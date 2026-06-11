@@ -1,0 +1,68 @@
+"""The self-recurring loop that makes Olympus self-sufficient.
+
+Run with `python -m olympus heartbeat`. On its own cadence it:
+  - sends Argus to scan the web for opportunities and world events,
+  - has Mnemosyne watch queued YouTube videos and store the lessons,
+  - triggers Prometheus's weekly self-audit and self-upgrade.
+"""
+
+from __future__ import annotations
+
+import time
+import traceback
+
+from . import config, memory, orchestrator
+
+
+def _due(state: dict, key: str, interval: int, now: float) -> bool:
+    return now - state.get(key, 0.0) >= interval
+
+
+def tick(state: dict, now: float | None = None) -> list[str]:
+    """Run any due tasks once; return a log of what happened."""
+    now = now or time.time()
+    log: list[str] = []
+
+    if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
+        log.append("Argus: scanning the world for opportunities...")
+        try:
+            orchestrator.opportunity_scan()
+            log.append("Argus: report saved to memory/reports.")
+        except Exception:
+            log.append("Argus failed:\n" + traceback.format_exc())
+        state["opportunity_scan"] = now
+
+    if _due(state, "watchlist", config.WATCHLIST_EVERY, now):
+        url = memory.watchlist_pop()
+        if url:
+            log.append(f"Mnemosyne: watching {url} ...")
+            try:
+                orchestrator.watch_and_learn(url)
+                log.append("Mnemosyne: lessons saved to memory/lessons.")
+            except Exception:
+                log.append("Mnemosyne failed:\n" + traceback.format_exc())
+        state["watchlist"] = now
+
+    if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
+        log.append("Prometheus: running self-audit and self-upgrade...")
+        try:
+            orchestrator.evolution_audit()
+            log.append("Prometheus: audit saved to memory/reports.")
+        except Exception:
+            log.append("Prometheus failed:\n" + traceback.format_exc())
+        state["evolution_audit"] = now
+
+    memory.save_state(state)
+    return log
+
+
+def run_forever() -> None:
+    state = memory.load_state()
+    print("Olympus heartbeat started. Ctrl-C to stop.")
+    print(f"  opportunity scan : every {config.OPPORTUNITY_SCAN_EVERY // 3600} h")
+    print(f"  youtube watchlist: every {config.WATCHLIST_EVERY // 60} min")
+    print(f"  evolution audit  : every {config.EVOLUTION_AUDIT_EVERY // 86400} d")
+    while True:
+        for line in tick(state):
+            print(f"[heartbeat] {line}")
+        time.sleep(config.HEARTBEAT_TICK)

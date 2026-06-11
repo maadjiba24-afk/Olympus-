@@ -1,0 +1,78 @@
+"""Thin wrapper around the Anthropic SDK used by every Olympus agent.
+
+All calls stream (timeout protection on long outputs), use adaptive thinking,
+and cache the system prompt so repeated agent calls are cheap.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+import anthropic
+
+from . import config
+
+_client: anthropic.Anthropic | None = None
+
+
+def client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()
+    return _client
+
+
+def complete(
+    system: str,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    effort: str = "high",
+    max_tokens: int | None = None,
+    output_schema: dict[str, Any] | None = None,
+) -> anthropic.types.Message:
+    """One streamed Messages API call; returns the final Message."""
+    params: dict[str, Any] = {
+        "model": config.MODEL,
+        "max_tokens": max_tokens or config.MAX_TOKENS,
+        "system": [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": messages,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": effort},
+    }
+    if tools:
+        params["tools"] = tools
+    if output_schema:
+        params["output_config"]["format"] = {
+            "type": "json_schema",
+            "schema": output_schema,
+        }
+
+    last_err: Exception | None = None
+    for attempt in range(4):
+        try:
+            with client().messages.stream(**params) as stream:
+                return stream.get_final_message()
+        except (anthropic.RateLimitError, anthropic.InternalServerError,
+                anthropic.APIConnectionError) as err:
+            last_err = err
+            time.sleep(2 ** attempt)
+    raise last_err  # type: ignore[misc]
+
+
+def text_of(message: anthropic.types.Message) -> str:
+    """Concatenate the text blocks of a response."""
+    return "\n".join(b.text for b in message.content if b.type == "text").strip()
+
+
+def json_of(message: anthropic.types.Message) -> dict[str, Any]:
+    """Parse the (schema-constrained) text of a response as JSON."""
+    return json.loads(text_of(message))
