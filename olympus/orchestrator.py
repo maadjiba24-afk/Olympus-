@@ -620,11 +620,72 @@ def daily_learning(settings: config.Settings | None = None) -> str:
     )
     report = SPECIALISTS["metis"].run(task, settings=settings)
     memory.save("reports", "Daily learning cycle", report)
+    # Prove the skills Metis just created; revert any that don't help.
+    try:
+        gate = gate_skills(settings)
+        report += f"\n\n## Skill gate\n{gate}"
+    except Exception:
+        pass
     # Hygiene: distillation done, prune the oldest raw shared lessons/corrections.
     memory.set_user("shared")
     memory.prune("lessons", keep=300)
     memory.prune("corrections", keep=200)
     return report
+
+
+def gate_skills(settings: config.Settings | None = None) -> str:
+    """Prove provisional skills with a before/after benchmark; keep the ones
+    that hold or raise the score, revert the rest. The safety net that lets
+    Olympus create skills autonomously.
+
+    For a specialist whose domain has no benchmark item yet, one is generated
+    first — so newly-covered ground gets measured, not rubber-stamped.
+    """
+    from . import evals, skills
+    settings = settings or config.Settings.from_env()
+    memory.set_user("shared")
+
+    provisional = skills.list_provisional()
+    if not provisional:
+        return "No provisional skills to gate."
+
+    specialists = {sp for _, sp in provisional if sp} or set()
+    # Ensure every affected specialist domain has at least one eval item.
+    for sp in list(specialists):
+        if not evals.ids_for([sp]):
+            try:
+                evals.generate_item(sp, settings)
+            except Exception:
+                pass
+    bench_ids = evals.ids_for(specialists) if specialists else None
+
+    names = [n for n, _ in provisional]
+    try:
+        after = evals.run(settings, only=bench_ids)["avg"]   # with provisional
+        for n in names:
+            skills.set_hidden(n, True)
+        before = evals.run(settings, only=bench_ids)["avg"]  # without them
+        for n in names:
+            skills.set_hidden(n, False)
+    except Exception as err:
+        for n in names:                                      # never leave hidden
+            skills.set_hidden(n, False)
+        return f"Skill gating could not run: {err}"
+
+    if after >= before:
+        for n in names:
+            skills.promote(n)
+        msg = (f"Promoted {len(names)} skill(s): benchmark held or improved "
+               f"({before} → {after}).")
+    else:
+        reverted = [skills.revert(n) for n in names]
+        memory.save("corrections", "Skills reverted by benchmark gate",
+                    f"Score regressed {before} → {after}; reverted: "
+                    + "; ".join(reverted))
+        msg = (f"Reverted {len(names)} skill(s): benchmark regressed "
+               f"({before} → {after}).")
+    memory.save("evals", f"skill gate {before}->{after}", msg)
+    return msg
 
 
 def evolution_audit(settings: config.Settings | None = None) -> str:

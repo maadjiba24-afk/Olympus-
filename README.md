@@ -111,10 +111,19 @@ per-step failures. You get parallel speed *and* correct serial reasoning.
    how-tos. Every specialist sees the skill index and loads relevant skills
    before working — knowledge gained once is applied by the whole council
    forever.
-3. **Measurement** — `python -m olympus eval` runs a fixed benchmark scored
-   by a strict LLM judge. Prometheus runs it before/after every prompt
+3. **Measurement** — `python -m olympus eval` runs a benchmark scored by a
+   strict, *separate* LLM judge. Prometheus runs it before/after every prompt
    upgrade and **rolls back changes that lower the score**. Improvement is
    measured, not assumed.
+3b. **Benchmark-gated skills** — autonomously-created skills are written
+   *provisional* and proven before they stick: `gate_skills` runs a
+   before/after benchmark for the affected specialist and **keeps only the
+   skills that hold or raise the score**, reverting the rest. When a domain
+   has no eval yet, one is auto-generated (`generate_benchmark`) so newly
+   covered ground gets measured, not rubber-stamped. This makes the
+   autonomous path safe enough to run with no human in the loop — the council
+   strengthens its existing specialists on its own, while a *new* specialist
+   (which needs new code) still arrives as a reviewed pull request.
 4. **Quality pressure** — Athena reviews every delegated answer against the
    brief and orders one round of rework with concrete feedback when the
    council under-delivers.
@@ -222,6 +231,7 @@ python -m olympus audit            # Prometheus: self-audit + self-upgrade now
 python -m olympus learn            # Metis: distill experience into skills now
 python -m olympus eval             # run the quality benchmark (saves score)
 python -m olympus skills           # list the self-built skill library
+python -m olympus gate             # benchmark-gate provisional skills now
 python -m olympus usage --days 7   # estimated token/cost spend
 python -m olympus heartbeat        # run the autonomous recurring loop
 ```
