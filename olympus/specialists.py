@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, tools
+from . import agent, config, tools
 
 
 @dataclass(frozen=True)
@@ -17,19 +17,23 @@ class Specialist:
     name: str           # Olympian codename
     title: str          # human-readable role
     description: str    # used by Zeus/Athena for routing
-    web: bool = False   # grant server-side web_search/web_fetch
+    web: bool = False   # grant web_search/web_fetch (server- or client-side)
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
 
-    def tool_defs(self):
+    def tool_defs(self, provider: str = "anthropic"):
         defs = list(tools.BASE_TOOLS)
         defs += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
         if self.web:
-            defs += tools.WEB_TOOLS
+            defs += tools.web_tool_defs(provider)
         return defs
 
-    def run(self, task: str, effort: str = "high") -> str:
+    def run(self, task: str, settings: config.Settings | None = None,
+            effort: str = "high") -> str:
+        from . import backend  # local import: backend imports this module's peers
+        settings = settings or config.Settings.from_env()
         system = agent.load_prompt(self.key)
-        return agent.run_agent(system, task, tool_defs=self.tool_defs(), effort=effort)
+        return backend.run_agent(settings, system, task,
+                                 self.tool_defs(settings.provider), effort)
 
 
 SPECIALISTS: dict[str, Specialist] = {

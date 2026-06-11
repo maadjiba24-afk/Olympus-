@@ -19,6 +19,7 @@ def run_agent(
     system: str,
     task: str,
     *,
+    settings: config.Settings | None = None,
     tool_defs: list[dict[str, Any]] | None = None,
     effort: str = "high",
     max_iterations: int = config.MAX_AGENT_ITERATIONS,
@@ -27,7 +28,8 @@ def run_agent(
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
 
     for _ in range(max_iterations):
-        response = llm.complete(system, messages, tools=tool_defs, effort=effort)
+        response = llm.complete(system, messages, settings=settings,
+                                tools=tool_defs, effort=effort)
 
         if response.stop_reason == "refusal":
             return "[The model declined this request for safety reasons.]"

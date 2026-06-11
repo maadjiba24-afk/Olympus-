@@ -84,9 +84,10 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
 | Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
 | Specialists | generic per-task workers | one assistant + plug-in skills | **10 permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
-| Internet access | via tools/skills | via skills/browser | **built into the API** (server-side web search) — zero connectors, zero MCP |
+| Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
-| Footprint | full server stack | persistent Node.js service | **~2K lines of readable Python**, stdlib-only interfaces |
+| Models | model-agnostic | model-agnostic | **model-agnostic** — Claude first-class, plus any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama/local) with **bring-your-own-key in the web UI** |
+| Footprint | full server stack | persistent Node.js service | **~2.5K lines of readable Python**, stdlib-only interfaces |
 
 ## Setup
 
@@ -117,6 +118,36 @@ python -m olympus heartbeat        # run the autonomous recurring loop
 ```
 
 (`pip install .` also gives you a plain `olympus` command.)
+
+### Use any model (bring your own key)
+
+Anthropic/Claude is the default and the most capable path (server-side web
+search, adaptive thinking). But Olympus runs on **any OpenAI-compatible
+endpoint** — OpenAI, Gemini, DeepSeek, Groq, Mistral, OpenRouter, Ollama,
+LM Studio, vLLM — with zero extra dependencies:
+
+```bash
+# OpenAI
+export OLYMPUS_PROVIDER=openai OLYMPUS_MODEL=gpt-4o OLYMPUS_API_KEY=sk-...
+
+# Groq
+export OLYMPUS_PROVIDER=openai OLYMPUS_MODEL=llama-3.3-70b-versatile \
+       OLYMPUS_API_KEY=gsk_... OLYMPUS_BASE_URL=https://api.groq.com/openai/v1
+
+# Fully local with Ollama (no API key at all)
+export OLYMPUS_PROVIDER=openai OLYMPUS_MODEL=llama3 \
+       OLYMPUS_BASE_URL=http://localhost:11434/v1
+```
+
+On non-Claude providers, web access automatically falls back to a built-in
+client-side DuckDuckGo search — the architecture (and the hallucination
+gate) works identically everywhere.
+
+**In the web UI**, each visitor can click **⚙ model** and enter their own
+provider, model, and API key. Keys live in the visitor's browser
+(localStorage), travel only with their own requests, are used in-memory, and
+are never stored or logged by the server — that's what makes a public
+Olympus instance feasible without burning your own key.
 
 ### Telegram in 2 minutes
 

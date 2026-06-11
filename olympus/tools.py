@@ -19,6 +19,36 @@ WEB_TOOLS: list[dict[str, Any]] = [
     {"type": "web_fetch_20260209", "name": "web_fetch"},
 ]
 
+# --- client-side web fallback (used on non-Anthropic providers) -------------
+
+WEB_SEARCH_CLIENT = {
+    "name": "web_search",
+    "description": "Search the web. Returns titles, URLs and snippets of the "
+                   "top results. Use web_fetch to read a promising result.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+}
+
+WEB_FETCH_CLIENT = {
+    "name": "web_fetch",
+    "description": "Fetch a web page and return its readable text content.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    },
+}
+
+
+def web_tool_defs(provider: str) -> list[dict[str, Any]]:
+    """Server-side web tools on Anthropic; client-side fallback elsewhere."""
+    if provider == "anthropic":
+        return list(WEB_TOOLS)
+    return [WEB_SEARCH_CLIENT, WEB_FETCH_CLIENT]
+
 # --- client-side tool schemas -------------------------------------------
 
 RECALL_MEMORY = {
@@ -152,6 +182,53 @@ PROPOSE_UPGRADE = {
 
 _SOURCE_SUFFIXES = {".py", ".md", ".txt", ".toml", ".cfg"}
 
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _http_get(url: str) -> str:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _strip_html(html: str) -> str:
+    import re as _re
+    html = _re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", html)
+    text = _re.sub(r"(?s)<[^>]+>", " ", html)
+    text = _re.sub(r"&nbsp;?", " ", text)
+    text = _re.sub(r"&amp;", "&", text)
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def _ddg_search(query: str) -> str:
+    """Client-side web search via DuckDuckGo's HTML endpoint (no API key)."""
+    import re as _re
+    import urllib.parse
+    html = _http_get(
+        "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
+    )
+    titles = _re.findall(
+        r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, _re.DOTALL
+    )
+    snippets = _re.findall(
+        r'class="result__snippet"[^>]*>(.*?)</a>', html, _re.DOTALL
+    )
+    results = []
+    for i, (href, title) in enumerate(titles[:8]):
+        if "uddg=" in href:
+            href = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
+        snippet = _strip_html(snippets[i]) if i < len(snippets) else ""
+        results.append(f"{_strip_html(title)}\n{href}\n{snippet}")
+    return "\n\n".join(results) or "No results found."
+
+
+def _web_fetch(url: str) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "Error: only http(s) URLs can be fetched."
+    return _strip_html(_http_get(url))[:20_000]
+
 
 def _list_source_files() -> str:
     files = []
@@ -196,6 +273,10 @@ def _watch_youtube(url: str) -> str:
 
 
 HANDLERS: dict[str, Callable[..., str]] = {
+    # web fallback — only dispatched on non-Anthropic providers (on Anthropic
+    # these names are server-side tools and never reach the client loop)
+    "web_search": _ddg_search,
+    "web_fetch": _web_fetch,
     "recall_memory": lambda query: memory.search(query),
     "save_lesson": lambda title, content: str(memory.save("lessons", title, content)),
     "watch_youtube": _watch_youtube,
