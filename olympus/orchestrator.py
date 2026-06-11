@@ -128,46 +128,83 @@ class Olympus:
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
-    def _plan(self, brief: str, keys: list[str]) -> list[dict[str, str]]:
+    def _plan(self, brief: str, keys: list[str]) -> list[dict[str, Any]]:
+        """Plan a dependency graph of specialist steps.
+
+        Each step has an id, a specialist, a self-contained task, and
+        depends_on (ids whose output it needs). Independent steps run in
+        parallel; dependent steps run after their inputs and receive them.
+        """
         valid = [k for k in keys if k in SPECIALISTS] or ["argus"]
         schema = {
             "type": "object",
             "properties": {
-                "assignments": {
+                "steps": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {"type": "string",
+                                   "description": "Short unique id, e.g. 's1'"},
                             "specialist": {"type": "string",
                                            "enum": list(SPECIALISTS)},
                             "task": {"type": "string"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "ids of steps whose output this "
+                                "step needs as input (empty if independent)",
+                            },
                         },
-                        "required": ["specialist", "task"],
+                        "required": ["id", "specialist", "task", "depends_on"],
                         "additionalProperties": False,
                     },
                 }
             },
-            "required": ["assignments"],
+            "required": ["steps"],
             "additionalProperties": False,
         }
         system = agent.load_prompt("athena") + "\n\n## Specialist roster\n" + roster()
         prompt = (
             f"Task brief from Zeus:\n{brief}\n\n"
             f"Suggested specialists: {', '.join(valid)}\n\n"
-            "Write one precise, self-contained task per specialist you decide "
-            "to use (you may drop or add specialists from the roster). Each "
-            "task must contain all context the specialist needs."
+            "Decompose this into specialist steps. For each step give a unique "
+            "id, the specialist, a precise self-contained task, and depends_on "
+            "— the ids of any steps whose output it needs.\n"
+            "- Make steps INDEPENDENT (empty depends_on) when they can be done "
+            "in parallel; they will run concurrently.\n"
+            "- Make a step DEPEND on another only when it genuinely needs that "
+            "step's result (e.g. write copy AFTER pricing is decided). The "
+            "dependent step will receive the upstream output as input, so don't "
+            "duplicate that work — reference it.\n"
+            "Keep the graph as small as the task honestly requires."
         )
         try:
-            assignments = backend.complete_json(
+            steps = backend.complete_json(
                 self.settings, system, [{"role": "user", "content": prompt}],
                 schema, effort="medium",
-            )["assignments"]
-            assignments = [a for a in assignments
-                           if a.get("specialist") in SPECIALISTS and a.get("task")]
+            )["steps"]
         except Exception:
-            assignments = []
-        return assignments or [{"specialist": valid[0], "task": brief}]
+            steps = []
+        clean = []
+        seen_ids = set()
+        for i, s in enumerate(steps):
+            if s.get("specialist") not in SPECIALISTS or not s.get("task"):
+                continue
+            sid = str(s.get("id") or f"s{i}")
+            while sid in seen_ids:
+                sid += "_"
+            seen_ids.add(sid)
+            clean.append({"id": sid, "specialist": s["specialist"],
+                          "task": s["task"],
+                          "depends_on": [str(d) for d in (s.get("depends_on") or [])]})
+        # drop references to ids that don't exist, and self-references
+        ids = {s["id"] for s in clean}
+        for s in clean:
+            s["depends_on"] = [d for d in s["depends_on"]
+                               if d in ids and d != s["id"]]
+        return clean or [{"id": "s0", "specialist": valid[0],
+                          "task": brief, "depends_on": []}]
 
     # -- stage 3: Aletheia -------------------------------------------------
 
@@ -238,32 +275,77 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
-    def _dispatch(self, assignments: list[dict[str, str]]) -> list[tuple[str, str]]:
-        """Run specialist assignments in parallel, in this user's namespace.
+    def _run_one(self, key: str, task: str) -> str:
+        """Run a single specialist with failure isolation."""
+        memory.set_user(self.user)  # worker threads get their own context
+        try:
+            return SPECIALISTS[key].run(task, settings=self.settings)
+        except Exception as err:
+            self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
+            return (f"[{SPECIALISTS[key].name} could not complete this task: "
+                    f"{err}. Treat this part as missing and answer from the "
+                    "other specialists.]")
 
-        Per-specialist failures are isolated: if one specialist errors, the
-        others still return and the pipeline continues with what succeeded,
-        rather than the whole answer failing.
-        """
+    def _dispatch(self, assignments: list[dict[str, str]]) -> list[tuple[str, str]]:
+        """Run flat (independent) assignments in parallel. Used by rework."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
-
-        def work(item: dict[str, str]) -> tuple[str, str]:
-            key = item["specialist"]
-            memory.set_user(self.user)  # worker threads get their own context
-            try:
-                return (key, SPECIALISTS[key].run(item["task"],
-                                                  settings=self.settings))
-            except Exception as err:
-                self.report(f"⚠️ {SPECIALISTS[key].name} failed: "
-                            f"{str(err)[:120]}")
-                return (key, f"[{SPECIALISTS[key].name} could not complete "
-                             f"this task: {err}. Treat this part as missing "
-                             "and answer from the other specialists.]")
-
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
-            return list(pool.map(work, assignments))
+            return list(pool.map(
+                lambda item: (item["specialist"],
+                              self._run_one(item["specialist"], item["task"])),
+                assignments))
+
+    def _dispatch_dag(self, steps: list[dict[str, Any]],
+                      tr: "trace_mod.Trace") -> list[tuple[str, str]]:
+        """Execute a dependency graph: independent steps run in parallel,
+        dependent steps run after their inputs and receive them.
+
+        Returns (specialist_key, output) pairs in completion order.
+        """
+        by_id = {s["id"]: s for s in steps}
+        done: dict[str, tuple[str, str]] = {}   # id -> (specialist_key, output)
+        outputs: list[tuple[str, str]] = []
+        remaining = dict(by_id)
+        level = 0
+
+        while remaining:
+            ready = [s for s in remaining.values()
+                     if all(d in done for d in s["depends_on"])]
+            if not ready:
+                # cycle or unresolvable dependency — run the rest as-is so the
+                # pipeline never deadlocks.
+                ready = list(remaining.values())
+                tr.event("dag.cycle_break", steps=[s["id"] for s in ready])
+            level += 1
+            names = ", ".join(f"{SPECIALISTS[s['specialist']].name}"
+                              + (" (uses upstream)" if s["depends_on"] else "")
+                              for s in ready)
+            self.report(f"🦉 Athena — step {level}: {names}")
+            tr.event("dag.level", n=level, steps=[s["id"] for s in ready])
+
+            def work(s: dict[str, Any]) -> tuple[str, str, str]:
+                key = s["specialist"]
+                task = s["task"]
+                if s["depends_on"]:
+                    inputs = "\n\n".join(
+                        f"### Input from {SPECIALISTS[done[d][0]].name}\n"
+                        f"{done[d][1]}"
+                        for d in s["depends_on"] if d in done)
+                    task = (f"{task}\n\n## Inputs from prior steps "
+                            f"(build on these, don't redo them)\n{inputs}")
+                return (s["id"], key, self._run_one(key, task))
+
+            with ThreadPoolExecutor(max_workers=min(4, len(ready))) as pool:
+                level_results = list(pool.map(work, ready))
+
+            for sid, key, out in level_results:
+                done[sid] = (key, out)
+                outputs.append((key, out))
+                remaining.pop(sid, None)
+
+        return outputs
 
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns
@@ -278,9 +360,11 @@ class Olympus:
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
         with tr.span("plan"):
             assignments = self._plan(brief, route.get("specialists", []))
-        tr.event("dispatch", specialists=[a["specialist"] for a in assignments])
+        has_deps = any(a["depends_on"] for a in assignments)
+        tr.event("dispatch", specialists=[a["specialist"] for a in assignments],
+                 dag=has_deps)
         with tr.span("dispatch"):
-            outputs = self._dispatch(assignments)
+            outputs = self._dispatch_dag(assignments, tr)
 
         raw = "\n\n".join(f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
         if route.get("needs_verification", True):
