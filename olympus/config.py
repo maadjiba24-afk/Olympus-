@@ -15,7 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 # Persistent memory lives outside the package so it survives upgrades.
-MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", PROJECT_ROOT / "memory"))
+# Git checkout -> ./memory next to the code; pip install -> ~/.olympus/memory.
+_default_memory = (
+    PROJECT_ROOT / "memory"
+    if (PROJECT_ROOT / "pyproject.toml").exists()
+    else Path.home() / ".olympus" / "memory"
+)
+MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", _default_memory))
 
 # Per-call output ceiling. Streaming is used everywhere, so this can be large.
 MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
