@@ -10,7 +10,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, github, memory, youtube
+from . import config, github, memory, skills, youtube
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -100,6 +100,104 @@ WATCH_YOUTUBE = {
             "url": {"type": "string", "description": "YouTube URL or 11-char video id"}
         },
         "required": ["url"],
+    },
+}
+
+READ_SKILL = {
+    "name": "read_skill",
+    "description": (
+        "Load a skill from Olympus's self-built skill library (the index is "
+        "in your system prompt). Read the relevant skill BEFORE doing a task "
+        "it covers — skills encode what Olympus has already learned works."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "Skill name"}},
+        "required": ["name"],
+    },
+}
+
+CREATE_SKILL = {
+    "name": "create_skill",
+    "description": (
+        "Create or update a skill in Olympus's library. A skill is a reusable "
+        "how-to distilled from experience, written so any specialist can apply "
+        "it without other context. Use the same name to improve an existing "
+        "skill rather than creating near-duplicates."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Short imperative name, "
+                     "e.g. 'Evaluate a SaaS niche' or 'Debug a flaky test'"},
+            "description": {"type": "string",
+                            "description": "One line: when to use this skill"},
+            "instructions": {"type": "string",
+                             "description": "The full method: steps, checks, "
+                             "pitfalls, examples"},
+        },
+        "required": ["name", "description", "instructions"],
+    },
+}
+
+SEND_EMAIL = {
+    "name": "send_email",
+    "description": (
+        "Send an email via the configured SMTP account. Only allowlisted "
+        "recipients are permitted. Use for reminders, reports, and messages "
+        "the user explicitly asked to send."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "Recipient address"},
+            "subject": {"type": "string"},
+            "body": {"type": "string", "description": "Plain-text body"},
+        },
+        "required": ["to", "subject", "body"],
+    },
+}
+
+CALL_WEBHOOK = {
+    "name": "call_webhook",
+    "description": (
+        "POST a JSON payload to one of the operator-configured webhooks "
+        "(OLYMPUS_WEBHOOKS). Use this to push content into external systems "
+        "the user has wired up — e.g. a posting queue, Zapier/Make/n8n flow, "
+        "or notification channel."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Configured webhook name"},
+            "payload": {"type": "object", "description": "JSON body to send"},
+        },
+        "required": ["name", "payload"],
+    },
+}
+
+RUN_BENCHMARK = {
+    "name": "run_benchmark",
+    "description": (
+        "Run Olympus's quality benchmark: fixed tasks per specialist, scored "
+        "1-10 by a strict judge against explicit criteria. Run it BEFORE and "
+        "AFTER prompt changes — if the average drops, roll the change back "
+        "with restore_prompt. Results are saved to memory/evals."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+RESTORE_PROMPT = {
+    "name": "restore_prompt",
+    "description": (
+        "Roll back an agent's prompt to its most recent backed-up version. "
+        "Use when a benchmark shows a prompt change made things worse."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"agent": {"type": "string",
+                                 "description": "Prompt file stem, e.g. 'argus'"}},
+        "required": ["agent"],
     },
 }
 
@@ -261,10 +359,100 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
     if not path.is_file():
         return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
     old = path.read_text(encoding="utf-8")
-    memory.save("prompt_backups", f"{stem} (before update)",
-                f"Reason for update: {reason}\n\n{old}")
+    # Body is the verbatim old prompt (restore_prompt depends on this);
+    # the update reason rides in a trailing comment that restore strips.
+    memory.save("prompt_backups", stem,
+                f"{old}\n<!-- update reason: {reason} -->")
     path.write_text(new_prompt.strip() + "\n", encoding="utf-8")
     return f"Prompt '{stem}' updated. Previous version backed up to memory/prompt_backups."
+
+
+def _restore_prompt(agent: str) -> str:
+    stem = Path(agent).stem
+    path = config.PROMPTS_DIR / f"{stem}.md"
+    if not path.is_file():
+        return f"Error: unknown agent prompt '{stem}'."
+    backups = sorted(
+        (config.MEMORY_DIR / "prompt_backups").glob(f"*-{stem}.md"),
+        reverse=True,
+    ) if (config.MEMORY_DIR / "prompt_backups").exists() else []
+    if not backups:
+        return f"Error: no backups exist for '{stem}'."
+    text = backups[0].read_text(encoding="utf-8")
+    # strip the "# <stem>" header memory.save added, and the trailing comment
+    lines = text.splitlines()
+    if lines and lines[0].startswith("# "):
+        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+    body = "\n".join(l for l in lines if not l.startswith("<!-- update reason:"))
+    path.write_text(body.strip() + "\n", encoding="utf-8")
+    return f"Prompt '{stem}' restored from {backups[0].name}."
+
+
+def _send_email(to: str, subject: str, body: str) -> str:
+    import os as _os
+    import smtplib
+    from email.message import EmailMessage
+
+    host = _os.environ.get("SMTP_HOST")
+    if not host:
+        return ("Error: email is not configured. The operator must set "
+                "SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS/SMTP_FROM.")
+    allow = {a.strip().lower()
+             for a in _os.environ.get("OLYMPUS_EMAIL_ALLOWLIST", "").split(",")
+             if a.strip()}
+    if not allow:
+        return ("Error: OLYMPUS_EMAIL_ALLOWLIST is empty — sending is "
+                "disabled until the operator allowlists recipients.")
+    if to.strip().lower() not in allow:
+        return f"Error: '{to}' is not in the recipient allowlist."
+
+    msg = EmailMessage()
+    msg["From"] = _os.environ.get("SMTP_FROM", _os.environ.get("SMTP_USER", ""))
+    msg["To"] = to.strip()
+    msg["Subject"] = subject.strip()[:200]
+    msg.set_content(body)
+    port = int(_os.environ.get("SMTP_PORT", "587"))
+    with smtplib.SMTP(host, port, timeout=30) as smtp:
+        if _os.environ.get("SMTP_TLS", "1") != "0":
+            smtp.starttls()
+        user = _os.environ.get("SMTP_USER")
+        if user:
+            smtp.login(user, _os.environ.get("SMTP_PASS", ""))
+        smtp.send_message(msg)
+    return f"Email sent to {to}."
+
+
+def _parse_webhooks() -> dict[str, str]:
+    import os as _os
+    hooks = {}
+    for pair in _os.environ.get("OLYMPUS_WEBHOOKS", "").split(","):
+        name, _, url = pair.strip().partition("=")
+        if name and url.startswith(("http://", "https://")):
+            hooks[name] = url
+    return hooks
+
+
+def _call_webhook(name: str, payload: dict | None = None) -> str:
+    import json as _json
+    import urllib.request
+    hooks = _parse_webhooks()
+    if name not in hooks:
+        configured = ", ".join(hooks) or "none configured"
+        return (f"Error: no webhook named '{name}'. Configured webhooks: "
+                f"{configured}. The operator defines them via OLYMPUS_WEBHOOKS.")
+    req = urllib.request.Request(
+        hooks[name],
+        data=_json.dumps(payload or {}).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "olympus-agent"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return (f"Webhook '{name}' responded {resp.status}: "
+                f"{resp.read(500).decode(errors='replace')}")
+
+
+def _run_benchmark() -> str:
+    from . import evals  # local import to avoid a cycle at module load
+    return evals.run_and_save()
 
 
 def _propose_upgrade(title: str, details: str) -> str:
@@ -300,11 +488,18 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
     "update_prompt": _update_prompt,
+    "restore_prompt": _restore_prompt,
     "propose_upgrade": _propose_upgrade,
+    "read_skill": lambda name: skills.read(name),
+    "create_skill": lambda name, description, instructions:
+        skills.create(name, description, instructions),
+    "send_email": _send_email,
+    "call_webhook": _call_webhook,
+    "run_benchmark": _run_benchmark,
 }
 
 # Tools every specialist gets by default.
-BASE_TOOLS = [RECALL_MEMORY, SAVE_LESSON, CURRENT_TIME]
+BASE_TOOLS = [RECALL_MEMORY, SAVE_LESSON, READ_SKILL, CURRENT_TIME]
 
 # Extra client-side tools, referenced by name in the specialist registry.
 EXTRA_TOOLS: dict[str, dict[str, Any]] = {
@@ -312,5 +507,13 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "list_source_files": LIST_SOURCE_FILES,
     "read_source_file": READ_SOURCE_FILE,
     "update_prompt": UPDATE_PROMPT,
+    "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
+    "create_skill": CREATE_SKILL,
+    "send_email": SEND_EMAIL,
+    "call_webhook": CALL_WEBHOOK,
+    "run_benchmark": RUN_BENCHMARK,
 }
+
+# Anthropic server-side code sandbox (Hephaestus runs and tests code in it).
+CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}

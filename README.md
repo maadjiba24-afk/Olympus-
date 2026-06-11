@@ -28,6 +28,8 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
    CHIRON     CHRONOS     ARGUS      MNEMOSYNE     PROMETHEUS
    Coaching   Scheduling  Opportunity YouTube       Evolution /
                           Scout 🌐    Learner 🎥    Self-Upgrade 🔧
+                      METIS · Learning Synthesizer 🧠
+                 (daily cycle: experience → skill library)
         └──────────┴──────────┴──────────┴──────────────┘
                                │ outputs
                                ▼
@@ -59,7 +61,8 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
 | **Chronos** | Scheduling management |
 | **Argus** | Opportunity scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
 | **Mnemosyne** | YouTube learner — watches videos via transcript, summarizes what it understood, stores lessons |
-| **Prometheus** | Evolution specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts, files improvement proposals |
+| **Metis** | Learning synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
+| **Prometheus** | Evolution specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
 
 ### Self-* properties
 
@@ -80,8 +83,40 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
   CLI, web, and Telegram; the audit runs in the background on the server's
   own credentials, never on a visitor's BYOK key). With `GITHUB_TOKEN` +
   `GITHUB_REPO` set, his upgrade proposals are **auto-filed as GitHub
-  issues** — a self-generated roadmap you can hand straight to a coding
-  agent.
+  issues** — and the optional `upgrade-agent` workflow lets a coding agent
+  implement them as pull requests automatically.
+
+### How it gets smarter day by day
+
+1. **Experience** — every conversation produces lessons (specialists),
+   corrections (Aletheia), and your 👍/👎 feedback (web buttons, `/good` /
+   `/bad` on Telegram and CLI). All of it lands in per-user memory.
+2. **Synthesis** — Metis's daily learning cycle distills recurring patterns
+   into a **self-built skill library** (`memory/skills/`): named, reusable
+   how-tos. Every specialist sees the skill index and loads relevant skills
+   before working — knowledge gained once is applied by the whole council
+   forever.
+3. **Measurement** — `python -m olympus eval` runs a fixed benchmark scored
+   by a strict LLM judge. Prometheus runs it before/after every prompt
+   upgrade and **rolls back changes that lower the score**. Improvement is
+   measured, not assumed.
+4. **Quality pressure** — Athena reviews every delegated answer against the
+   brief and orders one round of rework with concrete feedback when the
+   council under-delivers.
+
+### Privacy & hardening
+
+- **Per-user memory namespaces** — lessons, corrections, and feedback are
+  scoped per user (browser session, Telegram chat); one person's context
+  never leaks into another's answers. Conversations persist to disk and
+  survive restarts.
+- **Web instance protection** — per-IP rate limiting
+  (`OLYMPUS_RATE_LIMIT`/min) and an optional shared access token
+  (`OLYMPUS_ACCESS_TOKEN`).
+- **Action tools are off until allowlisted** — email sends only to
+  `OLYMPUS_EMAIL_ALLOWLIST` recipients; webhooks only to operator-defined
+  `OLYMPUS_WEBHOOKS` URLs; Hephaestus's code runs in Anthropic's server-side
+  sandbox, never on your machine.
 - **Accurate by design** — nothing reaches the user without passing the
   hallucination controller; uncertain claims are flagged, never laundered.
 
@@ -122,6 +157,9 @@ python -m olympus scan             # Argus: world/opportunity scan now
 python -m olympus watch <youtube-url>   # Mnemosyne: watch + learn now
 python -m olympus queue <youtube-url>   # queue a video for the heartbeat
 python -m olympus audit            # Prometheus: self-audit + self-upgrade now
+python -m olympus learn            # Metis: distill experience into skills now
+python -m olympus eval             # run the quality benchmark (saves score)
+python -m olympus skills           # list the self-built skill library
 python -m olympus heartbeat        # run the autonomous recurring loop
 ```
 

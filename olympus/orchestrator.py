@@ -66,14 +66,45 @@ def _silent(_: str) -> None:
     pass
 
 
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approve", "retry"]},
+        "feedback": {
+            "type": "string",
+            "description": "When retrying: precise, actionable feedback on "
+            "what is missing or wrong",
+        },
+        "retry_specialists": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specialist keys whose work must be redone",
+        },
+    },
+    "required": ["verdict", "feedback", "retry_specialists"],
+    "additionalProperties": False,
+}
+
+
 class Olympus:
-    """Stateful conversation handler running the full pipeline."""
+    """Stateful conversation handler running the full pipeline.
+
+    `user` scopes long-term memory (lessons/corrections/feedback) so one
+    person's context never leaks into another's session. `conversation_id`
+    persists the chat history to disk so restarts lose nothing.
+    """
 
     def __init__(self, report: Reporter = _silent,
-                 settings: config.Settings | None = None):
-        self.history: list[dict[str, Any]] = []
+                 settings: config.Settings | None = None,
+                 user: str = "shared",
+                 conversation_id: str | None = None):
         self.report = report
         self.settings = settings or config.Settings.from_env()
+        self.user = memory.safe_id(user)
+        self.conversation_id = conversation_id
+        self.history: list[dict[str, Any]] = (
+            memory.load_conversation(conversation_id) if conversation_id else []
+        )
 
     # -- stage 1: Zeus ----------------------------------------------------
 
@@ -160,6 +191,28 @@ class Olympus:
         return backend.run_agent(self.settings, system, task, tool_defs,
                                  effort="high")
 
+    # -- stage 3.5: Athena quality review -----------------------------------
+
+    def _review(self, brief: str, verified: str) -> dict[str, Any]:
+        system = agent.load_prompt("athena")
+        prompt = (
+            f"Task brief:\n{brief}\n\n"
+            f"Verified council output (post fact-check):\n{verified}\n\n"
+            "Quality gate: does this output actually fulfil the brief — "
+            "complete, concrete, and useful? Approve if yes. Order a retry "
+            "ONLY for substantive failures (missing deliverable, wrong focus, "
+            "vague where the brief demanded concrete, mostly-unverified "
+            "claims) — not for style. Retries are expensive; approve "
+            "good-enough work."
+        )
+        try:
+            return backend.complete_json(
+                self.settings, system, [{"role": "user", "content": prompt}],
+                REVIEW_SCHEMA, effort="medium",
+            )
+        except Exception:
+            return {"verdict": "approve", "feedback": "", "retry_specialists": []}
+
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
@@ -181,10 +234,26 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
+    def _dispatch(self, assignments: list[dict[str, str]]) -> list[tuple[str, str]]:
+        """Run specialist assignments in parallel, in this user's namespace."""
+        for item in assignments:
+            spec = SPECIALISTS[item["specialist"]]
+            self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
+
+        def work(item: dict[str, str]) -> tuple[str, str]:
+            memory.set_user(self.user)  # worker threads get their own context
+            return (item["specialist"],
+                    SPECIALISTS[item["specialist"]].run(
+                        item["task"], settings=self.settings))
+
+        with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
+            return list(pool.map(work, assignments))
+
     def ask(self, user_message: str) -> str:
         error = self.settings.validate()
         if error:
             return f"Configuration problem: {error}"
+        memory.set_user(self.user)
 
         route = self._route(user_message)
 
@@ -194,21 +263,7 @@ class Olympus:
             brief = route.get("brief") or user_message
             self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
             assignments = self._plan(brief, route.get("specialists", []))
-
-            # Specialists run in parallel — total latency is the slowest
-            # single agent, not the sum of all of them.
-            for item in assignments:
-                spec = SPECIALISTS[item["specialist"]]
-                self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
-            with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
-                outputs = list(pool.map(
-                    lambda item: (
-                        item["specialist"],
-                        SPECIALISTS[item["specialist"]].run(
-                            item["task"], settings=self.settings),
-                    ),
-                    assignments,
-                ))
+            outputs = self._dispatch(assignments)
 
             if route.get("needs_verification", True):
                 self.report("🔍 Aletheia verifies the findings...")
@@ -218,6 +273,32 @@ class Olympus:
                     f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs
                 )
 
+            # Quality gate: Athena may order one round of rework with
+            # concrete feedback before anything reaches the user.
+            review = self._review(brief, verified)
+            retry_keys = [k for k in review.get("retry_specialists", [])
+                          if k in SPECIALISTS]
+            if review.get("verdict") == "retry" and retry_keys:
+                self.report("🦉 Athena orders rework: "
+                            f"{', '.join(retry_keys)}")
+                by_key = {a["specialist"]: a["task"] for a in assignments}
+                prev = dict(outputs)
+                redo = [
+                    {"specialist": k,
+                     "task": (f"{by_key.get(k, brief)}\n\n"
+                              "## Supervisor feedback on your first attempt\n"
+                              f"{review.get('feedback', '')}\n\n"
+                              "## Your first attempt\n"
+                              f"{prev.get(k, '(none)')}\n\n"
+                              "Redo the task properly, fixing every point in "
+                              "the feedback.")}
+                    for k in retry_keys
+                ]
+                redone = dict(self._dispatch(redo))
+                outputs = [(k, redone.get(k, v)) for k, v in outputs]
+                self.report("🔍 Aletheia re-verifies the rework...")
+                verified = self._verify(brief, outputs)
+
             self.report("⚡ Zeus composes the final answer...")
             reply = self._synthesize(user_message, brief, verified)
 
@@ -226,8 +307,29 @@ class Olympus:
         # keep the rolling window bounded
         if len(self.history) > 24:
             self.history = self.history[-24:]
+        if self.conversation_id:
+            memory.save_conversation(self.conversation_id, self.history)
         note_conversation(self.report)
         return reply
+
+    def feedback(self, verdict: str, comment: str = "") -> str:
+        """Record a 👍/👎 on the last exchange — fuel for the learning cycle."""
+        memory.set_user(self.user)
+        if len(self.history) < 2:
+            return "Nothing to rate yet."
+        user_msg = self.history[-2].get("content", "")
+        reply = self.history[-1].get("content", "")
+        verdict = "positive" if verdict.lower() in ("up", "good", "positive",
+                                                    "+1", "👍") else "negative"
+        memory.save(
+            "feedback", f"{verdict} feedback",
+            f"Verdict: {verdict}\n"
+            + (f"Comment: {comment}\n" if comment else "")
+            + f"\n## User asked\n{str(user_msg)[:1000]}\n"
+            + f"\n## Olympus replied\n{str(reply)[:2000]}",
+        )
+        return ("Thanks — noted. Olympus learns from this in its daily "
+                "learning cycle.")
 
 
 # --- conversation-triggered self-audit ---------------------------------------
@@ -301,6 +403,24 @@ def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     summary = SPECIALISTS["mnemosyne"].run(task, settings=settings)
     memory.save("lessons", f"Video summary {url}", summary)
     return summary
+
+
+def daily_learning(settings: config.Settings | None = None) -> str:
+    """Metis distills the last day of experience into skills — the mechanism
+    that makes Olympus smarter day by day."""
+    from . import skills
+    task = (
+        "Run your daily learning cycle now.\n"
+        f"The skill library currently holds {skills.count()} skills.\n"
+        "Recent lessons:\n" + memory.recent("lessons", 8) + "\n\n"
+        "Recent corrections:\n" + memory.recent("corrections", 5) + "\n\n"
+        "Recent user feedback:\n" + memory.recent("feedback", 8) + "\n\n"
+        "Distill patterns into created/updated skills per your instructions, "
+        "then give your report."
+    )
+    report = SPECIALISTS["metis"].run(task, settings=settings)
+    memory.save("reports", "Daily learning cycle", report)
+    return report
 
 
 def evolution_audit(settings: config.Settings | None = None) -> str:

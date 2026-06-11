@@ -45,6 +45,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                 log.append("Mnemosyne failed:\n" + traceback.format_exc())
         state["watchlist"] = now
 
+    if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
+        log.append("Metis: running the daily learning cycle...")
+        try:
+            orchestrator.daily_learning()
+            log.append("Metis: skills updated; report saved to memory/reports.")
+        except Exception:
+            log.append("Metis failed:\n" + traceback.format_exc())
+        state["daily_learning"] = now
+
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
         try:
@@ -65,6 +74,7 @@ def run_forever() -> None:
     print("Olympus heartbeat started. Ctrl-C to stop.")
     print(f"  opportunity scan : every {config.OPPORTUNITY_SCAN_EVERY // 3600} h")
     print(f"  youtube watchlist: every {config.WATCHLIST_EVERY // 60} min")
+    print(f"  daily learning   : every {config.DAILY_LEARNING_EVERY // 3600} h")
     print(f"  evolution audit  : every {config.EVOLUTION_AUDIT_EVERY // 86400} d")
     while True:
         for line in tick(state):
