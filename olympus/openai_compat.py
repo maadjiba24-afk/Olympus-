@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from . import config, tools
+from . import config, security, tools, usage
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -32,8 +32,14 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     for attempt in range(4):
         req = urllib.request.Request(url, data=body, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                return json.loads(resp.read())
+            with usage.slot():
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    data = json.loads(resp.read())
+            u = data.get("usage") or {}
+            usage.record(payload.get("model", "unknown"),
+                         int(u.get("prompt_tokens", 0)),
+                         int(u.get("completion_tokens", 0)))
+            return data
         except urllib.error.HTTPError as err:
             detail = err.read().decode(errors="replace")[:500]
             if err.code in (408, 429, 500, 502, 503, 529) and attempt < 3:
@@ -132,10 +138,13 @@ def run_agent(settings: config.Settings, system: str, task: str,
                 result = handler(**args) if handler else f"Error: unknown tool {name}"
             except Exception as err:
                 result = f"Error: {err}"
+            text = str(result)[:40_000]
+            if name in security.INGESTION_TOOLS:
+                text = security.wrap_untrusted(text, source=name)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", name),
-                "content": str(result)[:40_000],
+                "content": text,
             })
 
     return ("[Agent stopped: tool-use iteration limit reached. Partial work "

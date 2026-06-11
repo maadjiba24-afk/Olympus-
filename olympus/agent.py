@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import config, llm, tools
+from . import config, llm, security, tools
 
 
 def load_prompt(stem: str) -> str:
@@ -68,10 +68,13 @@ def run_agent(
                     "is_error": True,
                 })
             else:
+                text = str(output)
+                if block.name in security.INGESTION_TOOLS:
+                    text = security.wrap_untrusted(text, source=block.name)
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": str(output),
+                    "content": text,
                 })
         messages.append({"role": "user", "content": results})
 

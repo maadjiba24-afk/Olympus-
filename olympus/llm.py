@@ -12,7 +12,7 @@ from typing import Any
 
 import anthropic
 
-from . import config
+from . import config, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 
@@ -68,13 +68,57 @@ def complete(
     last_err: Exception | None = None
     for attempt in range(4):
         try:
-            with client(settings).messages.stream(**params) as stream:
-                return stream.get_final_message()
+            with usage.slot():
+                with client(settings).messages.stream(**params) as stream:
+                    message = stream.get_final_message()
+            u = getattr(message, "usage", None)
+            if u is not None:
+                usage.record(
+                    params["model"],
+                    getattr(u, "input_tokens", 0)
+                    + getattr(u, "cache_read_input_tokens", 0)
+                    + getattr(u, "cache_creation_input_tokens", 0),
+                    getattr(u, "output_tokens", 0),
+                )
+            return message
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:
             last_err = err
             time.sleep(2 ** attempt)
     raise last_err  # type: ignore[misc]
+
+
+def stream_text(
+    system: str,
+    messages: list[dict[str, Any]],
+    *,
+    settings: config.Settings | None = None,
+    effort: str = "high",
+    max_tokens: int | None = None,
+):
+    """Yield text deltas of a streamed Anthropic completion (no tools)."""
+    settings = settings or config.Settings.from_env()
+    params: dict[str, Any] = {
+        "model": settings.model or config.MODEL,
+        "max_tokens": max_tokens or config.MAX_TOKENS,
+        "system": [{"type": "text", "text": system,
+                    "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": effort},
+    }
+    with usage.slot():
+        with client(settings).messages.stream(**params) as stream:
+            for text in stream.text_stream:
+                yield text
+            final = stream.get_final_message()
+    u = getattr(final, "usage", None)
+    if u is not None:
+        usage.record(params["model"],
+                     getattr(u, "input_tokens", 0)
+                     + getattr(u, "cache_read_input_tokens", 0)
+                     + getattr(u, "cache_creation_input_tokens", 0),
+                     getattr(u, "output_tokens", 0))
 
 
 def text_of(message: anthropic.types.Message) -> str:

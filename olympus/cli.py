@@ -60,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("skills", help="list the self-built skill library")
+    p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
+    p_usage.add_argument("--days", type=int, default=7)
 
     p_web = sub.add_parser("web", help="serve the browser chat UI")
     p_web.add_argument("--host", default="127.0.0.1")
@@ -92,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skills":
         from . import skills
         print(skills.index())
+    elif args.command == "usage":
+        from . import usage
+        print(usage.report(args.days))
     elif args.command == "heartbeat":
         try:
             heartbeat.run_forever()

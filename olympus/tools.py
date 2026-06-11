@@ -10,7 +10,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, github, memory, skills, youtube
+from . import config, facts, github, memory, security, skills, youtube
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -64,6 +64,37 @@ RECALL_MEMORY = {
             "query": {"type": "string", "description": "Keywords to search for"}
         },
         "required": ["query"],
+    },
+}
+
+RECALL_FACT = {
+    "name": "recall_fact",
+    "description": (
+        "Check Olympus's verified-facts cache before doing fresh research. If "
+        "a claim was already verified recently (with a source), reuse it "
+        "instead of re-searching."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+}
+
+CACHE_FACT = {
+    "name": "cache_fact",
+    "description": (
+        "Store a fact you just verified so future fact-checks are faster and "
+        "cheaper. Include the source and your verdict (true/false/nuance)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "claim": {"type": "string"},
+            "verdict": {"type": "string"},
+            "source": {"type": "string"},
+        },
+        "required": ["claim", "verdict"],
     },
 }
 
@@ -482,7 +513,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "web_search": _ddg_search,
     "web_fetch": _web_fetch,
     "recall_memory": lambda query: memory.search(query),
-    "save_lesson": lambda title, content: str(memory.save("lessons", title, content)),
+    "recall_fact": lambda query: facts.lookup(query),
+    "cache_fact": lambda claim, verdict, source="": facts.record(claim, verdict, source),
+    # content is sanitized so injection-shaped text can't poison future recall
+    "save_lesson": lambda title, content: str(
+        memory.save("lessons", title, security.sanitize_for_memory(content))),
     "watch_youtube": _watch_youtube,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
     "list_source_files": _list_source_files,
@@ -492,14 +527,15 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "propose_upgrade": _propose_upgrade,
     "read_skill": lambda name: skills.read(name),
     "create_skill": lambda name, description, instructions:
-        skills.create(name, description, instructions),
+        skills.create(name, description,
+                      security.sanitize_for_memory(instructions)),
     "send_email": _send_email,
     "call_webhook": _call_webhook,
     "run_benchmark": _run_benchmark,
 }
 
 # Tools every specialist gets by default.
-BASE_TOOLS = [RECALL_MEMORY, SAVE_LESSON, READ_SKILL, CURRENT_TIME]
+BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME]
 
 # Extra client-side tools, referenced by name in the specialist registry.
 EXTRA_TOOLS: dict[str, dict[str, Any]] = {
