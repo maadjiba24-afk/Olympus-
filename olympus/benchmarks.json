@@ -46,5 +46,11 @@
     "specialist": "iris",
     "task": "I'm a solo ceramicist selling handmade mugs. Write me a LinkedIn post and a TikTok hook to announce a holiday drop of 30 mugs going live Friday.",
     "criteria": "LinkedIn and TikTok versions are genuinely platform-native and different (tone, length, structure), not the same text twice; both are ready to post, not described; includes a clear call to action and urgency tied to the 30-mug limit; no engagement-bait or fake-scarcity tactics."
+  },
+  {
+    "id": "peitho-multilingual",
+    "specialist": "peitho",
+    "task": "Necesito un eslogan y tres ideas de publicaciones para lanzar mi cafetería de especialidad en Madrid. El público son jóvenes profesionales. Responde en español.",
+    "criteria": "The entire answer is written in fluent, natural Spanish (not translated-sounding); the slogan and post ideas are culturally appropriate for young professionals in Madrid; concrete and ready to use; addresses the specialty-coffee positioning. Penalize heavily if any substantial part is in English."
   }
 ]

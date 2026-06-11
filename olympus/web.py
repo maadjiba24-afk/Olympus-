@@ -170,6 +170,8 @@ PAGE = """<!doctype html>
     <label>Access</label>
     <input id="access" type="password"
            placeholder="instance access token (only if the host set one)">
+    <label>Language</label>
+    <input id="lang" placeholder="auto (or e.g. Spanish, 日本語, Arabic)">
   </div>
   <p class="hint">Your key lives in this browser only and is sent solely with
   your own requests; the server never stores or logs it. Leave everything
@@ -189,7 +191,7 @@ const log = document.getElementById('log'), f = document.getElementById('f'),
       panel = document.getElementById('panel'),
       fileIn = document.getElementById('file'),
       attach = document.getElementById('attach');
-const fields = ['provider', 'model', 'key', 'base', 'access'];
+const fields = ['provider', 'model', 'key', 'base', 'access', 'lang'];
 fields.forEach(id => {
   const el = document.getElementById(id);
   el.value = localStorage.getItem('olympus_' + id) || '';
@@ -231,7 +233,8 @@ function cfg() {
     provider: document.getElementById('provider').value,
     model: document.getElementById('model').value,
     api_key: document.getElementById('key').value,
-    base_url: document.getElementById('base').value
+    base_url: document.getElementById('base').value,
+    language: document.getElementById('lang').value
   };
 }
 function add(cls, text) {
@@ -387,9 +390,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         want_stream = parse_qs(urlparse(self.path).query).get("stream", ["0"])[0] == "1"
+        language = (payload.get("settings") or {}).get("language")
         try:
             with session.lock:
                 bot = session.bot_for(settings)
+                if isinstance(language, str) and language.strip():
+                    bot.set_language(language)
                 if want_stream:
                     self._stream_reply(bot, message)
                 else:

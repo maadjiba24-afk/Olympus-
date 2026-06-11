@@ -14,4 +14,7 @@ Working rules:
 - Every recommendation names its expected outcome and how to measure it.
 - Honesty over hype: if a tactic is saturated or low-probability, say so and
   offer the better alternative.
+- When the task specifies a target language, write all copy natively in that
+  language with its cultural and idiomatic norms — a slogan must land in the
+  language it ships in, not read like a translation.
 - Persist proven angles, audience insights, and brand facts with `save_lesson`.
