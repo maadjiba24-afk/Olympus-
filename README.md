@@ -50,7 +50,7 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
 | Agent | Role |
 |---|---|
 | **Zeus** | Main agent — the user's single interface; routes or answers |
-| **Athena** | Supervisor — turns goals into precise specialist assignments |
+| **Athena** | Supervisor — plans a **dependency graph** of specialist steps (parallel where independent, serial where one step needs another's output) and gates quality |
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
 | **Plutus** | Financial specialist |
 | **Peitho** | Marketing specialist |
@@ -85,6 +85,21 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
   `GITHUB_REPO` set, his upgrade proposals are **auto-filed as GitHub
   issues** — and the optional `upgrade-agent` workflow lets a coding agent
   implement them as pull requests automatically.
+
+### Reasoning over serial problems (dependency-graph planning)
+
+Most orchestrator-worker systems (Hermes included) fan tasks out in parallel
+and stitch the pieces together — which breaks on problems where one step needs
+another's result first. Olympus's Athena instead plans a **dependency graph**:
+
+- Independent steps run **concurrently** (fast — latency is the slowest branch).
+- A step that genuinely depends on another runs **after** it and **receives its
+  output as input**, so it builds on the result instead of guessing.
+
+So "research the market → price it from the findings → write copy for that
+price" executes as a real chain (each step fed the last), while anything that
+*can* run in parallel still does. The executor is cycle-safe and isolates
+per-step failures. You get parallel speed *and* correct serial reasoning.
 
 ### How it gets smarter day by day
 
