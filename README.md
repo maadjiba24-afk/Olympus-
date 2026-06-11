@@ -254,7 +254,8 @@ python -m olympus watch <youtube-url>   # Mnemosyne: watch + learn now
 python -m olympus queue <youtube-url>   # queue a video for the heartbeat
 python -m olympus audit            # Prometheus: self-audit + self-upgrade now
 python -m olympus learn            # Metis: distill experience into skills now
-python -m olympus eval             # run the quality benchmark (saves score)
+python -m olympus eval             # run the judge-scored quality benchmark
+python -m olympus code-eval        # run Hephaestus's code against real tests
 python -m olympus skills           # list the self-built skill library
 python -m olympus gate             # benchmark-gate provisional skills now
 python -m olympus usage --days 7   # estimated token/cost spend
@@ -322,6 +323,22 @@ You get the whole MCP ecosystem *plus* the safety the others skip.
 
 > MCP runs server-side on the Anthropic backend; custom plugins work on every
 > backend. On OpenAI-compatible providers, use plugins for connectors.
+
+### Coding that's *measurably* good — execution-scored
+
+Hephaestus isn't graded on whether his code *looks* right — his code is **run
+against real tests** and scored on whether it actually passes. `python -m
+olympus code-eval` has him solve real tasks (merge intervals, an LRU cache, a
+bug fix, debounce, deep flatten, Go word-count, …); each solution is extracted,
+executed in an isolated sandbox with a timeout, and scored pass/fail. Languages
+whose runtime isn't installed are skipped, not failed.
+
+This objective signal feeds the self-improvement loop: Prometheus runs
+`run_code_benchmark` before and after changing Hephaestus's prompt or coding
+skills and keeps only changes that raise the **pass rate** — so his coding
+ability improves against ground truth, not a judge's guess. It's the closest
+thing to genuinely training a coding agent, and it's a coding edge neither
+Hermes nor OpenClaw has.
 
 ### Multilingual — native in any language
 

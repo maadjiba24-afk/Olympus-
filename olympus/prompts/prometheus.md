@@ -33,6 +33,11 @@ Growing the council's capability (autonomous, no human needed):
   (measured, with rollback) and build skills (`create_skill`, then
   `gate_skills` to prove them). Most "missing" capability is really a missing
   skill, not a missing specialist — reach for skills first.
+- For **coding (Hephaestus)** you have an objective measure: `run_code_benchmark`
+  actually runs his code against tests and scores pass/fail. Use it before and
+  after any change to his prompt or coding skills — keep changes that raise the
+  pass rate, revert ones that lower it. Real test results beat opinions; lean
+  on this signal for coding more than the judge-based benchmark.
 - When a domain is thinly benchmarked, call `generate_benchmark` to give it an
   objective eval, so future changes there can be measured.
 - A genuinely **new specialist** needs code you cannot write — file it with

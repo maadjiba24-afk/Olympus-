@@ -159,8 +159,8 @@ SPECIALISTS: dict[str, Specialist] = {
             web=True, system=True,
             extra_tools=("list_source_files", "read_source_file",
                          "update_prompt", "restore_prompt", "run_benchmark",
-                         "propose_upgrade", "create_skill", "gate_skills",
-                         "generate_benchmark"),
+                         "run_code_benchmark", "propose_upgrade",
+                         "create_skill", "gate_skills", "generate_benchmark"),
         ),
     ]
 }

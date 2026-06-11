@@ -247,6 +247,17 @@ RUN_BENCHMARK = {
     "input_schema": {"type": "object", "properties": {}},
 }
 
+RUN_CODE_BENCHMARK = {
+    "name": "run_code_benchmark",
+    "description": (
+        "Run the execution-scored coding benchmark: Hephaestus solves real "
+        "coding tasks and the code is RUN against tests, scored by whether it "
+        "actually passes (objective, not a judge's opinion). Use this to "
+        "measure coding ability before/after changing Hephaestus's prompt."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
 RESTORE_PROMPT = {
     "name": "restore_prompt",
     "description": (
@@ -515,6 +526,11 @@ def _run_benchmark() -> str:
     return evals.run_and_save()
 
 
+def _run_code_benchmark() -> str:
+    from . import code_eval  # local import to avoid a cycle at module load
+    return code_eval.run_and_save()
+
+
 def _gate_skills() -> str:
     from . import orchestrator  # local import to avoid a cycle at module load
     return orchestrator.gate_skills()
@@ -575,6 +591,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "send_email": _send_email,
     "call_webhook": _call_webhook,
     "run_benchmark": _run_benchmark,
+    "run_code_benchmark": _run_code_benchmark,
 }
 
 # Tools every specialist gets by default.
@@ -591,6 +608,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,
+    "run_code_benchmark": RUN_CODE_BENCHMARK,
     "send_email": SEND_EMAIL,
     "call_webhook": CALL_WEBHOOK,
     "run_benchmark": RUN_BENCHMARK,
