@@ -36,6 +36,7 @@ HELP = (
     "/watch <youtube-url> — watch a video and learn from it\n"
     "/queue <youtube-url> — queue a video for the autonomous loop\n"
     "/audit — Olympus audits and upgrades itself\n"
+    "/good or /bad [comment] — rate the last answer (Olympus learns from it)\n"
 )
 
 
@@ -120,8 +121,16 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
         _send(token, chat_id, "Queued — the heartbeat will watch it on its next pass.")
         return
 
-    # Everything else: the full pipeline, with its own history per chat.
-    bot = bots.setdefault(chat_id, orchestrator.Olympus())
+    # Per-chat identity: private memory namespace + history that survives
+    # restarts (conversation persisted to disk under the chat id).
+    bot = bots.setdefault(chat_id, orchestrator.Olympus(
+        user=f"tg-{chat_id}", conversation_id=f"tg-{chat_id}"))
+
+    if cmd in ("/good", "/bad"):
+        _send(token, chat_id,
+              bot.feedback("up" if cmd == "/good" else "down", arg))
+        return
+
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")
     _send(token, chat_id, bot.ask(text))
 

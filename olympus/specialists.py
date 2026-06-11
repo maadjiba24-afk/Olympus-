@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, config, tools
+from . import agent, config, skills, tools
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class Specialist:
     title: str          # human-readable role
     description: str    # used by Zeus/Athena for routing
     web: bool = False   # grant web_search/web_fetch (server- or client-side)
+    code_exec: bool = False  # Anthropic server-side code sandbox
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
 
     def tool_defs(self, provider: str = "anthropic"):
@@ -25,14 +26,20 @@ class Specialist:
         defs += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
         if self.web:
             defs += tools.web_tool_defs(provider)
+        if self.code_exec and provider == "anthropic":
+            defs.append(tools.CODE_EXECUTION_TOOL)
         return defs
+
+    def system_prompt(self) -> str:
+        return (agent.load_prompt(self.key)
+                + "\n\n## Skill library (load with read_skill before "
+                  "relevant tasks)\n" + skills.index())
 
     def run(self, task: str, settings: config.Settings | None = None,
             effort: str = "high") -> str:
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
-        system = agent.load_prompt(self.key)
-        return backend.run_agent(settings, system, task,
+        return backend.run_agent(settings, self.system_prompt(), task,
                                  self.tool_defs(settings.provider), effort)
 
 
@@ -54,8 +61,9 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
             description="Software design, writing and reviewing code, debugging, "
-                        "architecture, DevOps questions.",
-            web=True,
+                        "architecture, DevOps questions. Can execute and test "
+                        "code in a sandbox.",
+            web=True, code_exec=True,
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
@@ -66,8 +74,10 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="iris", name="Iris", title="Social Network Assistant",
             description="Social media content, posting strategy, community "
-                        "management, platform best practices, trends.",
+                        "management, platform best practices, trends. Can push "
+                        "content to configured webhooks.",
             web=True,
+            extra_tools=("call_webhook",),
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
@@ -77,7 +87,9 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="chronos", name="Chronos", title="Scheduling Manager",
             description="Time management, planning, schedules, routines, "
-                        "deadlines, prioritization.",
+                        "deadlines, prioritization. Can send reminder emails "
+                        "and call configured webhooks.",
+            extra_tools=("send_email", "call_webhook"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",
@@ -90,16 +102,25 @@ SPECIALISTS: dict[str, Specialist] = {
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",
             description="Watches YouTube videos via transcript, understands and "
                         "summarizes them, and stores durable lessons in memory.",
-            extra_tools=("watch_youtube",),
+            extra_tools=("watch_youtube", "create_skill"),
+        ),
+        Specialist(
+            key="metis", name="Metis", title="Learning Synthesizer",
+            description="Runs Olympus's daily learning cycle: distills recent "
+                        "lessons, corrections, and user feedback into reusable "
+                        "skills so the whole council gets smarter every day.",
+            extra_tools=("create_skill",),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",
             description="Audits Olympus itself: reads its own source and prompts, "
-                        "finds what is missing, upgrades agent prompts, and files "
-                        "upgrade proposals so the product keeps improving.",
+                        "finds what is missing, upgrades agent prompts (measured "
+                        "by benchmark, with rollback), and files upgrade "
+                        "proposals so the product keeps improving.",
             web=True,
             extra_tools=("list_source_files", "read_source_file",
-                         "update_prompt", "propose_upgrade"),
+                         "update_prompt", "restore_prompt", "run_benchmark",
+                         "propose_upgrade", "create_skill"),
         ),
     ]
 }

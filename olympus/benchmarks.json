@@ -1,0 +1,38 @@
+[
+  {
+    "id": "plutus-budget",
+    "specialist": "plutus",
+    "task": "I earn $4,200/month after tax. Rent is $1,500, car payment $380, student loan minimum $220 at 6.8% APR, credit card balance $3,000 at 24% APR (minimum $90). I have $500 saved. Design my monthly plan.",
+    "criteria": "Prioritizes the 24% APR credit card over extra student-loan payments; builds an emergency buffer; gives concrete dollar allocations that sum correctly within income; states assumptions; separates facts from judgment."
+  },
+  {
+    "id": "peitho-launch",
+    "specialist": "peitho",
+    "task": "I built a $12/month app that turns voice memos into organized notes. Audience: busy contractors and tradespeople. I have $0 ad budget and 200 Instagram followers. Give me a 2-week launch plan.",
+    "criteria": "Starts from the audience, not channels; tactics are concrete and zero-budget; includes real example copy ready to paste; each recommendation names an expected outcome and how to measure it; honest about what is unlikely to work."
+  },
+  {
+    "id": "hephaestus-review",
+    "specialist": "hephaestus",
+    "task": "Review this Python function:\n\ndef get_user_orders(user_id, db):\n    orders = db.execute(f\"SELECT * FROM orders WHERE user_id = {user_id}\")\n    total = 0\n    for o in orders:\n        total += o['amount']\n    return {'orders': orders, 'total': total}",
+    "criteria": "Identifies the SQL injection vulnerability as the top issue; notes the cursor/iterator is consumed before being returned; provides corrected, complete code using parameterized queries; orders findings by severity."
+  },
+  {
+    "id": "chronos-week",
+    "specialist": "chronos",
+    "task": "I work 9-5 Mon-Fri, commute 45 min each way, want to train for a 10K (3 runs/week), study Spanish 30 min/day, and I keep doomscrolling 9-11pm. Two kids need me 6-8pm. Build my weekly schedule.",
+    "criteria": "Produces a concrete timetable with times and durations, not advice; includes buffers and realistic transitions; protects the 6-8pm family block; addresses the doomscrolling window with a specific replacement; says what to drop or defer if a day slips."
+  },
+  {
+    "id": "chiron-stuck",
+    "specialist": "chiron",
+    "task": "I've said for three years I want to start a woodworking side business. I have tools, skills, and even a logo. Every weekend I find reasons not to start. I'm telling myself I need a better website first.",
+    "criteria": "Names the avoidance pattern kindly but directly instead of validating the website excuse; reflects the user's own words; ends with one small concrete action sized for this week; does not prescribe a generic productivity system."
+  },
+  {
+    "id": "aegis-smb",
+    "specialist": "aegis",
+    "task": "I run a 6-person design agency. Everyone uses personal laptops, we share one Dropbox, passwords live in a shared Google Doc, and our client contracts are in email attachments. Where do I start?",
+    "criteria": "Prioritizes by risk reduction per effort (password manager + MFA before exotic measures); concrete tools and exact first steps; defensive framing without fear-mongering; states the actual risk level of the current setup plainly."
+  }
+]

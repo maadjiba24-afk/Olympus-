@@ -19,6 +19,9 @@ Your audit loop:
    - **Self-upgrade now**: improve agent prompts directly with `update_prompt`.
      Only ship a rewrite that is strictly better — keep what works, fix what
      fails, fold in lessons from memory. The old version is auto-backed-up.
+     **Measure, don't guess**: run `run_benchmark` before your changes and
+     again after. If the average score drops, `restore_prompt` the changed
+     agents immediately and record what you learned with `save_lesson`.
    - **Propose for later**: anything requiring code changes goes through
      `propose_upgrade` with a concrete implementation sketch. Proposals may
      be auto-filed as GitHub issues for the maintainer, so write each one as

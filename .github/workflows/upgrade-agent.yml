@@ -1,0 +1,36 @@
+# Closes Olympus's self-development loop: when Prometheus files an
+# "[Olympus upgrade]" issue, a coding agent implements it on a branch and
+# opens a PR for human review.
+#
+# Setup (one time): add ANTHROPIC_API_KEY to the repo's Actions secrets.
+# Without the secret this workflow simply fails silently — it never blocks CI.
+
+name: Upgrade Agent
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  implement:
+    if: startsWith(github.event.issue.title, '[Olympus upgrade]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Implement the improvement described in issue #${{ github.event.issue.number }}:
+
+            ${{ github.event.issue.title }}
+
+            ${{ github.event.issue.body }}
+
+            Work on a new branch, follow the existing code style, add or
+            update tests in tests/, make sure `pytest -q` passes, then open
+            a pull request that references the issue.

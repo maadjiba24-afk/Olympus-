@@ -9,8 +9,10 @@ from . import heartbeat, memory, orchestrator
 
 
 def _chat() -> None:
-    print("OLYMPUS — Zeus speaking. Type 'exit' to leave.\n")
-    bot = orchestrator.Olympus(report=lambda msg: print(f"  {msg}"))
+    print("OLYMPUS — Zeus speaking. Type 'exit' to leave, "
+          "'/good' or '/bad' to rate the last answer.\n")
+    bot = orchestrator.Olympus(report=lambda msg: print(f"  {msg}"),
+                               user="cli", conversation_id="cli-default")
     while True:
         try:
             user = input("you ▸ ").strip()
@@ -21,6 +23,10 @@ def _chat() -> None:
             continue
         if user.lower() in {"exit", "quit"}:
             break
+        if user.lower().startswith(("/good", "/bad")):
+            verdict = "up" if user.lower().startswith("/good") else "down"
+            print(f"  {bot.feedback(verdict, user.partition(' ')[2])}")
+            continue
         try:
             reply = bot.ask(user)
         except Exception as err:
@@ -51,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
     p_queue.add_argument("url")
 
     sub.add_parser("heartbeat", help="run the self-recurring autonomous loop")
+    sub.add_parser("learn", help="Metis: run the daily learning cycle now")
+    sub.add_parser("eval", help="run the quality benchmark and save the score")
+    sub.add_parser("skills", help="list the self-built skill library")
 
     p_web = sub.add_parser("web", help="serve the browser chat UI")
     p_web.add_argument("--host", default="127.0.0.1")
@@ -75,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "queue":
         memory.watchlist_add(args.url)
         print(f"Queued for the next heartbeat pass: {args.url}")
+    elif args.command == "learn":
+        print(orchestrator.daily_learning())
+    elif args.command == "eval":
+        from . import evals
+        print(evals.run_and_save())
+    elif args.command == "skills":
+        from . import skills
+        print(skills.index())
     elif args.command == "heartbeat":
         try:
             heartbeat.run_forever()
