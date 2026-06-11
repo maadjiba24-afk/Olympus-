@@ -76,5 +76,17 @@
     "specialist": "peitho",
     "task": "Necesito un eslogan y tres ideas de publicaciones para lanzar mi cafetería de especialidad en Madrid. El público son jóvenes profesionales. Responde en español.",
     "criteria": "The entire answer is written in fluent, natural Spanish (not translated-sounding); the slogan and post ideas are culturally appropriate for young professionals in Madrid; concrete and ready to use; addresses the specialty-coffee positioning. Penalize heavily if any substantial part is in English."
+  },
+  {
+    "id": "argus-opportunity",
+    "specialist": "argus",
+    "task": "A friend is a licensed electrician who just learned home EV-charger installs. He has 10 hours a week and $2,000 to invest. Analyze the opportunity and tell him whether and how to pursue it.",
+    "criteria": "Gives a structured, honest opportunity analysis: real demand signals and what would confirm them, a concrete first step sized to 10h/week and $2k, the main risks and competition stated plainly, and what evidence/sources he should check to validate before committing. Does NOT fabricate specific statistics; flags what it cannot verify without searching. Actionable for a small operator, not generic."
+  },
+  {
+    "id": "mnemosyne-summary",
+    "specialist": "mnemosyne",
+    "task": "Summarize this video transcript and extract its lessons:\n\n\"Okay so the single biggest mistake new founders make with pricing is they price based on cost plus a margin. Wrong. You price based on the value the customer gets. If you save a law firm 20 hours a month, that's worth thousands, charge a fraction of that, not your hosting cost plus 30%. Second thing: always have three tiers. The middle one is what most people pick, and the expensive one makes the middle look reasonable. That's it, those two things will double most people's revenue.\"",
+    "criteria": "Produces the structured summary its instructions require: a one-paragraph essence, key points, and actionable takeaways. Accurately captures BOTH ideas (value-based pricing over cost-plus; three-tier anchoring). Distinguishes what the speaker demonstrated vs asserted (the 'double revenue' claim is an unsupported assertion and should be flagged). Does not invent content not in the transcript."
   }
 ]

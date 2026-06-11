@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
+    p_train = sub.add_parser("train", help="score all specialists and have "
+                                           "Prometheus strengthen the weakest")
+    p_train.add_argument("--focus", type=int, default=2,
+                         help="how many of the weakest specialists to improve")
+    sub.add_parser("scores", help="show per-specialist benchmark scores")
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
@@ -118,6 +123,16 @@ def main(argv: list[str] | None = None) -> int:
         print(skills.index())
     elif args.command == "gate":
         print(orchestrator.gate_skills())
+    elif args.command == "train":
+        print(orchestrator.train_specialists(focus=args.focus))
+    elif args.command == "scores":
+        from . import evals
+        scores = evals.per_specialist_scores()
+        if not scores:
+            print("No scores (benchmark unavailable — set ANTHROPIC_API_KEY).")
+        else:
+            for s, sc in sorted(scores.items(), key=lambda kv: kv[1]):
+                print(f"  {s}: {sc}/10")
     elif args.command == "contrib":
         from . import contrib
         print(f"Cross-model contribution queue: {contrib.count()} snapshots.")
