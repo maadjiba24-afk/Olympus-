@@ -661,6 +661,52 @@ def daily_learning(settings: config.Settings | None = None) -> str:
     return report
 
 
+def train_specialists(settings: config.Settings | None = None,
+                      focus: int = 2) -> str:
+    """Systematically strengthen the council: ensure every user-facing
+    specialist is benchmarked, score them all, and have Prometheus focus on
+    improving the weakest — measured, with rollback. This is the routine that
+    makes all 11 specialists strong and keeps them improving.
+    """
+    from . import evals
+    settings = settings or config.Settings.from_env()
+    memory.set_user("shared")
+
+    generated = evals.ensure_coverage(min_items=1, settings=settings)
+    scores = evals.per_specialist_scores(settings)
+    if not scores:
+        return "Training could not score specialists (benchmark unavailable)."
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1])
+    weakest = [s for s, _ in ranked[:max(1, focus)]]
+    board = "\n".join(f"  {s}: {sc}/10" for s, sc in ranked)
+
+    from .specialists import SPECIALISTS
+    task = (
+        "Targeted training round. Current per-specialist benchmark scores "
+        f"(lowest first):\n{board}\n\n"
+        f"Focus on the weakest specialists: {', '.join(weakest)}.\n"
+        "For each, read its prompt and recent corrections, then improve it the "
+        "measured way:\n"
+        "1. run_benchmark to record the baseline.\n"
+        "2. Build a skill (create_skill, tagged to that specialist) and/or "
+        "sharpen its prompt (update_prompt) to fix the specific weaknesses the "
+        "scores reveal.\n"
+        "3. gate_skills and re-run_benchmark; KEEP changes that raise the "
+        "score, restore_prompt / let the gate revert anything that doesn't.\n"
+        "For coding (hephaestus) use run_code_benchmark — real pass/fail.\n"
+        "Never weaken safety rules. Report what you measured, changed, and the "
+        "score movement."
+    )
+    report = SPECIALISTS["prometheus"].run(task, settings=settings)
+    summary = (f"Training round complete.\nScores:\n{board}\n"
+               + (f"Generated coverage for: {', '.join(set(generated))}\n"
+                  if generated else "")
+               + f"Focused on: {', '.join(weakest)}\n\n{report}")
+    memory.save("reports", "Specialist training round", summary)
+    return summary
+
+
 def gate_skills(settings: config.Settings | None = None) -> str:
     """Prove provisional skills with a before/after benchmark; keep the ones
     that hold or raise the score, revert the rest. The safety net that lets

@@ -79,6 +79,6 @@ def test_coding_benchmark_is_polyglot():
 
 def test_heartbeat_nothing_due():
     from olympus import heartbeat
-    state = {k: 1e18 for k in ("opportunity_scan", "watchlist",
-                               "daily_learning", "evolution_audit")}
+    state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
+                               "daily_learning", "train", "evolution_audit")}
     assert heartbeat.tick(state) == []

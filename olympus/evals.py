@@ -50,6 +50,50 @@ def ids_for(specialists) -> list[str]:
     return [b["id"] for b in load_benchmarks() if b["specialist"] in keys]
 
 
+# Specialists that answer user tasks (benchmarkable). Metis and Prometheus are
+# internal — their quality is their effect on the system, not a single answer.
+USER_FACING = ("plutus", "peitho", "hephaestus", "aegis", "iris", "chiron",
+               "chronos", "argus", "mnemosyne")
+
+
+def coverage() -> dict[str, int]:
+    """How many benchmark items each specialist has."""
+    out = {s: 0 for s in USER_FACING}
+    for b in load_benchmarks():
+        out[b["specialist"]] = out.get(b["specialist"], 0) + 1
+    return out
+
+
+def ensure_coverage(min_items: int = 1,
+                    settings: config.Settings | None = None) -> list[str]:
+    """Generate benchmark items for any user-facing specialist below min_items.
+    Returns the specialists for which an item was generated."""
+    settings = settings or config.Settings.from_env()
+    generated = []
+    cov = coverage()
+    for spec in USER_FACING:
+        for _ in range(max(0, min_items - cov.get(spec, 0))):
+            try:
+                generate_item(spec, settings)
+                generated.append(spec)
+            except Exception:
+                break
+    return generated
+
+
+def per_specialist_scores(settings: config.Settings | None = None) -> dict[str, float]:
+    """Run the benchmark and return the average score per specialist."""
+    settings = settings or config.Settings.from_env()
+    result = run(settings)
+    buckets: dict[str, list[int]] = {}
+    bench_by_id = {b["id"]: b for b in load_benchmarks()}
+    for item in result["items"]:
+        spec = bench_by_id.get(item["id"], {}).get("specialist")
+        if spec:
+            buckets.setdefault(spec, []).append(item["score"])
+    return {s: round(sum(v) / len(v), 2) for s, v in buckets.items()}
+
+
 def add_item(item: dict) -> None:
     """Append an auto-generated benchmark item to the extensible eval set."""
     extra = config.MEMORY_DIR / "benchmarks_extra.json"

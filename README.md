@@ -126,6 +126,24 @@ The result is something neither Hermes nor OpenClaw has: a system that gets
 collectively smarter by distilling the best of every frontier model its users
 bring — with consent, anonymization, and quality-gating built in.
 
+### Keeping all 11 specialists strong (systematic training)
+
+A specialist only improves at what's *measured* — so Olympus measures every
+user-facing specialist and trains the weakest on a cadence:
+
+- **Full coverage.** Every user-facing specialist (Plutus, Peitho, Hephaestus,
+  Aegis, Iris, Chiron, Chronos, Argus, Mnemosyne) has benchmark items; any gap
+  is auto-filled with a generated one. (Metis and Prometheus are internal —
+  their quality is their effect on the system.)
+- **`python -m olympus scores`** shows every specialist's current score,
+  lowest first. **`python -m olympus train`** scores them all, then has
+  Prometheus focus on the weakest — building skills and sharpening prompts,
+  measured before/after with automatic rollback, so changes only stick if they
+  raise the score. Coding uses the execution benchmark (real pass/fail).
+- The heartbeat runs a training round every few days (`OLYMPUS_TRAIN_EVERY`),
+  so the whole council levels up over time without you asking — and the
+  weakest domain always gets attention first.
+
 ### How it gets smarter day by day
 
 1. **Experience** — every conversation produces lessons (specialists),
@@ -256,6 +274,8 @@ python -m olympus audit            # Prometheus: self-audit + self-upgrade now
 python -m olympus learn            # Metis: distill experience into skills now
 python -m olympus eval             # run the judge-scored quality benchmark
 python -m olympus code-eval        # run Hephaestus's code against real tests
+python -m olympus scores           # per-specialist benchmark scores (weakest first)
+python -m olympus train            # strengthen the weakest specialists now
 python -m olympus skills           # list the self-built skill library
 python -m olympus gate             # benchmark-gate provisional skills now
 python -m olympus usage --days 7   # estimated token/cost spend
