@@ -198,13 +198,28 @@ def mcp_servers() -> list[MCPServer]:
     return servers
 
 
+def action_allowlist() -> set[str]:
+    """Action MCP servers the operator has explicitly enabled by name.
+
+    Mirrors the email/webhook actuator pattern: defining an action server in
+    connectors.json is not enough — it stays inert until its name is also in
+    OLYMPUS_MCP_ACTION_ALLOWLIST. Two independent gates, both operator-only.
+    """
+    raw = os.environ.get("OLYMPUS_MCP_ACTION_ALLOWLIST", "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
 def mcp_for(specialist_key: str, *, allow_action: bool) -> list[MCPServer]:
+    allowed_actions = action_allowlist()
     out = []
     for s in mcp_servers():
         if s.specialists and specialist_key not in s.specialists:
             continue
-        if s.type == "action" and not allow_action:
-            continue
+        if s.type == "action":
+            if not allow_action:
+                continue
+            if s.name not in allowed_actions:
+                continue  # configured but not operator-allowlisted -> inert
         out.append(s)
     return out
 
@@ -243,11 +258,16 @@ def summary() -> str:
     load_plugins()
     lines = ["MCP servers:"]
     servers = mcp_servers()
+    allowed = action_allowlist()
     if servers:
         for s in servers:
             who = ", ".join(s.specialists) or "all"
             auth = f" auth:{s.auth_env}" if s.auth_env else ""
-            lines.append(f"  - {s.name} ({s.type}) → {who}{auth}  {s.url}")
+            state = ""
+            if s.type == "action":
+                state = (" [ACTIVE: allowlisted]" if s.name in allowed
+                         else " [INERT: add to OLYMPUS_MCP_ACTION_ALLOWLIST]")
+            lines.append(f"  - {s.name} ({s.type}){state} → {who}{auth}  {s.url}")
     else:
         lines.append("  (none configured)")
     lines.append("Custom plugins:")

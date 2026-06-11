@@ -270,14 +270,20 @@ a working template.
 
 **The security edge nobody else has.** Hermes and OpenClaw let you plug in MCP
 servers with no quality gate and no injection defense — a malicious or buggy
-connector runs unchecked. In Olympus, every connector is tagged `data`
-(read-only) or `action` (changes the world). Data-connector output is wrapped
-as untrusted content and **fact-checked by Aletheia** like any other claim;
-**action connectors are stripped from any specialist run that also ingests
-external content** (capability separation), so a poisoned web page or document
-can never trigger one. You get the whole MCP ecosystem *plus* the safety the
-others skip. Assign action connectors (GitHub-write, etc.) to a non-web
-specialist like Chronos.
+connector runs unchecked. Olympus gates connectors in two tiers:
+
+- **Tier 1 — data connectors** (read-only): wired into specialists like any
+  other tool. Output is wrapped as untrusted content, sanitized before it can
+  touch memory, and **fact-checked by Aletheia** like any other claim.
+- **Tier 2 — action connectors** (change the world): treated exactly like the
+  email/webhook actuators, behind a **double gate** — defining one in
+  `connectors.json` is not enough; it stays **inert** until the operator also
+  names it in `OLYMPUS_MCP_ACTION_ALLOWLIST`. And capability separation still
+  applies: action connectors are stripped from any specialist run that also
+  ingests external content, so a poisoned page or document can never trigger
+  one. Assign them to a non-web specialist like Chronos.
+
+You get the whole MCP ecosystem *plus* the safety the others skip.
 
 > MCP runs server-side on the Anthropic backend; custom plugins work on every
 > backend. On OpenAI-compatible providers, use plugins for connectors.
