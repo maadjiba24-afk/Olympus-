@@ -94,6 +94,9 @@ MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
 # Max tool-use iterations for a single specialist run (guards against loops).
 MAX_AGENT_ITERATIONS = 16
 
+# Process-wide cap on concurrent model calls (backpressure vs rate limits).
+MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
+
 # Heartbeat cadence (seconds).
 HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
@@ -101,6 +104,10 @@ WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
+
+# Benchmark judge model (kept different from the model being tuned, so
+# Prometheus can't game the scorer). Only used on the Anthropic backend.
+JUDGE_MODEL = os.environ.get("OLYMPUS_JUDGE_MODEL", "claude-sonnet-4-6")
 
 # Prometheus also self-audits after this many conversations (0 disables).
 AUDIT_EVERY_CHATS = int(os.environ.get("OLYMPUS_AUDIT_EVERY_CHATS", "20"))

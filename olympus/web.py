@@ -279,14 +279,27 @@ f.addEventListener('submit', async (ev) => {
   q.value = ''; clearFile(); b.disabled = true; q.disabled = true;
   const timer = setInterval(poll, 1200);
   try {
-    const r = await fetch('/api/chat', {
+    const r = await fetch('/api/chat?stream=1', {
       method: 'POST', headers: hdrs(),
       body: JSON.stringify({message: text, session: session, settings: cfg()})
     });
-    const d = await r.json();
     clearInterval(timer); await poll();
-    add('msg bot', d.reply || d.error || '(no reply)');
-    if (d.reply) addRating();
+    if (r.ok && r.body && r.headers.get('Content-Type') === 'text/plain') {
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      const p = add('msg bot', '');
+      let acc = '';
+      while (true) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        acc += dec.decode(value, {stream: true});
+        p.textContent = acc; log.scrollTop = log.scrollHeight;
+      }
+      if (acc.trim()) addRating();
+    } else {
+      const d = await r.json();
+      add('msg bot', d.reply || d.error || '(no reply)');
+      if (d.reply) addRating();
+    }
   } catch (e) {
     clearInterval(timer);
     add('sys', 'error: ' + e);
@@ -372,12 +385,30 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             self._json({"error": error}, 400)
             return
+
+        want_stream = parse_qs(urlparse(self.path).query).get("stream", ["0"])[0] == "1"
         try:
             with session.lock:
-                reply = session.bot_for(settings).ask(message)
-            self._json({"reply": reply})
+                bot = session.bot_for(settings)
+                if want_stream:
+                    self._stream_reply(bot, message)
+                else:
+                    self._json({"reply": bot.ask(message)})
         except Exception as err:
-            self._json({"error": str(err)}, 500)
+            try:
+                self._json({"error": str(err)}, 500)
+            except Exception:
+                pass
+
+    def _stream_reply(self, bot, message: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for chunk in bot.ask_stream(message):
+            if chunk:
+                self.wfile.write(chunk.encode("utf-8"))
+                self.wfile.flush()
 
     def log_message(self, *args) -> None:  # silence default request logging
         pass

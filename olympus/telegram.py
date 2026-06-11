@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
 import time
 import traceback
 import urllib.error
@@ -135,12 +137,36 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
     _send(token, chat_id, bot.ask(text))
 
 
+class _ChatWorker(threading.Thread):
+    """One worker per chat: serial within a chat, concurrent across chats so
+    a slow pipeline for one user never blocks everyone else."""
+
+    def __init__(self, token: str, bots: dict, chat_id: int):
+        super().__init__(daemon=True)
+        self.token, self.bots, self.chat_id = token, bots, chat_id
+        self.q: queue.Queue[str] = queue.Queue()
+
+    def run(self) -> None:
+        while True:
+            text = self.q.get()
+            try:
+                _handle(self.token, self.bots, self.chat_id, text)
+            except Exception:
+                traceback.print_exc()
+                try:
+                    _send(self.token, self.chat_id,
+                          "Something went wrong — try again.")
+                except Exception:
+                    pass
+
+
 def run_bot() -> None:
     token = _token()
     me = _call(token, "getMe")["result"]
     print(f"⚡ Olympus is live on Telegram as @{me['username']}  (Ctrl-C to stop)")
 
     bots: dict[int, orchestrator.Olympus] = {}
+    workers: dict[int, _ChatWorker] = {}
     offset = 0
     while True:
         try:
@@ -155,11 +181,9 @@ def run_bot() -> None:
             chat = message.get("chat") or {}
             if not text or "id" not in chat:
                 continue
-            try:
-                _handle(token, bots, chat["id"], text)
-            except Exception:
-                traceback.print_exc()
-                try:
-                    _send(token, chat["id"], "Something went wrong — try again.")
-                except Exception:
-                    pass
+            chat_id = chat["id"]
+            worker = workers.get(chat_id)
+            if worker is None:
+                worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)
+                worker.start()
+            worker.q.put(text)

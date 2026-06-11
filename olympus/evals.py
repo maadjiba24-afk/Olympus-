@@ -37,10 +37,23 @@ def load_benchmarks() -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _judge_settings(settings: config.Settings) -> config.Settings:
+    """A separate judge model so the scorer can't be gamed by the tuned model.
+    Only swaps models on the Anthropic backend; other providers judge in-model.
+    """
+    if settings.provider == "anthropic" and config.JUDGE_MODEL \
+            and config.JUDGE_MODEL != settings.model:
+        return config.Settings(provider="anthropic", model=config.JUDGE_MODEL,
+                               api_key=settings.api_key,
+                               base_url=settings.base_url)
+    return settings
+
+
 def run(settings: config.Settings | None = None,
         only: list[str] | None = None) -> dict:
     """Run the benchmark; returns {avg, items: [{id, score, justification}]}."""
     settings = settings or config.Settings.from_env()
+    judge = _judge_settings(settings)
     items = []
     for bench in load_benchmarks():
         if only and bench["id"] not in only:
@@ -54,7 +67,7 @@ def run(settings: config.Settings | None = None,
             [{"role": "user", "content": bench["task"]}], effort="medium",
         )
         verdict = backend.complete_json(
-            settings, JUDGE_SYSTEM,
+            judge, JUDGE_SYSTEM,
             [{"role": "user", "content":
                 f"## Task given to the assistant\n{bench['task']}\n\n"
                 f"## Criteria\n{bench['criteria']}\n\n"

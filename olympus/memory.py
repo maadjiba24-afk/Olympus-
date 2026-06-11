@@ -114,6 +114,29 @@ def recent(category: str, n: int = 5) -> str:
     )
 
 
+def prune(category: str, keep: int = 200) -> str:
+    """Keep only the newest `keep` files in a category (current user's
+    namespace). Older entries are deleted — Metis distills the durable ones
+    into skills before they're pruned, so signal survives, noise doesn't."""
+    files = sorted(_dir(category, current_user()).glob("*.md"),
+                   key=lambda p: p.name, reverse=True)
+    removed = 0
+    for path in files[keep:]:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return f"Pruned {removed} old {category} entries (kept {min(len(files), keep)})."
+
+
+def category_count(category: str) -> int:
+    n = len(list(_dir(category).glob("*.md")))
+    if category in USER_SCOPED and current_user() != "shared":
+        n += len(list(_dir(category, current_user()).glob("*.md")))
+    return n
+
+
 # --- persisted conversations ---------------------------------------------
 
 def _conversation_path(conversation_id: str) -> Path:
