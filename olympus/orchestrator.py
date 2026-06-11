@@ -28,7 +28,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import (agent, backend, config, connectors, llm, memory,
+from . import (agent, backend, config, connectors, i18n, llm, memory,
                trace as trace_mod, tools)
 from .specialists import SPECIALISTS, roster
 
@@ -110,7 +110,8 @@ class Olympus:
     # -- stage 1: Zeus ----------------------------------------------------
 
     def _route(self, user_message: str) -> dict[str, Any]:
-        system = agent.load_prompt("zeus") + "\n\n## Specialist roster\n" + roster()
+        system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
+                  + roster() + i18n.directive(self.user))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.settings, system, messages,
@@ -169,6 +170,7 @@ class Olympus:
         prompt = (
             f"Task brief from Zeus:\n{brief}\n\n"
             f"Suggested specialists: {', '.join(valid)}\n\n"
+            + i18n.content_directive(self.user).strip() + "\n\n"
             "Decompose this into specialist steps. For each step give a unique "
             "id, the specialist, a precise self-contained task, and depends_on "
             "— the ids of any steps whose output it needs.\n"
@@ -262,7 +264,7 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        system = agent.load_prompt("zeus")
+        system = agent.load_prompt("zeus") + i18n.directive(self.user)
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -486,7 +488,7 @@ class Olympus:
                 self._finish(user_message, result)
                 return
             self.report("⚡ Zeus composes the final answer...")
-            system = agent.load_prompt("zeus")
+            system = agent.load_prompt("zeus") + i18n.directive(self.user)
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"
@@ -511,6 +513,11 @@ class Olympus:
             self._finish(user_message, "".join(chunks))
         finally:
             tr.flush()
+
+    def set_language(self, value: str) -> str:
+        """Set this user's persistent language preference ('auto' to detect)."""
+        memory.set_user(self.user)
+        return i18n.set_preference(self.user, value)
 
     def feedback(self, verdict: str, comment: str = "") -> str:
         """Record a 👍/👎 on the last exchange — fuel for the learning cycle."""

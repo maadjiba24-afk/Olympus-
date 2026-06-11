@@ -27,6 +27,9 @@ def _chat() -> None:
             verdict = "up" if user.lower().startswith("/good") else "down"
             print(f"  {bot.feedback(verdict, user.partition(' ')[2])}")
             continue
+        if user.lower().startswith("/lang"):
+            print(f"  {bot.set_language(user.partition(' ')[2] or 'auto')}")
+            continue
         try:
             reply = bot.ask(user)
         except Exception as err:

@@ -39,6 +39,7 @@ HELP = (
     "/queue <youtube-url> — queue a video for the autonomous loop\n"
     "/audit — Olympus audits and upgrades itself\n"
     "/good or /bad [comment] — rate the last answer (Olympus learns from it)\n"
+    "/lang <language> — reply in your language (e.g. /lang Spanish, /lang auto)\n"
 )
 
 
@@ -131,6 +132,13 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
     if cmd in ("/good", "/bad"):
         _send(token, chat_id,
               bot.feedback("up" if cmd == "/good" else "down", arg))
+        return
+    if cmd == "/lang":
+        if not arg:
+            _send(token, chat_id, "Usage: /lang <language>  (e.g. /lang French, "
+                                  "/lang auto)")
+            return
+        _send(token, chat_id, bot.set_language(arg))
         return
 
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")

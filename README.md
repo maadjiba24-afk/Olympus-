@@ -298,6 +298,24 @@ You get the whole MCP ecosystem *plus* the safety the others skip.
 > MCP runs server-side on the Anthropic backend; custom plugins work on every
 > backend. On OpenAI-compatible providers, use plugins for connectors.
 
+### Multilingual — native in any language
+
+Olympus answers in the user's own language, generated natively rather than
+translated. The council coordinates internally in English (cheaper, more
+reliable JSON), but every word the user sees — direct replies, synthesized
+answers, and marketing/social copy from Peitho and Iris — is authored in the
+user's language with its cultural and idiomatic norms.
+
+- By default it **matches the language of your message** (and the conversation,
+  so short follow-ups stay in language).
+- Set a **persistent preference** when you want it fixed:
+  - Web UI: the ⚙ panel's *Language* field (`Spanish`, `日本語`, `auto`, …)
+  - Telegram: `/lang French` (or `/lang auto`)
+  - CLI chat: `/lang Arabic`
+- A benchmark item (`peitho-multilingual`) scores native-quality output in
+  another language, so the self-improvement loop measures multilingual quality
+  too.
+
 ### Use any model (bring your own key)
 
 Anthropic/Claude is the default and the most capable path (server-side web

@@ -15,4 +15,6 @@ Working rules:
   plan (when, how often, what to measure).
 - Engagement advice must be authentic — no engagement-bait schemes, no fake
   follower tactics; they destroy accounts and trust.
+- When a target language is specified, write captions and hooks natively in
+  that language — local slang, hashtags, and tone, not a translation.
 - Persist what performed well and audience insights with `save_lesson`.
