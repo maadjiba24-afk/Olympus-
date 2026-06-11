@@ -106,3 +106,30 @@ def sanitize_for_memory(text: str) -> str:
 
 def looks_like_injection(text: str) -> bool:
     return bool(_INJECTION_MARKERS.search(text or ""))
+
+
+# --- anonymization (for the opt-in cross-model learning pool) ------------
+
+_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_PHONE = re.compile(r"(?<!\d)(?:\+?\d[\d ().-]{7,}\d)(?!\d)")
+_LONGNUM = re.compile(r"\b\d{6,}\b")            # ids, card/account numbers
+_URL_CRED = re.compile(r"https?://[^\s/@]+:[^\s/@]+@")  # creds in URLs
+_KEYISH = re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs]|AKIA)[-_A-Za-z0-9]{8,}\b")
+
+
+def anonymize(text: str) -> str:
+    """Strip obvious PII/secrets before content can enter the SHARED pool.
+
+    Conservative redaction — this protects users who opt into cross-model
+    contribution. It is not a guarantee of perfect de-identification, so the
+    pool only ever holds distilled *methods*, never verbatim user data, and
+    contribution is strictly opt-in.
+    """
+    if not text:
+        return text
+    text = _URL_CRED.sub("https://[redacted]@", text)
+    text = _KEYISH.sub("[redacted-key]", text)
+    text = _EMAIL.sub("[email]", text)
+    text = _PHONE.sub("[phone]", text)
+    text = _LONGNUM.sub("[number]", text)
+    return text

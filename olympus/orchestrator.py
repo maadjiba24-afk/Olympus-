@@ -28,7 +28,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import (agent, backend, config, connectors, i18n, llm, memory,
+from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
                trace as trace_mod, tools)
 from .specialists import SPECIALISTS, roster
 
@@ -428,6 +428,12 @@ class Olympus:
             self._compress_history()
         if self.conversation_id:
             memory.save_conversation(self.conversation_id, self.history)
+        # Opt-in cross-model learning: contribute an anonymized snapshot tagged
+        # with the model that produced it (only if this user opted in).
+        try:
+            contrib.offer(self.user, self.settings.model, user_message, reply)
+        except Exception:
+            pass
         note_conversation(self.report)
 
     def _compress_history(self) -> None:
@@ -518,6 +524,11 @@ class Olympus:
         """Set this user's persistent language preference ('auto' to detect)."""
         memory.set_user(self.user)
         return i18n.set_preference(self.user, value)
+
+    def set_contribute(self, on: bool) -> str:
+        """Opt this user in/out of the shared cross-model learning pool."""
+        memory.set_user(self.user)
+        return contrib.set_enabled(self.user, on)
 
     def feedback(self, verdict: str, comment: str = "") -> str:
         """Record a 👍/👎 on the last exchange — fuel for the learning cycle."""
@@ -614,14 +625,23 @@ def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
 
 def daily_learning(settings: config.Settings | None = None) -> str:
     """Metis distills the last day of experience into skills — the mechanism
-    that makes Olympus smarter day by day."""
+    that makes Olympus smarter day by day, across every model users bring."""
     from . import skills
+    memory.set_user("shared")
+    cross_model = contrib.digest(40)
     task = (
         "Run your daily learning cycle now.\n"
         f"The skill library currently holds {skills.count()} skills.\n"
         "Recent lessons:\n" + memory.recent("lessons", 8) + "\n\n"
         "Recent corrections:\n" + memory.recent("corrections", 5) + "\n\n"
         "Recent user feedback:\n" + memory.recent("feedback", 8) + "\n\n"
+        "## Cross-model contributions (anonymized, opt-in; grouped by the "
+        "frontier model that produced them)\n" + cross_model + "\n\n"
+        "These come from different models (Claude, GPT, Gemini, …). Look "
+        "ESPECIALLY for knowledge or techniques that one model surfaced that "
+        "would help every specialist regardless of model — distill those into "
+        "skills so the whole council inherits the best of each frontier model. "
+        "Note the source model in the skill when relevant.\n\n"
         "Distill patterns into created/updated skills per your instructions, "
         "then give your report."
     )
@@ -633,10 +653,11 @@ def daily_learning(settings: config.Settings | None = None) -> str:
         report += f"\n\n## Skill gate\n{gate}"
     except Exception:
         pass
-    # Hygiene: distillation done, prune the oldest raw shared lessons/corrections.
+    # Hygiene: distillation done, prune raw shared memory and the contrib queue.
     memory.set_user("shared")
     memory.prune("lessons", keep=300)
     memory.prune("corrections", keep=200)
+    contrib.clear_old(keep=200)
     return report
 
 

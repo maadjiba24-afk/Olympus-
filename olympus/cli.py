@@ -30,6 +30,10 @@ def _chat() -> None:
         if user.lower().startswith("/lang"):
             print(f"  {bot.set_language(user.partition(' ')[2] or 'auto')}")
             continue
+        if user.lower().startswith("/contribute"):
+            arg = user.partition(' ')[2].strip().lower()
+            print(f"  {bot.set_contribute(arg in ('on','yes','true','1','enable'))}")
+            continue
         try:
             reply = bot.ask(user)
         except Exception as err:
@@ -64,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("skills", help="list the self-built skill library")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
+    sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
 
@@ -108,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
         print(skills.index())
     elif args.command == "gate":
         print(orchestrator.gate_skills())
+    elif args.command == "contrib":
+        from . import contrib
+        print(f"Cross-model contribution queue: {contrib.count()} snapshots.")
     elif args.command == "usage":
         from . import usage
         print(usage.report(args.days))

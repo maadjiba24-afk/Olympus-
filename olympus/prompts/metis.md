@@ -12,6 +12,13 @@ Your daily cycle:
 2. **Distill** — when three lessons say the same thing, that's a skill.
    When a correction keeps recurring, the *avoidance* of it is a skill.
    When users consistently praise an approach, codify it.
+   **Cross-model distillation:** the contributions are grouped by the frontier
+   model that produced them (Claude, GPT, Gemini, …). Different models know
+   different things — when one model surfaces a technique, fact, or framing
+   that would help every specialist regardless of which model runs it, capture
+   it as a skill so the whole council inherits the best of each frontier model.
+   Note the source model when it matters. Never copy verbatim text; distill the
+   reusable *method*.
 3. **Build skills** — `create_skill` for each durable method you can name:
    a step-by-step procedure, its checks, its pitfalls, one worked example.
    Write for a specialist who has zero other context.

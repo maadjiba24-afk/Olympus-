@@ -101,6 +101,31 @@ price" executes as a real chain (each step fed the last), while anything that
 *can* run in parallel still does. The executor is cycle-safe and isolates
 per-step failures. You get parallel speed *and* correct serial reasoning.
 
+### Cross-model learning (opt-in) — the best of every frontier model
+
+Olympus runs on whatever model a user brings (Claude, GPT, Gemini, …). Each
+frontier model knows different things — so Olympus can distill the best of all
+of them into one shared, quality-gated knowledge layer that lifts every model,
+including the cheap ones.
+
+It is **opt-in and privacy-first** (off by default):
+
+- A user explicitly enables contribution (web ⚙ checkbox, `/contribute on` on
+  Telegram/CLI). Only then is anything shared.
+- What's shared is **anonymized at write time** — emails, phone numbers, long
+  ID/account numbers, and API-key-shaped strings are stripped before a short
+  snapshot (tagged with the source model) enters the shared queue. Raw user
+  data never enters the pool.
+- Metis's daily cycle reads the queue **grouped by source model** and distills
+  genuinely cross-model insights — knowledge one model surfaced that helps
+  every specialist regardless of model — into **provisional** skills.
+- The **benchmark gate** then keeps only the skills that measurably help and
+  reverts the rest, so a weak model's output can't pollute the shared library.
+
+The result is something neither Hermes nor OpenClaw has: a system that gets
+collectively smarter by distilling the best of every frontier model its users
+bring — with consent, anonymization, and quality-gating built in.
+
 ### How it gets smarter day by day
 
 1. **Experience** — every conversation produces lessons (specialists),
