@@ -66,6 +66,17 @@ def test_benchmarks_reference_real_specialists():
         assert bench["task"] and bench["criteria"]
 
 
+def test_coding_benchmark_is_polyglot():
+    """Hephaestus must be benchmarked across many languages, not just Python,
+    so the self-improvement loop strengthens all of them equally."""
+    from olympus import evals
+    coding = [b for b in load_benchmarks() if b["specialist"] == "hephaestus"]
+    blob = " ".join((b["task"] + b["criteria"]).lower() for b in coding)
+    for lang in ("python", "go", "rust", "typescript", "sql"):
+        assert lang in blob, f"no coding benchmark covers {lang}"
+    assert len(evals.ids_for(["hephaestus"])) >= 5
+
+
 def test_heartbeat_nothing_due():
     from olympus import heartbeat
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist",

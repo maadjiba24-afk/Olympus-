@@ -54,7 +54,7 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
 | **Plutus** | Financial specialist |
 | **Peitho** | Marketing specialist |
-| **Hephaestus** | Coding specialist |
+| **Hephaestus** | Coding specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
 | **Aegis** | Cybersecurity specialist (strictly defensive) |
 | **Iris** | Social network assistant |
 | **Chiron** | Coaching specialist |

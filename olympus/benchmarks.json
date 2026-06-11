@@ -15,7 +15,31 @@
     "id": "hephaestus-review",
     "specialist": "hephaestus",
     "task": "Review this Python function:\n\ndef get_user_orders(user_id, db):\n    orders = db.execute(f\"SELECT * FROM orders WHERE user_id = {user_id}\")\n    total = 0\n    for o in orders:\n        total += o['amount']\n    return {'orders': orders, 'total': total}",
-    "criteria": "Identifies the SQL injection vulnerability as the top issue; notes the cursor/iterator is consumed before being returned; provides corrected, complete code using parameterized queries; orders findings by severity."
+    "criteria": "Identifies the SQL injection vulnerability as the top issue; notes the cursor/iterator is consumed before being returned; provides corrected, complete code using parameterized queries; orders findings by severity. Answer must stay in Python."
+  },
+  {
+    "id": "hephaestus-go",
+    "specialist": "hephaestus",
+    "task": "In Go, write a function that fetches a URL with a 5-second timeout and returns the body as a string, with proper error handling. Then briefly note the most common mistake people make here.",
+    "criteria": "Idiomatic Go: uses context.WithTimeout or http.Client{Timeout}, checks and wraps errors with if err != nil (not exceptions), defers resp.Body.Close(), reads with io.ReadAll. The 'common mistake' should be real (e.g. forgetting to close the body / leaking connections, or using the default client with no timeout). Must be Go, not Python translated to Go."
+  },
+  {
+    "id": "hephaestus-rust",
+    "specialist": "hephaestus",
+    "task": "This Rust code won't compile:\n\nfn longest(x: &str, y: &str) -> &str {\n    if x.len() > y.len() { x } else { y }\n}\n\nExplain why and fix it.",
+    "criteria": "Correctly identifies the missing lifetime annotation as the cause (the compiler can't infer which reference the return borrows from); fixes it with an explicit lifetime parameter fn longest<'a>(x: &'a str, y: &'a str) -> &'a str; explains lifetimes accurately without hand-waving. Idiomatic Rust."
+  },
+  {
+    "id": "hephaestus-typescript",
+    "specialist": "hephaestus",
+    "task": "Write a TypeScript utility type and function that takes an object and returns a new object with the same keys but all values converted to strings, fully typed (no `any`).",
+    "criteria": "Uses a mapped type ({ [K in keyof T]: string }) for the return type; the implementation is type-safe with no `any`; idiomatic TS (Object.fromEntries/entries or a typed reduce); compiles. Must be TypeScript, not JavaScript with types bolted on."
+  },
+  {
+    "id": "hephaestus-sql",
+    "specialist": "hephaestus",
+    "task": "I have tables orders(id, customer_id, total, created_at) and customers(id, name). Write a SQL query for the top 5 customers by total spend in 2025, with their name and total. Then say how to make it fast on a large table.",
+    "criteria": "Correct SQL: JOIN, SUM(total), GROUP BY customer/name, WHERE on the 2025 date range (sargable, not a function on created_at), ORDER BY total DESC, LIMIT 5. The performance note is real (index on customer_id and/or created_at; avoid wrapping created_at in a function so the index is used). Standard SQL, dialect-neutral or noted."
   },
   {
     "id": "chronos-week",
