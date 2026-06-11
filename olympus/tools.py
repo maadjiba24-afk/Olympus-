@@ -154,7 +154,8 @@ CREATE_SKILL = {
         "Create or update a skill in Olympus's library. A skill is a reusable "
         "how-to distilled from experience, written so any specialist can apply "
         "it without other context. Use the same name to improve an existing "
-        "skill rather than creating near-duplicates."
+        "skill rather than creating near-duplicates. New skills are provisional "
+        "until a benchmark proves they help — so tag the specialist they serve."
     ),
     "input_schema": {
         "type": "object",
@@ -166,8 +167,36 @@ CREATE_SKILL = {
             "instructions": {"type": "string",
                              "description": "The full method: steps, checks, "
                              "pitfalls, examples"},
+            "specialist": {"type": "string",
+                           "description": "Key of the specialist this skill "
+                           "primarily serves (e.g. 'plutus'), used to gate it "
+                           "by benchmark"},
         },
         "required": ["name", "description", "instructions"],
+    },
+}
+
+GATE_SKILLS = {
+    "name": "gate_skills",
+    "description": (
+        "Prove all provisional skills with a before/after benchmark: keep the "
+        "ones that hold or raise the affected specialist's score, revert the "
+        "rest. Run this after creating skills to make the change safe."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+GENERATE_BENCHMARK = {
+    "name": "generate_benchmark",
+    "description": (
+        "Generate and save a new benchmark item for a specialist's domain, so "
+        "future skill/prompt changes there can be measured. Use when a domain "
+        "is thinly covered by the current benchmark."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"specialist": {"type": "string"}},
+        "required": ["specialist"],
     },
 }
 
@@ -486,6 +515,16 @@ def _run_benchmark() -> str:
     return evals.run_and_save()
 
 
+def _gate_skills() -> str:
+    from . import orchestrator  # local import to avoid a cycle at module load
+    return orchestrator.gate_skills()
+
+
+def _generate_benchmark(specialist: str) -> str:
+    from . import evals  # local import to avoid a cycle at module load
+    return evals.generate_item(specialist)
+
+
 def _propose_upgrade(title: str, details: str) -> str:
     path = memory.save("upgrades", title, details)
     issue_url = github.create_issue(
@@ -526,9 +565,13 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "restore_prompt": _restore_prompt,
     "propose_upgrade": _propose_upgrade,
     "read_skill": lambda name: skills.read(name),
-    "create_skill": lambda name, description, instructions:
+    # autonomously-created skills are provisional until a benchmark proves them
+    "create_skill": lambda name, description, instructions, specialist=None:
         skills.create(name, description,
-                      security.sanitize_for_memory(instructions)),
+                      security.sanitize_for_memory(instructions),
+                      specialist=specialist, provisional=True),
+    "gate_skills": lambda: _gate_skills(),
+    "generate_benchmark": lambda specialist: _generate_benchmark(specialist),
     "send_email": _send_email,
     "call_webhook": _call_webhook,
     "run_benchmark": _run_benchmark,
@@ -546,6 +589,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
     "create_skill": CREATE_SKILL,
+    "gate_skills": GATE_SKILLS,
+    "generate_benchmark": GENERATE_BENCHMARK,
     "send_email": SEND_EMAIL,
     "call_webhook": CALL_WEBHOOK,
     "run_benchmark": RUN_BENCHMARK,

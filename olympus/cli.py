@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("skills", help="list the self-built skill library")
+    sub.add_parser("gate", help="benchmark-gate provisional skills now")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
 
@@ -102,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skills":
         from . import skills
         print(skills.index())
+    elif args.command == "gate":
+        print(orchestrator.gate_skills())
     elif args.command == "usage":
         from . import usage
         print(usage.report(args.days))

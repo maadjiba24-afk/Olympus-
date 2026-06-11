@@ -33,8 +33,82 @@ JUDGE_SCHEMA = {
 
 
 def load_benchmarks() -> list[dict]:
+    """Built-in benchmark items plus any Olympus auto-generated for new domains."""
     path = Path(__file__).resolve().parent / "benchmarks.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    items = json.loads(path.read_text(encoding="utf-8"))
+    extra = config.MEMORY_DIR / "benchmarks_extra.json"
+    if extra.exists():
+        try:
+            items = items + json.loads(extra.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return items
+
+
+def ids_for(specialists) -> list[str]:
+    keys = set(specialists)
+    return [b["id"] for b in load_benchmarks() if b["specialist"] in keys]
+
+
+def add_item(item: dict) -> None:
+    """Append an auto-generated benchmark item to the extensible eval set."""
+    extra = config.MEMORY_DIR / "benchmarks_extra.json"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    items = []
+    if extra.exists():
+        try:
+            items = json.loads(extra.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            items = []
+    items = [i for i in items if i.get("id") != item.get("id")]
+    items.append(item)
+    extra.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+_GEN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "task": {"type": "string",
+                 "description": "A realistic, specific user request for this "
+                 "specialist — concrete enough that quality is judgeable"},
+        "criteria": {"type": "string",
+                     "description": "Explicit, independently checkable success "
+                     "criteria for a great answer"},
+    },
+    "required": ["task", "criteria"],
+    "additionalProperties": False,
+}
+
+
+def generate_item(specialist: str, settings: config.Settings | None = None) -> str:
+    """Create and save a new benchmark item for a specialist's domain.
+
+    This is how a newly-strengthened or newly-covered domain earns its own
+    objective eval, so future skill/prompt changes there can be measured."""
+    from . import specialists as specs
+    if specialist not in specs.SPECIALISTS:
+        return f"Unknown specialist '{specialist}'."
+    settings = settings or config.Settings.from_env()
+    spec = specs.SPECIALISTS[specialist]
+    judge = _judge_settings(settings)
+    gen = backend.complete_json(
+        judge,
+        "You design evaluation cases for an AI specialist. Produce ONE "
+        "realistic user task and explicit, checkable success criteria.",
+        [{"role": "user", "content":
+            f"Specialist: {spec.name} — {spec.title}\n{spec.description}\n\n"
+            "Write a new benchmark case that probes whether this specialist "
+            "gives an excellent, concrete, honest answer. Avoid duplicating "
+            "obvious cases; pick a realistic but non-trivial scenario."}],
+        _GEN_SCHEMA, effort="medium")
+    item = {
+        "id": f"{specialist}-gen-{int(time.time())}",
+        "specialist": specialist,
+        "task": gen["task"],
+        "criteria": gen["criteria"],
+    }
+    add_item(item)
+    return f"Generated benchmark item {item['id']} for {spec.name}."
 
 
 def _judge_settings(settings: config.Settings) -> config.Settings:
