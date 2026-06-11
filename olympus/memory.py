@@ -185,6 +185,37 @@ def watchlist_pop() -> str | None:
     return url
 
 
+def sweep_dated_files(retain_days: int) -> int:
+    """Delete per-day trace/usage files older than retain_days. Returns count.
+
+    Files are named YYYYMMDD.* / YYYY-MM-DD.json — old ones are bounded growth
+    on a long-running instance."""
+    import datetime
+    cutoff = (datetime.date.today()
+              - datetime.timedelta(days=max(retain_days, 1)))
+    removed = 0
+    for sub in ("traces", "usage"):
+        d = config.MEMORY_DIR / sub
+        if not d.exists():
+            continue
+        for path in d.glob("*"):
+            digits = re.sub(r"\D", "", path.stem)[:8]
+            if len(digits) != 8:
+                continue
+            try:
+                stamp = datetime.date(int(digits[:4]), int(digits[4:6]),
+                                      int(digits[6:8]))
+            except ValueError:
+                continue
+            if stamp < cutoff:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
 # --- Heartbeat state -----------------------------------------------------
 
 def load_state() -> dict:

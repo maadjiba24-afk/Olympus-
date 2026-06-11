@@ -45,6 +45,16 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                 log.append("Mnemosyne failed:\n" + traceback.format_exc())
         state["watchlist"] = now
 
+    if _due(state, "maintenance", config.MAINTENANCE_EVERY, now):
+        try:
+            removed = memory.sweep_dated_files(config.RETAIN_DAYS)
+            if removed:
+                log.append(f"Maintenance: removed {removed} old trace/usage "
+                           "files.")
+        except Exception:
+            log.append("Maintenance failed:\n" + traceback.format_exc())
+        state["maintenance"] = now
+
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
         try:

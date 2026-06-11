@@ -239,16 +239,28 @@ class Olympus:
     # -- public entry point --------------------------------------------------
 
     def _dispatch(self, assignments: list[dict[str, str]]) -> list[tuple[str, str]]:
-        """Run specialist assignments in parallel, in this user's namespace."""
+        """Run specialist assignments in parallel, in this user's namespace.
+
+        Per-specialist failures are isolated: if one specialist errors, the
+        others still return and the pipeline continues with what succeeded,
+        rather than the whole answer failing.
+        """
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
 
         def work(item: dict[str, str]) -> tuple[str, str]:
+            key = item["specialist"]
             memory.set_user(self.user)  # worker threads get their own context
-            return (item["specialist"],
-                    SPECIALISTS[item["specialist"]].run(
-                        item["task"], settings=self.settings))
+            try:
+                return (key, SPECIALISTS[key].run(item["task"],
+                                                  settings=self.settings))
+            except Exception as err:
+                self.report(f"⚠️ {SPECIALISTS[key].name} failed: "
+                            f"{str(err)[:120]}")
+                return (key, f"[{SPECIALISTS[key].name} could not complete "
+                             f"this task: {err}. Treat this part as missing "
+                             "and answer from the other specialists.]")
 
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
             return list(pool.map(work, assignments))
@@ -270,13 +282,19 @@ class Olympus:
         with tr.span("dispatch"):
             outputs = self._dispatch(assignments)
 
+        raw = "\n\n".join(f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
         if route.get("needs_verification", True):
             self.report("🔍 Aletheia verifies the findings...")
-            with tr.span("verify"):
-                verified = self._verify(brief, outputs)
+            try:
+                with tr.span("verify"):
+                    verified = self._verify(brief, outputs)
+            except Exception as err:
+                tr.event("verify.failed", error=str(err)[:200])
+                self.report("⚠️ Verification step failed; using raw findings.")
+                verified = raw + ("\n\n[Note: automated fact-checking could "
+                                  "not run — verify important claims yourself.]")
         else:
-            verified = "\n\n".join(
-                f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
+            verified = raw
 
         with tr.span("review"):
             review = self._review(brief, verified)
@@ -302,8 +320,13 @@ class Olympus:
                 redone = dict(self._dispatch(redo))
             outputs = [(k, redone.get(k, v)) for k, v in outputs]
             self.report("🔍 Aletheia re-verifies the rework...")
-            with tr.span("reverify"):
-                verified = self._verify(brief, outputs)
+            try:
+                with tr.span("reverify"):
+                    verified = self._verify(brief, outputs)
+            except Exception as err:
+                tr.event("reverify.failed", error=str(err)[:200])
+                verified = "\n\n".join(
+                    f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
 
         return "delegate", brief, verified
 
