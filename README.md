@@ -1,9 +1,18 @@
 # ⚡ OLYMPUS
 
+[![CI](https://github.com/maadjiba24-afk/Olympus-/actions/workflows/ci.yml/badge.svg)](https://github.com/maadjiba24-afk/Olympus-/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-d9b44a.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+
 A self-sufficient, self-recurring, **self-improving** multi-agent AI system
-built on the Claude API. A main agent commands a supervised council of
-specialists, every answer passes through a hallucination controller, and the
-system continuously scans the world, learns from YouTube, and upgrades itself.
+built on the Claude API (and any other frontier model you bring). A main agent
+commands a supervised council of specialists, every answer passes through a
+hallucination controller, and the system continuously scans the world, learns
+from YouTube, and upgrades itself.
+
+> **Status:** the full architecture is implemented and covered by 116 passing
+> tests. Add an API key and run `python -m olympus ask "..."` to use it; run
+> `python -m olympus scores` to see each specialist's measured quality.
 
 ## Architecture
 
