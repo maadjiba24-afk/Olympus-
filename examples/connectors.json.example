@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy this to memory/connectors.json (or set OLYMPUS_MCP_SERVERS to this JSON) to connect MCP servers. MCP runs server-side on the Anthropic backend. 'data' servers are read-only and treated as untrusted input; 'action' servers change the world and are only active in non-ingesting specialist runs (assign them to chronos). Tokens are read from the named env var, never stored here.",
+  "servers": [
+    {
+      "name": "tavily",
+      "url": "https://mcp.tavily.com/mcp/",
+      "type": "data",
+      "auth_env": "TAVILY_MCP_TOKEN",
+      "specialists": ["argus", "aletheia"]
+    },
+    {
+      "name": "notion",
+      "url": "https://mcp.notion.com/mcp",
+      "type": "data",
+      "auth_env": "NOTION_MCP_TOKEN",
+      "specialists": ["chiron", "chronos"]
+    },
+    {
+      "name": "github",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "type": "action",
+      "auth_env": "GITHUB_MCP_TOKEN",
+      "specialists": ["chronos"]
+    }
+  ]
+}

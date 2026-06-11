@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, config, security, skills, tools
+from . import agent, config, connectors, security, skills, tools
 
 _UNTRUSTED_NOTE = (
     "\n\n## Handling external content (security)\n"
@@ -30,19 +30,42 @@ class Specialist:
     system: bool = False     # internal agent (self-modification tools allowed)
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
 
+    def _ingests(self, provider: str) -> bool:
+        """Does this specialist's loadout read external/untrusted content?"""
+        if self.web:
+            return True
+        if connectors.specialist_has_data_mcp(self.key):
+            return True
+        if connectors.plugin_data_names_for(self.key):
+            return True
+        return False
+
     def tool_defs(self, provider: str = "anthropic"):
+        ingests = self._ingests(provider)
+        # System specialists keep action capabilities; others lose them in any
+        # run that also ingests external content (capability separation).
+        allow_action = self.system or not ingests
+
         defs = list(tools.BASE_TOOLS)
         defs += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
         if self.web:
             defs += tools.web_tool_defs(provider)
         if self.code_exec and provider == "anthropic":
             defs.append(tools.CODE_EXECUTION_TOOL)
-        # Capability separation: a non-system specialist that ingests external
-        # content cannot also hold action tools in the same run.
+        defs += connectors.plugin_tools_for(self.key, allow_action=allow_action)
+
         if not self.system:
-            defs = security.filter_tools(
-                defs, ingests_external=security.loadout_ingests_external(defs))
+            defs = security.filter_tools(defs, ingests_external=ingests)
         return defs
+
+    def mcp_defs(self, provider: str = "anthropic"):
+        """MCP servers attached to this specialist (Anthropic backend only)."""
+        if provider != "anthropic":
+            return []
+        ingests = self._ingests(provider)
+        allow_action = self.system or not ingests
+        return [s.to_api() for s in connectors.mcp_for(
+            self.key, allow_action=allow_action)]
 
     def system_prompt(self) -> str:
         return (agent.load_prompt(self.key)
@@ -55,7 +78,9 @@ class Specialist:
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
         return backend.run_agent(settings, self.system_prompt(), task,
-                                 self.tool_defs(settings.provider), effort)
+                                 self.tool_defs(settings.provider),
+                                 mcp_servers=self.mcp_defs(settings.provider),
+                                 effort=effort)
 
 
 SPECIALISTS: dict[str, Specialist] = {
