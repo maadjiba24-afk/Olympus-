@@ -98,9 +98,14 @@ class Olympus:
     def __init__(self, report: Reporter = _silent,
                  settings: config.Settings | None = None,
                  user: str = "shared",
-                 conversation_id: str | None = None):
+                 conversation_id: str | None = None,
+                 pool: config.ModelPool | None = None):
         self.report = report
-        self.settings = settings or config.Settings.from_env()
+        # A pool lets several frontier keys be used together (each stage runs
+        # on its strongest model). A single Settings becomes a pool of one.
+        self.pool = pool or config.ModelPool.of(
+            settings or config.Settings.from_env())
+        self.settings = self.pool.primary()
         self.user = memory.safe_id(user)
         self.conversation_id = conversation_id
         self.history: list[dict[str, Any]] = (
@@ -114,8 +119,8 @@ class Olympus:
                   + roster() + i18n.directive(self.user))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
-            return backend.complete_json(self.settings, system, messages,
-                                         ROUTE_SCHEMA, effort="medium")
+            return backend.complete_json(self.pool.for_role("reasoning"), system,
+                                         messages, ROUTE_SCHEMA, effort="medium")
         except ValueError:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
@@ -184,8 +189,8 @@ class Olympus:
         )
         try:
             steps = backend.complete_json(
-                self.settings, system, [{"role": "user", "content": prompt}],
-                schema, effort="medium",
+                self.pool.for_role("reasoning"), system,
+                [{"role": "user", "content": prompt}], schema, effort="medium",
             )["steps"]
         except Exception:
             steps = []
@@ -229,14 +234,15 @@ class Olympus:
             "each claim you newly verify, and save_lesson when you correct a "
             "specialist so Olympus never repeats the mistake."
         )
-        tool_defs = (tools.web_tool_defs(self.settings.provider)
+        vs = self.pool.for_role("verify")    # accuracy-critical → strongest verifier
+        tool_defs = (tools.web_tool_defs(vs.provider)
                      + [tools.SAVE_LESSON, tools.RECALL_MEMORY,
                         tools.RECALL_FACT, tools.CACHE_FACT])
         # Aletheia ingests (web) so only data MCP servers attach, never action.
         mcp = [s.to_api() for s in connectors.mcp_for("aletheia",
                                                       allow_action=False)] \
-            if self.settings.provider == "anthropic" else []
-        return backend.run_agent(self.settings, system, task, tool_defs,
+            if vs.provider == "anthropic" else []
+        return backend.run_agent(vs, system, task, tool_defs,
                                  mcp_servers=mcp, effort="high")
 
     # -- stage 3.5: Athena quality review -----------------------------------
@@ -255,8 +261,9 @@ class Olympus:
         )
         try:
             return backend.complete_json(
-                self.settings, system, [{"role": "user", "content": prompt}],
-                REVIEW_SCHEMA, effort="medium",
+                self.pool.for_role("reasoning"), system,
+                [{"role": "user", "content": prompt}], REVIEW_SCHEMA,
+                effort="medium",
             )
         except Exception:
             return {"verdict": "approve", "feedback": "", "retry_specialists": []}
@@ -274,7 +281,7 @@ class Olympus:
             "or caveat the controller attached to uncertain claims."
         )
         return backend.complete_text(
-            self.settings,
+            self.pool.for_role("reasoning"),
             system,
             self.history + [{"role": "user", "content": prompt}],
             effort="high",
@@ -283,10 +290,10 @@ class Olympus:
     # -- public entry point --------------------------------------------------
 
     def _run_one(self, key: str, task: str) -> str:
-        """Run a single specialist with failure isolation."""
+        """Run a single specialist with failure isolation, on its best model."""
         memory.set_user(self.user)  # worker threads get their own context
         try:
-            return SPECIALISTS[key].run(task, settings=self.settings)
+            return SPECIALISTS[key].run(task, settings=self.pool.for_specialist(key))
         except Exception as err:
             self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
             return (f"[{SPECIALISTS[key].name} could not complete this task: "
@@ -431,7 +438,8 @@ class Olympus:
         # Opt-in cross-model learning: contribute an anonymized snapshot tagged
         # with the model that produced it (only if this user opted in).
         try:
-            contrib.offer(self.user, self.settings.model, user_message, reply)
+            contrib.offer(self.user, self.pool.for_role("reasoning").model,
+                          user_message, reply)
         except Exception:
             pass
         note_conversation(self.report)
@@ -504,16 +512,17 @@ class Olympus:
                 "flag or caveat the controller attached to uncertain claims."
             )
             messages = self.history + [{"role": "user", "content": prompt}]
+            synth = self.pool.for_role("reasoning")
             chunks: list[str] = []
             with tr.span("synthesize_stream"):
-                if self.settings.provider == "anthropic":
+                if synth.provider == "anthropic":
                     for piece in llm.stream_text(system, messages,
-                                                 settings=self.settings):
+                                                 settings=synth):
                         chunks.append(piece)
                         yield piece
                 else:
                     # Other providers: no token stream here — yield once.
-                    full = backend.complete_text(self.settings, system, messages)
+                    full = backend.complete_text(synth, system, messages)
                     chunks.append(full)
                     yield full
             self._finish(user_message, "".join(chunks))

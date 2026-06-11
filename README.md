@@ -378,6 +378,23 @@ user's language with its cultural and idiomatic norms.
   another language, so the self-improvement loop measures multilingual quality
   too.
 
+### Use several keys together — best of each, as one
+
+Give Olympus more than one frontier key and it uses them **together**, not as a
+switch: each part of the pipeline runs on whichever model is strongest for it.
+With Claude + GPT, for example, reasoning and verification run on one while
+coding runs on the other — composed into a single system.
+
+- **Web UI:** the ⚙ panel has a "+ Model 2" row — add a second provider/model/key.
+- **Env / CLI:** `OLYMPUS_MODELS=[{"provider":"openai","model":"gpt-5","api_key":"..."}]`
+  alongside your primary key. `python -m olympus models` shows the assignment.
+
+How it decides: a built-in capability ranking scores each model per role
+(reasoning, coding, verification). The strongest model wins a role outright;
+when two are comparable, the work is **split across keys** so both are actually
+used. One key still works exactly as before — it just becomes "every role on
+that model."
+
 ### Use any model (bring your own key)
 
 Anthropic/Claude is the default and the most capable path (server-side web

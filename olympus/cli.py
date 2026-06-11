@@ -9,10 +9,16 @@ from . import heartbeat, memory, orchestrator
 
 
 def _chat() -> None:
+    from . import config
+    pool = config.ModelPool.from_env()
     print("OLYMPUS — Zeus speaking. Type 'exit' to leave, "
-          "'/good' or '/bad' to rate the last answer.\n")
+          "'/good' or '/bad' to rate the last answer.")
+    if pool.is_multi():
+        print(pool.assignment())
+    print()
     bot = orchestrator.Olympus(report=lambda msg: print(f"  {msg}"),
-                               user="cli", conversation_id="cli-default")
+                               user="cli", conversation_id="cli-default",
+                               pool=pool)
     while True:
         try:
             user = input("you ▸ ").strip()
@@ -75,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
     sub.add_parser("scores", help="show per-specialist benchmark scores")
+    sub.add_parser("models", help="show the model pool and role assignments")
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
@@ -99,7 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in (None, "chat"):
         _chat()
     elif args.command == "ask":
-        bot = orchestrator.Olympus(report=lambda msg: print(f"  {msg}", file=sys.stderr))
+        from . import config
+        bot = orchestrator.Olympus(
+            report=lambda msg: print(f"  {msg}", file=sys.stderr),
+            pool=config.ModelPool.from_env())
         print(bot.ask(" ".join(args.question)))
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
@@ -125,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         print(orchestrator.gate_skills())
     elif args.command == "train":
         print(orchestrator.train_specialists(focus=args.focus))
+    elif args.command == "models":
+        from . import config
+        print(config.ModelPool.from_env().assignment())
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()
