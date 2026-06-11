@@ -228,6 +228,60 @@ python -m olympus heartbeat        # run the autonomous recurring loop
 
 (`pip install .` also gives you a plain `olympus` command.)
 
+### Connectors: MCP servers & custom plugins
+
+Olympus connects to external tools and data two ways, both governed by the
+same security model as its built-in tools:
+
+**MCP servers (the ecosystem).** Olympus speaks the Model Context Protocol
+natively on the Anthropic backend — plug in any of the hundreds of community
+MCP servers (GitHub, Notion, Postgres, Slack, Tavily, Linear, …). Tools run
+server-side on Anthropic's infrastructure.
+
+```bash
+# attach a server (tokens read from an env var, never stored on disk)
+python -m olympus add-mcp tavily https://mcp.tavily.com/mcp/ \
+       --type data --auth-env TAVILY_MCP_TOKEN --specialists argus,aletheia
+export TAVILY_MCP_TOKEN=tvly-...
+python -m olympus connectors          # list everything configured
+```
+
+Or drop a `memory/connectors.json` (see `examples/connectors.json.example`).
+
+**Custom plugins (your own connectors).** A plugin is a plain Python function
+that runs locally and works on **every** backend — the simplest way to wire
+Olympus to your own REST API or internal system:
+
+```python
+from olympus.connectors import plugin
+
+@plugin("crm_lookup", "Look up a customer by email",
+        schema={"type": "object",
+                "properties": {"email": {"type": "string"}},
+                "required": ["email"]},
+        specialists=["plutus"], action=False)
+def crm_lookup(email: str) -> str:
+    ...   # call your API, return a string
+```
+
+Put the file in a `plugins/` directory (or point `OLYMPUS_PLUGINS_DIR` at one;
+see `examples/plugins/`). See `examples/plugins/example_rest_connector.py` for
+a working template.
+
+**The security edge nobody else has.** Hermes and OpenClaw let you plug in MCP
+servers with no quality gate and no injection defense — a malicious or buggy
+connector runs unchecked. In Olympus, every connector is tagged `data`
+(read-only) or `action` (changes the world). Data-connector output is wrapped
+as untrusted content and **fact-checked by Aletheia** like any other claim;
+**action connectors are stripped from any specialist run that also ingests
+external content** (capability separation), so a poisoned web page or document
+can never trigger one. You get the whole MCP ecosystem *plus* the safety the
+others skip. Assign action connectors (GitHub-write, etc.) to a non-web
+specialist like Chronos.
+
+> MCP runs server-side on the Anthropic backend; custom plugins work on every
+> backend. On OpenAI-compatible providers, use plugins for connectors.
+
 ### Use any model (bring your own key)
 
 Anthropic/Claude is the default and the most capable path (server-side web

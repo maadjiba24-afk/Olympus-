@@ -63,6 +63,14 @@ def filter_tools(tool_defs, *, ingests_external: bool):
     return out
 
 
+def should_wrap(name: str) -> bool:
+    """Whether a tool's output is untrusted external content to be enveloped."""
+    if name in INGESTION_TOOLS:
+        return True
+    from . import connectors  # local import to avoid an import cycle
+    return connectors.is_data_plugin(name)
+
+
 def loadout_ingests_external(tool_defs) -> bool:
     for d in tool_defs:
         name = d.get("name") if isinstance(d, dict) else None

@@ -132,14 +132,14 @@ def run_agent(settings: config.Settings, system: str, task: str,
         })
         for call in tool_calls:
             name = call["function"]["name"]
-            handler = tools.HANDLERS.get(name)
+            handler = tools.resolve_handler(name)
             try:
                 args = json.loads(call["function"].get("arguments") or "{}")
                 result = handler(**args) if handler else f"Error: unknown tool {name}"
             except Exception as err:
                 result = f"Error: {err}"
             text = str(result)[:40_000]
-            if name in security.INGESTION_TOOLS:
+            if security.should_wrap(name):
                 text = security.wrap_untrusted(text, source=name)
             messages.append({
                 "role": "tool",

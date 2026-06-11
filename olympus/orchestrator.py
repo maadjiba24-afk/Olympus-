@@ -28,7 +28,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import agent, backend, config, llm, memory, trace as trace_mod, tools
+from . import (agent, backend, config, connectors, llm, memory,
+               trace as trace_mod, tools)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -229,8 +230,12 @@ class Olympus:
         tool_defs = (tools.web_tool_defs(self.settings.provider)
                      + [tools.SAVE_LESSON, tools.RECALL_MEMORY,
                         tools.RECALL_FACT, tools.CACHE_FACT])
+        # Aletheia ingests (web) so only data MCP servers attach, never action.
+        mcp = [s.to_api() for s in connectors.mcp_for("aletheia",
+                                                      allow_action=False)] \
+            if self.settings.provider == "anthropic" else []
         return backend.run_agent(self.settings, system, task, tool_defs,
-                                 effort="high")
+                                 mcp_servers=mcp, effort="high")
 
     # -- stage 3.5: Athena quality review -----------------------------------
 

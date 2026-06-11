@@ -21,6 +21,7 @@ def run_agent(
     *,
     settings: config.Settings | None = None,
     tool_defs: list[dict[str, Any]] | None = None,
+    mcp_servers: list[dict[str, Any]] | None = None,
     effort: str = "high",
     max_iterations: int = config.MAX_AGENT_ITERATIONS,
 ) -> str:
@@ -29,7 +30,8 @@ def run_agent(
 
     for _ in range(max_iterations):
         response = llm.complete(system, messages, settings=settings,
-                                tools=tool_defs, effort=effort)
+                                tools=tool_defs, mcp_servers=mcp_servers,
+                                effort=effort)
 
         if response.stop_reason == "refusal":
             return "[The model declined this request for safety reasons.]"
@@ -49,7 +51,7 @@ def run_agent(
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            handler = tools.HANDLERS.get(block.name)
+            handler = tools.resolve_handler(block.name)
             if handler is None:
                 results.append({
                     "type": "tool_result",
@@ -69,7 +71,7 @@ def run_agent(
                 })
             else:
                 text = str(output)
-                if block.name in security.INGESTION_TOOLS:
+                if security.should_wrap(block.name):
                     text = security.wrap_untrusted(text, source=block.name)
                 results.append({
                     "type": "tool_result",

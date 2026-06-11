@@ -63,6 +63,14 @@ def main(argv: list[str] | None = None) -> int:
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
 
+    sub.add_parser("connectors", help="list configured MCP servers and plugins")
+    p_mcp = sub.add_parser("add-mcp", help="add an MCP server connector")
+    p_mcp.add_argument("name")
+    p_mcp.add_argument("url")
+    p_mcp.add_argument("--type", choices=["data", "action"], default="data")
+    p_mcp.add_argument("--auth-env", help="env var holding the bearer token")
+    p_mcp.add_argument("--specialists", help="comma-separated specialist keys")
+
     p_web = sub.add_parser("web", help="serve the browser chat UI")
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8484)
@@ -97,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "usage":
         from . import usage
         print(usage.report(args.days))
+    elif args.command == "connectors":
+        from . import connectors
+        print(connectors.summary())
+    elif args.command == "add-mcp":
+        from . import connectors
+        specialists = ([s.strip() for s in args.specialists.split(",")]
+                       if args.specialists else None)
+        print(connectors.add_mcp_server(args.name, args.url, args.type,
+                                        args.auth_env, specialists))
     elif args.command == "heartbeat":
         try:
             heartbeat.run_forever()

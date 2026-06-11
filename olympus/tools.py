@@ -553,3 +553,12 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
 
 # Anthropic server-side code sandbox (Hephaestus runs and tests code in it).
 CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
+
+
+def resolve_handler(name: str):
+    """Find a tool handler: built-in first, then custom plugins."""
+    handler = HANDLERS.get(name)
+    if handler is not None:
+        return handler
+    from . import connectors  # local import to avoid an import cycle
+    return connectors.plugin_handler(name)

@@ -37,6 +37,7 @@ def complete(
     *,
     settings: config.Settings | None = None,
     tools: list[dict[str, Any]] | None = None,
+    mcp_servers: list[dict[str, Any]] | None = None,
     effort: str = "high",
     max_tokens: int | None = None,
     output_schema: dict[str, Any] | None = None,
@@ -64,12 +65,19 @@ def complete(
             "type": "json_schema",
             "schema": output_schema,
         }
+    # Native MCP connector support — routes through the beta endpoint.
+    use_beta = bool(mcp_servers)
+    if mcp_servers:
+        params["mcp_servers"] = mcp_servers
+        params["betas"] = ["mcp-client-2025-11-20"]
 
     last_err: Exception | None = None
     for attempt in range(4):
         try:
+            endpoint = client(settings).beta.messages if use_beta \
+                else client(settings).messages
             with usage.slot():
-                with client(settings).messages.stream(**params) as stream:
+                with endpoint.stream(**params) as stream:
                     message = stream.get_final_message()
             u = getattr(message, "usage", None)
             if u is not None:

@@ -33,8 +33,12 @@ def complete_json(settings: config.Settings, system: str,
 
 def run_agent(settings: config.Settings, system: str, task: str,
               tool_defs: list[dict[str, Any]] | None,
+              mcp_servers: list[dict[str, Any]] | None = None,
               effort: str = "high") -> str:
     if settings.provider == "anthropic":
         return agent.run_agent(system, task, settings=settings,
-                               tool_defs=tool_defs, effort=effort)
+                               tool_defs=tool_defs, mcp_servers=mcp_servers,
+                               effort=effort)
+    # MCP runs server-side on Anthropic only; other providers still get the
+    # local plugin tools (which are included in tool_defs).
     return openai_compat.run_agent(settings, system, task, tool_defs, effort)
