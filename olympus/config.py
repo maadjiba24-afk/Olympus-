@@ -99,3 +99,6 @@ HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
 WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
+
+# Prometheus also self-audits after this many conversations (0 disables).
+AUDIT_EVERY_CHATS = int(os.environ.get("OLYMPUS_AUDIT_EVERY_CHATS", "20"))

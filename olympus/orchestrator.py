@@ -23,6 +23,8 @@ to Claude (full capability) or any OpenAI-compatible endpoint (BYOK).
 
 from __future__ import annotations
 
+import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
@@ -224,7 +226,54 @@ class Olympus:
         # keep the rolling window bounded
         if len(self.history) > 24:
             self.history = self.history[-24:]
+        note_conversation(self.report)
         return reply
+
+
+# --- conversation-triggered self-audit ---------------------------------------
+
+_AUDIT_LOCK = threading.Lock()
+
+
+def _auto_audit(report: Reporter) -> None:
+    if not _AUDIT_LOCK.acquire(blocking=False):
+        return  # an audit is already running
+    try:
+        audit_report = evolution_audit()
+        from . import telegram  # local import to avoid a cycle at module load
+        telegram.notify("🔧 Olympus self-audit (conversation-triggered):\n\n"
+                        + audit_report)
+        report("🔧 Prometheus finished the background self-audit.")
+    except Exception:
+        traceback.print_exc()
+    finally:
+        _AUDIT_LOCK.release()
+
+
+def note_conversation(report: Reporter = _silent) -> None:
+    """Count one finished conversation; every N of them, Prometheus audits.
+
+    The counter persists across sessions and interfaces (CLI, web, Telegram).
+    The audit runs in the background on the *server's* configured credentials
+    only — a web visitor's bring-your-own key is never spent on system work.
+    """
+    threshold = config.AUDIT_EVERY_CHATS
+    if threshold <= 0:
+        return
+    state = memory.load_state()
+    state["conversation_count"] = state.get("conversation_count", 0) + 1
+    if state["conversation_count"] < threshold:
+        memory.save_state(state)
+        return
+    state["conversation_count"] = 0
+    memory.save_state(state)
+
+    env = config.Settings.from_env()
+    if env.validate() is not None or not (env.api_key or env.base_url):
+        return  # no server-side credentials — skip rather than fail in the dark
+    report("🔧 Conversation threshold reached — Prometheus will self-audit "
+           "in the background.")
+    threading.Thread(target=_auto_audit, args=(report,), daemon=True).start()
 
 
 # --- one-shot autonomous routines (used by the heartbeat and CLI) -----------
