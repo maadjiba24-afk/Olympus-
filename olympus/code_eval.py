@@ -76,6 +76,8 @@ def _runner_go(sol: str, test: str, d: Path) -> tuple[bool, str]:
     (d / "main.go").write_text(sol, encoding="utf-8")
     (d / "main_test.go").write_text(test, encoding="utf-8")
     ok, out = _run(["go", "mod", "init", "bench"], d)
+    if not ok:  # environment failure, not a wrong answer — don't mis-score
+        return False, f"go mod init failed (environment): {out}"
     return _run(["go", "test", "./..."], d)
 
 

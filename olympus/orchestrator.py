@@ -580,13 +580,9 @@ def note_conversation(report: Reporter = _silent) -> None:
     threshold = config.AUDIT_EVERY_CHATS
     if threshold <= 0:
         return
-    state = memory.load_state()
-    state["conversation_count"] = state.get("conversation_count", 0) + 1
-    if state["conversation_count"] < threshold:
-        memory.save_state(state)
+    if memory.bump_conversation_count() < threshold:
         return
-    state["conversation_count"] = 0
-    memory.save_state(state)
+    memory.reset_conversation_count()
 
     env = config.Settings.from_env()
     if env.validate() is not None or not (env.api_key or env.base_url):
@@ -600,6 +596,7 @@ def note_conversation(report: Reporter = _silent) -> None:
 
 def opportunity_scan(settings: config.Settings | None = None) -> str:
     """Argus surfs the web for opportunities & world events; report → memory."""
+    memory.set_user("shared")
     task = (
         "Run your full scan now: current world events that matter, emerging "
         "business opportunities, and anything actionable. Finish with the "
@@ -612,6 +609,7 @@ def opportunity_scan(settings: config.Settings | None = None) -> str:
 
 def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     """Mnemosyne watches one YouTube video and stores what it learned."""
+    memory.set_user("shared")
     task = (
         f"Watch this YouTube video and learn from it: {url}\n"
         "Use watch_youtube to get the transcript, then produce the summary "
@@ -723,7 +721,7 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     if not provisional:
         return "No provisional skills to gate."
 
-    specialists = {sp for _, sp in provisional if sp} or set()
+    specialists = {sp for _, sp in provisional if sp}
     # Ensure every affected specialist domain has at least one eval item.
     for sp in list(specialists):
         if not evals.ids_for([sp]):
@@ -731,39 +729,52 @@ def gate_skills(settings: config.Settings | None = None) -> str:
                 evals.generate_item(sp, settings)
             except Exception:
                 pass
-    bench_ids = evals.ids_for(specialists) if specialists else None
 
-    names = [n for n, _ in provisional]
-    try:
-        after = evals.run(settings, only=bench_ids)["avg"]   # with provisional
-        for n in names:
-            skills.set_hidden(n, True)
-        before = evals.run(settings, only=bench_ids)["avg"]  # without them
-        for n in names:
-            skills.set_hidden(n, False)
-    except Exception as err:
-        for n in names:                                      # never leave hidden
-            skills.set_hidden(n, False)
-        return f"Skill gating could not run: {err}"
+    # Gate EACH skill on its own marginal effect, not as an aggregate — so a
+    # harmful skill can't be promoted by riding along with a helpful one. Each
+    # skill is measured against its specialist's benchmark items with the skill
+    # visible vs hidden; decisions are applied greedily so later skills see the
+    # already-decided library.
+    promoted, reverted, skipped = [], [], []
+    for name, sp in provisional:
+        bench_ids = evals.ids_for([sp]) if sp else None
+        try:
+            after = evals.run(settings, only=bench_ids)["avg"]   # skill visible
+            skills.set_hidden(name, True)
+            before = evals.run(settings, only=bench_ids)["avg"]  # skill hidden
+            skills.set_hidden(name, False)
+        except Exception as err:
+            skills.set_hidden(name, False)  # never leave it hidden on error
+            skipped.append(f"{name} ({err})")
+            continue
+        if after >= before:
+            skills.promote(name)
+            promoted.append(f"{name} [{before}→{after}]")
+        else:
+            reverted.append(f"{name} [{before}→{after}]: {skills.revert(name)}")
 
-    if after >= before:
-        for n in names:
-            skills.promote(n)
-        msg = (f"Promoted {len(names)} skill(s): benchmark held or improved "
-               f"({before} → {after}).")
-    else:
-        reverted = [skills.revert(n) for n in names]
+    if reverted:
         memory.save("corrections", "Skills reverted by benchmark gate",
-                    f"Score regressed {before} → {after}; reverted: "
-                    + "; ".join(reverted))
-        msg = (f"Reverted {len(names)} skill(s): benchmark regressed "
-               f"({before} → {after}).")
-    memory.save("evals", f"skill gate {before}->{after}", msg)
+                    "Each gated on its own effect; reverted because hiding the "
+                    "skill scored as well or better:\n" + "\n".join(reverted))
+    parts = []
+    if promoted:
+        parts.append(f"Promoted {len(promoted)}: {', '.join(promoted)}")
+    if reverted:
+        parts.append(f"Reverted {len(reverted)}: {', '.join(reverted)}")
+    if skipped:
+        parts.append(f"Skipped {len(skipped)}: {', '.join(skipped)}")
+    msg = "Skill gate — " + ("; ".join(parts) if parts else "nothing to do")
+    memory.save("evals", "skill gate (per-skill)", msg)
     return msg
 
 
 def evolution_audit(settings: config.Settings | None = None) -> str:
     """Prometheus audits Olympus, upgrades prompts, files proposals."""
+    # System work runs in the SHARED namespace — never a triggering user's.
+    # (This routine can be launched from a background thread spawned inside a
+    # user request, which would otherwise inherit that user's memory context.)
+    memory.set_user("shared")
     task = (
         "Run a full self-audit of Olympus now:\n"
         "1. list_source_files and read the parts that matter.\n"

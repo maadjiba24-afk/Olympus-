@@ -107,8 +107,32 @@ def test_gate_unhides_on_benchmark_failure(monkeypatch):
     monkeypatch.setattr(evals, "run", boom)
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     msg = orchestrator.gate_skills()
-    assert "could not run" in msg
+    assert "Skipped" in msg                          # benchmark failed for it
     assert "Skill" in skills.index()                 # not left hidden
+    assert ("Skill", "plutus") in skills.list_provisional()  # stays provisional
+
+
+def test_gate_isolates_each_skill_no_riding_along(monkeypatch):
+    """Regression: a harmful skill must NOT be promoted by riding along with a
+    helpful one. Each skill is gated on its own marginal effect."""
+    skills.create("Helpful", "x", "y", specialist="plutus", provisional=True)
+    skills.create("Harmful", "x", "y", specialist="peitho", provisional=True)
+
+    def scorer(settings, only=None):
+        idx = skills.index()
+        if "Harmful" not in idx:    # removing Harmful scores BETTER -> revert it
+            return {"avg": 8.0, "items": []}
+        if "Helpful" not in idx:    # removing Helpful scores WORSE -> keep it
+            return {"avg": 6.0, "items": []}
+        return {"avg": 7.0, "items": []}   # both visible
+
+    monkeypatch.setattr(evals, "run", scorer)
+    monkeypatch.setattr(evals, "ids_for", lambda specs: ["x"])
+    orchestrator.gate_skills()
+    names = skills.index()
+    assert "Harmful" not in names, "harmful skill rode along and survived!"
+    assert "Helpful" in names
+    assert skills.list_provisional() == []   # decided: none left provisional
 
 
 # --- auto-generated benchmark items merge --------------------------------

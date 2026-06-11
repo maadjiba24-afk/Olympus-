@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextvars
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -218,14 +219,47 @@ def sweep_dated_files(retain_days: int) -> int:
 
 # --- Heartbeat state -----------------------------------------------------
 
+_STATE_LOCK = threading.Lock()
+
+
 def load_state() -> dict:
     path = config.MEMORY_DIR / "heartbeat_state.json"
-    if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+    with _STATE_LOCK:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return {}
     return {}
 
 
 def save_state(state: dict) -> None:
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "heartbeat_state.json"
-    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    with _STATE_LOCK:
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def bump_conversation_count() -> int:
+    """Atomically increment and return the cross-session conversation counter.
+
+    Kept in its own file (not heartbeat_state.json) so concurrent web/Telegram
+    increments can't clobber the heartbeat's last-run timestamps, and vice
+    versa. Guarded by a process-wide lock for read-modify-write safety."""
+    config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    path = config.MEMORY_DIR / "conversation_count.txt"
+    with _STATE_LOCK:
+        try:
+            n = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            n = 0
+        n += 1
+        path.write_text(str(n), encoding="utf-8")
+        return n
+
+
+def reset_conversation_count() -> None:
+    path = config.MEMORY_DIR / "conversation_count.txt"
+    with _STATE_LOCK:
+        path.write_text("0", encoding="utf-8")
+

@@ -42,7 +42,8 @@ def test_conversation_trigger(monkeypatch):
     assert not ran.is_set()
     orchestrator.note_conversation()
     assert ran.wait(5)
-    assert memory.load_state()["conversation_count"] == 0
+    # counter reset after triggering (separate file from heartbeat state)
+    assert memory.bump_conversation_count() == 1
 
 
 def test_conversation_trigger_guards(monkeypatch):

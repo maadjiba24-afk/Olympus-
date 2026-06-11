@@ -58,6 +58,53 @@ def test_facts_cache_is_bounded(monkeypatch):
     assert facts.count() <= facts.MAX_FACTS * 2
 
 
+def test_conversation_counter_atomic_and_separate(monkeypatch):
+    """The conversation counter is its own file and increments atomically under
+    concurrent writers — it must not clobber, or be clobbered by, heartbeat
+    state timestamps."""
+    memory.save_state({"opportunity_scan": 12345.0, "daily_learning": 678.0})
+
+    results = []
+
+    def worker():
+        for _ in range(25):
+            results.append(memory.bump_conversation_count())
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 4 threads * 25 increments = 100 distinct values, none lost
+    assert sorted(results) == list(range(1, 101))
+    # heartbeat state untouched by counter writes (separate file)
+    state = memory.load_state()
+    assert state["opportunity_scan"] == 12345.0
+    assert state["daily_learning"] == 678.0
+    memory.reset_conversation_count()
+    assert memory.bump_conversation_count() == 1
+
+
+def test_evolution_audit_runs_in_shared_namespace(monkeypatch):
+    """System self-audit must write to shared memory even when triggered from
+    a user-context thread (HIGH-1 regression)."""
+    from olympus import orchestrator
+    from olympus.specialists import SPECIALISTS
+
+    memory.set_user("web-visitor-42")   # simulate a user request context
+
+    captured = {}
+
+    def fake_run(self, task, settings=None, effort="high"):
+        captured["user"] = memory.current_user()
+        return "audit done"
+
+    monkeypatch.setattr(SPECIALISTS["prometheus"].__class__, "run", fake_run)
+    orchestrator.evolution_audit()
+    assert captured["user"] == "shared"   # not "web-visitor-42"
+
+
 def test_sweep_dated_files(monkeypatch):
     traces = config.MEMORY_DIR / "traces"
     traces.mkdir(parents=True)
