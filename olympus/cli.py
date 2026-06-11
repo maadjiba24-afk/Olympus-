@@ -52,6 +52,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("heartbeat", help="run the self-recurring autonomous loop")
 
+    p_web = sub.add_parser("web", help="serve the browser chat UI")
+    p_web.add_argument("--host", default="127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8484)
+
+    sub.add_parser("telegram", help="run the Telegram gateway "
+                                    "(needs TELEGRAM_BOT_TOKEN)")
+
     args = parser.parse_args(argv)
 
     if args.command in (None, "chat"):
@@ -73,6 +80,18 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat.run_forever()
         except KeyboardInterrupt:
             print("\nHeartbeat stopped.")
+    elif args.command == "web":
+        from . import web
+        try:
+            web.serve(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nWeb UI stopped.")
+    elif args.command == "telegram":
+        from . import telegram
+        try:
+            telegram.run_bot()
+        except KeyboardInterrupt:
+            print("\nTelegram gateway stopped.")
     return 0
 
 

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import agent, llm, memory
@@ -121,11 +122,11 @@ class Olympus:
 
     # -- stage 3: Aletheia -------------------------------------------------
 
-    def _verify(self, brief: str, outputs: dict[str, str]) -> str:
+    def _verify(self, brief: str, outputs: list[tuple[str, str]]) -> str:
         system = agent.load_prompt("aletheia")
         bundle = "\n\n".join(
             f"### Output from {SPECIALISTS[k].name} ({SPECIALISTS[k].title})\n{v}"
-            for k, v in outputs.items()
+            for k, v in outputs
         )
         task = (
             f"Original task brief:\n{brief}\n\n"
@@ -169,18 +170,25 @@ class Olympus:
             self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
             assignments = self._plan(brief, route.get("specialists", []))
 
-            outputs: dict[str, str] = {}
+            # Specialists run in parallel — total latency is the slowest
+            # single agent, not the sum of all of them.
             for item in assignments:
                 spec = SPECIALISTS[item["specialist"]]
                 self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
-                outputs[spec.key] = spec.run(item["task"])
+            with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
+                results = list(pool.map(
+                    lambda item: (item["specialist"],
+                                  SPECIALISTS[item["specialist"]].run(item["task"])),
+                    assignments,
+                ))
+            outputs: list[tuple[str, str]] = results
 
             if route.get("needs_verification", True):
                 self.report("🔍 Aletheia verifies the findings...")
                 verified = self._verify(brief, outputs)
             else:
                 verified = "\n\n".join(
-                    f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs.items()
+                    f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs
                 )
 
             self.report("⚡ Zeus composes the final answer...")

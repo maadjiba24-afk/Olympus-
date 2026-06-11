@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import traceback
 
-from . import config, memory, orchestrator
+from . import config, memory, orchestrator, telegram
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
@@ -26,8 +26,10 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")
         try:
-            orchestrator.opportunity_scan()
+            report = orchestrator.opportunity_scan()
             log.append("Argus: report saved to memory/reports.")
+            if telegram.notify("🌐 Olympus opportunity scan:\n\n" + report):
+                log.append("Argus: report pushed to Telegram.")
         except Exception:
             log.append("Argus failed:\n" + traceback.format_exc())
         state["opportunity_scan"] = now
@@ -46,8 +48,10 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
         try:
-            orchestrator.evolution_audit()
+            report = orchestrator.evolution_audit()
             log.append("Prometheus: audit saved to memory/reports.")
+            if telegram.notify("🔧 Olympus self-audit:\n\n" + report):
+                log.append("Prometheus: audit pushed to Telegram.")
         except Exception:
             log.append("Prometheus failed:\n" + traceback.format_exc())
         state["evolution_audit"] = now
