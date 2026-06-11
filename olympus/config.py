@@ -72,6 +72,139 @@ class Settings:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
         return None
 
+    def usable(self) -> bool:
+        if self.validate() is not None:
+            return False
+        # anthropic may read its key from the environment; others need a key/url
+        return (self.provider == "anthropic"
+                or bool(self.api_key) or bool(self.base_url))
+
+
+# --- multi-model pools: use the best of several frontier keys, as one --------
+
+# Rough, defensible capability scores per role (by model-name substring). The
+# point is relative strength so each provided key is used where it's strongest —
+# not a precise leaderboard. Users can override role assignments explicitly.
+_CAPABILITIES: dict[str, dict[str, float]] = {
+    "fable":    {"reasoning": 10, "coding": 10, "general": 10, "verify": 10},
+    "mythos":   {"reasoning": 10, "coding": 10, "general": 10, "verify": 10},
+    "opus":     {"reasoning": 9,  "coding": 9,  "general": 9,  "verify": 9},
+    "sonnet":   {"reasoning": 8,  "coding": 8,  "general": 8,  "verify": 8.5},
+    "haiku":    {"reasoning": 6,  "coding": 6,  "general": 7,  "verify": 6},
+    "gpt-5":    {"reasoning": 9,  "coding": 9,  "general": 9,  "verify": 8},
+    "o3":       {"reasoning": 9,  "coding": 9,  "general": 8,  "verify": 8},
+    "o1":       {"reasoning": 9,  "coding": 8,  "general": 8,  "verify": 8},
+    "gpt-4o":   {"reasoning": 8,  "coding": 8,  "general": 9,  "verify": 7.5},
+    "gpt-4":    {"reasoning": 8,  "coding": 8,  "general": 8,  "verify": 7.5},
+    "gemini":   {"reasoning": 8,  "coding": 8,  "general": 9,  "verify": 8},
+    "deepseek": {"reasoning": 8,  "coding": 9,  "general": 7,  "verify": 7},
+    "qwen":     {"reasoning": 7,  "coding": 8,  "general": 6,  "verify": 6},
+    "mistral":  {"reasoning": 6,  "coding": 6,  "general": 7,  "verify": 6},
+    "llama":    {"reasoning": 6,  "coding": 6,  "general": 6,  "verify": 6},
+}
+_DEFAULT_CAP = {"reasoning": 5, "coding": 5, "general": 5, "verify": 5}
+
+# Which capability each pipeline role / specialist wants.
+SPECIALIST_ROLE = {"hephaestus": "coding"}  # everyone else: "reasoning"
+
+
+def capability_score(model: str, role: str) -> float:
+    m = (model or "").lower()
+    for key, caps in _CAPABILITIES.items():
+        if key in m:
+            return caps.get(role, caps.get("general", 5))
+    return _DEFAULT_CAP.get(role, 5)
+
+
+@dataclass(frozen=True)
+class ModelPool:
+    """A set of frontier-model credentials used together — each pipeline role
+    runs on whichever provided model is strongest for it. With one key this is
+    just that key everywhere; with two (e.g. Claude + GPT) Olympus composes
+    their strengths into one system instead of switching between them."""
+
+    members: tuple[Settings, ...]
+
+    @classmethod
+    def of(cls, *settings: Settings) -> "ModelPool":
+        seen, members = set(), []
+        for s in settings:
+            if s and s.usable():
+                fp = (s.provider, s.model, s.api_key, s.base_url)
+                if fp not in seen:
+                    seen.add(fp)
+                    members.append(s)
+        if not members:                       # fall back to the first given/env
+            members = [settings[0] if settings else Settings.from_env()]
+        return cls(tuple(members))
+
+    @classmethod
+    def from_env(cls) -> "ModelPool":
+        primary = Settings.from_env()
+        extra = []
+        raw = os.environ.get("OLYMPUS_MODELS")
+        if raw:
+            import json
+            try:
+                for d in json.loads(raw):
+                    extra.append(Settings(
+                        provider=(d.get("provider") or "anthropic").lower(),
+                        model=d.get("model", ""),
+                        api_key=d.get("api_key"),
+                        base_url=d.get("base_url")))
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                pass
+        return cls.of(primary, *extra)
+
+    def primary(self) -> Settings:
+        return self.members[0]
+
+    def _role_map(self) -> dict[str, Settings]:
+        """Assign each role to a member: highest capability wins, and TIES are
+        broken toward the least-used member so comparable frontier models split
+        the work (both keys get used) rather than one hogging everything. A
+        strictly stronger model still wins outright — quality first."""
+        roles = ("reasoning", "coding", "verify")
+        if len(self.members) == 1:
+            return {r: self.members[0] for r in roles}
+        used = {id(m): 0 for m in self.members}
+        out: dict[str, Settings] = {}
+        for role in roles:
+            best = max(capability_score(m.model, role) for m in self.members)
+            tied = [m for m in self.members
+                    if capability_score(m.model, role) == best]
+            pick = min(tied, key=lambda m: used[id(m)])  # least-used among tied
+            out[role] = pick
+            used[id(pick)] += 1
+        return out
+
+    def for_role(self, role: str) -> Settings:
+        if len(self.members) == 1:
+            return self.members[0]
+        return self._role_map().get(role) or max(
+            self.members, key=lambda s: capability_score(s.model, role))
+
+    def for_specialist(self, key: str) -> Settings:
+        return self.for_role(SPECIALIST_ROLE.get(key, "reasoning"))
+
+    def is_multi(self) -> bool:
+        return len(self.members) > 1
+
+    def assignment(self) -> str:
+        """Human-readable view of which model handles what."""
+        if not self.is_multi():
+            s = self.members[0]
+            return f"Single model: {s.provider}/{s.model or '(env default)'}"
+        rmap = self._role_map()
+        lines = ["Model pool (best of each, used together):"]
+        for role in ("reasoning", "coding", "verify"):
+            s = rmap[role]
+            lines.append(f"  {role:9s} → {s.provider}/{s.model}")
+        lines.append("  members: "
+                     + ", ".join(f"{m.provider}/{m.model}" for m in self.members))
+        return "\n".join(lines)
+
+
 # Project root (the directory containing the `olympus` package).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

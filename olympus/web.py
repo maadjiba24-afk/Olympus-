@@ -33,14 +33,14 @@ class _Session:
         self.fingerprint: tuple | None = None
         self.bot: orchestrator.Olympus | None = None
 
-    def bot_for(self, settings: config.Settings) -> orchestrator.Olympus:
-        fp = (settings.provider, settings.model, settings.api_key,
-              settings.base_url)
+    def bot_for(self, pool: config.ModelPool) -> orchestrator.Olympus:
+        fp = tuple((m.provider, m.model, m.api_key, m.base_url)
+                   for m in pool.members)
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
             self.bot = orchestrator.Olympus(
                 report=self.events.append,
-                settings=settings,
+                pool=pool,
                 user=f"web-{self.sid}",
                 conversation_id=f"web-{self.sid}",
             )
@@ -167,6 +167,23 @@ PAGE = """<!doctype html>
     <input id="base" placeholder="optional, e.g. http://localhost:11434/v1">
   </div>
   <div class="row">
+    <label>+ Model 2</label>
+    <select id="provider2">
+      <option value="">none</option>
+      <option value="anthropic">Anthropic (Claude)</option>
+      <option value="openai">OpenAI-compatible</option>
+    </select>
+    <input id="model2" placeholder="2nd model, e.g. gpt-4o">
+    <input id="key2" type="password" placeholder="2nd key">
+    <input id="base2" placeholder="2nd base URL (optional)">
+  </div>
+  <div class="row">
+    <span class="hint" style="margin:0">Add a second frontier key and Olympus
+      uses both together — each part of the pipeline runs on whichever model is
+      strongest for it (e.g. one for reasoning, the other for coding). Not a
+      switch; they compose.</span>
+  </div>
+  <div class="row">
     <label>Access</label>
     <input id="access" type="password"
            placeholder="instance access token (only if the host set one)">
@@ -198,7 +215,8 @@ const log = document.getElementById('log'), f = document.getElementById('f'),
       panel = document.getElementById('panel'),
       fileIn = document.getElementById('file'),
       attach = document.getElementById('attach');
-const fields = ['provider', 'model', 'key', 'base', 'access', 'lang'];
+const fields = ['provider', 'model', 'key', 'base', 'access', 'lang',
+                'provider2', 'model2', 'key2', 'base2'];
 fields.forEach(id => {
   const el = document.getElementById(id);
   el.value = localStorage.getItem('olympus_' + id) || '';
@@ -246,7 +264,13 @@ function cfg() {
     api_key: document.getElementById('key').value,
     base_url: document.getElementById('base').value,
     language: document.getElementById('lang').value,
-    contribute: document.getElementById('contribute').checked
+    contribute: document.getElementById('contribute').checked,
+    extra: {
+      provider: document.getElementById('provider2').value,
+      model: document.getElementById('model2').value,
+      api_key: document.getElementById('key2').value,
+      base_url: document.getElementById('base2').value
+    }
   };
 }
 function add(cls, text) {
@@ -395,18 +419,32 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
             return
-        settings = config.Settings.from_env().merged(payload.get("settings") or {})
+        pset = payload.get("settings") or {}
+        settings = config.Settings.from_env().merged(pset)
         error = settings.validate()
         if error:
             self._json({"error": error}, 400)
             return
 
+        # Optional second frontier model — used together with the first, each
+        # stage on its strongest. Build a pool; invalid second model is ignored.
+        members = [settings]
+        extra = pset.get("extra") or {}
+        if isinstance(extra, dict) and (extra.get("api_key") or extra.get("model")):
+            second = config.Settings(
+                provider=(extra.get("provider") or "openai").lower(),
+                model=(extra.get("model") or "").strip(),
+                api_key=(extra.get("api_key") or "").strip() or None,
+                base_url=(extra.get("base_url") or "").strip() or None)
+            if second.usable():
+                members.append(second)
+        pool = config.ModelPool.of(*members)
+
         want_stream = parse_qs(urlparse(self.path).query).get("stream", ["0"])[0] == "1"
-        pset = payload.get("settings") or {}
         language = pset.get("language")
         try:
             with session.lock:
-                bot = session.bot_for(settings)
+                bot = session.bot_for(pool)
                 if isinstance(language, str) and language.strip():
                     bot.set_language(language)
                 bot.set_contribute(bool(pset.get("contribute")))
