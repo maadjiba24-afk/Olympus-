@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from . import config
 
 # Facts older than this are considered stale and re-verified.
 TTL_SECONDS = 30 * 86400
+
+# Hard cap on stored facts; the oldest are dropped past this (append-only file
+# is compacted when it grows beyond ~2x the cap).
+MAX_FACTS = 5000
 
 
 def _path() -> Path:
@@ -27,6 +32,9 @@ def _norm(claim: str) -> str:
     return re.sub(r"\s+", " ", claim.lower()).strip()[:300]
 
 
+_LOCK = threading.Lock()
+
+
 def record(claim: str, verdict: str, source: str = "") -> str:
     entry = {
         "claim": claim[:500],
@@ -35,8 +43,16 @@ def record(claim: str, verdict: str, source: str = "") -> str:
         "source": source[:300],
         "ts": int(time.time()),
     }
-    with _path().open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    path = _path()
+    with _LOCK:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        # Compact when the append-only log grows past 2x the cap: keep the
+        # newest MAX_FACTS lines, drop the rest.
+        if count() > MAX_FACTS * 2:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            path.write_text("\n".join(lines[-MAX_FACTS:]) + "\n",
+                            encoding="utf-8")
     return "Fact cached."
 
 

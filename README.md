@@ -166,6 +166,33 @@ docker build -t olympus .
 docker run -p 8484:8484 -e ANTHROPIC_API_KEY=sk-ant-... olympus
 ```
 
+### Hosting a public instance (HTTPS)
+
+The built-in web server speaks plain HTTP — fine on `localhost`, **not** safe
+to expose directly, because bring-your-own-key API keys and file contents
+would travel unencrypted. Put it behind a TLS-terminating reverse proxy:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name olympus.example.com;
+  ssl_certificate     /etc/letsencrypt/live/olympus.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/olympus.example.com/privkey.pem;
+  location / {
+    proxy_pass http://127.0.0.1:8484;
+    proxy_buffering off;            # required for token streaming
+    proxy_read_timeout 600s;        # pipeline runs can be minutes long
+  }
+}
+```
+
+Run Olympus bound to localhost (`--host 127.0.0.1`, the default) so only the
+proxy can reach it, and set `OLYMPUS_ACCESS_TOKEN`, `OLYMPUS_RATE_LIMIT`, and
+`OLYMPUS_MAX_CONCURRENT_CALLS` for a shared deployment. Caddy or a cloud load
+balancer with managed certificates works equally well — the only hard
+requirement is `proxy_buffering off` (or the equivalent) so streamed answers
+aren't held back.
+
 ## Usage
 
 ```bash

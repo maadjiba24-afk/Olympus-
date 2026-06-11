@@ -111,3 +111,7 @@ JUDGE_MODEL = os.environ.get("OLYMPUS_JUDGE_MODEL", "claude-sonnet-4-6")
 
 # Prometheus also self-audits after this many conversations (0 disables).
 AUDIT_EVERY_CHATS = int(os.environ.get("OLYMPUS_AUDIT_EVERY_CHATS", "20"))
+
+# Retain per-day trace and usage files for this many days (older are deleted).
+RETAIN_DAYS = int(os.environ.get("OLYMPUS_RETAIN_DAYS", "30"))
+MAINTENANCE_EVERY = 86400            # housekeeping sweep cadence
