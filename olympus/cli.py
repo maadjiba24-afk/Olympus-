@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("heartbeat", help="run the self-recurring autonomous loop")
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
+    sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
+                                     "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
@@ -108,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "eval":
         from . import evals
         print(evals.run_and_save())
+    elif args.command == "code-eval":
+        from . import code_eval
+        print(code_eval.run_and_save())
     elif args.command == "skills":
         from . import skills
         print(skills.index())
