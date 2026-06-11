@@ -74,6 +74,14 @@ system continuously scans the world, learns from YouTube, and upgrades itself.
   3. Prometheus reads recurring corrections + Olympus's own source, rewrites
      agent prompts (`update_prompt`, with automatic backups), and files
      `propose_upgrade` notes for changes that need code.
+
+  Prometheus runs weekly via the heartbeat **and** automatically after every
+  N conversations (`OLYMPUS_AUDIT_EVERY_CHATS`, default 20 — counted across
+  CLI, web, and Telegram; the audit runs in the background on the server's
+  own credentials, never on a visitor's BYOK key). With `GITHUB_TOKEN` +
+  `GITHUB_REPO` set, his upgrade proposals are **auto-filed as GitHub
+  issues** — a self-generated roadmap you can hand straight to a coding
+  agent.
 - **Accurate by design** — nothing reaches the user without passing the
   hallucination controller; uncertain claims are flagged, never laundered.
 

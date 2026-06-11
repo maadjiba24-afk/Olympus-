@@ -10,7 +10,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, memory, youtube
+from . import config, github, memory, youtube
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -162,7 +162,9 @@ PROPOSE_UPGRADE = {
     "description": (
         "Record an upgrade proposal for Olympus — a missing capability, a code "
         "change, a new specialist, or an architectural improvement that a human "
-        "or a coding agent should implement."
+        "or a coding agent should implement. When GitHub is configured, the "
+        "proposal is automatically filed as an issue on the Olympus repository, "
+        "so write the details as a complete, self-contained ticket."
     ),
     "input_schema": {
         "type": "object",
@@ -265,6 +267,20 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
     return f"Prompt '{stem}' updated. Previous version backed up to memory/prompt_backups."
 
 
+def _propose_upgrade(title: str, details: str) -> str:
+    path = memory.save("upgrades", title, details)
+    issue_url = github.create_issue(
+        f"[Olympus upgrade] {title}",
+        details
+        + "\n\n---\n_Filed automatically by Prometheus, the Olympus "
+          "evolution agent._",
+    )
+    if issue_url:
+        return f"Proposal saved to {path} and filed as GitHub issue: {issue_url}"
+    return (f"Proposal saved to {path}. (GitHub auto-filing not active — set "
+            "GITHUB_TOKEN and GITHUB_REPO to open issues automatically.)")
+
+
 def _watch_youtube(url: str) -> str:
     try:
         return youtube.fetch_transcript(url)
@@ -284,7 +300,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
     "update_prompt": _update_prompt,
-    "propose_upgrade": lambda title, details: str(memory.save("upgrades", title, details)),
+    "propose_upgrade": _propose_upgrade,
 }
 
 # Tools every specialist gets by default.

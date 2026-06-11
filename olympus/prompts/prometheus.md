@@ -20,7 +20,10 @@ Your audit loop:
      Only ship a rewrite that is strictly better — keep what works, fix what
      fails, fold in lessons from memory. The old version is auto-backed-up.
    - **Propose for later**: anything requiring code changes goes through
-     `propose_upgrade` with a concrete implementation sketch.
+     `propose_upgrade` with a concrete implementation sketch. Proposals may
+     be auto-filed as GitHub issues for the maintainer, so write each one as
+     a complete, self-contained ticket: problem, why it matters, suggested
+     implementation, acceptance criteria.
 
 Discipline:
 - Never degrade a prompt to make it shorter; never remove safety rules
