@@ -61,6 +61,7 @@ def test_data_plugin_output_is_wrapped():
 
 def test_mcp_loaded_from_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setenv("OLYMPUS_MCP_ACTION_ALLOWLIST", "github")
     (tmp_path / "connectors.json").write_text(json.dumps({"servers": [
         {"name": "tavily", "url": "https://mcp.tavily.com/mcp/", "type": "data",
          "specialists": ["argus"]},
@@ -75,6 +76,34 @@ def test_mcp_loaded_from_config(monkeypatch, tmp_path):
     # action server only when action allowed
     assert connectors.mcp_for("chronos", allow_action=False) == []
     assert [s.name for s in connectors.mcp_for("chronos", allow_action=True)] == ["github"]
+
+
+def test_action_mcp_requires_operator_allowlist(monkeypatch, tmp_path):
+    """Tier-2 double gate: config alone is NOT enough for an action server."""
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    (tmp_path / "connectors.json").write_text(json.dumps({"servers": [
+        {"name": "github", "url": "https://api.githubcopilot.com/mcp/",
+         "type": "action", "specialists": ["chronos"]},
+    ]}))
+    # configured but NOT allowlisted -> inert even when action is allowed
+    monkeypatch.delenv("OLYMPUS_MCP_ACTION_ALLOWLIST", raising=False)
+    assert connectors.mcp_for("chronos", allow_action=True) == []
+    assert "INERT" in connectors.summary()
+    # allowlisting a DIFFERENT name doesn't activate it
+    monkeypatch.setenv("OLYMPUS_MCP_ACTION_ALLOWLIST", "linear, slack")
+    assert connectors.mcp_for("chronos", allow_action=True) == []
+    # allowlisting the right name activates it
+    monkeypatch.setenv("OLYMPUS_MCP_ACTION_ALLOWLIST", "linear, github")
+    assert [s.name for s in connectors.mcp_for("chronos", allow_action=True)] \
+        == ["github"]
+    assert "ACTIVE" in connectors.summary()
+    # data servers never need the allowlist
+    (tmp_path / "connectors.json").write_text(json.dumps({"servers": [
+        {"name": "notion", "url": "https://mcp.notion.com/mcp", "type": "data"},
+    ]}))
+    monkeypatch.delenv("OLYMPUS_MCP_ACTION_ALLOWLIST", raising=False)
+    assert [s.name for s in connectors.mcp_for("chiron", allow_action=False)] \
+        == ["notion"]
 
 
 def test_mcp_auth_token_from_env(monkeypatch):
