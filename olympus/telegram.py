@@ -40,6 +40,7 @@ HELP = (
     "/audit — Olympus audits and upgrades itself\n"
     "/good or /bad [comment] — rate the last answer (Olympus learns from it)\n"
     "/lang <language> — reply in your language (e.g. /lang Spanish, /lang auto)\n"
+    "/contribute on|off — share anonymized insights to improve Olympus for all\n"
 )
 
 
@@ -139,6 +140,10 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
                                   "/lang auto)")
             return
         _send(token, chat_id, bot.set_language(arg))
+        return
+    if cmd == "/contribute":
+        on = arg.strip().lower() in ("on", "yes", "true", "1", "enable")
+        _send(token, chat_id, bot.set_contribute(on))
         return
 
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")

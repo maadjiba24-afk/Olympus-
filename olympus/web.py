@@ -173,6 +173,13 @@ PAGE = """<!doctype html>
     <label>Language</label>
     <input id="lang" placeholder="auto (or e.g. Spanish, 日本語, Arabic)">
   </div>
+  <div class="row">
+    <label><input type="checkbox" id="contribute" style="flex:none;width:auto;min-width:0">
+      Contribute anonymized insights</label>
+    <span class="hint" style="margin:0">Opt in to let Olympus distill
+      anonymized, PII-stripped insights from your chats into shared skills that
+      improve it for everyone — only proven skills are kept. Off by default.</span>
+  </div>
   <p class="hint">Your key lives in this browser only and is sent solely with
   your own requests; the server never stores or logs it. Leave everything
   blank to use the server's configured model.</p>
@@ -198,6 +205,10 @@ fields.forEach(id => {
   el.addEventListener('change',
     () => localStorage.setItem('olympus_' + id, el.value));
 });
+const contribEl = document.getElementById('contribute');
+contribEl.checked = localStorage.getItem('olympus_contribute') === '1';
+contribEl.addEventListener('change',
+  () => localStorage.setItem('olympus_contribute', contribEl.checked ? '1' : '0'));
 document.getElementById('gear').onclick = () => panel.classList.toggle('open');
 let session = localStorage.getItem('olympus_session');
 if (!session) {
@@ -234,7 +245,8 @@ function cfg() {
     model: document.getElementById('model').value,
     api_key: document.getElementById('key').value,
     base_url: document.getElementById('base').value,
-    language: document.getElementById('lang').value
+    language: document.getElementById('lang').value,
+    contribute: document.getElementById('contribute').checked
   };
 }
 function add(cls, text) {
@@ -390,12 +402,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         want_stream = parse_qs(urlparse(self.path).query).get("stream", ["0"])[0] == "1"
-        language = (payload.get("settings") or {}).get("language")
+        pset = payload.get("settings") or {}
+        language = pset.get("language")
         try:
             with session.lock:
                 bot = session.bot_for(settings)
                 if isinstance(language, str) and language.strip():
                     bot.set_language(language)
+                bot.set_contribute(bool(pset.get("contribute")))
                 if want_stream:
                     self._stream_reply(bot, message)
                 else:
