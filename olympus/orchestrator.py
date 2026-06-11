@@ -6,7 +6,7 @@
    Zeus (main agent) ── direct answer for casual chat
      │ delegates
      ▼
-   Athena (supervisor) ── plans sub-tasks, dispatches specialists
+   Athena (supervisor) ── plans sub-tasks, dispatches specialists (parallel)
      │                        │
      │                        ▼
      │                  specialist outputs
@@ -16,6 +16,9 @@
      │                                     records corrections to memory
      ▼
    Athena synthesis → Zeus final reply → user
+
+Provider-agnostic: every model call goes through `backend`, which dispatches
+to Claude (full capability) or any OpenAI-compatible endpoint (BYOK).
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import agent, llm, memory
+from . import agent, backend, config, memory, tools
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -64,24 +67,31 @@ def _silent(_: str) -> None:
 class Olympus:
     """Stateful conversation handler running the full pipeline."""
 
-    def __init__(self, report: Reporter = _silent):
+    def __init__(self, report: Reporter = _silent,
+                 settings: config.Settings | None = None):
         self.history: list[dict[str, Any]] = []
         self.report = report
+        self.settings = settings or config.Settings.from_env()
 
     # -- stage 1: Zeus ----------------------------------------------------
 
     def _route(self, user_message: str) -> dict[str, Any]:
         system = agent.load_prompt("zeus") + "\n\n## Specialist roster\n" + roster()
         messages = self.history + [{"role": "user", "content": user_message}]
-        response = llm.complete(
-            system, messages, effort="medium", output_schema=ROUTE_SCHEMA
-        )
-        if response.stop_reason == "refusal":
+        try:
+            return backend.complete_json(self.settings, system, messages,
+                                         ROUTE_SCHEMA, effort="medium")
+        except ValueError:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
                     "specialists": [], "brief": None,
                     "needs_verification": False}
-        return llm.json_of(response)
+        except Exception:
+            # Provider couldn't produce routable JSON — degrade gracefully to
+            # a full delegation with the raw message as the brief.
+            return {"mode": "delegate", "direct_reply": None,
+                    "specialists": [], "brief": user_message,
+                    "needs_verification": True}
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
@@ -115,9 +125,15 @@ class Olympus:
             "to use (you may drop or add specialists from the roster). Each "
             "task must contain all context the specialist needs."
         )
-        response = llm.complete(system, [{"role": "user", "content": prompt}],
-                                effort="medium", output_schema=schema)
-        assignments = llm.json_of(response)["assignments"]
+        try:
+            assignments = backend.complete_json(
+                self.settings, system, [{"role": "user", "content": prompt}],
+                schema, effort="medium",
+            )["assignments"]
+            assignments = [a for a in assignments
+                           if a.get("specialist") in SPECIALISTS and a.get("task")]
+        except Exception:
+            assignments = []
         return assignments or [{"specialist": valid[0], "task": brief}]
 
     # -- stage 3: Aletheia -------------------------------------------------
@@ -137,9 +153,10 @@ class Olympus:
             "anything, record it with save_lesson so Olympus never repeats "
             "the mistake."
         )
-        from . import tools  # local import to avoid cycle at module load
-        tool_defs = tools.WEB_TOOLS + [tools.SAVE_LESSON, tools.RECALL_MEMORY]
-        return agent.run_agent(system, task, tool_defs=tool_defs, effort="high")
+        tool_defs = (tools.web_tool_defs(self.settings.provider)
+                     + [tools.SAVE_LESSON, tools.RECALL_MEMORY])
+        return backend.run_agent(self.settings, system, task, tool_defs,
+                                 effort="high")
 
     # -- stage 4: synthesis -------------------------------------------------
 
@@ -153,17 +170,23 @@ class Olympus:
             "Compose the final reply to the user. Keep every confidence flag "
             "or caveat the controller attached to uncertain claims."
         )
-        response = llm.complete(system,
-                                self.history + [{"role": "user", "content": prompt}],
-                                effort="high")
-        return llm.text_of(response)
+        return backend.complete_text(
+            self.settings,
+            system,
+            self.history + [{"role": "user", "content": prompt}],
+            effort="high",
+        )
 
     # -- public entry point --------------------------------------------------
 
     def ask(self, user_message: str) -> str:
+        error = self.settings.validate()
+        if error:
+            return f"Configuration problem: {error}"
+
         route = self._route(user_message)
 
-        if route["mode"] == "direct" and route.get("direct_reply"):
+        if route.get("mode") == "direct" and route.get("direct_reply"):
             reply = route["direct_reply"]
         else:
             brief = route.get("brief") or user_message
@@ -176,12 +199,14 @@ class Olympus:
                 spec = SPECIALISTS[item["specialist"]]
                 self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
             with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
-                results = list(pool.map(
-                    lambda item: (item["specialist"],
-                                  SPECIALISTS[item["specialist"]].run(item["task"])),
+                outputs = list(pool.map(
+                    lambda item: (
+                        item["specialist"],
+                        SPECIALISTS[item["specialist"]].run(
+                            item["task"], settings=self.settings),
+                    ),
                     assignments,
                 ))
-            outputs: list[tuple[str, str]] = results
 
             if route.get("needs_verification", True):
                 self.report("🔍 Aletheia verifies the findings...")
@@ -204,19 +229,19 @@ class Olympus:
 
 # --- one-shot autonomous routines (used by the heartbeat and CLI) -----------
 
-def opportunity_scan() -> str:
+def opportunity_scan(settings: config.Settings | None = None) -> str:
     """Argus surfs the web for opportunities & world events; report → memory."""
     task = (
         "Run your full scan now: current world events that matter, emerging "
         "business opportunities, and anything actionable. Finish with the "
         "structured report described in your instructions."
     )
-    report = SPECIALISTS["argus"].run(task)
+    report = SPECIALISTS["argus"].run(task, settings=settings)
     memory.save("reports", "Opportunity scan", report)
     return report
 
 
-def watch_and_learn(url: str) -> str:
+def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     """Mnemosyne watches one YouTube video and stores what it learned."""
     task = (
         f"Watch this YouTube video and learn from it: {url}\n"
@@ -224,12 +249,12 @@ def watch_and_learn(url: str) -> str:
         "described in your instructions and persist the durable lessons with "
         "save_lesson."
     )
-    summary = SPECIALISTS["mnemosyne"].run(task)
+    summary = SPECIALISTS["mnemosyne"].run(task, settings=settings)
     memory.save("lessons", f"Video summary {url}", summary)
     return summary
 
 
-def evolution_audit() -> str:
+def evolution_audit(settings: config.Settings | None = None) -> str:
     """Prometheus audits Olympus, upgrades prompts, files proposals."""
     task = (
         "Run a full self-audit of Olympus now:\n"
@@ -242,6 +267,6 @@ def evolution_audit() -> str:
         "Finish with an audit report: what you checked, what you changed, what "
         "you proposed."
     )
-    report = SPECIALISTS["prometheus"].run(task)
+    report = SPECIALISTS["prometheus"].run(task, settings=settings)
     memory.save("reports", "Evolution audit", report)
     return report

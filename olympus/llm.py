@@ -1,4 +1,4 @@
-"""Thin wrapper around the Anthropic SDK used by every Olympus agent.
+"""Anthropic backend — Claude via the official SDK.
 
 All calls stream (timeout protection on long outputs), use adaptive thinking,
 and cache the system prompt so repeated agent calls are cheap.
@@ -14,28 +14,37 @@ import anthropic
 
 from . import config
 
-_client: anthropic.Anthropic | None = None
+_clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 
 
-def client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
+def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
+    key = settings.api_key if settings else None
+    base = settings.base_url if settings else None
+    cache_key = (key, base)
+    if cache_key not in _clients:
+        kwargs: dict[str, Any] = {}
+        if key:
+            kwargs["api_key"] = key
+        if base:
+            kwargs["base_url"] = base
+        _clients[cache_key] = anthropic.Anthropic(**kwargs)
+    return _clients[cache_key]
 
 
 def complete(
     system: str,
     messages: list[dict[str, Any]],
     *,
+    settings: config.Settings | None = None,
     tools: list[dict[str, Any]] | None = None,
     effort: str = "high",
     max_tokens: int | None = None,
     output_schema: dict[str, Any] | None = None,
 ) -> anthropic.types.Message:
     """One streamed Messages API call; returns the final Message."""
+    settings = settings or config.Settings.from_env()
     params: dict[str, Any] = {
-        "model": config.MODEL,
+        "model": settings.model or config.MODEL,
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [
             {
@@ -59,7 +68,7 @@ def complete(
     last_err: Exception | None = None
     for attempt in range(4):
         try:
-            with client().messages.stream(**params) as stream:
+            with client(settings).messages.stream(**params) as stream:
                 return stream.get_final_message()
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:
