@@ -37,7 +37,21 @@ class GmailError(RuntimeError):
 
 
 def _access_token() -> str:
-    """Return a valid access token, refreshing if we have the means."""
+    """Return a valid access token.
+
+    Order of preference: (1) the per-user Google account connected through the
+    OAuth flow (encrypted vault), so each user uses their own mailbox;
+    (2) environment-configured token/refresh, for single-user/dev setups.
+    """
+    # 1. Per-user OAuth token (multi-user, self-serve connect)
+    try:
+        from . import google_oauth, memory
+        user = memory.current_user()
+        if google_oauth.connected(user):
+            return google_oauth.access_token(user)
+    except Exception:
+        pass  # fall back to env-based auth below
+
     now = time.time()
     if _token["value"] and now < _token["expires"] - 60:
         return _token["value"]

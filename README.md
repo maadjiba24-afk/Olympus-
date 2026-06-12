@@ -423,6 +423,17 @@ attendees, so it's classed irreversible and **always waits for your approval**
 connect one Google account and Olympus triages your inbox, drafts replies,
 proposes meeting times, and prepares the invites — you approve, it acts.
 
+**Self-serve connect + encrypted credentials.** Users link Google with a click
+("Connect Google" in the web UI → Google consent → done) via a standard OAuth
+flow; tokens are stored **encrypted at rest** in a secrets vault (Fernet,
+keyed by `OLYMPUS_SECRET_KEY`) and refreshed automatically — never in plaintext.
+Set `OLYMPUS_GOOGLE_CLIENT_ID`/`SECRET` to enable it.
+
+**Runs anywhere, database when you want it.** Storage defaults to the local
+filesystem (zero setup). Set `OLYMPUS_DATABASE_URL` to a Postgres URL and the
+same data — including the encrypted vault — persists there instead, no code
+changes. Database-ready is a config switch, not a rewrite.
+
 ### Multilingual — native in any language
 
 Olympus answers in the user's own language, generated natively rather than
