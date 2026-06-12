@@ -27,11 +27,18 @@ def run_agent(
 ) -> str:
     """Run one agent to completion on a task; return its final text output."""
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
+    container: str | None = None
 
     for _ in range(max_iterations):
         response = llm.complete(system, messages, settings=settings,
                                 tools=tool_defs, mcp_servers=mcp_servers,
-                                effort=effort)
+                                container=container, effort=effort)
+
+        # Preserve any server-side container (created by web search's dynamic
+        # filtering) so the next turn can resume it.
+        resp_container = getattr(response, "container", None)
+        if resp_container is not None:
+            container = getattr(resp_container, "id", None) or container
 
         if response.stop_reason == "refusal":
             return "[The model declined this request for safety reasons.]"

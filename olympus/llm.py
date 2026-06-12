@@ -38,6 +38,7 @@ def complete(
     settings: config.Settings | None = None,
     tools: list[dict[str, Any]] | None = None,
     mcp_servers: list[dict[str, Any]] | None = None,
+    container: str | None = None,
     effort: str = "high",
     max_tokens: int | None = None,
     output_schema: dict[str, Any] | None = None,
@@ -58,6 +59,11 @@ def complete(
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": effort},
     }
+    # Reuse the server-side container across turns (web search's dynamic
+    # filtering runs server-side code execution, which the API requires us to
+    # reference by container id when continuing the conversation).
+    if container:
+        params["container"] = container
     if tools:
         params["tools"] = tools
     if output_schema:
