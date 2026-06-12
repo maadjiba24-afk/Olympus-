@@ -149,3 +149,14 @@ def test_add_item_merges_into_benchmarks(monkeypatch):
     evals.add_item({"id": "plutus-extra-1", "specialist": "plutus",
                     "task": "t2", "criteria": "c2"})
     assert len(evals.load_benchmarks()) == base + 1
+
+
+def test_judge_schema_has_no_unsupported_constraints():
+    """Regression: structured outputs reject min/max on integers (the live
+    `scores` crash). No schema field may carry numeric constraints."""
+    from olympus import evals
+    import json
+    for schema in (evals.JUDGE_SCHEMA, evals._GEN_SCHEMA):
+        blob = json.dumps(schema)
+        assert "minimum" not in blob and "maximum" not in blob
+        assert "multipleOf" not in blob
