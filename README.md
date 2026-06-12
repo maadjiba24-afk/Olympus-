@@ -402,6 +402,15 @@ The safety model is structural, not hopeful:
 New capabilities (calendar, files, payments-prep) are just new action types
 registered on this same spine — they inherit the gate automatically.
 
+**First real integration — Gmail.** Connect a Google account and **Angelos**,
+the correspondence manager, triages your inbox and *prepares* replies, drafts,
+and archives — but **sending always goes through the approval gate**. Because
+Angelos reads untrusted email, the capability-separation rule strips its direct
+action tools automatically: it can only `prepare_action`, never send on its own.
+So a malicious email that tries to make it wire money or leak data produces, at
+worst, a prepared action you preview and reject. Set `GMAIL_ACCESS_TOKEN` (see
+`.env.example`) to connect.
+
 ### Multilingual — native in any language
 
 Olympus answers in the user's own language, generated natively rather than
