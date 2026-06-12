@@ -130,6 +130,15 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("send_email", "call_webhook", "prepare_action"),
         ),
         Specialist(
+            key="angelos", name="Angelos", title="Inbox & Calendar Manager",
+            description="Runs the user's email and calendar: triages the inbox, "
+                        "drafts replies, proposes meeting times, and prepares "
+                        "send/draft/archive/invite actions for the user to "
+                        "approve. Reads untrusted mail; never sends on its own.",
+            extra_tools=("read_inbox", "read_email", "read_calendar",
+                         "prepare_action"),
+        ),
+        Specialist(
             key="argus", name="Argus", title="Opportunity Scout",
             description="Surfs the internet (no MCP needed — server-side web "
                         "search) to find business opportunities, emerging trends, "

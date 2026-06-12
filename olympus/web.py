@@ -22,7 +22,25 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import config, orchestrator
+from . import actions, builtin_actions, config, orchestrator  # noqa: F401
+
+
+def _user_for(sid: str) -> str:
+    return f"web-{sid}"
+
+
+def _actions_view(user: str) -> list[dict]:
+    """Pending actions (awaiting approval) plus recently executed reversible
+    ones (so the UI can offer undo)."""
+    out = []
+    for a in actions.pending(user):
+        out.append({"id": a.id, "title": a.title, "risk": a.risk_class,
+                    "preview": a.preview, "status": a.status, "reversible": a.reversible})
+    for a in actions.history(user, limit=8):
+        if a.status == actions.EXECUTED and a.reversible:
+            out.append({"id": a.id, "title": a.title, "risk": a.risk_class,
+                        "preview": a.preview, "status": a.status, "reversible": True})
+    return out
 
 
 class _Session:
@@ -141,14 +159,39 @@ PAGE = """<!doctype html>
                 border-radius: 8px; padding: 0 22px; font: inherit;
                 font-weight: bold; cursor: pointer; }
   button.send:disabled { opacity: .4; cursor: wait; }
+  #actbtn { background: none; border: 1px solid #2a2f3a; color: #d9b44a;
+            border-radius: 8px; padding: 4px 12px; cursor: pointer; font: inherit; }
+  #actcount { color: #0e1116; background: #d9b44a; border-radius: 10px;
+              padding: 0 7px; font-size: 12px; font-weight: bold; display: none; }
+  #actcount.show { display: inline; }
+  #actions { display: none; border-bottom: 1px solid #2a2f3a; background: #11151d;
+             max-height: 50vh; overflow-y: auto; padding: 12px 20px; }
+  #actions.open { display: block; }
+  .card { max-width: 860px; margin: 0 auto 12px; border: 1px solid #2a2f3a;
+          border-radius: 10px; padding: 12px 14px; background: #161b24; }
+  .card .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .card .ttl { color: #e8e3d8; font-weight: bold; }
+  .card .risk { font-size: 12px; color: #6b7280; }
+  .card .risk.irreversible_financial_legal, .card .risk.irreversible { color: #e0884a; }
+  .card pre { white-space: pre-wrap; word-wrap: break-word; color: #c8cdd6;
+              font: 13px/1.5 ui-monospace, monospace; margin: 8px 0; }
+  .card .btns { display: flex; gap: 8px; }
+  .card button { border: 0; border-radius: 7px; padding: 5px 14px; cursor: pointer;
+                 font: inherit; font-size: 13px; }
+  .card .ok { background: #d9b44a; color: #0e1116; font-weight: bold; }
+  .card .no { background: none; border: 1px solid #2a2f3a; color: #9aa3b2; }
+  .card .un { background: none; border: 1px solid #2a2f3a; color: #9aa3b2; }
 </style>
 </head>
 <body>
 <header>
   <h1>OLYMPUS</h1>
-  <span>main agent · supervisor · hallucination controller · 11 specialists</span>
+  <span>main agent · supervisor · hallucination controller · 12 specialists</span>
+  <button id="actbtn" title="Actions awaiting your approval">📋 actions
+    <span id="actcount"></span></button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
 </header>
+<div id="actions"></div>
 <div id="panel">
   <div class="row">
     <label>Provider</label>
@@ -306,6 +349,67 @@ async function poll() {
     seen = d.next;
   } catch (e) {}
 }
+
+const actionsEl = document.getElementById('actions');
+const actBtn = document.getElementById('actbtn');
+const actCount = document.getElementById('actcount');
+actBtn.onclick = () => { actionsEl.classList.toggle('open'); renderActions(); };
+
+function renderCards(list) {
+  const pending = list.filter(a => a.status === 'prepared');
+  actCount.textContent = pending.length;
+  actCount.classList.toggle('show', pending.length > 0);
+  actionsEl.innerHTML = '';
+  if (!list.length) {
+    actionsEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
+      'No actions to review. When Olympus prepares one (e.g. an email to send), ' +
+      'it appears here for your approval.</p>';
+    return;
+  }
+  list.forEach(a => {
+    const card = document.createElement('div'); card.className = 'card';
+    const executed = a.status === 'executed';
+    card.innerHTML =
+      '<div class="top"><span class="ttl"></span>' +
+      '<span class="risk ' + a.risk + '">' + a.risk.replace(/_/g,' ') +
+      (executed ? ' · done' : '') + '</span></div>' +
+      '<pre></pre><div class="btns"></div>';
+    card.querySelector('.ttl').textContent = a.title;
+    card.querySelector('pre').textContent = a.preview;
+    const btns = card.querySelector('.btns');
+    if (a.status === 'prepared') {
+      const ok = document.createElement('button'); ok.className='ok'; ok.textContent='Approve';
+      ok.onclick = () => act(a.id, 'approve');
+      const no = document.createElement('button'); no.className='no'; no.textContent='Reject';
+      no.onclick = () => act(a.id, 'reject');
+      btns.append(ok, no);
+    } else if (executed && a.reversible) {
+      const un = document.createElement('button'); un.className='un'; un.textContent='Undo';
+      un.onclick = () => act(a.id, 'undo');
+      btns.append(un);
+    }
+    actionsEl.appendChild(card);
+  });
+}
+
+async function renderActions() {
+  try {
+    const r = await fetch('/api/actions?session=' + encodeURIComponent(session),
+                          {headers: hdrs()});
+    renderCards((await r.json()).actions || []);
+  } catch (e) {}
+}
+
+async function act(id, op) {
+  const body = {session: session, action_id: id, op: op};
+  if (op === 'reject') body.reason = prompt('Why reject? (optional)') || '';
+  const r = await fetch('/api/action', {method:'POST', headers: hdrs(),
+                                        body: JSON.stringify(body)});
+  const d = await r.json();
+  if (d.actions) renderCards(d.actions); else renderActions();
+}
+setInterval(renderActions, 4000);
+renderActions();
 f.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   let text = q.value.trim();
@@ -344,6 +448,11 @@ f.addEventListener('submit', async (ev) => {
     add('sys', 'error: ' + e);
   } finally {
     b.disabled = false; q.disabled = false; q.focus();
+    const before = parseInt(actCount.textContent || '0', 10);
+    await renderActions();
+    // auto-open the panel if the reply prepared a new action to review
+    if (parseInt(actCount.textContent || '0', 10) > before)
+      actionsEl.classList.add('open');
   }
 });
 </script>
@@ -384,12 +493,15 @@ class Handler(BaseHTTPRequestHandler):
             sid = params.get("session", ["default"])[0][:64]
             events = _session(sid).events
             self._json({"events": events[since:], "next": len(events)})
+        elif url.path == "/api/actions":
+            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+            self._json({"actions": _actions_view(_user_for(sid))})
         else:
             self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/feedback"):
+        if path not in ("/api/chat", "/api/feedback", "/api/action"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -409,6 +521,30 @@ class Handler(BaseHTTPRequestHandler):
             note = session.bot.feedback(str(payload.get("verdict", "up")),
                                         str(payload.get("comment", ""))[:500])
             self._json({"ok": True, "note": note})
+            return
+
+        if path == "/api/action":
+            user = _user_for(sid)
+            op = str(payload.get("op", ""))
+            aid = str(payload.get("action_id", ""))
+            try:
+                if op == "approve":
+                    a = actions.approve(user, aid)
+                    msg = a.error or "executed"
+                elif op == "reject":
+                    actions.reject(user, aid, str(payload.get("reason", "")))
+                    msg = "rejected"
+                elif op == "undo":
+                    a = actions.undo(user, aid)
+                    msg = a.error or "reversed"
+                else:
+                    self._json({"error": "unknown op"}, 400)
+                    return
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
+                return
+            self._json({"ok": True, "message": msg,
+                        "actions": _actions_view(user)})
             return
 
         # /api/chat

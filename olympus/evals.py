@@ -56,7 +56,7 @@ def ids_for(specialists) -> list[str]:
 # Specialists that answer user tasks (benchmarkable). Metis and Prometheus are
 # internal — their quality is their effect on the system, not a single answer.
 USER_FACING = ("plutus", "peitho", "hephaestus", "aegis", "iris", "chiron",
-               "chronos", "argus", "mnemosyne")
+               "chronos", "argus", "mnemosyne", "angelos")
 
 
 def coverage() -> dict[str, int]:
