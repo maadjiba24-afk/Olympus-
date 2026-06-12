@@ -1,11 +1,10 @@
-# Closes Olympus's self-development loop: when Prometheus files an
-# "[Olympus upgrade]" issue, a coding agent implements it on a branch and
-# opens a PR for human review.
+# Auto-implements upgrade proposals: when an "[Olympus upgrade]" issue is
+# opened, a coding agent implements it on a branch and opens a PR for review.
 #
 # Setup (one time): add ANTHROPIC_API_KEY to the repo's Actions secrets.
-# Without the secret this workflow simply fails silently — it never blocks CI.
+# Without the secret this workflow simply no-ops — it never blocks CI.
 
-name: Upgrade Agent
+name: Auto-Upgrade
 
 on:
   issues:
