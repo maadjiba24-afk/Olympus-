@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import actions, config, gmail, memory, tools
+from . import actions, calendar, config, gmail, memory, tools
 
 
 # --- save_note: trivial, reversible -------------------------------------
@@ -118,6 +118,28 @@ def _gmail_archive_undo(result: dict) -> str:
     return "moved back to inbox"
 
 
+# --- Calendar actions ----------------------------------------------------
+
+def _cal_create_preview(p: dict) -> str:
+    who = ", ".join(p.get("attendees", []) or []) or "(no attendees — personal hold)"
+    return (f"Create calendar event\n  '{p.get('summary', '?')}'\n"
+            f"  {p.get('start', '?')} → {p.get('end', '?')}\n"
+            f"  Invite: {who}\n  {p.get('description', '')[:300]}")
+
+
+def _cal_create_execute(p: dict) -> dict:
+    r = calendar.create_event(
+        p.get("summary", ""), p.get("start", ""), p.get("end", ""),
+        p.get("attendees"), p.get("description", ""))
+    return {"event_id": r.get("id")}
+
+
+def _cal_create_undo(result: dict) -> str:
+    if result.get("event_id"):
+        calendar.delete_event(result["event_id"])
+    return "event cancelled"
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -146,6 +168,13 @@ def register_builtins() -> None:
         preview=_gmail_archive_preview, execute=_gmail_archive_execute,
         undo=_gmail_archive_undo,
         description="Archive a message (reversible: undo restores it)."))
+    # Calendar — creating an event with attendees emails them an invitation,
+    # so it's irreversible (always needs approval); undo cancels the event.
+    actions.register(actions.ActionType(
+        name="calendar_create", risk_class=actions.IRREVERSIBLE,
+        scope="calendar.events", preview=_cal_create_preview,
+        execute=_cal_create_execute, undo=_cal_create_undo,
+        description="Create a calendar event / send an invitation."))
 
 
 register_builtins()
