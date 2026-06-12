@@ -159,8 +159,9 @@ PAGE = """<!doctype html>
                 border-radius: 8px; padding: 0 22px; font: inherit;
                 font-weight: bold; cursor: pointer; }
   button.send:disabled { opacity: .4; cursor: wait; }
-  #actbtn { background: none; border: 1px solid #2a2f3a; color: #d9b44a;
+  #actbtn, #connect { background: none; border: 1px solid #2a2f3a; color: #d9b44a;
             border-radius: 8px; padding: 4px 12px; cursor: pointer; font: inherit; }
+  #connect.done { color: #7bbf7b; border-color: #2f4a2f; }
   #actcount { color: #0e1116; background: #d9b44a; border-radius: 10px;
               padding: 0 7px; font-size: 12px; font-weight: bold; display: none; }
   #actcount.show { display: inline; }
@@ -187,6 +188,7 @@ PAGE = """<!doctype html>
 <header>
   <h1>OLYMPUS</h1>
   <span>main agent · supervisor · hallucination controller · 12 specialists</span>
+  <button id="connect" title="Connect your Google account" style="display:none">🔗 connect Google</button>
   <button id="actbtn" title="Actions awaiting your approval">📋 actions
     <span id="actcount"></span></button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
@@ -410,6 +412,23 @@ async function act(id, op) {
 }
 setInterval(renderActions, 4000);
 renderActions();
+
+const connectBtn = document.getElementById('connect');
+connectBtn.onclick = () => window.open(
+  '/oauth/google/start?session=' + encodeURIComponent(session),
+  'olympus_connect', 'width=520,height=640');
+async function refreshConnected() {
+  try {
+    const d = await (await fetch('/api/connected?session=' +
+      encodeURIComponent(session), {headers: hdrs()})).json();
+    if (!d.configured) { connectBtn.style.display = 'none'; return; }
+    connectBtn.style.display = '';
+    connectBtn.textContent = d.connected ? '🔗 Google connected' : '🔗 connect Google';
+    connectBtn.classList.toggle('done', d.connected);
+  } catch (e) {}
+}
+setInterval(refreshConnected, 5000);
+refreshConnected();
 f.addEventListener('submit', async (ev) => {
   ev.preventDefault();
   let text = q.value.trim();
@@ -484,6 +503,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             return
+        if url.path == "/oauth/google/start":
+            self._oauth_start(url)
+            return
+        if url.path == "/oauth/google/callback":
+            self._oauth_callback(url)
+            return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
@@ -496,8 +521,41 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/api/actions":
             sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"actions": _actions_view(_user_for(sid))})
+        elif url.path == "/api/connected":
+            from . import google_oauth
+            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+            self._json({"configured": google_oauth.configured(),
+                        "connected": google_oauth.connected(_user_for(sid))})
         else:
             self._json({"error": "not found"}, 404)
+
+    def _oauth_start(self, url) -> None:
+        from . import google_oauth
+        sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+        try:
+            target = google_oauth.authorize_url(state=sid)
+        except google_oauth.OAuthError as err:
+            self._send(400, str(err).encode(), "text/plain; charset=utf-8")
+            return
+        self.send_response(302)
+        self.send_header("Location", target)
+        self.end_headers()
+
+    def _oauth_callback(self, url) -> None:
+        from . import google_oauth
+        params = parse_qs(url.query)
+        sid = params.get("state", ["default"])[0][:64]
+        code = params.get("code", [""])[0]
+        body = "<p>Google account connected. You can close this tab.</p>"
+        if not code:
+            body = "<p>Connection cancelled or failed.</p>"
+        else:
+            try:
+                google_oauth.exchange_code(_user_for(sid), code)
+            except Exception as err:
+                body = f"<p>Could not connect: {err}</p>"
+        self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),
+                   "text/html; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
