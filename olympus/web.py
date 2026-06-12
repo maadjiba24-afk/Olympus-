@@ -34,12 +34,17 @@ def _actions_view(user: str) -> list[dict]:
     ones (so the UI can offer undo)."""
     out = []
     for a in actions.pending(user):
+        # expose the editable fields (internal "_" keys stay server-side)
+        editable = {k: v for k, v in a.payload.items() if not k.startswith("_")}
         out.append({"id": a.id, "title": a.title, "risk": a.risk_class,
-                    "preview": a.preview, "status": a.status, "reversible": a.reversible})
+                    "preview": a.preview, "status": a.status,
+                    "reversible": a.reversible, "why": a.why,
+                    "payload": editable})
     for a in actions.history(user, limit=8):
         if a.status == actions.EXECUTED and a.reversible:
             out.append({"id": a.id, "title": a.title, "risk": a.risk_class,
-                        "preview": a.preview, "status": a.status, "reversible": True})
+                        "preview": a.preview, "status": a.status,
+                        "reversible": True, "why": a.why})
     return out
 
 
@@ -174,6 +179,7 @@ PAGE = """<!doctype html>
   .card .ttl { color: #e8e3d8; font-weight: bold; }
   .card .risk { font-size: 12px; color: #6b7280; }
   .card .risk.irreversible_financial_legal, .card .risk.irreversible { color: #e0884a; }
+  .card .why { color: #9aa3b2; font-size: 13px; font-style: italic; margin: 6px 0 0; }
   .card pre { white-space: pre-wrap; word-wrap: break-word; color: #c8cdd6;
               font: 13px/1.5 ui-monospace, monospace; margin: 8px 0; }
   .card .btns { display: flex; gap: 8px; }
@@ -375,16 +381,19 @@ function renderCards(list) {
       '<div class="top"><span class="ttl"></span>' +
       '<span class="risk ' + a.risk + '">' + a.risk.replace(/_/g,' ') +
       (executed ? ' · done' : '') + '</span></div>' +
-      '<pre></pre><div class="btns"></div>';
+      '<pre></pre><div class="why"></div><div class="btns"></div>';
     card.querySelector('.ttl').textContent = a.title;
     card.querySelector('pre').textContent = a.preview;
+    if (a.why) card.querySelector('.why').textContent = 'why: ' + a.why;
     const btns = card.querySelector('.btns');
     if (a.status === 'prepared') {
       const ok = document.createElement('button'); ok.className='ok'; ok.textContent='Approve';
       ok.onclick = () => act(a.id, 'approve');
+      const ed = document.createElement('button'); ed.className='no'; ed.textContent='Edit';
+      ed.onclick = () => editAction(a);
       const no = document.createElement('button'); no.className='no'; no.textContent='Reject';
       no.onclick = () => act(a.id, 'reject');
-      btns.append(ok, no);
+      btns.append(ok, ed, no);
     } else if (executed && a.reversible) {
       const un = document.createElement('button'); un.className='un'; un.textContent='Undo';
       un.onclick = () => act(a.id, 'undo');
@@ -407,6 +416,20 @@ async function act(id, op) {
   if (op === 'reject') body.reason = prompt('Why reject? (optional)') || '';
   const r = await fetch('/api/action', {method:'POST', headers: hdrs(),
                                         body: JSON.stringify(body)});
+  const d = await r.json();
+  if (d.actions) renderCards(d.actions); else renderActions();
+}
+
+async function editAction(a) {
+  const txt = prompt('Edit the fields, then approve when it looks right:',
+                     JSON.stringify(a.payload || {}, null, 1));
+  if (txt === null) return;                       // cancelled
+  let changes;
+  try { changes = JSON.parse(txt); }
+  catch (e) { alert('Not valid JSON — nothing changed.'); return; }
+  const r = await fetch('/api/action', {method:'POST', headers: hdrs(),
+    body: JSON.stringify({session: session, action_id: a.id,
+                          op: 'edit', changes: changes})});
   const d = await r.json();
   if (d.actions) renderCards(d.actions); else renderActions();
 }
@@ -595,6 +618,14 @@ class Handler(BaseHTTPRequestHandler):
                 elif op == "undo":
                     a = actions.undo(user, aid)
                     msg = a.error or "reversed"
+                elif op == "edit":
+                    changes = payload.get("changes")
+                    if not isinstance(changes, dict):
+                        self._json({"error": "changes must be an object"}, 400)
+                        return
+                    actions.edit(user, aid, changes,
+                                 title=payload.get("title"))
+                    msg = "edited — still awaiting your approval"
                 else:
                     self._json({"error": "unknown op"}, 400)
                     return

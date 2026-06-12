@@ -86,3 +86,36 @@ def test_unknown_op_rejected(server):
         _post(server, "/api/action",
               {"session": "s5", "action_id": a.id, "op": "delete_everything"})
     assert err.value.code == 400
+
+
+def test_edit_via_web_then_approve(server):
+    user = web._user_for("s6")
+    actions.grant_scope(user, "notes")
+    a = actions.prepare(user, "save_note",
+                        {"title": "n", "body": "draft", "_user": user},
+                        why="you asked to keep this")
+    # the view exposes why + editable payload (without internal keys)
+    view = _get(server, "/api/actions?session=s6")["actions"][0]
+    assert view["why"] == "you asked to keep this"
+    assert "_user" not in view["payload"] and view["payload"]["body"] == "draft"
+    # edit, then approve the edited version
+    out = _post(server, "/api/action",
+                {"session": "s6", "action_id": a.id, "op": "edit",
+                 "changes": {"body": "final"}})
+    assert out["ok"] is True
+    assert actions.get(user, a.id).payload["body"] == "final"
+    assert actions.get(user, a.id).status == actions.PREPARED
+    _post(server, "/api/action",
+          {"session": "s6", "action_id": a.id, "op": "approve"})
+    assert actions.get(user, a.id).status == actions.EXECUTED
+
+
+def test_edit_requires_object_changes(server):
+    user = web._user_for("s7")
+    a = actions.prepare(user, "save_note", {"title": "n", "body": "b", "_user": user})
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(server, "/api/action",
+              {"session": "s7", "action_id": a.id, "op": "edit",
+               "changes": "not-a-dict"})
+    assert err.value.code == 400

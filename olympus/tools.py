@@ -393,6 +393,9 @@ PREPARE_ACTION = {
             "payload": {"type": "object",
                         "description": "Fields the action needs, e.g. "
                         "{to, subject, body} for send_email"},
+            "why": {"type": "string",
+                    "description": "One sentence: why this action serves the "
+                    "user's request. Shown on the approval card."},
         },
         "required": ["type", "payload"],
     },
@@ -627,14 +630,15 @@ def _read_calendar(time_min: str, time_max: str) -> str:
         return f"Error reading calendar: {err}"
 
 
-def _prepare_action(type: str, payload: dict, title: str = None) -> str:
+def _prepare_action(type: str, payload: dict, title: str = None,
+                    why: str = "") -> str:
     """Queue a real-world action for the user to approve (never executes)."""
     from . import actions, builtin_actions  # noqa: F401  (registers built-ins)
     user = memory.current_user()
     payload = dict(payload or {})
     payload.setdefault("_user", user)  # some actions need to know the owner
     try:
-        action = actions.prepare(user, type, payload, title=title)
+        action = actions.prepare(user, type, payload, title=title, why=why)
     except ValueError as err:
         return (f"Error: {err}. Registered types: "
                 f"{', '.join(actions.registered())}")
