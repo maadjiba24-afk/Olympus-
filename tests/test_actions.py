@@ -162,3 +162,45 @@ def test_prepare_action_tool_queues_not_executes():
     assert "awaiting your approval" in msg
     assert len(actions.pending("toolu")) == 1
     assert actions.pending("toolu")[0].status == actions.PREPARED
+
+
+# --- edit before approve (user control: Approve / Edit / Reject) ----------
+
+def test_edit_updates_payload_and_preview(reg):
+    a = actions.prepare("u", "t_send", {"to": "wrong@x.z"})
+    edited = actions.edit("u", a.id, {"to": "right@x.z"})
+    assert edited.status == actions.PREPARED       # still awaiting approval
+    assert edited.payload["to"] == "right@x.z"
+    assert "send to right@x.z" in edited.preview   # preview re-rendered
+    assert reg["count"] == 0                       # editing never executes
+
+
+def test_edit_cannot_touch_internal_fields(reg):
+    a = actions.prepare("u", "t_note", {"body": "hi", "_user": "u"})
+    edited = actions.edit("u", a.id, {"body": "new", "_user": "mallory"})
+    assert edited.payload["_user"] == "u"          # internal key protected
+    assert edited.payload["body"] == "new"
+
+
+def test_edit_only_prepared_actions(reg):
+    actions.grant_scope("u", "email")
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    actions.approve("u", a.id)
+    with pytest.raises(ValueError, match="only prepared"):
+        actions.edit("u", a.id, {"to": "other@y.z"})
+
+
+def test_edit_is_audited(reg):
+    from olympus import config
+    import json
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    actions.edit("u", a.id, {"to": "y@y.z"})
+    log = config.MEMORY_DIR / "actions" / "u" / "audit.jsonl"
+    events = [json.loads(l)["event"] for l in log.read_text().splitlines()]
+    assert "edited" in events
+
+
+def test_why_is_recorded_and_round_trips(reg):
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"},
+                        why="you asked me to confirm the meeting")
+    assert actions.get("u", a.id).why == "you asked me to confirm the meeting"

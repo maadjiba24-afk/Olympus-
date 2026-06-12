@@ -93,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
     p_rj = sub.add_parser("reject", help="reject a prepared action")
     p_rj.add_argument("action_id")
     p_rj.add_argument("reason", nargs="*")
+    p_ed = sub.add_parser("edit", help="edit a prepared action before approving")
+    p_ed.add_argument("action_id")
+    p_ed.add_argument("changes", nargs="+", metavar="field=value",
+                      help="e.g. subject='New subject' body='...'")
     p_un = sub.add_parser("undo", help="undo a reversible, executed action")
     p_un.add_argument("action_id")
     p_au = sub.add_parser("autonomy", help="show or set the autonomy level (0-4)")
@@ -154,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "models":
         from . import config
         print(config.ModelPool.from_env().assignment())
-    elif args.command in ("actions", "approve", "reject", "undo",
+    elif args.command in ("actions", "approve", "reject", "edit", "undo",
                           "autonomy", "grant", "revoke"):
         from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
         user = "cli"
@@ -164,14 +168,28 @@ def main(argv: list[str] | None = None) -> int:
                 print("No actions awaiting approval.")
             for a in items:
                 print(f"\n[{a.id}] {a.title}  ({a.risk_class})")
+                if a.why:
+                    print(f"  why: {a.why}")
                 print("  " + a.preview.replace("\n", "\n  "))
-                print(f"  → approve {a.id}   |   reject {a.id} <reason>")
+                print(f"  → approve {a.id}  |  edit {a.id} field=value  |  "
+                      f"reject {a.id} <reason>")
         elif args.command == "approve":
             a = actions.approve(user, args.action_id)
             print(f"{a.status}: {a.error or a.result}")
         elif args.command == "reject":
             a = actions.reject(user, args.action_id, " ".join(args.reason))
             print(f"Rejected {a.id}.")
+        elif args.command == "edit":
+            changes = {}
+            for pair in args.changes:
+                if "=" not in pair:
+                    print(f"Skipping '{pair}' — expected field=value.")
+                    continue
+                key, _, value = pair.partition("=")
+                changes[key.strip()] = value
+            a = actions.edit(user, args.action_id, changes)
+            print(f"Edited {a.id} — still awaiting approval. New preview:\n")
+            print("  " + a.preview.replace("\n", "\n  "))
         elif args.command == "undo":
             a = actions.undo(user, args.action_id)
             print(f"{a.status}: {a.error or 'reversed'}")
