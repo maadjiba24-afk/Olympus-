@@ -56,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("chat", help="interactive conversation (default)")
+    sub.add_parser("setup", help="choose your AI provider & save your API key")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -123,9 +124,18 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
-    if args.command in (None, "chat"):
+    from . import firstrun
+    firstrun.load_env_file()        # saved keys apply to every command
+
+    if args.command == "setup":
+        firstrun.wizard()
+    elif args.command in (None, "chat"):
+        if not firstrun.ensure_ready():
+            return 1
         _chat()
     elif args.command == "ask":
+        if not firstrun.ensure_ready():
+            return 1
         from . import config
         bot = orchestrator.Olympus(
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
