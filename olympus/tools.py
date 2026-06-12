@@ -329,6 +329,30 @@ UPDATE_PROMPT = {
     },
 }
 
+PREPARE_ACTION = {
+    "name": "prepare_action",
+    "description": (
+        "Prepare a real-world action for the user to approve — do NOT perform "
+        "sensitive or irreversible actions directly. This queues the action "
+        "with a preview; the user explicitly approves before it executes. Use "
+        "for sending email, posting, and similar. Available types come from "
+        "the action registry (e.g. send_email, call_webhook, save_note)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string",
+                     "description": "Action type, e.g. 'send_email'"},
+            "title": {"type": "string",
+                      "description": "Short human-readable label"},
+            "payload": {"type": "object",
+                        "description": "Fields the action needs, e.g. "
+                        "{to, subject, body} for send_email"},
+        },
+        "required": ["type", "payload"],
+    },
+}
+
 PROPOSE_UPGRADE = {
     "name": "propose_upgrade",
     "description": (
@@ -534,6 +558,21 @@ def _run_code_benchmark() -> str:
     return code_eval.run_and_save()
 
 
+def _prepare_action(type: str, payload: dict, title: str = None) -> str:
+    """Queue a real-world action for the user to approve (never executes)."""
+    from . import actions, builtin_actions  # noqa: F401  (registers built-ins)
+    user = memory.current_user()
+    payload = dict(payload or {})
+    payload.setdefault("_user", user)  # some actions need to know the owner
+    try:
+        action = actions.prepare(user, type, payload, title=title)
+    except ValueError as err:
+        return (f"Error: {err}. Registered types: "
+                f"{', '.join(actions.registered())}")
+    return (f"Prepared action {action.id} ({action.type}, "
+            f"{action.risk_class}) — awaiting your approval.\n\n{action.preview}")
+
+
 def _gate_skills() -> str:
     from . import orchestrator  # local import to avoid a cycle at module load
     return orchestrator.gate_skills()
@@ -577,6 +616,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "save_lesson": lambda title, content: str(
         memory.save("lessons", title, security.sanitize_for_memory(content))),
     "watch_youtube": _watch_youtube,
+    "prepare_action": _prepare_action,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
@@ -608,6 +648,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "update_prompt": UPDATE_PROMPT,
     "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
+    "prepare_action": PREPARE_ACTION,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

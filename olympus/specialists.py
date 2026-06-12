@@ -125,9 +125,9 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="chronos", name="Chronos", title="Scheduling Manager",
             description="Time management, planning, schedules, routines, "
-                        "deadlines, prioritization. Can send reminder emails "
-                        "and call configured webhooks.",
-            extra_tools=("send_email", "call_webhook"),
+                        "deadlines, prioritization. Prepares real-world actions "
+                        "(emails, webhooks) for the user to approve.",
+            extra_tools=("send_email", "call_webhook", "prepare_action"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",
