@@ -24,7 +24,10 @@ JUDGE_SYSTEM = (
 JUDGE_SCHEMA = {
     "type": "object",
     "properties": {
-        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        # Structured outputs don't support numeric min/max on integers, so the
+        # range is stated in the description and clamped after parsing.
+        "score": {"type": "integer",
+                  "description": "Quality score from 1 (poor) to 10 (excellent)"},
         "justification": {"type": "string"},
     },
     "required": ["score", "justification"],
@@ -192,7 +195,8 @@ def run(settings: config.Settings | None = None,
                 f"## Assistant answer\n{answer}"}],
             JUDGE_SCHEMA, effort="medium",
         )
-        items.append({"id": bench["id"], "score": int(verdict["score"]),
+        items.append({"id": bench["id"],
+                      "score": max(1, min(10, int(verdict["score"]))),
                       "justification": verdict["justification"]})
     avg = round(sum(i["score"] for i in items) / max(len(items), 1), 2)
     return {"avg": avg, "items": items}
