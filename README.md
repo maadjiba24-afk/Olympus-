@@ -411,6 +411,13 @@ So a malicious email that tries to make it wire money or leak data produces, at
 worst, a prepared action you preview and reject. Set `GMAIL_ACCESS_TOKEN` (see
 `.env.example`) to connect.
 
+**Calendar too.** Angelos also reads your Google Calendar to propose genuinely
+free times and *prepares* invitations — but creating an event emails the
+attendees, so it's classed irreversible and **always waits for your approval**
+(with undo that cancels). That completes the **email + calendar assistant**:
+connect one Google account and Olympus triages your inbox, drafts replies,
+proposes meeting times, and prepares the invites — you approve, it acts.
+
 ### Multilingual — native in any language
 
 Olympus answers in the user's own language, generated natively rather than

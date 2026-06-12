@@ -60,7 +60,8 @@ def _access_token() -> str:
         _token["expires"] = now + int(payload.get("expires_in", 3600))
         return _token["value"]
 
-    direct = os.environ.get("GMAIL_ACCESS_TOKEN")
+    direct = (os.environ.get("GMAIL_ACCESS_TOKEN")
+              or os.environ.get("GOOGLE_ACCESS_TOKEN"))
     if direct:
         return direct
     raise GmailError(
