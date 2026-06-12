@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import actions, config, memory, tools
+from . import actions, config, gmail, memory, tools
 
 
 # --- save_note: trivial, reversible -------------------------------------
@@ -75,6 +75,49 @@ def _webhook_execute(p: dict) -> dict:
     return {"status": msg}
 
 
+# --- Gmail actions (the operating-assistant MVP) ------------------------
+
+def _gmail_send_preview(p: dict) -> str:
+    return (f"Send via Gmail\n  To: {p.get('to', '?')}\n"
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+
+
+def _gmail_send_execute(p: dict) -> dict:
+    r = gmail.send(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
+    return {"id": r.get("id"), "sent": True}
+
+
+def _gmail_draft_preview(p: dict) -> str:
+    return (f"Save a Gmail draft\n  To: {p.get('to', '?')}\n"
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+
+
+def _gmail_draft_execute(p: dict) -> dict:
+    r = gmail.create_draft(p.get("to", ""), p.get("subject", ""),
+                           p.get("body", ""))
+    return {"draft_id": r.get("id")}
+
+
+def _gmail_draft_undo(result: dict) -> str:
+    if result.get("draft_id"):
+        gmail.delete_draft(result["draft_id"])
+    return "draft deleted"
+
+
+def _gmail_archive_preview(p: dict) -> str:
+    return f"Archive message {p.get('message_id', '?')} (remove from inbox)"
+
+
+def _gmail_archive_execute(p: dict) -> dict:
+    gmail.archive(p.get("message_id", ""))
+    return {"message_id": p.get("message_id", "")}
+
+
+def _gmail_archive_undo(result: dict) -> str:
+    gmail.unarchive(result.get("message_id", ""))
+    return "moved back to inbox"
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -88,6 +131,21 @@ def register_builtins() -> None:
         name="call_webhook", risk_class=actions.IRREVERSIBLE, scope="webhook",
         preview=_webhook_preview, execute=_webhook_execute,
         description="POST a payload to an operator-configured webhook."))
+    # Gmail
+    actions.register(actions.ActionType(
+        name="gmail_send", risk_class=actions.IRREVERSIBLE, scope="gmail.send",
+        preview=_gmail_send_preview, execute=_gmail_send_execute,
+        description="Send an email via the connected Gmail account."))
+    actions.register(actions.ActionType(
+        name="gmail_draft", risk_class=actions.NOTABLE, scope="gmail.compose",
+        preview=_gmail_draft_preview, execute=_gmail_draft_execute,
+        undo=_gmail_draft_undo,
+        description="Save a Gmail draft (reversible: undo deletes it)."))
+    actions.register(actions.ActionType(
+        name="gmail_archive", risk_class=actions.NOTABLE, scope="gmail.modify",
+        preview=_gmail_archive_preview, execute=_gmail_archive_execute,
+        undo=_gmail_archive_undo,
+        description="Archive a message (reversible: undo restores it)."))
 
 
 register_builtins()
