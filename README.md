@@ -386,6 +386,11 @@ python -m olympus grant email      # grant a permission scope
 python -m olympus revoke all       # kill switch — revoke every scope
 ```
 
+In the **browser UI**, prepared actions appear as **cards** under a "📋 actions"
+button with a count badge — each shows the full preview and one-click
+**Approve / Reject / Undo**. The panel auto-opens when a reply prepares
+something for you to review, so approving is a click, not a command.
+
 The safety model is structural, not hopeful:
 
 - **Risk classes** — every action is `trivial` / `notable` / `irreversible` /
@@ -401,6 +406,22 @@ The safety model is structural, not hopeful:
 
 New capabilities (calendar, files, payments-prep) are just new action types
 registered on this same spine — they inherit the gate automatically.
+
+**First real integration — Gmail.** Connect a Google account and **Angelos**,
+the correspondence manager, triages your inbox and *prepares* replies, drafts,
+and archives — but **sending always goes through the approval gate**. Because
+Angelos reads untrusted email, the capability-separation rule strips its direct
+action tools automatically: it can only `prepare_action`, never send on its own.
+So a malicious email that tries to make it wire money or leak data produces, at
+worst, a prepared action you preview and reject. Set `GMAIL_ACCESS_TOKEN` (see
+`.env.example`) to connect.
+
+**Calendar too.** Angelos also reads your Google Calendar to propose genuinely
+free times and *prepares* invitations — but creating an event emails the
+attendees, so it's classed irreversible and **always waits for your approval**
+(with undo that cancels). That completes the **email + calendar assistant**:
+connect one Google account and Olympus triages your inbox, drafts replies,
+proposes meeting times, and prepares the invites — you approve, it acts.
 
 ### Multilingual — native in any language
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import actions, config, memory, tools
+from . import actions, calendar, config, gmail, memory, tools
 
 
 # --- save_note: trivial, reversible -------------------------------------
@@ -75,6 +75,71 @@ def _webhook_execute(p: dict) -> dict:
     return {"status": msg}
 
 
+# --- Gmail actions (the operating-assistant MVP) ------------------------
+
+def _gmail_send_preview(p: dict) -> str:
+    return (f"Send via Gmail\n  To: {p.get('to', '?')}\n"
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+
+
+def _gmail_send_execute(p: dict) -> dict:
+    r = gmail.send(p.get("to", ""), p.get("subject", ""), p.get("body", ""))
+    return {"id": r.get("id"), "sent": True}
+
+
+def _gmail_draft_preview(p: dict) -> str:
+    return (f"Save a Gmail draft\n  To: {p.get('to', '?')}\n"
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+
+
+def _gmail_draft_execute(p: dict) -> dict:
+    r = gmail.create_draft(p.get("to", ""), p.get("subject", ""),
+                           p.get("body", ""))
+    return {"draft_id": r.get("id")}
+
+
+def _gmail_draft_undo(result: dict) -> str:
+    if result.get("draft_id"):
+        gmail.delete_draft(result["draft_id"])
+    return "draft deleted"
+
+
+def _gmail_archive_preview(p: dict) -> str:
+    return f"Archive message {p.get('message_id', '?')} (remove from inbox)"
+
+
+def _gmail_archive_execute(p: dict) -> dict:
+    gmail.archive(p.get("message_id", ""))
+    return {"message_id": p.get("message_id", "")}
+
+
+def _gmail_archive_undo(result: dict) -> str:
+    gmail.unarchive(result.get("message_id", ""))
+    return "moved back to inbox"
+
+
+# --- Calendar actions ----------------------------------------------------
+
+def _cal_create_preview(p: dict) -> str:
+    who = ", ".join(p.get("attendees", []) or []) or "(no attendees — personal hold)"
+    return (f"Create calendar event\n  '{p.get('summary', '?')}'\n"
+            f"  {p.get('start', '?')} → {p.get('end', '?')}\n"
+            f"  Invite: {who}\n  {p.get('description', '')[:300]}")
+
+
+def _cal_create_execute(p: dict) -> dict:
+    r = calendar.create_event(
+        p.get("summary", ""), p.get("start", ""), p.get("end", ""),
+        p.get("attendees"), p.get("description", ""))
+    return {"event_id": r.get("id")}
+
+
+def _cal_create_undo(result: dict) -> str:
+    if result.get("event_id"):
+        calendar.delete_event(result["event_id"])
+    return "event cancelled"
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -88,6 +153,28 @@ def register_builtins() -> None:
         name="call_webhook", risk_class=actions.IRREVERSIBLE, scope="webhook",
         preview=_webhook_preview, execute=_webhook_execute,
         description="POST a payload to an operator-configured webhook."))
+    # Gmail
+    actions.register(actions.ActionType(
+        name="gmail_send", risk_class=actions.IRREVERSIBLE, scope="gmail.send",
+        preview=_gmail_send_preview, execute=_gmail_send_execute,
+        description="Send an email via the connected Gmail account."))
+    actions.register(actions.ActionType(
+        name="gmail_draft", risk_class=actions.NOTABLE, scope="gmail.compose",
+        preview=_gmail_draft_preview, execute=_gmail_draft_execute,
+        undo=_gmail_draft_undo,
+        description="Save a Gmail draft (reversible: undo deletes it)."))
+    actions.register(actions.ActionType(
+        name="gmail_archive", risk_class=actions.NOTABLE, scope="gmail.modify",
+        preview=_gmail_archive_preview, execute=_gmail_archive_execute,
+        undo=_gmail_archive_undo,
+        description="Archive a message (reversible: undo restores it)."))
+    # Calendar — creating an event with attendees emails them an invitation,
+    # so it's irreversible (always needs approval); undo cancels the event.
+    actions.register(actions.ActionType(
+        name="calendar_create", risk_class=actions.IRREVERSIBLE,
+        scope="calendar.events", preview=_cal_create_preview,
+        execute=_cal_create_execute, undo=_cal_create_undo,
+        description="Create a calendar event / send an invitation."))
 
 
 register_builtins()
