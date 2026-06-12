@@ -386,6 +386,11 @@ python -m olympus grant email      # grant a permission scope
 python -m olympus revoke all       # kill switch — revoke every scope
 ```
 
+In the **browser UI**, prepared actions appear as **cards** under a "📋 actions"
+button with a count badge — each shows the full preview and one-click
+**Approve / Reject / Undo**. The panel auto-opens when a reply prepares
+something for you to review, so approving is a click, not a command.
+
 The safety model is structural, not hopeful:
 
 - **Risk classes** — every action is `trivial` / `notable` / `irreversible` /
