@@ -10,9 +10,9 @@ commands a supervised council of specialists, every answer passes through a
 hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
-> **Status:** the full architecture is implemented and covered by 116 passing
-> tests. Add an API key and run `python -m olympus ask "..."` to use it; run
-> `python -m olympus scores` to see each specialist's measured quality.
+> **Status:** the full architecture is implemented and covered by 176 passing
+> tests. Install with the one-liner below, type `olympus`, and you're chatting;
+> `olympus scores` shows each specialist's measured quality.
 
 ## Architecture
 
@@ -230,10 +230,35 @@ user-facing specialist and trains the weakest on a cadence:
 
 ## Setup
 
+**One line.** Paste this in your terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
+```
+
+Then type `olympus`. The first run asks one question — which API key you're
+bringing (Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter,
+or a local Ollama) — saves it securely (`~/.olympus/config.env`, owner-only),
+and drops you into chat. From then on it's just:
+
+```
+olympus
+you ▸ find me 30 minutes with Sarah next week and draft the invite
+```
+
+Plain English. No bash, no pip, no environment variables. Add more keys
+anytime with `olympus setup` — Olympus composes multiple models into one
+brain. Uninstall: `rm -rf ~/.olympus ~/.local/bin/olympus`.
+
+<details>
+<summary>Manual install (developers)</summary>
+
 ```bash
 pip install -r requirements.txt        # or: pip install .
 export ANTHROPIC_API_KEY=sk-ant-...
+python -m olympus
 ```
+</details>
 
 Or with Docker:
 
