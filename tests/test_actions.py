@@ -1,0 +1,164 @@
+"""Tests for the Action spine — prepare → approve → execute → undo → log."""
+
+import pytest
+
+from olympus import actions
+from olympus import builtin_actions  # noqa: F401  (registers built-in types)
+
+
+@pytest.fixture()
+def reg(monkeypatch):
+    """A clean registry with a couple of controllable test action types."""
+    monkeypatch.setattr(actions, "_REGISTRY", {})
+    executed = {"count": 0}
+
+    actions.register(actions.ActionType(
+        name="t_note", risk_class=actions.TRIVIAL, scope="notes",
+        preview=lambda p: f"note: {p.get('body','')}",
+        execute=lambda p: (executed.__setitem__("count", executed["count"] + 1)
+                           or {"saved": p.get("body", "")}),
+        undo=lambda r: "deleted"))
+    actions.register(actions.ActionType(
+        name="t_send", risk_class=actions.IRREVERSIBLE, scope="email",
+        preview=lambda p: f"send to {p.get('to','')}",
+        execute=lambda p: {"sent": True}))
+    actions.register(actions.ActionType(
+        name="t_pay", risk_class=actions.FINANCIAL_LEGAL, scope="pay",
+        preview=lambda p: f"pay {p.get('amount','')}",
+        execute=lambda p: {"paid": True}))
+    return executed
+
+
+# --- core lifecycle ------------------------------------------------------
+
+def test_prepare_does_not_execute(reg):
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    assert a.status == actions.PREPARED
+    assert reg["count"] == 0          # nothing ran
+    assert "send to x@y.z" in a.preview
+
+
+def test_approve_executes(reg):
+    actions.grant_scope("u", "email")
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    done = actions.approve("u", a.id)
+    assert done.status == actions.EXECUTED
+    assert done.result == {"sent": True}
+
+
+def test_reject_records_feedback(reg):
+    from olympus import memory
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    actions.reject("u", a.id, "wrong recipient")
+    assert actions.get("u", a.id).status == actions.REJECTED
+    memory.set_user("u")
+    assert "rejected action" in memory.recent("feedback")
+
+
+def test_undo_reverses_executed_action(reg):
+    actions.grant_scope("u", "notes")
+    a = actions.prepare("u", "t_note", {"body": "hi", "_user": "u"})
+    actions.approve("u", a.id)
+    undone = actions.undo("u", a.id)
+    assert undone.status == actions.UNDONE
+
+
+def test_irreversible_action_cannot_be_undone(reg):
+    actions.grant_scope("u", "email")
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    actions.approve("u", a.id)
+    with pytest.raises(ValueError, match="not reversible"):
+        actions.undo("u", a.id)
+
+
+# --- the safety invariants (the whole point) -----------------------------
+
+def test_scope_gate_blocks_execution(reg):
+    # no scope granted -> approval still won't execute
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    done = actions.approve("u", a.id)
+    assert done.status == actions.FAILED
+    assert "not granted" in done.error
+
+
+def test_financial_action_never_auto_executes(reg):
+    actions.grant_scope("u", "pay")
+    actions.set_autonomy("u", actions.L4_STANDING)   # highest autonomy
+    a = actions.prepare("u", "t_pay", {"amount": 100})
+    held = actions.auto_or_hold(a)
+    assert held.status == actions.PREPARED           # still needs explicit approval
+    assert not actions.can_auto_execute(a)
+
+
+def test_irreversible_action_never_auto_executes(reg):
+    actions.grant_scope("u", "email")
+    actions.set_autonomy("u", actions.L4_STANDING)
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    assert not actions.can_auto_execute(a)
+    assert actions.auto_or_hold(a).status == actions.PREPARED
+
+
+def test_trivial_action_auto_executes_only_at_l3(reg):
+    actions.grant_scope("u", "notes")
+    # default autonomy L1 -> holds
+    a1 = actions.prepare("u", "t_note", {"body": "a"})
+    assert actions.auto_or_hold(a1).status == actions.PREPARED
+    # L3 -> auto-runs trivial reversible action
+    actions.set_autonomy("u", actions.L3_AUTO_SAFE)
+    a2 = actions.prepare("u", "t_note", {"body": "b"})
+    assert actions.auto_or_hold(a2).status == actions.EXECUTED
+
+
+def test_auto_execute_still_requires_scope(reg):
+    actions.set_autonomy("u", actions.L3_AUTO_SAFE)   # would auto-run...
+    a = actions.prepare("u", "t_note", {"body": "x"})  # ...but no 'notes' scope
+    assert not actions.can_auto_execute(a)
+    assert actions.auto_or_hold(a).status == actions.PREPARED
+
+
+def test_revoke_all_is_a_kill_switch(reg):
+    actions.grant_scope("u", "email")
+    actions.grant_scope("u", "notes")
+    actions.revoke_all("u")
+    assert actions.granted_scopes("u") == set()
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    assert actions.approve("u", a.id).status == actions.FAILED
+
+
+# --- audit log + isolation ----------------------------------------------
+
+def test_audit_log_records_transitions(reg):
+    actions.grant_scope("u", "email")
+    a = actions.prepare("u", "t_send", {"to": "x@y.z"})
+    actions.approve("u", a.id)
+    from olympus import config
+    import json
+    log = config.MEMORY_DIR / "actions" / "u" / "audit.jsonl"
+    events = [json.loads(l)["event"] for l in log.read_text().splitlines()]
+    assert "prepared" in events and "approved" in events and "executed" in events
+
+
+def test_per_user_action_isolation(reg):
+    actions.prepare("alice", "t_send", {"to": "x@y.z"})
+    assert len(actions.pending("alice")) == 1
+    assert actions.pending("bob") == []
+
+
+# --- built-in types registered ------------------------------------------
+
+def test_builtins_registered():
+    names = actions.registered()
+    assert {"send_email", "call_webhook", "save_note"} <= set(names)
+    assert names["send_email"].risk_class == actions.IRREVERSIBLE
+    assert names["save_note"].reversible is True
+    assert names["send_email"].reversible is False
+
+
+def test_prepare_action_tool_queues_not_executes():
+    from olympus import tools, memory
+    memory.set_user("toolu")
+    msg = tools._prepare_action("send_email",
+                                {"to": "a@b.c", "subject": "Hi", "body": "yo"})
+    assert "awaiting your approval" in msg
+    assert len(actions.pending("toolu")) == 1
+    assert actions.pending("toolu")[0].status == actions.PREPARED

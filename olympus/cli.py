@@ -86,6 +86,22 @@ def main(argv: list[str] | None = None) -> int:
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
 
+    # --- the Action spine (controlled-autonomy execution) ---
+    sub.add_parser("actions", help="list pending actions awaiting approval")
+    p_ap = sub.add_parser("approve", help="approve and execute a prepared action")
+    p_ap.add_argument("action_id")
+    p_rj = sub.add_parser("reject", help="reject a prepared action")
+    p_rj.add_argument("action_id")
+    p_rj.add_argument("reason", nargs="*")
+    p_un = sub.add_parser("undo", help="undo a reversible, executed action")
+    p_un.add_argument("action_id")
+    p_au = sub.add_parser("autonomy", help="show or set the autonomy level (0-4)")
+    p_au.add_argument("level", nargs="?", type=int)
+    p_gr = sub.add_parser("grant", help="grant a permission scope (e.g. email)")
+    p_gr.add_argument("scope")
+    p_rv = sub.add_parser("revoke", help="revoke a scope ('all' = kill switch)")
+    p_rv.add_argument("scope")
+
     sub.add_parser("connectors", help="list configured MCP servers and plugins")
     p_mcp = sub.add_parser("add-mcp", help="add an MCP server connector")
     p_mcp.add_argument("name")
@@ -138,6 +154,37 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "models":
         from . import config
         print(config.ModelPool.from_env().assignment())
+    elif args.command in ("actions", "approve", "reject", "undo",
+                          "autonomy", "grant", "revoke"):
+        from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
+        user = "cli"
+        if args.command == "actions":
+            items = actions.pending(user)
+            if not items:
+                print("No actions awaiting approval.")
+            for a in items:
+                print(f"\n[{a.id}] {a.title}  ({a.risk_class})")
+                print("  " + a.preview.replace("\n", "\n  "))
+                print(f"  → approve {a.id}   |   reject {a.id} <reason>")
+        elif args.command == "approve":
+            a = actions.approve(user, args.action_id)
+            print(f"{a.status}: {a.error or a.result}")
+        elif args.command == "reject":
+            a = actions.reject(user, args.action_id, " ".join(args.reason))
+            print(f"Rejected {a.id}.")
+        elif args.command == "undo":
+            a = actions.undo(user, args.action_id)
+            print(f"{a.status}: {a.error or 'reversed'}")
+        elif args.command == "autonomy":
+            if args.level is None:
+                print(f"Autonomy level: L{actions.autonomy_level(user)}")
+            else:
+                print(actions.set_autonomy(user, args.level))
+        elif args.command == "grant":
+            print(actions.grant_scope(user, args.scope))
+        elif args.command == "revoke":
+            print(actions.revoke_all(user) if args.scope == "all"
+                  else actions.revoke_scope(user, args.scope))
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()

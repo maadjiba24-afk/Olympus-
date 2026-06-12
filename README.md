@@ -369,6 +369,39 @@ ability improves against ground truth, not a judge's guess. It's the closest
 thing to genuinely training a coding agent, and it's a coding edge neither
 Hermes nor OpenClaw has.
 
+### Controlled-autonomy actions — prepare, approve, execute, undo
+
+Olympus doesn't just advise — it can *do* things, safely. The rule is absolute:
+**agents prepare actions; they never execute them.** A prepared action is queued
+with a preview; you approve it explicitly before it runs, and every step is
+logged to an immutable audit trail.
+
+```bash
+python -m olympus actions          # see actions awaiting your approval (with preview)
+python -m olympus approve <id>     # execute a prepared action
+python -m olympus reject <id> ...  # decline it (teaches future behavior)
+python -m olympus undo <id>        # reverse a reversible, executed action
+python -m olympus autonomy 2       # set the autonomy dial (0–4)
+python -m olympus grant email      # grant a permission scope
+python -m olympus revoke all       # kill switch — revoke every scope
+```
+
+The safety model is structural, not hopeful:
+
+- **Risk classes** — every action is `trivial` / `notable` / `irreversible` /
+  `financial-legal`. **Irreversible and financial actions can NEVER auto-run**,
+  at any autonomy level — they always require an explicit approval.
+- **Autonomy dial (L0–L4)** — L1 (default) prepares and stops; only L3+ may
+  auto-run *trivial, reversible* actions, and only within policy.
+- **Two independent gates** — an action needs both its permission scope granted
+  *and* its approval satisfied before it executes.
+- **Injection-safe by construction** — because agents only *prepare*, a
+  malicious email that tricks an agent into preparing a bad action is harmless:
+  you see the preview and reject it. Reading can never become acting without you.
+
+New capabilities (calendar, files, payments-prep) are just new action types
+registered on this same spine — they inherit the gate automatically.
+
 ### Multilingual — native in any language
 
 Olympus answers in the user's own language, generated natively rather than
