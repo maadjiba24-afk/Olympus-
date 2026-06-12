@@ -14,9 +14,12 @@ from . import config, facts, github, memory, security, skills, youtube
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
+# Use the stable web_search version WITHOUT dynamic filtering. The _20260209
+# version filters results via server-side code execution, which spins up a
+# container the API then requires us to track across turns — a fragile
+# dependency for a multi-turn agent loop. Plain search is all the scouts need.
 WEB_TOOLS: list[dict[str, Any]] = [
-    {"type": "web_search_20260209", "name": "web_search"},
-    {"type": "web_fetch_20260209", "name": "web_fetch"},
+    {"type": "web_search_20250305", "name": "web_search"},
 ]
 
 # --- client-side web fallback (used on non-Anthropic providers) -------------
