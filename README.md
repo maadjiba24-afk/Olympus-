@@ -379,6 +379,7 @@ logged to an immutable audit trail.
 ```bash
 python -m olympus actions          # see actions awaiting your approval (with preview)
 python -m olympus approve <id>     # execute a prepared action
+python -m olympus edit <id> to=... # fix the content first — stays awaiting approval
 python -m olympus reject <id> ...  # decline it (teaches future behavior)
 python -m olympus undo <id>        # reverse a reversible, executed action
 python -m olympus autonomy 2       # set the autonomy dial (0–4)
@@ -387,9 +388,11 @@ python -m olympus revoke all       # kill switch — revoke every scope
 ```
 
 In the **browser UI**, prepared actions appear as **cards** under a "📋 actions"
-button with a count badge — each shows the full preview and one-click
-**Approve / Reject / Undo**. The panel auto-opens when a reply prepares
-something for you to review, so approving is a click, not a command.
+button with a count badge — each shows the full preview, *why* Olympus prepared
+it, and one-click **Approve / Edit / Reject / Undo**. Edit lets you correct the
+exact content (a recipient, a subject line) before approving — the action stays
+held until you say go. The panel auto-opens when a reply prepares something for
+you to review, so approving is a click, not a command.
 
 The safety model is structural, not hopeful:
 

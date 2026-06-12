@@ -119,6 +119,7 @@ class Action:
     reversible: bool
     status: str = PREPARED
     preview: str = ""
+    why: str = ""                      # the agent's stated reason, shown on the card
     result: dict = field(default_factory=dict)
     error: str = ""
     created_at: float = field(default_factory=time.time)
@@ -206,7 +207,7 @@ def revoke_all(user: str) -> str:
 # --- the state machine ----------------------------------------------------
 
 def prepare(user: str, type_name: str, payload: dict,
-            title: str | None = None) -> Action:
+            title: str | None = None, why: str = "") -> Action:
     """Create a prepared action with a preview. Never executes."""
     at = _REGISTRY.get(type_name)
     if at is None:
@@ -219,9 +220,36 @@ def prepare(user: str, type_name: str, payload: dict,
         id=uuid.uuid4().hex[:12], user=memory.safe_id(user), type=type_name,
         title=title or type_name.replace("_", " ").title(),
         payload=payload, risk_class=at.risk_class, reversible=at.reversible,
-        preview=preview)
+        preview=preview, why=why)
     _save(action)
     _audit(action, "prepared")
+    return action
+
+
+def edit(user: str, action_id: str, changes: dict,
+         title: str | None = None) -> Action:
+    """Modify a PREPARED action before approving it — the user stays in
+    control of the exact content that will run. The preview is re-rendered
+    from the edited payload, and the action remains awaiting approval."""
+    action = get(user, action_id)
+    if action is None:
+        raise ValueError("no such action")
+    if action.status != PREPARED:
+        raise ValueError(f"action is {action.status}, only prepared actions "
+                         "can be edited")
+    for key, value in (changes or {}).items():
+        if key.startswith("_"):       # internal fields are not user-editable
+            continue
+        action.payload[key] = value
+    if title:
+        action.title = title
+    at = _REGISTRY.get(action.type)
+    try:
+        action.preview = at.preview(action.payload)
+    except Exception as err:
+        action.preview = f"(could not render preview: {err})"
+    _save(action)
+    _audit(action, "edited")
     return action
 
 
