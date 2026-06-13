@@ -654,9 +654,12 @@ typed memory is a projection), stored on the same backend as everything else —
 local files by default, Postgres when `OLYMPUS_DATABASE_URL` is set. Turn the
 whole thing off with `OLYMPUS_MEMORY=0`.
 
-In the **browser UI**, a "🧠 memory" button opens a panel showing what Olympus
-remembers (with one-click **Forget**) and any held candidates awaiting your
-**Approve / Dismiss** — sensitive items never auto-save, so they surface here.
+In the **browser UI**, a "🧠 memory" button opens a full **knowledge panel** —
+your editable profile, held candidates awaiting **Approve / Dismiss**, saved and
+proposed **playbooks**, the **people-and-companies graph**, what Olympus
+remembers (one-click **Forget** on anything), and its **track record** with
+growth insights (below). Everything the agent knows about you, visible and
+editable in one place.
 
 Retrieval is lexical by default. Point `OLYMPUS_EMBED_MODEL` at any
 OpenAI-compatible `/embeddings` endpoint (OpenAI, a local Ollama/LM Studio
@@ -704,6 +707,23 @@ olympus graph --forget "Acme"  # remove an entity and its edges
 
 It's the same store and the same rules — inspectable, per-user, and nothing it
 learns ever acts without the approval gate.
+
+### Growth loop — it learns from what you approve, edit, and reject
+
+Every time you approve a prepared action as-is, fix it first, or decline it,
+that's ground-truth feedback. Olympus logs those **outcomes** per action type and
+keeps a track record:
+
+```bash
+olympus outcomes   # e.g. "42 actions: 75% approved as-is, 18% after edit, 7% rejected"
+```
+
+When you keep changing or declining a particular kind of action, it surfaces an
+**insight** — *"you've edited 4 of the last 5 emails before sending; consider
+setting a preference or editing the playbook."* Crucially, Olympus **suggests,
+never silently changes**: improvement is something you confirm, not something
+done to you. No engagement optimization, no dark-pattern retention — the agent
+earns its keep by being useful, and the track record is yours to see.
 
 ## Layout
 

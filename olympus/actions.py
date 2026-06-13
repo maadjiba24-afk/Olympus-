@@ -120,6 +120,7 @@ class Action:
     status: str = PREPARED
     preview: str = ""
     why: str = ""                      # the agent's stated reason, shown on the card
+    edited: bool = False               # did the user change it before approving?
     result: dict = field(default_factory=dict)
     error: str = ""
     created_at: float = field(default_factory=time.time)
@@ -296,6 +297,7 @@ def edit(user: str, action_id: str, changes: dict,
         action.payload[key] = value
     if title:
         action.title = title
+    action.edited = True
     at = _REGISTRY.get(action.type)
     try:
         action.preview = at.preview(action.payload)
@@ -360,7 +362,13 @@ def approve(user: str, action_id: str) -> Action:
     action.status = APPROVED
     action.approved_at = time.time()
     _save(action); _audit(action, "approved")
-    return _execute(action)
+    result = _execute(action)
+    if result.status == EXECUTED:      # record the outcome only if it actually ran
+        from . import outcomes
+        outcomes.record(action.user, action.type,
+                        outcomes.APPROVED_AFTER_EDIT if action.edited
+                        else outcomes.APPROVED)
+    return result
 
 
 def reject(user: str, action_id: str, reason: str = "") -> Action:
@@ -373,6 +381,8 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     action.status = REJECTED
     action.error = reason
     _save(action); _audit(action, "rejected")
+    from . import outcomes
+    outcomes.record(action.user, action.type, outcomes.REJECTED)
     # rejections teach future behavior
     memory.set_user(action.user)
     memory.save("feedback", f"rejected action: {action.type}",
@@ -406,6 +416,8 @@ def undo(user: str, action_id: str) -> Action:
         at.undo(action.result)
         action.status = UNDONE
         _save(action); _audit(action, "undone")
+        from . import outcomes
+        outcomes.record(action.user, action.type, outcomes.UNDONE)
     except Exception as err:
         action.error = f"undo failed: {err}"
         _save(action); _audit(action, "undo_failed")
