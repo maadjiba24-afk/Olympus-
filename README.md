@@ -250,6 +250,14 @@ Plain English. No bash, no pip, no environment variables. Add more keys
 anytime with `olympus setup` — Olympus composes multiple models into one
 brain. Uninstall: `rm -rf ~/.olympus ~/.local/bin/olympus`.
 
+**Prefer a package manager?** Olympus is on PyPI:
+
+```bash
+pipx install olympus-council     # isolated, gets you the `olympus` command
+# or:  pip install olympus-council
+olympus                          # same one-question setup wizard
+```
+
 <details>
 <summary>Manual install (developers)</summary>
 
@@ -300,6 +308,7 @@ aren't held back.
 python -m olympus                  # interactive chat (default)
 python -m olympus web              # browser chat UI at http://localhost:8484
 python -m olympus telegram         # Telegram gateway (zero extra deps)
+python -m olympus whatsapp         # WhatsApp Cloud API gateway (webhook)
 python -m olympus ask "Find me 3 business opportunities in AI tooling"
 python -m olympus scan             # Argus: world/opportunity scan now
 python -m olympus watch <youtube-url>   # Mnemosyne: watch + learn now
@@ -561,6 +570,31 @@ Optional environment variables:
 - `TELEGRAM_NOTIFY_CHAT_ID=12345` — the heartbeat proactively pushes
   opportunity scans and self-audit reports to this chat, so Olympus reaches
   *you* instead of waiting to be asked.
+
+### WhatsApp (official Cloud API)
+
+Talk to Olympus from WhatsApp — same dependency-free style (raw Cloud API, no
+Twilio, no `whatsapp-web.js`). Because the Cloud API is webhook-based, this runs
+a small HTTP server that Meta calls.
+
+1. In the [Meta developer console](https://developers.facebook.com/), create an
+   app, add the **WhatsApp** product, and copy the **phone number ID** and an
+   **access token**.
+2. Set the env vars and start the gateway:
+   ```bash
+   export WHATSAPP_ACCESS_TOKEN=EAAG...
+   export WHATSAPP_PHONE_NUMBER_ID=123456789
+   export WHATSAPP_VERIFY_TOKEN=any-secret-you-choose
+   python -m olympus whatsapp            # serves the webhook on :8485
+   ```
+3. Put it behind HTTPS (same reverse-proxy note as the web UI — Meta requires a
+   public `https://` URL) and register `https://your-host/webhook` as the
+   webhook, using the same verify token.
+
+Optional: `WHATSAPP_ALLOWED_NUMBERS=15551234567,...` restricts who may talk to
+it; `WHATSAPP_APP_SECRET=...` makes Olympus verify Meta's payload signatures.
+Each sender gets a private memory namespace, and the same `/scan`, `/audit`,
+`/watch`, `/good`, `/lang`, `/contribute` commands as Telegram work.
 
 ## Layout
 
