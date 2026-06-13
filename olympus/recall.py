@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from . import backend, config, embed, security, usermem
+from . import backend, config, embed, relgraph, security, usermem
 
 _WORD = re.compile(r"[a-z0-9]+")
 # Common words carry no relevance signal and cause false lexical matches.
@@ -61,7 +61,29 @@ EXTRACT_SCHEMA = {
                 "required": ["type", "content", "confidence", "sensitivity"],
                 "additionalProperties": False,
             },
-        }
+        },
+        "relationships": {
+            "type": "array",
+            "description": "Connections between people/companies the user "
+                           "mentioned, as subject-relation-object triples.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "relation": {"type": "string",
+                                 "description": "e.g. works_at, cofounder_of, "
+                                 "competitor_of, reports_to, client_of"},
+                    "object": {"type": "string"},
+                    "subject_kind": {"type": "string",
+                                     "enum": ["person", "company", "other"]},
+                    "object_kind": {"type": "string",
+                                    "enum": ["person", "company", "other"]},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["subject", "relation", "object"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["memories"],
     "additionalProperties": False,
@@ -72,7 +94,9 @@ _EXTRACT_SYSTEM = (
     "remembering across future sessions: identity, stated preferences, "
     "decisions, projects, recurring tasks, important people/companies, and how "
     "they like recurring tasks done. Return ONLY such facts as structured "
-    "memories.\n\n"
+    "memories. Also capture connections between people and organizations the "
+    "user mentions as subject-relation-object 'relationships' (e.g. Sarah "
+    "cofounder_of Acme).\n\n"
     "Rules:\n"
     "- Do NOT store secrets, passwords, one-off trivia, or your own speculation.\n"
     "- If nothing is worth remembering, return an empty list.\n"
@@ -187,6 +211,9 @@ def extract(user: str, user_msg: str, reply: str,
             cand["content"] = content
             action = _gate(user, cand, eid)
             summary[action] = summary.get(action, 0) + 1
+        rels = relgraph.ingest(user, out.get("relationships") or [])
+        if rels:
+            summary["relationships"] = rels
     except Exception:
         pass                           # memory must never break a conversation
     return summary
