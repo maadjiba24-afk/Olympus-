@@ -1,8 +1,14 @@
-"""Cost accounting + global backpressure.
+"""Cost accounting + global backpressure + the budget guard.
 
 Every model call records token usage and an estimated dollar cost, attributed
 to the active user and day. A process-wide semaphore caps concurrent model
 calls so a burst of users can't trigger a rate-limit storm.
+
+The budget guard protects the user's OWN API bill. Olympus is bring-your-own-
+key: every model call bills the user's Anthropic/OpenAI account directly. A
+runaway loop or a long scheduled task can quietly run that bill up. If the user
+sets a daily budget, Olympus stops starting new work once today's estimated
+spend reaches it — a seatbelt on their provider bill, not a charge from us.
 """
 
 from __future__ import annotations
@@ -13,6 +19,10 @@ import time
 from pathlib import Path
 
 from . import config, memory
+
+
+class BudgetExceeded(RuntimeError):
+    """Raised when today's estimated spend has reached the daily budget."""
 
 # Approximate USD per 1M tokens (input, output). Used only for local
 # estimation/visibility — never billed. Unknown models fall back to DEFAULT.
@@ -67,6 +77,74 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
         path.write_text(json.dumps(ledger, indent=1), encoding="utf-8")
 
 
+# --- the budget guard (protects the user's own API bill) -----------------
+
+def today_spend() -> float:
+    """Total estimated USD spent across the whole instance today."""
+    day = time.strftime("%Y-%m-%d")
+    path = config.MEMORY_DIR / "usage" / f"{day}.json"
+    if not path.exists():
+        return 0.0
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return 0.0
+    return float(ledger.get("__all__", {}).get("cost", 0.0))
+
+
+def daily_budget() -> float:
+    """Resolved daily USD budget. A saved setting (set via `olympus budget`)
+    wins over the OLYMPUS_DAILY_BUDGET env var; 0 means no cap (the default)."""
+    from . import prefs
+    val = prefs.get("shared", "daily_budget", None)
+    if val is None:
+        val = config.DAILY_BUDGET
+    try:
+        return max(0.0, float(val))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def budget_status() -> dict:
+    """Snapshot for display: limit, spent, remaining, and whether it's hit."""
+    limit = daily_budget()
+    spent = round(today_spend(), 4)
+    return {
+        "enabled": limit > 0,
+        "limit": round(limit, 2),
+        "spent": spent,
+        "remaining": round(max(0.0, limit - spent), 4) if limit else None,
+        "exceeded": limit > 0 and spent >= limit,
+    }
+
+
+def check_budget() -> None:
+    """Raise BudgetExceeded if today's spend has reached the daily budget.
+    Called before starting new work; a single in-flight request may overshoot
+    by its own cost, so treat the budget as a soft 'stop starting' line."""
+    limit = daily_budget()
+    if limit > 0:
+        spent = today_spend()
+        if spent >= limit:
+            raise BudgetExceeded(
+                f"Daily budget of ${limit:.2f} reached (about ${spent:.2f} "
+                f"spent today on your API key). Olympus paused to protect your "
+                f"bill. Raise it with `olympus budget <amount>`, set "
+                f"`olympus budget 0` to remove the cap, or wait until tomorrow.")
+
+
+def set_budget(amount: float) -> str:
+    """Persist the daily budget (0 disables the cap)."""
+    from . import prefs
+    amount = max(0.0, float(amount))
+    prefs.set("shared", "daily_budget", amount)
+    if amount <= 0:
+        return ("Daily budget removed — Olympus will not cap spend on your "
+                "API key. (You can set one anytime with `olympus budget 5`.)")
+    return (f"Daily budget set to ${amount:.2f}. Olympus will pause new "
+            f"requests once today's estimated spend on your API key reaches it.")
+
+
 def report(days: int = 7) -> str:
     """Human-readable spend summary over the last N days."""
     base = config.MEMORY_DIR / "usage"
@@ -88,4 +166,9 @@ def report(days: int = 7) -> str:
                      f"{allrow.get('in', 0)+allrow.get('out', 0)} tokens)")
     lines.append("")
     lines.append(f"  total ({len(files)}d): ${grand:.4f}")
+    b = budget_status()
+    if b["enabled"]:
+        flag = "  ⚠ reached" if b["exceeded"] else ""
+        lines.append(f"  today's budget: ${b['spent']:.4f} / ${b['limit']:.2f}"
+                     f"{flag}")
     return "\n".join(lines)

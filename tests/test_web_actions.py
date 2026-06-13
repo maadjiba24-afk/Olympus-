@@ -36,6 +36,11 @@ def test_page_has_actions_surface(server):
     assert "📋 actions" in html and "/api/actions" in html and "renderCards" in html
 
 
+def test_actions_endpoint_includes_budget(server):
+    out = _get(server, "/api/actions?session=b1")
+    assert "budget" in out and "enabled" in out["budget"]
+
+
 def test_actions_endpoint_lists_prepared(server):
     # an action prepared for the web user shows up in the view
     actions.prepare(web._user_for("sess1"), "save_note",
