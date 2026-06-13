@@ -4,16 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olympus-council"
-version = "0.15.0"
-description = "OLYMPUS — self-improving multi-agent AI with a built-in hallucination controller"
+version = "0.16.0"
+description = "OLYMPUS — a controlled-autonomy, self-improving multi-agent AI assistant with a built-in hallucination controller"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "maadjiba24-afk" }]
+keywords = [
+    "ai", "agent", "assistant", "multi-agent", "llm", "anthropic", "claude",
+    "controlled-autonomy", "byok", "self-improving", "hallucination-controller",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Communications :: Chat",
+]
 dependencies = [
     "anthropic>=0.92.0",
     "youtube-transcript-api>=1.0.0",
     "cryptography>=41.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maadjiba24-afk/Olympus-"
+Repository = "https://github.com/maadjiba24-afk/Olympus-"
+Issues = "https://github.com/maadjiba24-afk/Olympus-/issues"
 
 [project.scripts]
 olympus = "olympus.cli:main"
