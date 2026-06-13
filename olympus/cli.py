@@ -70,6 +70,15 @@ def main(argv: list[str] | None = None) -> int:
         "action", nargs="?", default="list",
         choices=["list", "candidates", "approve", "reject", "forget", "search"])
     p_mem.add_argument("arg", nargs="*", help="id (approve/reject/forget) or query (search)")
+    p_pb = sub.add_parser(
+        "playbook", help="save/run/manage repeatable workflows")
+    p_pb.add_argument(
+        "action", nargs="?", default="list",
+        choices=["list", "proposed", "show", "save", "run", "forget",
+                 "approve", "reject"])
+    p_pb.add_argument("name", nargs="?", help="playbook name or id")
+    p_pb.add_argument("steps", nargs="*",
+                      help="for save: steps separated by ';'")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -208,6 +217,44 @@ def main(argv: list[str] | None = None) -> int:
                 print("Nothing relevant.")
             for m in hits:
                 print(f"  [{m['id']}] ({m['type']}) {m['content']}")
+    elif args.command == "playbook":
+        from . import playbooks
+        user = "cli"
+        name = args.name or ""
+        if args.action in ("list", "proposed"):
+            status = playbooks.PROPOSED if args.action == "proposed" else playbooks.ACTIVE
+            items = playbooks.list_all(user, status=status)
+            if not items:
+                print("No playbooks yet." if args.action == "list"
+                      else "No proposed playbooks.")
+            for p in items:
+                print(f"  [{p['id']}] {p['name']}  (v{p['version']}, "
+                      f"used {p['use_count']}x, {len(p['steps'])} steps)")
+        elif args.action == "show":
+            p = playbooks.get(user, name)
+            if not p:
+                print("No such playbook.")
+            else:
+                print(f"{p['name']}  (v{p['version']}, {p['status']})")
+                for i, s in enumerate(p["steps"], 1):
+                    print(f"  {i}. {s}")
+        elif args.action == "save":
+            steps = " ".join(args.steps).split(";")
+            try:
+                p = playbooks.save(user, name, steps)
+                print(f"Saved '{p['name']}' (v{p['version']}, {len(p['steps'])} steps). "
+                      f"Run it anytime with: olympus playbook run \"{p['name']}\"")
+            except ValueError as err:
+                print(f"Error: {err}")
+        elif args.action == "run":
+            block = playbooks.run_block(user, name)
+            print(block.strip() if block else "No such active playbook.")
+        elif args.action == "approve":
+            print("Approved." if playbooks.approve(user, name) else "No such playbook.")
+        elif args.action == "reject":
+            print("Removed." if playbooks.delete(user, name) else "No such playbook.")
+        elif args.action == "forget":
+            print("Forgotten." if playbooks.delete(user, name) else "No such playbook.")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
