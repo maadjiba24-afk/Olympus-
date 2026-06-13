@@ -129,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
+                                           "(needs WHATSAPP_* env vars)")
+    p_wa.add_argument("--host", default="0.0.0.0")
+    p_wa.add_argument("--port", type=int, default=8485)
 
     args = parser.parse_args(argv)
 
@@ -285,6 +289,12 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "whatsapp":
+        from . import whatsapp
+        try:
+            whatsapp.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nWhatsApp gateway stopped.")
     return 0
 
 
