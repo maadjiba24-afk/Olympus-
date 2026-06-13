@@ -10,9 +10,9 @@ commands a supervised council of specialists, every answer passes through a
 hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
-> **Status:** the full architecture is implemented and covered by 116 passing
-> tests. Add an API key and run `python -m olympus ask "..."` to use it; run
-> `python -m olympus scores` to see each specialist's measured quality.
+> **Status:** the full architecture is implemented and covered by 176 passing
+> tests. Install with the one-liner below, type `olympus`, and you're chatting;
+> `olympus scores` shows each specialist's measured quality.
 
 ## Architecture
 
@@ -230,10 +230,35 @@ user-facing specialist and trains the weakest on a cadence:
 
 ## Setup
 
+**One line.** Paste this in your terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
+```
+
+Then type `olympus`. The first run asks one question — which API key you're
+bringing (Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter,
+or a local Ollama) — saves it securely (`~/.olympus/config.env`, owner-only),
+and drops you into chat. From then on it's just:
+
+```
+olympus
+you ▸ find me 30 minutes with Sarah next week and draft the invite
+```
+
+Plain English. No bash, no pip, no environment variables. Add more keys
+anytime with `olympus setup` — Olympus composes multiple models into one
+brain. Uninstall: `rm -rf ~/.olympus ~/.local/bin/olympus`.
+
+<details>
+<summary>Manual install (developers)</summary>
+
 ```bash
 pip install -r requirements.txt        # or: pip install .
 export ANTHROPIC_API_KEY=sk-ant-...
+python -m olympus
 ```
+</details>
 
 Or with Docker:
 
@@ -385,6 +410,8 @@ python -m olympus undo <id>        # reverse a reversible, executed action
 python -m olympus autonomy 2       # set the autonomy dial (0–4)
 python -m olympus grant email      # grant a permission scope
 python -m olympus revoke all       # kill switch — revoke every scope
+python -m olympus budget 5         # cap your API spend at $5/day (0 = off)
+python -m olympus limit gmail_send 5  # max 5 sends/day (runaway guard)
 ```
 
 In the **browser UI**, prepared actions appear as **cards** under a "📋 actions"
@@ -406,6 +433,25 @@ The safety model is structural, not hopeful:
 - **Injection-safe by construction** — because agents only *prepare*, a
   malicious email that tricks an agent into preparing a bad action is harmless:
   you see the preview and reject it. Reading can never become acting without you.
+
+### Safety limits — your bill and your contacts, both capped
+
+Two guards protect you from a runaway or prompt-injected agent — neither has
+anything to do with Olympus charging you (it never does; you bring your own key):
+
+- **Budget guard.** Olympus is bring-your-own-key, so every model call bills
+  *your* provider account. Set `olympus budget 5` and Olympus pauses new
+  requests — chat *and* unattended background work — once today's estimated
+  spend reaches $5, instead of silently running your bill up. Spending money is
+  itself irreversible, so the same principle that gates sending an email gates
+  spending a dollar. The browser action panel shows today's spend against the
+  cap, and turns amber when it's reached.
+- **Action rate limits.** A daily cap on how many times each action type may
+  actually *execute*, so even fast-clicked approvals (or an injected agent)
+  can't flood your contacts. Irreversible actions default to a generous runaway
+  guard (50/day) and financial/legal ones to 10/day; trivial and reversible
+  actions are unlimited. Tune any of them with `olympus limit <type> <n>`
+  (`0` = unlimited). Drafting and rejecting never count — only real execution.
 
 New capabilities (calendar, files, payments-prep) are just new action types
 registered on this same spine — they inherit the gate automatically.
