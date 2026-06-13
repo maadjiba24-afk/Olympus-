@@ -238,6 +238,10 @@ MEMORY_CONFIDENCE_FLOOR = float(os.environ.get("OLYMPUS_MEMORY_FLOOR", "0.6"))
 MEMORY_RETRIEVAL_FLOOR_CONF = 0.25     # decayed-confidence floor for retrieval
 MEMORY_RETRIEVAL_BUDGET_TOKENS = int(os.environ.get("OLYMPUS_MEMORY_BUDGET", "800"))
 MEMORY_MIN_CHARS = 40                  # skip extraction for trivial turns
+# Hybrid retrieval: when lexical match yields fewer than this many hits AND an
+# embeddings endpoint is configured, fall back to semantic search (cosine).
+MEMORY_SEMANTIC_FALLBACK_MIN = 2
+MEMORY_SEMANTIC_THRESHOLD = 0.55       # min cosine to count as semantically relevant
 
 # Max tool-use iterations for a single specialist run (guards against loops).
 MAX_AGENT_ITERATIONS = 16

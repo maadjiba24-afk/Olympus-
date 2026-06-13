@@ -654,6 +654,38 @@ typed memory is a projection), stored on the same backend as everything else —
 local files by default, Postgres when `OLYMPUS_DATABASE_URL` is set. Turn the
 whole thing off with `OLYMPUS_MEMORY=0`.
 
+In the **browser UI**, a "🧠 memory" button opens a panel showing what Olympus
+remembers (with one-click **Forget**) and any held candidates awaiting your
+**Approve / Dismiss** — sensitive items never auto-save, so they surface here.
+
+Retrieval is lexical by default. Point `OLYMPUS_EMBED_MODEL` at any
+OpenAI-compatible `/embeddings` endpoint (OpenAI, a local Ollama/LM Studio
+server, …) and Olympus adds a **semantic fallback**: when keyword matching comes
+back thin, it embeds the query and finds memories by meaning, not just words.
+It's optional and off by default — and the fallback only fires when lexical
+search misses, so the hot path stays free in the common case.
+
+### Playbooks — save a workflow once, run it by name
+
+The retention engine: when you repeat a multi-step task, save it as a **named
+procedure** and next time one phrase loads the steps — with every action in them
+still flowing through the approval gate. Month-6 stops re-explaining what
+month-1 had to spell out.
+
+```bash
+olympus playbook save "weekly investor update" "pull the metrics; draft in my voice; CC my cofounder"
+olympus playbook run "weekly investor update"   # loads the steps; actions still gated
+olympus playbook list                           # your saved workflows
+olympus playbook proposed                        # ones Olympus suggested, awaiting approval
+olympus playbook approve "<name>"   |  forget "<name>"
+```
+
+When a turn matches a saved playbook's name, Olympus follows its steps
+automatically. Playbooks are **versioned** (re-saving bumps the version, keeps
+its usage stats) and **approval-gated to create**: a specialist may *propose* a
+procedure when it notices you repeating one, but it stays inert until you
+approve it — Olympus never invents a workflow and runs it on you.
+
 ## Layout
 
 ```

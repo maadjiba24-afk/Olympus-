@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               profile, recall, trace as trace_mod, tools, usage)
+               playbooks, profile, recall, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -118,7 +118,8 @@ class Olympus:
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user)
                   + profile.card(self.user)
-                  + recall.context_block(self.user, user_message))
+                  + recall.context_block(self.user, user_message)
+                  + playbooks.context_block(self.user, user_message))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -275,7 +276,8 @@ class Olympus:
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
         system = (agent.load_prompt("zeus") + i18n.directive(self.user)
                   + profile.card(self.user)
-                  + recall.context_block(self.user, user_message))
+                  + recall.context_block(self.user, user_message)
+                  + playbooks.context_block(self.user, user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -438,6 +440,13 @@ class Olympus:
         self._maybe_compact()
         if self.conversation_id:
             memory.save_conversation(self.conversation_id, self.history)
+        # Count a playbook as used once per turn (the context block is pure).
+        try:
+            pb = playbooks.match(self.user, user_message)
+            if pb:
+                playbooks.mark_used(self.user, pb["id"])
+        except Exception:
+            pass
         # Learn durable facts about this user in the background (cheap model),
         # so the reply is never delayed by it. Best-effort; guarded inside.
         if config.MEMORY_ENABLED:
@@ -549,7 +558,8 @@ class Olympus:
             self.report("⚡ Zeus composes the final answer...")
             system = (agent.load_prompt("zeus") + i18n.directive(self.user)
                       + profile.card(self.user)
-                      + recall.context_block(self.user, user_message))
+                      + recall.context_block(self.user, user_message)
+                      + playbooks.context_block(self.user, user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"
