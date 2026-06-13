@@ -401,6 +401,27 @@ PREPARE_ACTION = {
     },
 }
 
+PROPOSE_PLAYBOOK = {
+    "name": "propose_playbook",
+    "description": (
+        "Suggest saving a repeatable multi-step workflow the user does (e.g. "
+        "'weekly investor update'), so next time they can run it by name. This "
+        "only PROPOSES it — the user approves before it's ever followed. Use "
+        "when you notice the user repeating the same procedure, or when they "
+        "ask to remember how to do something."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string",
+                     "description": "Short name, e.g. 'weekly investor update'"},
+            "steps": {"type": "array", "items": {"type": "string"},
+                      "description": "Ordered steps, in the user's terms"},
+        },
+        "required": ["name", "steps"],
+    },
+}
+
 PROPOSE_UPGRADE = {
     "name": "propose_upgrade",
     "description": (
@@ -646,6 +667,19 @@ def _prepare_action(type: str, payload: dict, title: str = None,
             f"{action.risk_class}) — awaiting your approval.\n\n{action.preview}")
 
 
+def _propose_playbook(name: str, steps: list) -> str:
+    """Suggest saving a repeatable workflow (the user approves before it runs)."""
+    from . import playbooks
+    user = memory.current_user()
+    try:
+        pb = playbooks.propose(user, name, list(steps or []))
+    except ValueError as err:
+        return f"Could not propose playbook: {err}"
+    return (f"Proposed the workflow '{pb['name']}' ({len(pb['steps'])} steps) — "
+            "it won't be used until the user approves it "
+            "(`olympus playbook approve`).")
+
+
 def _gate_skills() -> str:
     from . import orchestrator  # local import to avoid a cycle at module load
     return orchestrator.gate_skills()
@@ -693,6 +727,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_email": lambda message_id: _read_email(message_id),
     "read_calendar": lambda time_min, time_max: _read_calendar(time_min, time_max),
     "prepare_action": _prepare_action,
+    "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
@@ -725,6 +760,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
     "prepare_action": PREPARE_ACTION,
+    "propose_playbook": PROPOSE_PLAYBOOK,
     "read_inbox": READ_INBOX,
     "read_email": READ_EMAIL,
     "read_calendar": READ_CALENDAR,
