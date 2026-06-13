@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               profile, trace as trace_mod, tools, usage)
+               profile, recall, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -117,7 +117,8 @@ class Olympus:
     def _route(self, user_message: str) -> dict[str, Any]:
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user)
-                  + profile.card(self.user))
+                  + profile.card(self.user)
+                  + recall.context_block(self.user, user_message))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -273,7 +274,8 @@ class Olympus:
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
         system = (agent.load_prompt("zeus") + i18n.directive(self.user)
-                  + profile.card(self.user))
+                  + profile.card(self.user)
+                  + recall.context_block(self.user, user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -436,6 +438,14 @@ class Olympus:
         self._maybe_compact()
         if self.conversation_id:
             memory.save_conversation(self.conversation_id, self.history)
+        # Learn durable facts about this user in the background (cheap model),
+        # so the reply is never delayed by it. Best-effort; guarded inside.
+        if config.MEMORY_ENABLED:
+            threading.Thread(
+                target=recall.extract,
+                args=(self.user, user_message, reply,
+                      self.pool.for_role("reasoning")),
+                daemon=True).start()
         # Opt-in cross-model learning: contribute an anonymized snapshot tagged
         # with the model that produced it (only if this user opted in).
         try:
@@ -538,7 +548,8 @@ class Olympus:
                 return
             self.report("⚡ Zeus composes the final answer...")
             system = (agent.load_prompt("zeus") + i18n.directive(self.user)
-                      + profile.card(self.user))
+                      + profile.card(self.user)
+                      + recall.context_block(self.user, user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"

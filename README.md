@@ -621,6 +621,39 @@ budget Olympus folds the older turns into a compact running **state** block
 (facts, decisions, preferences, open threads) and replays only the most recent
 turns verbatim — so cost tracks what matters, not how long you've been talking.
 
+### Durable memory — it remembers across sessions
+
+Beyond the single conversation, Olympus builds a **typed, per-user memory** over
+time. After each substantive turn, a cheap model runs in the background and
+extracts durable facts — identity, preferences, projects, recurring tasks,
+important people, procedures — as candidate memories. A **write gate** decides
+what's kept:
+
+- below a confidence floor → discarded; a duplicate → reinforces the existing
+  memory (raising its confidence); a conflict → supersedes the old one (keeping
+  history) when clearly confident, else asks you;
+- **anything sensitive (health, finances, legal, identifiers) is never
+  auto-saved** — it waits in an approval queue, exactly like a risky action.
+
+Memories **decay** unless reused, so stale facts fade. On each turn Olympus
+retrieves only the memories relevant to what you're asking (lexical match, ranked
+by importance × decayed-confidence × recency, under a token budget, with a
+relevance floor so junk never enters the prompt). Everything is inspectable and
+yours to edit or forget:
+
+```bash
+olympus memory                 # list what Olympus remembers (with confidence)
+olympus memory candidates      # sensitive/uncertain items awaiting your approval
+olympus memory approve <id>    # approve a held memory   (reject <id> to dismiss)
+olympus memory forget <id>     # tombstone a memory
+olympus memory search "..."    # what would Olympus recall for this query?
+```
+
+It's an event-sourced design (an append-only log is the source of truth; the
+typed memory is a projection), stored on the same backend as everything else —
+local files by default, Postgres when `OLYMPUS_DATABASE_URL` is set. Turn the
+whole thing off with `OLYMPUS_MEMORY=0`.
+
 ## Layout
 
 ```
