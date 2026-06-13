@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     p_gr.add_argument("entity", nargs="*",
                       help="an entity to describe (no args = list everything)")
     p_gr.add_argument("--forget", metavar="ENTITY", help="remove an entity")
+    sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
+                                    "edited, or declined")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -277,6 +279,20 @@ def main(argv: list[str] | None = None) -> int:
             for n in ns:
                 conns = relgraph.neighbors(user, n["id"])
                 print(f"  {n['label']} ({n['kind']}) — {len(conns)} connection(s)")
+    elif args.command == "outcomes":
+        from . import outcomes
+        user = "cli"
+        s = outcomes.stats(user)["overall"]
+        if not s["total"]:
+            print("No outcomes yet — they accrue as you approve, edit, or "
+                  "reject prepared actions.")
+        else:
+            print(f"Track record ({s['total']} actions): "
+                  f"{s['approved']} approved as-is, "
+                  f"{s['approved_after_edit']} approved after edit, "
+                  f"{s['rejected']} rejected, {s['undone']} undone.")
+            for ins in outcomes.insights(user):
+                print(f"\n  💡 {ins['message']}")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1

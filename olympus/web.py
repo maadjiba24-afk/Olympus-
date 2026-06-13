@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -30,14 +31,28 @@ def _user_for(sid: str) -> str:
 
 
 def _memory_view(user: str) -> dict:
-    """Active memories (with decayed confidence) + candidates awaiting approval."""
-    from . import usermem
+    """Everything Olympus knows about a user, for the web knowledge panel:
+    profile, memories, candidates, playbooks, relationship graph, and its
+    outcome track-record + insights."""
+    from . import usermem, profile, playbooks, relgraph, outcomes
     mems = [{"id": m["id"], "type": m["type"], "content": m["content"],
              "confidence": round(usermem.effective_confidence(m), 2)}
             for m in usermem.active_memories(user)]
     cands = [{"id": c["id"], "type": c["type"], "content": c["content"],
               "reason": c.get("reason", "")} for c in usermem.candidates(user)]
-    return {"memories": mems, "candidates": cands}
+    prof = profile.get(user)
+    pbs = [{"id": p["id"], "name": p["name"], "steps": p["steps"],
+            "status": p["status"], "use_count": p["use_count"]}
+           for p in playbooks.list_all(user)]
+    graph = [{"label": n["label"], "kind": n["kind"],
+              "connections": [phrase for phrase, _ in relgraph.neighbors(user, n["id"])]}
+             for n in relgraph.nodes(user)]
+    return {"memories": mems, "candidates": cands,
+            "profile": {"about": prof.get("about", ""),
+                        "facts": prof.get("facts", {})},
+            "playbooks": pbs, "graph": graph,
+            "outcomes": outcomes.stats(user)["overall"],
+            "insights": outcomes.insights(user)}
 
 
 def _actions_view(user: str) -> list[dict]:
@@ -88,6 +103,24 @@ _SESSIONS_LOCK = threading.Lock()
 _HITS: dict[str, deque] = {}
 _HITS_LOCK = threading.Lock()
 
+_MAX_BODY = 1_000_000          # 1 MB cap on request bodies (DoS guard)
+_SID_RE = re.compile(r"olympus_sid=([A-Za-z0-9]{8,64})")
+
+
+def _resolve_sid(handler: BaseHTTPRequestHandler,
+                 provided: str | None) -> tuple[str, str | None]:
+    """Determine the session id, preferring a server-issued HttpOnly cookie so
+    browser users get an unguessable, isolated session automatically (no shared
+    'default' namespace, no manual session strings). Falls back to an explicit
+    `session` value for programmatic/CLI use. Returns (sid, cookie_to_set)."""
+    m = _SID_RE.search(handler.headers.get("Cookie", "") or "")
+    if m:
+        return m.group(1), None
+    if provided:
+        return provided[:64], None
+    sid = uuid.uuid4().hex                       # fresh, random, server-issued
+    return sid, sid
+
 
 def _session(sid: str) -> _Session:
     with _SESSIONS_LOCK:
@@ -98,19 +131,26 @@ def _session(sid: str) -> _Session:
         return _SESSIONS[sid]
 
 
-def _rate_limited(ip: str) -> bool:
-    limit = int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
+def _rate_limited(key: str, limit: int) -> bool:
+    """Per-key sliding-window limiter (60s). Separate keys let the expensive
+    chat endpoint and the cheap write endpoints have independent budgets."""
     if limit <= 0:
         return False
     now = time.time()
     with _HITS_LOCK:
-        hits = _HITS.setdefault(ip, deque())
+        if len(_HITS) > 5000:          # bound the limiter's own memory
+            _HITS.clear()
+        hits = _HITS.setdefault(key, deque())
         while hits and now - hits[0] > 60:
             hits.popleft()
         if len(hits) >= limit:
             return True
         hits.append(now)
     return False
+
+
+def _chat_limit() -> int:
+    return int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -486,49 +526,88 @@ const memBtn = document.getElementById('membtn');
 const memCount = document.getElementById('memcount');
 memBtn.onclick = () => { memoryEl.classList.toggle('open'); renderMemory(); };
 
-function memRow(m, kind) {
+function memHeader(text, margin) {
+  const h = document.createElement('p'); h.className = 'sys';
+  h.style = 'max-width:860px;margin:' + (margin || '12px auto 4px');
+  h.textContent = text;
+  return h;
+}
+
+function memRow(label, content, buttons) {
   const row = document.createElement('div'); row.className = 'mem';
-  const t = document.createElement('span'); t.className = 't'; t.textContent = m.type;
-  const c = document.createElement('span'); c.className = 'c'; c.textContent = m.content;
-  const btns = document.createElement('span');
-  if (kind === 'candidate') {
-    const ok = document.createElement('button'); ok.className='ok'; ok.textContent='Approve';
-    ok.onclick = () => memact(m.id, 'approve');
-    const no = document.createElement('button'); no.className='no'; no.textContent='Dismiss';
-    no.onclick = () => memact(m.id, 'reject');
-    btns.append(ok, no);
-  } else {
-    const f = document.createElement('button'); f.className='no'; f.textContent='Forget';
-    f.onclick = () => memact(m.id, 'forget');
-    btns.append(f);
-  }
-  row.append(t, c, btns);
+  const t = document.createElement('span'); t.className = 't'; t.textContent = label;
+  const c = document.createElement('span'); c.className = 'c'; c.textContent = content;
+  const span = document.createElement('span');
+  (buttons || []).forEach(b => {
+    const el = document.createElement('button'); el.className = b.cls;
+    el.textContent = b.text; el.onclick = b.fn; span.appendChild(el);
+  });
+  row.append(t, c, span);
   return row;
 }
 
 function renderMemoryData(d) {
-  const cands = d.candidates || [], mems = d.memories || [];
-  memCount.textContent = cands.length;
-  memCount.classList.toggle('show', cands.length > 0);
+  const cands = d.candidates || [], mems = d.memories || [], pbs = d.playbooks || [],
+        graph = d.graph || [], insights = d.insights || [], prof = d.profile || {},
+        oc = d.outcomes || {};
+  const pendingPb = pbs.filter(p => p.status === 'proposed').length;
+  memCount.textContent = cands.length + pendingPb;
+  memCount.classList.toggle('show', (cands.length + pendingPb) > 0);
   memoryEl.innerHTML = '';
+
+  insights.forEach(i => {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.style = 'max-width:860px;margin:4px auto;color:#d9b44a';
+    p.textContent = '💡 ' + i.message;
+    memoryEl.appendChild(p);
+  });
+  if (oc.total) {
+    memoryEl.appendChild(memHeader('Track record: ' + oc.total + ' actions — ' +
+      oc.approved + ' approved as-is, ' + oc.approved_after_edit +
+      ' after edit, ' + oc.rejected + ' rejected.', '4px auto'));
+  }
+
+  memoryEl.appendChild(memHeader('Your profile:'));
+  memoryEl.appendChild(memRow('about', prof.about || '(not set)', [
+    {cls: 'no', text: 'Edit', fn: () => {
+      const v = prompt('About you (how Olympus should treat you):', prof.about || '');
+      if (v !== null) memact({kind: 'profile', op: 'set', value: v});
+    }}]));
+  Object.keys(prof.facts || {}).forEach(k =>
+    memoryEl.appendChild(memRow(k, prof.facts[k], [])));
+
   if (cands.length) {
-    const h = document.createElement('p'); h.className = 'sys';
-    h.style = 'max-width:860px;margin:4px auto'; h.textContent =
-      'Awaiting your approval (sensitive or uncertain) — nothing here was saved automatically:';
-    memoryEl.appendChild(h);
-    cands.forEach(m => memoryEl.appendChild(memRow(m, 'candidate')));
+    memoryEl.appendChild(memHeader(
+      'Awaiting your approval (sensitive/uncertain — not saved automatically):'));
+    cands.forEach(m => memoryEl.appendChild(memRow(m.type, m.content, [
+      {cls: 'ok', text: 'Approve', fn: () => memact({kind: 'memory', op: 'approve', id: m.id})},
+      {cls: 'no', text: 'Dismiss', fn: () => memact({kind: 'memory', op: 'reject', id: m.id})}])));
   }
+
+  if (pbs.length) {
+    memoryEl.appendChild(memHeader('Playbooks (saved workflows):'));
+    pbs.forEach(p => {
+      const proposed = p.status === 'proposed';
+      const btns = proposed
+        ? [{cls: 'ok', text: 'Approve', fn: () => memact({kind: 'playbook', op: 'approve', id: p.id})},
+           {cls: 'no', text: 'Dismiss', fn: () => memact({kind: 'playbook', op: 'reject', id: p.id})}]
+        : [{cls: 'no', text: 'Forget', fn: () => memact({kind: 'playbook', op: 'forget', id: p.id})}];
+      memoryEl.appendChild(memRow(proposed ? 'proposed' : 'playbook',
+        p.name + ' — ' + p.steps.join(' → '), btns));
+    });
+  }
+
+  if (graph.length) {
+    memoryEl.appendChild(memHeader('People & companies:'));
+    graph.forEach(n => memoryEl.appendChild(memRow(n.kind,
+      n.label + (n.connections.length ? ' (' + n.connections.join('; ') + ')' : ''),
+      [{cls: 'no', text: 'Forget', fn: () => memact({kind: 'graph', op: 'forget', label: n.label})}])));
+  }
+
   if (mems.length) {
-    const h = document.createElement('p'); h.className = 'sys';
-    h.style = 'max-width:860px;margin:10px auto 4px'; h.textContent =
-      'What Olympus remembers about you:';
-    memoryEl.appendChild(h);
-    mems.forEach(m => memoryEl.appendChild(memRow(m, 'memory')));
-  }
-  if (!cands.length && !mems.length) {
-    memoryEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
-      'Nothing remembered yet — Olympus learns durable facts as you chat, and ' +
-      'anything sensitive waits here for your approval.</p>';
+    memoryEl.appendChild(memHeader('What Olympus remembers about you:'));
+    mems.forEach(m => memoryEl.appendChild(memRow(m.type, m.content, [
+      {cls: 'no', text: 'Forget', fn: () => memact({kind: 'memory', op: 'forget', id: m.id})}])));
   }
 }
 
@@ -540,9 +619,9 @@ async function renderMemory() {
   } catch (e) {}
 }
 
-async function memact(id, op) {
-  const r = await fetch('/api/memory', {method:'POST', headers: hdrs(),
-    body: JSON.stringify({session: session, id: id, op: op})});
+async function memact(payload) {
+  const r = await fetch('/api/memory', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))});
   renderMemoryData(await r.json());
 }
 setInterval(renderMemory, 8000);
@@ -620,6 +699,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        cookie = getattr(self, "_set_cookie", None)
+        if cookie:
+            self.send_header("Set-Cookie",
+                             f"olympus_sid={cookie}; HttpOnly; SameSite=Strict; "
+                             "Path=/; Max-Age=31536000")
+            self._set_cookie = None       # set once per response
         self.end_headers()
         self.wfile.write(body)
 
@@ -629,13 +714,24 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length > _MAX_BODY:        # reject oversized bodies (DoS guard)
+                return None
             return json.loads(self.rfile.read(length))
         except Exception:
             return None
 
+    def _session_id(self, provided: str | None = None) -> str:
+        """Resolve the session id (cookie-preferred) and arrange to set the
+        cookie on the response if a fresh one was minted."""
+        sid, cookie = _resolve_sid(self, provided)
+        if cookie:
+            self._set_cookie = cookie
+        return sid
+
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/":
+            self._session_id()           # issue the session cookie up front
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             return
         if url.path == "/oauth/google/start":
@@ -647,22 +743,19 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
+        params = parse_qs(url.query)
+        sid = self._session_id(params.get("session", [None])[0])
         if url.path == "/api/status":
-            params = parse_qs(url.query)
             since = int(params.get("since", ["0"])[0])
-            sid = params.get("session", ["default"])[0][:64]
             events = _session(sid).events
             self._json({"events": events[since:], "next": len(events)})
         elif url.path == "/api/actions":
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"actions": _actions_view(_user_for(sid)),
                         "budget": usage.budget_status()})
         elif url.path == "/api/memory":
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json(_memory_view(_user_for(sid)))
         elif url.path == "/api/connected":
             from . import google_oauth
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"configured": google_oauth.configured(),
                         "connected": google_oauth.connected(_user_for(sid))})
         else:
@@ -670,7 +763,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _oauth_start(self, url) -> None:
         from . import google_oauth
-        sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+        sid = self._session_id(parse_qs(url.query).get("session", [None])[0])
         try:
             target = google_oauth.authorize_url(state=sid)
         except google_oauth.OAuthError as err:
@@ -683,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
     def _oauth_callback(self, url) -> None:
         from . import google_oauth
         params = parse_qs(url.query)
-        sid = params.get("state", ["default"])[0][:64]
+        sid = self._session_id(params.get("state", [None])[0])
         code = params.get("code", [""])[0]
         body = "<p>Google account connected. You can close this tab.</p>"
         if not code:
@@ -709,7 +802,13 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
-        sid = str(payload.get("session") or uuid.uuid4())[:64]
+        # Cheap write endpoints get a generous per-IP budget (DoS guard); the
+        # expensive /api/chat keeps its own stricter limit further down.
+        if path != "/api/chat" and _rate_limited(
+                "w:" + self.client_address[0], 60):
+            self._json({"error": "rate limit exceeded — slow down"}, 429)
+            return
+        sid = self._session_id(payload.get("session"))
         session = _session(sid)
 
         if path == "/api/feedback":
@@ -755,31 +854,56 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/memory":
-            from . import usermem
+            from . import usermem, profile, playbooks, relgraph
             user = _user_for(sid)
+            kind = str(payload.get("kind", "memory"))
             op = str(payload.get("op", ""))
             mid = str(payload.get("id", ""))
-            if op == "approve":
-                c = usermem.pop_candidate(user, mid)
-                if c:
-                    usermem.add_memory(
-                        user, type=c["type"], content=c["content"],
-                        confidence=c.get("confidence", 0.7), key=c.get("key"),
-                        importance=c.get("importance", 0.5),
-                        sensitivity=c.get("sensitivity", "normal"),
-                        provenance=c.get("provenance", []))
-            elif op == "reject":
-                usermem.pop_candidate(user, mid)
-            elif op == "forget":
-                usermem.tombstone(user, mid)
-            else:
-                self._json({"error": "unknown op"}, 400)
+            try:
+                if kind == "memory":
+                    if op == "approve":
+                        c = usermem.pop_candidate(user, mid)
+                        if c:
+                            usermem.add_memory(
+                                user, type=c["type"], content=c["content"],
+                                confidence=c.get("confidence", 0.7),
+                                key=c.get("key"),
+                                importance=c.get("importance", 0.5),
+                                sensitivity=c.get("sensitivity", "normal"),
+                                provenance=c.get("provenance", []))
+                    elif op == "reject":
+                        usermem.pop_candidate(user, mid)
+                    elif op == "forget":
+                        usermem.tombstone(user, mid)
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "profile":
+                    if op == "set":
+                        profile.set_about(user, str(payload.get("value", "")))
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "playbook":
+                    if op == "approve":
+                        playbooks.approve(user, mid)
+                    elif op in ("forget", "reject"):
+                        playbooks.delete(user, mid)
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "graph":
+                    if op == "forget":
+                        relgraph.forget(user, str(payload.get("label", "")))
+                    else:
+                        raise ValueError("unknown op")
+                else:
+                    raise ValueError("unknown kind")
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
                 return
             self._json({"ok": True, **_memory_view(user)})
             return
 
         # /api/chat
-        if _rate_limited(self.client_address[0]):
+        if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
         message = payload.get("message")
