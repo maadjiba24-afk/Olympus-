@@ -23,7 +23,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import actions, builtin_actions, config, orchestrator, usage  # noqa: F401
+from . import accounts, actions, builtin_actions, config, orchestrator, usage  # noqa: F401
 
 
 def _user_for(sid: str) -> str:
@@ -82,16 +82,18 @@ class _Session:
         self.fingerprint: tuple | None = None
         self.bot: orchestrator.Olympus | None = None
 
-    def bot_for(self, pool: config.ModelPool) -> orchestrator.Olympus:
+    def bot_for(self, pool: config.ModelPool,
+                user: str | None = None) -> orchestrator.Olympus:
+        user = user or f"web-{self.sid}"
         fp = tuple((m.provider, m.model, m.api_key, m.base_url)
-                   for m in pool.members)
+                   for m in pool.members) + (user,)
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
             self.bot = orchestrator.Olympus(
                 report=self.events.append,
                 pool=pool,
-                user=f"web-{self.sid}",
-                conversation_id=f"web-{self.sid}",
+                user=user,
+                conversation_id=user,
             )
         return self.bot
 
@@ -104,7 +106,7 @@ _HITS: dict[str, deque] = {}
 _HITS_LOCK = threading.Lock()
 
 _MAX_BODY = 1_000_000          # 1 MB cap on request bodies (DoS guard)
-_SID_RE = re.compile(r"olympus_sid=([A-Za-z0-9]{8,64})")
+_SID_RE = re.compile(r"olympus_sid=([A-Za-z0-9_-]{8,128})")
 
 
 def _resolve_sid(handler: BaseHTTPRequestHandler,
@@ -255,9 +257,32 @@ PAGE = """<!doctype html>
   .card .ok { background: #d9b44a; color: #0e1116; font-weight: bold; }
   .card .no { background: none; border: 1px solid #2a2f3a; color: #9aa3b2; }
   .card .un { background: none; border: 1px solid #2a2f3a; color: #9aa3b2; }
+  #auth { position: fixed; inset: 0; background: #0e1116; z-index: 50;
+          display: flex; align-items: center; justify-content: center; }
+  .authbox { width: 320px; max-width: 90vw; background: #161b24;
+             border: 1px solid #2a2f3a; border-radius: 12px; padding: 24px; }
+  .authbox h2 { margin: 0 0 12px; color: #d9b44a; }
+  .authbox input { width: 100%; box-sizing: border-box; margin: 6px 0;
+                   padding: 9px 11px; background: #0e1116; color: #e8e3d8;
+                   border: 1px solid #2a2f3a; border-radius: 8px; }
+  .authbtns { display: flex; gap: 8px; margin-top: 10px; }
+  .authbtns button { flex: 1; border: 0; border-radius: 8px; padding: 9px;
+                     cursor: pointer; font: inherit; }
 </style>
 </head>
 <body>
+<div id="auth" style="display:none">
+  <div class="authbox">
+    <h2>⚡ OLYMPUS</h2>
+    <p class="sys" id="autherr"></p>
+    <input id="authuser" placeholder="username" autocomplete="username">
+    <input id="authpass" type="password" placeholder="password" autocomplete="current-password">
+    <div class="authbtns">
+      <button id="loginbtn" class="ok">Log in</button>
+      <button id="registerbtn" class="no">Create account</button>
+    </div>
+  </div>
+</div>
 <header>
   <h1>OLYMPUS</h1>
   <span>main agent · supervisor · hallucination controller · 12 specialists</span>
@@ -688,6 +713,29 @@ f.addEventListener('submit', async (ev) => {
       actionsEl.classList.add('open');
   }
 });
+
+// --- accounts (only gates the UI when the server requires login) ---------
+const authEl = document.getElementById('auth');
+const authErr = document.getElementById('autherr');
+async function doAuth(path) {
+  authErr.textContent = '';
+  const r = await fetch(path, {method: 'POST', headers: hdrs(),
+    body: JSON.stringify({username: document.getElementById('authuser').value,
+                          password: document.getElementById('authpass').value})});
+  const d = await r.json();
+  if (d.ok) { authEl.style.display = 'none'; location.reload(); }
+  else authErr.textContent = d.error || 'failed';
+}
+document.getElementById('loginbtn').onclick = () => doAuth('/api/login');
+document.getElementById('registerbtn').onclick = () => doAuth('/api/register');
+async function checkAuth() {
+  try {
+    const d = await (await fetch('/api/me?session=' +
+      encodeURIComponent(session), {headers: hdrs()})).json();
+    if (d.login_required && !d.logged_in) authEl.style.display = 'flex';
+  } catch (e) {}
+}
+checkAuth();
 </script>
 </body>
 </html>
@@ -728,6 +776,44 @@ class Handler(BaseHTTPRequestHandler):
             self._set_cookie = cookie
         return sid
 
+    def _handle_auth(self, path: str, payload: dict) -> None:
+        """Register / log in / log out. On success, set the session-token
+        cookie so every later request is authenticated as this account."""
+        if path == "/api/logout":
+            cookie_sid = _resolve_sid(self, None)[0]
+            accounts.logout(cookie_sid)
+            self._set_cookie = uuid.uuid4().hex      # rotate to a fresh anon id
+            self._json({"ok": True, "logged_in": False})
+            return
+        username = str(payload.get("username", ""))
+        password = str(payload.get("password", ""))
+        try:
+            if path == "/api/register":
+                token = accounts.register(username, password)
+            else:
+                token = accounts.authenticate(username, password)
+                if not token:
+                    self._json({"error": "wrong username or password"}, 401)
+                    return
+        except ValueError as err:
+            self._json({"error": str(err)}, 400)
+            return
+        self._set_cookie = token
+        self._json({"ok": True, "logged_in": True,
+                    "username": username.strip()})
+
+    def _principal(self, sid: str) -> str | None:
+        """The per-user namespace for this request. A logged-in session token
+        (the cookie) maps to an account; otherwise, if login isn't required,
+        fall back to the anonymous per-cookie namespace. Returns None when
+        login is required and the caller isn't authenticated (→ 401)."""
+        ns = accounts.namespace_for_token(sid)
+        if ns:
+            return ns
+        if accounts.require_login():
+            return None
+        return _user_for(sid)
+
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/":
@@ -745,19 +831,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         params = parse_qs(url.query)
         sid = self._session_id(params.get("session", [None])[0])
+        if url.path == "/api/me":
+            sess = accounts.account_for_token(sid)
+            self._json({"login_required": accounts.require_login(),
+                        "logged_in": sess is not None,
+                        "username": sess["username"] if sess else None})
+            return
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
             events = _session(sid).events
             self._json({"events": events[since:], "next": len(events)})
-        elif url.path == "/api/actions":
-            self._json({"actions": _actions_view(_user_for(sid)),
+            return
+        user = self._principal(sid)
+        if user is None:
+            self._json({"error": "login required"}, 401)
+            return
+        if url.path == "/api/actions":
+            self._json({"actions": _actions_view(user),
                         "budget": usage.budget_status()})
         elif url.path == "/api/memory":
-            self._json(_memory_view(_user_for(sid)))
+            self._json(_memory_view(user))
         elif url.path == "/api/connected":
             from . import google_oauth
             self._json({"configured": google_oauth.configured(),
-                        "connected": google_oauth.connected(_user_for(sid))})
+                        "connected": google_oauth.connected(user)})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -783,7 +880,8 @@ class Handler(BaseHTTPRequestHandler):
             body = "<p>Connection cancelled or failed.</p>"
         else:
             try:
-                google_oauth.exchange_code(_user_for(sid), code)
+                google_oauth.exchange_code(
+                    accounts.namespace_for_token(sid) or _user_for(sid), code)
             except Exception as err:
                 body = f"<p>Could not connect: {err}</p>"
         self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),
@@ -792,7 +890,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path not in ("/api/chat", "/api/feedback", "/api/action",
-                        "/api/memory"):
+                        "/api/memory", "/api/register", "/api/login",
+                        "/api/logout"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -802,6 +901,9 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
+        if path in ("/api/register", "/api/login", "/api/logout"):
+            self._handle_auth(path, payload)
+            return
         # Cheap write endpoints get a generous per-IP budget (DoS guard); the
         # expensive /api/chat keeps its own stricter limit further down.
         if path != "/api/chat" and _rate_limited(
@@ -810,6 +912,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)
+        user = self._principal(sid)
+        if user is None:
+            self._json({"error": "login required"}, 401)
+            return
 
         if path == "/api/feedback":
             if session.bot is None:
@@ -821,7 +927,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/action":
-            user = _user_for(sid)
             op = str(payload.get("op", ""))
             aid = str(payload.get("action_id", ""))
             try:
@@ -855,7 +960,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/memory":
             from . import usermem, profile, playbooks, relgraph
-            user = _user_for(sid)
             kind = str(payload.get("kind", "memory"))
             op = str(payload.get("op", ""))
             mid = str(payload.get("id", ""))
@@ -935,7 +1039,7 @@ class Handler(BaseHTTPRequestHandler):
         language = pset.get("language")
         try:
             with session.lock:
-                bot = session.bot_for(pool)
+                bot = session.bot_for(pool, user=user)
                 if isinstance(language, str) and language.strip():
                     bot.set_language(language)
                 bot.set_contribute(bool(pset.get("contribute")))
