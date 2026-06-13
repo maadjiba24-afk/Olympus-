@@ -64,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
     p_prof.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"),
                         help="set a fact, e.g. --set company Acme")
     p_prof.add_argument("--clear", action="store_true", help="forget it all")
+    p_mem = sub.add_parser(
+        "memory", help="inspect/approve/forget durable memories")
+    p_mem.add_argument(
+        "action", nargs="?", default="list",
+        choices=["list", "candidates", "approve", "reject", "forget", "search"])
+    p_mem.add_argument("arg", nargs="*", help="id (approve/reject/forget) or query (search)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -162,6 +168,46 @@ def main(argv: list[str] | None = None) -> int:
             print(card.strip() if card else
                   "Nothing saved yet. Try: olympus profile \"I'm the founder "
                   "of Acme; keep replies concise.\"")
+    elif args.command == "memory":
+        from . import usermem, recall
+        user = "cli"
+        arg = " ".join(args.arg).strip()
+        if args.action == "list":
+            mems = usermem.active_memories(user)
+            if not mems:
+                print("No durable memories yet — they form as you chat.")
+            for m in sorted(mems, key=lambda x: x["type"]):
+                eff = usermem.effective_confidence(m)
+                print(f"  [{m['id']}] ({m['type']}, conf {eff:.2f}) {m['content']}")
+        elif args.action == "candidates":
+            cands = usermem.candidates(user)
+            if not cands:
+                print("No memories awaiting your approval.")
+            for c in cands:
+                print(f"  [{c['id']}] ({c['type']}, {c.get('reason','')}) "
+                      f"{c['content']}\n     → memory approve {c['id']} | reject {c['id']}")
+        elif args.action == "approve":
+            c = usermem.pop_candidate(user, arg)
+            if not c:
+                print("No such candidate.")
+            else:
+                usermem.add_memory(user, type=c["type"], content=c["content"],
+                                   confidence=c.get("confidence", 0.7),
+                                   key=c.get("key"),
+                                   importance=c.get("importance", 0.5),
+                                   sensitivity=c.get("sensitivity", "normal"),
+                                   provenance=c.get("provenance", []))
+                print("Saved.")
+        elif args.action == "reject":
+            print("Dismissed." if usermem.pop_candidate(user, arg) else "No such candidate.")
+        elif args.action == "forget":
+            print("Forgotten." if usermem.tombstone(user, arg) else "No such memory.")
+        elif args.action == "search":
+            hits = recall.retrieve(user, arg)
+            if not hits:
+                print("Nothing relevant.")
+            for m in hits:
+                print(f"  [{m['id']}] ({m['type']}) {m['content']}")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1

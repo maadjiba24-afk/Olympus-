@@ -224,6 +224,21 @@ MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", _default_memory))
 # Per-call output ceiling. Streaming is used everywhere, so this can be large.
 MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
 
+# Conversation state compaction: when the verbatim history exceeds this many
+# estimated tokens, older turns are folded into a compact running "state" block
+# and only the most recent turns are replayed verbatim. Token-based (not turn-
+# count) because cost tracks context size, not the number of messages.
+HISTORY_TOKEN_BUDGET = int(os.environ.get("OLYMPUS_HISTORY_TOKEN_BUDGET", "3000"))
+HISTORY_KEEP_TURNS = int(os.environ.get("OLYMPUS_HISTORY_KEEP_TURNS", "8"))
+
+# Durable per-user memory: extract durable facts from turns (cheap model, in the
+# background), gate them, and retrieve the relevant ones into context.
+MEMORY_ENABLED = os.environ.get("OLYMPUS_MEMORY", "1").lower() not in ("0", "false", "no")
+MEMORY_CONFIDENCE_FLOOR = float(os.environ.get("OLYMPUS_MEMORY_FLOOR", "0.6"))
+MEMORY_RETRIEVAL_FLOOR_CONF = 0.25     # decayed-confidence floor for retrieval
+MEMORY_RETRIEVAL_BUDGET_TOKENS = int(os.environ.get("OLYMPUS_MEMORY_BUDGET", "800"))
+MEMORY_MIN_CHARS = 40                  # skip extraction for trivial turns
+
 # Max tool-use iterations for a single specialist run (guards against loops).
 MAX_AGENT_ITERATIONS = 16
 
