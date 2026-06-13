@@ -133,6 +133,11 @@ def update_content(user: str, mem_id: str, content: str) -> dict | None:
     return _mutate(user, mem_id, lambda m: m.__setitem__("content", content))
 
 
+def set_embedding(user: str, mem_id: str, vector: list) -> dict | None:
+    """Attach a semantic embedding to a memory (used by hybrid retrieval)."""
+    return _mutate(user, mem_id, lambda m: m.__setitem__("embedding", vector))
+
+
 def supersede(user: str, old_id: str, new_mem: dict) -> dict:
     """Replace a memory with a newer one, keeping the old as history."""
     _mutate(user, old_id, lambda m: (m.__setitem__("status", SUPERSEDED),

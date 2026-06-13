@@ -29,6 +29,17 @@ def _user_for(sid: str) -> str:
     return f"web-{sid}"
 
 
+def _memory_view(user: str) -> dict:
+    """Active memories (with decayed confidence) + candidates awaiting approval."""
+    from . import usermem
+    mems = [{"id": m["id"], "type": m["type"], "content": m["content"],
+             "confidence": round(usermem.effective_confidence(m), 2)}
+            for m in usermem.active_memories(user)]
+    cands = [{"id": c["id"], "type": c["type"], "content": c["content"],
+              "reason": c.get("reason", "")} for c in usermem.candidates(user)]
+    return {"memories": mems, "candidates": cands}
+
+
 def _actions_view(user: str) -> list[dict]:
     """Pending actions (awaiting approval) plus recently executed reversible
     ones (so the UI can offer undo)."""
@@ -173,6 +184,17 @@ PAGE = """<!doctype html>
   #actions { display: none; border-bottom: 1px solid #2a2f3a; background: #11151d;
              max-height: 50vh; overflow-y: auto; padding: 12px 20px; }
   #actions.open { display: block; }
+  #memory { display: none; border-bottom: 1px solid #2a2f3a; background: #11151d;
+            max-height: 50vh; overflow-y: auto; padding: 12px 20px; }
+  #memory.open { display: block; }
+  #memcount { color: #0e1116; background: #7bbf7b; border-radius: 10px;
+              padding: 0 7px; font-size: 12px; font-weight: bold; display: none; }
+  #memcount.show { display: inline; }
+  .mem { max-width: 860px; margin: 0 auto 8px; display: flex; gap: 10px;
+         align-items: baseline; justify-content: space-between;
+         border-bottom: 1px solid #20242e; padding-bottom: 6px; }
+  .mem .t { color: #6b7280; font-size: 12px; }
+  .mem .c { color: #c8cdd6; flex: 1; }
   #budget { max-width: 860px; margin: 0 auto 10px; font-size: 13px; }
   #budget.ok { color: #6b7280; }
   #budget.over { color: #e0884a; border: 1px solid #4a392f; background: #1d1712;
@@ -202,9 +224,12 @@ PAGE = """<!doctype html>
   <button id="connect" title="Connect your Google account" style="display:none">🔗 connect Google</button>
   <button id="actbtn" title="Actions awaiting your approval">📋 actions
     <span id="actcount"></span></button>
+  <button id="membtn" title="What Olympus remembers about you">🧠 memory
+    <span id="memcount"></span></button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
 </header>
 <div id="actions"><div id="budget"></div><div id="cards"></div></div>
+<div id="memory"></div>
 <div id="panel">
   <div class="row">
     <label>Provider</label>
@@ -456,6 +481,73 @@ async function editAction(a) {
 setInterval(renderActions, 4000);
 renderActions();
 
+const memoryEl = document.getElementById('memory');
+const memBtn = document.getElementById('membtn');
+const memCount = document.getElementById('memcount');
+memBtn.onclick = () => { memoryEl.classList.toggle('open'); renderMemory(); };
+
+function memRow(m, kind) {
+  const row = document.createElement('div'); row.className = 'mem';
+  const t = document.createElement('span'); t.className = 't'; t.textContent = m.type;
+  const c = document.createElement('span'); c.className = 'c'; c.textContent = m.content;
+  const btns = document.createElement('span');
+  if (kind === 'candidate') {
+    const ok = document.createElement('button'); ok.className='ok'; ok.textContent='Approve';
+    ok.onclick = () => memact(m.id, 'approve');
+    const no = document.createElement('button'); no.className='no'; no.textContent='Dismiss';
+    no.onclick = () => memact(m.id, 'reject');
+    btns.append(ok, no);
+  } else {
+    const f = document.createElement('button'); f.className='no'; f.textContent='Forget';
+    f.onclick = () => memact(m.id, 'forget');
+    btns.append(f);
+  }
+  row.append(t, c, btns);
+  return row;
+}
+
+function renderMemoryData(d) {
+  const cands = d.candidates || [], mems = d.memories || [];
+  memCount.textContent = cands.length;
+  memCount.classList.toggle('show', cands.length > 0);
+  memoryEl.innerHTML = '';
+  if (cands.length) {
+    const h = document.createElement('p'); h.className = 'sys';
+    h.style = 'max-width:860px;margin:4px auto'; h.textContent =
+      'Awaiting your approval (sensitive or uncertain) — nothing here was saved automatically:';
+    memoryEl.appendChild(h);
+    cands.forEach(m => memoryEl.appendChild(memRow(m, 'candidate')));
+  }
+  if (mems.length) {
+    const h = document.createElement('p'); h.className = 'sys';
+    h.style = 'max-width:860px;margin:10px auto 4px'; h.textContent =
+      'What Olympus remembers about you:';
+    memoryEl.appendChild(h);
+    mems.forEach(m => memoryEl.appendChild(memRow(m, 'memory')));
+  }
+  if (!cands.length && !mems.length) {
+    memoryEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
+      'Nothing remembered yet — Olympus learns durable facts as you chat, and ' +
+      'anything sensitive waits here for your approval.</p>';
+  }
+}
+
+async function renderMemory() {
+  try {
+    const r = await fetch('/api/memory?session=' + encodeURIComponent(session),
+                          {headers: hdrs()});
+    renderMemoryData(await r.json());
+  } catch (e) {}
+}
+
+async function memact(id, op) {
+  const r = await fetch('/api/memory', {method:'POST', headers: hdrs(),
+    body: JSON.stringify({session: session, id: id, op: op})});
+  renderMemoryData(await r.json());
+}
+setInterval(renderMemory, 8000);
+renderMemory();
+
 const connectBtn = document.getElementById('connect');
 connectBtn.onclick = () => window.open(
   '/oauth/google/start?session=' + encodeURIComponent(session),
@@ -565,6 +657,9 @@ class Handler(BaseHTTPRequestHandler):
             sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"actions": _actions_view(_user_for(sid)),
                         "budget": usage.budget_status()})
+        elif url.path == "/api/memory":
+            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+            self._json(_memory_view(_user_for(sid)))
         elif url.path == "/api/connected":
             from . import google_oauth
             sid = parse_qs(url.query).get("session", ["default"])[0][:64]
@@ -603,7 +698,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path not in ("/api/chat", "/api/feedback", "/api/action"):
+        if path not in ("/api/chat", "/api/feedback", "/api/action",
+                        "/api/memory"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -656,6 +752,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "message": msg,
                         "actions": _actions_view(user),
                         "budget": usage.budget_status()})
+            return
+
+        if path == "/api/memory":
+            from . import usermem
+            user = _user_for(sid)
+            op = str(payload.get("op", ""))
+            mid = str(payload.get("id", ""))
+            if op == "approve":
+                c = usermem.pop_candidate(user, mid)
+                if c:
+                    usermem.add_memory(
+                        user, type=c["type"], content=c["content"],
+                        confidence=c.get("confidence", 0.7), key=c.get("key"),
+                        importance=c.get("importance", 0.5),
+                        sensitivity=c.get("sensitivity", "normal"),
+                        provenance=c.get("provenance", []))
+            elif op == "reject":
+                usermem.pop_candidate(user, mid)
+            elif op == "forget":
+                usermem.tombstone(user, mid)
+            else:
+                self._json({"error": "unknown op"}, 400)
+                return
+            self._json({"ok": True, **_memory_view(user)})
             return
 
         # /api/chat
