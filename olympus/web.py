@@ -22,7 +22,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import actions, builtin_actions, config, orchestrator  # noqa: F401
+from . import actions, builtin_actions, config, orchestrator, usage  # noqa: F401
 
 
 def _user_for(sid: str) -> str:
@@ -173,6 +173,11 @@ PAGE = """<!doctype html>
   #actions { display: none; border-bottom: 1px solid #2a2f3a; background: #11151d;
              max-height: 50vh; overflow-y: auto; padding: 12px 20px; }
   #actions.open { display: block; }
+  #budget { max-width: 860px; margin: 0 auto 10px; font-size: 13px; }
+  #budget.ok { color: #6b7280; }
+  #budget.over { color: #e0884a; border: 1px solid #4a392f; background: #1d1712;
+                 border-radius: 8px; padding: 8px 12px; }
+  #budget:empty { display: none; }
   .card { max-width: 860px; margin: 0 auto 12px; border: 1px solid #2a2f3a;
           border-radius: 10px; padding: 12px 14px; background: #161b24; }
   .card .top { display: flex; justify-content: space-between; align-items: baseline; }
@@ -199,7 +204,7 @@ PAGE = """<!doctype html>
     <span id="actcount"></span></button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
 </header>
-<div id="actions"></div>
+<div id="actions"><div id="budget"></div><div id="cards"></div></div>
 <div id="panel">
   <div class="row">
     <label>Provider</label>
@@ -359,17 +364,28 @@ async function poll() {
 }
 
 const actionsEl = document.getElementById('actions');
+const cardsEl = document.getElementById('cards');
+const budgetEl = document.getElementById('budget');
 const actBtn = document.getElementById('actbtn');
 const actCount = document.getElementById('actcount');
 actBtn.onclick = () => { actionsEl.classList.toggle('open'); renderActions(); };
+
+function renderBudget(b) {
+  if (!b || !b.enabled) { budgetEl.className = ''; budgetEl.textContent = ''; return; }
+  budgetEl.className = b.exceeded ? 'over' : 'ok';
+  budgetEl.textContent = b.exceeded
+    ? 'Daily budget reached: $' + b.spent.toFixed(2) + ' / $' + b.limit.toFixed(2) +
+      ' — Olympus paused new requests to protect your API bill.'
+    : 'Today on your API key: $' + b.spent.toFixed(2) + ' / $' + b.limit.toFixed(2);
+}
 
 function renderCards(list) {
   const pending = list.filter(a => a.status === 'prepared');
   actCount.textContent = pending.length;
   actCount.classList.toggle('show', pending.length > 0);
-  actionsEl.innerHTML = '';
+  cardsEl.innerHTML = '';
   if (!list.length) {
-    actionsEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
+    cardsEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
       'No actions to review. When Olympus prepares one (e.g. an email to send), ' +
       'it appears here for your approval.</p>';
     return;
@@ -399,7 +415,7 @@ function renderCards(list) {
       un.onclick = () => act(a.id, 'undo');
       btns.append(un);
     }
-    actionsEl.appendChild(card);
+    cardsEl.appendChild(card);
   });
 }
 
@@ -407,7 +423,9 @@ async function renderActions() {
   try {
     const r = await fetch('/api/actions?session=' + encodeURIComponent(session),
                           {headers: hdrs()});
-    renderCards((await r.json()).actions || []);
+    const d = await r.json();
+    renderBudget(d.budget);
+    renderCards(d.actions || []);
   } catch (e) {}
 }
 
@@ -417,6 +435,7 @@ async function act(id, op) {
   const r = await fetch('/api/action', {method:'POST', headers: hdrs(),
                                         body: JSON.stringify(body)});
   const d = await r.json();
+  if (d.budget) renderBudget(d.budget);
   if (d.actions) renderCards(d.actions); else renderActions();
 }
 
@@ -431,6 +450,7 @@ async function editAction(a) {
     body: JSON.stringify({session: session, action_id: a.id,
                           op: 'edit', changes: changes})});
   const d = await r.json();
+  if (d.budget) renderBudget(d.budget);
   if (d.actions) renderCards(d.actions); else renderActions();
 }
 setInterval(renderActions, 4000);
@@ -543,7 +563,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"events": events[since:], "next": len(events)})
         elif url.path == "/api/actions":
             sid = parse_qs(url.query).get("session", ["default"])[0][:64]
-            self._json({"actions": _actions_view(_user_for(sid))})
+            self._json({"actions": _actions_view(_user_for(sid)),
+                        "budget": usage.budget_status()})
         elif url.path == "/api/connected":
             from . import google_oauth
             sid = parse_qs(url.query).get("session", ["default"])[0][:64]
@@ -633,7 +654,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(err)}, 400)
                 return
             self._json({"ok": True, "message": msg,
-                        "actions": _actions_view(user)})
+                        "actions": _actions_view(user),
+                        "budget": usage.budget_status()})
             return
 
         # /api/chat

@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               trace as trace_mod, tools)
+               trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -468,6 +468,10 @@ class Olympus:
         error = self.settings.validate()
         if error:
             return f"Configuration problem: {error}"
+        try:
+            usage.check_budget()
+        except usage.BudgetExceeded as err:
+            return str(err)
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask", self.user)
         try:
@@ -492,6 +496,11 @@ class Olympus:
         error = self.settings.validate()
         if error:
             yield f"Configuration problem: {error}"
+            return
+        try:
+            usage.check_budget()
+        except usage.BudgetExceeded as err:
+            yield str(err)
             return
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask_stream", self.user)
@@ -603,9 +612,22 @@ def note_conversation(report: Reporter = _silent) -> None:
 
 # --- one-shot autonomous routines (used by the heartbeat and CLI) -----------
 
+def _budget_skip() -> str | None:
+    """Background routines run unattended and make many calls — exactly where a
+    runaway bill happens. If the daily budget is reached, skip rather than spend.
+    Returns a short message to return, or None to proceed."""
+    try:
+        usage.check_budget()
+        return None
+    except usage.BudgetExceeded as err:
+        return f"[skipped to stay within the daily budget — {err}]"
+
+
 def opportunity_scan(settings: config.Settings | None = None) -> str:
     """Argus surfs the web for opportunities & world events; report → memory."""
     memory.set_user("shared")
+    if (skip := _budget_skip()):
+        return skip
     task = (
         "Run your full scan now: current world events that matter, emerging "
         "business opportunities, and anything actionable. Finish with the "
@@ -619,6 +641,8 @@ def opportunity_scan(settings: config.Settings | None = None) -> str:
 def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     """Mnemosyne watches one YouTube video and stores what it learned."""
     memory.set_user("shared")
+    if (skip := _budget_skip()):
+        return skip
     task = (
         f"Watch this YouTube video and learn from it: {url}\n"
         "Use watch_youtube to get the transcript, then produce the summary "
@@ -635,6 +659,8 @@ def daily_learning(settings: config.Settings | None = None) -> str:
     that makes Olympus smarter day by day, across every model users bring."""
     from . import skills
     memory.set_user("shared")
+    if (skip := _budget_skip()):
+        return skip
     cross_model = contrib.digest(40)
     task = (
         "Run your daily learning cycle now.\n"
@@ -678,6 +704,8 @@ def train_specialists(settings: config.Settings | None = None,
     from . import evals
     settings = settings or config.Settings.from_env()
     memory.set_user("shared")
+    if (skip := _budget_skip()):
+        return skip
 
     generated = evals.ensure_coverage(min_items=1, settings=settings)
     scores = evals.per_specialist_scores(settings)
@@ -784,6 +812,8 @@ def evolution_audit(settings: config.Settings | None = None) -> str:
     # (This routine can be launched from a background thread spawned inside a
     # user request, which would otherwise inherit that user's memory context.)
     memory.set_user("shared")
+    if (skip := _budget_skip()):
+        return skip
     task = (
         "Run a full self-audit of Olympus now:\n"
         "1. list_source_files and read the parts that matter.\n"

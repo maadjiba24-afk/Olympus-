@@ -230,6 +230,11 @@ MAX_AGENT_ITERATIONS = 16
 # Process-wide cap on concurrent model calls (backpressure vs rate limits).
 MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
 
+# Budget guard: max estimated USD/day on the user's own API key before Olympus
+# pauses new requests (0 = no cap). Protects the BYOK bill; can also be set at
+# runtime with `olympus budget <amount>`, which takes precedence.
+DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET", "0") or 0)
+
 # Heartbeat cadence (seconds).
 HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
