@@ -86,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
+    p_budget = sub.add_parser(
+        "budget", help="show or set the daily spend cap on your API key (USD)")
+    p_budget.add_argument("amount", nargs="?", type=float,
+                          help="e.g. 5  (0 removes the cap)")
 
     # --- the Action spine (controlled-autonomy execution) ---
     sub.add_parser("actions", help="list pending actions awaiting approval")
@@ -106,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     p_gr.add_argument("scope")
     p_rv = sub.add_parser("revoke", help="revoke a scope ('all' = kill switch)")
     p_rv.add_argument("scope")
+    p_lim = sub.add_parser(
+        "limit", help="show or set daily execution caps per action type")
+    p_lim.add_argument("type", nargs="?", help="action type, e.g. gmail_send")
+    p_lim.add_argument("n", nargs="?", type=int, help="max per day (0 = off)")
 
     sub.add_parser("connectors", help="list configured MCP servers and plugins")
     p_mcp = sub.add_parser("add-mcp", help="add an MCP server connector")
@@ -169,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import config
         print(config.ModelPool.from_env().assignment())
     elif args.command in ("actions", "approve", "reject", "edit", "undo",
-                          "autonomy", "grant", "revoke"):
+                          "autonomy", "grant", "revoke", "limit"):
         from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
         user = "cli"
         if args.command == "actions":
@@ -213,6 +221,30 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "revoke":
             print(actions.revoke_all(user) if args.scope == "all"
                   else actions.revoke_scope(user, args.scope))
+        elif args.command == "limit":
+            if args.type is None:
+                eff = actions.limits(user)
+                if not eff:
+                    print("No action types registered.")
+                print("Daily execution limits (0 = unlimited):")
+                for name, n in sorted(eff.items()):
+                    print(f"  {name}: {n if n else 'unlimited'}")
+            elif args.n is None:
+                print(f"{args.type}: {actions.daily_limit(user, args.type) or 'unlimited'} per day")
+            else:
+                print(actions.set_limit(user, args.type, args.n))
+    elif args.command == "budget":
+        from . import usage
+        if args.amount is None:
+            b = usage.budget_status()
+            if not b["enabled"]:
+                print("No daily budget set. Olympus will not cap spend on your "
+                      "API key.\nSet one with `olympus budget 5` (USD/day).")
+            else:
+                print(f"Daily budget: ${b['spent']:.4f} / ${b['limit']:.2f} "
+                      f"spent today" + ("  ⚠ reached" if b["exceeded"] else ""))
+        else:
+            print(usage.set_budget(args.amount))
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()

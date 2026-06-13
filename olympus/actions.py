@@ -204,6 +204,59 @@ def revoke_all(user: str) -> str:
     return "Revoked all integration scopes (kill switch)."
 
 
+# --- daily rate limits (runaway / abuse guard, per action type) -----------
+# A confused or prompt-injected agent shouldn't be able to flood the world with
+# real actions even if approvals come quickly. These cap how many of a given
+# action type may EXECUTE per day. They guard against runaway behavior, not
+# spend — drafting and rejecting never count. 0 = unlimited.
+_DEFAULT_LIMITS = {
+    TRIVIAL: 0,            # save a note — no cap
+    NOTABLE: 0,            # reversible edits — no cap
+    IRREVERSIBLE: 50,      # send email, post — generous runaway guard
+    FINANCIAL_LEGAL: 10,   # pay, sign, delete — tighter (also always approved)
+}
+
+
+def daily_limit(user: str, type_name: str) -> int:
+    """Max executions/day for an action type. A per-user override (set via
+    `olympus limit`) wins over the risk-class default; 0 means unlimited."""
+    overrides = prefs.get(user, "action_limits", {}) or {}
+    if type_name in overrides:
+        try:
+            return max(0, int(overrides[type_name]))
+        except (TypeError, ValueError):
+            pass
+    at = _REGISTRY.get(type_name)
+    return _DEFAULT_LIMITS.get(at.risk_class, 0) if at else 0
+
+
+def set_limit(user: str, type_name: str, n: int) -> str:
+    """Persist a per-user daily execution cap for an action type (0 = off)."""
+    overrides = dict(prefs.get(user, "action_limits", {}) or {})
+    overrides[type_name] = max(0, int(n))
+    prefs.set(user, "action_limits", overrides)
+    if overrides[type_name] == 0:
+        return f"Removed the daily limit on '{type_name}' (now unlimited)."
+    return (f"Daily limit for '{type_name}' set to {overrides[type_name]} "
+            f"execution(s) per day.")
+
+
+def limits(user: str) -> dict[str, int]:
+    """Effective daily limits for every registered action type (0 = unlimited)."""
+    return {name: daily_limit(user, name) for name in _REGISTRY}
+
+
+def _executed_today(user: str, type_name: str) -> int:
+    """How many actions of this type already executed today, for this user."""
+    midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    count = 0
+    for a in history(user, limit=10000):
+        if (a.type == type_name and a.status == EXECUTED
+                and a.executed_at and a.executed_at >= midnight):
+            count += 1
+    return count
+
+
 # --- the state machine ----------------------------------------------------
 
 def prepare(user: str, type_name: str, payload: dict,
@@ -275,6 +328,15 @@ def _execute(action: Action) -> Action:
         action.error = (f"permission '{at.scope}' not granted — "
                         "grant it before executing")
         _save(action); _audit(action, "blocked_no_scope")
+        return action
+    limit = daily_limit(action.user, action.type)
+    if limit > 0 and _executed_today(action.user, action.type) >= limit:
+        action.status = FAILED
+        action.error = (
+            f"daily limit reached — already executed {limit} '{action.type}' "
+            f"action(s) today. This guards against a runaway agent; raise it "
+            f"with `olympus limit {action.type} <n>` (0 = unlimited).")
+        _save(action); _audit(action, "blocked_rate_limit")
         return action
     try:
         action.result = at.execute(action.payload) or {}
