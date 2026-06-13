@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               profile, trace as trace_mod, tools, usage)
+               profile, recall, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -117,7 +117,8 @@ class Olympus:
     def _route(self, user_message: str) -> dict[str, Any]:
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user)
-                  + profile.card(self.user))
+                  + profile.card(self.user)
+                  + recall.context_block(self.user, user_message))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -273,7 +274,8 @@ class Olympus:
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
         system = (agent.load_prompt("zeus") + i18n.directive(self.user)
-                  + profile.card(self.user))
+                  + profile.card(self.user)
+                  + recall.context_block(self.user, user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -433,10 +435,17 @@ class Olympus:
     def _finish(self, user_message: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_message})
         self.history.append({"role": "assistant", "content": reply})
-        if len(self.history) > 24:
-            self._compress_history()
+        self._maybe_compact()
         if self.conversation_id:
             memory.save_conversation(self.conversation_id, self.history)
+        # Learn durable facts about this user in the background (cheap model),
+        # so the reply is never delayed by it. Best-effort; guarded inside.
+        if config.MEMORY_ENABLED:
+            threading.Thread(
+                target=recall.extract,
+                args=(self.user, user_message, reply,
+                      self.pool.for_role("reasoning")),
+                daemon=True).start()
         # Opt-in cross-model learning: contribute an anonymized snapshot tagged
         # with the model that produced it (only if this user opted in).
         try:
@@ -446,23 +455,48 @@ class Olympus:
             pass
         note_conversation(self.report)
 
+    @staticmethod
+    def _estimate_tokens(history: list[dict[str, Any]]) -> int:
+        """Cheap, dependency-free token estimate (~4 chars/token) — enough to
+        decide *when* to compact without pulling in a tokenizer."""
+        chars = sum(len(str(m.get("content", ""))) for m in history)
+        return chars // 4
+
+    def _maybe_compact(self) -> None:
+        """Replay compact state, not full history. Compact only when the
+        verbatim history actually exceeds the token budget — so short chats
+        never pay for summarization, and a single huge paste triggers it even
+        at turn one."""
+        if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
+            return
+        if len(self.history) <= config.HISTORY_KEEP_TURNS:
+            return  # everything is in the verbatim tail; nothing to fold away
+        self._compress_history()
+
     def _compress_history(self) -> None:
-        """Summarize older turns instead of dropping them, so long
-        conversations keep their context without unbounded growth."""
-        old, keep = self.history[:-12], self.history[-12:]
+        """Fold older turns into a single running 'conversation state' block,
+        keeping only the most recent turns verbatim. The block carries facts,
+        decisions, preferences, and open threads forward — and because the old
+        slice already includes any prior state block, summaries fold
+        incrementally rather than re-growing."""
+        keep_n = config.HISTORY_KEEP_TURNS
+        old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
         try:
             summary = backend.complete_text(
                 self.settings,
-                "Summarize this conversation history into durable context — "
-                "facts, decisions, user preferences, open threads. Be concise.",
+                "Update the durable conversation state from this history — "
+                "facts, decisions, user preferences, and open threads only. "
+                "Be concise; this replaces the raw turns.",
                 [{"role": "user", "content": as_text}], effort="low")
         except Exception:
             self.history = keep  # fall back to truncation on any failure
             return
         self.history = [
-            {"role": "user", "content": "[Earlier conversation summary]\n" + summary},
+            {"role": "user",
+             "content": "[Conversation state — durable context from earlier "
+                        "turns]\n" + summary},
             {"role": "assistant", "content": "Understood — continuing with that context."},
         ] + keep
 
@@ -514,7 +548,8 @@ class Olympus:
                 return
             self.report("⚡ Zeus composes the final answer...")
             system = (agent.load_prompt("zeus") + i18n.directive(self.user)
-                      + profile.card(self.user))
+                      + profile.card(self.user)
+                      + recall.context_block(self.user, user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"
