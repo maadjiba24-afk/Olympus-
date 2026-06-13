@@ -79,6 +79,11 @@ def main(argv: list[str] | None = None) -> int:
     p_pb.add_argument("name", nargs="?", help="playbook name or id")
     p_pb.add_argument("steps", nargs="*",
                       help="for save: steps separated by ';'")
+    p_gr = sub.add_parser(
+        "graph", help="inspect the people/companies relationship graph")
+    p_gr.add_argument("entity", nargs="*",
+                      help="an entity to describe (no args = list everything)")
+    p_gr.add_argument("--forget", metavar="ENTITY", help="remove an entity")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -255,6 +260,23 @@ def main(argv: list[str] | None = None) -> int:
             print("Removed." if playbooks.delete(user, name) else "No such playbook.")
         elif args.action == "forget":
             print("Forgotten." if playbooks.delete(user, name) else "No such playbook.")
+    elif args.command == "graph":
+        from . import relgraph
+        user = "cli"
+        if args.forget:
+            print("Removed." if relgraph.forget(user, args.forget)
+                  else "No such entity.")
+        elif args.entity:
+            desc = relgraph.describe(user, " ".join(args.entity))
+            print(desc or "No such entity in the graph.")
+        else:
+            ns = relgraph.nodes(user)
+            if not ns:
+                print("The relationship graph is empty — it fills in as you "
+                      "mention people and companies.")
+            for n in ns:
+                conns = relgraph.neighbors(user, n["id"])
+                print(f"  {n['label']} ({n['kind']}) — {len(conns)} connection(s)")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1

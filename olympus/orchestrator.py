@@ -29,7 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               playbooks, profile, recall, trace as trace_mod, tools, usage)
+               playbooks, profile, recall, relgraph,
+               trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -119,7 +120,8 @@ class Olympus:
                   + roster() + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
-                  + playbooks.context_block(self.user, user_message))
+                  + playbooks.context_block(self.user, user_message)
+                  + relgraph.context_block(self.user, user_message))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -277,7 +279,8 @@ class Olympus:
         system = (agent.load_prompt("zeus") + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
-                  + playbooks.context_block(self.user, user_message))
+                  + playbooks.context_block(self.user, user_message)
+                  + relgraph.context_block(self.user, user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -559,7 +562,8 @@ class Olympus:
             system = (agent.load_prompt("zeus") + i18n.directive(self.user)
                       + profile.card(self.user)
                       + recall.context_block(self.user, user_message)
-                      + playbooks.context_block(self.user, user_message))
+                      + playbooks.context_block(self.user, user_message)
+                  + relgraph.context_block(self.user, user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"
