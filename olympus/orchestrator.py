@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               trace as trace_mod, tools, usage)
+               profile, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -116,7 +116,8 @@ class Olympus:
 
     def _route(self, user_message: str) -> dict[str, Any]:
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
-                  + roster() + i18n.directive(self.user))
+                  + roster() + i18n.directive(self.user)
+                  + profile.card(self.user))
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -271,7 +272,8 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        system = agent.load_prompt("zeus") + i18n.directive(self.user)
+        system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+                  + profile.card(self.user))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -511,7 +513,8 @@ class Olympus:
                 self._finish(user_message, result)
                 return
             self.report("⚡ Zeus composes the final answer...")
-            system = agent.load_prompt("zeus") + i18n.directive(self.user)
+            system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+                      + profile.card(self.user))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"

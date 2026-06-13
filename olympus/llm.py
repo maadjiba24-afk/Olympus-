@@ -17,6 +17,18 @@ from . import config, usage
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 
 
+def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Add a cache breakpoint to the tool list so the (often large) tool
+    schemas are billed once and then read from cache on every later turn of
+    the agent loop. The breakpoint on the last tool caches the whole array;
+    we copy rather than mutate the caller's dicts."""
+    if not tools:
+        return tools
+    out = [dict(t) for t in tools]
+    out[-1] = {**out[-1], "cache_control": {"type": "ephemeral"}}
+    return out
+
+
 def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
     key = settings.api_key if settings else None
     base = settings.base_url if settings else None
@@ -65,7 +77,7 @@ def complete(
     if container:
         params["container"] = container
     if tools:
-        params["tools"] = tools
+        params["tools"] = _cache_tools(tools)
     if output_schema:
         params["output_config"]["format"] = {
             "type": "json_schema",
