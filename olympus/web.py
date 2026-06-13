@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -102,6 +103,24 @@ _SESSIONS_LOCK = threading.Lock()
 _HITS: dict[str, deque] = {}
 _HITS_LOCK = threading.Lock()
 
+_MAX_BODY = 1_000_000          # 1 MB cap on request bodies (DoS guard)
+_SID_RE = re.compile(r"olympus_sid=([A-Za-z0-9]{8,64})")
+
+
+def _resolve_sid(handler: BaseHTTPRequestHandler,
+                 provided: str | None) -> tuple[str, str | None]:
+    """Determine the session id, preferring a server-issued HttpOnly cookie so
+    browser users get an unguessable, isolated session automatically (no shared
+    'default' namespace, no manual session strings). Falls back to an explicit
+    `session` value for programmatic/CLI use. Returns (sid, cookie_to_set)."""
+    m = _SID_RE.search(handler.headers.get("Cookie", "") or "")
+    if m:
+        return m.group(1), None
+    if provided:
+        return provided[:64], None
+    sid = uuid.uuid4().hex                       # fresh, random, server-issued
+    return sid, sid
+
 
 def _session(sid: str) -> _Session:
     with _SESSIONS_LOCK:
@@ -112,19 +131,26 @@ def _session(sid: str) -> _Session:
         return _SESSIONS[sid]
 
 
-def _rate_limited(ip: str) -> bool:
-    limit = int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
+def _rate_limited(key: str, limit: int) -> bool:
+    """Per-key sliding-window limiter (60s). Separate keys let the expensive
+    chat endpoint and the cheap write endpoints have independent budgets."""
     if limit <= 0:
         return False
     now = time.time()
     with _HITS_LOCK:
-        hits = _HITS.setdefault(ip, deque())
+        if len(_HITS) > 5000:          # bound the limiter's own memory
+            _HITS.clear()
+        hits = _HITS.setdefault(key, deque())
         while hits and now - hits[0] > 60:
             hits.popleft()
         if len(hits) >= limit:
             return True
         hits.append(now)
     return False
+
+
+def _chat_limit() -> int:
+    return int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -673,6 +699,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        cookie = getattr(self, "_set_cookie", None)
+        if cookie:
+            self.send_header("Set-Cookie",
+                             f"olympus_sid={cookie}; HttpOnly; SameSite=Strict; "
+                             "Path=/; Max-Age=31536000")
+            self._set_cookie = None       # set once per response
         self.end_headers()
         self.wfile.write(body)
 
@@ -682,13 +714,24 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length > _MAX_BODY:        # reject oversized bodies (DoS guard)
+                return None
             return json.loads(self.rfile.read(length))
         except Exception:
             return None
 
+    def _session_id(self, provided: str | None = None) -> str:
+        """Resolve the session id (cookie-preferred) and arrange to set the
+        cookie on the response if a fresh one was minted."""
+        sid, cookie = _resolve_sid(self, provided)
+        if cookie:
+            self._set_cookie = cookie
+        return sid
+
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/":
+            self._session_id()           # issue the session cookie up front
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             return
         if url.path == "/oauth/google/start":
@@ -700,22 +743,19 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
+        params = parse_qs(url.query)
+        sid = self._session_id(params.get("session", [None])[0])
         if url.path == "/api/status":
-            params = parse_qs(url.query)
             since = int(params.get("since", ["0"])[0])
-            sid = params.get("session", ["default"])[0][:64]
             events = _session(sid).events
             self._json({"events": events[since:], "next": len(events)})
         elif url.path == "/api/actions":
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"actions": _actions_view(_user_for(sid)),
                         "budget": usage.budget_status()})
         elif url.path == "/api/memory":
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json(_memory_view(_user_for(sid)))
         elif url.path == "/api/connected":
             from . import google_oauth
-            sid = parse_qs(url.query).get("session", ["default"])[0][:64]
             self._json({"configured": google_oauth.configured(),
                         "connected": google_oauth.connected(_user_for(sid))})
         else:
@@ -723,7 +763,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _oauth_start(self, url) -> None:
         from . import google_oauth
-        sid = parse_qs(url.query).get("session", ["default"])[0][:64]
+        sid = self._session_id(parse_qs(url.query).get("session", [None])[0])
         try:
             target = google_oauth.authorize_url(state=sid)
         except google_oauth.OAuthError as err:
@@ -736,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
     def _oauth_callback(self, url) -> None:
         from . import google_oauth
         params = parse_qs(url.query)
-        sid = params.get("state", ["default"])[0][:64]
+        sid = self._session_id(params.get("state", [None])[0])
         code = params.get("code", [""])[0]
         body = "<p>Google account connected. You can close this tab.</p>"
         if not code:
@@ -762,7 +802,13 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
-        sid = str(payload.get("session") or uuid.uuid4())[:64]
+        # Cheap write endpoints get a generous per-IP budget (DoS guard); the
+        # expensive /api/chat keeps its own stricter limit further down.
+        if path != "/api/chat" and _rate_limited(
+                "w:" + self.client_address[0], 60):
+            self._json({"error": "rate limit exceeded — slow down"}, 429)
+            return
+        sid = self._session_id(payload.get("session"))
         session = _session(sid)
 
         if path == "/api/feedback":
@@ -857,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # /api/chat
-        if _rate_limited(self.client_address[0]):
+        if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
         message = payload.get("message")

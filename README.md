@@ -302,6 +302,16 @@ balancer with managed certificates works equally well — the only hard
 requirement is `proxy_buffering off` (or the equivalent) so streamed answers
 aren't held back.
 
+**Built-in hardening for shared use.** Each browser gets its own unguessable,
+`HttpOnly` session cookie, so users never collide or read each other's memory
+and actions — no manual session strings. Request bodies are capped (1 MB), the
+expensive chat endpoint and the cheap write endpoints have separate per-IP rate
+limits, and per-user memory, the relationship graph, and playbooks are all
+bounded (weakest memories are pruned past the cap) so storage and prompt size
+stay in check. The access token remains the trust boundary; for fully
+untrusted, multi-tenant public use you'd still want real per-user accounts (not
+yet built).
+
 ## Usage
 
 ```bash
