@@ -29,6 +29,10 @@ _STOP = frozenset(("the", "for", "and", "run", "this", "that", "your", "with",
                    "now", "please", "again", "let", "make", "give"))
 
 ACTIVE, PROPOSED, DEPRECATED = "active", "proposed", "deprecated"
+_MAX_PLAYBOOKS = 200       # per user
+_MAX_STEPS = 40            # per playbook
+_MAX_STEP_LEN = 400        # per step
+_MAX_NAME_LEN = 100
 
 
 def _tok(text: str) -> set[str]:
@@ -61,14 +65,16 @@ def _find(items: list, name_or_id: str) -> dict | None:
 def save(user: str, name: str, steps: list[str], status: str = ACTIVE) -> dict:
     """Create a playbook, or bump an existing one to a new version (keeping its
     id and use stats). Empty steps are dropped."""
-    steps = [s.strip() for s in steps if s and s.strip()]
-    name = name.strip()
+    steps = [s.strip()[:_MAX_STEP_LEN] for s in steps if s and s.strip()][:_MAX_STEPS]
+    name = name.strip()[:_MAX_NAME_LEN]
     if not name or not steps:
         raise ValueError("a playbook needs a name and at least one step")
     now = time.time()
     with _LOCK:
         items = _load(user)
         existing = _find(items, name)
+        if not existing and len(items) >= _MAX_PLAYBOOKS:
+            raise ValueError("too many playbooks — remove some first")
         if existing:
             existing["steps"] = steps
             existing["version"] += 1

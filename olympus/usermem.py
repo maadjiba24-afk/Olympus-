@@ -36,6 +36,9 @@ ACTIVE, SUPERSEDED, TOMBSTONED = "active", "superseded", "tombstoned"
 _LOCK = threading.Lock()
 _EVENTS, _MEMS, _CANDS = "usermem.events", "usermem.memories", "usermem.candidates"
 _MAX_EVENTS = 2000          # cap raw provenance; typed memory is the durable view
+_MAX_MEMORIES = 500         # per user; prune the weakest beyond this (cost/bloat)
+_MAX_CANDIDATES = 100       # per user; bound the approval queue
+_MAX_CONTENT = 600          # per memory; truncate to bound context + storage
 
 
 def _load(ns: str, user: str) -> list:
@@ -79,7 +82,7 @@ def add_memory(user: str, *, type: str, content: str, confidence: float,
     now = time.time()
     mem = {
         "id": uuid.uuid4().hex[:12], "type": type, "key": key,
-        "content": content, "confidence": round(float(confidence), 3),
+        "content": str(content)[:_MAX_CONTENT], "confidence": round(float(confidence), 3),
         "importance": round(float(importance), 3), "sensitivity": sensitivity,
         "half_life_days": HALF_LIFE.get(type, 365), "status": ACTIVE,
         "superseded_by": None, "provenance": provenance or [],
@@ -88,8 +91,28 @@ def add_memory(user: str, *, type: str, content: str, confidence: float,
     with _LOCK:
         mems = _load(_MEMS, user)
         mems.append(mem)
+        _prune(mems)
         _save(_MEMS, user, mems)
     return mem
+
+
+def _prune(mems: list) -> None:
+    """Keep the store bounded: drop the weakest ACTIVE memories (lowest decayed
+    confidence) once past the cap. Non-active rows are kept as history but don't
+    count toward the cap and are trimmed first if the list grows huge."""
+    active = [m for m in mems if m["status"] == ACTIVE]
+    if len(active) <= _MAX_MEMORIES:
+        # still trim total bloat from superseded/tombstoned tails
+        if len(mems) > _MAX_MEMORIES * 3:
+            keep_ids = {m["id"] for m in active}
+            inactive = [m for m in mems if m["id"] not in keep_ids]
+            drop = set(id(m) for m in inactive[:len(mems) - _MAX_MEMORIES * 3])
+            mems[:] = [m for m in mems if id(m) not in drop]
+        return
+    now = time.time()
+    weakest = sorted(active, key=lambda m: effective_confidence(m, now))
+    drop_ids = {m["id"] for m in weakest[:len(active) - _MAX_MEMORIES]}
+    mems[:] = [m for m in mems if m["id"] not in drop_ids]
 
 
 def all_memories(user: str) -> list:
@@ -168,7 +191,7 @@ def add_candidate(user: str, cand: dict) -> dict:
     with _LOCK:
         cands = _load(_CANDS, user)
         cands.append(cand)
-        _save(_CANDS, user, cands)
+        _save(_CANDS, user, cands[-_MAX_CANDIDATES:])   # bound the queue
     return cand
 
 

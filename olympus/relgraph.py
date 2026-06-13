@@ -28,6 +28,14 @@ _STOP = frozenset(("the", "and", "for", "inc", "llc", "ltd", "corp", "co"))
 
 PERSON, COMPANY, OTHER = "person", "company", "other"
 _MAX_NODES_INJECTED = 8
+_MAX_NODES = 400            # per user; bound storage + injection cost
+_MAX_LABEL = 80            # entity labels are names, not paragraphs
+
+
+def _clean_label(label: str) -> str:
+    """Labels are entity names — collapse to a single line and cap length so
+    extracted content can't smuggle newlines/instructions into context."""
+    return " ".join(str(label or "").split())[:_MAX_LABEL]
 
 
 def _tok(text: str) -> set[str]:
@@ -53,7 +61,7 @@ def _save(ns: str, user: str, data: list) -> None:
 
 def add_node(user: str, label: str, kind: str = OTHER) -> dict:
     """Add an entity, or return the existing one (matched case-insensitively)."""
-    label = (label or "").strip()
+    label = _clean_label(label)
     if not label:
         raise ValueError("a node needs a label")
     with _LOCK:
@@ -64,6 +72,8 @@ def add_node(user: str, label: str, kind: str = OTHER) -> dict:
                     n["kind"] = kind          # upgrade an unknown kind
                     _save(_NODES, user, nodes)
                 return dict(n)
+        if len(nodes) >= _MAX_NODES:          # bounded: refuse new beyond cap
+            return dict(nodes[0])             # (existing graph is preserved)
         node = {"id": uuid.uuid4().hex[:12], "label": label, "kind": kind}
         nodes.append(node)
         _save(_NODES, user, nodes)
