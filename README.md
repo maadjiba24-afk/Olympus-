@@ -654,6 +654,17 @@ typed memory is a projection), stored on the same backend as everything else —
 local files by default, Postgres when `OLYMPUS_DATABASE_URL` is set. Turn the
 whole thing off with `OLYMPUS_MEMORY=0`.
 
+In the **browser UI**, a "🧠 memory" button opens a panel showing what Olympus
+remembers (with one-click **Forget**) and any held candidates awaiting your
+**Approve / Dismiss** — sensitive items never auto-save, so they surface here.
+
+Retrieval is lexical by default. Point `OLYMPUS_EMBED_MODEL` at any
+OpenAI-compatible `/embeddings` endpoint (OpenAI, a local Ollama/LM Studio
+server, …) and Olympus adds a **semantic fallback**: when keyword matching comes
+back thin, it embeds the query and finds memories by meaning, not just words.
+It's optional and off by default — and the fallback only fires when lexical
+search misses, so the hot path stays free in the common case.
+
 ## Layout
 
 ```

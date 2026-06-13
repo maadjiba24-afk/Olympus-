@@ -15,13 +15,23 @@ from __future__ import annotations
 
 import re
 
-from . import backend, config, security, usermem
+from . import backend, config, embed, security, usermem
 
 _WORD = re.compile(r"[a-z0-9]+")
+# Common words carry no relevance signal and cause false lexical matches.
+_STOP = frozenset((
+    "the", "and", "for", "are", "was", "but", "not", "you", "your", "his",
+    "her", "its", "our", "their", "this", "that", "these", "those", "with",
+    "what", "how", "why", "who", "when", "where", "which", "from", "into",
+    "about", "have", "has", "had", "will", "would", "can", "could", "should",
+    "they", "them", "she", "him", "use", "using", "any", "all", "out", "now",
+    "get", "got", "let", "please", "tell", "give", "make", "want", "need",
+))
 
 
 def _tokens(text: str) -> set[str]:
-    return {w for w in _WORD.findall(str(text).lower()) if len(w) > 2}
+    return {w for w in _WORD.findall(str(text).lower())
+            if len(w) > 2 and w not in _STOP}
 
 
 def _overlap(a: set[str], b: set[str]) -> float:
@@ -91,6 +101,16 @@ def _dedupe_or_conflict(user: str, cand: dict):
     return "new", None
 
 
+def _maybe_embed(user: str, mem: dict) -> None:
+    """Attach a semantic embedding if an embeddings endpoint is configured.
+    Best-effort and only relevant to hybrid retrieval; no-op otherwise."""
+    if not embed.available():
+        return
+    vec = embed.embed_one(mem["content"])
+    if vec:
+        usermem.set_embedding(user, mem["id"], vec)
+
+
 def _gate(user: str, cand: dict, event_id: str) -> str:
     """Apply the write policy to one candidate. Returns the action taken."""
     floor = config.MEMORY_CONFIDENCE_FLOOR
@@ -117,16 +137,18 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
                 importance=cand.get("importance", 0.5),
                 provenance=[event_id])
             usermem.supersede(user, existing["id"], new)
+            _maybe_embed(user, new)
             return "superseded"
         usermem.add_candidate(user, {**cand, "reason": "conflict",
                                      "conflicts_with": existing["id"],
                                      "provenance": [event_id]})
         return "held_conflict"
 
-    usermem.add_memory(user, type=cand["type"], content=cand["content"],
-                       confidence=cand["confidence"], key=cand.get("key"),
-                       importance=cand.get("importance", 0.5),
-                       provenance=[event_id])
+    mem = usermem.add_memory(user, type=cand["type"], content=cand["content"],
+                             confidence=cand["confidence"], key=cand.get("key"),
+                             importance=cand.get("importance", 0.5),
+                             provenance=[event_id])
+    _maybe_embed(user, mem)
     return "committed"
 
 
@@ -172,10 +194,32 @@ def extract(user: str, user_msg: str, reply: str,
 
 # --- read path -----------------------------------------------------------
 
+def _semantic_hits(user: str, query: str, already: set[str]) -> list[tuple]:
+    """Cosine-ranked memories with embeddings, excluding ids already found
+    lexically. Best-effort: empty if embeddings are unavailable or fail."""
+    qvec = embed.embed_one(query)
+    if not qvec:
+        return []
+    out = []
+    for m in usermem.active_memories(user):
+        if m["id"] in already or not m.get("embedding"):
+            continue
+        eff = usermem.effective_confidence(m)
+        if eff < config.MEMORY_RETRIEVAL_FLOOR_CONF:
+            continue
+        c = embed.cosine(qvec, m["embedding"])
+        if c >= config.MEMORY_SEMANTIC_THRESHOLD:
+            out.append((m.get("importance", 0.5) * eff * c, m))
+    return out
+
+
 def retrieve(user: str, query: str,
              budget_tokens: int | None = None) -> list[dict]:
-    """Rank active memories against the query; return those that clear the
-    relevance floor, up to the token budget."""
+    """Rank active memories against the query and return those that clear the
+    relevance floor, up to the token budget. Lexical first; when it comes back
+    thin AND an embeddings endpoint is configured, add a semantic fallback —
+    so the hot path stays free in the common case and only pays for embeddings
+    when keyword matching misses a paraphrase."""
     budget = budget_tokens or config.MEMORY_RETRIEVAL_BUDGET_TOKENS
     q = _tokens(query)
     if not q:
@@ -190,6 +234,11 @@ def retrieve(user: str, query: str,
             continue
         score = m.get("importance", 0.5) * eff * (0.3 + ov)
         scored.append((score, m))
+
+    if (len(scored) < config.MEMORY_SEMANTIC_FALLBACK_MIN and embed.available()):
+        found = {m["id"] for _, m in scored}
+        scored.extend(_semantic_hits(user, query, found))
+
     scored.sort(key=lambda s: s[0], reverse=True)
 
     chosen, used = [], 0
