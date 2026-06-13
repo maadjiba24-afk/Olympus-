@@ -686,6 +686,25 @@ its usage stats) and **approval-gated to create**: a specialist may *propose* a
 procedure when it notices you repeating one, but it stays inert until you
 approve it — Olympus never invents a workflow and runs it on you.
 
+### Relationship graph — who do you know at Acme?
+
+Flat memories answer "what do I know about Sarah?"; a graph answers "who do I
+know at **Acme**?" — which needs edges, not rows. As you mention people and
+companies, the same background extractor records them as a small per-user graph
+of entities and typed relations (`works_at`, `cofounder_of`, `competitor_of`,
+…). When a turn names a known entity, Olympus traverses one hop **in both
+directions** and injects the connections — so "who's at Acme?" surfaces everyone
+you've told it works there.
+
+```bash
+olympus graph                  # all entities and how many connections each has
+olympus graph "Acme"           # describe one entity and its relationships
+olympus graph --forget "Acme"  # remove an entity and its edges
+```
+
+It's the same store and the same rules — inspectable, per-user, and nothing it
+learns ever acts without the approval gate.
+
 ## Layout
 
 ```
