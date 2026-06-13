@@ -309,6 +309,7 @@ python -m olympus                  # interactive chat (default)
 python -m olympus web              # browser chat UI at http://localhost:8484
 python -m olympus telegram         # Telegram gateway (zero extra deps)
 python -m olympus whatsapp         # WhatsApp Cloud API gateway (webhook)
+python -m olympus profile "I run a bakery called Crumb; keep replies short"
 python -m olympus ask "Find me 3 business opportunities in AI tooling"
 python -m olympus scan             # Argus: world/opportunity scan now
 python -m olympus watch <youtube-url>   # Mnemosyne: watch + learn now
@@ -595,6 +596,26 @@ Optional: `WHATSAPP_ALLOWED_NUMBERS=15551234567,...` restricts who may talk to
 it; `WHATSAPP_APP_SECRET=...` makes Olympus verify Meta's payload signatures.
 Each sender gets a private memory namespace, and the same `/scan`, `/audit`,
 `/watch`, `/good`, `/lang`, `/contribute` commands as Telegram work.
+
+### Remembering you — the profile card
+
+Olympus keeps a small, editable **profile card** — who you are and how you like
+things done — and rides it (cached) on every turn, so you stop re-explaining
+yourself and the agent gets cheaper the longer you use it:
+
+```bash
+olympus profile "I run a bakery called Crumb; keep replies short"
+olympus profile --set timezone CET     # structured facts
+olympus profile                        # show the card
+olympus profile --clear                # forget it
+```
+
+The card is deliberately tiny and only states what you've actually set (an empty
+profile costs zero tokens), it's plain text you can read and edit, and it's
+never auto-written from untrusted content — the first, minimal slice of a larger
+memory system. Under the hood, Olympus also caches the system prompt **and** the
+tool definitions on every model call, so repeated agent turns bill the big,
+stable parts of the prompt once and read them from cache after that.
 
 ## Layout
 

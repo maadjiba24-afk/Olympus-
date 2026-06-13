@@ -57,6 +57,13 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("chat", help="interactive conversation (default)")
     sub.add_parser("setup", help="choose your AI provider & save your API key")
+    p_prof = sub.add_parser(
+        "profile", help="show or set what Olympus remembers about you")
+    p_prof.add_argument("about", nargs="*",
+                        help="a note about you (no args = show the card)")
+    p_prof.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"),
+                        help="set a fact, e.g. --set company Acme")
+    p_prof.add_argument("--clear", action="store_true", help="forget it all")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -141,6 +148,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "setup":
         firstrun.wizard()
+    elif args.command == "profile":
+        from . import profile
+        user = "cli"
+        if args.clear:
+            print(profile.clear(user))
+        elif args.set:
+            print(profile.set_fact(user, args.set[0], args.set[1]))
+        elif args.about:
+            print(profile.set_about(user, " ".join(args.about)))
+        else:
+            card = profile.card(user)
+            print(card.strip() if card else
+                  "Nothing saved yet. Try: olympus profile \"I'm the founder "
+                  "of Acme; keep replies concise.\"")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
