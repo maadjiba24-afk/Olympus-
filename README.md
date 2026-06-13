@@ -665,6 +665,27 @@ back thin, it embeds the query and finds memories by meaning, not just words.
 It's optional and off by default — and the fallback only fires when lexical
 search misses, so the hot path stays free in the common case.
 
+### Playbooks — save a workflow once, run it by name
+
+The retention engine: when you repeat a multi-step task, save it as a **named
+procedure** and next time one phrase loads the steps — with every action in them
+still flowing through the approval gate. Month-6 stops re-explaining what
+month-1 had to spell out.
+
+```bash
+olympus playbook save "weekly investor update" "pull the metrics; draft in my voice; CC my cofounder"
+olympus playbook run "weekly investor update"   # loads the steps; actions still gated
+olympus playbook list                           # your saved workflows
+olympus playbook proposed                        # ones Olympus suggested, awaiting approval
+olympus playbook approve "<name>"   |  forget "<name>"
+```
+
+When a turn matches a saved playbook's name, Olympus follows its steps
+automatically. Playbooks are **versioned** (re-saving bumps the version, keeps
+its usage stats) and **approval-gated to create**: a specialist may *propose* a
+procedure when it notices you repeating one, but it stays inert until you
+approve it — Olympus never invents a workflow and runs it on you.
+
 ## Layout
 
 ```
