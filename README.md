@@ -615,7 +615,11 @@ profile costs zero tokens), it's plain text you can read and edit, and it's
 never auto-written from untrusted content — the first, minimal slice of a larger
 memory system. Under the hood, Olympus also caches the system prompt **and** the
 tool definitions on every model call, so repeated agent turns bill the big,
-stable parts of the prompt once and read them from cache after that.
+stable parts of the prompt once and read them from cache after that. And instead
+of replaying the whole conversation each turn, once the history crosses a token
+budget Olympus folds the older turns into a compact running **state** block
+(facts, decisions, preferences, open threads) and replays only the most recent
+turns verbatim — so cost tracks what matters, not how long you've been talking.
 
 ## Layout
 
