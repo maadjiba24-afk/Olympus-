@@ -30,14 +30,28 @@ def _user_for(sid: str) -> str:
 
 
 def _memory_view(user: str) -> dict:
-    """Active memories (with decayed confidence) + candidates awaiting approval."""
-    from . import usermem
+    """Everything Olympus knows about a user, for the web knowledge panel:
+    profile, memories, candidates, playbooks, relationship graph, and its
+    outcome track-record + insights."""
+    from . import usermem, profile, playbooks, relgraph, outcomes
     mems = [{"id": m["id"], "type": m["type"], "content": m["content"],
              "confidence": round(usermem.effective_confidence(m), 2)}
             for m in usermem.active_memories(user)]
     cands = [{"id": c["id"], "type": c["type"], "content": c["content"],
               "reason": c.get("reason", "")} for c in usermem.candidates(user)]
-    return {"memories": mems, "candidates": cands}
+    prof = profile.get(user)
+    pbs = [{"id": p["id"], "name": p["name"], "steps": p["steps"],
+            "status": p["status"], "use_count": p["use_count"]}
+           for p in playbooks.list_all(user)]
+    graph = [{"label": n["label"], "kind": n["kind"],
+              "connections": [phrase for phrase, _ in relgraph.neighbors(user, n["id"])]}
+             for n in relgraph.nodes(user)]
+    return {"memories": mems, "candidates": cands,
+            "profile": {"about": prof.get("about", ""),
+                        "facts": prof.get("facts", {})},
+            "playbooks": pbs, "graph": graph,
+            "outcomes": outcomes.stats(user)["overall"],
+            "insights": outcomes.insights(user)}
 
 
 def _actions_view(user: str) -> list[dict]:
@@ -486,49 +500,88 @@ const memBtn = document.getElementById('membtn');
 const memCount = document.getElementById('memcount');
 memBtn.onclick = () => { memoryEl.classList.toggle('open'); renderMemory(); };
 
-function memRow(m, kind) {
+function memHeader(text, margin) {
+  const h = document.createElement('p'); h.className = 'sys';
+  h.style = 'max-width:860px;margin:' + (margin || '12px auto 4px');
+  h.textContent = text;
+  return h;
+}
+
+function memRow(label, content, buttons) {
   const row = document.createElement('div'); row.className = 'mem';
-  const t = document.createElement('span'); t.className = 't'; t.textContent = m.type;
-  const c = document.createElement('span'); c.className = 'c'; c.textContent = m.content;
-  const btns = document.createElement('span');
-  if (kind === 'candidate') {
-    const ok = document.createElement('button'); ok.className='ok'; ok.textContent='Approve';
-    ok.onclick = () => memact(m.id, 'approve');
-    const no = document.createElement('button'); no.className='no'; no.textContent='Dismiss';
-    no.onclick = () => memact(m.id, 'reject');
-    btns.append(ok, no);
-  } else {
-    const f = document.createElement('button'); f.className='no'; f.textContent='Forget';
-    f.onclick = () => memact(m.id, 'forget');
-    btns.append(f);
-  }
-  row.append(t, c, btns);
+  const t = document.createElement('span'); t.className = 't'; t.textContent = label;
+  const c = document.createElement('span'); c.className = 'c'; c.textContent = content;
+  const span = document.createElement('span');
+  (buttons || []).forEach(b => {
+    const el = document.createElement('button'); el.className = b.cls;
+    el.textContent = b.text; el.onclick = b.fn; span.appendChild(el);
+  });
+  row.append(t, c, span);
   return row;
 }
 
 function renderMemoryData(d) {
-  const cands = d.candidates || [], mems = d.memories || [];
-  memCount.textContent = cands.length;
-  memCount.classList.toggle('show', cands.length > 0);
+  const cands = d.candidates || [], mems = d.memories || [], pbs = d.playbooks || [],
+        graph = d.graph || [], insights = d.insights || [], prof = d.profile || {},
+        oc = d.outcomes || {};
+  const pendingPb = pbs.filter(p => p.status === 'proposed').length;
+  memCount.textContent = cands.length + pendingPb;
+  memCount.classList.toggle('show', (cands.length + pendingPb) > 0);
   memoryEl.innerHTML = '';
+
+  insights.forEach(i => {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.style = 'max-width:860px;margin:4px auto;color:#d9b44a';
+    p.textContent = '💡 ' + i.message;
+    memoryEl.appendChild(p);
+  });
+  if (oc.total) {
+    memoryEl.appendChild(memHeader('Track record: ' + oc.total + ' actions — ' +
+      oc.approved + ' approved as-is, ' + oc.approved_after_edit +
+      ' after edit, ' + oc.rejected + ' rejected.', '4px auto'));
+  }
+
+  memoryEl.appendChild(memHeader('Your profile:'));
+  memoryEl.appendChild(memRow('about', prof.about || '(not set)', [
+    {cls: 'no', text: 'Edit', fn: () => {
+      const v = prompt('About you (how Olympus should treat you):', prof.about || '');
+      if (v !== null) memact({kind: 'profile', op: 'set', value: v});
+    }}]));
+  Object.keys(prof.facts || {}).forEach(k =>
+    memoryEl.appendChild(memRow(k, prof.facts[k], [])));
+
   if (cands.length) {
-    const h = document.createElement('p'); h.className = 'sys';
-    h.style = 'max-width:860px;margin:4px auto'; h.textContent =
-      'Awaiting your approval (sensitive or uncertain) — nothing here was saved automatically:';
-    memoryEl.appendChild(h);
-    cands.forEach(m => memoryEl.appendChild(memRow(m, 'candidate')));
+    memoryEl.appendChild(memHeader(
+      'Awaiting your approval (sensitive/uncertain — not saved automatically):'));
+    cands.forEach(m => memoryEl.appendChild(memRow(m.type, m.content, [
+      {cls: 'ok', text: 'Approve', fn: () => memact({kind: 'memory', op: 'approve', id: m.id})},
+      {cls: 'no', text: 'Dismiss', fn: () => memact({kind: 'memory', op: 'reject', id: m.id})}])));
   }
+
+  if (pbs.length) {
+    memoryEl.appendChild(memHeader('Playbooks (saved workflows):'));
+    pbs.forEach(p => {
+      const proposed = p.status === 'proposed';
+      const btns = proposed
+        ? [{cls: 'ok', text: 'Approve', fn: () => memact({kind: 'playbook', op: 'approve', id: p.id})},
+           {cls: 'no', text: 'Dismiss', fn: () => memact({kind: 'playbook', op: 'reject', id: p.id})}]
+        : [{cls: 'no', text: 'Forget', fn: () => memact({kind: 'playbook', op: 'forget', id: p.id})}];
+      memoryEl.appendChild(memRow(proposed ? 'proposed' : 'playbook',
+        p.name + ' — ' + p.steps.join(' → '), btns));
+    });
+  }
+
+  if (graph.length) {
+    memoryEl.appendChild(memHeader('People & companies:'));
+    graph.forEach(n => memoryEl.appendChild(memRow(n.kind,
+      n.label + (n.connections.length ? ' (' + n.connections.join('; ') + ')' : ''),
+      [{cls: 'no', text: 'Forget', fn: () => memact({kind: 'graph', op: 'forget', label: n.label})}])));
+  }
+
   if (mems.length) {
-    const h = document.createElement('p'); h.className = 'sys';
-    h.style = 'max-width:860px;margin:10px auto 4px'; h.textContent =
-      'What Olympus remembers about you:';
-    memoryEl.appendChild(h);
-    mems.forEach(m => memoryEl.appendChild(memRow(m, 'memory')));
-  }
-  if (!cands.length && !mems.length) {
-    memoryEl.innerHTML = '<p class="sys" style="max-width:860px;margin:0 auto">' +
-      'Nothing remembered yet — Olympus learns durable facts as you chat, and ' +
-      'anything sensitive waits here for your approval.</p>';
+    memoryEl.appendChild(memHeader('What Olympus remembers about you:'));
+    mems.forEach(m => memoryEl.appendChild(memRow(m.type, m.content, [
+      {cls: 'no', text: 'Forget', fn: () => memact({kind: 'memory', op: 'forget', id: m.id})}])));
   }
 }
 
@@ -540,9 +593,9 @@ async function renderMemory() {
   } catch (e) {}
 }
 
-async function memact(id, op) {
-  const r = await fetch('/api/memory', {method:'POST', headers: hdrs(),
-    body: JSON.stringify({session: session, id: id, op: op})});
+async function memact(payload) {
+  const r = await fetch('/api/memory', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))});
   renderMemoryData(await r.json());
 }
 setInterval(renderMemory, 8000);
@@ -755,25 +808,50 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/memory":
-            from . import usermem
+            from . import usermem, profile, playbooks, relgraph
             user = _user_for(sid)
+            kind = str(payload.get("kind", "memory"))
             op = str(payload.get("op", ""))
             mid = str(payload.get("id", ""))
-            if op == "approve":
-                c = usermem.pop_candidate(user, mid)
-                if c:
-                    usermem.add_memory(
-                        user, type=c["type"], content=c["content"],
-                        confidence=c.get("confidence", 0.7), key=c.get("key"),
-                        importance=c.get("importance", 0.5),
-                        sensitivity=c.get("sensitivity", "normal"),
-                        provenance=c.get("provenance", []))
-            elif op == "reject":
-                usermem.pop_candidate(user, mid)
-            elif op == "forget":
-                usermem.tombstone(user, mid)
-            else:
-                self._json({"error": "unknown op"}, 400)
+            try:
+                if kind == "memory":
+                    if op == "approve":
+                        c = usermem.pop_candidate(user, mid)
+                        if c:
+                            usermem.add_memory(
+                                user, type=c["type"], content=c["content"],
+                                confidence=c.get("confidence", 0.7),
+                                key=c.get("key"),
+                                importance=c.get("importance", 0.5),
+                                sensitivity=c.get("sensitivity", "normal"),
+                                provenance=c.get("provenance", []))
+                    elif op == "reject":
+                        usermem.pop_candidate(user, mid)
+                    elif op == "forget":
+                        usermem.tombstone(user, mid)
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "profile":
+                    if op == "set":
+                        profile.set_about(user, str(payload.get("value", "")))
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "playbook":
+                    if op == "approve":
+                        playbooks.approve(user, mid)
+                    elif op in ("forget", "reject"):
+                        playbooks.delete(user, mid)
+                    else:
+                        raise ValueError("unknown op")
+                elif kind == "graph":
+                    if op == "forget":
+                        relgraph.forget(user, str(payload.get("label", "")))
+                    else:
+                        raise ValueError("unknown op")
+                else:
+                    raise ValueError("unknown kind")
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
                 return
             self._json({"ok": True, **_memory_view(user)})
             return
