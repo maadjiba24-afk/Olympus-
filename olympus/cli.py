@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     p_gr.add_argument("--forget", metavar="ENTITY", help="remove an entity")
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
+    sub.add_parser("status", help="instance health: provider, spend, usage")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -293,6 +294,22 @@ def main(argv: list[str] | None = None) -> int:
                   f"{s['rejected']} rejected, {s['undone']} undone.")
             for ins in outcomes.insights(user):
                 print(f"\n  💡 {ins['message']}")
+    elif args.command == "status":
+        from . import config, usage, accounts
+        firstrun.load_env_file()
+        s = config.Settings.from_env()
+        print("OLYMPUS status")
+        print(f"  provider/model : {s.provider} / {s.model or '(default)'}")
+        print(f"  key configured : {'yes' if firstrun.configured() else 'NO'}")
+        b = usage.budget_status()
+        print(f"  daily budget   : "
+              + (f"${b['spent']:.4f} / ${b['limit']:.2f}"
+                 + ("  ⚠ reached" if b["exceeded"] else "")
+                 if b["enabled"] else "off"))
+        print(f"  accounts       : "
+              + ("required (login)" if accounts.require_login() else "open"))
+        print()
+        print(usage.report(7))
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
