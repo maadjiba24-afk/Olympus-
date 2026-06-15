@@ -277,6 +277,11 @@ docker run -p 8484:8484 -e ANTHROPIC_API_KEY=sk-ant-... olympus
 
 ### Hosting a public instance (HTTPS)
 
+**Turnkey:** [`deploy/`](deploy/) has a one-command Docker Compose + Caddy setup
+(automatic HTTPS, no certificate steps) — see [`deploy/README.md`](deploy/README.md).
+The manual reverse-proxy recipe below is the alternative if you'd rather wire it
+yourself.
+
 The built-in web server speaks plain HTTP — fine on `localhost`, **not** safe
 to expose directly, because bring-your-own-key API keys and file contents
 would travel unencrypted. Put it behind a TLS-terminating reverse proxy:

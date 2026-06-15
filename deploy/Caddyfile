@@ -1,0 +1,22 @@
+# Caddy automatically obtains and renews a free Let's Encrypt certificate for
+# caelarion.com — no manual cert steps. It just needs ports 80/443 open and the
+# domain's DNS pointing at this server.
+
+{
+	# Change to your real email — Let's Encrypt uses it for expiry notices.
+	email admin@caelarion.com
+}
+
+caelarion.com {
+	encode gzip
+	# flush_interval -1 disables response buffering so streamed tokens arrive
+	# live (the equivalent of nginx's `proxy_buffering off`).
+	reverse_proxy olympus:8484 {
+		flush_interval -1
+	}
+}
+
+# Send www → the bare domain.
+www.caelarion.com {
+	redir https://caelarion.com{uri} permanent
+}
