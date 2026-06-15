@@ -1,0 +1,43 @@
+# OLYMPUS deployment — Caddy terminates HTTPS for caelarion.com and proxies to
+# the app over the private compose network. Run from this directory:
+#   cp .env.example .env   # then fill it in
+#   docker compose up -d --build
+services:
+  olympus:
+    build: ..                       # uses the Dockerfile at the repo root
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "olympus", "web", "--host", "0.0.0.0", "--port", "8484"]
+    volumes:
+      - olympus-memory:/app/memory  # persists memory/accounts/vault across restarts
+    expose:
+      - "8484"                       # internal only — never exposed to the internet
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"                      # ACME challenge + HTTP→HTTPS redirect
+      - "443:443"                    # HTTPS
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data             # stores the issued TLS certificates
+      - caddy-config:/config
+    depends_on:
+      - olympus
+
+  # The self-learning loop (opportunity scans, training, self-audit). It makes
+  # model calls on its own schedule, so it SPENDS TOKENS in the background —
+  # leave it off until you want it, and set OLYMPUS_DAILY_BUDGET as a guard.
+  # heartbeat:
+  #   build: ..
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   command: ["python", "-m", "olympus", "heartbeat"]
+  #   volumes:
+  #     - olympus-memory:/app/memory
+
+volumes:
+  olympus-memory:
+  caddy-data:
+  caddy-config:
