@@ -23,7 +23,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import accounts, actions, builtin_actions, config, orchestrator, usage  # noqa: F401
+from . import accounts, actions, builtin_actions, config, metrics, orchestrator, usage  # noqa: F401
 
 
 def _user_for(sid: str) -> str:
@@ -744,6 +744,10 @@ checkAuth();
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: bytes, ctype: str) -> None:
+        try:
+            metrics.record_response(urlparse(self.path).path, code)
+        except Exception:
+            pass
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -816,6 +820,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
+        if url.path == "/healthz":
+            # Liveness probe for load balancers / uptime checks — no auth, no
+            # data, just "the process is serving".
+            self._json({"status": "ok",
+                        "uptime_seconds": metrics.snapshot()["uptime_seconds"]})
+            return
         if url.path == "/":
             self._session_id()           # issue the session cookie up front
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
@@ -828,6 +838,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
+            return
+        if url.path == "/api/metrics":
+            self._json(metrics.snapshot())     # instance ops, not per-user
             return
         params = parse_qs(url.query)
         sid = self._session_id(params.get("session", [None])[0])

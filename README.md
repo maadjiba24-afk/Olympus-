@@ -308,7 +308,13 @@ and actions — no manual session strings. Request bodies are capped (1 MB), the
 expensive chat endpoint and the cheap write endpoints have separate per-IP rate
 limits, and per-user memory, the relationship graph, and playbooks are all
 bounded (weakest memories are pruned past the cap) so storage and prompt size
-stay in check. The access token gates entry to the instance; for per-person identity, set
+stay in check. **Monitoring.** `GET /healthz` is an unauthenticated liveness probe for load
+balancers and uptime checks; `GET /api/metrics` (behind the access token)
+reports uptime, request/error counts per path, and today's spend vs budget.
+From a shell, `olympus status` shows the provider, whether a key is configured,
+the daily budget, the account mode, and recent usage.
+
+The access token gates entry to the instance; for per-person identity, set
 `OLYMPUS_REQUIRE_LOGIN=1` to require **accounts**: users register/log in, and
 each account's memory, actions, playbooks, graph, and connected services are
 namespaced to their account — not a shared cookie. Passwords are hashed with
