@@ -1,12 +1,9 @@
 __pycache__/
-*.pyc
-.env
-memory/
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
-*.egg-info/
-dist/
-build/
-
-# deployment secrets
+.env
+memory/
+keys.sh
 deploy/.env
