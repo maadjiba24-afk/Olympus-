@@ -74,6 +74,27 @@ cd Olympus-/deploy && git pull && docker compose up -d --build
   already `https://caelarion.com/...`; fill the matching env vars in `.env` and
   `docker compose up -d` again.
 
+## WhatsApp (item #4)
+
+The WhatsApp gateway is included but **dormant** (a Compose profile), and Caddy
+already routes `https://caelarion.com/webhook` to it. To turn it on:
+
+1. Create a Meta app with the WhatsApp product; get the **phone number ID** and
+   an **access token**, and choose a **verify token** (any secret string).
+2. Add to `.env`:
+   ```
+   WHATSAPP_ACCESS_TOKEN=...
+   WHATSAPP_PHONE_NUMBER_ID=...
+   WHATSAPP_VERIFY_TOKEN=your-secret
+   WHATSAPP_ALLOWED_NUMBERS=15551234567   # lock to your number while testing
+   ```
+3. Start the gateway:
+   ```
+   docker compose --profile whatsapp up -d --build
+   ```
+4. In the Meta console, set the webhook to `https://caelarion.com/webhook` with
+   the same verify token, and subscribe to the **messages** field.
+
 ## Notes
 - Only Caddy is exposed to the internet (ports 80/443); the app listens on the
   private compose network. The access token is the entry gate, accounts are
