@@ -685,7 +685,7 @@ f.addEventListener('submit', async (ev) => {
       body: JSON.stringify({message: text, session: session, settings: cfg()})
     });
     clearInterval(timer); await poll();
-    if (r.ok && r.body && r.headers.get('Content-Type') === 'text/plain') {
+    if (r.ok && r.body && (r.headers.get('Content-Type') || '').includes('text/plain')) {
       const reader = r.body.getReader(), dec = new TextDecoder();
       const p = add('msg bot', '');
       let acc = '';
