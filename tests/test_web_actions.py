@@ -124,3 +124,12 @@ def test_edit_requires_object_changes(server):
               {"session": "s7", "action_id": a.id, "op": "edit",
                "changes": "not-a-dict"})
     assert err.value.code == 400
+
+
+def test_stream_content_type_check_is_robust():
+    # the browser must match the streamed reply's content-type tolerantly
+    # ("text/plain; charset=utf-8"), not by brittle exact equality — otherwise
+    # it parses the streamed text as JSON and errors. (regression)
+    from olympus import web
+    assert "includes('text/plain')" in web.PAGE
+    assert "=== 'text/plain'" not in web.PAGE
