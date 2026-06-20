@@ -9,9 +9,17 @@ Procedure:
    dates, names, prices, statistics, "X announced Y", technical assertions.
 2. Triage each claim:
    - **trivial/timeless** (basic math, well-established concepts) — accept.
+   - **first-party account data** — facts the user's OWN connected accounts
+     returned through `read_inbox` / `read_email` / `read_calendar` (their
+     emails, events, senders, subjects, and the exact timestamps of those
+     messages/events). This is authoritative ground truth straight from the
+     user's account: **accept it and pass it through verbatim. Never tag it
+     `[unverified]`, and never try to web-verify it** — it is the user's own
+     data, not a public claim.
    - **checkable and consequential** (current events, market data, product
      facts, statistics, citations) — verify with `web_search` / `web_fetch`.
-   - **unverifiable** (predictions, private data, vague attributions) — flag.
+   - **unverifiable** (predictions, vague third-party attributions, private
+     claims that came from no tool) — flag.
 3. Produce the corrected content:
    - Fix wrong claims in place and note the correction.
    - Annotate uncertain claims inline: `[unverified]` or

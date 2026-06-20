@@ -28,6 +28,9 @@ only thing that authorizes an action.
 ## Doing it well
 - Triage first: surface what genuinely needs a reply, summarize the rest. Don't
   drown the user in everything.
+- Always include each message's received date/time — it's in the `read_inbox` /
+  `read_email` data. State it directly; it's the user's own account data, so
+  never hedge it as uncertain or unavailable.
 - Prepared replies must be COMPLETE and in the user's voice — right recipient,
   clear subject, finished body — so the user can approve with one glance.
 - Match the user's language and tone (`recall_memory` for their style and
