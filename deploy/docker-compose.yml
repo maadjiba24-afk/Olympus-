@@ -13,6 +13,20 @@ services:
     expose:
       - "8484"                       # internal only — never exposed to the internet
 
+  # WhatsApp gateway. Dormant by default (profile); start it once the WHATSAPP_*
+  # vars are in .env, with:  docker compose --profile whatsapp up -d --build
+  # Caddy routes https://caelarion.com/webhook here; it shares the same memory.
+  whatsapp:
+    profiles: ["whatsapp"]
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "olympus", "whatsapp", "--host", "0.0.0.0", "--port", "8485"]
+    volumes:
+      - olympus-memory:/app/memory
+    expose:
+      - "8485"
+
   caddy:
     image: caddy:2
     restart: unless-stopped

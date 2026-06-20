@@ -9,10 +9,17 @@
 
 caelarion.com {
 	encode gzip
-	# flush_interval -1 disables response buffering so streamed tokens arrive
-	# live (the equivalent of nginx's `proxy_buffering off`).
-	reverse_proxy olympus:8484 {
-		flush_interval -1
+	# WhatsApp Cloud API webhook → the whatsapp gateway (only running when the
+	# 'whatsapp' compose profile is started). Everything else → the web app.
+	handle /webhook* {
+		reverse_proxy whatsapp:8485
+	}
+	handle {
+		# flush_interval -1 disables response buffering so streamed tokens arrive
+		# live (the equivalent of nginx's `proxy_buffering off`).
+		reverse_proxy olympus:8484 {
+			flush_interval -1
+		}
 	}
 }
 
