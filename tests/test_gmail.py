@@ -17,9 +17,11 @@ def fake_gmail(monkeypatch):
             return {"messages": [{"id": "m1"}, {"id": "m2"}]}
         if path.startswith("/messages/m") and "modify" not in path:
             return {"snippet": "hello there",
+                    "internalDate": "1700000000000",   # 2023-11-14 UTC
                     "payload": {"headers": [
                         {"name": "From", "value": "a@b.com"},
-                        {"name": "Subject", "value": "Hi"}]}}
+                        {"name": "Subject", "value": "Hi"},
+                        {"name": "Date", "value": "Tue, 14 Nov 2023 22:13:20 +0000"}]}}
         if path == "/messages/send":
             return {"id": "sent1"}
         if path == "/drafts":
@@ -36,6 +38,24 @@ def fake_gmail(monkeypatch):
 def test_list_inbox_summarizes(fake_gmail):
     out = gmail.list_inbox("in:inbox", 5)
     assert "a@b.com" in out and "Subject: Hi" in out and "hello there" in out
+
+
+def test_list_inbox_includes_received_time(fake_gmail):
+    # the received timestamp (from internalDate) must reach the model now
+    out = gmail.list_inbox("in:inbox", 5)
+    assert "2023-11-14" in out and "UTC" in out
+    # and the metadata request actually asks Gmail for the Date header
+    assert any("metadataHeaders=Date" in p for _, p, _ in fake_gmail)
+
+
+def test_get_message_includes_date(fake_gmail):
+    out = gmail.get_message("m1")
+    assert "Date:" in out and "2023-11-14" in out
+
+
+def test_received_falls_back_to_date_header():
+    msg = {"payload": {"headers": [{"name": "Date", "value": "Mon, 1 Jan 2024 10:00:00 +0000"}]}}
+    assert gmail._received(msg) == "Mon, 1 Jan 2024 10:00:00 +0000"   # no internalDate
 
 
 def test_send_builds_raw_message(fake_gmail):
