@@ -17,6 +17,7 @@ sending is irreversible (always needs approval); drafts/archive are reversible.
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
 import time
@@ -123,8 +124,22 @@ def _header(msg: dict, name: str) -> str:
     return ""
 
 
+def _received(msg: dict) -> str:
+    """A reliable received-time from Gmail's internalDate (epoch ms), falling
+    back to the Date header. Returns '' if neither is present."""
+    ms = msg.get("internalDate")
+    if ms:
+        try:
+            return datetime.datetime.fromtimestamp(
+                int(ms) / 1000, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M UTC")
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return _header(msg, "Date")
+
+
 def list_inbox(query: str = "in:inbox", max_results: int = 10) -> str:
-    """Summarize recent inbox messages (sender, subject, snippet)."""
+    """Summarize recent inbox messages (date, sender, subject, snippet)."""
     q = urllib.parse.urlencode({"q": query, "maxResults": max_results})
     listing = _request("GET", f"/messages?{q}")
     ids = [m["id"] for m in listing.get("messages", [])]
@@ -133,8 +148,9 @@ def list_inbox(query: str = "in:inbox", max_results: int = 10) -> str:
     out = []
     for mid in ids:
         m = _request("GET", f"/messages/{mid}?format=metadata"
-                            "&metadataHeaders=From&metadataHeaders=Subject")
-        out.append(f"[{mid}] From: {_header(m, 'From')}\n"
+                            "&metadataHeaders=From&metadataHeaders=Subject"
+                            "&metadataHeaders=Date")
+        out.append(f"[{mid}] {_received(m)} — From: {_header(m, 'From')}\n"
                    f"  Subject: {_header(m, 'Subject')}\n"
                    f"  {m.get('snippet', '')[:200]}")
     return "\n\n".join(out)
@@ -151,8 +167,8 @@ def get_message(message_id: str) -> str:
             body = base64.urlsafe_b64decode(data + "===").decode(
                 "utf-8", errors="replace")
             break
-    return (f"From: {_header(m, 'From')}\nSubject: {_header(m, 'Subject')}\n\n"
-            f"{body[:4000]}")
+    return (f"From: {_header(m, 'From')}\nDate: {_received(m)}\n"
+            f"Subject: {_header(m, 'Subject')}\n\n{body[:4000]}")
 
 
 # --- operations (used by gated Action types) ----------------------------
