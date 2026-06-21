@@ -23,13 +23,14 @@ to Claude (full capability) or any OpenAI-compatible endpoint (BYOK).
 
 from __future__ import annotations
 
+import os
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               playbooks, profile, recall, relgraph,
+               playbooks, profile, recall, relgraph, replaystore,
                trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
@@ -112,6 +113,11 @@ class Olympus:
         self.history: list[dict[str, Any]] = (
             memory.load_conversation(conversation_id) if conversation_id else []
         )
+
+    def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
+        s = self.pool.for_role(role)
+        return {"provider": s.provider, "model": s.model or config.MODEL,
+                "version": None}
 
     # -- stage 1: Zeus ----------------------------------------------------
 
@@ -375,6 +381,11 @@ class Olympus:
         (mode, brief, verified_or_reply)."""
         with tr.span("route"):
             route = self._route(user_message)
+        route_rec = tr.decision(
+            "route", {"name": "zeus", "role": "router"}, route,
+            inputs=user_message, model=self._model_meta(),
+            request_hash=replaystore.last_ref(),
+            response_ref=replaystore.last_ref())
 
         if route.get("mode") == "direct" and route.get("direct_reply"):
             return "direct", "", route["direct_reply"]
@@ -383,6 +394,11 @@ class Olympus:
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
         with tr.span("plan"):
             assignments = self._plan(brief, route.get("specialists", []))
+        tr.decision(
+            "plan", {"name": "athena", "role": "supervisor"}, assignments,
+            parent_record_id=route_rec["record_id"], inputs=brief,
+            model=self._model_meta(), request_hash=replaystore.last_ref(),
+            response_ref=replaystore.last_ref())
         has_deps = any(a["depends_on"] for a in assignments)
         tr.event("dispatch", specialists=[a["specialist"] for a in assignments],
                  dag=has_deps)
@@ -405,6 +421,11 @@ class Olympus:
 
         with tr.span("review"):
             review = self._review(brief, verified)
+        tr.decision(
+            "review", {"name": "athena", "role": "supervisor"}, review,
+            inputs=verified, model=self._model_meta(),
+            request_hash=replaystore.last_ref(),
+            response_ref=replaystore.last_ref())
         retry_keys = [k for k in review.get("retry_specialists", [])
                       if k in SPECIALISTS]
         if review.get("verdict") == "retry" and retry_keys:
@@ -522,6 +543,8 @@ class Olympus:
             return str(err)
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask", self.user)
+        tr.meta = {"input": user_message,
+                   "conversation_id": self.conversation_id}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -660,6 +683,40 @@ def note_conversation(report: Reporter = _silent) -> None:
     report("🔧 Conversation threshold reached — Prometheus will self-audit "
            "in the background.")
     threading.Thread(target=_auto_audit, args=(report,), daemon=True).start()
+
+
+def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
+    """Re-execute a recorded run against its frozen LLM responses and diff the
+    decision path. Returns (original_run, fresh_trace, diffs). `diffs` empty
+    means the reasoning replayed byte-identically; a non-empty diff (or a raised
+    ReplayDivergence) pinpoints where a code/prompt change altered a decision.
+
+    Re-executes the real orchestration code (`_pipeline`), not recorded state —
+    that's the moat: regression-testing of reasoning. The final user-facing
+    `stream_text` answer is out of scope (it's not a decision)."""
+    original = trace_mod.load_run(run_id)
+    if not original:
+        raise ValueError(f"no recorded run '{run_id}' found in traces")
+    user_input = (original.get("meta") or {}).get("input")
+    if not user_input:
+        raise ValueError(f"run '{run_id}' has no recorded input to replay")
+
+    prev = os.environ.get("OLYMPUS_REPLAY")
+    os.environ["OLYMPUS_REPLAY"] = run_id
+    try:
+        bot = Olympus(user=original.get("user", "shared"))
+        fresh = trace_mod.Trace("replay", bot.user)
+        fresh.meta = {"input": user_input, "replays": run_id}
+        bot._pipeline(user_input, fresh)
+    finally:
+        if prev is None:
+            os.environ.pop("OLYMPUS_REPLAY", None)
+        else:
+            os.environ["OLYMPUS_REPLAY"] = prev
+    fresh.flush()
+    diffs = trace_mod.diff_decisions(original.get("decisions", []),
+                                     fresh.decisions)
+    return original, fresh, diffs
 
 
 # --- one-shot autonomous routines (used by the heartbeat and CLI) -----------

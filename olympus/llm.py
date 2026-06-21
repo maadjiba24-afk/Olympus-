@@ -12,7 +12,7 @@ from typing import Any
 
 import anthropic
 
-from . import config, usage
+from . import config, replaystore, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 
@@ -89,6 +89,17 @@ def complete(
         params["mcp_servers"] = mcp_servers
         params["betas"] = ["mcp-client-2025-11-20"]
 
+    # Re-executable replay: hash this exact request. In replay mode return the
+    # frozen response with NO network; a missing hash means the orchestration
+    # diverged from the recorded run. In record mode we store the response below.
+    req_hash = replaystore.request_hash(params)
+    if replaystore.replaying():
+        message = replaystore.get(req_hash)
+        if message is None:
+            raise replaystore.ReplayDivergence(req_hash, params)
+        replaystore.note_call(req_hash)
+        return message
+
     last_err: Exception | None = None
     for attempt in range(4):
         try:
@@ -106,6 +117,8 @@ def complete(
                     + getattr(u, "cache_creation_input_tokens", 0),
                     getattr(u, "output_tokens", 0),
                 )
+            replaystore.put(req_hash, message)   # freeze for re-executable replay
+            replaystore.note_call(req_hash)
             return message
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:

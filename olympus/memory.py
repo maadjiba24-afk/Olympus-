@@ -217,6 +217,43 @@ def sweep_dated_files(retain_days: int) -> int:
     return removed
 
 
+def sweep_orphan_responses() -> int:
+    """Delete frozen LLM responses no surviving trace references. Returns count.
+
+    The re-executable decision log freezes each LLM response at
+    `responses/<hash>.json` (see `replaystore`). Those files are content-
+    addressed, not dated, so `sweep_dated_files` can't bound them; instead we
+    keep a response exactly as long as some retained run still references it
+    (via a decision's `model_response_ref`). Once `sweep_dated_files` has pruned
+    old traces, the responses only they referenced become orphans and are
+    removed here — a recorded run stays fully re-executable for its whole life."""
+    resp_dir = config.MEMORY_DIR / "responses"
+    if not resp_dir.exists():
+        return 0
+    referenced: set[str] = set()
+    traces = config.MEMORY_DIR / "traces"
+    if traces.exists():
+        for path in traces.glob("*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for d in rec.get("decisions", []):
+                    ref = d.get("model_response_ref")
+                    if ref:
+                        referenced.add(ref)
+    removed = 0
+    for path in resp_dir.glob("*.json"):
+        if path.stem not in referenced:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 # --- Heartbeat state -----------------------------------------------------
 
 _STATE_LOCK = threading.Lock()

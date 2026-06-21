@@ -88,6 +88,15 @@ def main(argv: list[str] | None = None) -> int:
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
 
+    p_replay = sub.add_parser(
+        "replay", help="re-execute a recorded run against its frozen LLM "
+                       "responses and prove the decision path is unchanged")
+    p_replay.add_argument("run_id", help="the run id from a trace")
+    p_explain = sub.add_parser(
+        "explain", help="show the decision path of a recorded run, or one "
+                        "decision record by id")
+    p_explain.add_argument("id", help="a run id, or a decision record id")
+
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
 
@@ -310,6 +319,56 @@ def main(argv: list[str] | None = None) -> int:
               + ("required (login)" if accounts.require_login() else "open"))
         print()
         print(usage.report(7))
+    elif args.command == "replay":
+        try:
+            original, fresh, diffs = orchestrator.replay_run(args.run_id)
+        except ValueError as err:
+            print(f"[error] {err}")
+            return 1
+        n = len(original.get("decisions", []))
+        if not diffs:
+            print(f"✓ Re-executable replay of run {args.run_id}: "
+                  f"{n} decision(s) replayed byte-identically against the "
+                  "frozen LLM responses. The reasoning path is reproducible.")
+        else:
+            print(f"✗ Replay of run {args.run_id} diverged in "
+                  f"{len(diffs)} decision(s):")
+            for d in diffs:
+                orig = d["original"] or {}
+                rep = d["replayed"] or {}
+                print(f"  - decision #{d['index']}: "
+                      f"{orig.get('decision_type', '∅')} → "
+                      f"{rep.get('decision_type', '∅')}")
+            return 1
+    elif args.command == "explain":
+        import json
+        from . import trace
+        run = trace.load_run(args.id)
+        if run:
+            decisions = run.get("decisions", [])
+            inp = (run.get("meta") or {}).get("input", "")
+            print(f"Run {args.id} ({run.get('kind', '?')}) — "
+                  f"{len(decisions)} decision(s)")
+            if inp:
+                print(f"  input: {inp[:200]}")
+            for d in decisions:
+                agent = (d.get("agent") or {}).get("model", "?")
+                ref = d.get("model_response_ref") or "—"
+                out = (d.get("outcome") or {}).get("status", "?")
+                print(f"\n  [{d.get('record_id')}] {d.get('decision_type')} "
+                      f"({out}, model={agent}, response={ref[:12]})")
+                rat = d.get("rationale")
+                if rat is not None:
+                    text = rat if isinstance(rat, str) else \
+                        json.dumps(rat, ensure_ascii=False)
+                    print(f"    rationale: {text[:300]}")
+        else:
+            found = trace.find_record(args.id)
+            if not found:
+                print(f"No run or decision record '{args.id}' found.")
+                return 1
+            print(f"Decision {args.id} (run {found['run_id']}):")
+            print(json.dumps(found["decision"], indent=2, ensure_ascii=False))
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
