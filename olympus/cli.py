@@ -125,6 +125,20 @@ def build_parser() -> argparse.ArgumentParser:
                        help="exit non-zero if the committed manifest or README "
                             "numbers drift from the code")
 
+    p_sign = sub.add_parser(
+        "sign", help="generate a signed release manifest (verification.json) "
+                     "over the package files")
+    p_sign.add_argument("--out", help="manifest output path "
+                                      "(default: in-package verification.json)")
+    p_verify = sub.add_parser(
+        "verify", help="verify the signed release manifest, or a recorded run's "
+                       "signed decision log")
+    p_verify.add_argument("--manifest", help="manifest path "
+                                             "(default: in-package verification.json)")
+    p_verify.add_argument("--log", metavar="RUN_ID",
+                          help="instead, verify a recorded run's "
+                               "decision-log signature")
+
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
 
@@ -479,6 +493,40 @@ def main(argv: list[str] | None = None) -> int:
                   "code.")
         else:
             print(capabilities.to_json(), end="")
+    elif args.command == "sign":
+        from pathlib import Path
+        from . import witness
+        if not witness.available():
+            print("Cannot sign: the cryptography backend is unavailable.")
+            return 1
+        path = witness.write_manifest(Path(args.out) if args.out else None)
+        print(f"Wrote signed release manifest: {path}")
+        print(f"  signing key (public): {witness.public_key_hex()}")
+    elif args.command == "verify":
+        from pathlib import Path
+        from . import witness
+        if not witness.available():
+            print("Cannot verify: the cryptography backend is unavailable.")
+            return 1
+        if args.log:
+            r = witness.verify_run(args.log)
+            if r["ok"]:
+                print(f"✓ run {args.log}: decision log is intact and signed by "
+                      "the trusted key.")
+            else:
+                for p in r["problems"]:
+                    print(f"[verify] {p}")
+                return 1
+        else:
+            r = witness.verify_release(
+                Path(args.manifest) if args.manifest else None)
+            if r["ok"]:
+                print("✓ verified: every tracked file matches the signed "
+                      "manifest and the signature is from the trusted key.")
+            else:
+                for p in r["problems"]:
+                    print(f"[verify] {p}")
+                return 1
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
