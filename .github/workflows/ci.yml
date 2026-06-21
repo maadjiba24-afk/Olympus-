@@ -12,9 +12,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest
+      # Install the exact, hash-pinned dependency set (supply-chain integrity).
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - run: pip install pytest
+      # Refuse pre-release (alpha/beta/rc/dev) dependencies.
+      - run: python scripts/check_no_prerelease.py requirements.lock
       - run: python -m compileall -q olympus
-      # Fail the build if any published capability count (agents/tools/commands)
-      # drifts from the code or the committed manifest. See olympus/capabilities.py.
+      # Fail the build if any published capability count drifts from the code.
       - run: python -m olympus capabilities --check
       - run: pytest -q
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cyclonedx-bom
+      # CycloneDX Software Bill of Materials, generated from the pinned lock.
+      - run: cyclonedx-py requirements requirements.lock --of JSON -o sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom.json
