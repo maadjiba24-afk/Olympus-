@@ -48,7 +48,9 @@ def _chat() -> None:
         print(f"\nolympus ▸ {reply}\n")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the full CLI parser. Exposed (not inlined in main) so the
+    capability manifest can introspect the real command surface from code."""
     parser = argparse.ArgumentParser(
         prog="olympus",
         description="OLYMPUS — self-improving multi-agent AI system",
@@ -113,6 +115,15 @@ def main(argv: list[str] | None = None) -> int:
         "explain", help="show the decision path of a recorded run, or one "
                         "decision record by id")
     p_explain.add_argument("id", help="a run id, or a decision record id")
+
+    p_cap = sub.add_parser(
+        "capabilities", help="print the code-generated capability manifest "
+                             "(agents, tools, commands)")
+    p_cap.add_argument("--write", action="store_true",
+                       help="(re)write capabilities.json from the live code")
+    p_cap.add_argument("--check", action="store_true",
+                       help="exit non-zero if the committed manifest or README "
+                            "numbers drift from the code")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -190,6 +201,20 @@ def main(argv: list[str] | None = None) -> int:
     p_wa.add_argument("--host", default="0.0.0.0")
     p_wa.add_argument("--port", type=int, default=8485)
 
+    return parser
+
+
+def command_names() -> list[str]:
+    """Every registered subcommand name, from the live parser."""
+    names: list[str] = []
+    for action in build_parser()._subparsers._group_actions:  # type: ignore[union-attr]
+        if isinstance(action, argparse._SubParsersAction):
+            names.extend(action.choices.keys())
+    return sorted(names)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     from . import firstrun
@@ -439,6 +464,21 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Decision {args.id} (run {found['run_id']}):")
             print(json.dumps(found["decision"], indent=2, ensure_ascii=False))
+    elif args.command == "capabilities":
+        from . import capabilities
+        if args.write:
+            path = capabilities.write()
+            print(f"Wrote {path}")
+        elif args.check:
+            problems = capabilities.check_repo()
+            if problems:
+                for p in problems:
+                    print(f"[drift] {p}")
+                return 1
+            print("Capabilities consistent: the manifest and README match the "
+                  "code.")
+        else:
+            print(capabilities.to_json(), end="")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
