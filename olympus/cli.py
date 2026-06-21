@@ -65,11 +65,28 @@ def main(argv: list[str] | None = None) -> int:
                         help="set a fact, e.g. --set company Acme")
     p_prof.add_argument("--clear", action="store_true", help="forget it all")
     p_mem = sub.add_parser(
-        "memory", help="inspect/approve/forget durable memories")
+        "memory", help="inspect/approve/forget durable memories; or carry your "
+                       "file memory out (migrate/export/import/delete)")
     p_mem.add_argument(
         "action", nargs="?", default="list",
-        choices=["list", "candidates", "approve", "reject", "forget", "search"])
-    p_mem.add_argument("arg", nargs="*", help="id (approve/reject/forget) or query (search)")
+        choices=["list", "candidates", "approve", "reject", "forget", "search",
+                 "migrate", "export", "import", "delete"])
+    p_mem.add_argument("arg", nargs="*",
+                       help="id (approve/reject/forget), query (search), or "
+                            "archive path (export/import)")
+    p_mem.add_argument("--user", help="memory namespace for export/delete "
+                                      "(default: shared)")
+    p_mem.add_argument("--all", action="store_true",
+                       help="export every user's memory, not just one")
+    p_mem.add_argument("--out", help="archive path for export")
+    p_mem.add_argument("--category", help="limit delete to one category "
+                                          "(e.g. lessons)")
+    p_mem.add_argument("--id", dest="note_id",
+                       help="limit delete to one note (filename or stem)")
+    p_mem.add_argument("--encrypt", action="store_true",
+                       help="encrypt the export with OLYMPUS_SECRET_KEY")
+    p_mem.add_argument("--yes", action="store_true",
+                       help="skip the confirmation prompt on delete")
     p_pb = sub.add_parser(
         "playbook", help="save/run/manage repeatable workflows")
     p_pb.add_argument(
@@ -198,7 +215,60 @@ def main(argv: list[str] | None = None) -> int:
         from . import usermem, recall
         user = "cli"
         arg = " ".join(args.arg).strip()
-        if args.action == "list":
+        if args.action == "migrate":
+            r = memory.migrate_notes()
+            print(f"Migrated {r['migrated']} note(s) to schema v"
+                  f"{memory.NOTE_SCHEMA_VERSION} (scanned {r['scanned']}).")
+        elif args.action == "export":
+            out = args.out or (arg or None)
+            if not out:
+                print("Where to? Use: memory export --out <archive> "
+                      "[--user U | --all] [--encrypt]")
+                return 1
+            m = memory.export_memory(out, user=args.user,
+                                     all_users=args.all, encrypt=args.encrypt)
+            scope = "all users" if args.all else f"user '{m['scope']['user']}'"
+            print(f"Exported {len(m['files'])} file(s) for {scope} to {out} "
+                  f"(schema v{m['schema_version']}"
+                  + (", encrypted)." if args.encrypt else ")."))
+        elif args.action == "import":
+            src = args.out or (arg or None)
+            if not src:
+                print("Which archive? Use: memory import <archive>")
+                return 1
+            try:
+                r = memory.import_memory(src)
+            except ValueError as err:
+                print(f"[refused] {err}")
+                return 1
+            print(f"Imported {r['count']} file(s) (schema v"
+                  f"{r['schema_version']}, {r['verified']} checksum-verified).")
+        elif args.action == "delete":
+            target = args.user or "shared"
+            # Show what will go before doing it, then require confirmation.
+            from . import config as _cfg
+            roots = (memory._memory_roots(target) if not args.category
+                     else [memory._dir(args.category, memory.safe_id(target))])
+            doomed = [p.relative_to(_cfg.MEMORY_DIR).as_posix()
+                      for r in roots if r.exists()
+                      for p in sorted(r.rglob("*")) if p.is_file()
+                      and (args.note_id is None
+                           or args.note_id in (p.name, p.stem))]
+            if not doomed:
+                print("Nothing matches that scope — nothing deleted.")
+                return 0
+            print(f"This will permanently delete {len(doomed)} file(s):")
+            for rel in doomed:
+                print(f"  {rel}")
+            if not args.yes:
+                ok = input("Type 'delete' to confirm: ").strip().lower()
+                if ok != "delete":
+                    print("Aborted — nothing deleted.")
+                    return 0
+            removed = memory.delete_memory(target, category=args.category,
+                                           note_id=args.note_id)
+            print(f"Deleted {len(removed)} file(s).")
+        elif args.action == "list":
             mems = usermem.active_memories(user)
             if not mems:
                 print("No durable memories yet — they form as you chat.")
