@@ -546,7 +546,9 @@ def _restore_prompt(agent: str) -> str:
     if not backups:
         return f"Error: no backups exist for '{stem}'."
     text = backups[0].read_text(encoding="utf-8")
-    # strip the "# <stem>" header memory.save added, and the trailing comment
+    # drop any versioned frontmatter, then the "# <stem>" header memory.save
+    # added, and the trailing update-reason comment
+    _, text = memory.parse_note(text)
     lines = text.splitlines()
     if lines and lines[0].startswith("# "):
         lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]

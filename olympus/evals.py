@@ -220,7 +220,8 @@ def latest_score() -> float | None:
     files = sorted((config.MEMORY_DIR / "evals").glob("*.md"), reverse=True) \
         if (config.MEMORY_DIR / "evals").exists() else []
     for path in files:
-        first = path.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        first = memory.note_title(
+            path.read_text(encoding="utf-8", errors="replace"))
         if "avg" in first:
             try:
                 return float(first.split("avg", 1)[1].split()[0])
