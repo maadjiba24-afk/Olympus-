@@ -21,6 +21,8 @@ jobs:
       - run: python -m compileall -q olympus
       # Fail the build if any published capability count drifts from the code.
       - run: python -m olympus capabilities --check
+      # Fail if any exposed tool is missing from the threat model.
+      - run: python scripts/check_threat_model.py
       - run: pytest -q
 
   sbom:
