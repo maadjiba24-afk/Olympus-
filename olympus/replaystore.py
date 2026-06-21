@@ -99,3 +99,31 @@ def note_call(h: str) -> None:
 
 def last_ref() -> str | None:
     return getattr(_local, "last", None)
+
+
+# --- client-side tool results --------------------------------------------
+#
+# Freezing the LLM responses isn't enough for byte-identical replay: a
+# client-side tool can be nondeterministic (e.g. `current_time`) or read state
+# that changed since the recorded run. So we also freeze each tool result,
+# keyed by the model-issued tool_use id — which is itself part of the (frozen)
+# assistant message, so it's stable across a replay. On replay the recorded
+# result is returned instead of re-executing the tool.
+
+def _tool_dir():
+    d = config.MEMORY_DIR / "tool_results"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def put_tool(tool_use_id: str, content: str, is_error: bool = False) -> None:
+    (_tool_dir() / f"{tool_use_id}.json").write_text(
+        json.dumps({"content": content, "is_error": bool(is_error)}),
+        encoding="utf-8")
+
+
+def get_tool(tool_use_id: str) -> dict | None:
+    path = _tool_dir() / f"{tool_use_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))

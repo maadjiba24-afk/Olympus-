@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import config, llm, security, tools
+from . import config, llm, replaystore, security, tools
 
 
 def load_prompt(stem: str) -> str:
@@ -54,40 +54,50 @@ def run_agent(
 
         # Client-side tool calls.
         messages.append({"role": "assistant", "content": response.content})
-        results = []
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-            handler = tools.resolve_handler(block.name)
-            if handler is None:
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: no handler for tool '{block.name}'",
-                    "is_error": True,
-                })
-                continue
-            try:
-                output = handler(**(block.input or {}))
-            except Exception as err:
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": f"Error: {err}",
-                    "is_error": True,
-                })
-            else:
-                text = str(output)
-                if security.should_wrap(block.name):
-                    text = security.wrap_untrusted(text, source=block.name)
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": text,
-                })
+        results = [_tool_result(block) for block in response.content
+                   if block.type == "tool_use"]
         messages.append({"role": "user", "content": results})
 
     return (
         "[Agent stopped: tool-use iteration limit reached. Partial work above "
         "may be incomplete.]"
     )
+
+
+def _tool_result(block) -> dict[str, Any]:
+    """Run one client-side tool and return its tool_result block.
+
+    For re-executable replay, the result is frozen by tool_use id in record
+    mode and returned verbatim in replay mode — never re-executing, so a
+    nondeterministic tool (e.g. `current_time`) or state that changed since the
+    recorded run can't break a byte-identical replay. A tool call with no frozen
+    result in replay mode means the orchestration diverged."""
+    def block_result(content: str, is_error: bool) -> dict[str, Any]:
+        out: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.id,
+                               "content": content}
+        if is_error:
+            out["is_error"] = True
+        return out
+
+    if replaystore.replaying():
+        frozen = replaystore.get_tool(block.id)
+        if frozen is None:
+            raise replaystore.ReplayDivergence(
+                block.id, {"model": f"tool:{block.name}"})
+        return block_result(frozen["content"], frozen.get("is_error", False))
+
+    handler = tools.resolve_handler(block.name)
+    if handler is None:
+        content, is_error = f"Error: no handler for tool '{block.name}'", True
+    else:
+        try:
+            output = handler(**(block.input or {}))
+        except Exception as err:
+            content, is_error = f"Error: {err}", True
+        else:
+            content = str(output)
+            if security.should_wrap(block.name):
+                content = security.wrap_untrusted(content, source=block.name)
+            is_error = False
+    replaystore.put_tool(block.id, content, is_error)
+    return block_result(content, is_error)
