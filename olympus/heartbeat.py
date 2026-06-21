@@ -49,9 +49,11 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         try:
             removed = memory.sweep_dated_files(config.RETAIN_DAYS)
             orphans = memory.sweep_orphan_responses()
-            if removed or orphans:
+            tool_res = memory.sweep_tool_results(config.RETAIN_DAYS)
+            if removed or orphans or tool_res:
                 log.append(f"Maintenance: removed {removed} old trace/usage "
-                           f"files and {orphans} orphaned frozen responses.")
+                           f"files, {orphans} orphaned frozen responses, and "
+                           f"{tool_res} aged tool results.")
         except Exception:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now
