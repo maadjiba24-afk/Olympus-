@@ -7,3 +7,4 @@ venv/
 memory/
 keys.sh
 deploy/.env
+olympus/verification.json
