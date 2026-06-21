@@ -123,12 +123,16 @@ class Olympus:
     # -- stage 1: Zeus ----------------------------------------------------
 
     def _route(self, user_message: str) -> dict[str, Any]:
+        # The memory-derived context is mutable run state (the background learner
+        # rewrites it), so freeze it for re-executable replay; the static prompt
+        # and roster stay live so a real prompt change is still caught.
+        mem_ctx = replaystore.frozen_context("route", lambda: (
+            profile.card(self.user)
+            + recall.context_block(self.user, user_message)
+            + playbooks.context_block(self.user, user_message)
+            + relgraph.context_block(self.user, user_message)))
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
-                  + roster() + i18n.directive(self.user)
-                  + profile.card(self.user)
-                  + recall.context_block(self.user, user_message)
-                  + playbooks.context_block(self.user, user_message)
-                  + relgraph.context_block(self.user, user_message))
+                  + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
@@ -386,6 +390,7 @@ class Olympus:
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
+        replaystore.set_run(tr.id)      # scope frozen run-state to this run
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
