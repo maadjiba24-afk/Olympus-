@@ -127,3 +127,47 @@ def get_tool(tool_use_id: str) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# --- frozen run-state context --------------------------------------------
+#
+# A prompt can also embed *mutable state* that the same run changes — e.g. the
+# memory/profile/relgraph context block injected into the router's system
+# prompt, which the run's own background memory-learner rewrites. Re-reading it
+# at replay time would change the request and break a byte-identical replay. So
+# the orchestration wraps such reads in `frozen_context`: in record mode the
+# value is frozen (keyed by the run id + a named slot), in replay mode the
+# frozen value is returned — while the static prompt/roster are still read live,
+# so a genuine code/prompt change is still detected as a divergence.
+
+def set_run(run_id: str | None) -> None:
+    """Mark the current run on this thread so `frozen_context` can key by it."""
+    _local.run_id = run_id
+
+
+def _current_run() -> str | None:
+    return replaying() or getattr(_local, "run_id", None)
+
+
+def _ctx_dir():
+    d = config.MEMORY_DIR / "context"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def frozen_context(slot: str, producer) -> str:
+    """Freeze (record) or return (replay) a piece of mutable run state injected
+    into a prompt. Keyed by run id + slot, so it's stable across a run's record
+    and replay but distinct per run. Outside a tracked run it just computes."""
+    rid = _current_run()
+    if rid is None:
+        return producer()
+    key = hashlib.sha256(f"{rid}:{slot}".encode("utf-8")).hexdigest()
+    path = _ctx_dir() / f"{key}.json"
+    if replaying():
+        if not path.exists():
+            raise ReplayDivergence(key, {"model": f"context:{slot}"})
+        return json.loads(path.read_text(encoding="utf-8"))["text"]
+    text = producer()
+    path.write_text(json.dumps({"text": text}), encoding="utf-8")
+    return text
