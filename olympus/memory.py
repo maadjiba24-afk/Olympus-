@@ -316,23 +316,24 @@ def sweep_orphan_responses() -> int:
 
 
 def sweep_tool_results(retain_days: int) -> int:
-    """Delete frozen client-side tool results older than retain_days. Returns
-    count. These are keyed by tool_use id (not trace-referenced), so they're
-    pruned by age — aligned with trace retention, keeping a run replayable for
-    its whole retained life while bounding growth."""
+    """Delete frozen client-side tool results and frozen run-state context older
+    than retain_days. Returns count. These are keyed by tool_use id / run id (not
+    trace-referenced), so they're pruned by age — aligned with trace retention,
+    keeping a run replayable for its whole retained life while bounding growth."""
     import time as _time
-    d = config.MEMORY_DIR / "tool_results"
-    if not d.exists():
-        return 0
     cutoff = _time.time() - max(retain_days, 1) * 86400
     removed = 0
-    for path in d.glob("*.json"):
-        try:
-            if path.stat().st_mtime < cutoff:
-                path.unlink()
-                removed += 1
-        except OSError:
-            pass
+    for sub in ("tool_results", "context"):
+        d = config.MEMORY_DIR / sub
+        if not d.exists():
+            continue
+        for path in d.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
     return removed
 
 
