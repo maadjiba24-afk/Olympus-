@@ -113,6 +113,7 @@ class Olympus:
         self.history: list[dict[str, Any]] = (
             memory.load_conversation(conversation_id) if conversation_id else []
         )
+        self.last_run_id: str | None = None   # set by ask(); used to replay a run
 
     def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
         s = self.pool.for_role(role)
@@ -555,6 +556,7 @@ class Olympus:
                     reply = self._synthesize(user_message, brief, result)
         finally:
             tr.flush()
+            self.last_run_id = tr.id
         self._finish(user_message, reply)
         return reply
 
