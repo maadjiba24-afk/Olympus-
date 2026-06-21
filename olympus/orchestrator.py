@@ -133,6 +133,8 @@ class Olympus:
         try:
             return backend.complete_json(self.pool.for_role("reasoning"), system,
                                          messages, ROUTE_SCHEMA, effort="medium")
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
         except ValueError:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
@@ -277,6 +279,8 @@ class Olympus:
                 [{"role": "user", "content": prompt}], REVIEW_SCHEMA,
                 effort="medium",
             )
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
         except Exception:
             return {"verdict": "approve", "feedback": "", "retry_specialists": []}
 
@@ -310,6 +314,8 @@ class Olympus:
         memory.set_user(self.user)  # worker threads get their own context
         try:
             return SPECIALISTS[key].run(task, settings=self.pool.for_specialist(key))
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
         except Exception as err:
             self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
             return (f"[{SPECIALISTS[key].name} could not complete this task: "
@@ -412,6 +418,8 @@ class Olympus:
             try:
                 with tr.span("verify"):
                     verified = self._verify(brief, outputs)
+            except replaystore.ReplayDivergence:
+                raise                   # never mask a replay divergence
             except Exception as err:
                 tr.event("verify.failed", error=str(err)[:200])
                 self.report("⚠️ Verification step failed; using raw findings.")
