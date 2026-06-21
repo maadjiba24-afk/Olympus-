@@ -106,6 +106,15 @@ class Trace:
             "events": self.events,
             "decisions": self.decisions,
         }
+        # Sign the decision path with the witness root-of-trust so the audit
+        # trail is tamper-evident. Best-effort: if crypto is unavailable the run
+        # is still recorded, just unsigned.
+        try:
+            from . import witness
+            if witness.available():
+                record["log_signature"] = witness.sign_log(self.decisions)
+        except Exception:
+            pass
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 
