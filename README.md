@@ -10,9 +10,16 @@ commands a supervised council of specialists, every answer passes through a
 hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
-> **Status:** the full architecture is implemented and covered by 176 passing
-> tests. Install with the one-liner below, type `olympus`, and you're chatting;
-> `olympus scores` shows each specialist's measured quality.
+Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
+<!--cap:tools-->26<!--/cap--> agent tools, and <!--cap:commands-->42<!--/cap-->
+CLI commands. Every count here is generated from the code
+(`olympus capabilities`) and verified in CI, so the numbers can't drift from
+what's actually built.
+
+> **Status:** the full architecture is implemented and covered by a
+> comprehensive passing test suite. Install with the one-liner below, type
+> `olympus`, and you're chatting; `olympus scores` shows each specialist's
+> measured quality.
 
 ## Architecture
 
@@ -135,7 +142,7 @@ The result is something neither Hermes nor OpenClaw has: a system that gets
 collectively smarter by distilling the best of every frontier model its users
 bring — with consent, anonymization, and quality-gating built in.
 
-### Keeping all 11 specialists strong (systematic training)
+### Keeping all <!--cap:agents-->12<!--/cap--> specialists strong (systematic training)
 
 A specialist only improves at what's *measured* — so Olympus measures every
 user-facing specialist and trains the weakest on a cadence:
