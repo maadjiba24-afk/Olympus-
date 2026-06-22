@@ -45,23 +45,45 @@ def _ok(rec: dict) -> bool:
     return rec["completed"] and rec["replayable"] and rec["decisions"] > 0
 
 
+# Errors that mean "couldn't run the gate" (infrastructure/account), NOT "the
+# reasoning diverged". These are skipped, never reported as a replay failure, so
+# an empty wallet or a missing key can't masquerade as a regression.
+_PROVIDER_UNAVAILABLE = (
+    "credit balance", "plans & billing", "billing", "quota",
+    "authentication", "x-api-key", "api key", "permission",
+    "overloaded", "rate limit", "503", "529",
+)
+
+
+def _is_provider_unavailable(msg: str) -> bool:
+    m = (msg or "").lower()
+    return any(sig in m for sig in _PROVIDER_UNAVAILABLE)
+
+
 def check_one(prompt: str, make_bot, report) -> dict:
-    """Run one prompt live, then replay it. Returns a result record."""
+    """Run one prompt live, then replay it. Returns a result record. `skipped`
+    marks an infrastructure/account problem (no key, no credits, rate limit,
+    budget cap) — distinct from a genuine replay failure."""
     rec: dict = {"prompt": prompt, "completed": False, "replayable": False,
-                 "decisions": 0, "run_id": None, "detail": ""}
+                 "decisions": 0, "run_id": None, "detail": "", "skipped": False}
     bot = make_bot()
     try:
         reply = bot.ask(prompt)
-    except Exception as err:                       # unattended means: no human
-        rec["detail"] = f"ask() raised: {err!r}"
-        return rec
-    rec["completed"] = bool(reply) and not reply.startswith(
-        ("Configuration problem", "Daily budget"))
-    rec["run_id"] = getattr(bot, "last_run_id", None)
-    if not rec["completed"]:
-        rec["detail"] = f"did not complete: {reply[:120]}"
+    except Exception as err:
+        if _is_provider_unavailable(str(err)):
+            rec["skipped"] = True
+            rec["detail"] = f"skipped — provider unavailable: {str(err)[:140]}"
+        else:
+            rec["detail"] = f"ask() raised: {err!r}"
         return rec
 
+    if not reply or reply.startswith(("Configuration problem", "Daily budget")):
+        rec["skipped"] = True            # our own config/budget guard, not a fail
+        rec["detail"] = f"skipped — {reply[:120]}"
+        return rec
+
+    rec["completed"] = True
+    rec["run_id"] = getattr(bot, "last_run_id", None)
     run = trace.load_run(rec["run_id"]) if rec["run_id"] else None
     rec["decisions"] = len(run.get("decisions", [])) if run else 0
     if rec["decisions"] == 0:
@@ -91,12 +113,18 @@ def run_exit_check(prompts=None, *, make_bot=None, report=print) -> tuple[bool, 
     for i, prompt in enumerate(prompts, 1):
         report(f"\n[{i}/{len(prompts)}] {prompt[:70]}...")
         rec = check_one(prompt, make_bot, report)
+        status = "SKIP" if rec.get("skipped") else ("PASS" if _ok(rec) else "FAIL")
         report(f"    completed={rec['completed']} decisions={rec['decisions']} "
                f"replayable={rec['replayable']} — {rec['detail']}")
-        report(f"    {'PASS' if _ok(rec) else 'FAIL'}  (run {rec['run_id']})")
+        report(f"    {status}  (run {rec['run_id']})")
         results.append(rec)
     all_pass = len(results) >= 3 and all(_ok(r) for r in results)
     return all_pass, results
+
+
+def genuine_failures(results: list[dict]) -> list[dict]:
+    """Runs that actually broke the gate — not passes, not infra/account skips."""
+    return [r for r in results if not _ok(r) and not r.get("skipped")]
 
 
 def _failure_body(results: list[dict]) -> str:
@@ -129,6 +157,13 @@ def self_check(prompts=None, *, make_bot=None, report=None) -> dict:
     if all_pass:
         memory.save("reports", "Replay self-check passed", summary)
         return {"ran": True, "passed": True, "summary": summary, "results": results}
+
+    # Only infra/account skips (no credits, no key, rate limit) and no genuine
+    # divergence → inconclusive. Don't escalate: that's not a regression.
+    if not genuine_failures(results):
+        return {"ran": False, "passed": None, "summary": summary,
+                "skipped": "provider unavailable or budget — gate inconclusive",
+                "results": results}
 
     body = summary + "\n\n" + _failure_body(results)
     memory.save("corrections", "Replay self-check FAILED", body)

@@ -158,6 +158,40 @@ def test_self_check_skips_when_budget_exceeded(monkeypatch):
     assert res["ran"] is False and "cap" in res["skipped"]
 
 
+def test_provider_error_is_skipped_not_failed():
+    # An out-of-credits / billing error must be a SKIP, never a replay failure.
+    class _Broke:
+        last_run_id = None
+        def ask(self, prompt):
+            raise RuntimeError("Error code: 400 — Your credit balance is too low "
+                               "to access the Anthropic API. Plans & Billing.")
+
+    all_pass, results = harness.run_exit_check(
+        ["a", "b", "c"], make_bot=lambda: _Broke(), report=lambda *a: None)
+    assert all_pass is False
+    assert all(r["skipped"] for r in results)
+    assert harness.genuine_failures(results) == []     # nothing genuinely failed
+
+
+def test_self_check_does_not_escalate_on_provider_error(monkeypatch):
+    from olympus import github, telegram
+    alerts = {}
+    monkeypatch.setattr(telegram, "notify", lambda m: alerts.setdefault("tg", m))
+    monkeypatch.setattr(github, "configured", lambda: True)
+    monkeypatch.setattr(github, "create_issue",
+                        lambda t, b: alerts.setdefault("issue", t))
+
+    class _Broke:
+        last_run_id = None
+        def ask(self, prompt):
+            raise RuntimeError("credit balance is too low")
+
+    res = harness.self_check(["a", "b", "c"], make_bot=lambda: _Broke(),
+                             report=lambda *a: None)
+    assert res["ran"] is False and res.get("skipped")
+    assert "tg" not in alerts and "issue" not in alerts   # no false alarm
+
+
 def test_gate_bot_pins_cheaper_model(monkeypatch):
     # The gate runs on the cheaper GATE_MODEL by default, not the main model,
     # so the weekly tripwire stays affordable.
