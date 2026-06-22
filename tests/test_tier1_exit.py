@@ -6,22 +6,13 @@ against the frozen responses and correctly reports completed + replayable. The
 live gate (real Claude calls on 3 prompts) runs the same code with a real key.
 """
 
-import importlib.util
 import json
-import sys
 import types
-from pathlib import Path
 
 import anthropic
 
 from olympus import config, llm, orchestrator  # noqa: F401
-
-ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location(
-    "tier1_exit_check", ROOT / "scripts" / "tier1_exit_check.py")
-harness = importlib.util.module_from_spec(_spec)
-sys.modules["tier1_exit_check"] = harness
-_spec.loader.exec_module(harness)
+from olympus import replaygate as harness
 
 
 def _message(text: str) -> anthropic.types.Message:
@@ -111,3 +102,57 @@ def test_harness_flags_incomplete_run(monkeypatch):
         ["a", "b", "c"], make_bot=lambda: _Stub(), report=lambda *a: None)
     assert all_pass is False
     assert all(r["completed"] is False for r in results)
+
+
+# --- the automatic tripwire (self_check escalation) ----------------------
+
+def test_self_check_passes_quietly_when_replayable(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setattr(config, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(llm, "client", _fake_client)
+    res = harness.self_check(["one", "two", "three"], report=lambda *a: None)
+    assert res["passed"] is True and res["ran"] is True
+
+
+def test_self_check_escalates_on_divergence(monkeypatch):
+    # A run that completes but never replays -> the gate must fail AND escalate.
+    from olympus import github, memory, telegram
+
+    class _Stub:
+        last_run_id = "r1"
+        def ask(self, prompt):
+            return "a real answer"
+
+    # make it look completed-but-not-replayable
+    monkeypatch.setattr(harness, "trace",
+                        types.SimpleNamespace(load_run=lambda rid: {"decisions": [{}]}))
+    monkeypatch.setattr(harness.orchestrator, "replay_run",
+                        lambda rid: (_ for _ in ()).throw(
+                            harness.replaystore.ReplayDivergence("h", {"model": "m"})))
+
+    alerts = {}
+    monkeypatch.setattr(telegram, "notify", lambda msg: alerts.setdefault("tg", msg))
+    monkeypatch.setattr(github, "configured", lambda: True)
+
+    def _fake_issue(title, body):
+        alerts["issue"] = title
+        return "http://x/1"
+    monkeypatch.setattr(github, "create_issue", _fake_issue)
+    saved = []
+    monkeypatch.setattr(memory, "save", lambda cat, title, body: saved.append((cat, title)))
+
+    res = harness.self_check(["a", "b", "c"], make_bot=lambda: _Stub(),
+                             report=lambda *a: None)
+    assert res["passed"] is False
+    assert "tg" in alerts                      # Telegram alerted
+    assert "issue" in alerts                    # GitHub issue filed
+    assert any(cat == "corrections" for cat, _ in saved)   # recorded to memory
+    assert res["issue"] == "http://x/1"
+
+
+def test_self_check_skips_when_budget_exceeded(monkeypatch):
+    from olympus import usage
+    monkeypatch.setattr(usage, "check_budget",
+                        lambda: (_ for _ in ()).throw(usage.BudgetExceeded("cap")))
+    res = harness.self_check(["a", "b", "c"], report=lambda *a: None)
+    assert res["ran"] is False and "cap" in res["skipped"]

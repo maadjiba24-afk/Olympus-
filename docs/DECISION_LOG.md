@@ -99,11 +99,46 @@ In other words: the log proves the *reasoning path* (what Olympus decided and
 why) is reproducible. It does not pin the exact prose of the final reply, which
 is non-deterministic streamed text and not part of the decision.
 
+## The replay invariant (read this before adding a decision input)
+
+> **Every non-LLM input to a decision must be frozen.** That means tool results
+> *and* any mutable state injected into a prompt. If a decision reads something
+> that can differ between the recorded run and a later replay, freeze it at
+> record time and return the frozen value on replay — otherwise the request
+> changes and replay diverges.
+
+Concretely, when you add or change a stage:
+
+- **LLM calls** are frozen automatically — every `llm.complete()` request is
+  hashed and its response stored. You get this for free.
+- **Client-side tool results** are frozen automatically — `agent.run_agent`
+  freezes each result by its `tool_use` id (`replaystore.put_tool` / `get_tool`).
+  So any *new* tool is covered with no extra work; never re-execute a tool on
+  replay.
+- **Assistant turns re-sent in a multi-turn loop** are normalized to canonical
+  JSON (`agent._assistant_turn`), so live and reloaded SDK objects serialize
+  identically. Don't append raw `response.content` back into `messages`.
+- **Mutable state injected into a prompt** (recalled memory, profile, the
+  relationship graph, anything the run itself can mutate) is **not** automatic.
+  Wrap it in `replaystore.frozen_context("<slot>", lambda: <read>)` — as `_route`
+  does for its memory context — keyed by run id so record and replay see the same
+  bytes. Keep the *static* prompt/roster live so a genuine prompt change is still
+  caught as a divergence (that's the point of replay).
+
+This invariant is enforced, not just documented: the heartbeat runs the **replay
+self-check** (`replaygate.self_check`, cadence `config.REPLAY_GATE_EVERY`) on
+real prompts, and a CI **replay-gate** workflow does the same on a schedule. If a
+live run stops replaying byte-identically, both escalate (a memory correction, a
+Telegram alert, and — if GitHub is configured — an auto-filed issue) so a new
+unfrozen input is caught within a cycle instead of silently rotting the audit
+trail. Run it by hand anytime with `python scripts/tier1_exit_check.py`.
+
 ## Retention
 
 Frozen responses are content-addressed, not dated, so they are pruned by
 reachability rather than age. The heartbeat's maintenance pass runs
-`memory.sweep_dated_files()` (drops old dated traces/usage) and then
-`memory.sweep_orphan_responses()`, which removes any frozen response no
-surviving trace still references. A recorded run therefore stays fully
+`memory.sweep_dated_files()` (drops old dated traces/usage), then
+`memory.sweep_orphan_responses()` (removes any frozen response no surviving
+trace references) and `memory.sweep_tool_results()` (ages out frozen tool
+results and run-state context). A recorded run therefore stays fully
 re-executable for its entire retained life, and storage stays bounded.
