@@ -1,0 +1,35 @@
+name: Replay gate
+
+# Re-executable-decision-log tripwire: runs the replay gate on real prompts and
+# fails if a live run no longer replays byte-identically (a sign that a non-LLM
+# input to a decision isn't being frozen — see docs/DECISION_LOG.md).
+#
+# Needs an ANTHROPIC_API_KEY repo secret (the record pass makes real calls; the
+# replay pass makes none). Spend is capped via OLYMPUS_DAILY_BUDGET. If the
+# secret isn't set, the job skips cleanly rather than failing.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"        # weekly, Monday 06:00 UTC
+  workflow_dispatch:           # and on demand
+
+jobs:
+  replay-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - name: Run the replay gate (skips if no key)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OLYMPUS_DAILY_BUDGET: "1.00"     # hard cap on spend for this run
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "No ANTHROPIC_API_KEY secret set — skipping replay gate."
+            exit 0
+          fi
+          python scripts/tier1_exit_check.py
