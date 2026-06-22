@@ -279,3 +279,9 @@ MAINTENANCE_EVERY = 86400            # housekeeping sweep cadence
 # this cadence and escalates if a live run no longer replays byte-identically.
 # It makes a few real model calls (budget-guarded); 0 disables it.
 REPLAY_GATE_EVERY = int(os.environ.get("OLYMPUS_REPLAY_GATE_EVERY", str(7 * 86400)))
+
+# The gate proves *replay determinism*, which is model-independent — so it runs
+# on a cheaper model by default (≈5x less than Opus) to keep the weekly CI /
+# heartbeat tripwire affordable. Override for a full-fidelity run on your main
+# model: OLYMPUS_GATE_MODEL=claude-opus-4-8.
+GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "claude-sonnet-4-6")

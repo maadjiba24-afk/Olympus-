@@ -29,6 +29,18 @@ DEFAULT_PROMPTS = [
 ]
 
 
+def _gate_bot() -> "orchestrator.Olympus":
+    """Build the bot the gate runs on. For Anthropic, pin the cheaper
+    `config.GATE_MODEL` (the determinism check doesn't need the main model);
+    for other providers, just use the configured pool."""
+    base = config.Settings.from_env()
+    if base.provider == "anthropic" and config.GATE_MODEL:
+        s = config.Settings(provider="anthropic", model=config.GATE_MODEL,
+                            api_key=base.api_key, base_url=base.base_url)
+        return orchestrator.Olympus(pool=config.ModelPool.of(s))
+    return orchestrator.Olympus(pool=config.ModelPool.from_env())
+
+
 def _ok(rec: dict) -> bool:
     return rec["completed"] and rec["replayable"] and rec["decisions"] > 0
 
@@ -74,8 +86,7 @@ def check_one(prompt: str, make_bot, report) -> dict:
 def run_exit_check(prompts=None, *, make_bot=None, report=print) -> tuple[bool, list[dict]]:
     """Run the gate over `prompts`. Returns (all_pass, results)."""
     prompts = prompts or DEFAULT_PROMPTS
-    make_bot = make_bot or (
-        lambda: orchestrator.Olympus(pool=config.ModelPool.from_env()))
+    make_bot = make_bot or _gate_bot
     results = []
     for i, prompt in enumerate(prompts, 1):
         report(f"\n[{i}/{len(prompts)}] {prompt[:70]}...")
