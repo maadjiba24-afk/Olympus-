@@ -716,10 +716,24 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     if not user_input:
         raise ValueError(f"run '{run_id}' has no recorded input to replay")
 
+    # Replay on the model the run was *recorded* with, not the current default —
+    # the request hash includes the model, so a different model (e.g. the gate
+    # runs on a cheaper one, or the instance changed its default since) would
+    # spuriously diverge. No key is needed (replay returns frozen responses).
+    decs = original.get("decisions") or []
+    rec_model = next((d.get("model") for d in decs if d.get("model")), None)
+    pool = None
+    if rec_model and rec_model.get("model"):
+        base = config.Settings.from_env()
+        pool = config.ModelPool.of(config.Settings(
+            provider=rec_model.get("provider", base.provider),
+            model=rec_model["model"], api_key=base.api_key,
+            base_url=base.base_url))
+
     prev = os.environ.get("OLYMPUS_REPLAY")
     os.environ["OLYMPUS_REPLAY"] = run_id
     try:
-        bot = Olympus(user=original.get("user", "shared"))
+        bot = Olympus(user=original.get("user", "shared"), pool=pool)
         fresh = trace_mod.Trace("replay", bot.user)
         fresh.meta = {"input": user_input, "replays": run_id}
         bot._pipeline(user_input, fresh)
