@@ -87,6 +87,27 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Prometheus failed:\n" + traceback.format_exc())
         state["evolution_audit"] = now
 
+    if config.REPLAY_GATE_EVERY and _due(state, "replay_gate",
+                                          config.REPLAY_GATE_EVERY, now):
+        try:
+            from . import firstrun, replaygate
+            if not firstrun.configured():
+                log.append("Replay self-check skipped: no provider key.")
+            else:
+                res = replaygate.self_check(report=lambda _m: None)
+                if not res.get("ran"):
+                    log.append(f"Replay self-check skipped: {res.get('skipped')}")
+                elif res["passed"]:
+                    log.append(f"Replay self-check: PASS — {res['summary']}")
+                else:
+                    msg = "Replay self-check: FAILED — divergence alert raised"
+                    if res.get("issue"):
+                        msg += f" (GitHub issue: {res['issue']})"
+                    log.append(msg)
+        except Exception:
+            log.append("Replay self-check errored:\n" + traceback.format_exc())
+        state["replay_gate"] = now
+
     memory.save_state(state)
     return log
 
@@ -100,6 +121,8 @@ def run_forever() -> None:
     if config.TRAIN_EVERY:
         print(f"  specialist train : every {config.TRAIN_EVERY // 86400} d")
     print(f"  evolution audit  : every {config.EVOLUTION_AUDIT_EVERY // 86400} d")
+    if config.REPLAY_GATE_EVERY:
+        print(f"  replay self-check: every {config.REPLAY_GATE_EVERY // 86400} d")
     while True:
         for line in tick(state):
             print(f"[heartbeat] {line}")
