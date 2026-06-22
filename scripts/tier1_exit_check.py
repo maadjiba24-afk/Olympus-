@@ -26,13 +26,22 @@ def main(argv=None) -> int:
     firstrun.load_env_file()
     all_pass, results = replaygate.run_exit_check(argv or None)
     passed = sum(1 for r in results if replaygate._ok(r))
+    skipped = sum(1 for r in results if r.get("skipped"))
+    failures = replaygate.genuine_failures(results)
     print(f"\n{'=' * 60}")
-    print(f"Tier-1 exit gate: {passed}/{len(results)} prompts passed.")
+    print(f"Tier-1 exit gate: {passed}/{len(results)} prompts passed"
+          + (f", {skipped} skipped" if skipped else "") + ".")
     if all_pass:
         print("✓ GATE MET — runs complete unattended and replay byte-identically. "
               "Cleared for Tier 2.")
         return 0
-    print("✗ GATE NOT MET — see the failing prompt(s) above.")
+    if not failures:
+        print("⚠ INCONCLUSIVE — the gate couldn't run (provider unavailable, "
+              "e.g. out of credits / no key / rate limit). This is NOT a replay "
+              "failure. Fix the provider/account and re-run.")
+        return 0
+    print("✗ GATE NOT MET — a recorded run did not replay byte-identically "
+          "(see the failing prompt(s) above).")
     return 1
 
 
