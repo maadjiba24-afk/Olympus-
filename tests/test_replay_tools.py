@@ -105,6 +105,28 @@ def test_tool_result_roundtrips_through_store():
     assert replaystore.get_tool("toolu_missing") is None
 
 
+def test_assistant_turn_is_identical_live_vs_reloaded():
+    """A re-sent assistant turn must serialize identically whether it's the live
+    response (record) or the frozen response reloaded (replay) — otherwise the
+    follow-up request hash diverges. Covers thinking + text + tool_use blocks."""
+    live = anthropic.types.Message.model_validate({
+        "id": "m", "type": "message", "role": "assistant", "model": "claude",
+        "content": [
+            {"type": "thinking", "thinking": "reasoning", "signature": "sig"},
+            {"type": "text", "text": "searching"},
+            {"type": "tool_use", "id": "toolu_1", "name": "current_time", "input": {}},
+            {"type": "tool_use", "id": "toolu_2", "name": "recall_memory",
+             "input": {"query": "x"}}],
+        "stop_reason": "tool_use", "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
+    reloaded = anthropic.types.Message.model_validate_json(live.to_json())
+    assert agent._assistant_turn(live) == agent._assistant_turn(reloaded)
+    req = lambda turn: {"model": "m", "messages": [turn]}
+    assert (replaystore.request_hash(req(agent._assistant_turn(live)))
+            == replaystore.request_hash(req(agent._assistant_turn(reloaded))))
+
+
 # --- frozen run-state context (the memory-drift fix) ---------------------
 
 def test_frozen_context_replays_despite_state_change(monkeypatch):
