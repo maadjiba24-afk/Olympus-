@@ -55,13 +55,28 @@ class ReplayDivergence(RuntimeError):
             "decision's request since the recorded run.")
 
 
+def _canonical_default(obj):
+    """Serialize a value json can't handle. SDK response blocks (thinking,
+    tool_use, web_search_tool_result, …) get re-sent in later requests; their
+    `str()` repr is NOT stable across a freeze→reload round-trip, but their
+    structured `model_dump` is — so hash over that, falling back to str()."""
+    dump = getattr(obj, "model_dump", None)
+    if dump is not None:
+        try:
+            return dump(mode="json")
+        except Exception:
+            pass
+    return str(obj)
+
+
 def canonical_request(params: dict) -> bytes:
     """Deterministic bytes for a request: keys sorted recursively (json
-    sort_keys), the server-allocated `container` dropped. Structurally-equal
-    requests serialize identically, so they hash identically."""
+    sort_keys), the server-allocated `container` dropped, and SDK objects
+    serialized by their structured `model_dump` so a re-sent assistant turn
+    hashes identically whether it's live (record) or reloaded (replay)."""
     cleaned = {k: v for k, v in params.items() if k not in _EXCLUDE_FROM_HASH}
     return json.dumps(cleaned, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, default=str).encode("utf-8")
+                      ensure_ascii=False, default=_canonical_default).encode("utf-8")
 
 
 def request_hash(params: dict) -> str:
