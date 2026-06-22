@@ -6,9 +6,22 @@ Handles client-side tool execution, server-side tool continuation
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from . import config, llm, replaystore, security, tools
+
+
+def _assistant_turn(response) -> dict[str, Any]:
+    """An assistant message whose content is the SDK's canonical JSON dicts.
+
+    Re-sending raw SDK block objects makes a recorded run and its replay build
+    *different* follow-up requests: a live response object and the same response
+    reloaded from the frozen JSON don't serialize identically. Round-tripping
+    through `to_json` (which is idempotent after one pass) yields byte-identical
+    content in both record and replay, so the request hashes match."""
+    return {"role": "assistant",
+            "content": json.loads(response.to_json())["content"]}
 
 
 def load_prompt(stem: str) -> str:
@@ -46,14 +59,14 @@ def run_agent(
         # Server-side tool loop (web_search/web_fetch) hit its iteration cap —
         # append the assistant turn and re-send; the server resumes.
         if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
+            messages.append(_assistant_turn(response))
             continue
 
         if response.stop_reason != "tool_use":
             return llm.text_of(response)
 
         # Client-side tool calls.
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append(_assistant_turn(response))
         results = [_tool_result(block) for block in response.content
                    if block.type == "tool_use"]
         messages.append({"role": "user", "content": results})
