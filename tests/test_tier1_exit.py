@@ -156,3 +156,13 @@ def test_self_check_skips_when_budget_exceeded(monkeypatch):
                         lambda: (_ for _ in ()).throw(usage.BudgetExceeded("cap")))
     res = harness.self_check(["a", "b", "c"], report=lambda *a: None)
     assert res["ran"] is False and "cap" in res["skipped"]
+
+
+def test_gate_bot_pins_cheaper_model(monkeypatch):
+    # The gate runs on the cheaper GATE_MODEL by default, not the main model,
+    # so the weekly tripwire stays affordable.
+    monkeypatch.setenv("OLYMPUS_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setattr(config, "GATE_MODEL", "claude-sonnet-4-6")
+    bot = harness._gate_bot()
+    assert bot.pool.primary().model == "claude-sonnet-4-6"
