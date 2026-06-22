@@ -274,3 +274,8 @@ AUDIT_EVERY_CHATS = int(os.environ.get("OLYMPUS_AUDIT_EVERY_CHATS", "20"))
 # Retain per-day trace and usage files for this many days (older are deleted).
 RETAIN_DAYS = int(os.environ.get("OLYMPUS_RETAIN_DAYS", "30"))
 MAINTENANCE_EVERY = 86400            # housekeeping sweep cadence
+
+# Replay self-check (decision-log tripwire): the heartbeat re-runs the gate on
+# this cadence and escalates if a live run no longer replays byte-identically.
+# It makes a few real model calls (budget-guarded); 0 disables it.
+REPLAY_GATE_EVERY = int(os.environ.get("OLYMPUS_REPLAY_GATE_EVERY", str(7 * 86400)))
