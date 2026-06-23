@@ -115,5 +115,5 @@ def test_heartbeat_nothing_due():
     from olympus import heartbeat
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
                                "daily_learning", "train", "evolution_audit",
-                               "replay_gate")}
+                               "replay_gate", "backup")}
     assert heartbeat.tick(state) == []

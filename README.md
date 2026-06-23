@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->26<!--/cap--> agent tools, and <!--cap:commands-->48<!--/cap-->
+<!--cap:tools-->26<!--/cap--> agent tools, and <!--cap:commands-->50<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -792,6 +792,7 @@ Memory lives in `./memory/` (gitignored): `lessons/`, `corrections/`,
 - [`RELEASING.md`](RELEASING.md) — how a signed release is cut (tag → sign → publish → verify).
 - [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately, and the blast-radius guarantees.
 - [`docs/SUPPORT.md`](docs/SUPPORT.md) — SemVer, the 6-month LTS window, and release-integrity policy.
+- [`docs/BACKUPS.md`](docs/BACKUPS.md) — encrypted, signed, off-droplet data backups and disaster recovery.
 
 Verify any published release with `olympus verify` (recomputes every file hash
 and checks the signature against the pinned key); verify a recorded run's audit

@@ -51,6 +51,17 @@ services:
   #   volumes:
   #     - olympus-memory:/app/memory
 
+  # Off-droplet backups WITHOUT the token-spending heartbeat: this loop only
+  # runs `olympus backup` (no model calls), so it's safe to leave on. Set
+  # OLYMPUS_BACKUP_CMD + OLYMPUS_SECRET_KEY in .env first (see docs/BACKUPS.md).
+  # backup:
+  #   build: ..
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   command: ["sh", "-c", "while true; do python -m olympus backup || true; sleep ${OLYMPUS_BACKUP_EVERY:-86400}; done"]
+  #   volumes:
+  #     - olympus-memory:/app/memory
+
 volumes:
   olympus-memory:
   caddy-data:

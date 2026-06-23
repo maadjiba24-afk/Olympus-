@@ -108,6 +108,26 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Replay self-check errored:\n" + traceback.format_exc())
         state["replay_gate"] = now
 
+    if config.BACKUP_EVERY and _due(state, "backup", config.BACKUP_EVERY, now):
+        try:
+            from . import backup
+            res = backup.run()
+            if res.get("ok"):
+                where = res.get("via") or ("delivered" if res.get("delivered")
+                                           else "local only")
+                log.append(f"Backup: {res['files']} files, "
+                           f"{res['bytes'] // 1024} KB, "
+                           f"{'encrypted' if res.get('encrypted') else 'PLAINTEXT'},"
+                           f" {where}.")
+            else:
+                log.append(f"Backup FAILED at {res.get('stage')}: "
+                           f"{res.get('error')}")
+                telegram.notify("⚠️ Olympus backup failed at "
+                                f"{res.get('stage')}: {res.get('error')}")
+        except Exception:
+            log.append("Backup errored:\n" + traceback.format_exc())
+        state["backup"] = now
+
     memory.save_state(state)
     return log
 
@@ -123,6 +143,10 @@ def run_forever() -> None:
     print(f"  evolution audit  : every {config.EVOLUTION_AUDIT_EVERY // 86400} d")
     if config.REPLAY_GATE_EVERY:
         print(f"  replay self-check: every {config.REPLAY_GATE_EVERY // 86400} d")
+    if config.BACKUP_EVERY:
+        dest = "off-droplet" if config.backup_command() else "local only"
+        print(f"  data backup      : every {config.BACKUP_EVERY // 3600} h "
+              f"({dest})")
     while True:
         for line in tick(state):
             print(f"[heartbeat] {line}")

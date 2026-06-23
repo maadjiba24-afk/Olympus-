@@ -1,0 +1,136 @@
+"""Off-droplet backups must be recoverable AND hardened: encrypted at rest,
+signed, integrity-checked on restore, and unable to be tricked into writing
+outside the restore dir or shipping plaintext secrets off the machine."""
+
+import io
+import tarfile
+
+import pytest
+
+from olympus import backup, config, errors
+
+
+@pytest.fixture()
+def mem(tmp_path, monkeypatch):
+    """An isolated MEMORY_DIR seeded with user/account data plus a replay cache
+    (which backups exclude by default)."""
+    d = tmp_path / "mem"
+    (d / "accounts").mkdir(parents=True)
+    (d / "accounts" / "users.json").write_text('{"alice": "h"}')
+    (d / "usermem").mkdir()
+    (d / "usermem" / "alice.json").write_text('{"facts": ["likes tea"]}')
+    (d / "responses").mkdir()
+    (d / "responses" / "big.json").write_text("x" * 4096)   # reproducible cache
+    monkeypatch.setattr(config, "MEMORY_DIR", d)
+    return d
+
+
+def test_roundtrip_encrypted_signed_excludes_replay_cache(mem, tmp_path, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
+    res = backup.create()
+    assert res["encrypted"] and res["signed"]
+    assert res["name"].endswith(".enc")
+    assert res["files"] == 2                       # responses/ excluded
+
+    into = tmp_path / "restored"
+    out = backup.restore(res["path"], into=into)
+    assert out["restored"] == 2 and out["signature_ok"] and out["mismatched"] == []
+    assert (into / "accounts" / "users.json").read_text() == '{"alice": "h"}'
+    assert not (into / "responses").exists()       # cache was not in the archive
+    assert not (into / "data").exists()            # staging tree cleaned up
+
+
+def test_full_includes_replay_cache(mem, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
+    res = backup.create(full=True)
+    assert res["files"] == 3                       # responses/big.json included
+
+
+def test_unencrypted_when_no_secret_key(mem, tmp_path, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    res = backup.create()
+    assert res["encrypted"] is False
+    assert res["name"].endswith(".tar.gz")
+    out = backup.restore(res["path"], into=tmp_path / "r")
+    assert out["restored"] == 2                    # still recoverable
+
+
+def test_tampered_archive_fails_restore(mem, tmp_path, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)   # plaintext, so we
+    res = backup.create()                                     # can flip a byte
+    from pathlib import Path
+    p = Path(res["path"])
+    blob = bytearray(p.read_bytes())
+    blob[len(blob) // 2] ^= 0xFF                    # corrupt the middle
+    p.write_bytes(bytes(blob))
+    with pytest.raises(backup.BackupError, match="signature is INVALID"):
+        backup.restore(res["path"], into=tmp_path / "r")
+
+
+def test_path_traversal_member_is_rejected(mem, tmp_path):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("../escape.txt")
+        data = b"pwned"
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    archive = backup._backups_dir() / "olympus-backup-evil.tar.gz"
+    archive.write_bytes(buf.getvalue())
+    with pytest.raises(backup.BackupError, match="traversal"):
+        backup.restore(str(archive), into=tmp_path / "r", insecure=True)
+    assert not (tmp_path / "escape.txt").exists()  # nothing escaped the dir
+
+
+def test_refuses_plaintext_delivery_off_droplet(mem, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    monkeypatch.setenv("OLYMPUS_BACKUP_CMD", "true {path}")
+    monkeypatch.delenv("OLYMPUS_BACKUP_ALLOW_PLAINTEXT", raising=False)
+    res = backup.create()
+    out = backup.deliver(res["path"])
+    assert out["delivered"] is False and "UNENCRYPTED" in out["reason"]
+
+
+def test_restore_refuses_non_empty_target(mem, tmp_path, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    res = backup.create()
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    (dest / "keep.txt").write_text("do not clobber")
+    with pytest.raises(backup.BackupError, match="non-empty"):
+        backup.restore(res["path"], into=dest)
+    assert (dest / "keep.txt").read_text() == "do not clobber"
+    # ...but --force lets it through
+    out = backup.restore(res["path"], into=dest, force=True)
+    assert out["restored"] == 2
+
+
+def test_prune_keeps_newest(mem):
+    import os
+    bdir = backup._backups_dir()
+    for i in range(4):
+        f = bdir / f"olympus-backup-2026010{i}T000000Z.tar.gz"
+        f.write_text("x")
+        (bdir / (f.name + ".sig.json")).write_text("{}")
+        os.utime(f, (i, i))                        # ascending mtime
+    removed = backup.prune(keep=2)
+    assert removed == 2
+    assert len(backup.list_backups()) == 2
+
+
+def test_run_is_best_effort_and_alerts_on_failure(mem, monkeypatch):
+    captured = []
+    monkeypatch.setattr(errors, "capture",
+                        lambda where, exc, **k: captured.append(where))
+    monkeypatch.setattr(backup, "create",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("disk full")))
+    res = backup.run()
+    assert res["ok"] is False and res["stage"] == "create"
+    assert captured == ["backup.create"]           # operator was alerted
+
+
+def test_run_local_only_succeeds_and_prunes(mem, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_BACKUP_CMD", raising=False)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
+    res = backup.run()
+    assert res["ok"] and res["delivered"] is False
+    assert "local only" in res["reason"] or "no OLYMPUS_BACKUP_CMD" in res["reason"]
