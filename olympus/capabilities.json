@@ -29,7 +29,7 @@
     ]
   },
   "commands": {
-    "count": 44,
+    "count": 45,
     "names": [
       "actions",
       "add-mcp",
@@ -60,6 +60,7 @@
       "queue",
       "reject",
       "replay",
+      "reports",
       "revoke",
       "scan",
       "scores",
