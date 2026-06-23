@@ -465,6 +465,8 @@ class Olympus:
             try:
                 with tr.span("reverify"):
                     verified = self._verify(brief, outputs)
+            except replaystore.ReplayDivergence:
+                raise                   # never mask a replay divergence
             except Exception as err:
                 tr.event("reverify.failed", error=str(err)[:200])
                 verified = "\n\n".join(
