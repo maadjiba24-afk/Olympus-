@@ -124,6 +124,13 @@ Concretely, when you add or change a stage:
   does for its memory context — keyed by run id so record and replay see the same
   bytes. Keep the *static* prompt/roster live so a genuine prompt change is still
   caught as a divergence (that's the point of replay).
+- **`try/except` around a stage must let `ReplayDivergence` through.** A stage
+  often wraps its LLM call in `except Exception` to degrade gracefully on a
+  provider hiccup (e.g. `_route`, `_review`, `_run_one`, `_verify`). Every such
+  handler must first `except replaystore.ReplayDivergence: raise` — otherwise a
+  genuine divergence on that path is swallowed as a benign failure and the run
+  replays to a false green. The reverify branch in `_pipeline` is covered by a
+  regression test (`test_reverify_divergence_is_not_masked`).
 
 This invariant is enforced, not just documented: the heartbeat runs the **replay
 self-check** (`replaygate.self_check`, cadence `config.REPLAY_GATE_EVERY`) on
