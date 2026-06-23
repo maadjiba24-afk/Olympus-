@@ -132,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
                      "over the package files")
     p_sign.add_argument("--out", help="manifest output path "
                                       "(default: in-package verification.json)")
+    p_sign.add_argument("--dev", action="store_true",
+                        help="allow signing under the public default seed "
+                             "(marks the manifest as dev — local use only)")
     p_verify = sub.add_parser(
         "verify", help="verify the signed release manifest, or a recorded run's "
                        "signed decision log")
@@ -140,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--log", metavar="RUN_ID",
                           help="instead, verify a recorded run's "
                                "decision-log signature")
+    p_verify.add_argument("--allow-dev", action="store_true",
+                          help="accept a dev manifest (signed by the public "
+                               "default seed) for local use")
+    sub.add_parser("witness-pubkey", help="print the Ed25519 public key for the "
+                                          "current signing seed (to pin it)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -501,9 +509,21 @@ def main(argv: list[str] | None = None) -> int:
         if not witness.available():
             print("Cannot sign: the cryptography backend is unavailable.")
             return 1
-        path = witness.write_manifest(Path(args.out) if args.out else None)
-        print(f"Wrote signed release manifest: {path}")
+        try:
+            path = witness.write_manifest(Path(args.out) if args.out else None,
+                                          dev=args.dev)
+        except witness.WitnessError as err:
+            print(f"[sign] {err}")
+            return 1
+        kind = "DEV (local use only)" if witness.is_default_seed() else "release"
+        print(f"Wrote signed {kind} manifest: {path}")
         print(f"  signing key (public): {witness.public_key_hex()}")
+    elif args.command == "witness-pubkey":
+        from . import witness
+        if not witness.available():
+            print("Cannot derive key: the cryptography backend is unavailable.")
+            return 1
+        print(witness.public_key_hex())
     elif args.command == "verify":
         from pathlib import Path
         from . import witness
@@ -521,10 +541,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         else:
             r = witness.verify_release(
-                Path(args.manifest) if args.manifest else None)
+                Path(args.manifest) if args.manifest else None,
+                allow_dev=args.allow_dev)
             if r["ok"]:
+                note = " (dev manifest, accepted for local use)" if r.get("is_dev") else ""
                 print("✓ verified: every tracked file matches the signed "
-                      "manifest and the signature is from the trusted key.")
+                      f"manifest and the signature is from the trusted key{note}.")
             else:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
