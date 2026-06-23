@@ -29,7 +29,7 @@
     ]
   },
   "commands": {
-    "count": 48,
+    "count": 50,
     "names": [
       "actions",
       "add-mcp",
@@ -37,6 +37,7 @@
       "ask",
       "audit",
       "autonomy",
+      "backup",
       "budget",
       "capabilities",
       "chat",
@@ -63,6 +64,7 @@
       "reject",
       "replay",
       "reports",
+      "restore",
       "revoke",
       "scan",
       "scores",

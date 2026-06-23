@@ -280,6 +280,41 @@ MAINTENANCE_EVERY = 86400            # housekeeping sweep cadence
 # It makes a few real model calls (budget-guarded); 0 disables it.
 REPLAY_GATE_EVERY = int(os.environ.get("OLYMPUS_REPLAY_GATE_EVERY", str(7 * 86400)))
 
+# Off-droplet data backups: the heartbeat archives MEMORY_DIR (user memory,
+# accounts, encrypted OAuth tokens, the signed decision log), encrypts and signs
+# it, and hands the archive to OLYMPUS_BACKUP_CMD for off-machine delivery on
+# this cadence. 0 disables the scheduled backup (you can still run it by hand
+# with `olympus backup`). Daily by default.
+BACKUP_EVERY = int(os.environ.get("OLYMPUS_BACKUP_EVERY", str(86400)))
+
+
+def backup_command() -> str:
+    """Shell command that delivers a finished backup archive off-droplet — this
+    is what makes a backup survive losing the machine. The literal token {path}
+    is replaced with the archive path, e.g.
+    `rclone copy {path} spaces:olympus-backups/` or `aws s3 cp {path} s3://...`.
+    Empty = keep backups local only (guards against data corruption, but NOT
+    against losing the droplet)."""
+    return os.environ.get("OLYMPUS_BACKUP_CMD", "").strip()
+
+
+def backup_keep() -> int:
+    """How many local backup archives to retain (OLYMPUS_BACKUP_KEEP, default 7).
+    Off-droplet copies are retained by your storage provider's own policy."""
+    try:
+        return max(1, int(os.environ.get("OLYMPUS_BACKUP_KEEP", "7")))
+    except ValueError:
+        return 7
+
+
+def backup_allow_plaintext() -> bool:
+    """Off-droplet delivery of an UNENCRYPTED archive is refused by default
+    (it would put user PII and OAuth tokens on third-party storage in the
+    clear). Set OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 only if the destination is
+    itself trusted/encrypted."""
+    return os.environ.get("OLYMPUS_BACKUP_ALLOW_PLAINTEXT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
 
 def require_byok() -> bool:
     """When set, every web chat must carry the user's own API key — so a public

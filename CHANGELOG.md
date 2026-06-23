@@ -15,7 +15,17 @@ carries a migration note here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added — disaster recovery
+
+- **Off-droplet data backups** (`olympus backup` / `olympus restore`,
+  `olympus/backup.py`). Archives `MEMORY_DIR` (per-user memory, accounts, the
+  encrypted OAuth tokens, the signed decision log), **encrypts** it at rest with
+  the vault key, **signs** it with the witness Ed25519 root of trust, and hands
+  it to `OLYMPUS_BACKUP_CMD` for off-machine delivery. Restore verifies the
+  signature and every file's SHA-256, rejects path-traversal entries, and won't
+  clobber a non-empty target. Runs on a cadence via the heartbeat (or the
+  dedicated, token-free `backup` compose service). See
+  [docs/BACKUPS.md](docs/BACKUPS.md).
 
 ## [0.16.0]
 

@@ -110,6 +110,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("errors", help="recent captured runtime errors (operator view)")
     sub.add_parser("dashboard", help="one consolidated operator health view "
                                      "(uptime, spend, reports, errors, policy)")
+    p_backup = sub.add_parser(
+        "backup", help="archive, encrypt, sign, and deliver a data backup of "
+                       "your memory/accounts/tokens off-droplet")
+    p_backup.add_argument("--list", action="store_true",
+                          help="list local backup archives instead of making one")
+    p_backup.add_argument("--full", action="store_true",
+                          help="include the (large, reproducible) replay caches")
+    p_backup.add_argument("--no-deliver", action="store_true",
+                          help="make the archive but don't run OLYMPUS_BACKUP_CMD")
+    p_restore = sub.add_parser(
+        "restore", help="restore MEMORY_DIR from a backup archive "
+                        "(verifies signature + every file hash)")
+    p_restore.add_argument("archive", help="path to a backup archive")
+    p_restore.add_argument("--into", help="restore target dir (default: MEMORY_DIR)")
+    p_restore.add_argument("--force", action="store_true",
+                           help="overwrite a non-empty target")
+    p_restore.add_argument("--insecure", action="store_true",
+                           help="proceed despite a signature/hash failure "
+                                "(not recommended)")
 
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
@@ -576,6 +595,44 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "dashboard":
         from . import dashboard
         print(dashboard.render())
+    elif args.command == "backup":
+        from . import backup, config
+        if args.list:
+            items = backup.list_backups()
+            if not items:
+                print("No local backups yet. Run `olympus backup` to make one.")
+            for b in items:
+                enc = "encrypted" if b["encrypted"] else "PLAINTEXT"
+                print(f"  {b['name']}  ({b['bytes'] // 1024} KB, {enc})")
+            return 0
+        res = backup.run(full=args.full, deliver_off=not args.no_deliver)
+        if not res.get("ok"):
+            print(f"✗ backup failed at {res.get('stage')}: {res.get('error')}")
+            return 1
+        print(f"✓ wrote {res['name']} — {res['files']} files, "
+              f"{res['bytes'] // 1024} KB, "
+              f"{'encrypted' if res.get('encrypted') else 'UNENCRYPTED'}, "
+              f"{'signed' if res.get('signed') else 'unsigned'}.")
+        if res.get("delivered"):
+            print(f"  delivered off-droplet via {res.get('via')}.")
+        elif res.get("reason"):
+            print(f"  not delivered: {res['reason']}")
+        if not config.backup_command():
+            print("  tip: set OLYMPUS_BACKUP_CMD (e.g. 'rclone copy {path} "
+                  "spaces:bucket/') to get the copy OFF this machine.")
+    elif args.command == "restore":
+        from . import backup
+        try:
+            res = backup.restore(args.archive, into=args.into,
+                                 force=args.force, insecure=args.insecure)
+        except backup.BackupError as err:
+            print(f"✗ restore refused: {err}")
+            return 1
+        print(f"✓ restored {res['restored']} files into {res['into']} "
+              f"({'signature verified' if res['signature_ok'] else 'unsigned'}).")
+        if res["mismatched"]:
+            print(f"  ⚠ {len(res['mismatched'])} file(s) failed integrity: "
+                  f"{res['mismatched'][:5]}")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
