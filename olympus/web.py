@@ -6,8 +6,14 @@
   browser, used in-memory per request, never stored or logged).
 - Each browser gets a private memory namespace and a conversation that
   persists across server restarts.
-- Abuse protection: per-IP rate limit (OLYMPUS_RATE_LIMIT/min, default 8) and
-  an optional shared access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
+- Abuse protection: per-IP rate limit (OLYMPUS_RATE_LIMIT/min, default 8), an
+  optional per-user daily cap (OLYMPUS_DAILY_CHATS), and an optional shared
+  access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
+- Cost protection: OLYMPUS_FREE_CHATS gives each visitor N free chats/day on the
+  operator's key, then they continue on their own (BYOK as a free allowance);
+  OLYMPUS_REQUIRE_BYOK makes it all-or-nothing instead.
+- Error visibility: unexpected 500s are captured (errors.capture) and pushed to
+  the operator over Telegram, so failures don't vanish into the logs.
 - 👍/👎 on every answer feeds the daily learning cycle.
 """
 
@@ -153,6 +159,75 @@ def _rate_limited(key: str, limit: int) -> bool:
 
 def _chat_limit() -> int:
     return int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
+
+
+# per-user daily counter (cost/abuse cap, separate from the per-minute limiter)
+_DAILY: dict[str, int] = {}
+_DAILY_LOCK = threading.Lock()
+
+
+def _today() -> str:
+    return time.strftime("%Y%m%d", time.gmtime())
+
+
+def _daily_reset_if_new_day() -> None:
+    day = _today()
+    if _DAILY and not any(k.startswith(day) for k in _DAILY):
+        _DAILY.clear()                     # counters are per-UTC-day
+
+
+def _daily_count(key: str) -> int:
+    """How many times `key` has been used today (read-only)."""
+    with _DAILY_LOCK:
+        _daily_reset_if_new_day()
+        return _DAILY.get(f"{_today()}:{key}", 0)
+
+
+def _daily_bump(key: str) -> int:
+    with _DAILY_LOCK:
+        _daily_reset_if_new_day()
+        k = f"{_today()}:{key}"
+        _DAILY[k] = _DAILY.get(k, 0) + 1
+        return _DAILY[k]
+
+
+def _daily_limited(key: str, limit: int) -> bool:
+    """True once `key` has hit its daily allowance (and counts this call)."""
+    if limit <= 0:
+        return False
+    with _DAILY_LOCK:
+        _daily_reset_if_new_day()
+        k = f"{_today()}:{key}"
+        if _DAILY.get(k, 0) >= limit:
+            return True
+        _DAILY[k] = _DAILY.get(k, 0) + 1
+    return False
+
+
+def _brought_own_key(pset: dict) -> bool:
+    """Did this request supply the user's own credentials (BYOK)?"""
+    if not isinstance(pset, dict):
+        return False
+    if (pset.get("api_key") or "").strip() or (pset.get("base_url") or "").strip():
+        return True
+    extra = pset.get("extra") or {}
+    return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
+                                             or (extra.get("base_url") or "").strip()))
+
+
+def _key_decision(brought: bool, free_used: int) -> str:
+    """Policy for a chat request. Returns:
+      ""          allow (BYOK, or within the free operator-funded allowance)
+      "over_free" the user spent their free allowance — must bring a key now
+      "byok"      BYOK required outright (no free allowance configured)
+    A free allowance (OLYMPUS_FREE_CHATS > 0) means BYOK is a *limit*, not a
+    wall: keyless users get N free chats/day, then continue on their own key."""
+    if brought:
+        return ""
+    free = config.free_chats()
+    if free > 0:
+        return "over_free" if free_used >= free else ""
+    return "byok" if config.require_byok() else ""
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -365,6 +440,10 @@ answers with 👍/👎 so Olympus learns.</p></div>
   <input id="q" class="q" autocomplete="off" placeholder="Ask the council..." autofocus>
   <button id="b" class="send" type="submit">Send</button>
 </form>
+<div style="text-align:center;padding:6px;font-size:12px;color:#6b7280">
+  <a href="/privacy" target="_blank" style="color:#6b7280">Privacy</a> ·
+  <a href="/terms" target="_blank" style="color:#6b7280">Terms</a>
+</div>
 <script>
 const log = document.getElementById('log'), f = document.getElementById('f'),
       q = document.getElementById('q'), b = document.getElementById('b'),
@@ -737,6 +816,7 @@ f.addEventListener('submit', async (ev) => {
       const d = await r.json();
       add('msg bot', d.reply || d.error || '(no reply)');
       if (d.reply) addRating();
+      if (d.need_key) panel.classList.add('open');   // BYOK required — show ⚙
     }
   } catch (e) {
     clearInterval(timer);
@@ -866,6 +946,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._session_id()           # issue the session cookie up front
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            return
+        if url.path in ("/privacy", "/terms"):
+            from . import legal               # public: legal pages need no auth
+            html = (legal.privacy_html() if url.path == "/privacy"
+                    else legal.terms_html())
+            self._send(200, html.encode(), "text/html; charset=utf-8")
             return
         if url.path == "/oauth/google/start":
             self._oauth_start(url)
@@ -1077,11 +1163,33 @@ class Handler(BaseHTTPRequestHandler):
         if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
+        if _daily_limited("u:" + user, config.daily_chat_limit()):
+            self._json({"error": "daily limit reached for your account — "
+                                 "try again tomorrow."}, 429)
+            return
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
             return
         pset = payload.get("settings") or {}
+        # Cost policy: BYOK can be a free *allowance* (OLYMPUS_FREE_CHATS) rather
+        # than a wall — keyless users get N free chats/day on the operator's key,
+        # then continue on their own. With no allowance, OLYMPUS_REQUIRE_BYOK
+        # makes it all-or-nothing.
+        brought = _brought_own_key(pset)
+        decision = _key_decision(brought, _daily_count("free:" + user))
+        if decision == "over_free":
+            self._json({"error": f"You've used your {config.free_chats()} free "
+                                 "chats for today — add your own API key (⚙ model) "
+                                 "to keep going.", "need_key": True}, 402)
+            return
+        if decision == "byok":
+            self._json({"error": "This instance requires your own API key. "
+                                 "Open ⚙ model and add your provider key.",
+                        "need_key": True}, 402)
+            return
+        if not brought and config.free_chats() > 0:
+            _daily_bump("free:" + user)         # consume one free, operator-funded chat
         settings = config.Settings.from_env().merged(pset)
         error = settings.validate()
         if error:
@@ -1115,6 +1223,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json({"reply": bot.ask(message)})
         except Exception as err:
+            from . import errors
+            errors.capture("web /api/chat", err, context=message[:200])
             try:
                 self._json({"error": str(err)}, 500)
             except Exception:
