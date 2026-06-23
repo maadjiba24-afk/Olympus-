@@ -11,6 +11,8 @@
   access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
 - Cost protection: OLYMPUS_REQUIRE_BYOK makes every chat use the visitor's own
   key, so a public instance never spends the operator's key on strangers.
+- Error visibility: unexpected 500s are captured (errors.capture) and pushed to
+  the operator over Telegram, so failures don't vanish into the logs.
 - 👍/👎 on every answer feeds the daily learning cycle.
 """
 
@@ -1163,6 +1165,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json({"reply": bot.ask(message)})
         except Exception as err:
+            from . import errors
+            errors.capture("web /api/chat", err, context=message[:200])
             try:
                 self._json({"error": str(err)}, 500)
             except Exception:
