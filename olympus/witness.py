@@ -12,11 +12,14 @@ dependency Olympus already ships (Ed25519 — no new dependency):
   Olympus signs for the whole decision log.
 
 Root of trust: an Ed25519 key derived deterministically from a seed
-(`OLYMPUS_SIGNING_SEED`, or a built-in default for local/dev use). The public
-key is embedded in what it signs *and* re-derived from the seed at verify time,
-so re-signing tampered content with a different key is detected. Keep the seed
-secret in production (set `OLYMPUS_SIGNING_SEED`); the default seed is public and
-provides integrity, not authenticity.
+(`OLYMPUS_SIGNING_SEED`). For a real release the verifier checks the manifest's
+key against a **pinned** public key (`OLYMPUS_PINNED_PUBKEY` or a committed
+`witness_pubkey.txt`) — so a manifest re-signed with any other key is rejected,
+not merely checked for internal consistency. With no secret seed set, the key is
+the PUBLIC built-in default: such manifests are marked `"dev": true` and are
+accepted only with `--allow-dev` (local integrity, never release authenticity).
+See docs/SIGNING.md for key custody. `sign` refuses to write a release under the
+default seed unless `--dev` is passed.
 """
 
 from __future__ import annotations
@@ -71,6 +74,30 @@ def canonical_json(obj) -> bytes:
 def _seed_bytes() -> bytes:
     seed = os.environ.get("OLYMPUS_SIGNING_SEED") or _DEFAULT_SEED
     return hashlib.sha256(seed.encode("utf-8")).digest()
+
+
+def is_default_seed() -> bool:
+    """True when no secret signing seed is configured — i.e. the key is the
+    PUBLIC default and anyone could forge a signature. Such manifests are 'dev'
+    only: integrity for local use, never authenticity for a release."""
+    return not (os.environ.get("OLYMPUS_SIGNING_SEED") or "").strip()
+
+
+def pinned_pubkey() -> str | None:
+    """The canonical public key a verifier trusts, if pinned out-of-band:
+    OLYMPUS_PINNED_PUBKEY (hex), else a committed `witness_pubkey.txt`. When set,
+    a manifest must be signed by exactly this key — internal consistency with the
+    local seed is not enough."""
+    env = (os.environ.get("OLYMPUS_PINNED_PUBKEY") or "").strip()
+    if env:
+        return env.lower()
+    f = _package_dir() / "witness_pubkey.txt"
+    if f.exists():
+        for line in f.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line.lower()
+    return None
 
 
 def _require_crypto() -> None:
@@ -163,6 +190,10 @@ def build_manifest(root: Path | None = None) -> dict:
         "files": files,
         "summary": {"total": len(files), "verified": 0, "failed": 0},
     }
+    if is_default_seed():
+        # Mark (inside the signed core) that this was signed by the public
+        # default seed, so a verifier can refuse it for anything but local use.
+        core["dev"] = True
     payload = canonical_json(core)
     core["integrity"] = {
         "manifestHash": hashlib.sha256(payload).hexdigest(),
@@ -173,20 +204,39 @@ def build_manifest(root: Path | None = None) -> dict:
     return core
 
 
-def write_manifest(path: Path | None = None) -> Path:
+def write_manifest(path: Path | None = None, *, dev: bool = False) -> Path:
+    """Write a signed release manifest. Refuses to sign under the public default
+    seed unless `dev=True` (a clearly-marked local manifest), so a forgeable
+    release can't be produced by accident."""
+    if is_default_seed() and not dev:
+        raise WitnessError(
+            "refusing to sign a release manifest under the PUBLIC default seed — "
+            "anyone could forge it. Set OLYMPUS_SIGNING_SEED to a secret value "
+            "(see `olympus witness-pubkey` and docs/SIGNING.md), or pass --dev to "
+            "write a clearly-marked local dev manifest.")
     path = path or (_package_dir() / "verification.json")
     path.write_text(json.dumps(build_manifest(), indent=2) + "\n", encoding="utf-8")
     return path
 
 
-def verify_manifest(manifest: dict, *, base: Path | None = None) -> dict:
-    """Recompute every file hash and check the signature. Returns
-    {ok, drifted, missing, signature_ok, pubkey_trusted, problems}."""
+def verify_manifest(manifest: dict, *, base: Path | None = None,
+                    pin: str | None = None, allow_dev: bool = False) -> dict:
+    """Recompute every file hash and establish trust in the signer. Returns
+    {ok, drifted, missing, signature_ok, pubkey_trusted, is_dev, problems}.
+
+    Trust model (authenticity, not just internal consistency):
+    - A **pinned** key (arg, or `pinned_pubkey()`): the manifest MUST be signed
+      by exactly that key — a manifest re-signed with any other key fails even
+      if its own signature checks out.
+    - No pin, **dev** manifest (signed by the public default seed): accepted only
+      with `allow_dev=True`, and only as local integrity (never authenticity).
+    - No pin, non-dev manifest: rejected — there's no trusted key to check against.
+    """
     base = base or _package_dir()
     integrity = manifest.get("integrity") or {}
     core = {k: v for k, v in manifest.items() if k != "integrity"}
-    # The signature covers the manifest exactly as it was at build time, when
-    # summary.verified/failed were 0; normalize before re-checking.
+    # The signature covers the manifest as built, when summary.verified/failed
+    # were 0; normalize before re-checking.
     core_for_sig = json.loads(json.dumps(core))
     core_for_sig["summary"] = {**core_for_sig.get("summary", {}),
                                "verified": 0, "failed": 0}
@@ -200,40 +250,58 @@ def verify_manifest(manifest: dict, *, base: Path | None = None) -> dict:
         elif _sha256_file(fp) != entry["sha256"]:
             drifted.append(entry["path"])
 
-    pub = integrity.get("publicKey", "")
+    pub = (integrity.get("publicKey") or "").lower()
     signature_ok = bool(pub) and verify_signature(pub, payload,
                                                   integrity.get("signature", ""))
-    # Re-derive the expected key from the seed: a manifest re-signed with a
-    # different key is caught here even if its own signature is internally valid.
-    pubkey_trusted = (pub == public_key_hex()) if _HAVE_CRYPTO else False
+    is_dev = bool(manifest.get("dev"))
+    pin = (pin if pin is not None else pinned_pubkey())
+    pin = pin.lower() if pin else None
 
     problems = []
     for p in drifted:
         problems.append(f"drifted (hash mismatch): {p}")
     for p in missing:
         problems.append(f"missing tracked file: {p}")
+
+    pubkey_trusted = False
     if not signature_ok:
         problems.append("manifest signature is INVALID (content was altered).")
-    if signature_ok and not pubkey_trusted:
-        problems.append("manifest is signed by an UNTRUSTED key "
-                        "(does not match the signing seed).")
+    elif pin:
+        if pub == pin:
+            pubkey_trusted = True
+        else:
+            problems.append("manifest is signed by an UNTRUSTED key "
+                            "(does not match the pinned public key).")
+    elif is_dev:
+        if allow_dev:
+            pubkey_trusted = True
+        else:
+            problems.append("this is a DEV manifest signed by the PUBLIC default "
+                            "seed — not trustworthy for a release. Pass "
+                            "--allow-dev to accept it for local use.")
+    else:
+        problems.append("no pinned key configured — cannot establish trust. Set "
+                        "OLYMPUS_PINNED_PUBKEY or commit witness_pubkey.txt "
+                        "(or use --allow-dev for a dev manifest).")
+
     return {
         "ok": not problems,
         "drifted": drifted, "missing": missing,
         "signature_ok": signature_ok, "pubkey_trusted": pubkey_trusted,
-        "problems": problems,
+        "is_dev": is_dev, "problems": problems,
     }
 
 
-def verify_release(manifest_path: Path | None = None) -> dict:
+def verify_release(manifest_path: Path | None = None, *,
+                   allow_dev: bool = False) -> dict:
     path = manifest_path or (_package_dir() / "verification.json")
     if not path.exists():
         return {"ok": False, "problems": [f"no manifest at {path} — run "
                                           "`olympus sign` to create one."],
                 "drifted": [], "missing": [], "signature_ok": False,
-                "pubkey_trusted": False}
+                "pubkey_trusted": False, "is_dev": False}
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    return verify_manifest(manifest)
+    return verify_manifest(manifest, allow_dev=allow_dev)
 
 
 # --- signed decision log (Task 1's audit trail) --------------------------

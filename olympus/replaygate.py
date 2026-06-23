@@ -71,10 +71,14 @@ def check_one(prompt: str, make_bot, report) -> dict:
         reply = bot.ask(prompt)
     except Exception as err:
         if _is_provider_unavailable(str(err)):
-            rec["skipped"] = True
+            rec["skipped"] = True       # infra/account problem, not a real failure
             rec["detail"] = f"skipped — provider unavailable: {str(err)[:140]}"
         else:
-            rec["detail"] = f"ask() raised: {err!r}"
+            # An unexpected failure is a real FAIL — log it loudly, never let it
+            # masquerade as a pass or a benign skip.
+            from . import errors
+            errors.capture("replaygate.ask", err, context=prompt[:120])
+            rec["detail"] = f"ask() FAILED (unexpected error, logged): {err!r}"
         return rec
 
     if not reply or reply.startswith(("Configuration problem", "Daily budget")):
@@ -93,10 +97,14 @@ def check_one(prompt: str, make_bot, report) -> dict:
     try:
         _original, _fresh, diffs = orchestrator.replay_run(rec["run_id"])
     except replaystore.ReplayDivergence as err:
-        rec["detail"] = f"replay diverged: {err}"
+        rec["detail"] = f"replay diverged: {err}"   # genuine divergence -> FAIL
         return rec
     except Exception as err:
-        rec["detail"] = f"replay failed: {err!r}"
+        # An unexpected internal error is NOT a pass and NOT a benign skip —
+        # log it loudly and fail, so a swallowed bug can't yield a false green.
+        from . import errors
+        errors.capture("replaygate.replay_run", err, context=f"run {rec['run_id']}")
+        rec["detail"] = f"replay FAILED (unexpected error, logged): {err!r}"
         return rec
 
     rec["replayable"] = (diffs == [])

@@ -181,27 +181,26 @@ def extract(user: str, user_msg: str, reply: str,
     """Run the extractor over one turn and apply the write policy. Best-effort:
     never raises into the caller. Returns a small summary of actions taken."""
     summary: dict[str, int] = {}
+    # Expected control-flow — quietly do nothing (not errors):
+    if not config.MEMORY_ENABLED:
+        return summary
+    if len((user_msg or "").strip()) < config.MEMORY_MIN_CHARS:
+        return summary                # trivial turn — not worth a model call
+    from . import usage
     try:
-        if not config.MEMORY_ENABLED:
-            return summary
-        if len((user_msg or "").strip()) < config.MEMORY_MIN_CHARS:
-            return summary            # trivial turn — not worth a model call
-        from . import usage
-        try:
-            usage.check_budget()       # don't extract over the spend cap
-        except usage.BudgetExceeded:
-            return summary
+        usage.check_budget()           # don't extract over the spend cap
+    except usage.BudgetExceeded:
+        return summary
 
+    # The actual work. Best-effort (extraction must never break a conversation),
+    # but an UNEXPECTED failure is logged, never silently swallowed — otherwise a
+    # bug here makes Olympus quietly stop learning with no signal.
+    try:
         convo = (f"User said:\n{user_msg[:2000]}\n\n"
                  f"Assistant replied:\n{reply[:1500]}")
-        try:
-            out = backend.complete_json(
-                settings, _EXTRACT_SYSTEM,
-                [{"role": "user", "content": convo}], EXTRACT_SCHEMA,
-                effort="low")
-        except Exception:
-            return summary
-
+        out = backend.complete_json(
+            settings, _EXTRACT_SYSTEM,
+            [{"role": "user", "content": convo}], EXTRACT_SCHEMA, effort="low")
         eid = usermem.record_event(
             user, "turn", {"user": user_msg[:500]}, source="user")
         for cand in (out.get("memories") or []):
@@ -214,8 +213,9 @@ def extract(user: str, user_msg: str, reply: str,
         rels = relgraph.ingest(user, out.get("relationships") or [])
         if rels:
             summary["relationships"] = rels
-    except Exception:
-        pass                           # memory must never break a conversation
+    except Exception as err:
+        from . import errors
+        errors.capture("recall.extract", err, context=(user_msg or "")[:120])
     return summary
 
 

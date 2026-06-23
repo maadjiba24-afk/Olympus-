@@ -79,7 +79,9 @@ def notify(text: str) -> bool:
     try:
         _send(token, chat_id, text)
         return True
-    except Exception:
+    except Exception as err:
+        import logging
+        logging.getLogger("olympus.telegram").warning("notify failed: %s", err)
         return False
 
 
