@@ -107,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
+    sub.add_parser("errors", help="recent captured runtime errors (operator view)")
 
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
@@ -538,6 +539,16 @@ def main(argv: list[str] | None = None) -> int:
                                         else "")
             print(f"\n[{r.get('ts', '?')}] {who}")
             print("  " + r.get("message", "").replace("\n", "\n  "))
+    elif args.command == "errors":
+        from . import errors
+        items = errors.recent(50)
+        if not items:
+            print("No errors captured. 🎉")
+        for e in items:
+            print(f"\n[{e.get('ts', '?')}] {e.get('where', '?')}")
+            print(f"  {e.get('error', '')}")
+            if e.get("context"):
+                print(f"  context: {e['context']}")
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
