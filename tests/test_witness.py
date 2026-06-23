@@ -108,8 +108,8 @@ def test_verify_rejects_manifest_resigned_with_foreign_key(tmp_path, monkeypatch
 def _signed_run(tmp_path, monkeypatch) -> str:
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     tr = trace.Trace("ask", "shared")
-    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"})
-    tr.decision("review", {"name": "athena"}, {"verdict": "approve"})
+    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"}, status="ok")
+    tr.decision("review", {"name": "athena"}, {"verdict": "approve"}, status="ok")
     tr.flush()
     return tr.id
 

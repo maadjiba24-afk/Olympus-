@@ -91,21 +91,22 @@ def _mini_pipeline(tr: trace.Trace, user_text: str) -> None:
     route = backend.complete_json(_SETTINGS, "route-system",
                                   [{"role": "user", "content": user_text}],
                                   schema, effort="medium")
-    route_rec = tr.decision("route", model, route, model=model,
+    route_rec = tr.decision("route", model, route, status="ok", model=model,
                             request_hash=replaystore.last_ref(),
                             response_ref=replaystore.last_ref())
 
     plan = backend.complete_json(_SETTINGS, "plan-system",
                                  [{"role": "user", "content": user_text}],
                                  schema)
-    tr.decision("plan", model, plan, parent_record_id=route_rec["record_id"],
+    tr.decision("plan", model, plan, status="ok",
+                parent_record_id=route_rec["record_id"],
                 model=model, request_hash=replaystore.last_ref(),
                 response_ref=replaystore.last_ref())
 
     review = backend.complete_json(_SETTINGS, "review-system",
                                    [{"role": "user", "content": user_text}],
                                    schema)
-    tr.decision("review", model, review, model=model,
+    tr.decision("review", model, review, status="ok", model=model,
                 request_hash=replaystore.last_ref(),
                 response_ref=replaystore.last_ref())
 
@@ -265,3 +266,20 @@ def test_orphan_responses_are_swept_referenced_kept(monkeypatch):
     # the run's own responses survive, so it stays fully re-executable
     for d in rec.decisions:
         assert replaystore.get(d["model_response_ref"]) is not None
+
+
+# --- F4: status is mandatory in the decision log -------------------------
+
+def test_decision_requires_status():
+    tr = trace.Trace("ask", "shared")
+    with pytest.raises(TypeError):
+        tr.decision("route", {"name": "zeus"}, {"mode": "direct"})  # no status
+
+
+def test_failed_decision_records_error_not_ok():
+    tr = trace.Trace("ask", "shared")
+    rec = tr.decision("verify", {"name": "aletheia"}, {"note": "blew up"},
+                      status="error", error="boom")
+    assert rec["outcome"] == {"status": "error", "error": "boom"}
+    ok = tr.decision("route", {"name": "zeus"}, {"mode": "direct"}, status="ok")
+    assert ok["outcome"]["status"] == "ok"
