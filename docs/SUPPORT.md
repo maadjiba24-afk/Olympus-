@@ -75,6 +75,25 @@ If any recorded decision is altered after the fact, the signature check fails.
 This is what Ruflo signs for trajectories — Olympus signs the **whole** decision
 log, the thing you replay (`olympus replay`) and now also prove untampered.
 
+## Release-readiness reliability check (operator-run)
+
+CI proves *recorded* runs replay; before a release, prove the harness works
+**unattended end-to-end on a real key** with the reliability gate:
+
+```bash
+python scripts/reliability_gate.py
+# or with your own cap / prompts:
+OLYMPUS_DAILY_BUDGET=10 python scripts/reliability_gate.py "p1" "p2" "p3"
+```
+
+It runs three distinct prompts through the full pipeline, and for each confirms
+a decision log was produced and that the run replays **zero new API calls and
+byte-identically** (`orchestrator.replay_run` → empty diff). It enforces a spend
+cap (`OLYMPUS_DAILY_BUDGET`, default $5) and prints each `run_id`, a per-run
+PASS, and the total spend. Exit 0 = all three replayed reproducibly under the
+cap; a provider/credit problem reports INCONCLUSIVE (not a failure). Needs
+`ANTHROPIC_API_KEY`, so it's run by the operator, not in offline CI.
+
 ## Reporting issues & vulnerabilities
 
 File issues at the repository tracker. For suspected security issues, prefer a
