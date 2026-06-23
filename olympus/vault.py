@@ -55,6 +55,25 @@ def available() -> bool:
         return False
 
 
+def encrypt_bytes(data: bytes) -> bytes:
+    """Encrypt arbitrary bytes with the vault key (Fernet: AES-128-CBC + HMAC).
+    Used for at-rest encryption of backup archives. Raises VaultError if no key
+    or crypto backend is available, so a misconfiguration fails safe rather than
+    writing plaintext."""
+    return _fernet().encrypt(data)
+
+
+def decrypt_bytes(token: bytes) -> bytes:
+    """Inverse of `encrypt_bytes`. Raises VaultError on a wrong key or tampered
+    ciphertext (Fernet authenticates, so corruption is detected, not silently
+    returned)."""
+    try:
+        return _fernet().decrypt(token)
+    except (InvalidToken, ValueError):
+        raise VaultError("could not decrypt — wrong OLYMPUS_SECRET_KEY or the "
+                         "data was corrupted/tampered.")
+
+
 _NS = "vault"
 
 
