@@ -108,6 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="instance health: provider, spend, usage")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
     sub.add_parser("errors", help="recent captured runtime errors (operator view)")
+    sub.add_parser("dashboard", help="one consolidated operator health view "
+                                     "(uptime, spend, reports, errors, policy)")
 
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
@@ -571,6 +573,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {e.get('error', '')}")
             if e.get("context"):
                 print(f"  context: {e['context']}")
+    elif args.command == "dashboard":
+        from . import dashboard
+        print(dashboard.render())
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1

@@ -29,7 +29,7 @@
     ]
   },
   "commands": {
-    "count": 47,
+    "count": 48,
     "names": [
       "actions",
       "add-mcp",
@@ -43,6 +43,7 @@
       "code-eval",
       "connectors",
       "contrib",
+      "dashboard",
       "edit",
       "errors",
       "eval",
