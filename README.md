@@ -785,3 +785,14 @@ Memory lives in `./memory/` (gitignored): `lessons/`, `corrections/`,
 - Prometheus can modify **prompts only** — code changes become written
   proposals in `memory/upgrades/` for a human (or coding agent) to apply.
 - Every prompt rewrite is automatically backed up to `memory/prompt_backups/`.
+
+## Releases, support & security
+
+- [`CHANGELOG.md`](CHANGELOG.md) — notable changes per version (Keep a Changelog).
+- [`RELEASING.md`](RELEASING.md) — how a signed release is cut (tag → sign → publish → verify).
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately, and the blast-radius guarantees.
+- [`docs/SUPPORT.md`](docs/SUPPORT.md) — SemVer, the 6-month LTS window, and release-integrity policy.
+
+Verify any published release with `olympus verify` (recomputes every file hash
+and checks the signature against the pinned key); verify a recorded run's audit
+trail with `olympus verify --log <run_id>`.
