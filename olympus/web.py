@@ -403,6 +403,10 @@ answers with 👍/👎 so Olympus learns.</p></div>
   <input id="q" class="q" autocomplete="off" placeholder="Ask the council..." autofocus>
   <button id="b" class="send" type="submit">Send</button>
 </form>
+<div style="text-align:center;padding:6px;font-size:12px;color:#6b7280">
+  <a href="/privacy" target="_blank" style="color:#6b7280">Privacy</a> ·
+  <a href="/terms" target="_blank" style="color:#6b7280">Terms</a>
+</div>
 <script>
 const log = document.getElementById('log'), f = document.getElementById('f'),
       q = document.getElementById('q'), b = document.getElementById('b'),
@@ -905,6 +909,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._session_id()           # issue the session cookie up front
             self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            return
+        if url.path in ("/privacy", "/terms"):
+            from . import legal               # public: legal pages need no auth
+            html = (legal.privacy_html() if url.path == "/privacy"
+                    else legal.terms_html())
+            self._send(200, html.encode(), "text/html; charset=utf-8")
             return
         if url.path == "/oauth/google/start":
             self._oauth_start(url)
