@@ -9,8 +9,9 @@
 - Abuse protection: per-IP rate limit (OLYMPUS_RATE_LIMIT/min, default 8), an
   optional per-user daily cap (OLYMPUS_DAILY_CHATS), and an optional shared
   access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
-- Cost protection: OLYMPUS_REQUIRE_BYOK makes every chat use the visitor's own
-  key, so a public instance never spends the operator's key on strangers.
+- Cost protection: OLYMPUS_FREE_CHATS gives each visitor N free chats/day on the
+  operator's key, then they continue on their own (BYOK as a free allowance);
+  OLYMPUS_REQUIRE_BYOK makes it all-or-nothing instead.
 - Error visibility: unexpected 500s are captured (errors.capture) and pushed to
   the operator over Telegram, so failures don't vanish into the logs.
 - 👍/👎 on every answer feeds the daily learning cycle.
@@ -165,20 +166,41 @@ _DAILY: dict[str, int] = {}
 _DAILY_LOCK = threading.Lock()
 
 
+def _today() -> str:
+    return time.strftime("%Y%m%d", time.gmtime())
+
+
+def _daily_reset_if_new_day() -> None:
+    day = _today()
+    if _DAILY and not any(k.startswith(day) for k in _DAILY):
+        _DAILY.clear()                     # counters are per-UTC-day
+
+
+def _daily_count(key: str) -> int:
+    """How many times `key` has been used today (read-only)."""
+    with _DAILY_LOCK:
+        _daily_reset_if_new_day()
+        return _DAILY.get(f"{_today()}:{key}", 0)
+
+
+def _daily_bump(key: str) -> int:
+    with _DAILY_LOCK:
+        _daily_reset_if_new_day()
+        k = f"{_today()}:{key}"
+        _DAILY[k] = _DAILY.get(k, 0) + 1
+        return _DAILY[k]
+
+
 def _daily_limited(key: str, limit: int) -> bool:
-    """True once `key` has used its daily allowance. Counters are namespaced by
-    UTC day so they reset at midnight; the map is cleared when the day rolls."""
+    """True once `key` has hit its daily allowance (and counts this call)."""
     if limit <= 0:
         return False
-    day = time.strftime("%Y%m%d", time.gmtime())
-    k = f"{day}:{key}"
     with _DAILY_LOCK:
-        if not any(x.startswith(day) for x in _DAILY):
-            _DAILY.clear()                 # new day (or first call) — reset
-        n = _DAILY.get(k, 0)
-        if n >= limit:
+        _daily_reset_if_new_day()
+        k = f"{_today()}:{key}"
+        if _DAILY.get(k, 0) >= limit:
             return True
-        _DAILY[k] = n + 1
+        _DAILY[k] = _DAILY.get(k, 0) + 1
     return False
 
 
@@ -191,6 +213,21 @@ def _brought_own_key(pset: dict) -> bool:
     extra = pset.get("extra") or {}
     return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
                                              or (extra.get("base_url") or "").strip()))
+
+
+def _key_decision(brought: bool, free_used: int) -> str:
+    """Policy for a chat request. Returns:
+      ""          allow (BYOK, or within the free operator-funded allowance)
+      "over_free" the user spent their free allowance — must bring a key now
+      "byok"      BYOK required outright (no free allowance configured)
+    A free allowance (OLYMPUS_FREE_CHATS > 0) means BYOK is a *limit*, not a
+    wall: keyless users get N free chats/day, then continue on their own key."""
+    if brought:
+        return ""
+    free = config.free_chats()
+    if free > 0:
+        return "over_free" if free_used >= free else ""
+    return "byok" if config.require_byok() else ""
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -1135,13 +1172,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "bad request"}, 400)
             return
         pset = payload.get("settings") or {}
-        # On a BYOK-only instance, refuse to spend the operator's key: the
-        # request must bring the user's own credentials.
-        if config.require_byok() and not _brought_own_key(pset):
+        # Cost policy: BYOK can be a free *allowance* (OLYMPUS_FREE_CHATS) rather
+        # than a wall — keyless users get N free chats/day on the operator's key,
+        # then continue on their own. With no allowance, OLYMPUS_REQUIRE_BYOK
+        # makes it all-or-nothing.
+        brought = _brought_own_key(pset)
+        decision = _key_decision(brought, _daily_count("free:" + user))
+        if decision == "over_free":
+            self._json({"error": f"You've used your {config.free_chats()} free "
+                                 "chats for today — add your own API key (⚙ model) "
+                                 "to keep going.", "need_key": True}, 402)
+            return
+        if decision == "byok":
             self._json({"error": "This instance requires your own API key. "
                                  "Open ⚙ model and add your provider key.",
                         "need_key": True}, 402)
             return
+        if not brought and config.free_chats() > 0:
+            _daily_bump("free:" + user)         # consume one free, operator-funded chat
         settings = config.Settings.from_env().merged(pset)
         error = settings.validate()
         if error:

@@ -50,3 +50,57 @@ def test_daily_limited_caps_per_key(monkeypatch):
 def test_daily_limited_zero_is_unlimited():
     web._DAILY.clear()
     assert all(web._daily_limited("u:x", 0) is False for _ in range(100))
+
+
+def test_daily_count_and_bump():
+    web._DAILY.clear()
+    assert web._daily_count("free:a") == 0
+    web._daily_bump("free:a")
+    web._daily_bump("free:a")
+    assert web._daily_count("free:a") == 2
+    assert web._daily_count("free:b") == 0      # independent per key
+
+
+# --- free-allowance policy (BYOK as a limit, not a wall) -----------------
+
+def test_free_chats_flag(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_FREE_CHATS", raising=False)
+    assert config.free_chats() == 0
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "5")
+    assert config.free_chats() == 5
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "junk")
+    assert config.free_chats() == 0
+
+
+def test_byok_user_always_allowed(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_REQUIRE_BYOK", "1")
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "3")
+    assert web._key_decision(brought=True, free_used=999) == ""
+
+
+def test_free_allowance_then_requires_key(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "3")
+    monkeypatch.delenv("OLYMPUS_REQUIRE_BYOK", raising=False)
+    assert web._key_decision(brought=False, free_used=0) == ""
+    assert web._key_decision(brought=False, free_used=2) == ""
+    assert web._key_decision(brought=False, free_used=3) == "over_free"
+    assert web._key_decision(brought=False, free_used=10) == "over_free"
+
+
+def test_free_allowance_overrides_require_byok(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_REQUIRE_BYOK", "1")
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "2")
+    assert web._key_decision(brought=False, free_used=0) == ""      # free taste first
+    assert web._key_decision(brought=False, free_used=2) == "over_free"
+
+
+def test_hard_byok_when_no_free_allowance(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_REQUIRE_BYOK", "1")
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "0")
+    assert web._key_decision(brought=False, free_used=0) == "byok"
+
+
+def test_no_policy_means_operator_funded(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_REQUIRE_BYOK", raising=False)
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "0")
+    assert web._key_decision(brought=False, free_used=100) == ""
