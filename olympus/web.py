@@ -6,8 +6,11 @@
   browser, used in-memory per request, never stored or logged).
 - Each browser gets a private memory namespace and a conversation that
   persists across server restarts.
-- Abuse protection: per-IP rate limit (OLYMPUS_RATE_LIMIT/min, default 8) and
-  an optional shared access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
+- Abuse protection: per-IP rate limit (OLYMPUS_RATE_LIMIT/min, default 8), an
+  optional per-user daily cap (OLYMPUS_DAILY_CHATS), and an optional shared
+  access token (OLYMPUS_ACCESS_TOKEN) for hosted instances.
+- Cost protection: OLYMPUS_REQUIRE_BYOK makes every chat use the visitor's own
+  key, so a public instance never spends the operator's key on strangers.
 - 👍/👎 on every answer feeds the daily learning cycle.
 """
 
@@ -153,6 +156,39 @@ def _rate_limited(key: str, limit: int) -> bool:
 
 def _chat_limit() -> int:
     return int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
+
+
+# per-user daily counter (cost/abuse cap, separate from the per-minute limiter)
+_DAILY: dict[str, int] = {}
+_DAILY_LOCK = threading.Lock()
+
+
+def _daily_limited(key: str, limit: int) -> bool:
+    """True once `key` has used its daily allowance. Counters are namespaced by
+    UTC day so they reset at midnight; the map is cleared when the day rolls."""
+    if limit <= 0:
+        return False
+    day = time.strftime("%Y%m%d", time.gmtime())
+    k = f"{day}:{key}"
+    with _DAILY_LOCK:
+        if not any(x.startswith(day) for x in _DAILY):
+            _DAILY.clear()                 # new day (or first call) — reset
+        n = _DAILY.get(k, 0)
+        if n >= limit:
+            return True
+        _DAILY[k] = n + 1
+    return False
+
+
+def _brought_own_key(pset: dict) -> bool:
+    """Did this request supply the user's own credentials (BYOK)?"""
+    if not isinstance(pset, dict):
+        return False
+    if (pset.get("api_key") or "").strip() or (pset.get("base_url") or "").strip():
+        return True
+    extra = pset.get("extra") or {}
+    return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
+                                             or (extra.get("base_url") or "").strip()))
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
@@ -737,6 +773,7 @@ f.addEventListener('submit', async (ev) => {
       const d = await r.json();
       add('msg bot', d.reply || d.error || '(no reply)');
       if (d.reply) addRating();
+      if (d.need_key) panel.classList.add('open');   // BYOK required — show ⚙
     }
   } catch (e) {
     clearInterval(timer);
@@ -1077,11 +1114,22 @@ class Handler(BaseHTTPRequestHandler):
         if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
+        if _daily_limited("u:" + user, config.daily_chat_limit()):
+            self._json({"error": "daily limit reached for your account — "
+                                 "try again tomorrow."}, 429)
+            return
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
             return
         pset = payload.get("settings") or {}
+        # On a BYOK-only instance, refuse to spend the operator's key: the
+        # request must bring the user's own credentials.
+        if config.require_byok() and not _brought_own_key(pset):
+            self._json({"error": "This instance requires your own API key. "
+                                 "Open ⚙ model and add your provider key.",
+                        "need_key": True}, 402)
+            return
         settings = config.Settings.from_env().merged(pset)
         error = settings.validate()
         if error:
