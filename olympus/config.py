@@ -296,6 +296,18 @@ def daily_chat_limit() -> int:
     except ValueError:
         return 0
 
+
+def free_chats() -> int:
+    """Free, operator-funded chats per user per day before they must bring their
+    own key (OLYMPUS_FREE_CHATS; 0 = none). This makes BYOK a *free allowance*
+    rather than all-or-nothing: offer a taste on your key, then users continue
+    'as much as they bring' on their own. When > 0 it governs keyless users
+    regardless of OLYMPUS_REQUIRE_BYOK."""
+    try:
+        return max(0, int(os.environ.get("OLYMPUS_FREE_CHATS", "0")))
+    except ValueError:
+        return 0
+
 # The gate proves *replay determinism*, which is model-independent — so it runs
 # on a cheaper model by default (≈5x less than Opus) to keep the weekly CI /
 # heartbeat tripwire affordable. Override for a full-fidelity run on your main
