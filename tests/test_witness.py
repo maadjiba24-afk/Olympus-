@@ -172,8 +172,8 @@ def test_witness_pubkey_is_stable_per_seed(monkeypatch):
 def _signed_run(tmp_path, monkeypatch) -> str:
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     tr = trace.Trace("ask", "shared")
-    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"})
-    tr.decision("review", {"name": "athena"}, {"verdict": "approve"})
+    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"}, status="ok")
+    tr.decision("review", {"name": "athena"}, {"verdict": "approve"}, status="ok")
     tr.flush()
     return tr.id
 

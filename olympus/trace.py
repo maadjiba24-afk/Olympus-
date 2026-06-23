@@ -67,11 +67,13 @@ class Trace:
             self.event(stage + ".end", secs=round(time.time() - start, 2))
 
     def decision(self, decision_type: str, agent: dict, rationale,
-                 *, parent_record_id: str | None = None, inputs=None,
-                 model: dict | None = None, request_hash: str | None = None,
-                 response_ref: str | None = None, cost: float = 0.0,
-                 status: str = "ok", error: str = "",
+                 *, status: str, parent_record_id: str | None = None,
+                 inputs=None, model: dict | None = None,
+                 request_hash: str | None = None, response_ref: str | None = None,
+                 cost: float = 0.0, error: str = "",
                  duration_ms: int = 0) -> dict:
+        # `status` is REQUIRED (no default): a failure path that forgets it must
+        # not silently record success — that would poison per-agent trust scoring.
         """Record one orchestration decision. `rationale` is the verbatim
         `_route`/`_plan`/`_review` return; `request_hash`/`response_ref` come
         from `replaystore` (the frozen LLM call that produced the decision)."""
