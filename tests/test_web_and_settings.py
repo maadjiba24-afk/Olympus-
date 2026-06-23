@@ -48,6 +48,17 @@ def test_tool_conversion():
     assert conv[0]["function"]["name"] == "save_lesson"
 
 
+def test_home_page_injects_config_and_onboarding(server, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FREE_CHATS", "5")
+    page = urllib.request.urlopen(server + "/").read().decode()
+    # The server config placeholder is always substituted (never shipped raw).
+    assert "__OLYMPUS_CFG__" not in page
+    assert '"free_chats": 5' in page
+    # First-run onboarding is present: welcome, example chips, BYOK guidance.
+    assert 'id="welcome"' in page and 'class="chip"' in page
+    assert "Bring your own model" in page
+
+
 def test_web_invalid_settings_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as err:
         _post(server, "/api/chat", {"message": "hi", "session": "s",

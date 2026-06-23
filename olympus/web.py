@@ -343,9 +343,18 @@ PAGE = """<!doctype html>
   .authbtns { display: flex; gap: 8px; margin-top: 10px; }
   .authbtns button { flex: 1; border: 0; border-radius: 8px; padding: 9px;
                      cursor: pointer; font: inherit; }
+  #welcome { max-width: 860px; margin: 0 auto; }
+  #cost { margin: 10px 0 0; font-size: 13px; color: #d9b44a; }
+  #cost:empty { display: none; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip { background: #161b24; border: 1px solid #2a2f3a; color: #c8cdd6;
+          border-radius: 16px; padding: 6px 13px; cursor: pointer; font: inherit;
+          font-size: 13px; text-align: left; }
+  .chip:hover { border-color: #d9b44a; color: #e8e3d8; }
 </style>
 </head>
 <body>
+<script>window.OLYMPUS_CFG = __OLYMPUS_CFG__;</script>
 <div id="auth" style="display:none">
   <div class="authbox">
     <h2>⚡ OLYMPUS</h2>
@@ -381,6 +390,10 @@ PAGE = """<!doctype html>
 <div id="actions"><div id="budget"></div><div id="cards"></div></div>
 <div id="memory"></div>
 <div id="panel">
+  <p class="hint" style="margin-top:0"><b>Bring your own model &amp; key.</b>
+  1) pick a provider · 2) type the model name · 3) paste your API key from that
+  provider's dashboard, then send. Your key stays in this browser and is sent
+  only with your own requests. Leave blank to use the server's model.</p>
   <div class="row">
     <label>Provider</label>
     <select id="provider">
@@ -432,8 +445,20 @@ PAGE = """<!doctype html>
   your own requests; the server never stores or logs it. Leave everything
   blank to use the server's configured model.</p>
 </div>
-<div id="log"><p class="sys">The council is assembled. Ask anything — and rate
-answers with 👍/👎 so Olympus learns.</p></div>
+<div id="log"><div id="welcome">
+  <p class="sys">The council is assembled — a main agent, a supervisor, a
+  hallucination-checker, and 12 specialists. Ask anything; rate answers with
+  👍/👎 so Olympus learns. It <b>prepares</b> actions like sending email and
+  waits for your approval before doing anything irreversible.</p>
+  <div id="cost"></div>
+  <p class="sys" style="margin-bottom:0">Try one:</p>
+  <div class="chips" id="chips">
+    <button class="chip" type="button">Research small modular nuclear reactor startups and give me a five-bullet investment brief</button>
+    <button class="chip" type="button">Write a Python function that parses ISO-8601 durations into seconds, then review it for edge cases</button>
+    <button class="chip" type="button">Draft a 30-day go-to-market plan for a B2B scheduling tool</button>
+    <button class="chip" type="button">Summarize this YouTube video and what I should take away from it</button>
+  </div>
+</div></div>
 <form id="f">
   <button id="attach" type="button" title="Attach a text/CSV/code file">📎</button>
   <input id="file" type="file" hidden>
@@ -463,6 +488,28 @@ contribEl.checked = localStorage.getItem('olympus_contribute') === '1';
 contribEl.addEventListener('change',
   () => localStorage.setItem('olympus_contribute', contribEl.checked ? '1' : '0'));
 document.getElementById('gear').onclick = () => panel.classList.toggle('open');
+
+// --- first-run onboarding -----------------------------------------------
+const CFG = window.OLYMPUS_CFG || {};
+(function onboarding() {
+  const cost = document.getElementById('cost');
+  if (cost) {
+    if (CFG.free_chats > 0)
+      cost.innerHTML = 'You get <b>' + CFG.free_chats + ' free chats per day</b>'
+        + ' on us — after that, add your own API key in <b>⚙ model</b> to keep going.';
+    else if (CFG.require_byok)
+      cost.innerHTML = 'This instance runs on <b>your</b> API key. Open '
+        + '<b>⚙ model</b>, choose a provider, and paste your key (it stays in '
+        + 'your browser).';
+  }
+  document.querySelectorAll('#chips .chip').forEach(btn => {
+    btn.onclick = () => { q.value = btn.textContent; q.focus(); };
+  });
+})();
+function hideWelcome() {
+  const w = document.getElementById('welcome');
+  if (w) w.remove();
+}
 const reportbox = document.getElementById('reportbox');
 const reportmsg = document.getElementById('reportmsg');
 document.getElementById('reportbtn').onclick = () => {
@@ -792,6 +839,7 @@ f.addEventListener('submit', async (ev) => {
     text += '\\n\\n[Attached file: ' + attached.name + ']\\n```\\n' +
             attached.text.slice(0, 100000) + '\\n```';
   }
+  hideWelcome();
   add('msg user', q.value.trim() + (attached ? '  📎 ' + attached.name : ''));
   q.value = ''; clearFile(); b.disabled = true; q.disabled = true;
   const timer = setInterval(poll, 1200);
@@ -816,7 +864,11 @@ f.addEventListener('submit', async (ev) => {
       const d = await r.json();
       add('msg bot', d.reply || d.error || '(no reply)');
       if (d.reply) addRating();
-      if (d.need_key) panel.classList.add('open');   // BYOK required — show ⚙
+      if (d.need_key) {                              // BYOK required — guide the user
+        panel.classList.add('open');
+        panel.scrollIntoView({behavior: 'smooth', block: 'center'});
+        document.getElementById('key').focus();
+      }
     }
   } catch (e) {
     clearInterval(timer);
@@ -945,7 +997,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/":
             self._session_id()           # issue the session cookie up front
-            self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            cfg = {"free_chats": config.free_chats(),
+                   "require_byok": config.require_byok(),
+                   "has_server_key": config.Settings.from_env().usable()}
+            page = PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+            self._send(200, page.encode(), "text/html; charset=utf-8")
             return
         if url.path in ("/privacy", "/terms"):
             from . import legal               # public: legal pages need no auth
