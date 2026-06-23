@@ -106,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    sub.add_parser("reports", help="problem reports users submitted from the web UI")
 
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
@@ -527,6 +528,16 @@ def main(argv: list[str] | None = None) -> int:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
                 return 1
+    elif args.command == "reports":
+        from . import support
+        items = support.recent(100)
+        if not items:
+            print("No problem reports yet.")
+        for r in items:
+            who = r.get("user", "?") + (f" ({r['contact']})" if r.get("contact")
+                                        else "")
+            print(f"\n[{r.get('ts', '?')}] {who}")
+            print("  " + r.get("message", "").replace("\n", "\n  "))
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1

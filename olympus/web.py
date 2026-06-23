@@ -292,7 +292,17 @@ PAGE = """<!doctype html>
   <button id="membtn" title="What Olympus remembers about you">🧠 memory
     <span id="memcount"></span></button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
+  <button id="reportbtn" title="Report a problem to the operator">📣 report</button>
 </header>
+<div id="reportbox" style="display:none;padding:12px 20px;border-bottom:1px solid #2a2f3a">
+  <textarea id="reporttext" rows="3" placeholder="Describe the problem you hit — what you did and what went wrong..." style="width:100%;box-sizing:border-box"></textarea>
+  <input id="reportcontact" placeholder="how to reach you (optional — email/handle)" style="margin-top:6px">
+  <div style="display:flex;gap:8px;margin-top:6px">
+    <button id="reportsend" class="ok">Send report</button>
+    <button id="reportcancel" class="no">Cancel</button>
+  </div>
+  <p class="sys" id="reportmsg"></p>
+</div>
 <div id="actions"><div id="budget"></div><div id="cards"></div></div>
 <div id="memory"></div>
 <div id="panel">
@@ -374,6 +384,33 @@ contribEl.checked = localStorage.getItem('olympus_contribute') === '1';
 contribEl.addEventListener('change',
   () => localStorage.setItem('olympus_contribute', contribEl.checked ? '1' : '0'));
 document.getElementById('gear').onclick = () => panel.classList.toggle('open');
+const reportbox = document.getElementById('reportbox');
+const reportmsg = document.getElementById('reportmsg');
+document.getElementById('reportbtn').onclick = () => {
+  reportbox.style.display = reportbox.style.display === 'none' ? 'block' : 'none';
+  reportmsg.textContent = '';
+};
+document.getElementById('reportcancel').onclick = () => {
+  reportbox.style.display = 'none';
+};
+document.getElementById('reportsend').onclick = async () => {
+  const text = document.getElementById('reporttext').value.trim();
+  if (!text) { reportmsg.textContent = 'Please describe the problem.'; return; }
+  reportmsg.textContent = 'Sending...';
+  try {
+    const r = await fetch('/api/report', {method: 'POST', headers: hdrs(),
+      body: JSON.stringify({session, message: text,
+        contact: document.getElementById('reportcontact').value})});
+    const d = await r.json();
+    reportmsg.textContent = d.ok ? 'Thank you — your report was sent.'
+                                 : (d.error || 'Could not send.');
+    if (d.ok) {
+      document.getElementById('reporttext').value = '';
+      document.getElementById('reportcontact').value = '';
+      setTimeout(() => { reportbox.style.display = 'none'; reportmsg.textContent = ''; }, 1800);
+    }
+  } catch (e) { reportmsg.textContent = 'Network error — try again.'; }
+};
 let session = localStorage.getItem('olympus_session');
 if (!session) {
   session = (crypto.randomUUID ? crypto.randomUUID() :
@@ -904,7 +941,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/register", "/api/login",
-                        "/api/logout"):
+                        "/api/logout", "/api/report"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -925,6 +962,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)
+
+        # A problem report works even before login (e.g. "I can't log in") — it
+        # only needs the access token, already checked above.
+        if path == "/api/report":
+            from . import support
+            try:
+                support.report(str(payload.get("message", "")),
+                               user=self._principal(sid) or "anon",
+                               contact=str(payload.get("contact", "")),
+                               context=str(payload.get("context", "")))
+            except ValueError:
+                self._json({"error": "please describe the problem"}, 400)
+                return
+            self._json({"ok": True,
+                        "note": "Thanks — your report was sent to the operator."})
+            return
+
         user = self._principal(sid)
         if user is None:
             self._json({"error": "login required"}, 401)
