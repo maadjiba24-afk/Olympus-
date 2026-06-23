@@ -57,6 +57,8 @@ def _manifest_for(pkg: Path) -> dict:
     core = {"schema": witness.SCHEMA, "gitCommit": None, "branch": None,
             "files": files,
             "summary": {"total": len(files), "verified": 0, "failed": 0}}
+    if witness.is_default_seed():            # mirror build_manifest's dev marker
+        core["dev"] = True
     payload = witness.canonical_json(core)
     core["integrity"] = {"manifestHash": "x", "publicKey": witness.public_key_hex(),
                          "signature": witness.sign(payload),
@@ -66,7 +68,8 @@ def _manifest_for(pkg: Path) -> dict:
 
 def test_verify_passes_on_intact_tree(tmp_path):
     pkg = _make_tree(tmp_path)
-    result = witness.verify_manifest(_manifest_for(pkg), base=pkg)
+    # default seed in tests -> a dev manifest, accepted for local use
+    result = witness.verify_manifest(_manifest_for(pkg), base=pkg, allow_dev=True)
     assert result["ok"] is True
     assert result["signature_ok"] and result["pubkey_trusted"]
     assert result["drifted"] == [] and result["missing"] == []
@@ -76,7 +79,7 @@ def test_verify_fails_naming_a_tampered_file(tmp_path):
     pkg = _make_tree(tmp_path)
     manifest = _manifest_for(pkg)
     (pkg / "b.py").write_text("print('TAMPERED')\n")     # drift one file
-    result = witness.verify_manifest(manifest, base=pkg)
+    result = witness.verify_manifest(manifest, base=pkg, allow_dev=True)
     assert result["ok"] is False
     assert "b.py" in result["drifted"]
     assert any("b.py" in p for p in result["problems"])
@@ -86,21 +89,82 @@ def test_verify_fails_on_missing_file(tmp_path):
     pkg = _make_tree(tmp_path)
     manifest = _manifest_for(pkg)
     (pkg / "a.py").unlink()
-    result = witness.verify_manifest(manifest, base=pkg)
+    result = witness.verify_manifest(manifest, base=pkg, allow_dev=True)
     assert result["ok"] is False and "a.py" in result["missing"]
 
 
 def test_verify_rejects_manifest_resigned_with_foreign_key(tmp_path, monkeypatch):
     pkg = _make_tree(tmp_path)
-    # Attacker tampers a file AND re-signs the manifest with their own key.
+    pin = witness.public_key_hex()                  # the legitimate key, pinned
+    # Attacker tampers a file AND re-signs with their own key.
     (pkg / "a.py").write_text("print('evil')\n")
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "attacker-key")
     forged = _manifest_for(pkg)        # internally valid, but wrong key
     monkeypatch.delenv("OLYMPUS_SIGNING_SEED")
-    result = witness.verify_manifest(forged, base=pkg)
+    result = witness.verify_manifest(forged, base=pkg, pin=pin)
     assert result["ok"] is False
     assert result["pubkey_trusted"] is False
     assert any("UNTRUSTED" in p for p in result["problems"])
+
+
+# --- F1: pinned key + default-seed refusal -------------------------------
+
+def test_sign_refuses_default_seed_without_dev(tmp_path, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SIGNING_SEED", raising=False)   # default seed
+    assert witness.is_default_seed() is True
+    with pytest.raises(witness.WitnessError, match="default seed"):
+        witness.write_manifest(tmp_path / "m.json")            # no dev -> refuse
+    # with --dev it writes, and the manifest is marked dev
+    path = witness.write_manifest(tmp_path / "m.json", dev=True)
+    assert json.loads(path.read_text())["dev"] is True
+
+
+def test_dev_manifest_requires_allow_dev(tmp_path, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SIGNING_SEED", raising=False)
+    pkg = _make_tree(tmp_path)
+    manifest = _manifest_for(pkg)                  # dev (default seed)
+    blocked = witness.verify_manifest(manifest, base=pkg, allow_dev=False)
+    assert blocked["ok"] is False
+    assert any("DEV" in p or "allow-dev" in p for p in blocked["problems"])
+    ok = witness.verify_manifest(manifest, base=pkg, allow_dev=True)
+    assert ok["ok"] is True
+
+
+def test_pinned_key_happy_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "prod-secret-seed")
+    pkg = _make_tree(tmp_path)
+    pin = witness.public_key_hex()                 # the production key
+    manifest = _manifest_for(pkg)                  # non-dev (real seed)
+    result = witness.verify_manifest(manifest, base=pkg, pin=pin)
+    assert result["ok"] is True and result["pubkey_trusted"] is True
+    assert result["is_dev"] is False
+
+
+def test_no_pin_non_dev_manifest_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "prod-secret-seed")
+    pkg = _make_tree(tmp_path)
+    manifest = _manifest_for(pkg)                  # non-dev, but no pin to trust
+    result = witness.verify_manifest(manifest, base=pkg)   # no pin, no allow_dev
+    assert result["ok"] is False
+    assert any("no pinned key" in p for p in result["problems"])
+
+
+def test_pinned_pubkey_from_env(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_PINNED_PUBKEY", "ABCDEF")
+    assert witness.pinned_pubkey() == "abcdef"
+    monkeypatch.delenv("OLYMPUS_PINNED_PUBKEY")
+    # falls back to None when neither env nor witness_pubkey.txt is set
+    monkeypatch.setattr(witness, "_package_dir", lambda: __import__("pathlib").Path("/nonexistent"))
+    assert witness.pinned_pubkey() is None
+
+
+def test_witness_pubkey_is_stable_per_seed(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "seed-A")
+    a1 = witness.public_key_hex()
+    a2 = witness.public_key_hex()
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "seed-B")
+    b = witness.public_key_hex()
+    assert a1 == a2 and a1 != b and len(a1) == 64
 
 
 # --- signed decision log: tamper decisions -> signature fails ------------
@@ -108,8 +172,8 @@ def test_verify_rejects_manifest_resigned_with_foreign_key(tmp_path, monkeypatch
 def _signed_run(tmp_path, monkeypatch) -> str:
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     tr = trace.Trace("ask", "shared")
-    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"})
-    tr.decision("review", {"name": "athena"}, {"verdict": "approve"})
+    tr.decision("route", {"name": "zeus"}, {"mode": "delegate"}, status="ok")
+    tr.decision("review", {"name": "athena"}, {"verdict": "approve"}, status="ok")
     tr.flush()
     return tr.id
 

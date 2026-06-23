@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import datetime
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -50,8 +51,9 @@ def _access_token() -> str:
         user = memory.current_user()
         if google_oauth.connected(user):
             return google_oauth.access_token(user)
-    except Exception:
-        pass  # fall back to env-based auth below
+    except Exception as err:
+        logging.getLogger("olympus.gmail").warning(
+            "OAuth token lookup failed; falling back to env auth: %s", err)
 
     now = time.time()
     if _token["value"] and now < _token["expires"] - 60:

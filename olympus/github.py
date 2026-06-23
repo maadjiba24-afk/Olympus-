@@ -39,5 +39,7 @@ def create_issue(title: str, body: str) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read()).get("html_url")
-    except Exception:
+    except Exception as err:
+        import logging
+        logging.getLogger("olympus.github").warning("create_issue failed: %s", err)
         return None  # best-effort: the proposal is already saved to memory

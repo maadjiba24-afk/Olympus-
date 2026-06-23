@@ -55,9 +55,11 @@ olympus verify --manifest <path>
 
 The root of trust is an Ed25519 key derived from `OLYMPUS_SIGNING_SEED`
 (`ed25519(sha256(seed))`). Set it as a secret in the publish workflow for an
-authentic key; the built-in default seed is public and provides integrity for
-local use, not authenticity. Pin the published public key out-of-band to verify
-authenticity downstream.
+authentic key; the built-in default seed is public, so manifests signed under it
+are marked `dev` and rejected for release unless `--allow-dev` is passed. Pin the
+production public key (`OLYMPUS_PINNED_PUBKEY` or `witness_pubkey.txt`) so a
+manifest re-signed with any other key fails verification. **Full key-custody
+procedure: see [docs/SIGNING.md](SIGNING.md).**
 
 ## Signed decision log (one root of trust)
 

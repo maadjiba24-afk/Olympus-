@@ -394,7 +394,7 @@ class Olympus:
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
-            "route", {"name": "zeus", "role": "router"}, route,
+            "route", {"name": "zeus", "role": "router"}, route, status="ok",
             inputs=user_message, model=self._model_meta(),
             request_hash=replaystore.last_ref(),
             response_ref=replaystore.last_ref())
@@ -408,7 +408,7 @@ class Olympus:
             assignments = self._plan(brief, route.get("specialists", []))
         tr.decision(
             "plan", {"name": "athena", "role": "supervisor"}, assignments,
-            parent_record_id=route_rec["record_id"], inputs=brief,
+            status="ok", parent_record_id=route_rec["record_id"], inputs=brief,
             model=self._model_meta(), request_hash=replaystore.last_ref(),
             response_ref=replaystore.last_ref())
         has_deps = any(a["depends_on"] for a in assignments)
@@ -437,7 +437,7 @@ class Olympus:
             review = self._review(brief, verified)
         tr.decision(
             "review", {"name": "athena", "role": "supervisor"}, review,
-            inputs=verified, model=self._model_meta(),
+            status="ok", inputs=verified, model=self._model_meta(),
             request_hash=replaystore.last_ref(),
             response_ref=replaystore.last_ref())
         retry_keys = [k for k in review.get("retry_specialists", [])
