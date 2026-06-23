@@ -1,7 +1,9 @@
 import threading
 import time
 
-from olympus import config, memory, orchestrator
+import pytest
+
+from olympus import config, memory, orchestrator, replaystore, trace
 from olympus.evals import load_benchmarks
 from olympus.specialists import SPECIALISTS
 
@@ -76,6 +78,37 @@ def test_coding_benchmark_is_polyglot():
     for lang in ("python", "go", "rust", "typescript", "sql"):
         assert lang in blob, f"no coding benchmark covers {lang}"
     assert len(evals.ids_for(["hephaestus"])) >= 5
+
+
+def test_reverify_divergence_is_not_masked(monkeypatch):
+    """A ReplayDivergence on the rework *reverify* path must propagate, exactly
+    like the first verify/route/review paths — never be swallowed as a benign
+    verify failure. Otherwise a code/prompt change on the rework branch would
+    replay to a false green instead of being caught as a divergence."""
+    bot = orchestrator.Olympus(user="tester")
+    monkeypatch.setattr(bot, "_route", lambda msg: {
+        "mode": "delegate", "direct_reply": None, "specialists": ["argus"],
+        "brief": "do it", "needs_verification": True})
+    monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
+        {"id": "s1", "specialist": "argus", "task": "t", "depends_on": []}])
+    monkeypatch.setattr(bot, "_dispatch_dag", lambda steps, tr: [("argus", "out")])
+    monkeypatch.setattr(bot, "_dispatch", lambda redo: [("argus", "redone")])
+    # First verify succeeds; Athena orders a retry; the reverify call diverges.
+    calls = {"verify": 0}
+
+    def verify(brief, outputs):
+        calls["verify"] += 1
+        if calls["verify"] == 1:
+            return "verified-once"
+        raise replaystore.ReplayDivergence("h" * 64, {"model": "m"})
+    monkeypatch.setattr(bot, "_verify", verify)
+    monkeypatch.setattr(bot, "_review", lambda brief, verified: {
+        "verdict": "retry", "feedback": "fix it", "retry_specialists": ["argus"]})
+
+    tr = trace.Trace("chat", "tester")
+    with pytest.raises(replaystore.ReplayDivergence):
+        bot._pipeline("a real user message", tr)
+    assert calls["verify"] == 2          # we actually reached the reverify path
 
 
 def test_heartbeat_nothing_due():
