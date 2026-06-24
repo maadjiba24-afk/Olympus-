@@ -48,6 +48,11 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_skill` | Read a skill from the library | first-party read | Read-only | None significant (own content) |
 | `list_source_files` | List Olympus's own source files | first-party read | Read-only | Recon — limited to Olympus's own (public, MIT) source |
 | `read_source_file` | Read one of Olympus's source files | first-party read | Read-only | Exfil of own source — source is public anyway |
+| `query_codegraph` | Look up symbols in the code graph of Olympus's own source | first-party read | Read-only; trusted local code | Recon — limited to Olympus's own (public, MIT) source |
+| `codegraph_neighbors` | Show a symbol's callers/callees/imports | first-party read | Read-only | Recon of own public source structure |
+| `codegraph_impact` | Reverse-dependency closure for a symbol | first-party read | Read-only | Recon of own public source structure |
+| `codegraph_path` | Shortest dependency path between two symbols | first-party read | Read-only | Recon of own public source structure |
+| `verify_code_claim` | Check a structural claim against EXTRACTED graph edges | first-party read | Read-only; ground-truth (EXTRACTED) only, INFERRED never authoritative | None significant — verifies, never asserts on a guess |
 | `cache_fact` | Store a fact in memory | first-party write | Sanitized at write | Cache poisoning via injection-shaped text |
 | `save_lesson` | Store a lesson in memory | first-party write | Sanitized at write | Memory poisoning — `sanitize_for_memory` strips injections |
 | `web_search` | Server-side web search | ingests untrusted | Output treated as untrusted | Prompt injection from web results — wrapped, not trusted |

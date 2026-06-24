@@ -10,7 +10,7 @@ import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, facts, github, memory, security, skills, youtube
+from . import codegraph, config, facts, github, memory, security, skills, youtube
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -749,7 +749,131 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "call_webhook": _call_webhook,
     "run_benchmark": _run_benchmark,
     "run_code_benchmark": _run_code_benchmark,
+    # code-graph reads over project "self" (Olympus's own source). Safe reads of
+    # trusted local code: not in ACTION_TOOLS / INGESTION_TOOLS, so they survive
+    # capability separation. Formatted as short strings the model can cite.
+    "query_codegraph": lambda query: _fmt_cg_nodes(codegraph.find("self", query)),
+    "codegraph_neighbors": lambda symbol: _fmt_cg_pairs(
+        codegraph.neighbors("self", _cg_first_id("self", symbol))),
+    "codegraph_impact": lambda symbol: _fmt_cg_nodes(
+        codegraph.impact("self", _cg_first_id("self", symbol))),
+    "codegraph_path": lambda from_symbol, to_symbol: _fmt_cg_path(
+        codegraph.shortest_path("self", _cg_first_id("self", from_symbol),
+                                _cg_first_id("self", to_symbol))),
+    "verify_code_claim": lambda claim: _fmt_cg_verdict(
+        codegraph.verify_claim("self", claim)),
 }
+
+
+# --- code-graph formatting (string output the model reads + can cite) -----
+
+def _cg_first_id(project: str, symbol: str) -> str:
+    hits = codegraph.find(project, symbol)
+    return hits[0]["id"] if hits else ""
+
+
+def _fmt_cg_nodes(nodes_: list) -> str:
+    if not nodes_:
+        return "No matching symbols in the code graph (run `olympus codegraph " \
+               "build`, or fall back to read_source_file)."
+    out = []
+    for n in nodes_[:20]:
+        span = f":{n['span'][0]}" if n.get("span") else ""
+        out.append(f"- {n['label']} ({n['kind']}) — {n.get('path', '?')}{span}")
+    return "\n".join(out)
+
+
+def _fmt_cg_pairs(pairs: list) -> str:
+    if not pairs:
+        return "No connections found (symbol may not be in the graph)."
+    return "\n".join(f"- {phrase}" for phrase, _ in pairs[:20])
+
+
+def _fmt_cg_path(ids: list) -> str:
+    if not ids:
+        return "No path found between those symbols in the code graph."
+    labels = {n["id"]: n["label"] for n in codegraph.nodes("self")}
+    return " -> ".join(labels.get(i, i) for i in ids)
+
+
+def _fmt_cg_verdict(v: dict) -> str:
+    return f"{v['verdict']}: {v.get('detail', '')}"
+
+
+QUERY_CODEGRAPH = {
+    "name": "query_codegraph",
+    "description": (
+        "Ask the code knowledge graph about Olympus's own source instead of "
+        "reading files one by one. Returns the symbols (modules, classes, "
+        "functions) matching your query with their file:line and how they "
+        "connect. Prefer this over read_source_file for 'where is X', 'what "
+        "connects X to Y', 'how does X work' questions."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string",
+                                 "description": "Symbol name(s), e.g. 'resolve_handler'"}},
+        "required": ["query"],
+    },
+}
+
+CODEGRAPH_NEIGHBORS = {
+    "name": "codegraph_neighbors",
+    "description": (
+        "Show what a symbol connects to in both directions (callers and "
+        "callees, importers and imports) without opening the file."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"symbol": {"type": "string"}},
+        "required": ["symbol"],
+    },
+}
+
+CODEGRAPH_IMPACT = {
+    "name": "codegraph_impact",
+    "description": (
+        "Reverse-dependency analysis: everything that (transitively) calls, "
+        "imports, or references a symbol — 'what breaks if I change this'. Call "
+        "it before editing or refactoring any function."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"symbol": {"type": "string"}},
+        "required": ["symbol"],
+    },
+}
+
+CODEGRAPH_PATH = {
+    "name": "codegraph_path",
+    "description": (
+        "Find the shortest dependency path between two symbols — how one part "
+        "of the codebase reaches another."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"from_symbol": {"type": "string"},
+                       "to_symbol": {"type": "string"}},
+        "required": ["from_symbol", "to_symbol"],
+    },
+}
+
+VERIFY_CODE_CLAIM = {
+    "name": "verify_code_claim",
+    "description": (
+        "Verify a STRUCTURAL claim about Olympus's own code against the graph's "
+        "ground-truth (EXTRACTED) edges — e.g. 'X calls Y', 'A imports B', 'Z "
+        "is unused'. Returns CONFIRMED, REFUTED, or UNKNOWN (symbol not in the "
+        "graph). The web cannot verify private code structure; this can. Use it "
+        "before asserting any claim about how the code is wired."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"claim": {"type": "string"}},
+        "required": ["claim"],
+    },
+}
+
 
 # Tools every specialist gets by default.
 BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME]
@@ -774,6 +898,11 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "send_email": SEND_EMAIL,
     "call_webhook": CALL_WEBHOOK,
     "run_benchmark": RUN_BENCHMARK,
+    "query_codegraph": QUERY_CODEGRAPH,
+    "codegraph_neighbors": CODEGRAPH_NEIGHBORS,
+    "codegraph_impact": CODEGRAPH_IMPACT,
+    "codegraph_path": CODEGRAPH_PATH,
+    "verify_code_claim": VERIFY_CODE_CLAIM,
 }
 
 # Anthropic server-side code sandbox (Hephaestus runs and tests code in it).
