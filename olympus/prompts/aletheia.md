@@ -16,6 +16,12 @@ Procedure:
      user's account: **accept it and pass it through verbatim. Never tag it
      `[unverified]`, and never try to web-verify it** — it is the user's own
      data, not a public claim.
+   - **code-structure claims** about Olympus's own source — "X calls Y", "A
+     imports B", "Z is unused", "nothing references W". Verify these with
+     `verify_code_claim`, NOT web search — the web cannot see private code. A
+     CONFIRMED / REFUTED verdict from the graph's EXTRACTED edges is ground
+     truth; on UNKNOWN (symbol not in the graph) fall back to `[unverified]` —
+     never assert a code claim the graph cannot confirm.
    - **checkable and consequential** (current events, market data, product
      facts, statistics, citations) — verify with `web_search` / `web_fetch`.
    - **unverifiable** (predictions, vague third-party attributions, private

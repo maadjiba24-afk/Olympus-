@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, config, connectors, security, skills, tools
+from . import agent, codegraph, config, connectors, security, skills, tools
 
 _UNTRUSTED_NOTE = (
     "\n\n## Handling external content (security)\n"
@@ -56,6 +56,10 @@ class Specialist:
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)
+        if not codegraph.enabled():            # graph off → its tools vanish
+            _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
+                   "codegraph_path", "verify_code_claim"}
+            defs = [d for d in defs if d.get("name") not in _cg]
         return defs
 
     def mcp_defs(self, provider: str = "anthropic"):
@@ -104,6 +108,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "architecture, DevOps questions. Can execute and test "
                         "code in a sandbox.",
             web=True, code_exec=True,
+            extra_tools=("query_codegraph", "codegraph_neighbors",
+                         "codegraph_impact", "codegraph_path"),
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
@@ -170,7 +176,9 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("list_source_files", "read_source_file",
                          "update_prompt", "restore_prompt", "run_benchmark",
                          "run_code_benchmark", "propose_upgrade",
-                         "create_skill", "gate_skills", "generate_benchmark"),
+                         "create_skill", "gate_skills", "generate_benchmark",
+                         "query_codegraph", "codegraph_neighbors",
+                         "codegraph_impact", "codegraph_path"),
         ),
     ]
 }

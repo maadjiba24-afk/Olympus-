@@ -29,8 +29,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import (agent, backend, config, connectors, contrib, i18n, llm, memory,
-               playbooks, profile, recall, relgraph, replaystore,
+from . import (agent, backend, codegraph, config, connectors, contrib, i18n,
+               llm, memory, playbooks, profile, recall, relgraph, replaystore,
                trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
@@ -130,7 +130,8 @@ class Olympus:
             profile.card(self.user)
             + recall.context_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
-            + relgraph.context_block(self.user, user_message)))
+            + relgraph.context_block(self.user, user_message)
+            + codegraph.context_block("self", user_message)))
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
@@ -256,6 +257,8 @@ class Olympus:
         tool_defs = (tools.web_tool_defs(vs.provider)
                      + [tools.SAVE_LESSON, tools.RECALL_MEMORY,
                         tools.RECALL_FACT, tools.CACHE_FACT])
+        if codegraph.enabled():       # verify code-structure claims the web can't
+            tool_defs = tool_defs + [tools.VERIFY_CODE_CLAIM]
         # Aletheia ingests (web) so only data MCP servers attach, never action.
         mcp = [s.to_api() for s in connectors.mcp_for("aletheia",
                                                       allow_action=False)] \
@@ -295,7 +298,8 @@ class Olympus:
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
-                  + relgraph.context_block(self.user, user_message))
+                  + relgraph.context_block(self.user, user_message)
+                  + codegraph.context_block("self", user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
             f"Task brief:\n{brief}\n\n"
@@ -603,7 +607,8 @@ class Olympus:
                       + profile.card(self.user)
                       + recall.context_block(self.user, user_message)
                       + playbooks.context_block(self.user, user_message)
-                  + relgraph.context_block(self.user, user_message))
+                      + relgraph.context_block(self.user, user_message)
+                      + codegraph.context_block("self", user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"
                 f"Task brief:\n{brief}\n\n"

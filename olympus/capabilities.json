@@ -85,10 +85,13 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 26,
+    "count": 31,
     "names": [
       "cache_fact",
       "call_webhook",
+      "codegraph_impact",
+      "codegraph_neighbors",
+      "codegraph_path",
       "create_skill",
       "current_time",
       "gate_skills",
@@ -97,6 +100,7 @@
       "prepare_action",
       "propose_playbook",
       "propose_upgrade",
+      "query_codegraph",
       "read_calendar",
       "read_email",
       "read_inbox",
@@ -110,6 +114,7 @@
       "save_lesson",
       "send_email",
       "update_prompt",
+      "verify_code_claim",
       "watch_youtube",
       "web_fetch",
       "web_search"
