@@ -134,8 +134,8 @@ def test_disconnect_clears_tokens(monkeypatch):
 # --- web connect endpoints ----------------------------------------------
 
 @needs_crypto
-def test_web_connect_status_and_callback(monkeypatch):
-    import json, threading, urllib.request
+def test_web_connect_flow_validates_state(monkeypatch):
+    import json, threading, urllib.error, urllib.parse, urllib.request
     from http.server import ThreadingHTTPServer
     from olympus import web
 
@@ -145,18 +145,77 @@ def test_web_connect_status_and_callback(monkeypatch):
     monkeypatch.setattr(google_oauth, "_post_token",
                         lambda data: {"access_token": "AT", "refresh_token": "RT",
                                       "expires_in": 3600})
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    opener = urllib.request.build_opener(_NoRedirect)
+
     srv = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def connected():
+        # tokens land under _user_for("cookiesid9") == "web-cookiesid9"
+        return json.loads(urllib.request.urlopen(
+            base + "/api/connected?session=cookiesid9").read())["connected"]
+
+    def callback(state, cookie="olympus_sid=cookiesid9"):
+        try:
+            req = urllib.request.Request(
+                base + f"/oauth/google/callback?state={state}&code=abc",
+                headers={"Cookie": cookie})
+            urllib.request.urlopen(req).read()
+            return 200
+        except urllib.error.HTTPError as e:
+            return e.code
+
     try:
-        st = json.loads(urllib.request.urlopen(
-            base + "/api/connected?session=s9").read())
-        assert st["configured"] is True and st["connected"] is False
-        # simulate Google redirecting back with a code
-        urllib.request.urlopen(
-            base + "/oauth/google/callback?state=s9&code=abc").read()
-        st2 = json.loads(urllib.request.urlopen(
-            base + "/api/connected?session=s9").read())
-        assert st2["connected"] is True
+        assert connected() is False
+
+        # 1) start the flow with a known browser cookie -> 302 to Google
+        #    carrying a server-issued state bound to that cookie's sid.
+        try:
+            loc = opener.open(urllib.request.Request(
+                base + "/oauth/google/start",
+                headers={"Cookie": "olympus_sid=cookiesid9"})).headers["Location"]
+        except urllib.error.HTTPError as e:
+            loc = e.headers["Location"]
+        state = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["state"][0]
+        assert state and state != "cookiesid9"        # opaque nonce, not the sid
+
+        # 2) a forged state is refused
+        assert callback("forged-never-issued") == 400
+        assert connected() is False
+
+        # 3) the real state but a DIFFERENT browser cookie is refused
+        #    (login-CSRF: an attacker-started flow can't complete in another
+        #    browser). State is single-use, so re-issue for the valid step.
+        assert callback(state, cookie="olympus_sid=someoneelse9") == 400
+
+        # 4) the real state with the matching cookie connects
+        try:
+            loc = opener.open(urllib.request.Request(
+                base + "/oauth/google/start",
+                headers={"Cookie": "olympus_sid=cookiesid9"})).headers["Location"]
+        except urllib.error.HTTPError as e:
+            loc = e.headers["Location"]
+        state2 = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)["state"][0]
+        assert callback(state2) == 200
+        assert connected() is True
     finally:
         srv.shutdown()
+
+
+def test_consume_state_is_single_use_and_expiring(monkeypatch):
+    from olympus import store
+    store.reset()
+    state = google_oauth.issue_state("web-abc", "abc")
+    rec = google_oauth.consume_state(state)
+    assert rec and rec["user"] == "web-abc" and rec["sid"] == "abc"
+    assert google_oauth.consume_state(state) is None        # single-use
+    assert google_oauth.consume_state("never-issued") is None
+    # expiry
+    monkeypatch.setattr(google_oauth, "_STATE_TTL", -1)
+    stale = google_oauth.issue_state("web-xyz", "xyz")
+    assert google_oauth.consume_state(stale) is None

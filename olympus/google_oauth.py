@@ -17,12 +17,13 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import vault
+from . import store, vault
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -63,7 +64,9 @@ def configured() -> bool:
 
 
 def authorize_url(state: str) -> str:
-    """The Google consent URL to send the user to. `state` carries the session."""
+    """The Google consent URL to send the user to. `state` is an opaque,
+    single-use nonce minted by issue_state() and validated on the callback —
+    it is NOT trusted as identity on return."""
     cid, _, redirect = _client()
     params = {
         "client_id": cid,
@@ -75,6 +78,42 @@ def authorize_url(state: str) -> str:
         "state": state,
     }
     return AUTH_URL + "?" + urllib.parse.urlencode(params)
+
+
+# --- CSRF state (single-use, server-side, short-lived) -------------------
+
+_STATE_NS = "oauth_state"
+_STATE_TTL = 600          # seconds; a consent round-trip is quick
+
+
+def issue_state(user: str, sid: str) -> str:
+    """Mint an unguessable, single-use `state` and bind it server-side to the
+    user/browser that started the flow. The returned `state` carries no
+    identity itself — the callback resolves identity from this record, so a
+    forged or replayed `state` cannot bind a connection to the wrong user."""
+    token = secrets.token_urlsafe(32)
+    store.backend().put(_STATE_NS, token, json.dumps(
+        {"user": user, "sid": sid, "created_at": time.time()}).encode())
+    return token
+
+
+def consume_state(state: str) -> dict | None:
+    """Validate a returned `state`; return its {user, sid} record or None if
+    it's unknown, already used, or expired. Single-use: a valid state is
+    deleted on consumption."""
+    if not state:
+        return None
+    blob = store.backend().get(_STATE_NS, state)
+    if not blob:
+        return None
+    store.backend().delete(_STATE_NS, state)      # single-use, even if expired
+    try:
+        rec = json.loads(blob)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if time.time() - rec.get("created_at", 0) > _STATE_TTL:
+        return None
+    return rec
 
 
 def _post_token(data: dict) -> dict:

@@ -19,7 +19,10 @@ its own memory".
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
+from urllib.parse import urlparse
 
 # Tools that act on the world or mutate Olympus itself. They are stripped from
 # any agent run that also has web/file ingestion enabled.
@@ -134,3 +137,65 @@ def anonymize(text: str) -> str:
     text = _PHONE.sub("[phone]", text)
     text = _LONGNUM.sub("[number]", text)
     return text
+
+
+# --- SSRF guard (outbound fetches) ---------------------------------------
+
+# Hostnames that name an internal/metadata service directly. Blocked by name as
+# well as by resolved address, in case resolution is intercepted.
+_BLOCKED_HOSTNAMES = frozenset({
+    "localhost", "metadata", "metadata.google.internal",
+})
+
+
+def _ip_is_public(ip: "ipaddress._BaseAddress") -> bool:
+    """A routable, non-internal address: not loopback / private / link-local /
+    reserved / multicast / unspecified. Covers the cloud metadata endpoints
+    (169.254.169.254 is link-local; fd00:ec2::254 is private/ULA)."""
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped          # unwrap ::ffff:10.0.0.1 style addresses
+    return not (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def url_block_reason(url: str) -> str | None:
+    """Return a human reason if `url` must NOT be fetched, else None.
+
+    SSRF defense for any tool that fetches a model- or user-supplied URL. We
+    refuse non-http(s) schemes and any host that resolves to a non-public
+    address — so neither a literal internal IP nor a public hostname pointed at
+    one (e.g. the cloud metadata service) can be reached.
+
+    Note: this validates at resolve time; it does not pin the socket to the
+    validated IP, so a DNS-rebinding attacker who flips the record between this
+    check and the actual connection is not fully defeated. It does stop the
+    common cases (direct IP, static internal name, metadata endpoints).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "malformed URL"
+    if parsed.scheme.lower() not in ("http", "https"):
+        return "only http(s) URLs can be fetched"
+    host = parsed.hostname
+    if not host:
+        return "URL has no host"
+    if host.lower() in _BLOCKED_HOSTNAMES:
+        return f"refusing to fetch an internal host ({host})"
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return f"could not resolve host: {host}"
+    except (UnicodeError, ValueError):
+        return f"invalid host: {host}"
+    if not infos:
+        return f"could not resolve host: {host}"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return f"unparseable address for host: {host}"
+        if not _ip_is_public(ip):
+            return f"refusing to fetch a non-public address ({ip})"
+    return None
