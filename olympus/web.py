@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -234,7 +235,20 @@ def _authorized(handler: BaseHTTPRequestHandler) -> bool:
     required = os.environ.get("OLYMPUS_ACCESS_TOKEN")
     if not required:
         return True
-    return handler.headers.get("X-Olympus-Token", "") == required
+    provided = handler.headers.get("X-Olympus-Token", "")
+    return hmac.compare_digest(provided, required)
+
+
+def _https_request(handler: BaseHTTPRequestHandler) -> bool:
+    """Whether the original client request arrived over HTTPS, so the session
+    cookie can be marked Secure. Honors X-Forwarded-Proto from a TLS-terminating
+    reverse proxy (Caddy/nginx) and an explicit OLYMPUS_SECURE_COOKIES toggle for
+    operators who know they're always behind TLS."""
+    if os.environ.get("OLYMPUS_SECURE_COOKIES", "").lower() in (
+            "1", "true", "yes", "on"):
+        return True
+    proto = handler.headers.get("X-Forwarded-Proto", "")
+    return proto.split(",")[0].strip().lower() == "https"
 
 
 PAGE = """<!doctype html>
@@ -922,12 +936,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         cookie = getattr(self, "_set_cookie", None)
         if cookie:
-            self.send_header("Set-Cookie",
-                             f"olympus_sid={cookie}; HttpOnly; SameSite=Strict; "
-                             "Path=/; Max-Age=31536000")
+            self.send_header("Set-Cookie", self._cookie_header(cookie))
             self._set_cookie = None       # set once per response
         self.end_headers()
         self.wfile.write(body)
+
+    def _cookie_header(self, value: str) -> str:
+        """Set-Cookie for the session id. SameSite=Lax (not Strict) so the
+        cookie rides the top-level redirect back from Google's consent screen,
+        which lets the OAuth callback bind to the originating browser. Lax still
+        withholds the cookie on cross-site POST/fetch, so CSRF on the
+        state-changing API stays closed. Secure is added behind TLS."""
+        secure = "; Secure" if _https_request(self) else ""
+        return (f"olympus_sid={value}; HttpOnly; SameSite=Lax; "
+                f"Path=/; Max-Age=31536000{secure}")
 
     def _json(self, payload: dict, code: int = 200) -> None:
         self._send(code, json.dumps(payload).encode(), "application/json")
@@ -1053,27 +1075,47 @@ class Handler(BaseHTTPRequestHandler):
     def _oauth_start(self, url) -> None:
         from . import google_oauth
         sid = self._session_id(parse_qs(url.query).get("session", [None])[0])
+        user = accounts.namespace_for_token(sid) or _user_for(sid)
         try:
-            target = google_oauth.authorize_url(state=sid)
+            state = google_oauth.issue_state(user, sid)
+            target = google_oauth.authorize_url(state=state)
         except google_oauth.OAuthError as err:
             self._send(400, str(err).encode(), "text/plain; charset=utf-8")
             return
         self.send_response(302)
         self.send_header("Location", target)
+        cookie = getattr(self, "_set_cookie", None)
+        if cookie:                       # carry the sid through the round-trip
+            self.send_header("Set-Cookie", self._cookie_header(cookie))
+            self._set_cookie = None
         self.end_headers()
 
     def _oauth_callback(self, url) -> None:
         from . import google_oauth
         params = parse_qs(url.query)
-        sid = self._session_id(params.get("state", [None])[0])
+        state = params.get("state", [""])[0]
         code = params.get("code", [""])[0]
+        rec = google_oauth.consume_state(state)
+        # The browser finishing the flow must be the one that started it: the
+        # session cookie (sent on this top-level navigation under SameSite=Lax)
+        # must match the sid bound to the state at /start. This closes
+        # login-CSRF — an attacker-started flow cannot be completed in a
+        # victim's browser, and the returned `state` is never trusted as
+        # identity on its own.
+        m = _SID_RE.search(self.headers.get("Cookie", "") or "")
+        cookie_sid = m.group(1) if m else None
+        if not rec or not cookie_sid or rec.get("sid") != cookie_sid:
+            self._send(400, b"<!doctype html><meta charset=utf-8>"
+                       b"<p>Invalid or expired authorization request \xe2\x80\x94 "
+                       b"please start the connection again in this browser.</p>",
+                       "text/html; charset=utf-8")
+            return
         body = "<p>Google account connected. You can close this tab.</p>"
         if not code:
             body = "<p>Connection cancelled or failed.</p>"
         else:
             try:
-                google_oauth.exchange_code(
-                    accounts.namespace_for_token(sid) or _user_for(sid), code)
+                google_oauth.exchange_code(rec["user"], code)
             except Exception as err:
                 body = f"<p>Could not connect: {err}</p>"
         self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),

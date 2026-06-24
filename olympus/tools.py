@@ -492,8 +492,9 @@ def _ddg_search(query: str) -> str:
 
 
 def _web_fetch(url: str) -> str:
-    if not url.startswith(("http://", "https://")):
-        return "Error: only http(s) URLs can be fetched."
+    reason = security.url_block_reason(url)
+    if reason:
+        return f"Error: {reason}."
     return _strip_html(_http_get(url))[:20_000]
 
 
