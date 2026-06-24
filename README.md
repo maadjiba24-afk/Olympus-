@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
 A self-sufficient, self-recurring, **self-improving** multi-agent AI system
-built on the Claude API (and any other frontier model you bring). A main agent
+built on frontier LLM APIs. A main agent
 commands a supervised council of specialists, every answer passes through a
 hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
