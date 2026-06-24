@@ -32,13 +32,17 @@ DEFAULT_PROMPTS = [
 def _gate_bot() -> "orchestrator.Olympus":
     """Build the bot the gate runs on. For Anthropic, pin the cheaper
     `config.GATE_MODEL` (the determinism check doesn't need the main model);
-    for other providers, just use the configured pool."""
+    for other providers, just use the configured pool.
+
+    Runs in a dedicated, empty memory namespace (`gate`) so accumulated user
+    memory can't make a run's prompts differ between the record and replay
+    passes — that would be a false divergence, not a pipeline fault."""
     base = config.Settings.from_env()
     if base.provider == "anthropic" and config.GATE_MODEL:
         s = config.Settings(provider="anthropic", model=config.GATE_MODEL,
                             api_key=base.api_key, base_url=base.base_url)
-        return orchestrator.Olympus(pool=config.ModelPool.of(s))
-    return orchestrator.Olympus(pool=config.ModelPool.from_env())
+        return orchestrator.Olympus(pool=config.ModelPool.of(s), user="gate")
+    return orchestrator.Olympus(pool=config.ModelPool.from_env(), user="gate")
 
 
 def _ok(rec: dict) -> bool:
@@ -114,18 +118,32 @@ def check_one(prompt: str, make_bot, report) -> dict:
 
 
 def run_exit_check(prompts=None, *, make_bot=None, report=print) -> tuple[bool, list[dict]]:
-    """Run the gate over `prompts`. Returns (all_pass, results)."""
+    """Run the gate over `prompts`. Returns (all_pass, results).
+
+    Memory learning is disabled for the duration. The gate proves the
+    *pipeline* replays deterministically; Olympus's background learner would
+    otherwise write new memory between a run's record and replay passes, so a
+    memory-derived prompt would differ the second time and report a false
+    divergence. Together with the empty `gate` namespace (`_gate_bot`), both
+    passes see identical, empty memory — so any real divergence is a genuine
+    pipeline-determinism bug, not learner drift. (Spend/usage tracking is
+    untouched, so the operator still sees the gate's cost.)"""
     prompts = prompts or DEFAULT_PROMPTS
     make_bot = make_bot or _gate_bot
     results = []
-    for i, prompt in enumerate(prompts, 1):
-        report(f"\n[{i}/{len(prompts)}] {prompt[:70]}...")
-        rec = check_one(prompt, make_bot, report)
-        status = "SKIP" if rec.get("skipped") else ("PASS" if _ok(rec) else "FAIL")
-        report(f"    completed={rec['completed']} decisions={rec['decisions']} "
-               f"replayable={rec['replayable']} — {rec['detail']}")
-        report(f"    {status}  (run {rec['run_id']})")
-        results.append(rec)
+    prev_memory = config.MEMORY_ENABLED
+    config.MEMORY_ENABLED = False
+    try:
+        for i, prompt in enumerate(prompts, 1):
+            report(f"\n[{i}/{len(prompts)}] {prompt[:70]}...")
+            rec = check_one(prompt, make_bot, report)
+            status = "SKIP" if rec.get("skipped") else ("PASS" if _ok(rec) else "FAIL")
+            report(f"    completed={rec['completed']} decisions={rec['decisions']} "
+                   f"replayable={rec['replayable']} — {rec['detail']}")
+            report(f"    {status}  (run {rec['run_id']})")
+            results.append(rec)
+    finally:
+        config.MEMORY_ENABLED = prev_memory
     all_pass = len(results) >= 3 and all(_ok(r) for r in results)
     return all_pass, results
 
