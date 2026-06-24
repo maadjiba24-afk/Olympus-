@@ -2,7 +2,7 @@
 divergent run FAILS, a provider/account problem SKIPS, and an unexpected
 internal error FAILS loudly (logged, not swallowed)."""
 
-from olympus import errors, replaygate, replaystore
+from olympus import config, errors, replaygate, replaystore
 
 
 class _Bot:
@@ -19,6 +19,32 @@ class _Bot:
 
 def _quiet(*_a):
     pass
+
+
+def test_gate_disables_memory_learning_during_run(monkeypatch):
+    """The gate must run with the background learner OFF, so a write between a
+    run's record and replay passes can't cause a false divergence — and it must
+    restore the prior setting afterward."""
+    monkeypatch.setattr(config, "MEMORY_ENABLED", True)
+    seen = {}
+
+    def fake_check_one(prompt, make_bot, report):
+        seen["during"] = config.MEMORY_ENABLED        # captured mid-run
+        return {"prompt": prompt, "completed": True, "replayable": True,
+                "decisions": 2, "run_id": "r", "detail": "ok", "skipped": False}
+    monkeypatch.setattr(replaygate, "check_one", fake_check_one)
+
+    replaygate.run_exit_check(["a", "b", "c"], make_bot=lambda: None, report=_quiet)
+    assert seen["during"] is False        # learner OFF during the gate...
+    assert config.MEMORY_ENABLED is True  # ...and restored afterward
+
+
+def test_gate_bot_uses_isolated_memory_namespace(monkeypatch):
+    """The gate bot runs in its own empty 'gate' namespace, never the live
+    'shared' one, so accumulated user memory can't perturb a replay."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    bot = replaygate._gate_bot()
+    assert bot.user == "gate"
 
 
 def test_clean_run_passes(monkeypatch):
