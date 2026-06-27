@@ -35,6 +35,7 @@ _UNITS = {"s": 1, "sec": 1, "second": 1, "seconds": 1,
 
 DAY = 86400
 MIN_INTERVAL = 60          # never busier than once a minute
+MAX_JOBS = 200             # bound stored jobs so the file can't grow unbounded
 
 
 def parse_interval(text: str) -> int:
@@ -101,6 +102,9 @@ def add(name: str, interval: str | int, prompt: str,
     job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)), prompt=prompt,
               deliver_to=deliver_to.strip().lower(), user=user, created=now)
     jobs.append(job)
+    # Bound storage: keep the most-recently-created MAX_JOBS.
+    if len(jobs) > MAX_JOBS:
+        jobs = sorted(jobs, key=lambda j: j.created)[-MAX_JOBS:]
     _save(jobs)
     return job
 

@@ -19,6 +19,18 @@ pytestmark = pytest.mark.skipif(not witness.available(),
                                 reason="cryptography backend unavailable")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_from_shipped_pin(tmp_path_factory, monkeypatch):
+    """Olympus ships a production pinned key (olympus/witness_pubkey.txt), and
+    verify_manifest() falls back to it when no pin is passed. These unit tests
+    exercise the dev / no-pin / explicit-pin semantics, so neutralize the
+    ambient shipped pin: clear the env override and point _package_dir at an
+    empty dir. Tests that want a pin pass it explicitly."""
+    monkeypatch.delenv("OLYMPUS_PINNED_PUBKEY", raising=False)
+    empty = tmp_path_factory.mktemp("no_committed_pin")
+    monkeypatch.setattr(witness, "_package_dir", lambda: empty)
+
+
 # --- canonical encoding + keys -------------------------------------------
 
 def test_canonical_json_sorts_and_drops_none():
