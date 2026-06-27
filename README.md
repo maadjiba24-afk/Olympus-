@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->31<!--/cap--> agent tools, and <!--cap:commands-->50<!--/cap-->
+<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->61<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -243,7 +243,14 @@ user-facing specialist and trains the weakest on a cadence:
 curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
 ```
 
-Then type `olympus`. The first run asks one question — which API key you're
+**On Windows**, paste this in PowerShell instead:
+
+```powershell
+irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
+```
+
+Both create a private Python environment, install Olympus, and put an `olympus`
+command on your PATH. Then type `olympus`. The first run asks one question — which API key you're
 bringing (Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter,
 or a local Ollama) — saves it securely (`~/.olympus/config.env`, owner-only),
 and drops you into chat. From then on it's just:

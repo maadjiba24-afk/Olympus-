@@ -33,7 +33,8 @@ ACTION_TOOLS = frozenset({
 
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
-                             "read_inbox", "read_email", "read_calendar"})
+                             "read_inbox", "read_email", "read_calendar",
+                             "browse_page"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"

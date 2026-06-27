@@ -15,6 +15,48 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — operator capabilities (Hermes gap-closure)
+
+A batch of capabilities closing the operator-axis gaps identified against
+NousResearch/hermes-agent. Each ships with tests and is bound to the
+CI-verified capability manifest.
+
+- **Real execution environment** (`olympus/sandbox.py`). A workspace-confined
+  shell + file surface with `local` and `docker` backends (timeout- and
+  output-capped, path-escape-refused). Exposed as approval-gated actions
+  `run_command` (irreversible) and `write_file` (reversible/undoable), plus
+  read-only `read_file` / `list_dir` tools. Hephaestus gains the loadout.
+- **Scriptable subagents** (`olympus/subagents.py` + `spawn_subagent` tool):
+  ad-hoc, isolated, parallel specialist fan-out with per-branch failure
+  containment.
+- **Natural-language cron** (`olympus/scheduler.py`, `olympus schedule`,
+  `schedule_task` tool): user-defined recurring tasks in plain English, run
+  unattended by the heartbeat, results delivered to any platform.
+- **Discord / Slack / Signal gateways** (`olympus/{discord,slack,signal}.py`)
+  over a shared `gateway.py` router; Slack HMAC + Discord Ed25519 request
+  verification.
+- **Rich TUI** (`olympus/tui.py`): multiline input, `readline` slash-command
+  autocomplete, streamed answers.
+- **Cross-session search** (`olympus/search.py`, `olympus search`,
+  `search_sessions` tool): SQLite FTS5 over all persisted conversations, with a
+  LIKE fallback; indexed live on save.
+- **Training-trajectory export** (`olympus/trajectories.py`,
+  `olympus export-trajectories`): conversations → SFT pairs and traces →
+  decision trajectories as JSONL.
+- **Serverless / hibernation mode** (`olympus/hibernate.py`, `olympus tick`,
+  `olympus next-wake`): run one tick and report the next-due time so an external
+  scheduler can wake Olympus on demand.
+- **agentskills.io interop** (`olympus/skillpack.py`, `olympus skill-import` /
+  `skill-export`): import/export skills in the open SKILL.md standard.
+- **Migration importer** (`olympus/migrate.py`, `olympus import-agent`): fold an
+  OpenClaw/Hermes-style agent's memories, profile, and skills into Olympus;
+  API keys are detected and reported, never silently stored (opt-in `--keys`).
+- **Media tools** (`olympus/media.py`): `generate_image`, `text_to_speech`, and
+  a link-extracting `browse_page`; generative tools degrade gracefully without a
+  key and write only into the confined workspace.
+- **Windows installer** (`install.ps1`): PowerShell one-liner mirroring the
+  POSIX installer.
+
 ### Added — disaster recovery
 
 - **Off-droplet data backups** (`olympus backup` / `olympus restore`,

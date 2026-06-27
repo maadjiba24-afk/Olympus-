@@ -221,6 +221,12 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     _conversation_path(conversation_id).write_text(
         json.dumps(history, indent=1), encoding="utf-8"
     )
+    # Keep the cross-session search index fresh (best-effort; never block a save).
+    try:
+        from . import search
+        search.index_conversation(safe_id(conversation_id), history)
+    except Exception:
+        pass
 
 
 # --- YouTube watch queue ------------------------------------------------

@@ -729,6 +729,18 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_inbox": lambda query="in:inbox", max_results=10: _read_inbox(query, max_results),
     "read_email": lambda message_id: _read_email(message_id),
     "read_calendar": lambda time_min, time_max: _read_calendar(time_min, time_max),
+    "read_file": lambda path: _sandbox().read_file(path),
+    "list_dir": lambda path=".": _sandbox().list_dir(path),
+    "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
+        specialist, task),
+    "schedule_task": lambda name, interval, prompt, deliver_to="": _schedule_task(
+        name, interval, prompt, deliver_to),
+    "search_sessions": lambda query: _search_sessions(query),
+    "generate_image": lambda prompt, filename="": _media().generate_image(
+        prompt, filename),
+    "text_to_speech": lambda text, filename="": _media().text_to_speech(
+        text, filename),
+    "browse_page": lambda url: _media().browse_page(url),
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -875,8 +887,142 @@ VERIFY_CODE_CLAIM = {
 }
 
 
+READ_FILE = {
+    "name": "read_file",
+    "description": (
+        "Read a UTF-8 file from Olympus's confined workspace (host-side). "
+        "Side-effect-free. To create/modify files or run commands, prepare a "
+        "'write_file' or 'run_command' action instead (they need approval)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string",
+                                "description": "Path relative to the workspace root"}},
+        "required": ["path"],
+    },
+}
+
+GENERATE_IMAGE = {
+    "name": "generate_image",
+    "description": (
+        "Generate an image from a text prompt and save it to the workspace. "
+        "Use for marketing visuals, social posts, mockups, diagrams-as-art. "
+        "Returns the saved filename."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "What to depict"},
+            "filename": {"type": "string",
+                         "description": "Optional output filename (.png)"},
+        },
+        "required": ["prompt"],
+    },
+}
+
+TEXT_TO_SPEECH = {
+    "name": "text_to_speech",
+    "description": "Synthesize spoken audio from text and save it to the "
+                   "workspace (e.g. for a voiceover or accessibility). Returns "
+                   "the saved filename.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "filename": {"type": "string",
+                         "description": "Optional output filename (.mp3)"},
+        },
+        "required": ["text"],
+    },
+}
+
+BROWSE_PAGE = {
+    "name": "browse_page",
+    "description": (
+        "Fetch a web page as readable text AND extract its links, so you can "
+        "navigate from it (follow a link with another browse_page call). Richer "
+        "than web_fetch when you need to move through a site."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    },
+}
+
+SEARCH_SESSIONS = {
+    "name": "search_sessions",
+    "description": (
+        "Full-text search across ALL of this user's past conversations to recall "
+        "something discussed before ('what did we decide about X', 'the budget "
+        "we set last week'). Returns the most relevant matching turns."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
+    },
+}
+
+SCHEDULE_TASK = {
+    "name": "schedule_task",
+    "description": (
+        "Schedule a recurring task to run unattended on a cadence and (optionally) "
+        "deliver the result to a messaging platform. Use when the user asks for "
+        "something repeating — 'every morning', 'weekly report', 'check X hourly'. "
+        "Interval accepts plain English: 'hourly', 'daily', 'every 30m', 'every 2 days'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Short unique job name"},
+            "interval": {"type": "string",
+                         "description": "e.g. 'daily', 'hourly', 'every 6h'"},
+            "prompt": {"type": "string",
+                       "description": "The task to run each time, in full"},
+            "deliver_to": {"type": "string",
+                           "description": "Optional: telegram | discord | slack | signal"},
+        },
+        "required": ["name", "interval", "prompt"],
+    },
+}
+
+SPAWN_SUBAGENT = {
+    "name": "spawn_subagent",
+    "description": (
+        "Delegate a self-contained sub-task to another specialist and get its "
+        "answer back inline. Use this to fan out isolated workstreams or to "
+        "pull in another domain's expertise mid-task. Specialist must be one of "
+        "the known council keys (e.g. plutus, peitho, hephaestus, aegis, argus)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "specialist": {"type": "string"},
+            "task": {"type": "string",
+                     "description": "A complete, self-contained task brief"},
+        },
+        "required": ["specialist", "task"],
+    },
+}
+
+LIST_DIR = {
+    "name": "list_dir",
+    "description": "List entries of a directory in the confined workspace "
+                   "(directories end with '/'). Side-effect-free.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string",
+                                "description": "Directory relative to the "
+                                "workspace root (default '.')"}},
+        "required": [],
+    },
+}
+
+
 # Tools every specialist gets by default.
-BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME]
+BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME,
+              SEARCH_SESSIONS]
 
 # Extra client-side tools, referenced by name in the specialist registry.
 EXTRA_TOOLS: dict[str, dict[str, Any]] = {
@@ -891,6 +1037,14 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_inbox": READ_INBOX,
     "read_email": READ_EMAIL,
     "read_calendar": READ_CALENDAR,
+    "read_file": READ_FILE,
+    "list_dir": LIST_DIR,
+    "spawn_subagent": SPAWN_SUBAGENT,
+    "schedule_task": SCHEDULE_TASK,
+    "search_sessions": SEARCH_SESSIONS,
+    "generate_image": GENERATE_IMAGE,
+    "text_to_speech": TEXT_TO_SPEECH,
+    "browse_page": BROWSE_PAGE,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,
@@ -907,6 +1061,41 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
 
 # Anthropic server-side code sandbox (Hephaestus runs and tests code in it).
 CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_execution"}
+
+
+def _sandbox():
+    from . import sandbox          # local import keeps the module graph shallow
+    return sandbox
+
+
+def _subagents():
+    from . import subagents
+    return subagents
+
+
+def _media():
+    from . import media
+    return media
+
+
+def _search_sessions(query: str) -> str:
+    from . import search
+    hits = search.search(query, limit=10)
+    if not hits:
+        return f"No past conversation turns match '{query}'."
+    return "\n".join(h.render() for h in hits)
+
+
+def _schedule_task(name: str, interval: str, prompt: str,
+                   deliver_to: str = "") -> str:
+    from . import scheduler
+    user = memory.current_user()
+    job = scheduler.add(name, interval, prompt, deliver_to=deliver_to, user=user)
+    every = (f"{job.interval // 3600}h" if job.interval % 3600 == 0
+             else f"{job.interval // 60}m")
+    to = f", delivering to {job.deliver_to}" if job.deliver_to else ""
+    return (f"Scheduled '{job.name}' to run every {every}{to}. It runs "
+            "unattended via the heartbeat.")
 
 
 def resolve_handler(name: str):

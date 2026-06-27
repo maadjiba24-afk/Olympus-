@@ -101,6 +101,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Marketing strategy, branding, copywriting, growth, "
                         "audience research, campaigns, SEO.",
             web=True,
+            extra_tools=("generate_image", "text_to_speech", "browse_page"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
@@ -109,7 +110,9 @@ SPECIALISTS: dict[str, Specialist] = {
                         "code in a sandbox.",
             web=True, code_exec=True,
             extra_tools=("query_codegraph", "codegraph_neighbors",
-                         "codegraph_impact", "codegraph_path"),
+                         "codegraph_impact", "codegraph_path",
+                         "read_file", "list_dir", "prepare_action",
+                         "spawn_subagent"),
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
@@ -122,6 +125,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
+            extra_tools=("generate_image", "browse_page"),
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
@@ -134,7 +138,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "deadlines, prioritization. Prepares real-world actions "
                         "(emails, webhooks) for the user to approve.",
             extra_tools=("send_email", "call_webhook", "prepare_action",
-                         "propose_playbook"),
+                         "propose_playbook", "schedule_task"),
         ),
         Specialist(
             key="angelos", name="Angelos", title="Inbox & Calendar Manager",
@@ -151,6 +155,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "search) to find business opportunities, emerging trends, "
                         "and what is happening in the world right now.",
             web=True,
+            extra_tools=("browse_page",),
         ),
         Specialist(
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",
