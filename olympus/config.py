@@ -66,8 +66,9 @@ class Settings:
 
     def validate(self) -> str | None:
         """Return an error message if unusable, else None."""
-        if self.provider not in ("anthropic", "openai"):
-            return f"Unknown provider '{self.provider}' (use anthropic or openai)."
+        if self.provider not in ("anthropic", "openai", "claude-code"):
+            return (f"Unknown provider '{self.provider}' "
+                    "(use anthropic, openai, or claude-code).")
         if self.provider == "openai" and not self.model:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
         return None
@@ -75,8 +76,9 @@ class Settings:
     def usable(self) -> bool:
         if self.validate() is not None:
             return False
-        # anthropic may read its key from the environment; others need a key/url
-        return (self.provider == "anthropic"
+        # anthropic reads its key from the env; claude-code authenticates via the
+        # local `claude` CLI (your subscription); others need a key/url.
+        return (self.provider in ("anthropic", "claude-code")
                 or bool(self.api_key) or bool(self.base_url))
 
 
