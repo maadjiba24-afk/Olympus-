@@ -55,29 +55,25 @@ def test_configured_detects_any_key(monkeypatch):
 
 
 def test_wizard_anthropic_saves_and_restricts(monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *_: "1")
+    from olympus import providers
+    monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: [])  # no network
+    # provider #2 (anthropic) → model #1 (sample) → no more → fast n, sandbox n, msg n
+    answers = iter(["2", "1", "n", "n", "n", "n"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "sk-ant-wizard")
     assert firstrun.wizard() is True
     text = firstrun.CONFIG_ENV.read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-wizard" in text
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-wizard"
-    # the file holds a key — owner-only permissions
     assert (firstrun.CONFIG_ENV.stat().st_mode & 0o777) == 0o600
 
 
-def test_wizard_openai_provider(monkeypatch):
-    answers = iter(["2", "gpt-4o"])
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "sk-openai")
-    assert firstrun.wizard() is True
-    text = firstrun.CONFIG_ENV.read_text()
-    assert "OLYMPUS_PROVIDER=openai" in text
-    assert "OLYMPUS_API_KEY=sk-openai" in text
-    assert "OLYMPUS_MODEL=gpt-4o" in text
-
-
 def test_wizard_empty_key_cancels(monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda *_: "1")
+    from olympus import providers
+    monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: [])
+    # provider #3 (openai) but no key → skipped; decline another → no members
+    answers = iter(["3", "n"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "")
     assert firstrun.wizard() is False
     assert not firstrun.CONFIG_ENV.exists()

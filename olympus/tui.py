@@ -151,13 +151,53 @@ def _install_readline() -> None:
     readline.set_completer_delims(" \t\n")
 
 
+def welcome_banner(pool) -> str:
+    """A branded launch screen: the model pool + a capability overview drawn
+    from the live manifest, so a new user immediately sees what they have."""
+    from . import capabilities
+    from .specialists import SPECIALISTS
+    lines = [
+        "        ⚡  O L Y M P U S",
+        "   a self-improving council of AI specialists",
+        "",
+    ]
+    lines.append(pool.assignment())
+    try:
+        m = capabilities.manifest()
+        roster = ", ".join(SPECIALISTS[k].name for k in sorted(SPECIALISTS))
+        lines += [
+            "",
+            f"  {m['agents']['count']} specialists · {m['tools']['count']} tools"
+            f" · {m['commands']['count']} commands",
+            f"  council: {roster}",
+        ]
+    except Exception:
+        pass
+    lines += [
+        "",
+        "  Type a question in plain English. /help for commands, /growth to see",
+        "  how Olympus is adapting to you, /exit to leave.",
+    ]
+    return "\n".join(lines)
+
+
+def status_line(model: str, secs: float, *, fast: bool = False,
+                spend: float | None = None) -> str:
+    """A compact per-turn status bar: model · time · spend · mode."""
+    parts = [f"⚡ {model}", f"{secs:.1f}s"]
+    if spend is not None:
+        parts.append(f"${spend:.4f} today")
+    if fast:
+        parts.append("fast")
+    return "  " + " · ".join(parts)
+
+
 def run(pool=None) -> None:
-    from . import config, orchestrator
+    import time
+    from . import config, orchestrator, usage
     pool = pool or config.ModelPool.from_env()
     _install_readline()
-    print("⚡ OLYMPUS — Zeus speaking. Type /help for commands, /exit to leave.")
-    if pool.is_multi():
-        print(pool.assignment())
+    print(welcome_banner(pool))
     print()
     bot = orchestrator.Olympus(report=lambda m: print(f"  {m}"),
                                user="cli", conversation_id="cli-default",
@@ -191,9 +231,17 @@ def run(pool=None) -> None:
         try:
             sys.stdout.write("\nolympus ▸ ")
             sys.stdout.flush()
+            t0 = time.time()
             for piece in bot.ask_stream(text):
                 sys.stdout.write(piece)
                 sys.stdout.flush()
-            print("\n")
+            secs = time.time() - t0
+            try:
+                spend = usage.today_spend()
+            except Exception:
+                spend = None
+            print("\n" + status_line(
+                f"{pool.primary().provider}/{pool.primary().model or 'default'}",
+                secs, fast=config.fast_mode(), spend=spend) + "\n")
         except Exception as err:
             print(f"\n  [error] {err}\n")

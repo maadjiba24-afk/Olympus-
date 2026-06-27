@@ -15,6 +15,25 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-06-27
+
+### Added — guided onboarding (Hermes-style)
+
+- **`olympus/providers.py`** — a curated provider catalog (Anthropic, OpenAI,
+  DeepSeek, GLM/Z.AI, Kimi/Moonshot, Groq, OpenRouter, Gemini, Mistral, Ollama,
+  custom) with base URLs and auth styles, plus `fetch_models()` that lists the
+  provider's real model IDs so users don't guess model names, and
+  `build_pool_config()` to assemble the multi-key pool.
+- **Guided `olympus setup` wizard** (numbered menus — robust over SSH/WSL):
+  pick one or more providers, **auto-discover models**, compose them into the
+  model pool, and optionally enable fast mode, choose an execution backend, and
+  connect a messaging gateway — then it writes `config.env`. Subscription auth
+  is first-class: **run on a Claude subscription** (the `claude-code` provider)
+  with no API key.
+- **Rich launch screen + status line** (`olympus/tui.py`): a branded welcome
+  with the model-pool assignment and a capability overview from the manifest,
+  and a per-turn status bar (model · seconds · today's spend · fast-mode).
+
 ## [0.20.0] — 2026-06-27
 
 ### Added — latency controls (fast mode)
@@ -228,7 +247,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.17.0...v0.18.0
