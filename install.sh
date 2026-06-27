@@ -42,8 +42,16 @@ fi
 
 "$VENV/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1 || true
 say "Downloading Olympus…"
-"$VENV/bin/pip" install --quiet --upgrade "git+$REPO" \
-    || fail "Install failed. Check your internet connection and try again."
+# Prefer the published PyPI release (stable); fall back to installing straight
+# from the GitHub repo if it isn't on PyPI yet (or the index is unreachable).
+PKG="${OLYMPUS_PACKAGE:-olympus-council}"
+if "$VENV/bin/pip" install --quiet --upgrade "$PKG" >/dev/null 2>&1; then
+    say "Installed from PyPI ($PKG)."
+elif "$VENV/bin/pip" install --quiet --upgrade "git+$REPO"; then
+    say "Installed from source (latest main)."
+else
+    fail "Install failed. Check your internet connection and try again."
+fi
 
 # --- 3. the `olympus` command --------------------------------------------
 mkdir -p "$BIN_DIR"
