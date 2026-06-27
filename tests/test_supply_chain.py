@@ -95,3 +95,20 @@ def test_real_lock_is_hash_pinned_and_covers_runtime_deps():
         assert dep in text
     # the transitive deps that make the crypto backend actually load
     assert "cffi==" in text and "pycparser==" in text
+
+
+# --- 4. the shipped release-signing pinned key is well-formed -------------
+
+def test_shipped_witness_pubkey_is_valid_hex():
+    """The committed pinned key must be a 64-char Ed25519 public key (hex), and
+    must be packaged so it ships in the wheel (verify trust-pins to it)."""
+    f = ROOT / "olympus" / "witness_pubkey.txt"
+    assert f.is_file(), "olympus/witness_pubkey.txt must be committed"
+    keys = [ln.strip() for ln in f.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.startswith("#")]
+    assert len(keys) == 1, "exactly one pinned key expected"
+    key = keys[0].lower()
+    assert len(key) == 64 and all(c in "0123456789abcdef" for c in key)
+    # packaged into the wheel
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "witness_pubkey.txt" in pyproject
