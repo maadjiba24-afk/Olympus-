@@ -1,0 +1,6 @@
+# Olympus release-signing public key (Ed25519, hex).
+# `olympus verify` trusts ONLY this key for release manifests: a manifest signed
+# with any other key is rejected, not merely checked for internal consistency.
+# Derived from the secret OLYMPUS_SIGNING_SEED (held as a GitHub Actions secret);
+# see RELEASING.md and docs/SIGNING.md for key custody.
+350f970ac5159b30f6736c124a1e468cd1cc82ddd73cb24799057c5c3b0b0336

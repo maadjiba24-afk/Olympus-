@@ -15,6 +15,8 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-06-27
+
 ### Added — release tooling
 
 - **`scripts/bump_version.py`** — one command bumps the version (patch/minor/
@@ -31,6 +33,18 @@ carries a migration note here.
   it was never measured against. The index is now scoped per specialist (its own
   skills + untagged/`all` global skills); evaluation uses the same scoped view,
   and global/untagged skills are gated against the whole benchmark.
+- **Pinned release-signing key.** The production Ed25519 public key is committed
+  to `olympus/witness_pubkey.txt` (and shipped in the wheel), so `olympus verify`
+  trust-pins releases to exactly this key — a manifest re-signed with any other
+  key is rejected, not merely checked for internal consistency.
+
+### Hardening
+
+- Sandbox: empty commands are rejected, the timeout is clamped, and an unknown
+  backend falls back to local; `docker` runs are network-isolated by default
+  (opt in with `OLYMPUS_EXEC_NETWORK=1`). Added docker-command coverage.
+- Scheduler: stored jobs are bounded (`MAX_JOBS`, keeping the most recent) so
+  the schedule file can't grow without limit.
 
 ## [0.17.0] — 2026-06-27
 
@@ -179,6 +193,7 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maadjiba24-afk/Olympus-/releases/tag/v0.16.0

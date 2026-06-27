@@ -92,6 +92,8 @@ def run(command: str, *, timeout: int | None = None,
     """Run a shell command in the confined workspace. Never raises on a
     non-zero exit — that's reported in the Result; only truly broken setups
     (missing docker, etc.) surface as ok=False with the error in output."""
+    if not (command or "").strip():
+        return Result(False, 2, "empty command")
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
     root = workdir()
     be = (be or backend()).lower()
