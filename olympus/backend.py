@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import agent, config, llm, openai_compat
+from . import agent, claude_code, config, llm, openai_compat
 
 
 def complete_text(settings: config.Settings, system: str,
@@ -16,6 +16,8 @@ def complete_text(settings: config.Settings, system: str,
         if response.stop_reason == "refusal":
             return "[The model declined this request for safety reasons.]"
         return llm.text_of(response)
+    if settings.provider == "claude-code":
+        return claude_code.complete_text(settings, system, messages, effort)
     return openai_compat.complete_text(settings, system, messages, effort)
 
 
@@ -28,6 +30,8 @@ def complete_json(settings: config.Settings, system: str,
         if response.stop_reason == "refusal":
             raise ValueError("model refused the request")
         return llm.json_of(response)
+    if settings.provider == "claude-code":
+        return claude_code.complete_json(settings, system, messages, schema, effort)
     return openai_compat.complete_json(settings, system, messages, schema, effort)
 
 
@@ -39,6 +43,8 @@ def run_agent(settings: config.Settings, system: str, task: str,
         return agent.run_agent(system, task, settings=settings,
                                tool_defs=tool_defs, mcp_servers=mcp_servers,
                                effort=effort)
+    if settings.provider == "claude-code":
+        return claude_code.run_agent(settings, system, task, tool_defs, effort)
     # MCP runs server-side on Anthropic only; other providers still get the
     # local plugin tools (which are included in tool_defs).
     return openai_compat.run_agent(settings, system, task, tool_defs, effort)

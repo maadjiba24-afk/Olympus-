@@ -583,6 +583,25 @@ On non-Claude providers, web access automatically falls back to a built-in
 client-side DuckDuckGo search — the architecture (and the hallucination
 gate) works identically everywhere.
 
+**Run on a Claude subscription instead of API credits (`claude-code`).** If you
+have a Claude Pro/Max plan and the [Claude Code](https://claude.com/claude-code)
+CLI installed and logged in, point Olympus at it and pay nothing per token — it
+runs on your subscription:
+
+```bash
+export OLYMPUS_PROVIDER=claude-code      # uses the local `claude` CLI; no API key
+# optional: OLYMPUS_MODEL=sonnet         # else Claude Code's default (Opus on Max)
+python -m olympus
+```
+
+Each model call is one stateless, single-turn `claude -p` completion, so it
+never runs tools/bash on your machine during the pipeline (the trade-off:
+specialists reason from the model's own knowledge — no live web_search on this
+provider). It's for **personal, single-user** use on your own subscription —
+not for serving a multi-user public instance (that would breach the plan terms
+and its rate limits; use API keys there). Needs the `claude` CLI on `PATH`
+(`OLYMPUS_CLAUDE_BIN` overrides).
+
 **In the web UI**, each visitor can click **⚙ model** and enter their own
 provider, model, and API key. Keys live in the visitor's browser
 (localStorage), travel only with their own requests, are used in-memory, and
