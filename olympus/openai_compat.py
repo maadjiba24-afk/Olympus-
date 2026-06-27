@@ -90,6 +90,9 @@ def complete_text(settings: config.Settings, system: str,
     resp = _post(settings, {
         "model": settings.model,
         "messages": [{"role": "system", "content": system}, *messages],
+        # Bound the response — without a cap, reasoning models can generate
+        # unboundedly (a major latency/cost sink). config.MAX_TOKENS is generous.
+        "max_tokens": config.MAX_TOKENS,
     })
     return (resp["choices"][0]["message"].get("content") or "").strip()
 

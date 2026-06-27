@@ -15,6 +15,25 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — latency controls (fast mode)
+
+- **`OLYMPUS_FAST=1`** — a latency dial: the lightweight pipeline stages
+  (route/plan) run on the pool's **fastest** model (`ModelPool.fastest()`, picked
+  by model-name hints like flash/air/mini/8k/haiku) and the optional Athena
+  **review** stage is skipped — trading a little polish for markedly lower
+  latency while keeping the strong model for the actual specialist work and the
+  final synthesis.
+
+### Fixed
+
+- **Final-compose no longer crashes the run.** A provider error in the
+  `synthesize` stage previously raised an unhandled traceback; it now degrades
+  gracefully to the already-verified findings (both the blocking and streaming
+  paths).
+- **OpenAI-compatible backend now bounds output** with `max_tokens`
+  (`config.MAX_TOKENS`). It previously sent no cap, so reasoning models could
+  generate unboundedly — a significant latency and cost sink.
+
 ## [0.19.0] — 2026-06-27
 
 ### Added — per-user adaptive evolution (gets smarter the more you use it)
