@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — guided onboarding (Hermes-style)
+
+- **`olympus/providers.py`** — a curated provider catalog (Anthropic, OpenAI,
+  DeepSeek, GLM/Z.AI, Kimi/Moonshot, Groq, OpenRouter, Gemini, Mistral, Ollama,
+  custom) with base URLs and auth styles, plus `fetch_models()` that lists the
+  provider's real model IDs so users don't guess model names, and
+  `build_pool_config()` to assemble the multi-key pool.
+- **Guided `olympus setup` wizard** (numbered menus — robust over SSH/WSL):
+  pick one or more providers, **auto-discover models**, compose them into the
+  model pool, and optionally enable fast mode, choose an execution backend, and
+  connect a messaging gateway — then it writes `config.env`. Subscription auth
+  is first-class: **run on a Claude subscription** (the `claude-code` provider)
+  with no API key.
+- **Rich launch screen + status line** (`olympus/tui.py`): a branded welcome
+  with the model-pool assignment and a capability overview from the manifest,
+  and a per-turn status bar (model · seconds · today's spend · fast-mode).
+
 ## [0.20.0] — 2026-06-27
 
 ### Added — latency controls (fast mode)
