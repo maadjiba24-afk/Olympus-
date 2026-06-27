@@ -25,6 +25,20 @@ jobs:
       - run: python scripts/check_threat_model.py
       - run: pytest -q
 
+  package:
+    # Build the wheel/sdist and validate their metadata the same way the
+    # publish workflow does, so a packaging regression (bad license metadata,
+    # missing data files, …) is caught on every PR — not at release time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --upgrade build twine
+      - run: python -m build
+      - run: twine check dist/*
+
   sbom:
     runs-on: ubuntu-latest
     steps:

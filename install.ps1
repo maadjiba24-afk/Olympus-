@@ -45,8 +45,17 @@ if ($LASTEXITCODE -ne 0) { Fail "Could not create a Python environment." }
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 & $VenvPy -m pip install --quiet --upgrade pip 2>$null
 Say "Downloading Olympus..."
-& $VenvPy -m pip install --quiet --upgrade "git+$Repo"
-if ($LASTEXITCODE -ne 0) { Fail "Install failed. Check your internet connection and that git is installed, then try again." }
+# Prefer the published PyPI release (stable); fall back to the GitHub repo if it
+# isn't on PyPI yet (or the index is unreachable).
+$Pkg = if ($env:OLYMPUS_PACKAGE) { $env:OLYMPUS_PACKAGE } else { "olympus-council" }
+& $VenvPy -m pip install --quiet --upgrade $Pkg 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Say "Installed from PyPI ($Pkg)."
+} else {
+    & $VenvPy -m pip install --quiet --upgrade "git+$Repo"
+    if ($LASTEXITCODE -ne 0) { Fail "Install failed. Check your internet connection and that git is installed, then try again." }
+    Say "Installed from source (latest main)."
+}
 
 # --- 3. the `olympus` command --------------------------------------------
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null

@@ -32,6 +32,12 @@ carries a migration note here.
 - Switched to the PEP 639 SPDX license declaration (`license = "MIT"` +
   `license-files`), so the built wheel/sdist pass `twine check` on current
   tooling and publish cleanly to PyPI. Requires `setuptools>=77` to build.
+- Installers now **prefer the PyPI release and fall back to source**: they try
+  `pip install olympus-council` first and only install from the GitHub repo if
+  PyPI is unavailable — so they work before the package is published and switch
+  to stable releases automatically once it is (`OLYMPUS_PACKAGE` overrides).
+- CI now builds the wheel/sdist and runs `twine check` on every push/PR
+  (new `package` job), catching packaging regressions before release.
 
 ### Added — operator capabilities (Hermes gap-closure)
 
