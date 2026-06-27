@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->61<!--/cap-->
+<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->63<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -20,6 +20,55 @@ what's actually built.
 > comprehensive passing test suite. Install with the one-liner below, type
 > `olympus`, and you're chatting; `olympus scores` shows each specialist's
 > measured quality.
+
+## Install
+
+Pick your OS, paste one line, then type `olympus`. The first run asks which API
+key you're bringing (Anthropic, OpenAI, or any compatible provider), saves it
+securely, and drops you into chat. Requires **Python 3.10+**.
+
+**Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
+```
+
+**macOS**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
+```
+
+**Any OS, via pip/pipx** (once published to PyPI):
+
+```bash
+pipx install olympus-council     # isolated; gives the `olympus` command
+# or:  pip install olympus-council
+```
+
+Then just:
+
+```bash
+olympus
+```
+
+**Stay up to date.** New versions are one command away — Olympus updates itself
+in place whichever way you installed it:
+
+```bash
+olympus upgrade          # update to the latest release
+olympus version          # show the installed version
+```
+
+(On Windows, open a **new** terminal after installing so the `olympus` command
+is on your PATH. Uninstall anytime: `rm -rf ~/.olympus ~/.local/bin/olympus`,
+or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 
 ## Architecture
 

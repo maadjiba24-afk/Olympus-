@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-06-27
+
+### Added — install & updates (frictionless onboarding)
+
+- **Top-of-README Install section** with copy-pasteable Linux / macOS / Windows
+  one-liners, the pip/pipx path, and the upgrade commands.
+- **`olympus upgrade`** (`olympus/selfupdate.py`) — one command to update to the
+  latest release; detects whether you installed via pipx, the install-script
+  venv, or plain pip and runs the right thing (`--git` forces a from-source
+  upgrade). **`olympus version`** prints the installed version, and
+  `__version__` now reflects the installed distribution's real version.
+
+### Packaging
+
+- Switched to the PEP 639 SPDX license declaration (`license = "MIT"` +
+  `license-files`), so the built wheel/sdist pass `twine check` on current
+  tooling and publish cleanly to PyPI. Requires `setuptools>=77` to build.
+
 ### Added — operator capabilities (Hermes gap-closure)
 
 A batch of capabilities closing the operator-axis gaps identified against
@@ -138,5 +156,6 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maadjiba24-afk/Olympus-/releases/tag/v0.16.0
