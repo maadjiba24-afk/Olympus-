@@ -27,11 +27,15 @@ See [docs/SUPPORT.md](docs/SUPPORT.md) for the versioning/LTS policy and
 1. **Pick the version** per SemVer (`docs/SUPPORT.md`): PATCH for fixes only,
    MINOR for new backward-compatible capabilities, MAJOR for incompatible CLI /
    public-API / memory-`schema_version` changes (add a migration note).
-2. **Update `pyproject.toml`** — it is the single source of truth for the
-   version.
-3. **Update `CHANGELOG.md`** — move the `[Unreleased]` items into a new
-   `[X.Y.Z]` section and refresh the compare/links at the bottom. A MAJOR bump
-   needs a migration note.
+2. **Bump the version + cut the changelog in one step:**
+   ```bash
+   python scripts/bump_version.py patch      # or minor / major / --set X.Y.Z
+   ```
+   This updates `pyproject.toml` (the single source of truth), the
+   `olympus/__init__.py` fallback, and `CHANGELOG.md` (promotes `[Unreleased]`
+   to a dated `[X.Y.Z]` section, adds a fresh `[Unreleased]`, fixes the compare
+   links). Use `--dry-run` to preview. Then polish the new changelog notes by
+   hand (a MAJOR bump needs a migration note).
 4. **Run the gates locally** (the same checks CI enforces):
    ```bash
    pip install --require-hashes -r requirements.lock

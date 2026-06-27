@@ -93,11 +93,32 @@ def read(name: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace")[:20_000]
 
 
-def index() -> str:
-    """One line per skill: shown to every specialist in its system prompt."""
+GLOBAL_SPECIALIST = "all"   # tag a skill `specialist: all` to share it with everyone
+
+
+def _visible_to(owner: str | None, specialist: str | None) -> bool:
+    """Whether a skill owned by `owner` should appear for `specialist`.
+
+    `specialist=None` means "show everything" (the human `olympus skills` view).
+    A skill with no owner, or owner 'all', is global. A skill tagged for one
+    specialist is shown ONLY to that specialist — so a benchmark-gated skill
+    can't silently degrade other specialists that merely see it in a shared
+    index (the cross-contamination the gate couldn't catch)."""
+    if specialist is None:
+        return True
+    if not owner or owner == GLOBAL_SPECIALIST:
+        return True
+    return owner == specialist
+
+
+def index(specialist: str | None = None) -> str:
+    """One line per skill. With `specialist`, scope to the skills that
+    specialist should actually see (its own + global); without it, list all."""
     lines = []
     for path in sorted(_dir().glob("*.md")):
         text = path.read_text(encoding="utf-8", errors="replace")
+        if not _visible_to(_meta(text, "specialist"), specialist):
+            continue
         name = _title(text) or path.stem
         desc = ""
         for line in text.splitlines():

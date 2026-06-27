@@ -903,7 +903,13 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     if not provisional:
         return "No provisional skills to gate."
 
-    specialists = {sp for _, sp in provisional if sp}
+    # A skill tagged for a single specialist is gated against that specialist;
+    # an untagged or 'all' (global) skill is visible to everyone, so it must be
+    # gated against the WHOLE benchmark.
+    def _is_scoped(sp) -> bool:
+        return bool(sp) and sp != skills.GLOBAL_SPECIALIST
+
+    specialists = {sp for _, sp in provisional if _is_scoped(sp)}
     # Ensure every affected specialist domain has at least one eval item.
     for sp in list(specialists):
         if not evals.ids_for([sp]):
@@ -919,7 +925,7 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     # already-decided library.
     promoted, reverted, skipped = [], [], []
     for name, sp in provisional:
-        bench_ids = evals.ids_for([sp]) if sp else None
+        bench_ids = evals.ids_for([sp]) if _is_scoped(sp) else None  # None = whole bench
         try:
             after = evals.run(settings, only=bench_ids)["avg"]   # skill visible
             skills.set_hidden(name, True)

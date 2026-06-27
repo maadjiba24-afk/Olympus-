@@ -72,9 +72,13 @@ class Specialist:
             self.key, allow_action=allow_action)]
 
     def system_prompt(self) -> str:
+        # Scope the skill index to THIS specialist (its own skills + global
+        # ones). A skill tagged for another specialist never enters this prompt,
+        # so a benchmark-gated skill can't degrade specialists it was never
+        # measured against.
         return (agent.load_prompt(self.key)
                 + "\n\n## Skill library (load with read_skill before "
-                  "relevant tasks)\n" + skills.index()
+                  "relevant tasks)\n" + skills.index(self.key)
                 + _UNTRUSTED_NOTE)
 
     def run(self, task: str, settings: config.Settings | None = None,
