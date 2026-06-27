@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — release tooling
+
+- **`scripts/bump_version.py`** — one command bumps the version (patch/minor/
+  major or `--set`) across `pyproject.toml` + `olympus/__init__.py` and cuts the
+  CHANGELOG (`[Unreleased]` → dated section, fresh `[Unreleased]`, fixed compare
+  links). `--dry-run` previews. Documented in RELEASING.md.
+
+### Security
+
+- **Per-specialist skill-index scoping.** Skills tagged for one specialist no
+  longer appear in every other specialist's prompt. Previously a skill was
+  benchmark-gated against only its own specialist yet was injected into the
+  shared index every specialist sees, so it could silently degrade specialists
+  it was never measured against. The index is now scoped per specialist (its own
+  skills + untagged/`all` global skills); evaluation uses the same scoped view,
+  and global/untagged skills are gated against the whole benchmark.
+
 ## [0.17.0] — 2026-06-27
 
 ### Added — install & updates (frictionless onboarding)

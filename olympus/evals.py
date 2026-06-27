@@ -179,8 +179,11 @@ def run(settings: config.Settings | None = None,
     for bench in load_benchmarks():
         if only and bench["id"] not in only:
             continue
+        # Scope the index to this specialist — exactly what it sees in
+        # production — so the gate measures a skill against the specialist that
+        # actually uses it.
         system = (agent.load_prompt(bench["specialist"])
-                  + "\n\n## Skill library\n" + skills.index()
+                  + "\n\n## Skill library\n" + skills.index(bench["specialist"])
                   + "\n\nNote: tools are unavailable in this evaluation — "
                     "answer directly from expertise.")
         answer = backend.complete_text(
