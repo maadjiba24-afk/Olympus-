@@ -115,6 +115,12 @@ class Olympus:
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
 
+    def _light(self) -> config.Settings:
+        """Settings for the lightweight stages (route/plan/review). In fast mode
+        these run on the pool's fastest model instead of the strongest one."""
+        return (self.pool.fastest() if config.fast_mode()
+                else self.pool.for_role("reasoning"))
+
     def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
         s = self.pool.for_role(role)
         return {"provider": s.provider, "model": s.model or config.MODEL,
@@ -137,7 +143,7 @@ class Olympus:
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
-            return backend.complete_json(self.pool.for_role("reasoning"), system,
+            return backend.complete_json(self._light(), system,
                                          messages, ROUTE_SCHEMA, effort="medium")
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
@@ -209,7 +215,7 @@ class Olympus:
         )
         try:
             steps = backend.complete_json(
-                self.pool.for_role("reasoning"), system,
+                self._light(), system,
                 [{"role": "user", "content": prompt}], schema, effort="medium",
             )["steps"]
         except Exception:
@@ -439,13 +445,18 @@ class Olympus:
         else:
             verified = raw
 
-        with tr.span("review"):
-            review = self._review(brief, verified)
-        tr.decision(
-            "review", {"name": "athena", "role": "supervisor"}, review,
-            status="ok", inputs=verified, model=self._model_meta(),
-            request_hash=replaystore.last_ref(),
-            response_ref=replaystore.last_ref())
+        if config.fast_mode():
+            # Fast mode skips the optional quality-review round-trip entirely.
+            tr.event("review.skipped", reason="fast_mode")
+            review = {"verdict": "approve", "feedback": "", "retry_specialists": []}
+        else:
+            with tr.span("review"):
+                review = self._review(brief, verified)
+            tr.decision(
+                "review", {"name": "athena", "role": "supervisor"}, review,
+                status="ok", inputs=verified, model=self._model_meta(),
+                request_hash=replaystore.last_ref(),
+                response_ref=replaystore.last_ref())
         retry_keys = [k for k in review.get("retry_specialists", [])
                       if k in SPECIALISTS]
         if review.get("verdict") == "retry" and retry_keys:
@@ -586,8 +597,20 @@ class Olympus:
                 reply = result
             else:
                 self.report("⚡ Zeus composes the final answer...")
-                with tr.span("synthesize"):
-                    reply = self._synthesize(user_message, brief, result)
+                try:
+                    with tr.span("synthesize"):
+                        reply = self._synthesize(user_message, brief, result)
+                except replaystore.ReplayDivergence:
+                    raise
+                except Exception as err:
+                    # The final compose failed (e.g. a provider error). Don't
+                    # crash — fall back to the already-verified findings so the
+                    # user still gets the work the council did.
+                    tr.event("synthesize.failed", error=str(err)[:200])
+                    self.report(f"⚠️ Final compose failed ({str(err)[:80]}); "
+                                "returning the verified findings.")
+                    reply = (result or "").strip() or (
+                        f"[Could not complete the request: {str(err)[:200]}]")
         finally:
             tr.flush()
             self.last_run_id = tr.id
@@ -636,17 +659,29 @@ class Olympus:
             messages = self.history + [{"role": "user", "content": prompt}]
             synth = self.pool.for_role("reasoning")
             chunks: list[str] = []
-            with tr.span("synthesize_stream"):
-                if synth.provider == "anthropic":
-                    for piece in llm.stream_text(system, messages,
-                                                 settings=synth):
-                        chunks.append(piece)
-                        yield piece
-                else:
-                    # Other providers: no token stream here — yield once.
-                    full = backend.complete_text(synth, system, messages)
-                    chunks.append(full)
-                    yield full
+            try:
+                with tr.span("synthesize_stream"):
+                    if synth.provider == "anthropic":
+                        for piece in llm.stream_text(system, messages,
+                                                     settings=synth):
+                            chunks.append(piece)
+                            yield piece
+                    else:
+                        # Other providers: no token stream here — yield once.
+                        full = backend.complete_text(synth, system, messages)
+                        chunks.append(full)
+                        yield full
+            except replaystore.ReplayDivergence:
+                raise
+            except Exception as err:
+                # Final compose failed — degrade to the verified findings instead
+                # of crashing the stream.
+                tr.event("synthesize.failed", error=str(err)[:200])
+                fallback = (("".join(chunks)).strip() or (result or "").strip()
+                            or f"[Could not complete the request: {str(err)[:200]}]")
+                if not "".join(chunks).strip():
+                    yield fallback
+                chunks = [fallback]
             self._finish(user_message, "".join(chunks))
         finally:
             tr.flush()

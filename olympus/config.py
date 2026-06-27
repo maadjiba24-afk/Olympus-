@@ -192,6 +192,18 @@ class ModelPool:
     def for_specialist(self, key: str) -> Settings:
         return self.for_role(SPECIALIST_ROLE.get(key, "reasoning"))
 
+    def fastest(self) -> Settings:
+        """The member most likely to respond quickly — by model-name hints
+        (flash/air/mini/8k/haiku/turbo/…), else the primary. Used for the
+        latency-sensitive light stages in fast mode."""
+        if len(self.members) == 1:
+            return self.members[0]
+        hints = ("flash", "air", "mini", "nano", "haiku", "turbo", "lite",
+                 "fast", "instant", "small", "8k", "scout")
+        def speed(s: Settings) -> int:
+            return 1 if any(h in (s.model or "").lower() for h in hints) else 0
+        return max(self.members, key=speed)  # ties keep the first (primary-ish)
+
     def is_multi(self) -> bool:
         return len(self.members) > 1
 
@@ -318,6 +330,14 @@ def backup_allow_plaintext() -> bool:
     clear). Set OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 only if the destination is
     itself trusted/encrypted."""
     return os.environ.get("OLYMPUS_BACKUP_ALLOW_PLAINTEXT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def fast_mode() -> bool:
+    """Latency mode: run the lightweight pipeline stages (route/plan) on the
+    pool's fastest model and skip the optional Athena review stage. Trades a
+    little polish for markedly lower latency (OLYMPUS_FAST=1)."""
+    return os.environ.get("OLYMPUS_FAST", "").strip().lower() in (
         "1", "true", "yes", "on")
 
 
