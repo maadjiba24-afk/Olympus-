@@ -61,6 +61,14 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_inbox` | List inbox messages | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — `should_wrap` wraps it |
 | `read_email` | Read one email | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — wrapped |
 | `read_calendar` | Read calendar events | ingests untrusted | Read-only; wrapped | Event-text injection — wrapped |
+| `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
+| `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
+| `browse_page` | Fetch a page as text + extract links | ingests untrusted | Output treated as untrusted; wrapped | SSRF / injected page content — `should_wrap` wraps it |
+| `search_sessions` | Full-text search past conversations | first-party read | Read-only; this user's own history | None significant — own content; per-user namespaced |
+| `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
+| `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |
+| `generate_image` | Generate an image into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn / disallowed content — key-gated, confined output |
+| `text_to_speech` | Synthesize audio into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn — key-gated, confined output |
 | `prepare_action` | Stage an action for approval | first-party (gated) | **Never executes** — human approval required | Self-authorizing actions — execution is human-gated |
 | `propose_playbook` | Propose a repeatable workflow | first-party (gated) | Proposal only — approval required | Malicious playbook — approval-gated before it can run |
 | `create_skill` | Add a provisional skill | self-modifying | **Provisional** until benchmark-gated; sanitized | Malicious/weak skill — gated and reverted if it doesn't help |
@@ -78,7 +86,9 @@ longer exists. So the surface and its threat model can't drift apart.
 
 Tools that *act* (`send_email`, `call_webhook`) and the higher-level action
 types (`gmail_send`, `gmail_draft`, `gmail_archive`, `calendar_create`,
-`save_note`, …) all run through the Action spine, which enforces deny-first:
+`save_note`, and the workspace-execution types `run_command` (irreversible) and
+`write_file` (reversible — `undo` restores prior contents), …) all run through
+the Action spine, which enforces deny-first:
 
 - irreversible actions **never** auto-execute (`can_auto_execute` is always
   false for them), regardless of autonomy level;

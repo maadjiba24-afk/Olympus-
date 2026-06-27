@@ -9,43 +9,8 @@ from . import heartbeat, memory, orchestrator
 
 
 def _chat() -> None:
-    from . import config
-    pool = config.ModelPool.from_env()
-    print("OLYMPUS — Zeus speaking. Type 'exit' to leave, "
-          "'/good' or '/bad' to rate the last answer.")
-    if pool.is_multi():
-        print(pool.assignment())
-    print()
-    bot = orchestrator.Olympus(report=lambda msg: print(f"  {msg}"),
-                               user="cli", conversation_id="cli-default",
-                               pool=pool)
-    while True:
-        try:
-            user = input("you ▸ ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not user:
-            continue
-        if user.lower() in {"exit", "quit"}:
-            break
-        if user.lower().startswith(("/good", "/bad")):
-            verdict = "up" if user.lower().startswith("/good") else "down"
-            print(f"  {bot.feedback(verdict, user.partition(' ')[2])}")
-            continue
-        if user.lower().startswith("/lang"):
-            print(f"  {bot.set_language(user.partition(' ')[2] or 'auto')}")
-            continue
-        if user.lower().startswith("/contribute"):
-            arg = user.partition(' ')[2].strip().lower()
-            print(f"  {bot.set_contribute(arg in ('on','yes','true','1','enable'))}")
-            continue
-        try:
-            reply = bot.ask(user)
-        except Exception as err:
-            print(f"  [error] {err}")
-            continue
-        print(f"\nolympus ▸ {reply}\n")
+    from . import tui
+    tui.run()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -182,13 +147,52 @@ def build_parser() -> argparse.ArgumentParser:
     p_queue = sub.add_parser("queue", help="queue a YouTube video for the heartbeat")
     p_queue.add_argument("url")
 
+    p_search = sub.add_parser("search", help="full-text search across all past "
+                                             "conversations")
+    p_search.add_argument("query", nargs="+", help="words to search for")
+    p_search.add_argument("--reindex", action="store_true",
+                          help="rebuild the index from conversation files first")
+    p_traj = sub.add_parser("export-trajectories",
+                            help="export past runs as training-data JSONL "
+                                 "(SFT pairs or decision trajectories)")
+    p_traj.add_argument("--out", required=True, help="output .jsonl path")
+    p_traj.add_argument("--kind", default="messages",
+                        choices=["messages", "trace"])
     sub.add_parser("heartbeat", help="run the self-recurring autonomous loop")
+    sub.add_parser("tick", help="run ONE heartbeat tick and exit "
+                                "(for cron/serverless/hibernating deploys)")
+    sub.add_parser("next-wake", help="seconds until the next scheduled work is "
+                                     "due (for external schedulers)")
+    p_sched = sub.add_parser("schedule", help="manage natural-language "
+                                              "scheduled tasks (run by the heartbeat)")
+    p_sched.add_argument("action", nargs="?", default="list",
+                         choices=["list", "add", "remove", "enable", "disable", "run"])
+    p_sched.add_argument("name", nargs="?", default="")
+    p_sched.add_argument("interval", nargs="?", default="daily",
+                         help="e.g. daily, hourly, 'every 6h'")
+    p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
+    p_sched.add_argument("--to", default="", dest="deliver_to",
+                         help="deliver result to: telegram|discord|slack|signal")
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
+    p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
+                                                 "file(s) into the skill library")
+    p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
+    p_skim.add_argument("--provisional", action="store_true",
+                        help="route imports through the benchmark gate")
+    p_skex = sub.add_parser("skill-export", help="export a skill as an "
+                                                 "agentskills.io SKILL.md")
+    p_skex.add_argument("name", help="skill name to export")
+    p_skex.add_argument("--out", default=".", help="destination directory")
+    p_mig = sub.add_parser("import-agent", help="migrate memories/skills/profile "
+                                                "from another agent (OpenClaw/Hermes-style)")
+    p_mig.add_argument("path", help="the other agent's data directory")
+    p_mig.add_argument("--keys", action="store_true",
+                       help="also import recognised provider API keys")
     p_train = sub.add_parser("train", help="score all specialists and have "
                                            "Prometheus strengthen the weakest")
     p_train.add_argument("--focus", type=int, default=2,
@@ -245,6 +249,19 @@ def build_parser() -> argparse.ArgumentParser:
                                            "(needs WHATSAPP_* env vars)")
     p_wa.add_argument("--host", default="0.0.0.0")
     p_wa.add_argument("--port", type=int, default=8485)
+
+    p_dc = sub.add_parser("discord", help="serve the Discord interactions "
+                                          "endpoint (needs DISCORD_* env vars)")
+    p_dc.add_argument("--host", default="0.0.0.0")
+    p_dc.add_argument("--port", type=int, default=8486)
+
+    p_sl = sub.add_parser("slack", help="serve the Slack Events endpoint "
+                                        "(needs SLACK_* env vars)")
+    p_sl.add_argument("--host", default="0.0.0.0")
+    p_sl.add_argument("--port", type=int, default=8487)
+
+    sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
+                                  "(needs SIGNAL_* env vars)")
 
     return parser
 
@@ -769,6 +786,72 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat.run_forever()
         except KeyboardInterrupt:
             print("\nHeartbeat stopped.")
+    elif args.command == "import-agent":
+        from . import migrate
+        print(migrate.render(migrate.import_dir(args.path, user="cli",
+                                                with_keys=args.keys)))
+    elif args.command == "skill-import":
+        from . import skillpack
+        import os.path
+        if os.path.isdir(args.path) and not os.path.isfile(
+                os.path.join(args.path, "SKILL.md")):
+            msgs = skillpack.import_dir(args.path, provisional=args.provisional)
+            print("\n".join(msgs) if msgs else "No SKILL.md files found.")
+        else:
+            print(skillpack.import_file(args.path, provisional=args.provisional))
+    elif args.command == "skill-export":
+        from . import skillpack
+        try:
+            print(f"Wrote {skillpack.export(args.name, args.out)}")
+        except ValueError as err:
+            print(str(err))
+            return 1
+    elif args.command == "export-trajectories":
+        from . import trajectories
+        n = trajectories.export(args.out, kind=args.kind)
+        print(f"Exported {n} {args.kind} trajectories to {args.out}.")
+    elif args.command == "search":
+        from . import search
+        if args.reindex:
+            n = search.reindex()
+            print(f"Reindexed {n} turns.")
+        hits = search.search(" ".join(args.query))
+        if not hits:
+            print("No matches.")
+        for h in hits:
+            print(h.render())
+    elif args.command == "tick":
+        from . import hibernate
+        result = hibernate.run_once()
+        for line in result["log"]:
+            print(f"[tick] {line}")
+        secs = result["next_wake_secs"]
+        print(f"Next work due in {secs:.0f}s "
+              f"(~{secs / 3600:.1f}h). Safe to hibernate until then.")
+    elif args.command == "next-wake":
+        from . import hibernate
+        print(int(hibernate.next_due_in()))
+    elif args.command == "schedule":
+        from . import scheduler
+        if args.action == "list":
+            print(scheduler.summary())
+        elif args.action == "add":
+            prompt = " ".join(args.prompt).strip()
+            if not args.name or not prompt:
+                print('Usage: olympus schedule add <name> <interval> "<prompt>" '
+                      '[--to telegram]')
+                return 1
+            job = scheduler.add(args.name, args.interval, prompt,
+                                deliver_to=args.deliver_to, user="cli")
+            print(f"Scheduled '{job.name}' every {job.interval // 60}m.")
+        elif args.action == "remove":
+            print("Removed." if scheduler.remove(args.name) else "No such job.")
+        elif args.action in ("enable", "disable"):
+            ok = scheduler.set_enabled(args.name, args.action == "enable")
+            print("Updated." if ok else "No such job.")
+        elif args.action == "run":
+            ran = scheduler.run_due()
+            print("\n".join(ran) if ran else "Nothing due right now.")
     elif args.command == "web":
         from . import web
         try:
@@ -787,6 +870,24 @@ def main(argv: list[str] | None = None) -> int:
             whatsapp.run_server(args.host, args.port)
         except KeyboardInterrupt:
             print("\nWhatsApp gateway stopped.")
+    elif args.command == "discord":
+        from . import discord
+        try:
+            discord.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nDiscord gateway stopped.")
+    elif args.command == "slack":
+        from . import slack
+        try:
+            slack.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nSlack gateway stopped.")
+    elif args.command == "signal":
+        from . import signal as signal_gw
+        try:
+            signal_gw.run_bot()
+        except KeyboardInterrupt:
+            print("\nSignal gateway stopped.")
     return 0
 
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import actions, calendar, config, gmail, memory, tools
+from . import actions, calendar, config, gmail, memory, sandbox, tools
 
 
 # --- save_note: trivial, reversible -------------------------------------
@@ -140,6 +140,32 @@ def _cal_create_undo(result: dict) -> str:
     return "event cancelled"
 
 
+# --- sandbox execution: run a command / write a file --------------------
+# These are the operator surface. They are IRREVERSIBLE/NOTABLE and scope-gated,
+# so an agent can only PREPARE them — a human (or explicit policy) approves
+# before anything runs on the host.
+
+def _run_command_preview(p: dict) -> str:
+    return (f"Run command in the workspace ({sandbox.backend()} backend):\n"
+            f"  $ {p.get('command', '')}")
+
+
+def _run_command_execute(p: dict) -> dict:
+    res = sandbox.run(p.get("command", ""), timeout=p.get("timeout"))
+    return {"code": res.code, "ok": res.ok, "output": res.output}
+
+
+def _write_file_preview(p: dict) -> str:
+    body = p.get("content", "")
+    return (f"Write file '{p.get('path', '?')}' "
+            f"({len(body.encode('utf-8'))} bytes) in the workspace:\n"
+            f"{body[:500]}")
+
+
+def _write_file_execute(p: dict) -> dict:
+    return sandbox.write_file(p.get("path", ""), p.get("content", ""))
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -175,6 +201,16 @@ def register_builtins() -> None:
         scope="calendar.events", preview=_cal_create_preview,
         execute=_cal_create_execute, undo=_cal_create_undo,
         description="Create a calendar event / send an invitation."))
+    # Sandbox execution — the operator surface.
+    actions.register(actions.ActionType(
+        name="run_command", risk_class=actions.IRREVERSIBLE, scope="exec",
+        preview=_run_command_preview, execute=_run_command_execute,
+        description="Run a shell command in the confined workspace."))
+    actions.register(actions.ActionType(
+        name="write_file", risk_class=actions.NOTABLE, scope="exec",
+        preview=_write_file_preview, execute=_write_file_execute,
+        undo=sandbox.undo_write,
+        description="Create/overwrite a file in the workspace (reversible)."))
 
 
 register_builtins()

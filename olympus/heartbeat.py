@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import traceback
 
-from . import config, memory, orchestrator, telegram
+from . import config, memory, orchestrator, scheduler, telegram
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
@@ -22,6 +22,14 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     """Run any due tasks once; return a log of what happened."""
     now = now or time.time()
     log: list[str] = []
+
+    # User-defined scheduled tasks (natural-language cron). Checked every tick;
+    # each job has its own interval, so this is cheap when nothing is due.
+    try:
+        for line in scheduler.run_due(now):
+            log.append("Scheduler: " + line)
+    except Exception:
+        log.append("Scheduler failed:\n" + traceback.format_exc())
 
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")

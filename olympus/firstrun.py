@@ -77,6 +77,26 @@ def _save(values: dict[str, str]) -> None:
             os.environ[k] = v
 
 
+def _read_saved() -> dict[str, str]:
+    """Current KEY=VALUE pairs in the saved config (empty if none)."""
+    out: dict[str, str] = {}
+    if not CONFIG_ENV.exists():
+        return out
+    for line in CONFIG_ENV.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip("'\"")
+    return out
+
+
+def save_env_value(key: str, value: str) -> None:
+    """Set one saved config value without clobbering the others."""
+    values = _read_saved()
+    values[key] = value
+    _save(values)
+
+
 def wizard() -> bool:
     """Interactive setup: choose a provider, paste a key, done.
     Returns True if a configuration was saved."""
