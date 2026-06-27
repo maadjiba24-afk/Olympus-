@@ -16,6 +16,20 @@ def test_capability_scores_rank_models():
     assert config.capability_score("some-unknown-model", "reasoning") == 5
 
 
+def test_glm_kimi_deepseek_pool_uses_all_three():
+    """A GLM + Kimi + DeepSeek pool must compose all three — each role to the
+    provider strongest at it — not let one dominate. GLM/Kimi are now in the
+    capability ranking, so they aren't treated as unknown/average."""
+    assert config.capability_score("glm-4.6", "reasoning") > 5
+    assert config.capability_score("kimi-k2-0905-preview", "verify") > 5
+    assert config.capability_score("moonshot-v1-128k", "coding") > 5
+    pool = ModelPool.of(_s("openai", "deepseek-chat"), _s("openai", "glm-4.6"),
+                        _s("openai", "kimi-k2-0905-preview"))
+    by_role = {r: pool.for_role(r).model for r in ("reasoning", "coding", "verify")}
+    assert len(set(by_role.values())) == 3          # all three actually used
+    assert by_role["coding"] == "deepseek-chat"     # DeepSeek strongest at code
+
+
 def test_single_key_pool_uses_that_model_everywhere():
     pool = ModelPool.of(_s("anthropic", "claude-opus-4-8"))
     assert not pool.is_multi()
