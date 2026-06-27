@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->63<!--/cap-->
+<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->64<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -142,6 +142,11 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
   3. Prometheus reads recurring corrections + Olympus's own source, rewrites
      agent prompts (`update_prompt`, with automatic backups), and files
      `propose_upgrade` notes for changes that need code.
+- **Evolves with you** — beyond the shared loops above, Olympus adapts to *each
+  person*: every few conversations it distills your own history (facts, 👍/👎,
+  corrections) into a private, evolving **working model** that tailors every
+  answer to you, with a growth level that deepens the more you use it
+  (`olympus growth`). It's per-user and never leaks across people.
 
   Prometheus runs weekly via the heartbeat **and** automatically after every
   N conversations (`OLYMPUS_AUDIT_EVERY_CHATS`, default 20 — counted across

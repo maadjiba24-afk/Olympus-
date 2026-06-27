@@ -15,6 +15,20 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-06-27
+
+### Added — per-user adaptive evolution (gets smarter the more you use it)
+
+- **`olympus/companion.py`** — the personal counterpart to Metis's shared
+  learning cycle. Every few conversations (`OLYMPUS_EVOLVE_EVERY`, default 6),
+  Olympus re-distills *that user's own* history — durable facts, 👍/👎 feedback,
+  and corrections — into a compact, private **working model** ("how to work well
+  with this person") that is injected into every answer for them, and nobody
+  else. A visible **growth level** (new → acquainted → familiar → attuned →
+  trusted companion) deepens with use. Surfaced via `olympus growth` and the
+  `/growth` chat command. Runs in the background, never delays a reply, and
+  keeps the prior model on any failure so accumulated learning is never wiped.
+
 ## [0.18.0] — 2026-06-27
 
 ### Added — release tooling
@@ -193,7 +207,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/maadjiba24-afk/Olympus-/releases/tag/v0.16.0
