@@ -14,3 +14,16 @@ def isolated_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     memory.set_user("shared")
     yield
+
+
+@pytest.fixture(autouse=True)
+def preserve_environ():
+    """Snapshot and restore os.environ around every test. Some code paths (the
+    setup wizard's `firstrun._save`) write provider config straight into
+    os.environ; without this, a test that configures e.g. OLYMPUS_PROVIDER=openai
+    would leak that into later tests, which then attempt real network calls."""
+    import os
+    snapshot = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(snapshot)
