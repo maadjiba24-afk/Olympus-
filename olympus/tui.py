@@ -30,6 +30,7 @@ COMMANDS: dict[str, str] = {
     "/bad": "rate the last answer bad (optionally /bad <comment>)",
     "/lang": "set reply language: /lang <language|auto>",
     "/contribute": "share anonymized insights: /contribute on|off",
+    "/growth": "see how Olympus has adapted to you over time",
     "/exit": "leave Olympus",
 }
 
@@ -128,6 +129,9 @@ def dispatch_command(bot, raw: str):
     if name == "/contribute":
         on = arg.strip().lower() in ("on", "yes", "true", "1", "enable")
         return (True, bot.set_contribute(on), False)
+    if name == "/growth":
+        from . import companion
+        return (True, companion.summary("cli"), False)
     return (False, None, False)
 
 

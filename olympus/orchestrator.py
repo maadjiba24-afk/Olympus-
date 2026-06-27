@@ -29,9 +29,9 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import (agent, backend, codegraph, config, connectors, contrib, i18n,
-               llm, memory, playbooks, profile, recall, relgraph, replaystore,
-               trace as trace_mod, tools, usage)
+from . import (agent, backend, codegraph, companion, config, connectors,
+               contrib, i18n, llm, memory, playbooks, profile, recall, relgraph,
+               replaystore, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -131,6 +131,7 @@ class Olympus:
             + recall.context_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
             + relgraph.context_block(self.user, user_message)
+            + companion.model_block(self.user)
             + codegraph.context_block("self", user_message)))
         system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user) + mem_ctx)
@@ -299,6 +300,7 @@ class Olympus:
                   + recall.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
                   + relgraph.context_block(self.user, user_message)
+                  + companion.model_block(self.user)
                   + codegraph.context_block("self", user_message))
         prompt = (
             f"The user asked:\n{user_message}\n\n"
@@ -499,6 +501,19 @@ class Olympus:
                 args=(self.user, user_message, reply,
                       self.pool.for_role("reasoning")),
                 daemon=True).start()
+            # Per-user adaptive evolution: count this conversation and, at every
+            # checkpoint, re-distill this user's private working model in the
+            # background so Olympus gets measurably better at working with them.
+            try:
+                count = companion.note_interaction(self.user)
+                if companion.due(count):
+                    self.report("🌱 Olympus is learning to work better with you...")
+                    threading.Thread(
+                        target=companion.maybe_evolve,
+                        args=(self.user, count, self.pool.for_role("reasoning")),
+                        daemon=True).start()
+            except Exception:
+                pass
         # Opt-in cross-model learning: contribute an anonymized snapshot tagged
         # with the model that produced it (only if this user opted in).
         try:
@@ -608,6 +623,7 @@ class Olympus:
                       + recall.context_block(self.user, user_message)
                       + playbooks.context_block(self.user, user_message)
                       + relgraph.context_block(self.user, user_message)
+                      + companion.model_block(self.user)
                       + codegraph.context_block("self", user_message))
             prompt = (
                 f"The user asked:\n{user_message}\n\n"

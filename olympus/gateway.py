@@ -27,6 +27,7 @@ HELP = (
     "/good or /bad [comment] — rate the last answer\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
+    "/growth — see how Olympus has adapted to you over time\n"
 )
 
 
@@ -76,5 +77,8 @@ def reply_for(bots: dict, user_key: str, text: str,
     if cmd == "/contribute":
         on = arg.strip().lower() in ("on", "yes", "true", "1", "enable")
         return chunk(bot.set_contribute(on))
+    if cmd == "/growth":
+        from . import companion
+        return chunk(companion.summary(uid))
 
     return chunk(bot.ask(text))

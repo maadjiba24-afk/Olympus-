@@ -25,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("chat", help="interactive conversation (default)")
     sub.add_parser("setup", help="choose your AI provider & save your API key")
     sub.add_parser("version", help="show the installed Olympus version")
+    sub.add_parser("growth", help="show how Olympus has adapted to you over time")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
     p_up.add_argument("--git", action="store_true",
                       help="upgrade from the GitHub repo (latest main) instead "
@@ -292,6 +293,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")
+    elif args.command == "growth":
+        from . import companion
+        print(companion.summary("cli"))
     elif args.command == "upgrade":
         from . import selfupdate
         return selfupdate.run(force_git=args.git)

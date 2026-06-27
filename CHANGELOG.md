@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — per-user adaptive evolution (gets smarter the more you use it)
+
+- **`olympus/companion.py`** — the personal counterpart to Metis's shared
+  learning cycle. Every few conversations (`OLYMPUS_EVOLVE_EVERY`, default 6),
+  Olympus re-distills *that user's own* history — durable facts, 👍/👎 feedback,
+  and corrections — into a compact, private **working model** ("how to work well
+  with this person") that is injected into every answer for them, and nobody
+  else. A visible **growth level** (new → acquainted → familiar → attuned →
+  trusted companion) deepens with use. Surfaced via `olympus growth` and the
+  `/growth` chat command. Runs in the background, never delays a reply, and
+  keeps the prior model on any failure so accumulated learning is never wiped.
+
 ## [0.18.0] — 2026-06-27
 
 ### Added — release tooling

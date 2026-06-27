@@ -31,7 +31,7 @@
     ]
   },
   "commands": {
-    "count": 63,
+    "count": 64,
     "names": [
       "actions",
       "add-mcp",
@@ -56,6 +56,7 @@
       "gate",
       "grant",
       "graph",
+      "growth",
       "heartbeat",
       "import-agent",
       "learn",
