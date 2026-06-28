@@ -39,8 +39,31 @@ def run_agent(
     max_iterations: int = config.MAX_AGENT_ITERATIONS,
 ) -> str:
     """Run one agent to completion on a task; return its final text output."""
+    text, _ = run_agent_counted(
+        system, task, settings=settings, tool_defs=tool_defs,
+        mcp_servers=mcp_servers, effort=effort, max_iterations=max_iterations)
+    return text
+
+
+def run_agent_counted(
+    system: str,
+    task: str,
+    *,
+    settings: config.Settings | None = None,
+    tool_defs: list[dict[str, Any]] | None = None,
+    mcp_servers: list[dict[str, Any]] | None = None,
+    effort: str = "high",
+    max_iterations: int = config.MAX_AGENT_ITERATIONS,
+) -> tuple[str, int]:
+    """Run one agent to completion; return (final text, client-side tool-call
+    count). The count feeds the output-contract tool-call cap; `run_agent`
+    wraps this and discards it, so every existing caller is unchanged. Only
+    client-side tool calls are counted (server-side web search runs in the
+    `pause_turn` branch and is not a client-side call). Deterministic under
+    replay: the count follows from the frozen LLM responses, not wall-clock."""
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
     container: str | None = None
+    tool_calls = 0
 
     for _ in range(max_iterations):
         response = llm.complete(system, messages, settings=settings,
@@ -54,7 +77,7 @@ def run_agent(
             container = getattr(resp_container, "id", None) or container
 
         if response.stop_reason == "refusal":
-            return "[The model declined this request for safety reasons.]"
+            return "[The model declined this request for safety reasons.]", tool_calls
 
         # Server-side tool loop (web_search/web_fetch) hit its iteration cap —
         # append the assistant turn and re-send; the server resumes.
@@ -63,17 +86,19 @@ def run_agent(
             continue
 
         if response.stop_reason != "tool_use":
-            return llm.text_of(response)
+            return llm.text_of(response), tool_calls
 
         # Client-side tool calls.
         messages.append(_assistant_turn(response))
         results = [_tool_result(block) for block in response.content
                    if block.type == "tool_use"]
+        tool_calls += len(results)
         messages.append({"role": "user", "content": results})
 
     return (
         "[Agent stopped: tool-use iteration limit reached. Partial work above "
-        "may be incomplete.]"
+        "may be incomplete.]",
+        tool_calls,
     )
 
 

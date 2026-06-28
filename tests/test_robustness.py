@@ -4,6 +4,7 @@ import threading
 
 from olympus import config, facts, memory
 from olympus import orchestrator
+from olympus import trace as trace_mod
 from olympus.specialists import SPECIALISTS
 
 
@@ -11,16 +12,19 @@ def test_specialist_failure_is_isolated(monkeypatch):
     """One specialist raising must not kill the whole dispatch."""
     bot = orchestrator.Olympus(user="iso")
 
-    def fake_run(self, task, settings=None, effort="high"):
+    def fake_run_counted(self, task, settings=None, effort="high"):
         if self.key == "argus":
             raise RuntimeError("network down")
-        return f"ok from {self.key}"
+        return f"ok from {self.key}", 0
 
-    monkeypatch.setattr(SPECIALISTS["argus"].__class__, "run", fake_run)
+    # _run_one funnels through run_counted; stub that (failure isolation is the
+    # same try/except path).
+    monkeypatch.setattr(SPECIALISTS["argus"].__class__, "run_counted",
+                        fake_run_counted)
     out = dict(bot._dispatch([
         {"specialist": "argus", "task": "t"},
         {"specialist": "plutus", "task": "t"},
-    ]))
+    ], trace_mod.Trace("t")))
     assert "could not complete" in out["argus"]
     assert out["plutus"] == "ok from plutus"
 

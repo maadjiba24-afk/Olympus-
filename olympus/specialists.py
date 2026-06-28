@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, codegraph, config, connectors, security, skills, tools
+from . import (agent, codegraph, config, connectors, contracts, security,
+               skills, tools)
 
 _UNTRUSTED_NOTE = (
     "\n\n## Handling external content (security)\n"
@@ -29,6 +30,10 @@ class Specialist:
     code_exec: bool = False  # Anthropic server-side code sandbox
     system: bool = False     # internal agent (self-modification tools allowed)
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
+    # Optional hard output contract enforced at orchestrator._run_one when
+    # config.contracts_enabled(). None = no contract = no behavior change; every
+    # existing entry omits it and ships at None (see docs/DESIGN_OUTPUT_CONTRACTS.md).
+    contract: contracts.OutputContract | None = None
 
     def _ingests(self, provider: str) -> bool:
         """Does this specialist's loadout read external/untrusted content?"""
@@ -83,12 +88,19 @@ class Specialist:
 
     def run(self, task: str, settings: config.Settings | None = None,
             effort: str = "high") -> str:
+        return self.run_counted(task, settings=settings, effort=effort)[0]
+
+    def run_counted(self, task: str, settings: config.Settings | None = None,
+                    effort: str = "high") -> tuple[str, int | None]:
+        """Like `run`, but also returns the count of client-side tool calls the
+        specialist made (or None when the provider can't report it — only the
+        Anthropic backend counts). Used by the output-contract tool-call cap."""
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
-        return backend.run_agent(settings, self.system_prompt(), task,
-                                 self.tool_defs(settings.provider),
-                                 mcp_servers=self.mcp_defs(settings.provider),
-                                 effort=effort)
+        return backend.run_agent_counted(settings, self.system_prompt(), task,
+                                         self.tool_defs(settings.provider),
+                                         mcp_servers=self.mcp_defs(settings.provider),
+                                         effort=effort)
 
 
 SPECIALISTS: dict[str, Specialist] = {
