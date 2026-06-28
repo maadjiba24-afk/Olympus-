@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — hard output contracts (primitive, off by default)
+
+- **`olympus/contracts.py`** — a pure, dependency-free check of a specialist's
+  final output against an optional `OutputContract` (size ceiling, must-be-JSON
+  + shallow required-keys/top-level-type schema check, client-side tool-call
+  cap). Returns a `ContractResult(ok, violations)`; no I/O, no config reads.
+- **`config.contracts_enabled()`** (`OLYMPUS_CONTRACTS`, off by default,
+  matching the `require_byok` convention) gates enforcement at
+  `orchestrator._run_one`. A violation **fails closed** but degrades gracefully,
+  returning the same "treat this part as missing" placeholder the existing
+  failure path uses, so verify/synthesis tolerate it unchanged.
+- Each check is recorded as a new `decision_type="contract"` record in the
+  existing signed, re-executable decision log (`trace.py`) — no parallel log.
+  The enforcement mode is stamped into `tr.meta` and restored by `replay_run`
+  so a contracts-on run replays in the same mode. Ships with every specialist
+  at `contract=None` (zero behaviour change). See
+  [docs/DESIGN_OUTPUT_CONTRACTS.md](docs/DESIGN_OUTPUT_CONTRACTS.md).
+
 ## [0.21.0] — 2026-06-27
 
 ### Added — guided onboarding (Hermes-style)

@@ -348,6 +348,14 @@ def require_byok() -> bool:
         "1", "true", "yes", "on")
 
 
+def contracts_enabled() -> bool:
+    """Enforce hard output contracts on specialist outputs (OLYMPUS_CONTRACTS=1).
+    OFF BY DEFAULT: contracts are inert until an operator opts in, so the
+    feature can't surprise a fresh install or a public BYOK instance."""
+    return os.environ.get("OLYMPUS_CONTRACTS", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def daily_chat_limit() -> int:
     """Max chats per user per day (OLYMPUS_DAILY_CHATS; 0 = unlimited). Bounds
     cost and abuse on a public instance, independent of the per-minute limit."""

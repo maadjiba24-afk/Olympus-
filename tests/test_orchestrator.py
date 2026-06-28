@@ -92,7 +92,7 @@ def test_reverify_divergence_is_not_masked(monkeypatch):
     monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
         {"id": "s1", "specialist": "argus", "task": "t", "depends_on": []}])
     monkeypatch.setattr(bot, "_dispatch_dag", lambda steps, tr: [("argus", "out")])
-    monkeypatch.setattr(bot, "_dispatch", lambda redo: [("argus", "redone")])
+    monkeypatch.setattr(bot, "_dispatch", lambda redo, tr: [("argus", "redone")])
     # First verify succeeds; Athena orders a retry; the reverify call diverges.
     calls = {"verify": 0}
 

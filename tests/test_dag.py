@@ -8,11 +8,13 @@ def _bot(monkeypatch, recorder):
     """An Olympus whose specialists just echo their task (no model calls)."""
     bot = orchestrator.Olympus(user="dag")
 
-    def fake_run(self, task, settings=None, effort="high"):
+    def fake_run_counted(self, task, settings=None, effort="high"):
         recorder.append((self.key, task))
-        return f"output[{self.key}]"
+        return f"output[{self.key}]", 0
 
-    monkeypatch.setattr(SPECIALISTS["plutus"].__class__, "run", fake_run)
+    # _run_one funnels through run_counted (the contract path); stub that.
+    monkeypatch.setattr(SPECIALISTS["plutus"].__class__, "run_counted",
+                        fake_run_counted)
     return bot
 
 

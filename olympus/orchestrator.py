@@ -30,8 +30,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
-               contrib, i18n, llm, memory, playbooks, profile, recall, relgraph,
-               replaystore, trace as trace_mod, tools, usage)
+               contracts, contrib, i18n, llm, memory, playbooks, profile,
+               recall, relgraph, replaystore, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -325,11 +325,25 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
-    def _run_one(self, key: str, task: str) -> str:
-        """Run a single specialist with failure isolation, on its best model."""
+    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace") -> str:
+        """Run a single specialist with failure isolation, on its best model.
+
+        This is the single funnel for the main pipeline: both dispatch paths
+        (`_dispatch_dag` and the rework `_dispatch`) call it, so the hard output
+        contract below covers every in-pipeline specialist invocation, parallel
+        or serial, first-pass or rework. KNOWN, DOCUMENTED GAP (intentional, see
+        docs/DESIGN_OUTPUT_CONTRACTS.md): the out-of-band callers
+        `subagents.py` and the one-shot routines (e.g. `opportunity_scan` below)
+        call `Specialist.run`/`.run_counted` directly and are NOT contract-
+        checked. Closing that gap is explicitly out of scope for this primitive.
+
+        `tr` is passed in (not stored on self) so the run's Trace reaches this
+        method safely across the dispatch ThreadPoolExecutor.
+        """
         memory.set_user(self.user)  # worker threads get their own context
         try:
-            return SPECIALISTS[key].run(task, settings=self.pool.for_specialist(key))
+            output, tool_calls = SPECIALISTS[key].run_counted(
+                task, settings=self.pool.for_specialist(key))
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
         except Exception as err:
@@ -338,7 +352,30 @@ class Olympus:
                     f"{err}. Treat this part as missing and answer from the "
                     "other specialists.]")
 
-    def _dispatch(self, assignments: list[dict[str, str]]) -> list[tuple[str, str]]:
+        # --- hard output contract (off unless enabled) ----------------------
+        if config.contracts_enabled():
+            spec = SPECIALISTS[key]
+            result = contracts.check(output, spec.contract, tool_calls=tool_calls)
+            tr.decision(
+                "contract",
+                {"name": spec.name, "role": "specialist", "key": key},
+                {"violations": list(result.violations)},
+                status="ok" if result.ok else "violation",
+                inputs=task)
+            if not result.ok:
+                reasons = "; ".join(result.violations)
+                self.report(
+                    f"⛔ {spec.name}'s output failed its contract ({reasons}).")
+                # Fail closed, but degrade gracefully: return the SAME typed
+                # "treat this part as missing" contract the existing exception
+                # path returns, so verify/synthesis tolerate it unchanged.
+                return (f"[{spec.name}'s output was rejected by its output "
+                        f"contract: {reasons}. Treat this part as missing and "
+                        "answer from the other specialists.]")
+        return output
+
+    def _dispatch(self, assignments: list[dict[str, str]],
+                  tr: "trace_mod.Trace") -> list[tuple[str, str]]:
         """Run flat (independent) assignments in parallel. Used by rework."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
@@ -346,7 +383,7 @@ class Olympus:
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
             return list(pool.map(
                 lambda item: (item["specialist"],
-                              self._run_one(item["specialist"], item["task"])),
+                              self._run_one(item["specialist"], item["task"], tr)),
                 assignments))
 
     def _dispatch_dag(self, steps: list[dict[str, Any]],
@@ -387,7 +424,7 @@ class Olympus:
                         for d in s["depends_on"] if d in done)
                     task = (f"{task}\n\n## Inputs from prior steps "
                             f"(build on these, don't redo them)\n{inputs}")
-                return (s["id"], key, self._run_one(key, task))
+                return (s["id"], key, self._run_one(key, task, tr))
 
             with ThreadPoolExecutor(max_workers=min(4, len(ready))) as pool:
                 level_results = list(pool.map(work, ready))
@@ -403,6 +440,11 @@ class Olympus:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
         replaystore.set_run(tr.id)      # scope frozen run-state to this run
+        # Record the enforcement mode as run metadata so a replay can reproduce
+        # it: a run recorded with contracts ON, replayed with them OFF, would
+        # drop the `contract` records and diverge. `replay_run` reads this back
+        # and restores the env. meta is NOT part of the diffed decision path.
+        tr.meta["contracts_enabled"] = config.contracts_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -476,7 +518,7 @@ class Olympus:
                 for k in retry_keys
             ]
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo))
+                redone = dict(self._dispatch(redo, tr))
             outputs = [(k, redone.get(k, v)) for k, v in outputs]
             self.report("🔍 Aletheia re-verifies the rework...")
             try:
@@ -790,6 +832,12 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
 
     prev = os.environ.get("OLYMPUS_REPLAY")
     os.environ["OLYMPUS_REPLAY"] = run_id
+    # Replay in the same contract-enforcement mode the run was recorded in.
+    # Without this, replaying a contracts-ON run in a contracts-OFF process
+    # (or vice versa) would add/drop `contract` decisions and diverge spuriously.
+    prev_contracts = os.environ.get("OLYMPUS_CONTRACTS")
+    rec_contracts = bool((original.get("meta") or {}).get("contracts_enabled"))
+    os.environ["OLYMPUS_CONTRACTS"] = "1" if rec_contracts else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         fresh = trace_mod.Trace("replay", bot.user)
@@ -800,6 +848,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:
             os.environ["OLYMPUS_REPLAY"] = prev
+        if prev_contracts is None:
+            os.environ.pop("OLYMPUS_CONTRACTS", None)
+        else:
+            os.environ["OLYMPUS_CONTRACTS"] = prev_contracts
     fresh.flush()
     diffs = trace_mod.diff_decisions(original.get("decisions", []),
                                      fresh.decisions)
