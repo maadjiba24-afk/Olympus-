@@ -93,7 +93,7 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
    CHIRON     CHRONOS     ARGUS      MNEMOSYNE     PROMETHEUS
    Coaching   Scheduling  Opportunity YouTube       Evolution /
                           Scout 🌐    Learner 🎥    Self-Upgrade 🔧
-                      METIS · Learning Synthesizer 🧠
+          ANGELOS · Inbox & Calendar 📬      METIS · Learning Synthesizer 🧠
                  (daily cycle: experience → skill library)
         └──────────┴──────────┴──────────┴──────────────┘
                                │ outputs
@@ -112,22 +112,34 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 
 ### The council
 
-| Agent | Role |
+**Orchestration pipeline.** These three run every request — they route, plan,
+and verify — and are **not** counted among the <!--cap:agents-->12<!--/cap-->
+specialists.
+
+| Stage | Role |
 |---|---|
 | **Zeus** | Main agent — the user's single interface; routes or answers |
 | **Athena** | Supervisor — plans a **dependency graph** of specialist steps (parallel where independent, serial where one step needs another's output) and gates quality |
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
-| **Plutus** | Financial specialist |
-| **Peitho** | Marketing specialist |
-| **Hephaestus** | Coding specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
-| **Aegis** | Cybersecurity specialist (strictly defensive) |
-| **Iris** | Social network assistant |
-| **Chiron** | Coaching specialist |
-| **Chronos** | Scheduling management |
-| **Argus** | Opportunity scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
-| **Mnemosyne** | YouTube learner — watches videos via transcript, summarizes what it understood, stores lessons |
-| **Metis** | Learning synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
-| **Prometheus** | Evolution specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
+
+**The <!--cap:agents-->12<!--/cap--> specialists.** The permanent domain experts
+registered in `olympus/specialists.py` (names and titles below come straight
+from that registry):
+
+| Agent | Role |
+|---|---|
+| **Plutus** | Financial Specialist |
+| **Peitho** | Marketing Specialist |
+| **Hephaestus** | Coding Specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
+| **Aegis** | Cybersecurity Specialist (strictly defensive) |
+| **Iris** | Social Network Assistant |
+| **Chiron** | Coaching Specialist |
+| **Chronos** | Scheduling Manager |
+| **Angelos** | Inbox & Calendar Manager |
+| **Argus** | Opportunity Scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
+| **Mnemosyne** | YouTube Learner — watches videos via transcript, summarizes what it understood, stores lessons |
+| **Metis** | Learning Synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
+| **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
 
 ### Self-* properties
 
@@ -282,7 +294,7 @@ user-facing specialist and trains the weakest on a cadence:
 | | Hermes | OpenClaw | **Olympus** |
 |---|---|---|---|
 | Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
-| Specialists | generic per-task workers | one assistant + plug-in skills | **10 permanent domain experts** with crafted identities |
+| Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->12<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
