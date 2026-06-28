@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/instal
 irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
 ```
 
-**Any OS, via pip/pipx** (once published to PyPI):
+**Any OS, via pip/pipx:**
 
 ```bash
 pipx install olympus-council     # isolated; gives the `olympus` command
