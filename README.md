@@ -17,9 +17,11 @@ CLI commands. Every count here is generated from the code
 what's actually built.
 
 > **Status:** the full architecture is implemented and covered by a
-> comprehensive passing test suite. Install with the one-liner below, type
-> `olympus`, and you're chatting; `olympus scores` shows each specialist's
-> measured quality.
+> comprehensive passing test suite. The test suite covers architecture, gates,
+> and security logic; AI-output quality is measured separately by
+> `olympus eval` / `olympus scores`, not by `pytest`. Install with the
+> one-liner below, type `olympus`, and you're chatting; `olympus scores` shows
+> each specialist's measured quality.
 
 ## Install
 
@@ -277,8 +279,9 @@ user-facing specialist and trains the weakest on a cadence:
 - **Verified-facts cache** — Aletheia caches what she verifies, so fact-checks
   get faster and cheaper over time (`recall_fact` / `cache_fact`).
 - **Measured self-upgrades, ungameable judge** — the benchmark is scored by a
-  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned, so
-  Prometheus can't optimize against his own scorer.
+  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned (on the
+  Anthropic backend; other providers judge in-model), so Prometheus can't
+  optimize against his own scorer.
 - **Web instance protection** — per-IP rate limiting
   (`OLYMPUS_RATE_LIMIT`/min) and an optional shared access token
   (`OLYMPUS_ACCESS_TOKEN`). Final answers stream token-by-token.
