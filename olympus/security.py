@@ -29,12 +29,18 @@ from urllib.parse import urlparse
 ACTION_TOOLS = frozenset({
     "send_email", "call_webhook", "update_prompt", "restore_prompt",
     "propose_upgrade", "run_benchmark",
+    # The browser actuator can click/type on a *credentialed* session, so it is
+    # an action: capability separation strips it from any run that also ingests
+    # untrusted page content (an injected page can't reach your logged-in tabs).
+    "browser_act",
 })
 
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
-                             "browse_page"})
+                             "browse_page",
+                             # The governed CDP harness loads real web pages.
+                             "browser_open", "browser_read"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"

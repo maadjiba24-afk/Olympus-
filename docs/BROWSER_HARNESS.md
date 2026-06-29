@@ -1,0 +1,66 @@
+# The Governed Browser Harness
+
+Olympus can drive a real browser over the Chrome DevTools Protocol (CDP). This
+document explains *why it is built the way it is*: it is a direct response to
+the popular open-web pattern (an LLM wired straight to Chrome, `exec`-ing
+agent-written code into a credentialed session, auto-registering hundreds of
+unreviewed "skills", phoning home by default). Each of that pattern's strengths
+is kept and turned into something hard to copy; each of its weaknesses is named
+out loud and answered with an enforced control rather than spun.
+
+The implementation lives in [`olympus/browser.py`](../olympus/browser.py); the
+guarantees below are pinned to code in [`tests/test_browser.py`](../tests/test_browser.py).
+
+## Strengths kept — and turned into moats
+
+A *moat* must compound or lock in, or be something a rival can't adopt without
+contradicting their own pitch ("minimal, no intermediaries, the agent writes
+its own code"). Every governance layer here is exactly such an intermediary.
+
+| Open-web strength | How Olympus makes it a moat |
+| --- | --- |
+| Persistent CDP connection (daemon holds the socket) | The session keeps a **replayable, auditable ledger** of every CDP call. The socket is trivial to copy; an accumulated, diffable record of sessions is not. Plugs into Olympus's existing `replaystore`/`witness`/`trace`. |
+| Self-improving skills accrete over time | Skills are **provenance-stamped and reliability-scored** (`successes/runs`, content hash, source/author/time) and ranked by *measured* success — a data network effect. The mechanism is copyable; the verified, ranked corpus is not. |
+| Careful credential hygiene | **Capability separation** (already in `specialists.py`): the credentialed actuator is unreachable from any run that ingests untrusted content. A rival built on `exec`-into-a-live-session can't retrofit this without abandoning the live-session model — i.e. their core feature. |
+| Local-threat awareness | A **published, CI-enforced threat model** (`docs/THREAT_MODEL.md`): every exposed tool has an entry, no entry is stale. "Remove all intermediaries" is precisely the intermediary that enforces this. |
+| Tiny dependency tree | The real-browser transport is an **optional, lazily-imported** extra; the core dependency set is unchanged and the surface stays small and named — `threatmodel.py` calls this out vs. "a harness that auto-registers hundreds". |
+| Direct CDP / no abstraction tax | The raw `cdp` power is kept **under** an egress-gated, replayable, capability-separated layer. A pure minimalist can offer one or the other, not both. |
+
+## Weaknesses named — and turned into credibility assets
+
+A credibility asset states the danger plainly and ships the enforced control
+that defeats it. No cosmetic spin.
+
+| Open-web weakness | The control Olympus enforces |
+| --- | --- |
+| `exec` into a browser holding live credentials → prompt-injection = account takeover | **Capability separation.** `browser_act` is a registered `ACTION_TOOL`; `security.filter_tools` strips it from any run that also ingests untrusted page content. An injected page cannot reach the actuator that operates your logged-in tabs. |
+| "~1,000 lines" markets the core, hides a large unreviewed skill payload | **Provenance + a measured score on every skill, and a CI-verified capability count** that can't drift from code (`capabilities.py`). |
+| Self-healing → non-deterministic, not reproducible | **A per-session ledger** of every CDP call: adaptation is admitted, and made auditable/diffable. |
+| Pixel-coordinate clicking is fragile | **Selector-first** (`browser_read`/`browser_act` take CSS selectors), with x/y as an explicit fallback, and a **reliability score** per skill so flakiness is measured, not hidden. |
+| OSS as a funnel to a hosted cloud (lock-in) | **BYOK, local-first.** The harness attaches to *your* Chrome; no mandatory cloud, and skills are a local, portable JSON file. |
+| Telemetry opt-out, phones home by default | **Default-deny egress.** Every navigation passes the SSRF + egress-allowlist gate; under sovereign mode only allowlisted hosts are reachable. |
+
+## The tool surface
+
+| Tool | Kind | Governance |
+| --- | --- | --- |
+| `browser_open` | ingests untrusted | SSRF + egress gate on the URL; output wrapped as untrusted |
+| `browser_read` | ingests untrusted | output wrapped as untrusted |
+| `browser_act` | credentialed actuator | `ACTION_TOOL` — stripped from any ingesting run |
+| `browser_skill_record` | first-party write | steps sanitized; provenance + content hash recorded |
+| `browser_skills` | first-party read | ranked by measured reliability |
+
+## Attaching a real browser
+
+By default no browser is attached and the tools say so honestly. To attach one:
+
+```bash
+# 1. start Chrome with remote debugging
+google-chrome --remote-debugging-port=9222
+# 2. point Olympus at the CDP WebSocket and install the optional transport dep
+export OLYMPUS_BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/<id>
+pip install websockets
+```
+
+Tests never need any of this — they inject `browser.FakeTransport`, so the whole
+suite runs offline.
