@@ -216,7 +216,7 @@ A specialist only improves at what's *measured* — so Olympus measures every
 user-facing specialist and trains the weakest on a cadence:
 
 - **Full coverage.** Every user-facing specialist (Plutus, Peitho, Hephaestus,
-  Aegis, Iris, Chiron, Chronos, Argus, Mnemosyne) has benchmark items; any gap
+  Aegis, Iris, Chiron, Chronos, Angelos, Argus, Mnemosyne) has benchmark items; any gap
   is auto-filled with a generated one. (Metis and Prometheus are internal —
   their quality is their effect on the system.)
 - **`python -m olympus scores`** shows every specialist's current score,
@@ -239,7 +239,8 @@ user-facing specialist and trains the weakest on a cadence:
    before working — knowledge gained once is applied by the whole council
    forever.
 3. **Measurement** — `python -m olympus eval` runs a benchmark scored by a
-   strict, *separate* LLM judge. Prometheus runs it before/after every prompt
+   strict, *separate* LLM judge (on the Anthropic backend; other providers
+   judge in-model). Prometheus runs it before/after every prompt
    upgrade and **rolls back changes that lower the score**. Improvement is
    measured, not assumed.
 3b. **Benchmark-gated skills** — autonomously-created skills are written
