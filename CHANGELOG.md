@@ -33,6 +33,10 @@ carries a migration note here.
   blind trust. Stored at `MEMORY_DIR/browser_skills.json`.
 - **Replayable session ledger.** Every CDP call is appended to a per-session
   ledger, so a browser session is auditable rather than a black box.
+- **Real-browser attach + opt-in smoke test.** `OLYMPUS_BROWSER_CDP_URL` accepts
+  a DevTools base (`http://host:port`, auto-discovering a page target) or a
+  `ws://` page URL; `tests/test_browser_smoke.py` drives real headless Chrome
+  through the live transport, skipped unless `OLYMPUS_BROWSER_SMOKE=1`.
 
 ### Security
 

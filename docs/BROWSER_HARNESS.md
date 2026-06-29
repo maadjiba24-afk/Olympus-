@@ -57,10 +57,21 @@ By default no browser is attached and the tools say so honestly. To attach one:
 ```bash
 # 1. start Chrome with remote debugging
 google-chrome --remote-debugging-port=9222
-# 2. point Olympus at the CDP WebSocket and install the optional transport dep
-export OLYMPUS_BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/<id>
+# 2. install the optional transport dep and point Olympus at the DevTools base
 pip install websockets
+export OLYMPUS_BROWSER_CDP_URL=http://127.0.0.1:9222
 ```
 
+`OLYMPUS_BROWSER_CDP_URL` accepts either a DevTools HTTP base (`http://host:port`
+— Olympus discovers a page target via `/json`) or a ready `ws://` page-target
+URL. The SSRF + egress gate still applies to every navigation.
+
 Tests never need any of this — they inject `browser.FakeTransport`, so the whole
-suite runs offline.
+suite runs offline. A real end-to-end check lives in
+[`tests/test_browser_smoke.py`](../tests/test_browser_smoke.py), opt-in via
+`OLYMPUS_BROWSER_SMOKE=1` (launches headless Chrome, drives the real transport):
+
+```bash
+pip install websockets
+OLYMPUS_BROWSER_SMOKE=1 pytest tests/test_browser_smoke.py -q
+```

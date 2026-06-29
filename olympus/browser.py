@@ -153,15 +153,40 @@ def set_transport_factory(factory: Callable[[], Transport] | None) -> None:
     reset()
 
 
+def _resolve_page_ws(value: str) -> str:  # pragma: no cover - needs a browser
+    """Turn `OLYMPUS_BROWSER_CDP_URL` into a *page-target* WebSocket URL.
+
+    Accepts either a ready ws(s):// URL (used as-is) or a DevTools HTTP base
+    like `http://127.0.0.1:9222` — in which case we discover an existing page
+    target via `/json` (opening one via `/json/new` only if none exist). A page
+    target's socket accepts `Page.navigate`/`Runtime.evaluate` directly, with no
+    session plumbing.
+    """
+    value = value.strip()
+    if value.startswith(("ws://", "wss://")):
+        return value
+    import urllib.request
+    base = value.rstrip("/")
+    with urllib.request.urlopen(base + "/json", timeout=10) as resp:
+        targets = json.loads(resp.read().decode("utf-8"))
+    pages = [t for t in targets
+             if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+    if pages:
+        return pages[0]["webSocketDebuggerUrl"]
+    with urllib.request.urlopen(base + "/json/new", timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))["webSocketDebuggerUrl"]
+
+
 def _build_transport() -> Transport:
     if _TRANSPORT_FACTORY is not None:
         return _TRANSPORT_FACTORY()
-    ws_url = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
-    if ws_url:
-        return _RealTransport(ws_url)
+    endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
+    if endpoint:
+        return _RealTransport(_resolve_page_ws(endpoint))
     raise BrowserUnavailable(
         "no browser attached — start Chrome with --remote-debugging-port and "
-        "set OLYMPUS_BROWSER_CDP_URL=ws://… (or inject a transport in tests).")
+        "set OLYMPUS_BROWSER_CDP_URL (a DevTools http://host:port base or a "
+        "ws:// page-target URL); or inject a transport in tests.")
 
 
 # --- session -------------------------------------------------------------
