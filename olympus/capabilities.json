@@ -1,15 +1,17 @@
 {
   "actions": {
-    "count": 9,
+    "count": 11,
     "names": [
       "calendar_create",
       "call_webhook",
+      "email_egress_held",
       "gmail_archive",
       "gmail_draft",
       "gmail_send",
       "run_command",
       "save_note",
       "send_email",
+      "webhook_egress_held",
       "write_file"
     ]
   },

@@ -341,38 +341,49 @@ class Olympus:
         method safely across the dispatch ThreadPoolExecutor.
         """
         memory.set_user(self.user)  # worker threads get their own context
+        # Publish the run's Trace for this worker thread so deep actuators (the
+        # egress gateway, called inside the specialist's tool loop) can record
+        # into the current run's signed log without threading `tr` through the
+        # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
+        # so this is set here in the worker, not in _pipeline.
+        token = trace_mod.set_current(tr)
         try:
-            output, tool_calls = SPECIALISTS[key].run_counted(
-                task, settings=self.pool.for_specialist(key))
-        except replaystore.ReplayDivergence:
-            raise                       # never mask a replay divergence
-        except Exception as err:
-            self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
-            return (f"[{SPECIALISTS[key].name} could not complete this task: "
-                    f"{err}. Treat this part as missing and answer from the "
-                    "other specialists.]")
+            try:
+                output, tool_calls = SPECIALISTS[key].run_counted(
+                    task, settings=self.pool.for_specialist(key))
+            except replaystore.ReplayDivergence:
+                raise                       # never mask a replay divergence
+            except Exception as err:
+                self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
+                return (f"[{SPECIALISTS[key].name} could not complete this task: "
+                        f"{err}. Treat this part as missing and answer from the "
+                        "other specialists.]")
 
-        # --- hard output contract (off unless enabled) ----------------------
-        if config.contracts_enabled():
-            spec = SPECIALISTS[key]
-            result = contracts.check(output, spec.contract, tool_calls=tool_calls)
-            tr.decision(
-                "contract",
-                {"name": spec.name, "role": "specialist", "key": key},
-                {"violations": list(result.violations)},
-                status="ok" if result.ok else "violation",
-                inputs=task)
-            if not result.ok:
-                reasons = "; ".join(result.violations)
-                self.report(
-                    f"⛔ {spec.name}'s output failed its contract ({reasons}).")
-                # Fail closed, but degrade gracefully: return the SAME typed
-                # "treat this part as missing" contract the existing exception
-                # path returns, so verify/synthesis tolerate it unchanged.
-                return (f"[{spec.name}'s output was rejected by its output "
-                        f"contract: {reasons}. Treat this part as missing and "
-                        "answer from the other specialists.]")
-        return output
+            # --- hard output contract (off unless enabled) ------------------
+            if config.contracts_enabled():
+                spec = SPECIALISTS[key]
+                result = contracts.check(output, spec.contract,
+                                         tool_calls=tool_calls)
+                tr.decision(
+                    "contract",
+                    {"name": spec.name, "role": "specialist", "key": key},
+                    {"violations": list(result.violations)},
+                    status="ok" if result.ok else "violation",
+                    inputs=task)
+                if not result.ok:
+                    reasons = "; ".join(result.violations)
+                    self.report(
+                        f"⛔ {spec.name}'s output failed its contract ({reasons}).")
+                    # Fail closed, but degrade gracefully: return the SAME typed
+                    # "treat this part as missing" contract the existing
+                    # exception path returns, so verify/synthesis tolerate it
+                    # unchanged.
+                    return (f"[{spec.name}'s output was rejected by its output "
+                            f"contract: {reasons}. Treat this part as missing "
+                            "and answer from the other specialists.]")
+            return output
+        finally:
+            trace_mod.reset_current(token)
 
     def _dispatch(self, assignments: list[dict[str, str]],
                   tr: "trace_mod.Trace") -> list[tuple[str, str]]:
@@ -445,6 +456,7 @@ class Olympus:
         # drop the `contract` records and diverge. `replay_run` reads this back
         # and restores the env. meta is NOT part of the diffed decision path.
         tr.meta["contracts_enabled"] = config.contracts_enabled()
+        tr.meta["egress_guard_enabled"] = config.egress_guard_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -838,6 +850,9 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_contracts = os.environ.get("OLYMPUS_CONTRACTS")
     rec_contracts = bool((original.get("meta") or {}).get("contracts_enabled"))
     os.environ["OLYMPUS_CONTRACTS"] = "1" if rec_contracts else "0"
+    prev_egress = os.environ.get("OLYMPUS_EGRESS_GUARD")
+    rec_egress = bool((original.get("meta") or {}).get("egress_guard_enabled"))
+    os.environ["OLYMPUS_EGRESS_GUARD"] = "1" if rec_egress else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         fresh = trace_mod.Trace("replay", bot.user)
@@ -852,6 +867,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_CONTRACTS", None)
         else:
             os.environ["OLYMPUS_CONTRACTS"] = prev_contracts
+        if prev_egress is None:
+            os.environ.pop("OLYMPUS_EGRESS_GUARD", None)
+        else:
+            os.environ["OLYMPUS_EGRESS_GUARD"] = prev_egress
     fresh.flush()
     diffs = trace_mod.diff_decisions(original.get("decisions", []),
                                      fresh.decisions)

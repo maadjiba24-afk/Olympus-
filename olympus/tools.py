@@ -10,7 +10,8 @@ import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from . import codegraph, config, facts, github, memory, security, skills, youtube
+from . import (codegraph, config, egress, facts, github, memory, security,
+               skills, youtube)
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -558,7 +559,8 @@ def _restore_prompt(agent: str) -> str:
     return f"Prompt '{stem}' restored from {backups[0].name}."
 
 
-def _send_email(to: str, subject: str, body: str) -> str:
+def _send_email(to: str, subject: str, body: str, *,
+                user: str | None = None, _approved: bool = False) -> str:
     import os as _os
     import smtplib
     from email.message import EmailMessage
@@ -575,6 +577,20 @@ def _send_email(to: str, subject: str, body: str) -> str:
                 "disabled until the operator allowlists recipients.")
     if to.strip().lower() not in allow:
         return f"Error: '{to}' is not in the recipient allowlist."
+
+    # Egress gateway (off by default). `_approved=True` is the bypass for the
+    # approved-action path (_email_execute) — approval IS the gate clearing, so
+    # re-guarding there would loop forever (held → execute → send → held → ...).
+    if config.egress_guard_enabled() and not _approved:
+        d = egress.guard(f"{subject}\n\n{body}", egress.ChannelKind.USER_DIRECTED,
+                         user=user or memory.current_user(),
+                         asserted=egress.DataClass.OPERATIONAL,
+                         action_type="email_egress_held",
+                         payload={"to": to, "subject": subject, "body": body})
+        if d.verdict is egress.Verdict.HOLD:
+            return (f"[Held for approval: {d.reason}. Approve it with "
+                    "`olympus actions`.]")
+        # ALLOW falls through to the existing send below.
 
     msg = EmailMessage()
     msg["From"] = _os.environ.get("SMTP_FROM", _os.environ.get("SMTP_USER", ""))
@@ -602,7 +618,8 @@ def _parse_webhooks() -> dict[str, str]:
     return hooks
 
 
-def _call_webhook(name: str, payload: dict | None = None) -> str:
+def _call_webhook(name: str, payload: dict | None = None, *,
+                  user: str | None = None, _approved: bool = False) -> str:
     import json as _json
     import urllib.request
     hooks = _parse_webhooks()
@@ -610,6 +627,20 @@ def _call_webhook(name: str, payload: dict | None = None) -> str:
         configured = ", ".join(hooks) or "none configured"
         return (f"Error: no webhook named '{name}'. Configured webhooks: "
                 f"{configured}. The operator defines them via OLYMPUS_WEBHOOKS.")
+
+    # Egress gateway (off by default). `_approved=True` bypasses on the approved
+    # path (_webhook_execute) to avoid the held→execute→held loop.
+    if config.egress_guard_enabled() and not _approved:
+        d = egress.guard(_json.dumps(payload or {}),
+                         egress.ChannelKind.USER_DIRECTED,
+                         user=user or memory.current_user(),
+                         asserted=egress.DataClass.OPERATIONAL,
+                         action_type="webhook_egress_held",
+                         payload={"name": name, "payload": payload or {}})
+        if d.verdict is egress.Verdict.HOLD:
+            return (f"[Held for approval: {d.reason}. Approve it with "
+                    "`olympus actions`.]")
+
     req = urllib.request.Request(
         hooks[name],
         data=_json.dumps(payload or {}).encode(),
