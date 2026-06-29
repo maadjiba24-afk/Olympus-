@@ -356,6 +356,14 @@ def contracts_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
+def egress_guard_enabled() -> bool:
+    """Route outbound data through the egress gateway (OLYMPUS_EGRESS_GUARD=1).
+    OFF BY DEFAULT — inert until an operator opts in, so it can't surprise a
+    fresh install or a public BYOK instance."""
+    return os.environ.get("OLYMPUS_EGRESS_GUARD", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def daily_chat_limit() -> int:
     """Max chats per user per day (OLYMPUS_DAILY_CHATS; 0 = unlimited). Bounds
     cost and abuse on a public instance, independent of the per-minute limit."""

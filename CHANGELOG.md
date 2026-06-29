@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — egress gateway, Phase A (boundary layer, off by default)
+
+- **`olympus/egress.py`** — the unified egress chokepoint. `classify()` (pure,
+  regex-based, reusing `security.py`'s `_KEYISH`/`_URL_CRED`/`_EMAIL`/`_PHONE`/
+  `_LONGNUM`) labels a payload PUBLIC/OPERATIONAL/SENSITIVE; `guard()` checks it
+  against a per-channel policy matrix and returns ALLOW / REDACT (POOLED only) /
+  HOLD. No LLM, no new dependency.
+- **`config.egress_guard_enabled()`** (`OLYMPUS_EGRESS_GUARD`, off by default,
+  matching `require_byok`) wires the guard into the two raw actuators
+  `tools._send_email` and `tools._call_webhook` (Phase A only). A SENSITIVE
+  payload is HELD and routed to the existing actions spine via two new
+  `IRREVERSIBLE` action types (`email_egress_held`, `webhook_egress_held`,
+  reusing the existing executors); within-policy sends are unchanged.
+- The approved-execution path bypasses the guard (`_approved=True`) so an
+  approved HOLD sends exactly once (no held→execute→held loop).
+- Each decision is recorded as a new `decision_type="egress"` record in the
+  existing signed Trace (via a per-thread current-Trace accessor in `trace.py`);
+  the mode is stamped into `tr.meta` and restored by `replay_run`. Off by
+  default — zero change to a fresh install. See
+  [docs/DESIGN_BOUNDARY_LAYER.md](docs/DESIGN_BOUNDARY_LAYER.md).
+
 ### Added — hard output contracts (primitive, off by default)
 
 - **`olympus/contracts.py`** — a pure, dependency-free check of a specialist's

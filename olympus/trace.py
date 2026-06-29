@@ -12,6 +12,7 @@ exact divergence.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import threading
@@ -22,6 +23,31 @@ from contextlib import contextmanager
 from . import config
 
 SCHEMA_VERSION = 1
+
+# The run's Trace, published per-thread so deep actuators (e.g. the egress
+# gateway, called inside a specialist's tool loop in a worker thread) can record
+# a decision into the *current* run's signed log without threading `tr` through
+# the whole agent stack. Mirrors memory.current_user(). Default None = no run in
+# scope → such a recorder is a no-op. NOTE: ThreadPoolExecutor does not copy
+# context to its workers, so the orchestrator sets this inside the worker
+# (_run_one), not in _pipeline.
+_CURRENT: "contextvars.ContextVar[Trace | None]" = contextvars.ContextVar(
+    "olympus_trace", default=None)
+
+
+def set_current(tr: "Trace | None"):
+    """Publish `tr` as the current run's Trace for this context; returns a token
+    to pass to reset_current()."""
+    return _CURRENT.set(tr)
+
+
+def reset_current(token) -> None:
+    _CURRENT.reset(token)
+
+
+def current() -> "Trace | None":
+    """The current run's Trace, or None if no run is in scope."""
+    return _CURRENT.get()
 
 # Fields that legitimately differ between a recorded run and its replay (a new
 # run id, fresh record ids, wall-clock timing, re-estimated cost). They're
