@@ -140,6 +140,98 @@ def anonymize(text: str) -> str:
     return text
 
 
+# --- sovereign egress choke point (SPEC-02) ------------------------------
+# Single function every outbound call funnels through under sovereign mode. With
+# sovereign OFF, egress_allowed() is a pure no-op (True for everything), so all
+# call paths are byte-for-byte unchanged. With sovereign ON, only allowlisted
+# destinations pass and everything else fails closed via EgressBlocked.
+
+
+class SovereigntyError(RuntimeError):
+    """Base for sovereign-mode policy refusals (always fail-closed)."""
+
+
+class EgressBlocked(SovereigntyError):
+    """A network egress to a non-allowlisted host was refused under sovereign
+    mode — Olympus stops rather than letting data leave the box."""
+
+
+class NoLocalModelError(SovereigntyError):
+    """Sovereign / local-only routing required a local model but none is
+    eligible. Raised instead of silently falling back to a remote model."""
+
+
+def _host_is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return False
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _entry_matches(host: str, entry: str) -> bool:
+    """Whether `host` matches an allowlist `entry` (hostname, IP, or CIDR)."""
+    host = (host or "").lower()
+    entry = (entry or "").strip().lower()
+    if not entry:
+        return False
+    try:
+        net = ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        net = None
+    if net is not None:                     # IP / CIDR entry
+        try:
+            return ipaddress.ip_address(host) in net
+        except ValueError:                  # host is a name → resolve (guarded)
+            try:
+                for info in socket.getaddrinfo(host, None,
+                                               proto=socket.IPPROTO_TCP):
+                    if ipaddress.ip_address(info[4][0]) in net:
+                        return True
+            except (socket.gaierror, ValueError, UnicodeError, OSError):
+                return False
+            return False
+    return host == entry or host.endswith("." + entry)   # hostname / subdomain
+
+
+def host_on_allowlist(host: str) -> bool:
+    """Whether `host` may receive our data — independent of the sovereign flag.
+    Loopback is always allowed; plus known local-provider hosts (providers.py
+    auth="local", reusing that catalog's notion of "local" rather than
+    redefining it); plus every OLYMPUS_EGRESS_ALLOWLIST entry."""
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return False
+    if _host_is_loopback(h):
+        return True
+    from . import config, providers      # local imports avoid an import cycle
+    if h in providers.local_provider_hosts():
+        return True
+    return any(_entry_matches(h, e) for e in config.egress_allowlist())
+
+
+def egress_allowed(host: str) -> bool:
+    """With sovereign OFF: always True (no-op → unchanged behavior). With
+    sovereign ON: True only for allowlisted hosts."""
+    from . import config
+    if not config.sovereign_mode():
+        return True
+    return host_on_allowlist(host)
+
+
+def assert_egress_allowed(host: str) -> None:
+    """Raise EgressBlocked if `host` must not receive our data under sovereign
+    mode. The single choke every model call / tool fetch funnels through."""
+    if not egress_allowed(host):
+        raise EgressBlocked(
+            f"sovereign mode: refusing egress to '{host}' — not on the "
+            "allowlist (loopback + OLYMPUS_EGRESS_ALLOWLIST + local providers).")
+
+
 # --- SSRF guard (outbound fetches) ---------------------------------------
 
 # Hostnames that name an internal/metadata service directly. Blocked by name as
@@ -199,4 +291,9 @@ def url_block_reason(url: str) -> str | None:
             return f"unparseable address for host: {host}"
         if not _ip_is_public(ip):
             return f"refusing to fetch a non-public address ({ip})"
+    # Under sovereign mode the same guard also enforces the egress allowlist:
+    # a public host that is not explicitly allowlisted may not receive our data.
+    if not egress_allowed(host):
+        return (f"sovereign mode: egress to '{host}' is not on the allowlist "
+                "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None
