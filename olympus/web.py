@@ -30,7 +30,8 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import accounts, actions, builtin_actions, config, metrics, orchestrator, usage  # noqa: F401
+from . import (accounts, actions, builtin_actions, config, metrics,  # noqa: F401
+               openai_server, orchestrator, usage)
 
 
 def _user_for(sid: str) -> str:
@@ -1037,6 +1038,15 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/oauth/google/callback":
             self._oauth_callback(url)
             return
+        if url.path == "/v1/models":
+            # OpenAI-compatible: bearer-gated (its own scheme), not the
+            # dashboard's X-Olympus-Token.
+            ok, code, msg = self._v1_authorized()
+            if not ok:
+                self._v1_error(code, msg)
+                return
+            self._json(openai_server.models_response())
+            return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
@@ -1123,6 +1133,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/v1/chat/completions":
+            self._handle_v1_chat()
+            return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/register", "/api/login",
                         "/api/logout", "/api/report"):
@@ -1328,6 +1341,91 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # --- OpenAI-compatible inbound endpoint (/v1/*) ----------------------
+
+    def _is_loopback(self) -> bool:
+        """Whether the request came from this machine. Used so that, with no
+        OLYMPUS_API_KEYS configured, the /v1/* routes never act as an open relay
+        — they answer locally but refuse remote callers."""
+        host = (self.client_address[0] if self.client_address else "") or ""
+        return (host.startswith("127.") or host == "::1"
+                or host == "::ffff:127.0.0.1")
+
+    def _bearer_token(self) -> str:
+        auth = self.headers.get("Authorization", "") or ""
+        if auth[:7].lower() == "bearer ":
+            return auth[7:].strip()
+        return ""
+
+    def _v1_authorized(self) -> tuple[bool, int, str]:
+        """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid
+        bearer key. With none set, serve loopback-only (never an open relay).
+        Returns (ok, http_status, message)."""
+        keys = config.api_keys()
+        if keys:
+            token = self._bearer_token()
+            if token and any(hmac.compare_digest(token, k) for k in keys):
+                return True, 200, ""
+            return (False, 401,
+                    "missing or invalid API key — pass a configured "
+                    "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
+        if not self._is_loopback():
+            return (False, 403,
+                    "the OpenAI-compatible API is loopback-only until "
+                    "OLYMPUS_API_KEYS is configured (no open relay).")
+        return True, 200, ""
+
+    def _v1_error(self, code: int, message: str) -> None:
+        """An OpenAI-shaped error envelope."""
+        self._json({"error": {"message": message, "type": "invalid_request_error",
+                              "code": None}}, code)
+
+    def _handle_v1_chat(self) -> None:
+        ok, code, msg = self._v1_authorized()
+        if not ok:
+            self._v1_error(code, msg)
+            return
+        payload = self._read_json()
+        if not isinstance(payload, dict) or not isinstance(
+                payload.get("messages"), list):
+            self._v1_error(400, "invalid request: 'messages' must be a list.")
+            return
+        model = payload.get("model") or openai_server.MODEL_ID
+        stream = bool(payload.get("stream"))
+        prompt = openai_server.messages_to_prompt(payload["messages"])
+        if not prompt.strip():
+            self._v1_error(400, "invalid request: no user message content.")
+            return
+        # Any `model` value maps to the one council pipeline for v1; unsupported
+        # params (temperature, tools, ...) are accepted and ignored by design.
+        try:
+            pool = config.ModelPool.from_env()
+            bot = orchestrator.Olympus(pool=pool, user="api-v1")
+            if stream:
+                self._stream_v1(bot, prompt, model)
+            else:
+                answer = bot.ask(prompt)
+                self._json(openai_server.completion_response(
+                    answer, model, prompt_text=prompt))
+        except Exception as err:
+            from . import errors
+            errors.capture("web /v1/chat/completions", err,
+                           context=prompt[:200])
+            try:
+                self._v1_error(500, str(err))
+            except Exception:
+                pass
+
+    def _stream_v1(self, bot, prompt: str, model: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        pieces = bot.ask_stream(prompt)
+        for frame in openai_server.stream_events(pieces, model):
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
     def _stream_reply(self, bot, message: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1345,6 +1443,9 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host: str = "127.0.0.1", port: int = 8484) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"⚡ Olympus web UI: http://{host}:{port}  (Ctrl-C to stop)")
+    print(f"   OpenAI-compatible API: http://{host}:{port}/v1  "
+          + ("(bearer-gated via OLYMPUS_API_KEYS)" if config.api_keys()
+             else "(loopback-only — set OLYMPUS_API_KEYS to expose it)"))
     if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
         print("   access token required (OLYMPUS_ACCESS_TOKEN is set)")
     server.serve_forever()

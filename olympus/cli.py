@@ -249,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8484)
 
+    p_serve = sub.add_parser(
+        "serve", help="serve the HTTP API incl. the OpenAI-compatible "
+                      "/v1/* endpoints (set OLYMPUS_API_KEYS to expose it)")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8484)
+
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
@@ -867,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "run":
             ran = scheduler.run_due()
             print("\n".join(ran) if ran else "Nothing due right now.")
-    elif args.command == "web":
+    elif args.command in ("web", "serve"):
         from . import web
         try:
             web.serve(args.host, args.port)

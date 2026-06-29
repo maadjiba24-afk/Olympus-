@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->64<!--/cap-->
+<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->65<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -399,6 +399,7 @@ are opt-in, so local single-user runs need nothing.
 ```bash
 python -m olympus                  # interactive chat (default)
 python -m olympus web              # browser chat UI at http://localhost:8484
+python -m olympus serve            # HTTP API incl. OpenAI-compatible /v1/* endpoints
 python -m olympus telegram         # Telegram gateway (zero extra deps)
 python -m olympus whatsapp         # WhatsApp Cloud API gateway (webhook)
 python -m olympus profile "I run a bakery called Crumb; keep replies short"
@@ -419,6 +420,35 @@ python -m olympus heartbeat        # run the autonomous recurring loop
 ```
 
 (`pip install .` also gives you a plain `olympus` command.)
+
+### Use Olympus from any OpenAI client
+
+Olympus exposes an **OpenAI-compatible inbound endpoint**, so any existing
+OpenAI client, IDE, or app can drive the full council by changing only
+`base_url`, `model`, and `api_key` — every request runs the same
+route → plan → dispatch → verify → review → synthesize pipeline.
+
+```bash
+export OLYMPUS_API_KEYS=sk-my-secret-key   # comma-separated; gates /v1/*
+python -m olympus serve --host 127.0.0.1 --port 8484
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8484/v1", api_key="sk-my-secret-key")
+resp = client.chat.completions.create(
+    model="olympus-council",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(resp.choices[0].message.content)
+```
+
+`GET /v1/models`, non-streaming and streaming (`stream=true`)
+`POST /v1/chat/completions` are all supported. When `OLYMPUS_API_KEYS` is unset
+the `/v1/*` routes answer on **loopback only** (never a silent open relay). Full
+details, `curl` examples, and the auth/loopback notes live in
+[docs/OPENAI_ENDPOINT.md](docs/OPENAI_ENDPOINT.md).
 
 ### Connectors: MCP servers & custom plugins
 

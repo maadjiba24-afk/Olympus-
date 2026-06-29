@@ -348,6 +348,15 @@ def require_byok() -> bool:
         "1", "true", "yes", "on")
 
 
+def api_keys() -> list[str]:
+    """Bearer keys that authorize the OpenAI-compatible `/v1/*` endpoints
+    (OLYMPUS_API_KEYS, comma-separated). When this is empty the `/v1/*` routes
+    answer on loopback only — never a silent open relay: a remote caller with no
+    configured key is refused outright."""
+    raw = os.environ.get("OLYMPUS_API_KEYS", "")
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
 def contracts_enabled() -> bool:
     """Enforce hard output contracts on specialist outputs (OLYMPUS_CONTRACTS=1).
     OFF BY DEFAULT: contracts are inert until an operator opts in, so the
