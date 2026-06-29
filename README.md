@@ -17,9 +17,11 @@ CLI commands. Every count here is generated from the code
 what's actually built.
 
 > **Status:** the full architecture is implemented and covered by a
-> comprehensive passing test suite. Install with the one-liner below, type
-> `olympus`, and you're chatting; `olympus scores` shows each specialist's
-> measured quality.
+> comprehensive passing test suite. The test suite covers architecture, gates,
+> and security logic; AI-output quality is measured separately by
+> `olympus eval` / `olympus scores`, not by `pytest`. Install with the
+> one-liner below, type `olympus`, and you're chatting; `olympus scores` shows
+> each specialist's measured quality.
 
 ## Install
 
@@ -45,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/instal
 irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
 ```
 
-**Any OS, via pip/pipx** (once published to PyPI):
+**Any OS, via pip/pipx:**
 
 ```bash
 pipx install olympus-council     # isolated; gives the `olympus` command
@@ -93,7 +95,7 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
    CHIRON     CHRONOS     ARGUS      MNEMOSYNE     PROMETHEUS
    Coaching   Scheduling  Opportunity YouTube       Evolution /
                           Scout 🌐    Learner 🎥    Self-Upgrade 🔧
-                      METIS · Learning Synthesizer 🧠
+          ANGELOS · Inbox & Calendar 📬      METIS · Learning Synthesizer 🧠
                  (daily cycle: experience → skill library)
         └──────────┴──────────┴──────────┴──────────────┘
                                │ outputs
@@ -112,22 +114,34 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 
 ### The council
 
-| Agent | Role |
+**Orchestration pipeline.** These three run every request — they route, plan,
+and verify — and are **not** counted among the <!--cap:agents-->12<!--/cap-->
+specialists.
+
+| Stage | Role |
 |---|---|
 | **Zeus** | Main agent — the user's single interface; routes or answers |
 | **Athena** | Supervisor — plans a **dependency graph** of specialist steps (parallel where independent, serial where one step needs another's output) and gates quality |
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
-| **Plutus** | Financial specialist |
-| **Peitho** | Marketing specialist |
-| **Hephaestus** | Coding specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
-| **Aegis** | Cybersecurity specialist (strictly defensive) |
-| **Iris** | Social network assistant |
-| **Chiron** | Coaching specialist |
-| **Chronos** | Scheduling management |
-| **Argus** | Opportunity scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
-| **Mnemosyne** | YouTube learner — watches videos via transcript, summarizes what it understood, stores lessons |
-| **Metis** | Learning synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
-| **Prometheus** | Evolution specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
+
+**The <!--cap:agents-->12<!--/cap--> specialists.** The permanent domain experts
+registered in `olympus/specialists.py` (names and titles below come straight
+from that registry):
+
+| Agent | Role |
+|---|---|
+| **Plutus** | Financial Specialist |
+| **Peitho** | Marketing Specialist |
+| **Hephaestus** | Coding Specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
+| **Aegis** | Cybersecurity Specialist (strictly defensive) |
+| **Iris** | Social Network Assistant |
+| **Chiron** | Coaching Specialist |
+| **Chronos** | Scheduling Manager |
+| **Angelos** | Inbox & Calendar Manager |
+| **Argus** | Opportunity Scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
+| **Mnemosyne** | YouTube Learner — watches videos via transcript, summarizes what it understood, stores lessons |
+| **Metis** | Learning Synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
+| **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
 
 ### Self-* properties
 
@@ -202,7 +216,7 @@ A specialist only improves at what's *measured* — so Olympus measures every
 user-facing specialist and trains the weakest on a cadence:
 
 - **Full coverage.** Every user-facing specialist (Plutus, Peitho, Hephaestus,
-  Aegis, Iris, Chiron, Chronos, Argus, Mnemosyne) has benchmark items; any gap
+  Aegis, Iris, Chiron, Chronos, Angelos, Argus, Mnemosyne) has benchmark items; any gap
   is auto-filled with a generated one. (Metis and Prometheus are internal —
   their quality is their effect on the system.)
 - **`python -m olympus scores`** shows every specialist's current score,
@@ -225,7 +239,8 @@ user-facing specialist and trains the weakest on a cadence:
    before working — knowledge gained once is applied by the whole council
    forever.
 3. **Measurement** — `python -m olympus eval` runs a benchmark scored by a
-   strict, *separate* LLM judge. Prometheus runs it before/after every prompt
+   strict, *separate* LLM judge (on the Anthropic backend; other providers
+   judge in-model). Prometheus runs it before/after every prompt
    upgrade and **rolls back changes that lower the score**. Improvement is
    measured, not assumed.
 3b. **Benchmark-gated skills** — autonomously-created skills are written
@@ -265,8 +280,9 @@ user-facing specialist and trains the weakest on a cadence:
 - **Verified-facts cache** — Aletheia caches what she verifies, so fact-checks
   get faster and cheaper over time (`recall_fact` / `cache_fact`).
 - **Measured self-upgrades, ungameable judge** — the benchmark is scored by a
-  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned, so
-  Prometheus can't optimize against his own scorer.
+  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned (on the
+  Anthropic backend; other providers judge in-model), so Prometheus can't
+  optimize against his own scorer.
 - **Web instance protection** — per-IP rate limiting
   (`OLYMPUS_RATE_LIMIT`/min) and an optional shared access token
   (`OLYMPUS_ACCESS_TOKEN`). Final answers stream token-by-token.
@@ -282,12 +298,12 @@ user-facing specialist and trains the weakest on a cadence:
 | | Hermes | OpenClaw | **Olympus** |
 |---|---|---|---|
 | Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
-| Specialists | generic per-task workers | one assistant + plug-in skills | **10 permanent domain experts** with crafted identities |
+| Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->12<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
 | Models | model-agnostic | model-agnostic | **model-agnostic** — Claude first-class, plus any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama/local) with **bring-your-own-key in the web UI** |
-| Footprint | full server stack | persistent Node.js service | **~2.5K lines of readable Python**, stdlib-only interfaces |
+| Footprint | full server stack | persistent Node.js service | **single Python package · 3 runtime deps · stdlib-only interfaces** |
 
 ## Setup
 
