@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->65<!--/cap-->
+<!--cap:tools-->39<!--/cap--> agent tools, and <!--cap:commands-->66<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -487,6 +487,31 @@ firewall (pair it with one for a host-wide guarantee). The threat model, the
 fully-local recipe (Ollama/vLLM), the data-class policy table, and an honest
 statement of the boundary are in
 [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md).
+
+### Every decision is replayable and signed — verify it yourself
+
+Olympus records every orchestration decision, freezes the exact model responses
+that produced it, and **signs the decision path** with an Ed25519 key. Anyone can
+re-execute a past run against those frozen responses and confirm the reasoning is
+**byte-identical**, and check the signature against a pinned public key — no trust
+in us required:
+
+```bash
+olympus verify --run <RUN_ID>        # replays the decision path AND checks the signature
+#   replay    : PASS — N decision(s) replayed byte-identically
+#   signature : PASS — decision-log signature valid
+#   RESULT    : PASS — replay-identical and signed by the trusted production key.
+```
+
+A run id comes back in the `X-Olympus-Run-Id` header of every `/v1` answer, and
+`/api/status` reports the signing posture. **Honesty about trust:** with no secret
+signing seed configured, runs are signed by a *public default key* — verification
+still passes but is loudly labeled `DEV / UNVERIFIED` (integrity, not
+authenticity), and `olympus verify --run … --require-production` rejects it. Set a
+real `OLYMPUS_SIGNING_SEED` (HSM/KMS recommended) and pin the derived key to make
+it a genuine guarantee. Step-by-step for a skeptical evaluator:
+[docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
+[docs/SIGNING.md](docs/SIGNING.md).
 
 ### Connectors: MCP servers & custom plugins
 

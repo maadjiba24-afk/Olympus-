@@ -7,10 +7,84 @@ import sys
 
 from . import heartbeat, memory, orchestrator
 
+# The label every surface MUST attach to a pass produced under the public
+# default seed — a default-seed pass proves integrity, never authenticity.
+_DEV_LABEL = ("DEV / UNVERIFIED — signed by the public default key; proves the "
+              "log is internally consistent, not that it came from a trusted "
+              "signer.")
+
 
 def _chat() -> None:
     from . import tui
     tui.run()
+
+
+def _verify_run_combined(run_id: str, require_production: bool) -> int:
+    """Auditor-facing single PASS/FAIL for a recorded run: BOTH halves of the
+    guarantee — replay (byte-identical decision path) AND decision-log signature
+    against the trusted key. Reuses orchestrator.replay_run and
+    witness.verify_run; adds the pinned-key authenticity and dev-seed posture
+    gates. Returns a process exit code (0 = PASS)."""
+    from . import witness, trace, replaystore, orchestrator as orch
+    run = trace.load_run(run_id)
+    if not run:
+        print(f"[verify] FAIL: no recorded run '{run_id}' in the traces.")
+        return 1
+
+    posture = "dev" if witness.log_signed_by_default(run) else "production"
+
+    # Half 1 — replay the reasoning against the frozen responses.
+    replay_ok, replay_msg = True, ""
+    try:
+        original, _fresh, diffs = orch.replay_run(run_id)
+        if diffs:
+            replay_ok = False
+            d0 = diffs[0]
+            o = (d0.get("original") or {}).get("decision_type", "∅")
+            r = (d0.get("replayed") or {}).get("decision_type", "∅")
+            replay_msg = (f"decision #{d0['index']} DIVERGED ({o} → {r}); "
+                          f"{len(diffs)} decision(s) differ from the recording")
+        else:
+            n = len(original.get("decisions", []))
+            replay_msg = f"{n} decision(s) replayed byte-identically"
+    except replaystore.ReplayDivergence as err:
+        replay_ok, replay_msg = False, str(err)
+    except ValueError as err:
+        replay_ok, replay_msg = False, str(err)
+
+    # Half 2 — decision-log signature, against the pinned/trusted key.
+    sig = witness.verify_run(run_id)
+    sig_ok = bool(sig.get("ok"))
+    sig_msg = ("decision-log signature valid" if sig_ok
+               else "; ".join(sig.get("problems", []) or ["signature invalid"]))
+    # Pinned-key authenticity applies to PRODUCTION runs only: a dev-posture run
+    # (signed by the public default key) is integrity-only by definition and is
+    # handled by the dev label / --require-production gate below, not by the pin
+    # (which is the production trust anchor).
+    pin = witness.pinned_pubkey()
+    signer = ((run.get("log_signature") or {}).get("publicKey") or "").lower()
+    if sig_ok and posture == "production" and pin and signer != pin.lower():
+        sig_ok = False
+        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that does not "
+                   f"match the pinned public key {pin.lower()[:16]}…")
+
+    print(f"Run {run_id} — verification ({posture} signing posture)")
+    print(f"  replay    : {'PASS' if replay_ok else 'FAIL'} — {replay_msg}")
+    print(f"  signature : {'PASS' if sig_ok else 'FAIL'} — {sig_msg}")
+
+    if require_production and posture == "dev":
+        print(f"  RESULT    : FAIL — {_DEV_LABEL}\n"
+              "              --require-production forbids a default-seed run.")
+        return 1
+    if not (replay_ok and sig_ok):
+        print("  RESULT    : FAIL — this run is NOT verifiable as recorded.")
+        return 1
+    if posture == "dev":
+        print(f"  RESULT    : PASS (integrity only) — {_DEV_LABEL}")
+    else:
+        print("  RESULT    : PASS — replay-identical and signed by the trusted "
+              "production key.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -135,10 +209,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--log", metavar="RUN_ID",
                           help="instead, verify a recorded run's "
                                "decision-log signature")
+    p_verify.add_argument("--run", metavar="RUN_ID",
+                          help="verify a recorded run END TO END: replay "
+                               "(byte-identical decision path) AND decision-log "
+                               "signature, reported as one PASS/FAIL")
     p_verify.add_argument("--allow-dev", action="store_true",
                           help="accept a dev manifest (signed by the public "
                                "default seed) for local use")
-    sub.add_parser("witness-pubkey", help="print the Ed25519 public key for the "
+    p_verify.add_argument("--require-production", action="store_true",
+                          help="FAIL (exit non-zero) if the artifact was signed "
+                               "under the public default seed, regardless of "
+                               "internal validity (the inverse of --allow-dev)")
+    sub.add_parser("witness-pubkey", aliases=["pubkey"],
+                   help="print the Ed25519 public key for the "
                                           "current signing seed (to pin it)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
@@ -592,39 +675,83 @@ def main(argv: list[str] | None = None) -> int:
         kind = "DEV (local use only)" if witness.is_default_seed() else "release"
         print(f"Wrote signed {kind} manifest: {path}")
         print(f"  signing key (public): {witness.public_key_hex()}")
-    elif args.command == "witness-pubkey":
+    elif args.command in ("witness-pubkey", "pubkey"):
         from . import witness
         if not witness.available():
             print("Cannot derive key: the cryptography backend is unavailable.")
             return 1
-        print(witness.public_key_hex())
+        pub = witness.public_key_hex()
+        print(pub)
+        # Key-custody guidance on stderr so `olympus pubkey` still pipes the bare
+        # key on stdout (e.g. into witness_pubkey.txt) while telling an operator
+        # how to make it a real root of trust.
+        if witness.is_default_seed():
+            print("\nposture: DEV — this is the PUBLIC default key; anyone can "
+                  "forge signatures with it.\n"
+                  "To make signatures authentic:\n"
+                  "  export OLYMPUS_SIGNING_SEED=\"$(python -c 'import secrets;"
+                  "print(secrets.token_hex(32))')\"\n"
+                  "  olympus pubkey > olympus/witness_pubkey.txt   # pin the "
+                  "derived key\n"
+                  "  # or set OLYMPUS_PINNED_PUBKEY to this value\n"
+                  "See docs/SIGNING.md (HSM/KMS recommended for the seed).",
+                  file=sys.stderr)
+        else:
+            pin = witness.pinned_pubkey()
+            state = ("matches the pinned key" if pin and pin.lower() == pub.lower()
+                     else "NOT yet pinned — add it to witness_pubkey.txt / "
+                          "OLYMPUS_PINNED_PUBKEY" if not pin
+                     else "DIFFERS from the pinned key (rotation in progress?)")
+            print(f"\nposture: PRODUCTION — derived from OLYMPUS_SIGNING_SEED; "
+                  f"{state}.", file=sys.stderr)
     elif args.command == "verify":
         from pathlib import Path
         from . import witness
         if not witness.available():
             print("Cannot verify: the cryptography backend is unavailable.")
             return 1
+        require_prod = getattr(args, "require_production", False)
+        if args.run:
+            return _verify_run_combined(args.run, require_prod)
         if args.log:
+            from . import trace
             r = witness.verify_run(args.log)
-            if r["ok"]:
-                print(f"✓ run {args.log}: decision log is intact and signed by "
-                      "the trusted key.")
-            else:
+            run = trace.load_run(args.log)
+            dev = (witness.log_signed_by_default(run) if run
+                   else witness.is_default_seed())
+            if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
                 return 1
+            if dev and require_prod:
+                print(f"[verify] FAIL: run {args.log} is {_DEV_LABEL} "
+                      "--require-production forbids it.")
+                return 1
+            if dev:
+                print(f"✓ run {args.log}: decision log is internally consistent.")
+                print(f"  {_DEV_LABEL}")
+            else:
+                print(f"✓ run {args.log}: decision log is intact and signed by "
+                      "the trusted (production) key.")
         else:
             r = witness.verify_release(
                 Path(args.manifest) if args.manifest else None,
                 allow_dev=args.allow_dev)
-            if r["ok"]:
-                note = " (dev manifest, accepted for local use)" if r.get("is_dev") else ""
-                print("✓ verified: every tracked file matches the signed "
-                      f"manifest and the signature is from the trusted key{note}.")
-            else:
+            if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
                 return 1
+            if r.get("is_dev") and require_prod:
+                print(f"[verify] FAIL: manifest is {_DEV_LABEL} "
+                      "--require-production forbids it.")
+                return 1
+            if r.get("is_dev"):
+                print("✓ verified: every tracked file matches the signed "
+                      "manifest and its signature is internally consistent.")
+                print(f"  {_DEV_LABEL}")
+            else:
+                print("✓ verified: every tracked file matches the signed "
+                      "manifest and the signature is from the trusted key.")
     elif args.command == "reports":
         from . import support
         items = support.recent(100)

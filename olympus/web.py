@@ -252,6 +252,33 @@ def _https_request(handler: BaseHTTPRequestHandler) -> bool:
     return proto.split(",")[0].strip().lower() == "https"
 
 
+def _signing_posture() -> dict:
+    """Verification posture for /api/status — lets a prospective buyer confirm
+    the audit guarantee from the running server. Never exposes the seed itself.
+    `posture` is 'production' (a secret signing seed is configured) or 'dev'
+    (the public default key — integrity only); `pinned` is whether a trusted
+    public key is pinned; `public_key` is the derived verifying key (public)."""
+    from . import witness
+    if not witness.available():
+        return {"posture": "unavailable", "pinned": False, "public_key": None,
+                "verify_hint": "cryptography backend unavailable — cannot sign "
+                               "or verify on this instance."}
+    pub = None
+    try:
+        pub = witness.public_key_hex()
+    except Exception:
+        pass
+    return {
+        "posture": witness.posture(),
+        "pinned": bool(witness.pinned_pubkey()),
+        "public_key": pub,
+        "verify_hint": "Verify any answer's reasoning with: "
+                       "`olympus verify --run <run_id>` (replays the decision "
+                       "path AND checks the decision-log signature). The run id "
+                       "is returned in the X-Olympus-Run-Id response header.",
+    }
+
+
 # --- /v1/* loopback boundary (security primitive, header-independent) --------
 # The remoteness decision for the OpenAI-compatible endpoints is made from the
 # kernel-reported peer address ONLY — never from a client-controllable header
@@ -984,7 +1011,8 @@ checkAuth();
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str,
+              extra_headers: dict | None = None) -> None:
         try:
             metrics.record_response(urlparse(self.path).path, code)
         except Exception:
@@ -992,6 +1020,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         cookie = getattr(self, "_set_cookie", None)
         if cookie:
             self.send_header("Set-Cookie", self._cookie_header(cookie))
@@ -1009,8 +1039,10 @@ class Handler(BaseHTTPRequestHandler):
         return (f"olympus_sid={value}; HttpOnly; SameSite=Lax; "
                 f"Path=/; Max-Age=31536000{secure}")
 
-    def _json(self, payload: dict, code: int = 200) -> None:
-        self._send(code, json.dumps(payload).encode(), "application/json")
+    def _json(self, payload: dict, code: int = 200,
+              extra_headers: dict | None = None) -> None:
+        self._send(code, json.dumps(payload).encode(), "application/json",
+                   extra_headers=extra_headers)
 
     def _read_json(self) -> dict | None:
         try:
@@ -1124,7 +1156,8 @@ class Handler(BaseHTTPRequestHandler):
             since = int(params.get("since", ["0"])[0])
             events = _session(sid).events
             self._json({"events": events[since:], "next": len(events),
-                        "sovereignty": config.sovereign_status()})
+                        "sovereignty": config.sovereign_status(),
+                        "signing": _signing_posture()})
             return
         user = self._principal(sid)
         if user is None:
@@ -1497,8 +1530,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._stream_v1(bot, prompt, model)
             else:
                 answer = bot.ask(prompt)
+                # Audit headers: let the caller locate and verify the reasoning
+                # behind this answer — `olympus verify --run <X-Olympus-Run-Id>`.
+                from . import witness
+                hdrs = {"X-Olympus-Audit": "signed-" + witness.posture()}
+                run_id = getattr(bot, "last_run_id", None)
+                if run_id:
+                    hdrs["X-Olympus-Run-Id"] = run_id
                 self._json(openai_server.completion_response(
-                    answer, model, prompt_text=prompt))
+                    answer, model, prompt_text=prompt), extra_headers=hdrs)
         except security.SovereigntyError as err:
             # Fail closed with a clear, non-leaky message (never downgrade).
             self._v1_error(403, str(err))
@@ -1512,9 +1552,14 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _stream_v1(self, bot, prompt: str, model: str) -> None:
+        from . import witness
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        # Posture is known up front; the run id is only assigned once the run
+        # completes, so it isn't available as a header on the streamed response
+        # (use /api/status or a non-streaming request to obtain it).
+        self.send_header("X-Olympus-Audit", "signed-" + witness.posture())
         self.end_headers()
         pieces = bot.ask_stream(prompt)
         for frame in openai_server.stream_events(pieces, model):

@@ -118,6 +118,38 @@ def public_key_hex() -> str:
     return pk.hex()
 
 
+def default_public_key_hex() -> str:
+    """The public key derived from the PUBLIC default seed. Lets a verifier
+    recognize a run/manifest signed by the forgeable default key regardless of
+    the seed currently configured."""
+    _require_crypto()
+    sk = ed25519.Ed25519PrivateKey.from_private_bytes(
+        hashlib.sha256(_DEFAULT_SEED.encode("utf-8")).digest())
+    return sk.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def posture() -> str:
+    """The signing posture of THIS instance: 'production' when a secret
+    OLYMPUS_SIGNING_SEED is configured, else 'dev' (the public default key —
+    proves integrity, never authenticity)."""
+    return "dev" if is_default_seed() else "production"
+
+
+def log_signed_by_default(run: dict) -> bool:
+    """Whether a recorded run's decision-log signature was produced by the
+    PUBLIC default seed — i.e. the run is dev/unverified no matter what seed the
+    verifier has configured."""
+    sig = (run or {}).get("log_signature") or {}
+    pub = (sig.get("publicKey") or "").lower()
+    if not pub or not _HAVE_CRYPTO:
+        return False
+    try:
+        return pub == default_public_key_hex()
+    except WitnessError:
+        return False
+
+
 def available() -> bool:
     """True if signing/verification can actually run (crypto backend present)."""
     return _HAVE_CRYPTO

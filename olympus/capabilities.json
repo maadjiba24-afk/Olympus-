@@ -33,7 +33,7 @@
     ]
   },
   "commands": {
-    "count": 65,
+    "count": 66,
     "names": [
       "actions",
       "add-mcp",
@@ -69,6 +69,7 @@
       "outcomes",
       "playbook",
       "profile",
+      "pubkey",
       "queue",
       "reject",
       "replay",

@@ -51,13 +51,62 @@ tampered content, and produce a "valid" signature. So:
    # ✓ verified: ... signature is from the trusted key.
    ```
 
+## Generating a strong seed
+
+The seed must be high-entropy and stable. Generate one and store it as a secret
+(never in the repo):
+```bash
+python -c 'import secrets; print(secrets.token_hex(32))'   # 256-bit seed
+```
+`olympus pubkey` prints the derived public key on stdout (and, when you're still
+on the default seed, prints custody guidance on stderr), so you can pin it in one
+step:
+```bash
+export OLYMPUS_SIGNING_SEED='<the 64-hex secret above>'
+olympus pubkey > olympus/witness_pubkey.txt    # pin the derived key
+# or:  export OLYMPUS_PINNED_PUBKEY="$(olympus pubkey)"
+```
+
+## Where the seed should live (HSM / KMS recommended)
+
+The seed is the entire root of trust — treat it like a signing key, because it
+is one. In order of preference:
+
+1. **An HSM or cloud KMS** (AWS KMS, GCP KMS, Azure Key Vault, YubiHSM, …) is the
+   recommended home: the secret never sits in an env var or on disk. Olympus
+   reads the seed from `OLYMPUS_SIGNING_SEED`, so inject it at process start from
+   the KMS/secret store (or have your launcher fetch-and-export it) rather than
+   committing or baking it in. SPEC-03 deliberately does **not** bind to a
+   specific KMS vendor — that integration is the recommended deployment shape,
+   not a code dependency.
+2. A CI/secret manager (GitHub Actions secret, Vault) injected as an env var at
+   build/run time.
+3. A local password-manager entry for solo/dev use.
+
+Never echo the seed into logs, traces, or shell history. Olympus never prints or
+records the seed — only the derived **public** key.
+
+## Rotating the signing key
+
+Rotating means switching to a new secret seed (new private key → new public key):
+
+1. Generate a new seed and derive its public key (`olympus pubkey`).
+2. **Re-pin** the new public key (`witness_pubkey.txt` / `OLYMPUS_PINNED_PUBKEY`).
+3. Re-sign the current release with the new seed (`olympus sign`).
+4. **Keep the previous public key(s)** if you still need to verify historical
+   runs: a decision log signed under the old key remains valid *against the old
+   key*. Verification matches a run/manifest's embedded key against the pin in
+   effect, so to verify an old run you pin (or check against) the old public key
+   that signed it. Keep an append-only list of retired pubkeys with their date
+   ranges; nothing about rotation invalidates already-signed history.
+
 ## Rules
 
 - **Never** publish a release under the default seed (`--dev` manifests are for
   local use only).
 - **Never** pin the default public key — that would trust the forgeable key.
 - Keep `OLYMPUS_SIGNING_SEED` secret; rotating it changes the public key, so
-  update the pin when you rotate.
+  update the pin when you rotate (and retain old pubkeys for historical runs).
 
 ## Dev / local use
 
