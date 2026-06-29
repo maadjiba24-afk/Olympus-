@@ -143,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
+    p_ask.add_argument("--data-class", choices=("public", "internal", "restricted"),
+                       default=None,
+                       help="data-sensitivity class for routing; 'restricted' "
+                            "stays local even with sovereign mode off")
 
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
@@ -248,6 +252,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_web = sub.add_parser("web", help="serve the browser chat UI")
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8484)
+
+    p_serve = sub.add_parser(
+        "serve", help="serve the HTTP API incl. the OpenAI-compatible "
+                      "/v1/* endpoints (set OLYMPUS_API_KEYS to expose it)")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8484)
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
@@ -489,6 +499,17 @@ def main(argv: list[str] | None = None) -> int:
                  if b["enabled"] else "off"))
         print(f"  accounts       : "
               + ("required (login)" if accounts.require_login() else "open"))
+        sov = config.sovereign_status()
+        print(f"  sovereign mode : "
+              + ("ON — zero-egress, local-only" if sov["sovereign"] else "off"))
+        if sov["sovereign"] or sov["allowlist"]:
+            print(f"  egress allowlist: "
+                  + (", ".join(sov["allowlist"]) or "(loopback + local only)"))
+        print(f"  default class  : {sov['default_data_class']}")
+        print(f"  models         : " + (", ".join(sov["members"]) or "(none)"))
+        print(f"  eligible local : "
+              + (", ".join(sov["eligible_local"]) or "(none — sovereign would "
+                 "fail closed)"))
         print()
         print(usage.report(7))
     elif args.command == "replay":
@@ -672,10 +693,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "ask":
         if not firstrun.ensure_ready():
             return 1
-        from . import config
+        from . import config, security
+        try:
+            pool = config.ModelPool.from_env()
+            if config.data_class_local_only(args.data_class):
+                pool = pool.local_only()      # fail-closed if no local member
+        except security.SovereigntyError as err:
+            print(f"[sovereign] {err}", file=sys.stderr)
+            return 1
         bot = orchestrator.Olympus(
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
-            pool=config.ModelPool.from_env())
+            pool=pool)
         print(bot.ask(" ".join(args.question)))
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
@@ -867,7 +895,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "run":
             ran = scheduler.run_due()
             print("\n".join(ran) if ran else "Nothing due right now.")
-    elif args.command == "web":
+    elif args.command in ("web", "serve"):
         from . import web
         try:
             web.serve(args.host, args.port)

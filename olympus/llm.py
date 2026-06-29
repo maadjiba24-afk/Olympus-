@@ -12,7 +12,7 @@ from typing import Any
 
 import anthropic
 
-from . import config, replaystore, usage
+from . import config, replaystore, security, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 
@@ -100,6 +100,11 @@ def complete(
         replaystore.note_call(req_hash)
         return message
 
+    # Sovereign egress choke (after replay, which makes no network call): a
+    # remote Anthropic host fails closed here under sovereign mode. No-op when
+    # sovereign is off, so the normal path is unchanged.
+    security.assert_egress_allowed(config.member_host(settings))
+
     last_err: Exception | None = None
     for attempt in range(4):
         try:
@@ -146,6 +151,7 @@ def stream_text(
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": effort},
     }
+    security.assert_egress_allowed(config.member_host(settings))
     with usage.slot():
         with client(settings).messages.stream(**params) as stream:
             for text in stream.text_stream:

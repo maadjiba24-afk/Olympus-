@@ -94,6 +94,20 @@ def get(key: str) -> Provider | None:
     return _BY_KEY.get(key)
 
 
+def local_provider_hosts() -> set[str]:
+    """Hosts of catalog providers that run locally (auth='local', e.g. Ollama).
+    This is the catalog's existing notion of 'local'; sovereign mode reuses it
+    rather than redefining what counts as a local endpoint."""
+    from urllib.parse import urlparse
+    hosts = set()
+    for p in CATALOG:
+        if p.auth == "local" and p.base_url:
+            host = (urlparse(p.base_url).hostname or "").lower()
+            if host:
+                hosts.add(host)
+    return hosts
+
+
 def _http_json(url: str, headers: dict, timeout: int = 15) -> dict:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:

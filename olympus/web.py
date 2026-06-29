@@ -30,7 +30,8 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import accounts, actions, builtin_actions, config, metrics, orchestrator, usage  # noqa: F401
+from . import (accounts, actions, builtin_actions, config, metrics,  # noqa: F401
+               openai_server, orchestrator, usage)
 
 
 def _user_for(sid: str) -> str:
@@ -249,6 +250,63 @@ def _https_request(handler: BaseHTTPRequestHandler) -> bool:
         return True
     proto = handler.headers.get("X-Forwarded-Proto", "")
     return proto.split(",")[0].strip().lower() == "https"
+
+
+# --- /v1/* loopback boundary (security primitive, header-independent) --------
+# The remoteness decision for the OpenAI-compatible endpoints is made from the
+# kernel-reported peer address ONLY — never from a client-controllable header
+# (Host / X-Forwarded-For / X-Real-IP / Forwarded), which would be spoofable and
+# would turn the "loopback-only" guarantee into an open relay. This module-level
+# predicate is the single source of truth for that decision.
+
+# Header names that signal a reverse proxy is relaying a request. Their PRESENCE
+# (not their value — values are attacker-controlled) means the loopback peer is
+# a proxy fronting a real remote client; see _forwarding_headers_present.
+_FORWARDING_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded",
+                       "X-Forwarded-Host", "X-Forwarded-Proto")
+
+
+def _is_loopback(ip: str) -> bool:
+    """True iff `ip` (a peer address from self.client_address[0]) is loopback.
+
+    Decided purely from the kernel-reported peer address. IPv4 loopback is the
+    whole 127.0.0.0/8 block; IPv6 loopback is ::1; IPv4-mapped-IPv6 forms
+    (::ffff:127.x) are unwrapped first so a mapped public address can't sneak
+    through. No header is consulted."""
+    ip = (ip or "").strip().lower()
+    if ip.startswith("::ffff:"):          # IPv4-mapped IPv6 → compare the v4 part
+        ip = ip[len("::ffff:"):]
+    if ip in ("::1", "0:0:0:0:0:0:0:1"):
+        return True
+    return ip.startswith("127.")
+
+
+def _forwarding_headers_present(headers) -> bool:
+    """Whether any reverse-proxy forwarding header is present. A loopback peer
+    that carries one of these is a proxy relaying an external client — so a
+    loopback peer alone must NOT be treated as 'trusted local' when it appears.
+    Only presence is checked; the (spoofable) value is never trusted."""
+    if not headers:
+        return False
+    return any(headers.get(h) for h in _FORWARDING_HEADERS)
+
+
+def _v1_allowed(peer_ip: str, headers) -> bool:
+    """The /v1/* allow decision when OLYMPUS_API_KEYS is unset, as a pure
+    function of the kernel peer address and the request headers' shape.
+
+    This is the single predicate both the request handler (`_v1_authorized`)
+    and the boundary tests consult. A no-key deployment only ever serves when
+    the server is bound to loopback, so this assumes that binding and answers
+    the two remaining dimensions:
+      * the peer must be loopback (decided from client_address, never a header);
+      * no reverse-proxy forwarding header may be present (its presence proves
+        the loopback peer is a proxy relaying an off-box client — the Caddy
+        trap), so we refuse and require a key instead.
+    Header *values* are never trusted; only the *presence* of a forwarding
+    header is used, and only to deny. Returns True iff the request may be served
+    without a configured API key."""
+    return _is_loopback(peer_ip) and not _forwarding_headers_present(headers)
 
 
 PAGE = """<!doctype html>
@@ -1037,11 +1095,22 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/oauth/google/callback":
             self._oauth_callback(url)
             return
+        if url.path == "/v1/models":
+            # OpenAI-compatible: bearer-gated (its own scheme), not the
+            # dashboard's X-Olympus-Token.
+            ok, code, msg = self._v1_authorized()
+            if not ok:
+                self._v1_error(code, msg)
+                return
+            self._json(openai_server.models_response())
+            return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
         if url.path == "/api/metrics":
-            self._json(metrics.snapshot())     # instance ops, not per-user
+            snap = metrics.snapshot()          # instance ops, not per-user
+            snap["sovereignty"] = config.sovereign_status()
+            self._json(snap)
             return
         params = parse_qs(url.query)
         sid = self._session_id(params.get("session", [None])[0])
@@ -1054,7 +1123,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
             events = _session(sid).events
-            self._json({"events": events[since:], "next": len(events)})
+            self._json({"events": events[since:], "next": len(events),
+                        "sovereignty": config.sovereign_status()})
             return
         user = self._principal(sid)
         if user is None:
@@ -1123,6 +1193,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/v1/chat/completions":
+            self._handle_v1_chat()
+            return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/register", "/api/login",
                         "/api/logout", "/api/report"):
@@ -1328,6 +1401,126 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # --- OpenAI-compatible inbound endpoint (/v1/*) ----------------------
+
+    def _peer_is_loopback(self) -> bool:
+        """Whether the request came from this machine — decided from the kernel
+        peer socket (self.client_address[0]) ONLY, never a header. Delegates to
+        the module-level `_is_loopback`, the single source of truth."""
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        return _is_loopback(peer)
+
+    def _bound_to_loopback(self) -> bool:
+        """Whether the server socket is bound to a loopback address. If it's
+        bound to anything else (0.0.0.0, a LAN IP, ...), the process is reachable
+        off-box and 'no key' can't be safe — we don't infer safety from the
+        per-connection peer. Defaults to False (treat as exposed) if unknown."""
+        try:
+            return _is_loopback(self.server.server_address[0])
+        except Exception:
+            return False
+
+    def _bearer_token(self) -> str:
+        auth = self.headers.get("Authorization", "") or ""
+        if auth[:7].lower() == "bearer ":
+            return auth[7:].strip()
+        return ""
+
+    def _v1_authorized(self) -> tuple[bool, int, str]:
+        """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid
+        bearer key. With none set, serve loopback-only — and never an open relay:
+        the remoteness decision comes from the peer socket (not headers), and a
+        process bound off-loopback must carry a key even for a 'local'-looking
+        peer (a reverse proxy connects from loopback while fronting the world).
+        Returns (ok, http_status, message)."""
+        keys = config.api_keys()
+        if keys:
+            token = self._bearer_token()
+            if token and any(hmac.compare_digest(token, k) for k in keys):
+                return True, 200, ""
+            return (False, 401,
+                    "missing or invalid API key — pass a configured "
+                    "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
+        # No keys configured: loopback-only, and never an open relay.
+        if not self._peer_is_loopback():
+            return (False, 403,
+                    "the OpenAI-compatible API is loopback-only until "
+                    "OLYMPUS_API_KEYS is configured (no open relay).")
+        if not self._bound_to_loopback():
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: the server is bound to a non-loopback "
+                    "address, so the OpenAI-compatible API needs an API key "
+                    "(safety is not inferred from the connection).")
+        if _forwarding_headers_present(self.headers):
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
+                    "present, so this request is being relayed from off-box and "
+                    "needs an API key (no open relay behind a proxy).")
+        return True, 200, ""
+
+    def _v1_error(self, code: int, message: str) -> None:
+        """An OpenAI-shaped error envelope."""
+        self._json({"error": {"message": message, "type": "invalid_request_error",
+                              "code": None}}, code)
+
+    def _handle_v1_chat(self) -> None:
+        ok, code, msg = self._v1_authorized()
+        if not ok:
+            self._v1_error(code, msg)
+            return
+        payload = self._read_json()
+        if not isinstance(payload, dict) or not isinstance(
+                payload.get("messages"), list):
+            self._v1_error(400, "invalid request: 'messages' must be a list.")
+            return
+        model = payload.get("model") or openai_server.MODEL_ID
+        stream = bool(payload.get("stream"))
+        prompt = openai_server.messages_to_prompt(payload["messages"])
+        if not prompt.strip():
+            self._v1_error(400, "invalid request: no user message content.")
+            return
+        # Data-class routing: an X-Olympus-Data-Class header (public/internal/
+        # restricted) selects the destination policy. `restricted` stays local
+        # even with sovereign mode off; an unspecified class defaults to
+        # local-only when sovereign mode is on.
+        data_class = config.normalize_data_class(
+            self.headers.get("X-Olympus-Data-Class"))
+        from . import security
+        # Any `model` value maps to the one council pipeline for v1; unsupported
+        # params (temperature, tools, ...) are accepted and ignored by design.
+        try:
+            pool = config.ModelPool.from_env()
+            if config.data_class_local_only(data_class):
+                pool = pool.local_only()        # fail-closed if no local member
+            bot = orchestrator.Olympus(pool=pool, user="api-v1")
+            if stream:
+                self._stream_v1(bot, prompt, model)
+            else:
+                answer = bot.ask(prompt)
+                self._json(openai_server.completion_response(
+                    answer, model, prompt_text=prompt))
+        except security.SovereigntyError as err:
+            # Fail closed with a clear, non-leaky message (never downgrade).
+            self._v1_error(403, str(err))
+        except Exception as err:
+            from . import errors
+            errors.capture("web /v1/chat/completions", err,
+                           context=prompt[:200])
+            try:
+                self._v1_error(500, str(err))
+            except Exception:
+                pass
+
+    def _stream_v1(self, bot, prompt: str, model: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        pieces = bot.ask_stream(prompt)
+        for frame in openai_server.stream_events(pieces, model):
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
     def _stream_reply(self, bot, message: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1345,6 +1538,9 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host: str = "127.0.0.1", port: int = 8484) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"⚡ Olympus web UI: http://{host}:{port}  (Ctrl-C to stop)")
+    print(f"   OpenAI-compatible API: http://{host}:{port}/v1  "
+          + ("(bearer-gated via OLYMPUS_API_KEYS)" if config.api_keys()
+             else "(loopback-only — set OLYMPUS_API_KEYS to expose it)"))
     if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
         print("   access token required (OLYMPUS_ACCESS_TOKEN is set)")
     server.serve_forever()
