@@ -50,6 +50,14 @@ carries a migration note here.
   so it is stripped from any run that also ingests untrusted page content. Argus
   reads/learns via the harness but, because it ingests the web, never holds the
   credentialed actuator in the same run — proven in `tests/test_browser.py`.
+- **Hardening pass.** The SSRF/egress gate is re-run against the *landed* URL
+  after navigation (a 3xx redirect or JS navigation onto an internal host is
+  blocked and the tab is sent to `about:blank` instead of surfacing its
+  content); the real transport bounds a single CDP frame (anti-OOM) and times
+  out a stuck reply instead of wedging the agent; `browser_open` waits (bounded)
+  for `readyState=complete` before reading; the CDP ledger is a bounded circular
+  buffer; and the skill store caps field/step lengths, bounds the library
+  (dropping lowest-reliability skills), and skips malformed entries.
 - See [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for the full
   strengths→moats / weaknesses→credibility-assets rationale.
 

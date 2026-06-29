@@ -39,6 +39,16 @@ that defeats it. No cosmetic spin.
 | Pixel-coordinate clicking is fragile | **Selector-first** (`browser_read`/`browser_act` take CSS selectors), with x/y as an explicit fallback, and a **reliability score** per skill so flakiness is measured, not hidden. |
 | OSS as a funnel to a hosted cloud (lock-in) | **BYOK, local-first.** The harness attaches to *your* Chrome; no mandatory cloud, and skills are a local, portable JSON file. |
 | Telemetry opt-out, phones home by default | **Default-deny egress.** Every navigation passes the SSRF + egress-allowlist gate; under sovereign mode only allowlisted hosts are reachable. |
+| Redirect / DNS-rebind slips past a resolve-time URL check | **The gate is re-run against the *landed* URL** after navigation, not just the requested one: a 3xx or JS hop onto an internal host is blocked and the tab is sent to `about:blank` rather than surfacing its content to the model. |
+
+### Robustness limits (hardening)
+
+The session bounds its own resource use so a hostile or slow page can't degrade
+the agent: a single CDP frame is size-capped and a stuck reply times out rather
+than wedging the loop; reads wait (bounded) for `readyState=complete`; the CDP
+ledger is a bounded circular buffer; and the skill store caps field/step
+lengths, bounds the library (dropping the lowest-reliability tail), and skips
+malformed entries on load.
 
 ## The tool surface
 

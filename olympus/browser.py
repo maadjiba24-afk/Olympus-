@@ -45,10 +45,22 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass, field
+import time
+from collections import deque
+from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 from . import config, security
+
+# Hardening limits.
+_TEXT_LIMIT = 20_000          # max chars of page text returned to the model
+_LEDGER_MAX = 2_000           # bounded CDP-call ledger (circular)
+_RECV_TIMEOUT = 30.0          # per-CDP-call deadline on the real transport
+_WS_MAX_FRAME = 16 * 1024 * 1024   # cap a single CDP message (anti-OOM)
+_LOAD_TIMEOUT = 12.0          # bounded wait for document.readyState=complete
+_SKILL_STEPS_MAX = 10_000     # max chars of a recorded skill body
+_SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
+_SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
 
 # --- transport -----------------------------------------------------------
 
@@ -74,9 +86,13 @@ class FakeTransport:
     no real browser, so nothing here can navigate or act on anything.
     """
 
-    def __init__(self, pages: dict[str, dict[str, str]] | None = None) -> None:
+    def __init__(self, pages: dict[str, dict[str, str]] | None = None,
+                 redirects: dict[str, str] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
+        # navigated-url -> landed-url, to simulate a server/JS redirect so the
+        # post-navigation SSRF re-check can be exercised offline.
+        self.redirects = redirects or {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
 
@@ -84,13 +100,18 @@ class FakeTransport:
         params = params or {}
         self.calls.append({"method": method, "params": params})
         if method == "Page.navigate":
-            self._url = params.get("url", self._url)
+            target = params.get("url", self._url)
+            self._url = self.redirects.get(target, target)   # follow redirect
             return {"frameId": "fake-frame"}
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
-            if "document.title" in expr:
+            if "readyState" in expr:
+                value = "complete"
+            elif "document.title" in expr:
                 value = page.get("title", "")
+            elif "location" in expr or "href" in expr:
+                value = self._url          # the *landed* URL (after redirects)
             elif "innerText" in expr or "textContent" in expr:
                 value = page.get("text", "")
             else:
@@ -120,15 +141,23 @@ class _RealTransport:
             raise BrowserUnavailable(
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
-        self._conn = connect(ws_url, open_timeout=10, max_size=None)
+        # Bound a single CDP message so a hostile/huge page can't OOM us; we
+        # truncate text to _TEXT_LIMIT anyway.
+        self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         self._id += 1
         self._conn.send(json.dumps(
             {"id": self._id, "method": method, "params": params or {}}))
+        # Read replies until ours arrives, but never block past the deadline
+        # (a hung tab or a dropped reply must not wedge the whole agent).
+        deadline = time.monotonic() + _RECV_TIMEOUT
         while True:
-            msg = json.loads(self._conn.recv())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"CDP call {method} timed out")
+            msg = json.loads(self._conn.recv(timeout=remaining))
             if msg.get("id") == self._id:
                 if "error" in msg:
                     raise RuntimeError(msg["error"].get("message", "CDP error"))
@@ -192,9 +221,6 @@ def _build_transport() -> Transport:
 # --- session -------------------------------------------------------------
 
 
-_TEXT_LIMIT = 20_000
-
-
 class BrowserSession:
     """A stateful CDP session over a transport, with the governance baked in.
 
@@ -205,8 +231,10 @@ class BrowserSession:
     def __init__(self, transport: Transport) -> None:
         self._t = transport
         self.url: str = "about:blank"
-        # Every CDP call, in order — the replayable/auditable record.
-        self.ledger: list[dict[str, Any]] = []
+        # Every CDP call, in order — the replayable/auditable record. Bounded so
+        # a long-lived session can't grow it without limit (like a browser's own
+        # circular event buffer); the most recent _LEDGER_MAX calls are kept.
+        self.ledger: deque[dict[str, Any]] = deque(maxlen=_LEDGER_MAX)
         # Set once the session has loaded any external page: from then on its
         # content is untrusted. Surfaced so the tool layer / orchestrator can
         # reason about capability separation.
@@ -216,6 +244,35 @@ class BrowserSession:
         self.ledger.append({"method": method, "params": params})
         return self._t.send(method, params)
 
+    def _current_url(self) -> str:
+        """The URL actually loaded right now (after any redirect / JS nav)."""
+        try:
+            return self._eval("document.location ? document.location.href : ''")
+        except Exception:
+            return ""
+
+    def _blocked_landing(self) -> str | None:
+        """Re-run the SSRF/egress gate against the *landed* URL. The initial
+        check only covers the URL we asked for; a 3xx redirect or a JS
+        navigation can move the tab onto an internal host before we read it.
+        Returns a reason if the current page must not be exposed, else None."""
+        href = self._current_url()
+        if not href or href.startswith("about:"):
+            return None
+        return security.url_block_reason(href)
+
+    def _wait_ready(self, timeout: float = _LOAD_TIMEOUT) -> None:
+        """Bounded poll for document.readyState == 'complete' so reads don't
+        race a still-loading page. Best-effort: returns on timeout, never raises."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self._eval("document.readyState") == "complete":
+                    return
+            except Exception:
+                return
+            time.sleep(0.25)
+
     def open(self, url: str) -> str:
         """Navigate to `url` through the SSRF + egress gate, return a snapshot."""
         reason = security.url_block_reason(url)
@@ -224,18 +281,29 @@ class BrowserSession:
         self._call("Page.navigate", url=url)
         self.url = url
         self.ingested_untrusted = True
+        self._wait_ready()
+        # Defend against redirect/JS-nav SSRF: if the tab landed somewhere the
+        # gate forbids, navigate away and refuse to surface its content.
+        landed = self._blocked_landing()
+        if landed:
+            self._call("Page.navigate", url="about:blank")
+            self.url = "about:blank"
+            return f"Error: navigation landed on a blocked address ({landed})."
         title = self._eval("document.title")
         text = self._eval("document.body ? document.body.innerText : ''")
         return self._snapshot(title, text)
 
     def read(self, selector: str = "") -> str:
         """Read readable text from the current page (or a CSS `selector`)."""
+        self.ingested_untrusted = True
+        landed = self._blocked_landing()
+        if landed:
+            return f"Error: current page is a blocked address ({landed})."
         if selector:
             expr = (f"(function(){{var e=document.querySelector("
                     f"{json.dumps(selector)});return e?e.innerText:'';}})()")
         else:
             expr = "document.body ? document.body.innerText : ''"
-        self.ingested_untrusted = True
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
@@ -375,7 +443,17 @@ def _load_skills() -> list[BrowserSkill]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
-    return [BrowserSkill.from_dict(d) for d in raw if isinstance(d, dict)]
+    if not isinstance(raw, list):
+        return []
+    out: list[BrowserSkill] = []
+    for d in raw:
+        if not isinstance(d, dict):
+            continue
+        try:                       # tolerate a hand-edited/partial entry
+            out.append(BrowserSkill.from_dict(d))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _store_skills(skills: list[BrowserSkill]) -> None:
@@ -391,13 +469,29 @@ def _key(domain: str, name: str) -> tuple[str, str]:
     return (domain.strip().lower(), name.strip().lower())
 
 
+def _clip(text: str, limit: int) -> str:
+    return (text or "").strip()[:limit]
+
+
 def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
                  author: str = "olympus", base_score: float = 0.0) -> BrowserSkill:
     """Insert or replace a skill (keyed by domain+name), preserving outcome
-    counts on replacement so a re-recorded skill keeps its measured score."""
+    counts on replacement so a re-recorded skill keeps its measured score.
+
+    Inputs are length-capped and the library is bounded (lowest-reliability
+    skills are dropped past _SKILLS_MAX) so an over-eager agent can't bloat the
+    on-disk store without limit.
+    """
+    domain = _clip(domain, _SKILL_FIELD_MAX)
+    name = _clip(name, _SKILL_FIELD_MAX)
+    if not domain or not name:
+        raise ValueError("a browser skill needs a non-empty domain and name")
+    skill = BrowserSkill(
+        domain=domain, name=name, steps=_clip(steps, _SKILL_STEPS_MAX),
+        source=_clip(source, _SKILL_FIELD_MAX) or "agent",
+        author=_clip(author, _SKILL_FIELD_MAX) or "olympus",
+        base_score=max(0.0, min(1.0, base_score)))
     skills = _load_skills()
-    skill = BrowserSkill(domain=domain, name=name, steps=steps, source=source,
-                         author=author, base_score=max(0.0, min(1.0, base_score)))
     out, replaced = [], False
     for existing in skills:
         if _key(existing.domain, existing.name) == _key(domain, name):
@@ -409,6 +503,9 @@ def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
             out.append(existing)
     if not replaced:
         out.append(skill)
+    if len(out) > _SKILLS_MAX:      # keep the most reliable, drop the long tail
+        out = sorted(out, key=lambda s: (s.reliability, s.runs),
+                     reverse=True)[:_SKILLS_MAX]
     _store_skills(out)
     return skill
 
