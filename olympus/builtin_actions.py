@@ -55,8 +55,11 @@ def _email_preview(p: dict) -> str:
 
 
 def _email_execute(p: dict) -> dict:
+    # _approved=True: this runs only after explicit approval on the actions
+    # spine, so the egress guard must NOT re-fire here (it would re-hold the
+    # send and loop forever). Approval IS the gate clearing.
     msg = tools._send_email(p.get("to", ""), p.get("subject", ""),
-                            p.get("body", ""))
+                            p.get("body", ""), _approved=True)
     if msg.lower().startswith("error"):
         raise RuntimeError(msg)
     return {"status": msg}
@@ -69,7 +72,10 @@ def _webhook_preview(p: dict) -> str:
 
 
 def _webhook_execute(p: dict) -> dict:
-    msg = tools._call_webhook(p.get("name", ""), p.get("payload", {}))
+    # _approved=True: approved-action path; the egress guard must not re-fire
+    # here (see _email_execute).
+    msg = tools._call_webhook(p.get("name", ""), p.get("payload", {}),
+                              _approved=True)
     if msg.lower().startswith("error"):
         raise RuntimeError(msg)
     return {"status": msg}
@@ -179,6 +185,20 @@ def register_builtins() -> None:
         name="call_webhook", risk_class=actions.IRREVERSIBLE, scope="webhook",
         preview=_webhook_preview, execute=_webhook_execute,
         description="POST a payload to an operator-configured webhook."))
+    # Egress-gateway HOLD targets: when egress.guard() classifies an outbound
+    # email/webhook SENSITIVE (C2), it routes the send here for explicit
+    # approval. They reuse the existing executors/previews; IRREVERSIBLE so they
+    # never auto-run. (Boundary layer, Phase A — docs/DESIGN_BOUNDARY_LAYER.md.)
+    actions.register(actions.ActionType(
+        name="email_egress_held", risk_class=actions.IRREVERSIBLE, scope="email",
+        preview=_email_preview, execute=_email_execute,
+        description="An email whose content was classified SENSITIVE and held "
+                    "for explicit approval before sending."))
+    actions.register(actions.ActionType(
+        name="webhook_egress_held", risk_class=actions.IRREVERSIBLE,
+        scope="webhook", preview=_webhook_preview, execute=_webhook_execute,
+        description="A webhook POST whose payload was classified SENSITIVE and "
+                    "held for explicit approval before sending."))
     # Gmail
     actions.register(actions.ActionType(
         name="gmail_send", risk_class=actions.IRREVERSIBLE, scope="gmail.send",
