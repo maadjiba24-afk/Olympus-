@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from . import config, security, tools, usage
 
@@ -23,6 +24,9 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
     url = f"{base}/chat/completions"
+    # Sovereign egress choke: under sovereign mode a model call to a
+    # non-allowlisted host fails closed here (no-op when sovereign is off).
+    security.assert_egress_allowed(urlparse(url).hostname or "")
     body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if settings.api_key:

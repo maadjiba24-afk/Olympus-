@@ -143,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
+    p_ask.add_argument("--data-class", choices=("public", "internal", "restricted"),
+                       default=None,
+                       help="data-sensitivity class for routing; 'restricted' "
+                            "stays local even with sovereign mode off")
 
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
@@ -495,6 +499,17 @@ def main(argv: list[str] | None = None) -> int:
                  if b["enabled"] else "off"))
         print(f"  accounts       : "
               + ("required (login)" if accounts.require_login() else "open"))
+        sov = config.sovereign_status()
+        print(f"  sovereign mode : "
+              + ("ON — zero-egress, local-only" if sov["sovereign"] else "off"))
+        if sov["sovereign"] or sov["allowlist"]:
+            print(f"  egress allowlist: "
+                  + (", ".join(sov["allowlist"]) or "(loopback + local only)"))
+        print(f"  default class  : {sov['default_data_class']}")
+        print(f"  models         : " + (", ".join(sov["members"]) or "(none)"))
+        print(f"  eligible local : "
+              + (", ".join(sov["eligible_local"]) or "(none — sovereign would "
+                 "fail closed)"))
         print()
         print(usage.report(7))
     elif args.command == "replay":
@@ -678,10 +693,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "ask":
         if not firstrun.ensure_ready():
             return 1
-        from . import config
+        from . import config, security
+        try:
+            pool = config.ModelPool.from_env()
+            if config.data_class_local_only(args.data_class):
+                pool = pool.local_only()      # fail-closed if no local member
+        except security.SovereigntyError as err:
+            print(f"[sovereign] {err}", file=sys.stderr)
+            return 1
         bot = orchestrator.Olympus(
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
-            pool=config.ModelPool.from_env())
+            pool=pool)
         print(bot.ask(" ".join(args.question)))
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())

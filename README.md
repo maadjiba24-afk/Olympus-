@@ -450,6 +450,28 @@ the `/v1/*` routes answer on **loopback only** (never a silent open relay). Full
 details, `curl` examples, and the auth/loopback notes live in
 [docs/OPENAI_ENDPOINT.md](docs/OPENAI_ENDPOINT.md).
 
+### Sovereignty: provable zero-egress mode
+
+Set `OLYMPUS_SOVEREIGN=1` and Olympus runs **fully local with an enforced,
+fail-closed guarantee**: remote models are excluded from selection entirely,
+every model call / tool fetch funnels through a single egress check
+(`security.assert_egress_allowed`) that raises rather than leaking, and routing
+honors a `public` / `internal` / `restricted` data class (a `restricted` request
+stays local even when sovereign mode is off). If no local model is configured it
+**fails closed** instead of downgrading to a remote one.
+
+```bash
+export OLYMPUS_SOVEREIGN=1
+export OLYMPUS_PROVIDER=openai OLYMPUS_BASE_URL=http://localhost:11434/v1 OLYMPUS_MODEL=qwen2.5
+olympus status          # shows sovereign=ON, allowlist, eligible local models
+```
+
+This is application-layer enforcement at Olympus's own egress choke — not an OS
+firewall (pair it with one for a host-wide guarantee). The threat model, the
+fully-local recipe (Ollama/vLLM), the data-class policy table, and an honest
+statement of the boundary are in
+[docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md).
+
 ### Connectors: MCP servers & custom plugins
 
 Olympus connects to external tools and data two ways, both governed by the

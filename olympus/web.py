@@ -1108,7 +1108,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "missing or wrong access token"}, 401)
             return
         if url.path == "/api/metrics":
-            self._json(metrics.snapshot())     # instance ops, not per-user
+            snap = metrics.snapshot()          # instance ops, not per-user
+            snap["sovereignty"] = config.sovereign_status()
+            self._json(snap)
             return
         params = parse_qs(url.query)
         sid = self._session_id(params.get("session", [None])[0])
@@ -1121,7 +1123,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
             events = _session(sid).events
-            self._json({"events": events[since:], "next": len(events)})
+            self._json({"events": events[since:], "next": len(events),
+                        "sovereignty": config.sovereign_status()})
             return
         user = self._principal(sid)
         if user is None:
@@ -1476,10 +1479,19 @@ class Handler(BaseHTTPRequestHandler):
         if not prompt.strip():
             self._v1_error(400, "invalid request: no user message content.")
             return
+        # Data-class routing: an X-Olympus-Data-Class header (public/internal/
+        # restricted) selects the destination policy. `restricted` stays local
+        # even with sovereign mode off; an unspecified class defaults to
+        # local-only when sovereign mode is on.
+        data_class = config.normalize_data_class(
+            self.headers.get("X-Olympus-Data-Class"))
+        from . import security
         # Any `model` value maps to the one council pipeline for v1; unsupported
         # params (temperature, tools, ...) are accepted and ignored by design.
         try:
             pool = config.ModelPool.from_env()
+            if config.data_class_local_only(data_class):
+                pool = pool.local_only()        # fail-closed if no local member
             bot = orchestrator.Olympus(pool=pool, user="api-v1")
             if stream:
                 self._stream_v1(bot, prompt, model)
@@ -1487,6 +1499,9 @@ class Handler(BaseHTTPRequestHandler):
                 answer = bot.ask(prompt)
                 self._json(openai_server.completion_response(
                     answer, model, prompt_text=prompt))
+        except security.SovereigntyError as err:
+            # Fail closed with a clear, non-leaky message (never downgrade).
+            self._v1_error(403, str(err))
         except Exception as err:
             from . import errors
             errors.capture("web /v1/chat/completions", err,

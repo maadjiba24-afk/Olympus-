@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Default model for the Anthropic backend. Opus 4.8 supports adaptive
 # thinking, effort control, and the server-side web_search/web_fetch tools.
@@ -139,12 +140,30 @@ class ModelPool:
                 if fp not in seen:
                     seen.add(fp)
                     members.append(s)
+        # Sovereign mode constrains *which members are eligible* before the
+        # existing capability-score selection runs — it never touches scoring.
+        # A remote frontier model can never be selected (not even as a tie-break
+        # or fallback); if no local member remains we FAIL CLOSED rather than
+        # reaching for a remote one.
+        if sovereign_mode():
+            eligible = [m for m in members if member_is_local(m)]
+            if not eligible:
+                from . import security
+                raise security.NoLocalModelError(
+                    "sovereign mode is on but no local model is configured — "
+                    "no pool member's host is on the egress allowlist "
+                    "(loopback + OLYMPUS_EGRESS_ALLOWLIST + local providers). "
+                    "Refusing to fall back to a remote model.")
+            members = eligible
         if not members:                       # fall back to the first given/env
             members = [settings[0] if settings else Settings.from_env()]
         return cls(tuple(members))
 
     @classmethod
-    def from_env(cls) -> "ModelPool":
+    def _env_members(cls) -> list[Settings]:
+        """The raw member list from env (primary + OLYMPUS_MODELS pool), BEFORE
+        any sovereign eligibility filtering — used by status surfaces to report
+        every configured member and which of them are local."""
         primary = Settings.from_env()
         extra = []
         raw = os.environ.get("OLYMPUS_MODELS")
@@ -159,7 +178,23 @@ class ModelPool:
                         base_url=d.get("base_url")))
             except (json.JSONDecodeError, AttributeError, TypeError):
                 pass
-        return cls.of(primary, *extra)
+        return [primary, *extra]
+
+    @classmethod
+    def from_env(cls) -> "ModelPool":
+        return cls.of(*cls._env_members())
+
+    def local_only(self) -> "ModelPool":
+        """A pool restricted to local/allowlisted members — used to honor a
+        data class that must stay local (e.g. `restricted`) even when the global
+        sovereign flag is OFF. Fails closed if no eligible member remains."""
+        eligible = tuple(m for m in self.members if member_is_local(m))
+        if not eligible:
+            from . import security
+            raise security.NoLocalModelError(
+                "this request's data class requires a local model, but none is "
+                "configured (no member's host is on the egress allowlist).")
+        return ModelPool(eligible)
 
     def primary(self) -> Settings:
         return self.members[0]
@@ -339,6 +374,96 @@ def fast_mode() -> bool:
     little polish for markedly lower latency (OLYMPUS_FAST=1)."""
     return os.environ.get("OLYMPUS_FAST", "").strip().lower() in (
         "1", "true", "yes", "on")
+
+
+# --- sovereignty: provable zero-egress mode (SPEC-02) --------------------
+# Sovereign mode turns Olympus's *capability* to run fully local into an
+# enforced, fail-closed *guarantee*: remote models are excluded from selection,
+# every egress is funneled through security.assert_egress_allowed, and a blocked
+# destination raises rather than leaking. OFF by default → behavior unchanged.
+
+DATA_CLASSES = ("public", "internal", "restricted")
+
+
+def sovereign_mode() -> bool:
+    """Whether zero-egress sovereignty is enforced (OLYMPUS_SOVEREIGN). When on,
+    the egress invariant holds: data leaves only to allowlisted hosts, remote
+    models are never selected, and a forbidden egress fails closed."""
+    return os.environ.get("OLYMPUS_SOVEREIGN", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def egress_allowlist() -> list[str]:
+    """Hosts/CIDRs permitted to receive data under sovereign mode
+    (OLYMPUS_EGRESS_ALLOWLIST, comma-separated). Loopback and known local
+    providers are always allowed implicitly and need not be listed."""
+    raw = os.environ.get("OLYMPUS_EGRESS_ALLOWLIST", "")
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def member_host(s: "Settings") -> str:
+    """The egress host a pool member would talk to: the base_url host if set,
+    else the provider's default endpoint. (claude-code shells to the `claude`
+    CLI, which itself egresses to Anthropic, so it counts as remote.)"""
+    if s.base_url:
+        return (urlparse(s.base_url).hostname or "").lower()
+    return {"anthropic": "api.anthropic.com",
+            "claude-code": "api.anthropic.com",
+            "openai": "api.openai.com"}.get(s.provider, "")
+
+
+def member_is_local(s: "Settings") -> bool:
+    """Whether a member is sovereign-eligible: its egress host is on the
+    allowlist (loopback / local provider / OLYMPUS_EGRESS_ALLOWLIST). Independent
+    of the global sovereign flag so data-class routing can use it too."""
+    from . import security
+    return security.host_on_allowlist(member_host(s))
+
+
+def normalize_data_class(value) -> str | None:
+    """Return a valid data class (public/internal/restricted) or None."""
+    v = (value or "").strip().lower() if isinstance(value, str) else ""
+    return v if v in DATA_CLASSES else None
+
+
+def default_data_class() -> str:
+    """Class for an unspecified request: most-permissive (`public`) only when
+    sovereign mode is OFF; when ON, default to at least `internal` (local-only).
+    """
+    return "internal" if sovereign_mode() else "public"
+
+
+def data_class_local_only(value) -> bool:
+    """Policy table → whether a request of this data class must stay local:
+      restricted ⇒ local-only regardless of the global sovereign flag;
+      internal   ⇒ local-only when sovereign is on;
+      public     ⇒ may use remote only when sovereign is off.
+    An unspecified class resolves via default_data_class()."""
+    dc = normalize_data_class(value) or default_data_class()
+    if dc == "restricted":
+        return True
+    return sovereign_mode()
+
+
+def sovereign_status() -> dict:
+    """Auditor-facing snapshot: mode, the active allowlist, every configured
+    member, and which members are eligible (local). Never raises — it reports
+    the raw configuration even when sovereign mode would fail closed."""
+    members = ModelPool._env_members()
+    usable = [m for m in members if m.usable()]
+
+    def desc(m: "Settings") -> str:
+        host = member_host(m) or "local"
+        return f"{m.provider}/{m.model or '(default)'} @ {host}"
+
+    eligible = [m for m in usable if member_is_local(m)]
+    return {
+        "sovereign": sovereign_mode(),
+        "allowlist": egress_allowlist(),
+        "default_data_class": default_data_class(),
+        "members": [desc(m) for m in usable],
+        "eligible_local": [desc(m) for m in eligible],
+    }
 
 
 def require_byok() -> bool:
