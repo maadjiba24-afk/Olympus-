@@ -64,6 +64,11 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
 | `browse_page` | Fetch a page as text + extract links | ingests untrusted | Output treated as untrusted; wrapped | SSRF / injected page content — `should_wrap` wraps it |
+| `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
+| `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
+| `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any run that ingests untrusted content (capability separation) | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run |
+| `browser_skill_record` | Save a browser skill with provenance + score | first-party write | Steps sanitized at write; provenance + content hash recorded | Skill poisoning via injection-shaped steps — `sanitize_for_memory` |
+| `browser_skills` | List browser skills ranked by reliability | first-party read | Read-only; own recorded skills | None significant — own content, scored not trusted blindly |
 | `search_sessions` | Full-text search past conversations | first-party read | Read-only; this user's own history | None significant — own content; per-user namespaced |
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |

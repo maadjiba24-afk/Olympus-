@@ -169,9 +169,16 @@ SPECIALISTS: dict[str, Specialist] = {
             key="argus", name="Argus", title="Opportunity Scout",
             description="Surfs the internet (no MCP needed — server-side web "
                         "search) to find business opportunities, emerging trends, "
-                        "and what is happening in the world right now.",
+                        "and what is happening in the world right now. Can drive "
+                        "a real browser to read sites that need it.",
             web=True,
-            extra_tools=("browse_page",),
+            # Granted the full browser loadout. Because Argus ingests untrusted
+            # web content, capability separation strips the credentialed
+            # actuator (browser_act) from its live loadout — it can read/learn
+            # via the harness but never act on a logged-in session in the same
+            # run. The read/learn tools (open/read/skills) remain.
+            extra_tools=("browse_page", "browser_open", "browser_read",
+                         "browser_act", "browser_skills", "browser_skill_record"),
         ),
         Specialist(
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",

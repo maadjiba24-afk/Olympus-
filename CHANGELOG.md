@@ -15,6 +15,44 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Governed browser harness (`olympus/browser.py`)
+
+- A stateful Chrome-DevTools-Protocol harness that lets a specialist drive a
+  **real** browser — Olympus's answer to the open-web "agent + CDP" pattern,
+  built so the browser inherits Olympus's governance instead of bypassing it.
+  The transport is pluggable: a lazy WebSocket transport attaches to Chrome
+  (`OLYMPUS_BROWSER_CDP_URL`, optional `websockets` extra), while an in-memory
+  `FakeTransport` keeps tests and headless CI fully offline — the core
+  dependency set is unchanged.
+- **Five named, threat-modeled tools** (39 → 44): `browser_open`,
+  `browser_read`, `browser_act`, `browser_skill_record`, `browser_skills`.
+  Granted to **Argus**.
+- **Provenance-scored skill library.** A browser skill carries its source,
+  author, creation time, a content hash, and an outcome-derived reliability
+  score (`successes/runs`); `browser_skills` ranks by measured reliability, not
+  blind trust. Stored at `MEMORY_DIR/browser_skills.json`.
+- **Replayable session ledger.** Every CDP call is appended to a per-session
+  ledger, so a browser session is auditable rather than a black box.
+- **Real-browser attach + opt-in smoke test.** `OLYMPUS_BROWSER_CDP_URL` accepts
+  a DevTools base (`http://host:port`, auto-discovering a page target) or a
+  `ws://` page URL; `tests/test_browser_smoke.py` drives real headless Chrome
+  through the live transport, skipped unless `OLYMPUS_BROWSER_SMOKE=1`.
+
+### Security
+
+- **Egress + SSRF gate on every navigation.** `browser_open` routes through
+  `security.url_block_reason` — no internal/metadata address, and under
+  sovereign mode no non-allowlisted host, can be reached. `browser_open` /
+  `browser_read` join `INGESTION_TOOLS`, so their output is wrapped as
+  untrusted.
+- **Capability separation closes the credential kill-chain.** `browser_act`
+  (click/type on a possibly logged-in session) is a registered `ACTION_TOOL`,
+  so it is stripped from any run that also ingests untrusted page content. Argus
+  reads/learns via the harness but, because it ingests the web, never holds the
+  credentialed actuator in the same run — proven in `tests/test_browser.py`.
+- See [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for the full
+  strengths→moats / weaknesses→credibility-assets rationale.
+
 ## [0.22.0] — 2026-06-29
 
 ### Added — OpenAI-compatible inbound endpoint (SPEC-01)

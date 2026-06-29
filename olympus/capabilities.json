@@ -105,9 +105,14 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 39,
+    "count": 44,
     "names": [
       "browse_page",
+      "browser_act",
+      "browser_open",
+      "browser_read",
+      "browser_skill_record",
+      "browser_skills",
       "cache_fact",
       "call_webhook",
       "codegraph_impact",
