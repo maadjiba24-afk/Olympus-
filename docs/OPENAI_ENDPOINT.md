@@ -42,6 +42,28 @@ Authorization: Bearer sk-my-secret-key
   refused with **`403`** — Olympus never becomes a silent open relay. Set
   `OLYMPUS_API_KEYS` before exposing the endpoint off-box.
 
+### How "remote" is decided (anti-spoofing)
+
+The loopback decision is made **only from the kernel-reported peer address**
+(`self.client_address[0]`) — never from a request header. `Host`,
+`X-Forwarded-For`, `X-Real-IP`, and `Forwarded` are all client-controllable, so
+trusting them would make the loopback guarantee spoofable. Two consequences when
+`OLYMPUS_API_KEYS` is unset:
+
+- **Bound off-loopback ⇒ key required.** If the server is bound to anything
+  other than a loopback address (e.g. `--host 0.0.0.0`), `/v1/*` refuses with
+  `401` until you configure keys. Safety is *not* inferred from the per-request
+  connection.
+- **Reverse-proxy trap is closed.** Behind a proxy (this repo ships a
+  `Caddyfile`) the peer address is the proxy's *loopback* address, so a naive
+  "peer == 127.0.0.1 ⇒ trusted" check would expose `/v1/*` to the whole
+  internet. So when no keys are set, the **presence** of a reverse-proxy
+  forwarding header (`X-Forwarded-For` / `X-Real-IP` / `Forwarded` /
+  `X-Forwarded-Host` / `X-Forwarded-Proto`) is treated as proof the request is
+  relayed from off-box and is refused with `401` (configure keys). Only the
+  header's *presence* is used, and only to deny — its (spoofable) value is never
+  trusted. **Set `OLYMPUS_API_KEYS` whenever Olympus sits behind a proxy.**
+
 > This is independent of the dashboard's `OLYMPUS_ACCESS_TOKEN` (the
 > `X-Olympus-Token` header), which gates the browser UI's `/api/*` routes.
 

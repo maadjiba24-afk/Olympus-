@@ -252,6 +252,63 @@ def _https_request(handler: BaseHTTPRequestHandler) -> bool:
     return proto.split(",")[0].strip().lower() == "https"
 
 
+# --- /v1/* loopback boundary (security primitive, header-independent) --------
+# The remoteness decision for the OpenAI-compatible endpoints is made from the
+# kernel-reported peer address ONLY — never from a client-controllable header
+# (Host / X-Forwarded-For / X-Real-IP / Forwarded), which would be spoofable and
+# would turn the "loopback-only" guarantee into an open relay. This module-level
+# predicate is the single source of truth for that decision.
+
+# Header names that signal a reverse proxy is relaying a request. Their PRESENCE
+# (not their value — values are attacker-controlled) means the loopback peer is
+# a proxy fronting a real remote client; see _forwarding_headers_present.
+_FORWARDING_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded",
+                       "X-Forwarded-Host", "X-Forwarded-Proto")
+
+
+def _is_loopback(ip: str) -> bool:
+    """True iff `ip` (a peer address from self.client_address[0]) is loopback.
+
+    Decided purely from the kernel-reported peer address. IPv4 loopback is the
+    whole 127.0.0.0/8 block; IPv6 loopback is ::1; IPv4-mapped-IPv6 forms
+    (::ffff:127.x) are unwrapped first so a mapped public address can't sneak
+    through. No header is consulted."""
+    ip = (ip or "").strip().lower()
+    if ip.startswith("::ffff:"):          # IPv4-mapped IPv6 → compare the v4 part
+        ip = ip[len("::ffff:"):]
+    if ip in ("::1", "0:0:0:0:0:0:0:1"):
+        return True
+    return ip.startswith("127.")
+
+
+def _forwarding_headers_present(headers) -> bool:
+    """Whether any reverse-proxy forwarding header is present. A loopback peer
+    that carries one of these is a proxy relaying an external client — so a
+    loopback peer alone must NOT be treated as 'trusted local' when it appears.
+    Only presence is checked; the (spoofable) value is never trusted."""
+    if not headers:
+        return False
+    return any(headers.get(h) for h in _FORWARDING_HEADERS)
+
+
+def _v1_allowed(peer_ip: str, headers) -> bool:
+    """The /v1/* allow decision when OLYMPUS_API_KEYS is unset, as a pure
+    function of the kernel peer address and the request headers' shape.
+
+    This is the single predicate both the request handler (`_v1_authorized`)
+    and the boundary tests consult. A no-key deployment only ever serves when
+    the server is bound to loopback, so this assumes that binding and answers
+    the two remaining dimensions:
+      * the peer must be loopback (decided from client_address, never a header);
+      * no reverse-proxy forwarding header may be present (its presence proves
+        the loopback peer is a proxy relaying an off-box client — the Caddy
+        trap), so we refuse and require a key instead.
+    Header *values* are never trusted; only the *presence* of a forwarding
+    header is used, and only to deny. Returns True iff the request may be served
+    without a configured API key."""
+    return _is_loopback(peer_ip) and not _forwarding_headers_present(headers)
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -1343,13 +1400,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- OpenAI-compatible inbound endpoint (/v1/*) ----------------------
 
-    def _is_loopback(self) -> bool:
-        """Whether the request came from this machine. Used so that, with no
-        OLYMPUS_API_KEYS configured, the /v1/* routes never act as an open relay
-        — they answer locally but refuse remote callers."""
-        host = (self.client_address[0] if self.client_address else "") or ""
-        return (host.startswith("127.") or host == "::1"
-                or host == "::ffff:127.0.0.1")
+    def _peer_is_loopback(self) -> bool:
+        """Whether the request came from this machine — decided from the kernel
+        peer socket (self.client_address[0]) ONLY, never a header. Delegates to
+        the module-level `_is_loopback`, the single source of truth."""
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        return _is_loopback(peer)
+
+    def _bound_to_loopback(self) -> bool:
+        """Whether the server socket is bound to a loopback address. If it's
+        bound to anything else (0.0.0.0, a LAN IP, ...), the process is reachable
+        off-box and 'no key' can't be safe — we don't infer safety from the
+        per-connection peer. Defaults to False (treat as exposed) if unknown."""
+        try:
+            return _is_loopback(self.server.server_address[0])
+        except Exception:
+            return False
 
     def _bearer_token(self) -> str:
         auth = self.headers.get("Authorization", "") or ""
@@ -1359,7 +1425,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _v1_authorized(self) -> tuple[bool, int, str]:
         """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid
-        bearer key. With none set, serve loopback-only (never an open relay).
+        bearer key. With none set, serve loopback-only — and never an open relay:
+        the remoteness decision comes from the peer socket (not headers), and a
+        process bound off-loopback must carry a key even for a 'local'-looking
+        peer (a reverse proxy connects from loopback while fronting the world).
         Returns (ok, http_status, message)."""
         keys = config.api_keys()
         if keys:
@@ -1369,10 +1438,21 @@ class Handler(BaseHTTPRequestHandler):
             return (False, 401,
                     "missing or invalid API key — pass a configured "
                     "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
-        if not self._is_loopback():
+        # No keys configured: loopback-only, and never an open relay.
+        if not self._peer_is_loopback():
             return (False, 403,
                     "the OpenAI-compatible API is loopback-only until "
                     "OLYMPUS_API_KEYS is configured (no open relay).")
+        if not self._bound_to_loopback():
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: the server is bound to a non-loopback "
+                    "address, so the OpenAI-compatible API needs an API key "
+                    "(safety is not inferred from the connection).")
+        if _forwarding_headers_present(self.headers):
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
+                    "present, so this request is being relayed from off-box and "
+                    "needs an API key (no open relay behind a proxy).")
         return True, 200, ""
 
     def _v1_error(self, code: int, message: str) -> None:
