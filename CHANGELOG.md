@@ -15,6 +15,59 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-06-29
+
+### Added — OpenAI-compatible inbound endpoint (SPEC-01)
+
+- **`olympus/openai_server.py`** (new) + the `web.py` handler — expose Olympus
+  as an OpenAI Chat Completions API: `POST /v1/chat/completions` (streaming and
+  non-streaming) and `GET /v1/models`, so any OpenAI client/IDE/app can drive
+  the full council by changing only `base_url` + `model` + `api_key`. Pure
+  stdlib request/response translation (messages→prompt, `chat.completion` /
+  `chat.completion.chunk` shaping, SSE ending in `data: [DONE]`, a usage
+  estimate); each request runs the existing `orchestrator` pipeline — no new
+  framework, no parallel pipeline.
+- **`config.api_keys()`** (`OLYMPUS_API_KEYS`) gates it: `/v1/*` is
+  **loopback-only** when unset (never a silent open relay), `401` on a bad
+  bearer token, `403` for a remote peer. `olympus serve` mounts the same
+  handler. See [docs/OPENAI_ENDPOINT.md](docs/OPENAI_ENDPOINT.md).
+
+### Added — provable zero-egress sovereignty mode (SPEC-02, off by default)
+
+- **`security.py`** — a single egress choke point `assert_egress_allowed(host)`
+  (typed `EgressBlocked`) with `host_on_allowlist()` / `egress_allowed()`.
+  Loopback, local providers, and `OLYMPUS_EGRESS_ALLOWLIST` (hosts/IPs/CIDRs)
+  are permitted; the existing SSRF guard routes through the same choke. A pure
+  no-op when sovereign mode is off — behaviour byte-for-byte unchanged.
+- **`config.py`** — `OLYMPUS_SOVEREIGN` / `OLYMPUS_EGRESS_ALLOWLIST`; the
+  `ModelPool` filters non-local members **before** model selection and **fails
+  closed** if none remain (no silent remote fallback), plus per-request
+  data-class routing (`olympus ask --data-class`, the `X-Olympus-Data-Class`
+  header). `olympus status` shows the mode, allowlist, and eligible models. See
+  [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md).
+
+### Added — production-real audit & verification (SPEC-03)
+
+- **`olympus verify --run <id>`** — one PASS/FAIL that combines `replay_run`
+  (the byte-identical decision path) **and** the decision-log signature against
+  the trusted key, exiting non-zero and naming the divergence/signature failure.
+  `--require-production` fails a run signed under the public default seed, and a
+  default-seed pass is loudly labelled `DEV / UNVERIFIED`.
+- **`web.py`** — `/api/status` reports a `signing` posture object, and an OpenAI
+  endpoint answer carries `X-Olympus-Run-Id` + `X-Olympus-Audit` so a caller can
+  locate and verify the run behind it. New [docs/VERIFY.md](docs/VERIFY.md);
+  `docs/SIGNING.md` gains seed generation, HSM/KMS guidance, and a key-rotation
+  procedure.
+
+### Security
+
+- **Hardened the `/v1/*` loopback boundary** against header spoofing and the
+  reverse-proxy open-relay trap. The remoteness decision reads only the kernel
+  peer socket (never a forwarding header), unwraps IPv4-mapped IPv6, and — when
+  no `OLYMPUS_API_KEYS` are set — refuses non-loopback peers and requires a key
+  whenever a proxy forwarding header is present. Header values are never
+  trusted, only their presence, and only to deny.
+
 ### Added — egress gateway, Phase A (boundary layer, off by default)
 
 - **`olympus/egress.py`** — the unified egress chokepoint. `classify()` (pure,
@@ -286,7 +339,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0
