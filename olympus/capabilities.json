@@ -36,7 +36,7 @@
     ]
   },
   "commands": {
-    "count": 66,
+    "count": 67,
     "names": [
       "actions",
       "add-mcp",
@@ -65,6 +65,7 @@
       "heartbeat",
       "import-agent",
       "learn",
+      "learned",
       "limit",
       "memory",
       "models",
@@ -108,7 +109,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 58,
+    "count": 59,
     "names": [
       "browse_page",
       "browser_act",
@@ -150,6 +151,7 @@
       "read_source_file",
       "recall_fact",
       "recall_memory",
+      "recent_learning",
       "restore_prompt",
       "run_benchmark",
       "run_code_benchmark",

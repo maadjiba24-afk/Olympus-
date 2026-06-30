@@ -151,6 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    sub.add_parser("learned", help="what Olympus learned/did on its own "
+                                   "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
     sub.add_parser("errors", help="recent captured runtime errors (operator view)")
     sub.add_parser("dashboard", help="one consolidated operator health view "
@@ -568,6 +570,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"{s['rejected']} rejected, {s['undone']} undone.")
             for ins in outcomes.insights(user):
                 print(f"\n  💡 {ins['message']}")
+    elif args.command == "learned":
+        from . import digest
+        firstrun.load_env_file()
+        print(digest.learned_recently())
     elif args.command == "status":
         from . import config, usage, accounts
         firstrun.load_env_file()

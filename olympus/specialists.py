@@ -192,7 +192,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "lessons, corrections, and user feedback into reusable "
                         "skills so the whole council gets smarter every day.",
             system=True,
-            extra_tools=("create_skill", "gate_skills", "operator_review"),
+            extra_tools=("create_skill", "gate_skills", "operator_review",
+                         "recent_learning"),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",

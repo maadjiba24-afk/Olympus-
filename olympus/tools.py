@@ -1000,6 +1000,11 @@ def _operator_remember_login(domain: str) -> str:
             "straight to the encrypted vault and never through our chat.")
 
 
+def _recent_learning() -> str:
+    from . import digest
+    return digest.learned_recently()
+
+
 def _set_advanced_mode(on: bool = True) -> str:
     user = memory.current_user()
     val = str(on).strip().lower() in ("1", "true", "yes", "on") \
@@ -1056,6 +1061,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "operator_status": _operator_status,
     "operator_remember_login": _operator_remember_login,
     "set_advanced_mode": _set_advanced_mode,
+    "recent_learning": _recent_learning,
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -1589,6 +1595,17 @@ OPERATOR_REMEMBER_LOGIN = {
     },
 }
 
+RECENT_LEARNING = {
+    "name": "recent_learning",
+    "description": (
+        "Summarize what Olympus has done and learned on its own (the autonomous "
+        "heartbeat loop): when each cycle last ran, the skill count, and recent "
+        "world reports, lessons, and self-upgrades. Use when the user asks what "
+        "Olympus did or learned while they were away."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
 SET_ADVANCED_MODE = {
     "name": "set_advanced_mode",
     "description": (
@@ -1718,6 +1735,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "operator_status": OPERATOR_STATUS,
     "operator_remember_login": OPERATOR_REMEMBER_LOGIN,
     "set_advanced_mode": SET_ADVANCED_MODE,
+    "recent_learning": RECENT_LEARNING,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

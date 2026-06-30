@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — "What Olympus learned on its own" readout (`olympus/digest.py`)
+
+- A plain-language summary of the autonomous loop's recent activity: when each
+  cycle last ran (world scan, video learning, daily skill distillation,
+  training, self-audit), the skill count, and recent world reports / lessons /
+  self-upgrades. Read-only over the heartbeat's persisted state + memory — no
+  model calls. Surfaced three ways: the `olympus learned` CLI command, the
+  `/learned` chat command, and the `recent_learning` agent tool (granted to
+  Metis) so you can just ask "what did you learn while I was away?".
+- New `memory.recent_titles(category, n)` helper. Tools 58 → 59; commands
+  66 → 67. THREAT_MODEL row, `capabilities.json`, README counts, and
+  `tests/test_digest.py` added.
+
 ### Changed — Always-on learning runs by default in the cloud deploy
 
 - `deploy/docker-compose.yml` now enables the `heartbeat` service by default, so

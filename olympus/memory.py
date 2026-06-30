@@ -176,6 +176,21 @@ def recent(category: str, n: int = 5) -> str:
     )
 
 
+def recent_titles(category: str, n: int = 5) -> list[str]:
+    """The titles of the most recent notes in a category (newest first) — a
+    glanceable list without the bodies."""
+    files = list(_dir(category).glob("*.md"))
+    if category in USER_SCOPED and current_user() != "shared":
+        files += list(_dir(category, current_user()).glob("*.md"))
+    files = sorted(files, key=lambda p: p.name, reverse=True)[:n]
+    out: list[str] = []
+    for p in files:
+        body = parse_note(p.read_text(encoding="utf-8", errors="replace"))[1]
+        first = body.lstrip().splitlines()[0] if body.strip() else ""
+        out.append(first.lstrip("# ").strip() or p.stem)
+    return out
+
+
 def prune(category: str, keep: int = 200) -> str:
     """Keep only the newest `keep` files in a category (current user's
     namespace). Older entries are deleted — Metis distills the durable ones
