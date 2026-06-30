@@ -87,14 +87,25 @@ class FakeTransport:
     """
 
     def __init__(self, pages: dict[str, dict[str, str]] | None = None,
-                 redirects: dict[str, str] | None = None) -> None:
+                 redirects: dict[str, str] | None = None,
+                 present: list[str] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
         # post-navigation SSRF re-check can be exercised offline.
         self.redirects = redirects or {}
+        # CSS selectors that "exist" on the page, so exists()/fill()/login() can
+        # be driven offline. Tracks what fill() set, too.
+        self.present = set(present or [])
+        self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
+
+    def _matched_selector(self, expr: str) -> str | None:
+        for sel in self.present:
+            if json.dumps(sel) in expr:
+                return sel
+        return None
 
     def send(self, method: str, params: dict | None = None) -> dict:
         params = params or {}
@@ -106,6 +117,15 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
+            if "querySelector" in expr:           # exists / fill / click / read
+                sel = self._matched_selector(expr)
+                if "innerText" in expr:           # selector read → text or ''
+                    value: Any = page.get("text", "") if sel else ""
+                else:                             # predicate / mutator → bool
+                    if sel and "value=" in expr:
+                        self.filled[sel] = "set"
+                    value = sel is not None
+                return {"result": {"value": value}}
             if "readyState" in expr:
                 value = "complete"
             elif "document.title" in expr:
@@ -335,6 +355,46 @@ class BrowserSession:
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
 
+    def _eval_bool(self, expression: str) -> bool:
+        res = self._call("Runtime.evaluate", expression=expression,
+                         returnByValue=True)
+        return bool((res or {}).get("result", {}).get("value"))
+
+    def exists(self, selector: str) -> bool:
+        """Structured predicate: is the selector present? Returns a bool, never
+        page prose — so the actuator-holder can branch without ingesting text."""
+        return self._eval_bool(
+            f"!!document.querySelector({json.dumps(selector)})")
+
+    def fill(self, selector: str, value: str) -> bool:
+        """Set an input's value and fire input/change. `value` is sent to Chrome
+        to type, never returned to the model (used for vault-sourced secrets)."""
+        expr = (f"(function(){{var e=document.querySelector("
+                f"{json.dumps(selector)});if(!e)return false;e.focus();"
+                f"e.value={json.dumps(value)};"
+                f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"return true;}})()")
+        return self._eval_bool(expr)
+
+    def login(self, profile: "SiteProfile", creds: dict) -> bool:
+        """Drive a declarative login: navigate to the profile's login URL (SSRF/
+        egress gated), fill username/password from `creds`, submit, and verify
+        the success marker. Returns True iff the marker appears. No page prose is
+        read as instructions; the password never leaves this method."""
+        if self.open(profile.login_url).startswith("Error:"):
+            return False
+        if profile.username_selector:
+            self.fill(profile.username_selector, str(creds.get("username", "")))
+        if profile.password_selector:
+            self.fill(profile.password_selector, str(creds.get("password", "")))
+        if profile.submit_selector:
+            self.act("click", selector=profile.submit_selector)
+        self._wait_ready()
+        if not profile.success_selector:
+            return True
+        return self.exists(profile.success_selector)
+
     @staticmethod
     def _snapshot(title: str, text: str) -> str:
         body = (text or "")[:_TEXT_LIMIT]
@@ -532,3 +592,179 @@ def list_skills(domain: str = "") -> list[BrowserSkill]:
         d = domain.strip().lower()
         skills = [s for s in skills if d in s.domain.strip().lower()]
     return sorted(skills, key=lambda s: (s.reliability, s.runs), reverse=True)
+
+
+# --- operator: site profiles + gating (HERMES, Phase 1) ------------------
+#
+# A Site Profile is the declarative, per-domain spec the operator acts through:
+# how to log in (selectors) and how to tell it worked (success marker). It is a
+# provenance-stamped, reliability-scored skill — never free-form "do what the
+# page says". See docs/DESIGN_OPERATOR.md.
+
+
+@dataclass
+class SiteProfile:
+    domain: str
+    login_url: str = ""
+    username_selector: str = ""
+    password_selector: str = ""
+    submit_selector: str = ""
+    success_selector: str = ""        # present iff the login succeeded
+    source: str = "agent"
+    author: str = "olympus"
+    created: str = ""
+    runs: int = 0
+    successes: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.created:
+            self.created = datetime.datetime.now(
+                datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    @property
+    def content_hash(self) -> str:
+        h = hashlib.sha256()
+        h.update("\n".join([
+            self.domain, self.login_url, self.username_selector,
+            self.password_selector, self.submit_selector,
+            self.success_selector]).encode("utf-8"))
+        return "sha256:" + h.hexdigest()[:16]
+
+    @property
+    def reliability(self) -> float:
+        return round(self.successes / self.runs, 3) if self.runs else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {f: getattr(self, f) for f in (
+            "domain", "login_url", "username_selector", "password_selector",
+            "submit_selector", "success_selector", "source", "author",
+            "created", "runs", "successes")}
+        d["content_hash"] = self.content_hash
+        d["reliability"] = self.reliability
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SiteProfile":
+        return cls(
+            domain=d["domain"], login_url=d.get("login_url", ""),
+            username_selector=d.get("username_selector", ""),
+            password_selector=d.get("password_selector", ""),
+            submit_selector=d.get("submit_selector", ""),
+            success_selector=d.get("success_selector", ""),
+            source=d.get("source", "agent"), author=d.get("author", "olympus"),
+            created=d.get("created", ""), runs=int(d.get("runs", 0)),
+            successes=int(d.get("successes", 0)))
+
+
+def _profiles_path() -> "config.Path":  # type: ignore[name-defined]
+    return config.MEMORY_DIR / "site_profiles.json"
+
+
+def _load_profiles() -> list[SiteProfile]:
+    path = _profiles_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[SiteProfile] = []
+    for d in raw:
+        if not isinstance(d, dict):
+            continue
+        try:
+            out.append(SiteProfile.from_dict(d))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _store_profiles(profiles: list[SiteProfile]) -> None:
+    path = _profiles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps([p.to_dict() for p in profiles], indent=2)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(path)
+
+
+def record_profile(domain: str, *, login_url: str = "",
+                   username_selector: str = "", password_selector: str = "",
+                   submit_selector: str = "", success_selector: str = "",
+                   source: str = "agent", author: str = "olympus") -> SiteProfile:
+    """Insert or replace a site profile (keyed by domain), preserving outcome
+    counts on replacement. Fields are length-capped."""
+    domain = _clip(domain, _SKILL_FIELD_MAX).lower()
+    if not domain:
+        raise ValueError("a site profile needs a non-empty domain")
+    prof = SiteProfile(
+        domain=domain, login_url=_clip(login_url, 2048),
+        username_selector=_clip(username_selector, _SKILL_FIELD_MAX),
+        password_selector=_clip(password_selector, _SKILL_FIELD_MAX),
+        submit_selector=_clip(submit_selector, _SKILL_FIELD_MAX),
+        success_selector=_clip(success_selector, _SKILL_FIELD_MAX),
+        source=_clip(source, _SKILL_FIELD_MAX) or "agent",
+        author=_clip(author, _SKILL_FIELD_MAX) or "olympus")
+    out, replaced = [], False
+    for existing in _load_profiles():
+        if existing.domain == domain:
+            prof.runs, prof.successes = existing.runs, existing.successes
+            prof.created = existing.created
+            out.append(prof)
+            replaced = True
+        else:
+            out.append(existing)
+    if not replaced:
+        out.append(prof)
+    _store_profiles(out)
+    return prof
+
+
+def get_profile(domain: str) -> SiteProfile | None:
+    d = (domain or "").strip().lower()
+    for p in _load_profiles():
+        if p.domain == d:
+            return p
+    return None
+
+
+def list_profiles() -> list[SiteProfile]:
+    return sorted(_load_profiles(), key=lambda p: (p.reliability, p.runs),
+                  reverse=True)
+
+
+def mark_profile_outcome(domain: str, success: bool) -> SiteProfile | None:
+    profiles = _load_profiles()
+    hit = None
+    d = (domain or "").strip().lower()
+    for p in profiles:
+        if p.domain == d:
+            p.runs += 1
+            if success:
+                p.successes += 1
+            hit = p
+    if hit is not None:
+        _store_profiles(profiles)
+    return hit
+
+
+def operator_enabled() -> bool:
+    """Master switch. The whole credentialed-operator path is off by default."""
+    return os.environ.get("OLYMPUS_OPERATOR", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def operator_domains() -> list[str]:
+    raw = os.environ.get("OLYMPUS_OPERATOR_DOMAINS", "")
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
+def domain_allowed(domain: str) -> bool:
+    """An operator may only touch domains explicitly listed *and* on the egress
+    allowlist — two independent fences."""
+    d = (domain or "").strip().lower()
+    if not d or d not in operator_domains():
+        return False
+    return security.egress_allowed(d)

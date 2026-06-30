@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import (browser, codegraph, config, egress, facts, github, memory,
-               security, skills, youtube)
+               security, skills, vault, youtube)
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -790,6 +790,68 @@ def _browser_skills(domain: str = "") -> str:
     return "\n".join(lines)
 
 
+# --- operator handlers (HERMES, Phase 1) ------------------------------------
+
+def _browser_exists(selector: str) -> str:
+    try:
+        return "yes" if browser.session().exists(selector) else "no"
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+
+
+def _browser_login(domain: str) -> str:
+    # Deny-first gates: master switch, domain allowlist, profile, vault creds.
+    if not browser.operator_enabled():
+        return ("Error: the browser operator is disabled. Set OLYMPUS_OPERATOR=1 "
+                "to enable credentialed actions.")
+    if not browser.domain_allowed(domain):
+        return (f"Error: '{domain}' is not authorized — add it to "
+                "OLYMPUS_OPERATOR_DOMAINS (and the egress allowlist).")
+    profile = browser.get_profile(domain)
+    if profile is None or not profile.login_url:
+        return (f"Error: no site profile with a login URL for '{domain}'. "
+                "Record one with site_profile_record first.")
+    if not vault.available():
+        return "Error: the credential vault is not configured."
+    creds = vault.get(memory.current_user(), f"site:{domain.strip().lower()}")
+    if not isinstance(creds, dict) or not creds.get("username"):
+        return (f"Error: no vault credentials for '{domain}'. Store them under "
+                f"the vault key 'site:{domain.strip().lower()}'.")
+    try:
+        ok = browser.session().login(profile, creds)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    browser.mark_profile_outcome(domain, ok)
+    if ok:
+        return f"Logged in to {domain}."
+    return (f"Login to {domain} did not reach the success marker — it may need "
+            "2FA/CAPTCHA or the profile selectors have drifted. Stopping.")
+
+
+def _site_profile_record(domain: str, login_url: str = "",
+                         username_selector: str = "", password_selector: str = "",
+                         submit_selector: str = "",
+                         success_selector: str = "") -> str:
+    prof = browser.record_profile(
+        domain, login_url=login_url, username_selector=username_selector,
+        password_selector=password_selector, submit_selector=submit_selector,
+        success_selector=success_selector)
+    return (f"Recorded site profile for {prof.domain} ({prof.content_hash}, "
+            f"login reliability {prof.reliability}).")
+
+
+def _site_profiles(domain: str = "") -> str:
+    profs = browser.list_profiles()
+    if domain:
+        d = domain.strip().lower()
+        profs = [p for p in profs if d in p.domain]
+    if not profs:
+        return "No site profiles recorded yet."
+    return "\n".join(
+        f"- {p.domain} — login reliability {p.reliability} ({p.runs} runs, "
+        f"source {p.source}, {p.content_hash})" for p in profs)
+
+
 HANDLERS: dict[str, Callable[..., str]] = {
     # web fallback — only dispatched on non-Anthropic providers (on Anthropic
     # these names are server-side tools and never reach the client loop)
@@ -822,6 +884,10 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_act": _browser_act,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
+    "browser_exists": _browser_exists,
+    "browser_login": _browser_login,
+    "site_profile_record": _site_profile_record,
+    "site_profiles": _site_profiles,
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -1122,6 +1188,78 @@ BROWSER_SKILLS = {
     },
 }
 
+# --- operator (HERMES, Phase 1): credentialed login + structured predicates --
+
+BROWSER_EXISTS = {
+    "name": "browser_exists",
+    "description": (
+        "Check whether a CSS selector is present on the current browser page. "
+        "Returns only yes/no — never page text — so you can branch on page "
+        "state without ingesting untrusted content."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"selector": {"type": "string"}},
+        "required": ["selector"],
+    },
+}
+
+BROWSER_LOGIN = {
+    "name": "browser_login",
+    "description": (
+        "Log in to an authorized site using its saved site profile and "
+        "credentials from the encrypted vault. Only works for domains you've "
+        "enabled (OLYMPUS_OPERATOR + OLYMPUS_OPERATOR_DOMAINS) with a stored "
+        "vault entry. The password is never shown to you. Returns success or a "
+        "reason (e.g. 2FA needed)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string",
+                                  "description": "e.g. 'example.com'"}},
+        "required": ["domain"],
+    },
+}
+
+SITE_PROFILE_RECORD = {
+    "name": "site_profile_record",
+    "description": (
+        "Save or update a site profile: the declarative login recipe for a "
+        "domain (login URL + CSS selectors for username/password/submit and a "
+        "success marker). Provenance and a reliability score are tracked. "
+        "Credentials are NOT stored here — they live in the vault."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string"},
+            "login_url": {"type": "string"},
+            "username_selector": {"type": "string"},
+            "password_selector": {"type": "string"},
+            "submit_selector": {"type": "string"},
+            "success_selector": {"type": "string",
+                                 "description": "Selector present only when "
+                                 "logged in (verifies success)"},
+        },
+        "required": ["domain"],
+    },
+}
+
+SITE_PROFILES = {
+    "name": "site_profiles",
+    "description": (
+        "List saved site profiles ranked by login reliability, with provenance. "
+        "Check before attempting a login."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "description": "Optional domain filter"},
+        },
+        "required": [],
+    },
+}
+
 SEARCH_SESSIONS = {
     "name": "search_sessions",
     "description": (
@@ -1222,6 +1360,10 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_act": BROWSER_ACT,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
+    "browser_exists": BROWSER_EXISTS,
+    "browser_login": BROWSER_LOGIN,
+    "site_profile_record": SITE_PROFILE_RECORD,
+    "site_profiles": SITE_PROFILES,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

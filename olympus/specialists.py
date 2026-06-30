@@ -208,6 +208,21 @@ SPECIALISTS: dict[str, Specialist] = {
                          "query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path"),
         ),
+        Specialist(
+            key="hermes", name="Hermes", title="Operator",
+            description="Acts on your behalf on sites you've explicitly "
+                        "authorized: logs in with vaulted credentials and "
+                        "operates declarative site profiles. Does NOT browse the "
+                        "open web; credentialed actions are scope/approval gated "
+                        "and off by default (OLYMPUS_OPERATOR).",
+            # Deliberately non-ingesting (web=False, no data MCP): _ingests() is
+            # False, so it legitimately keeps the actuator (browser_login). It is
+            # NOT given browser_open/browser_read — it never reads open-web prose
+            # as instructions. That is what lets it hold credentials safely while
+            # capability separation still holds across the system.
+            extra_tools=("browser_exists", "browser_login",
+                         "site_profiles", "site_profile_record"),
+        ),
     ]
 }
 

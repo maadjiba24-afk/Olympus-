@@ -10,8 +10,8 @@ commands a supervised council of specialists, every answer passes through a
 hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
-Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->44<!--/cap--> agent tools, and <!--cap:commands-->66<!--/cap-->
+Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
+<!--cap:tools-->48<!--/cap--> agent tools, and <!--cap:commands-->66<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -115,7 +115,7 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 ### The council
 
 **Orchestration pipeline.** These three run every request — they route, plan,
-and verify — and are **not** counted among the <!--cap:agents-->12<!--/cap-->
+and verify — and are **not** counted among the <!--cap:agents-->13<!--/cap-->
 specialists.
 
 | Stage | Role |
@@ -124,7 +124,7 @@ specialists.
 | **Athena** | Supervisor — plans a **dependency graph** of specialist steps (parallel where independent, serial where one step needs another's output) and gates quality |
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
 
-**The <!--cap:agents-->12<!--/cap--> specialists.** The permanent domain experts
+**The <!--cap:agents-->13<!--/cap--> specialists.** The permanent domain experts
 registered in `olympus/specialists.py` (names and titles below come straight
 from that registry):
 
@@ -142,6 +142,7 @@ from that registry):
 | **Mnemosyne** | YouTube Learner — watches videos via transcript, summarizes what it understood, stores lessons |
 | **Metis** | Learning Synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
 | **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
+| **Hermes** | Operator — acts on your behalf on **explicitly authorized** sites: logs in with vaulted credentials and operates declarative site profiles. Never browses the open web; credentialed actions are scope/approval-gated and off by default (`OLYMPUS_OPERATOR`). See [docs/DESIGN_OPERATOR.md](docs/DESIGN_OPERATOR.md) |
 
 ### Self-* properties
 
@@ -210,7 +211,7 @@ The result is something neither Hermes nor OpenClaw has: a system that gets
 collectively smarter by distilling the best of every frontier model its users
 bring — with consent, anonymization, and quality-gating built in.
 
-### Keeping all <!--cap:agents-->12<!--/cap--> specialists strong (systematic training)
+### Keeping all <!--cap:agents-->13<!--/cap--> specialists strong (systematic training)
 
 A specialist only improves at what's *measured* — so Olympus measures every
 user-facing specialist and trains the weakest on a cadence:
@@ -298,7 +299,7 @@ user-facing specialist and trains the weakest on a cadence:
 | | Hermes | OpenClaw | **Olympus** |
 |---|---|---|---|
 | Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
-| Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->12<!--/cap--> permanent domain experts** with crafted identities |
+| Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->13<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |

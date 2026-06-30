@@ -16,7 +16,7 @@
     ]
   },
   "agents": {
-    "count": 12,
+    "count": 13,
     "names": [
       "aegis",
       "angelos",
@@ -24,6 +24,7 @@
       "chiron",
       "chronos",
       "hephaestus",
+      "hermes",
       "iris",
       "metis",
       "mnemosyne",
@@ -105,10 +106,12 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 44,
+    "count": 48,
     "names": [
       "browse_page",
       "browser_act",
+      "browser_exists",
+      "browser_login",
       "browser_open",
       "browser_read",
       "browser_skill_record",
@@ -144,6 +147,8 @@
       "schedule_task",
       "search_sessions",
       "send_email",
+      "site_profile_record",
+      "site_profiles",
       "spawn_subagent",
       "text_to_speech",
       "update_prompt",
