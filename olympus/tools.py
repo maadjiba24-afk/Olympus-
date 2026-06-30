@@ -800,23 +800,27 @@ def _browser_exists(selector: str) -> str:
 
 
 def _browser_login(domain: str) -> str:
-    # Deny-first gates: master switch, domain allowlist, profile, vault creds.
-    if not browser.operator_enabled():
-        return ("Error: the browser operator is disabled. Set OLYMPUS_OPERATOR=1 "
-                "to enable credentialed actions.")
-    if not browser.domain_allowed(domain):
-        return (f"Error: '{domain}' is not authorized — add it to "
-                "OLYMPUS_OPERATOR_DOMAINS (and the egress allowlist).")
+    user = memory.current_user()
+    reason = operator._gate(user, domain)         # per-user: env OR opt-in
+    if reason:
+        return f"Error: {reason}."
+    d = domain.strip().lower()
+    # Manual mode (the consumer default): the person signs in themselves; we
+    # never touch a password. Only short-circuit when they explicitly chose it.
+    if d in operator.sites(user) and operator.login_mode(user, d) == "manual":
+        return (f"{domain} uses manual sign-in. Open it in the browser, log in "
+                "yourself (including any 2FA), then tell me you're ready — I'll "
+                "use that session.")
+    # Remembered mode (or the engineer/env path): auto-login from the vault.
     profile = browser.get_profile(domain)
     if profile is None or not profile.login_url:
-        return (f"Error: no site profile with a login URL for '{domain}'. "
-                "Record one with site_profile_record first.")
+        return (f"Error: I don't have a sign-in recipe for '{domain}' yet.")
     if not vault.available():
-        return "Error: the credential vault is not configured."
-    creds = vault.get(memory.current_user(), f"site:{domain.strip().lower()}")
+        return "Error: the secure vault is not set up, so I can't auto-sign-in."
+    creds = vault.get(user, f"site:{domain.strip().lower()}")
     if not isinstance(creds, dict) or not creds.get("username"):
-        return (f"Error: no vault credentials for '{domain}'. Store them under "
-                f"the vault key 'site:{domain.strip().lower()}'.")
+        return (f"Error: I don't have saved credentials for '{domain}'. Ask me "
+                "to remember your sign-in for it first.")
     try:
         ok = browser.session().login(profile, creds)
     except browser.BrowserUnavailable as err:
@@ -824,8 +828,8 @@ def _browser_login(domain: str) -> str:
     browser.mark_profile_outcome(domain, ok)
     if ok:
         return f"Logged in to {domain}."
-    return (f"Login to {domain} did not reach the success marker — it may need "
-            "2FA/CAPTCHA or the profile selectors have drifted. Stopping.")
+    return (f"Sign-in to {domain} didn't go through — it may need 2FA/CAPTCHA, "
+            "or the page changed. Want to sign in manually instead?")
 
 
 def _site_profile_record(domain: str, login_url: str = "",
@@ -862,7 +866,7 @@ def _parse_json_arg(raw, default):
 
 
 def _browser_operate(domain: str, template: str, params: str = "") -> str:
-    reason = operator._gate(domain)
+    reason = operator._gate(memory.current_user(), domain)
     if reason:
         return f"Error: {reason}."
     _, tmpl = operator._template(domain, template)
@@ -904,11 +908,9 @@ def _site_template_record(domain: str, name: str, risk: str, steps: str,
 
 def _operator_schedule(name: str, domain: str, template: str, interval: str,
                        params: str = "") -> str:
-    if not browser.operator_enabled():
-        return "Error: the operator is disabled (set OLYMPUS_OPERATOR=1)."
-    if not browser.domain_allowed(domain):
-        return (f"Error: '{domain}' is not authorized (OLYMPUS_OPERATOR_DOMAINS "
-                "+ egress allowlist).")
+    reason = operator._gate(memory.current_user(), domain)
+    if reason:
+        return f"Error: {reason}."
     if operator._template(domain, template)[1] is None:
         return f"Error: no template '{template}' for {domain}."
     try:
@@ -942,6 +944,47 @@ def _propose_site_profile(domain: str, rationale: str, login_url: str = "",
 def actions_mod():
     from . import actions
     return actions
+
+
+def _operator_authorize_site(domain: str, login: str = "manual") -> str:
+    user = memory.current_user()
+    login = (login or "manual").strip().lower()
+    try:
+        operator.authorize_site(user, domain, login)
+    except ValueError as err:
+        return f"Error: {err}."
+    d = domain.strip().lower()
+    if not operator.authorized(user, d):
+        return (f"Noted, but '{d}' is blocked by your network allowlist, so I "
+                "can't act on it until that's changed.")
+    if login == "manual":
+        return (f"Set up '{d}'. Open it in the browser and sign in yourself "
+                "(including any 2FA), then tell me you're ready — I'll take it "
+                "from there, and I never see your password.")
+    return (f"Set up '{d}' to remember your sign-in. To save your password I'll "
+            "use a private secure prompt that never goes through our chat. "
+            "(Until then, you can just sign in manually.)")
+
+
+def _operator_forget_site(domain: str) -> str:
+    existed = operator.forget_site(memory.current_user(), domain)
+    d = domain.strip().lower()
+    return (f"Done — I removed '{d}' and any saved sign-in for it."
+            if existed else f"'{d}' wasn't set up, so there's nothing to remove.")
+
+
+def _operator_status() -> str:
+    user = memory.current_user()
+    if not operator.enabled(user):
+        return ("The operator is off. Just ask me to do something on a site "
+                "(e.g. 'reorder my dog food on Amazon') and I'll set it up.")
+    s = operator.sites(user)
+    if not s:
+        return "The operator is on, but no sites are set up yet."
+    lines = ["I'm set up to act on these sites:"]
+    for d, meta in sorted(s.items()):
+        lines.append(f"- {d} ({meta.get('login', 'manual')} sign-in)")
+    return "\n".join(lines)
 
 
 HANDLERS: dict[str, Callable[..., str]] = {
@@ -985,6 +1028,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "operator_schedule": _operator_schedule,
     "operator_review": _operator_review,
     "propose_site_profile": _propose_site_profile,
+    "operator_authorize_site": _operator_authorize_site,
+    "operator_forget_site": _operator_forget_site,
+    "operator_status": _operator_status,
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -1459,6 +1505,50 @@ PROPOSE_SITE_PROFILE = {
     },
 }
 
+# --- conversational onboarding (no env vars / CLI for the user) -------------
+
+OPERATOR_AUTHORIZE_SITE = {
+    "name": "operator_authorize_site",
+    "description": (
+        "Authorize the operator to act on a site for the user — call this when "
+        "the user asks you to do something on a site you're not set up for yet, "
+        "and only with their clear go-ahead. 'manual' (default) = the user signs "
+        "in themselves and you reuse the session (you never see their password); "
+        "'remember' = save their sign-in securely for auto-login. Turns the "
+        "operator on for this user and persists, so they never touch a CLI."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "description": "e.g. 'amazon.com'"},
+            "login": {"type": "string", "enum": ["manual", "remember"]},
+        },
+        "required": ["domain"],
+    },
+}
+
+OPERATOR_FORGET_SITE = {
+    "name": "operator_forget_site",
+    "description": (
+        "Remove a site's authorization and delete any saved sign-in for it. Use "
+        "when the user wants to stop the operator acting on a site."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string"}},
+        "required": ["domain"],
+    },
+}
+
+OPERATOR_STATUS = {
+    "name": "operator_status",
+    "description": (
+        "Show, in plain language, whether the operator is on for the user and "
+        "which sites it's set up to act on (and how each signs in)."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
 SEARCH_SESSIONS = {
     "name": "search_sessions",
     "description": (
@@ -1568,6 +1658,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "operator_schedule": OPERATOR_SCHEDULE,
     "operator_review": OPERATOR_REVIEW,
     "propose_site_profile": PROPOSE_SITE_PROFILE,
+    "operator_authorize_site": OPERATOR_AUTHORIZE_SITE,
+    "operator_forget_site": OPERATOR_FORGET_SITE,
+    "operator_status": OPERATOR_STATUS,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

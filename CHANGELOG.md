@@ -15,6 +15,28 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Operator for non-engineers: plain-English setup (`docs/DESIGN_OPERATOR_UX.md`)
+
+- The operator can now be turned on and authorized **per site, through
+  conversation** — no env vars, no CLI, no "vault" for a normal user. Settings
+  persist per-user in `prefs`; `enabled(user)` is `env OR the user's opt-in` and
+  `authorized(user, domain)` is `(env domains OR their authorized sites) AND the
+  egress allowlist`. The `OLYMPUS_OPERATOR*` env vars remain as an additive
+  engineer/admin override.
+- **Manual sign-in is the default and works end to end with no password
+  handling:** the person signs in themselves and Olympus reuses the session —
+  it never sees or stores a password. An opt-in **remember** mode stores
+  credentials in the vault via a secure local prompt (primitive shipped;
+  in-chat secure capture is the next interactive step).
+- **Three conversational tools** for HERMES (53 → 56): `operator_authorize_site`
+  (manual | remember), `operator_forget_site`, `operator_status`. The Hermes
+  prompt leads with manual sign-in and never tells a non-technical user to set
+  env vars or run commands.
+- All operator gating (`browser_login`, `browser_operate`, `operator_schedule`,
+  scheduled jobs, and the spine `execute`) is now per-user; scheduled jobs are a
+  silent no-op for users who haven't enabled the operator. THREAT_MODEL rows,
+  `capabilities.json`, README count, and `tests/test_operator_ux.py` added.
+
 ### Added — HERMES operator, Phases 2-4: credentialed actions, always-on, self-healing
 
 - **Credentialed actions on the approval spine (Phase 2).** `browser_operate`

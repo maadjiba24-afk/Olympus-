@@ -108,7 +108,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 53,
+    "count": 56,
     "names": [
       "browse_page",
       "browser_act",
@@ -131,8 +131,11 @@
       "generate_image",
       "list_dir",
       "list_source_files",
+      "operator_authorize_site",
+      "operator_forget_site",
       "operator_review",
       "operator_schedule",
+      "operator_status",
       "prepare_action",
       "propose_playbook",
       "propose_site_profile",
