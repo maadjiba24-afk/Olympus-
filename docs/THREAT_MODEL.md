@@ -83,6 +83,7 @@ longer exists. So the surface and its threat model can't drift apart.
 | `operator_status` | Show which sites the operator is set up for | first-party read | Read-only; own settings; no secrets shown | None significant — own settings |
 | `operator_remember_login` | Start saving a site sign-in for auto-login | first-party (gated) | Records a pending request only; the password is captured out-of-band by a private prompt and stored in the vault — it never passes through the model or this tool | Password exposure to the model — the secret never enters the model loop by construction |
 | `set_advanced_mode` | Toggle plain-English vs. engineer surface | first-party write | Per-user UI preference; no capability change | None — purely a presentation setting |
+| `recent_learning` | Summarize the autonomous loop's recent activity | first-party read | Read-only over heartbeat state + own memory; no model calls | None significant — own content, no secrets |
 | `search_sessions` | Full-text search past conversations | first-party read | Read-only; this user's own history | None significant — own content; per-user namespaced |
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |

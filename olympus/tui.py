@@ -31,6 +31,7 @@ COMMANDS: dict[str, str] = {
     "/lang": "set reply language: /lang <language|auto>",
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
+    "/learned": "see what Olympus learned/did on its own while you were away",
     "/exit": "leave Olympus",
 }
 
@@ -132,6 +133,9 @@ def dispatch_command(bot, raw: str):
     if name == "/growth":
         from . import companion
         return (True, companion.summary("cli"), False)
+    if name == "/learned":
+        from . import digest
+        return (True, digest.learned_recently(), False)
     return (False, None, False)
 
 
