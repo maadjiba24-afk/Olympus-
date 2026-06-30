@@ -350,7 +350,8 @@ class Olympus:
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
-                    task, settings=self.pool.for_specialist(key))
+                    task, settings=self.pool.for_specialist(key),
+                    effort=SPECIALISTS[key].effort)
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
             except Exception as err:

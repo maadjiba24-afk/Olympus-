@@ -34,6 +34,15 @@ class Specialist:
     # config.contracts_enabled(). None = no contract = no behavior change; every
     # existing entry omits it and ships at None (see docs/DESIGN_OUTPUT_CONTRACTS.md).
     contract: contracts.OutputContract | None = None
+    # Model role for pool routing: in a multi-model pool, this specialist runs on
+    # whichever member is strongest for this role ("reasoning" | "coding" |
+    # "verify"). Single-model pools ignore it. Data-driven here instead of a
+    # hardcoded map so tiering is per-specialist and extensible.
+    role: str = "reasoning"
+    # Reasoning effort for this specialist's runs. Default "high" preserves
+    # today's behavior; lets the hard specialists stay deep while light ones can
+    # be dialed down for cost without touching the rest.
+    effort: str = "high"
 
     def _ingests(self, provider: str) -> bool:
         """Does this specialist's loadout read external/untrusted content?"""
@@ -124,7 +133,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Software design, writing and reviewing code, debugging, "
                         "architecture, DevOps questions. Can execute and test "
                         "code in a sandbox.",
-            web=True, code_exec=True,
+            web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "read_file", "list_dir", "prepare_action",
@@ -142,6 +151,9 @@ SPECIALISTS: dict[str, Specialist] = {
                         "management, platform best practices, trends.",
             web=True,
             extra_tools=("generate_image", "browse_page"),
+            # Social copy should stay tight — guard against a wall-of-text reply.
+            # Enforced only when contracts are enabled (off by default).
+            contract=contracts.OutputContract(max_chars=8000),
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
@@ -179,6 +191,9 @@ SPECIALISTS: dict[str, Specialist] = {
             # run. The read/learn tools (open/read/skills) remain.
             extra_tools=("browse_page", "browser_open", "browser_read",
                          "browser_act", "browser_skills", "browser_skill_record"),
+            # Safety ceiling on a runaway scan loop (well above a normal scan).
+            # Enforced only when contracts are enabled (off by default).
+            contract=contracts.OutputContract(max_tool_calls=24),
         ),
         Specialist(
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",

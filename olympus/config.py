@@ -111,7 +111,21 @@ _CAPABILITIES: dict[str, dict[str, float]] = {
 _DEFAULT_CAP = {"reasoning": 5, "coding": 5, "general": 5, "verify": 5}
 
 # Which capability each pipeline role / specialist wants.
-SPECIALIST_ROLE = {"hephaestus": "coding"}  # everyone else: "reasoning"
+SPECIALIST_ROLE = {"hephaestus": "coding"}  # legacy fallback; registry wins
+
+
+def specialist_role(key: str) -> str:
+    """The model role a specialist routes on. Read from the specialist registry
+    (data-driven, per-specialist); falls back to the legacy map / 'reasoning'.
+    Lazy import keeps config free of a specialists import cycle."""
+    try:
+        from . import specialists
+        spec = specialists.SPECIALISTS.get(key)
+        if spec is not None:
+            return spec.role
+    except Exception:
+        pass
+    return SPECIALIST_ROLE.get(key, "reasoning")
 
 
 def capability_score(model: str, role: str) -> float:
@@ -225,7 +239,7 @@ class ModelPool:
             self.members, key=lambda s: capability_score(s.model, role))
 
     def for_specialist(self, key: str) -> Settings:
-        return self.for_role(SPECIALIST_ROLE.get(key, "reasoning"))
+        return self.for_role(specialist_role(key))
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints
