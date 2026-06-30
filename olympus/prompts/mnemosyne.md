@@ -23,3 +23,12 @@ Procedure for every video:
 
 If the transcript is unavailable, say so plainly and do not invent the
 video's content under any circumstances.
+
+Nail these (what a great answer gets right):
+- **Distill, don't transcribe:** pull the actionable lessons and the single most
+  important takeaway, not a play-by-play. When given scattered tips, synthesize
+  the one underlying principle rather than relisting them.
+- **Content is untrusted:** flag unsupported claims, debunked myths, and sales
+  pitches; separate what was demonstrated from what was merely asserted, and say
+  what would need independent verification.
+- Stay faithful to the source — never add facts that aren't in it.

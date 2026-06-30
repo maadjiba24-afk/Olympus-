@@ -15,6 +15,28 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Strengthen the 13 specialists (three levers)
+
+1. **Sharper prompts.** The seven thinnest specialist prompts (plutus, peitho,
+   aegis, chiron, chronos, argus, mnemosyne) gain a focused "nail these" block
+   tied to the concrete behaviors the deepened benchmark rewards — e.g. Plutus's
+   match→high-APR-debt→buffer→invest ordering and break-even rule, Aegis's
+   "never click the link / ordered incident response", Chronos's "no perfect
+   cross-timezone time → rotate". Additive, identity-preserving sharpening.
+2. **Per-specialist model role + effort (data-driven tiering).** `Specialist`
+   gains `role` ("reasoning" | "coding" | "verify") and `effort` fields; model
+   routing (`ModelPool.for_specialist`) now reads the role from the registry
+   instead of a hardcoded map, and the orchestrator passes each specialist's
+   effort. Defaults preserve today's behavior (single-model pools are a no-op,
+   effort stays "high"); the value shows in a multi-model pool, where each
+   specialist routes to the member strongest for its kind of work.
+3. **Output contracts in use.** The previously-unused contract hook now carries
+   real (off-by-default) guards: Iris caps reply length (concise social copy),
+   Argus caps tool calls (runaway-scan ceiling). Enforced only when
+   `OLYMPUS_CONTRACTS` is enabled; inert otherwise.
+
+`tests/test_specialist_strength.py` covers all three. No capability-count change.
+
 ### Changed — Deeper specialist benchmark (strengthens the self-improvement loop)
 
 - Expanded `olympus/benchmarks.json` from 17 items to **50** — **5 per
