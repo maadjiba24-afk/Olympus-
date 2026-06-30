@@ -226,16 +226,102 @@ def _resolve_page_ws(value: str) -> str:  # pragma: no cover - needs a browser
         return json.loads(resp.read().decode("utf-8"))["webSocketDebuggerUrl"]
 
 
+def _find_chrome() -> str | None:
+    """Locate a Chrome/Chromium binary to launch (env override, PATH, then the
+    bundled Playwright Chromium)."""
+    import os
+    import shutil
+    from glob import glob
+    if os.environ.get("OLYMPUS_BROWSER_BIN"):
+        return os.environ["OLYMPUS_BROWSER_BIN"]
+    for name in ("google-chrome", "google-chrome-stable", "chromium",
+                 "chromium-browser"):
+        path = shutil.which(name)
+        if path:
+            return path
+    root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
+    hits = sorted(glob(os.path.join(root, "chromium-*/chrome-linux/chrome")))
+    return hits[-1] if hits else None
+
+
+def _free_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _chrome_args(binary: str, port: int, user_data_dir: str,
+                 headless: bool = False) -> list[str]:
+    """Command line for a remote-debuggable Chrome. Headed by default so a
+    person can see it and sign in (manual mode); headless for automated runs."""
+    args = [binary, f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*", f"--user-data-dir={user_data_dir}",
+            "--no-first-run", "--no-default-browser-check"]
+    if headless:
+        args += ["--headless=new", "--disable-gpu", "--no-sandbox"]
+    args.append("about:blank")
+    return args
+
+
+_launched: Any = None      # (Popen, base_url) of a browser we started
+
+
+def launch_local(headless: bool = False, timeout: float = 20.0) -> str:
+    """Launch a local Chrome with remote debugging and return its DevTools HTTP
+    base. Reuses an already-launched one. Best-effort: raises BrowserUnavailable
+    if no binary is found or DevTools never comes up."""
+    global _launched
+    if _launched is not None and _launched[0].poll() is None:
+        return _launched[1]
+    import subprocess
+    import tempfile
+    import time as _time
+    import urllib.request
+    binary = _find_chrome()
+    if not binary:
+        raise BrowserUnavailable(
+            "no Chrome/Chromium found to launch — install Chrome or set "
+            "OLYMPUS_BROWSER_BIN")
+    port = _free_port()
+    profile = tempfile.mkdtemp(prefix="olympus-browser-")
+    proc = subprocess.Popen(_chrome_args(binary, port, profile, headless),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/json/version", timeout=2) as r:
+                if r.status == 200:
+                    _launched = (proc, base)
+                    return base
+        except Exception:
+            _time.sleep(0.2)
+    proc.terminate()
+    raise BrowserUnavailable("launched Chrome but its DevTools never responded")
+
+
+def _autolaunch_enabled() -> bool:
+    return os.environ.get("OLYMPUS_BROWSER_AUTOLAUNCH", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _build_transport() -> Transport:
     if _TRANSPORT_FACTORY is not None:
         return _TRANSPORT_FACTORY()
     endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
+    if not endpoint and _autolaunch_enabled():
+        # Consumer convenience: bring a browser up automatically so the user
+        # never starts Chrome with debug flags themselves. Headed so manual
+        # sign-in is visible (OLYMPUS_BROWSER_HEADLESS forces headless).
+        headless = os.environ.get("OLYMPUS_BROWSER_HEADLESS", "").strip().lower() \
+            in ("1", "true", "yes", "on")
+        endpoint = launch_local(headless=headless)
     if endpoint:
         return _RealTransport(_resolve_page_ws(endpoint))
     raise BrowserUnavailable(
-        "no browser attached — start Chrome with --remote-debugging-port and "
-        "set OLYMPUS_BROWSER_CDP_URL (a DevTools http://host:port base or a "
-        "ws:// page-target URL); or inject a transport in tests.")
+        "no browser attached — set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
+        "open one, or OLYMPUS_BROWSER_CDP_URL to attach to your own.")
 
 
 # --- session -------------------------------------------------------------

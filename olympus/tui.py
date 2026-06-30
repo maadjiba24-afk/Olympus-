@@ -245,3 +245,10 @@ def run(pool=None) -> None:
                 secs, fast=config.fast_mode(), spend=spend) + "\n")
         except Exception as err:
             print(f"\n  [error] {err}\n")
+        # Post-turn interactions outside the model loop: secure credential
+        # capture (remember mode) and plain-English approval of held actions.
+        try:
+            from . import interactive
+            interactive.after_turn(getattr(bot, "user", "cli"))
+        except Exception:
+            pass

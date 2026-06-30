@@ -987,6 +987,29 @@ def _operator_status() -> str:
     return "\n".join(lines)
 
 
+def _operator_remember_login(domain: str) -> str:
+    user = memory.current_user()
+    d = (domain or "").strip().lower()
+    if not d:
+        return "Error: which site should I remember the sign-in for?"
+    operator.authorize_site(user, d, "remember")
+    from . import securecapture
+    securecapture.request(user, d)
+    return (f"Okay — I'll remember your {d} sign-in. When you continue, a "
+            "private prompt will ask for your username and password; they go "
+            "straight to the encrypted vault and never through our chat.")
+
+
+def _set_advanced_mode(on: bool = True) -> str:
+    user = memory.current_user()
+    val = str(on).strip().lower() in ("1", "true", "yes", "on") \
+        if not isinstance(on, bool) else on
+    operator.set_advanced(user, val)
+    return ("Advanced mode on — I'll surface engineer controls (CLI, env vars, "
+            "action IDs)." if val else
+            "Advanced mode off — I'll keep things simple and plain-English.")
+
+
 HANDLERS: dict[str, Callable[..., str]] = {
     # web fallback — only dispatched on non-Anthropic providers (on Anthropic
     # these names are server-side tools and never reach the client loop)
@@ -1031,6 +1054,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "operator_authorize_site": _operator_authorize_site,
     "operator_forget_site": _operator_forget_site,
     "operator_status": _operator_status,
+    "operator_remember_login": _operator_remember_login,
+    "set_advanced_mode": _set_advanced_mode,
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -1549,6 +1574,36 @@ OPERATOR_STATUS = {
     "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
+OPERATOR_REMEMBER_LOGIN = {
+    "name": "operator_remember_login",
+    "description": (
+        "Start saving the user's sign-in for a site so the operator can log in "
+        "automatically. Call this ONLY when the user explicitly asks to remember "
+        "their password. You never handle the password yourself — a private, "
+        "secure prompt collects it after this turn and stores it encrypted."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string"}},
+        "required": ["domain"],
+    },
+}
+
+SET_ADVANCED_MODE = {
+    "name": "set_advanced_mode",
+    "description": (
+        "Turn 'advanced mode' on or off for this user. Off (default) keeps "
+        "everything plain-English and hides engineer details (CLI commands, env "
+        "vars, action IDs). On surfaces them. Set it when the user asks for "
+        "developer/advanced controls — or to simplify back."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"on": {"type": "boolean"}},
+        "required": ["on"],
+    },
+}
+
 SEARCH_SESSIONS = {
     "name": "search_sessions",
     "description": (
@@ -1661,6 +1716,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "operator_authorize_site": OPERATOR_AUTHORIZE_SITE,
     "operator_forget_site": OPERATOR_FORGET_SITE,
     "operator_status": OPERATOR_STATUS,
+    "operator_remember_login": OPERATOR_REMEMBER_LOGIN,
+    "set_advanced_mode": SET_ADVANCED_MODE,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

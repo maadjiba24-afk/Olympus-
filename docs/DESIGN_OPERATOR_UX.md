@@ -65,18 +65,28 @@ spine — it just surfaced as a plain-English "Place it?".
 - **Manual mode works end to end today** — no password handling at all.
 - `remember_credentials` storage primitive + `advanced` flag are in place.
 
-## Still to wire (interactive app layer — designed, not yet built)
+## The interactive layer (now built)
 
-These need the live REPL / a real browser and so aren't unit-testable here:
+All four are implemented, with the logic centralized behind an injectable IO
+(`olympus/interactive.py`) so it's unit-tested without a terminal; `tui.run`
+calls `interactive.after_turn(user)` once per turn (guarded).
 
-1. **Secure password capture in chat** for "remember" mode — a private local
-   prompt (e.g. `getpass`/a one-time localhost form) the REPL runs when the user
-   opts in; the model never receives the password. Today the primitive exists
-   but the in-chat secure entry does not, so the assistant steers to manual.
-2. **Auto-launching/attaching the browser** so the person doesn't run Chrome
-   with debugging flags themselves.
-3. **Inline plain-English approval** — surfacing a pending irreversible action
-   as "Place it?" and treating "yes" as the approval, instead of `olympus
-   approve <id>`.
-4. **Advanced-mode toggle UX** — hide every engineer affordance unless the user
-   turns on advanced; the `advanced` flag is stored, the UX gating is pending.
+1. **Secure password capture in chat** for "remember" mode — `securecapture`
+   records a pending request (domain only); after the turn, a private prompt
+   (`getpass`) collects the credentials and stores them in the vault. The
+   password never enters the model loop. Tool: `operator_remember_login`.
+2. **Auto-launching/attaching the browser** — `browser.launch_local()` finds a
+   Chrome/Chromium (PATH or the bundled Playwright build) and starts it with
+   remote debugging (headed by default so manual sign-in is visible). Enabled
+   with `OLYMPUS_BROWSER_AUTOLAUNCH=1`; the person never runs Chrome flags.
+3. **Inline plain-English approval** — `approvals` + `interactive.after_turn`
+   surface any held action as its preview and take a yes/no, mapping to
+   `actions.approve`/`reject`. "yes" places the order; no CLI id needed.
+4. **Advanced-mode toggle** — `set_advanced_mode` flips a per-user flag
+   (`operator.advanced`); the Hermes prompt hides env/CLI/IDs unless it's on.
+
+### Still genuinely environment-dependent
+The real *feel* still needs a live terminal + a real browser to experience end
+to end (a headless CI can't show a visible login window or a `getpass` prompt).
+The opt-in `tests/test_browser_smoke.py` exercises the real launch+CDP path; the
+interactive logic is covered by `tests/test_interactive.py` with a fake IO.

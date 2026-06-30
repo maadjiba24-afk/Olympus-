@@ -225,7 +225,8 @@ SPECIALISTS: dict[str, Specialist] = {
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",
-                         "operator_forget_site", "operator_status"),
+                         "operator_forget_site", "operator_status",
+                         "operator_remember_login", "set_advanced_mode"),
         ),
     ]
 }
