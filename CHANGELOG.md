@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Deeper specialist benchmark (strengthens the self-improvement loop)
+
+- Expanded `olympus/benchmarks.json` from 17 items to **50** — **5 per
+  user-facing specialist** (was as low as 1 for plutus/iris/chiron/chronos/
+  argus/mnemosyne). The benchmark is the signal Prometheus's measured-training
+  loop optimizes against and the basis for `olympus scores`; with one item per
+  specialist the score was too noisy to tell a good prompt from a bad one and to
+  catch regressions. Deeper, varied, harshly-gradeable items give every
+  specialist real signal to be strengthened against — no engine change needed,
+  the existing train-with-rollback loop now has something to push on.
+- `tests/test_benchmarks.py` guards depth (≥5 per user-facing specialist),
+  unique ids, valid specialist keys, and well-formed task/criteria.
+
 ### Added — "What Olympus learned on its own" readout (`olympus/digest.py`)
 
 - A plain-language summary of the autonomous loop's recent activity: when each
