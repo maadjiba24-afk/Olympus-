@@ -49,18 +49,18 @@ def test_browser_login_is_an_action_tool_and_not_ingestion():
 def test_login_refused_when_operator_disabled(monkeypatch):
     monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
     out = tools._browser_login("example.com")
-    assert "disabled" in out and "OLYMPUS_OPERATOR" in out
+    assert out.startswith("Error") and "set it up" in out.lower()
 
 
 def test_login_refused_when_domain_not_authorized(monkeypatch):
     monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
     monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "other.com")
-    assert "not authorized" in tools._browser_login("example.com")
+    assert "isn't authorized" in tools._browser_login("example.com")
 
 
 def test_login_refused_without_a_profile(monkeypatch):
     _enable(monkeypatch)
-    assert "no site profile" in tools._browser_login("example.com").lower()
+    assert "sign-in recipe" in tools._browser_login("example.com").lower()
 
 
 def test_login_refused_without_vault_credentials(monkeypatch):
@@ -70,7 +70,7 @@ def test_login_refused_without_vault_credentials(monkeypatch):
     monkeypatch.setattr(vault, "available", lambda: True)
     monkeypatch.setattr(vault, "get", lambda user, name: None)
     out = tools._browser_login("example.com")
-    assert "no vault credentials" in out.lower()
+    assert "saved credentials" in out.lower()
 
 
 # --- the happy path: vaulted login, password never surfaced ---------------
@@ -108,7 +108,7 @@ def test_login_reports_blocked_on_missing_success_marker(monkeypatch):
     monkeypatch.setattr(vault, "get",
                         lambda user, name: {"username": "a", "password": "b"})
     out = tools._browser_login("example.com")
-    assert "did not reach the success marker" in out
+    assert "didn't go through" in out
     assert browser.get_profile("example.com").reliability == 0.0
 
 

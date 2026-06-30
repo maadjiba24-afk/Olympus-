@@ -224,7 +224,8 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("browser_exists", "browser_login",
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
-                         "operator_schedule"),
+                         "operator_schedule", "operator_authorize_site",
+                         "operator_forget_site", "operator_status"),
         ),
     ]
 }

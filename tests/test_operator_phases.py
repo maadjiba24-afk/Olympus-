@@ -60,7 +60,7 @@ def test_capability_separation_for_operate():
 
 def test_operate_refused_when_disabled(monkeypatch):
     monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
-    assert "disabled" in tools._browser_operate("shop.com", "buy")
+    assert "set it up" in tools._browser_operate("shop.com", "buy").lower()
 
 
 def test_operate_refused_unknown_template(monkeypatch):

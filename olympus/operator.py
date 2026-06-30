@@ -21,6 +21,107 @@ from . import actions, browser, config, memory, security
 OPERATE_SCOPE = "browser.operate"      # one coarse scope enables the operator
 _REVIEW_MIN_RUNS = 3
 _REVIEW_FLOOR = 0.34                    # prune profiles that fail >2/3 of the time
+_SETTINGS_KEY = "operator"             # per-user prefs blob
+
+
+# --- per-user settings (the conversational surface) ----------------------
+#
+# A normal person never sets an env var. They authorize a site by *asking*
+# Olympus to set it up; that writes here. The OLYMPUS_OPERATOR / _DOMAINS env
+# vars remain as an engineer/admin override that is always additive.
+
+def _settings(user: str) -> dict:
+    from . import prefs
+    s = prefs.get(user, _SETTINGS_KEY, {}) or {}
+    s.setdefault("sites", {})
+    return s
+
+
+def _save_settings(user: str, s: dict) -> None:
+    from . import prefs
+    prefs.set(user, _SETTINGS_KEY, s)
+
+
+def enabled(user: str) -> bool:
+    """Operator on for this user — via the env switch OR their own opt-in."""
+    return browser.operator_enabled() or bool(_settings(user).get("enabled"))
+
+
+def advanced(user: str) -> bool:
+    """Whether to surface engineer controls (CLI/env). Off = plain-English only."""
+    return bool(_settings(user).get("advanced"))
+
+
+def set_advanced(user: str, on: bool) -> None:
+    s = _settings(user)
+    s["advanced"] = bool(on)
+    _save_settings(user, s)
+
+
+def sites(user: str) -> dict:
+    return dict(_settings(user).get("sites", {}))
+
+
+def login_mode(user: str, domain: str) -> str:
+    site = _settings(user).get("sites", {}).get((domain or "").strip().lower(), {})
+    return (site or {}).get("login", "manual")
+
+
+def authorize_site(user: str, domain: str, login: str = "manual") -> str:
+    """Turn the operator on for `user` and authorize one site. `login` is
+    'manual' (they sign in themselves; we never see the password) or 'remember'
+    (we store credentials in the vault for auto-login)."""
+    domain = (domain or "").strip().lower()
+    if not domain:
+        raise ValueError("a domain is required")
+    if login not in ("manual", "remember"):
+        raise ValueError("login must be 'manual' or 'remember'")
+    s = _settings(user)
+    s["enabled"] = True
+    s["sites"][domain] = {"login": login, "created": int(time.time())}
+    _save_settings(user, s)
+    return domain
+
+
+def forget_site(user: str, domain: str) -> bool:
+    """Remove a site's authorization and any stored credentials for it."""
+    domain = (domain or "").strip().lower()
+    s = _settings(user)
+    existed = s.get("sites", {}).pop(domain, None) is not None
+    _save_settings(user, s)
+    try:
+        from . import vault
+        if vault.available():
+            vault.delete(user, f"site:{domain}")
+    except Exception:
+        pass
+    return existed
+
+
+def authorized(user: str, domain: str) -> bool:
+    """Two independent fences: the domain is authorized (by this user OR the env
+    override) AND it passes the network egress allowlist."""
+    d = (domain or "").strip().lower()
+    if not d:
+        return False
+    listed = (d in browser.operator_domains()
+              or d in _settings(user).get("sites", {}))
+    return listed and security.egress_allowed(d)
+
+
+def remember_credentials(user: str, domain: str, username: str,
+                         password: str) -> str:
+    """Store site credentials in the encrypted vault and switch the site to
+    auto-login. The password is passed in by a SECURE LOCAL PROMPT, never by the
+    model — it must never appear as a tool argument."""
+    from . import vault
+    if not vault.available():
+        raise RuntimeError("the secure vault is not configured")
+    domain = (domain or "").strip().lower()
+    vault.put(user, f"site:{domain}", {"username": username,
+                                        "password": password})
+    authorize_site(user, domain, "remember")
+    return domain
 
 
 # --- risk → spine ActionType ---------------------------------------------
@@ -32,13 +133,13 @@ def type_for_risk(risk: str) -> str:
             else "browser_operate_irreversible")
 
 
-def _gate(domain: str) -> str | None:
+def _gate(user: str, domain: str) -> str | None:
     """Return a refusal reason if the operator may not act on `domain`."""
-    if not browser.operator_enabled():
-        return "the operator is disabled (set OLYMPUS_OPERATOR=1)"
-    if not browser.domain_allowed(domain):
-        return (f"'{domain}' is not authorized (add it to "
-                "OLYMPUS_OPERATOR_DOMAINS and the egress allowlist)")
+    if not enabled(user):
+        return ("the operator isn't set up yet — ask me to set it up for this "
+                "site")
+    if not authorized(user, domain):
+        return f"'{domain}' isn't authorized yet — ask me to set it up first"
     return None
 
 
@@ -68,7 +169,9 @@ def execute(payload: dict) -> dict:
     domain = payload.get("domain", "")
     name = payload.get("template", "")
     params = payload.get("params", {}) or {}
-    reason = _gate(domain)               # re-check at execution time (defense in depth)
+    # Re-check authorization for the acting user at execution time (defense in
+    # depth — covers a job prepared earlier whose authorization was since pulled).
+    reason = _gate(payload.get("user", ""), domain)
     if reason:
         raise RuntimeError(reason)
     _, tmpl = _template(domain, name)
@@ -108,7 +211,8 @@ def run(user: str, domain: str, template: str, params: dict) -> actions.Action:
                               if _template(domain, template)[1] else "notable")
     action = actions.prepare(
         user, type_name,
-        {"domain": domain, "template": template, "params": params},
+        {"domain": domain, "template": template, "params": params,
+         "user": user},
         title=f"Operate '{template}' on {domain}", why="HERMES operator")
     return actions.auto_or_hold(action)
 
@@ -152,26 +256,29 @@ def schedule(user: str, name: str, domain: str, template: str,
 
 
 def run_due(now: float | None = None) -> list[str]:
-    """Run any operator jobs whose interval has elapsed. Off entirely unless the
-    operator is enabled. Each job goes through the spine: it auto-executes only
-    within granted scope+autonomy+budget, otherwise it's left pending for
-    approval. Returns human-readable log lines."""
-    if not browser.operator_enabled():
-        return []
+    """Run any operator jobs whose interval has elapsed. Each job is gated per
+    user (env switch OR that user's opt-in) via _gate, and goes through the
+    spine: it auto-executes only within granted scope+autonomy+budget, otherwise
+    it's left pending for approval. Returns human-readable log lines."""
     now = now or time.time()
     jobs = _load_jobs()
+    if not jobs:
+        return []
     out: list[str] = []
     changed = False
     for j in jobs:
         if not j.get("enabled", True):
             continue
+        ju = j.get("user", "")
+        if not enabled(ju):              # operator off for this user → silent no-op
+            continue
         if now - float(j.get("last_run", 0.0)) < int(j.get("interval", 300)):
             continue
         j["last_run"] = now
         changed = True
-        reason = _gate(j.get("domain", ""))
-        if reason:
-            out.append(f"job '{j.get('name')}' skipped: {reason}")
+        if not authorized(ju, j.get("domain", "")):
+            out.append(f"job '{j.get('name')}' skipped: "
+                       f"'{j.get('domain')}' isn't authorized")
             continue
         try:
             action = run(j["user"], j["domain"], j["template"],
