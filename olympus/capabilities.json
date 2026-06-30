@@ -1,7 +1,9 @@
 {
   "actions": {
-    "count": 11,
+    "count": 13,
     "names": [
+      "browser_operate",
+      "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",
       "email_egress_held",
@@ -16,7 +18,7 @@
     ]
   },
   "agents": {
-    "count": 12,
+    "count": 13,
     "names": [
       "aegis",
       "angelos",
@@ -24,6 +26,7 @@
       "chiron",
       "chronos",
       "hephaestus",
+      "hermes",
       "iris",
       "metis",
       "mnemosyne",
@@ -105,11 +108,14 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 44,
+    "count": 53,
     "names": [
       "browse_page",
       "browser_act",
+      "browser_exists",
+      "browser_login",
       "browser_open",
+      "browser_operate",
       "browser_read",
       "browser_skill_record",
       "browser_skills",
@@ -125,8 +131,11 @@
       "generate_image",
       "list_dir",
       "list_source_files",
+      "operator_review",
+      "operator_schedule",
       "prepare_action",
       "propose_playbook",
+      "propose_site_profile",
       "propose_upgrade",
       "query_codegraph",
       "read_calendar",
@@ -144,6 +153,9 @@
       "schedule_task",
       "search_sessions",
       "send_email",
+      "site_profile_record",
+      "site_profiles",
+      "site_template_record",
       "spawn_subagent",
       "text_to_speech",
       "update_prompt",

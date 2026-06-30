@@ -192,7 +192,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "lessons, corrections, and user feedback into reusable "
                         "skills so the whole council gets smarter every day.",
             system=True,
-            extra_tools=("create_skill", "gate_skills"),
+            extra_tools=("create_skill", "gate_skills", "operator_review"),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",
@@ -206,7 +206,25 @@ SPECIALISTS: dict[str, Specialist] = {
                          "run_code_benchmark", "propose_upgrade",
                          "create_skill", "gate_skills", "generate_benchmark",
                          "query_codegraph", "codegraph_neighbors",
-                         "codegraph_impact", "codegraph_path"),
+                         "codegraph_impact", "codegraph_path",
+                         "propose_site_profile"),
+        ),
+        Specialist(
+            key="hermes", name="Hermes", title="Operator",
+            description="Acts on your behalf on sites you've explicitly "
+                        "authorized: logs in with vaulted credentials and "
+                        "operates declarative site profiles. Does NOT browse the "
+                        "open web; credentialed actions are scope/approval gated "
+                        "and off by default (OLYMPUS_OPERATOR).",
+            # Deliberately non-ingesting (web=False, no data MCP): _ingests() is
+            # False, so it legitimately keeps the actuator (browser_login). It is
+            # NOT given browser_open/browser_read — it never reads open-web prose
+            # as instructions. That is what lets it hold credentials safely while
+            # capability separation still holds across the system.
+            extra_tools=("browser_exists", "browser_login",
+                         "site_profiles", "site_profile_record",
+                         "browser_operate", "site_template_record",
+                         "operator_schedule"),
         ),
     ]
 }

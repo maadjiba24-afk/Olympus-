@@ -45,10 +45,22 @@ import hashlib
 import json
 import os
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from . import config, security
+
+# Hardening limits.
+_TEXT_LIMIT = 20_000          # max chars of page text returned to the model
+_LEDGER_MAX = 2_000           # bounded CDP-call ledger (circular)
+_RECV_TIMEOUT = 30.0          # per-CDP-call deadline on the real transport
+_WS_MAX_FRAME = 16 * 1024 * 1024   # cap a single CDP message (anti-OOM)
+_LOAD_TIMEOUT = 12.0          # bounded wait for document.readyState=complete
+_SKILL_STEPS_MAX = 10_000     # max chars of a recorded skill body
+_SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
+_SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
 
 # --- transport -----------------------------------------------------------
 
@@ -74,23 +86,52 @@ class FakeTransport:
     no real browser, so nothing here can navigate or act on anything.
     """
 
-    def __init__(self, pages: dict[str, dict[str, str]] | None = None) -> None:
+    def __init__(self, pages: dict[str, dict[str, str]] | None = None,
+                 redirects: dict[str, str] | None = None,
+                 present: list[str] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
+        # navigated-url -> landed-url, to simulate a server/JS redirect so the
+        # post-navigation SSRF re-check can be exercised offline.
+        self.redirects = redirects or {}
+        # CSS selectors that "exist" on the page, so exists()/fill()/login() can
+        # be driven offline. Tracks what fill() set, too.
+        self.present = set(present or [])
+        self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
+
+    def _matched_selector(self, expr: str) -> str | None:
+        for sel in self.present:
+            if json.dumps(sel) in expr:
+                return sel
+        return None
 
     def send(self, method: str, params: dict | None = None) -> dict:
         params = params or {}
         self.calls.append({"method": method, "params": params})
         if method == "Page.navigate":
-            self._url = params.get("url", self._url)
+            target = params.get("url", self._url)
+            self._url = self.redirects.get(target, target)   # follow redirect
             return {"frameId": "fake-frame"}
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
-            if "document.title" in expr:
+            if "querySelector" in expr:           # exists / fill / click / read
+                sel = self._matched_selector(expr)
+                if "innerText" in expr:           # selector read → text or ''
+                    value: Any = page.get("text", "") if sel else ""
+                else:                             # predicate / mutator → bool
+                    if sel and "value=" in expr:
+                        self.filled[sel] = "set"
+                    value = sel is not None
+                return {"result": {"value": value}}
+            if "readyState" in expr:
+                value = "complete"
+            elif "document.title" in expr:
                 value = page.get("title", "")
+            elif "location" in expr or "href" in expr:
+                value = self._url          # the *landed* URL (after redirects)
             elif "innerText" in expr or "textContent" in expr:
                 value = page.get("text", "")
             else:
@@ -120,15 +161,23 @@ class _RealTransport:
             raise BrowserUnavailable(
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
-        self._conn = connect(ws_url, open_timeout=10, max_size=None)
+        # Bound a single CDP message so a hostile/huge page can't OOM us; we
+        # truncate text to _TEXT_LIMIT anyway.
+        self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         self._id += 1
         self._conn.send(json.dumps(
             {"id": self._id, "method": method, "params": params or {}}))
+        # Read replies until ours arrives, but never block past the deadline
+        # (a hung tab or a dropped reply must not wedge the whole agent).
+        deadline = time.monotonic() + _RECV_TIMEOUT
         while True:
-            msg = json.loads(self._conn.recv())
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"CDP call {method} timed out")
+            msg = json.loads(self._conn.recv(timeout=remaining))
             if msg.get("id") == self._id:
                 if "error" in msg:
                     raise RuntimeError(msg["error"].get("message", "CDP error"))
@@ -192,9 +241,6 @@ def _build_transport() -> Transport:
 # --- session -------------------------------------------------------------
 
 
-_TEXT_LIMIT = 20_000
-
-
 class BrowserSession:
     """A stateful CDP session over a transport, with the governance baked in.
 
@@ -205,8 +251,10 @@ class BrowserSession:
     def __init__(self, transport: Transport) -> None:
         self._t = transport
         self.url: str = "about:blank"
-        # Every CDP call, in order — the replayable/auditable record.
-        self.ledger: list[dict[str, Any]] = []
+        # Every CDP call, in order — the replayable/auditable record. Bounded so
+        # a long-lived session can't grow it without limit (like a browser's own
+        # circular event buffer); the most recent _LEDGER_MAX calls are kept.
+        self.ledger: deque[dict[str, Any]] = deque(maxlen=_LEDGER_MAX)
         # Set once the session has loaded any external page: from then on its
         # content is untrusted. Surfaced so the tool layer / orchestrator can
         # reason about capability separation.
@@ -216,6 +264,35 @@ class BrowserSession:
         self.ledger.append({"method": method, "params": params})
         return self._t.send(method, params)
 
+    def _current_url(self) -> str:
+        """The URL actually loaded right now (after any redirect / JS nav)."""
+        try:
+            return self._eval("document.location ? document.location.href : ''")
+        except Exception:
+            return ""
+
+    def _blocked_landing(self) -> str | None:
+        """Re-run the SSRF/egress gate against the *landed* URL. The initial
+        check only covers the URL we asked for; a 3xx redirect or a JS
+        navigation can move the tab onto an internal host before we read it.
+        Returns a reason if the current page must not be exposed, else None."""
+        href = self._current_url()
+        if not href or href.startswith("about:"):
+            return None
+        return security.url_block_reason(href)
+
+    def _wait_ready(self, timeout: float = _LOAD_TIMEOUT) -> None:
+        """Bounded poll for document.readyState == 'complete' so reads don't
+        race a still-loading page. Best-effort: returns on timeout, never raises."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if self._eval("document.readyState") == "complete":
+                    return
+            except Exception:
+                return
+            time.sleep(0.25)
+
     def open(self, url: str) -> str:
         """Navigate to `url` through the SSRF + egress gate, return a snapshot."""
         reason = security.url_block_reason(url)
@@ -224,18 +301,29 @@ class BrowserSession:
         self._call("Page.navigate", url=url)
         self.url = url
         self.ingested_untrusted = True
+        self._wait_ready()
+        # Defend against redirect/JS-nav SSRF: if the tab landed somewhere the
+        # gate forbids, navigate away and refuse to surface its content.
+        landed = self._blocked_landing()
+        if landed:
+            self._call("Page.navigate", url="about:blank")
+            self.url = "about:blank"
+            return f"Error: navigation landed on a blocked address ({landed})."
         title = self._eval("document.title")
         text = self._eval("document.body ? document.body.innerText : ''")
         return self._snapshot(title, text)
 
     def read(self, selector: str = "") -> str:
         """Read readable text from the current page (or a CSS `selector`)."""
+        self.ingested_untrusted = True
+        landed = self._blocked_landing()
+        if landed:
+            return f"Error: current page is a blocked address ({landed})."
         if selector:
             expr = (f"(function(){{var e=document.querySelector("
                     f"{json.dumps(selector)});return e?e.innerText:'';}})()")
         else:
             expr = "document.body ? document.body.innerText : ''"
-        self.ingested_untrusted = True
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
@@ -266,6 +354,78 @@ class BrowserSession:
                          returnByValue=True)
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
+
+    def _eval_bool(self, expression: str) -> bool:
+        res = self._call("Runtime.evaluate", expression=expression,
+                         returnByValue=True)
+        return bool((res or {}).get("result", {}).get("value"))
+
+    def exists(self, selector: str) -> bool:
+        """Structured predicate: is the selector present? Returns a bool, never
+        page prose — so the actuator-holder can branch without ingesting text."""
+        return self._eval_bool(
+            f"!!document.querySelector({json.dumps(selector)})")
+
+    def fill(self, selector: str, value: str) -> bool:
+        """Set an input's value and fire input/change. `value` is sent to Chrome
+        to type, never returned to the model (used for vault-sourced secrets)."""
+        expr = (f"(function(){{var e=document.querySelector("
+                f"{json.dumps(selector)});if(!e)return false;e.focus();"
+                f"e.value={json.dumps(value)};"
+                f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"return true;}})()")
+        return self._eval_bool(expr)
+
+    def run_template(self, steps: list[dict], params: dict | None = None) -> dict:
+        """Execute a declarative action template step by step. Supported ops:
+        `assert` (selector must exist), `click` (selector), `fill`
+        (selector+value; value '$name' pulls from params), `wait`. Raises on a
+        failed assert or unknown op — the spine turns that into a FAILED action.
+        Page prose is never read as instructions; only selectors are touched."""
+        params = params or {}
+        done: list[str] = []
+        for i, step in enumerate(steps or []):
+            op = (step.get("op") or "").lower()
+            sel = step.get("selector", "")
+            if op == "assert":
+                if not self.exists(sel):
+                    raise RuntimeError(f"step {i}: required element {sel!r} "
+                                       "is missing")
+                done.append(f"assert {sel}")
+            elif op == "click":
+                self.act("click", selector=sel)
+                done.append(f"click {sel}")
+            elif op == "fill":
+                val = step.get("value", "")
+                if isinstance(val, str) and val.startswith("$"):
+                    val = str(params.get(val[1:], ""))
+                self.fill(sel, val)
+                done.append(f"fill {sel}")
+            elif op == "wait":
+                self._wait_ready()
+                done.append("wait")
+            else:
+                raise RuntimeError(f"step {i}: unknown op {op!r}")
+        return {"steps": done}
+
+    def login(self, profile: "SiteProfile", creds: dict) -> bool:
+        """Drive a declarative login: navigate to the profile's login URL (SSRF/
+        egress gated), fill username/password from `creds`, submit, and verify
+        the success marker. Returns True iff the marker appears. No page prose is
+        read as instructions; the password never leaves this method."""
+        if self.open(profile.login_url).startswith("Error:"):
+            return False
+        if profile.username_selector:
+            self.fill(profile.username_selector, str(creds.get("username", "")))
+        if profile.password_selector:
+            self.fill(profile.password_selector, str(creds.get("password", "")))
+        if profile.submit_selector:
+            self.act("click", selector=profile.submit_selector)
+        self._wait_ready()
+        if not profile.success_selector:
+            return True
+        return self.exists(profile.success_selector)
 
     @staticmethod
     def _snapshot(title: str, text: str) -> str:
@@ -375,7 +535,17 @@ def _load_skills() -> list[BrowserSkill]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
-    return [BrowserSkill.from_dict(d) for d in raw if isinstance(d, dict)]
+    if not isinstance(raw, list):
+        return []
+    out: list[BrowserSkill] = []
+    for d in raw:
+        if not isinstance(d, dict):
+            continue
+        try:                       # tolerate a hand-edited/partial entry
+            out.append(BrowserSkill.from_dict(d))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
 
 
 def _store_skills(skills: list[BrowserSkill]) -> None:
@@ -391,13 +561,29 @@ def _key(domain: str, name: str) -> tuple[str, str]:
     return (domain.strip().lower(), name.strip().lower())
 
 
+def _clip(text: str, limit: int) -> str:
+    return (text or "").strip()[:limit]
+
+
 def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
                  author: str = "olympus", base_score: float = 0.0) -> BrowserSkill:
     """Insert or replace a skill (keyed by domain+name), preserving outcome
-    counts on replacement so a re-recorded skill keeps its measured score."""
+    counts on replacement so a re-recorded skill keeps its measured score.
+
+    Inputs are length-capped and the library is bounded (lowest-reliability
+    skills are dropped past _SKILLS_MAX) so an over-eager agent can't bloat the
+    on-disk store without limit.
+    """
+    domain = _clip(domain, _SKILL_FIELD_MAX)
+    name = _clip(name, _SKILL_FIELD_MAX)
+    if not domain or not name:
+        raise ValueError("a browser skill needs a non-empty domain and name")
+    skill = BrowserSkill(
+        domain=domain, name=name, steps=_clip(steps, _SKILL_STEPS_MAX),
+        source=_clip(source, _SKILL_FIELD_MAX) or "agent",
+        author=_clip(author, _SKILL_FIELD_MAX) or "olympus",
+        base_score=max(0.0, min(1.0, base_score)))
     skills = _load_skills()
-    skill = BrowserSkill(domain=domain, name=name, steps=steps, source=source,
-                         author=author, base_score=max(0.0, min(1.0, base_score)))
     out, replaced = [], False
     for existing in skills:
         if _key(existing.domain, existing.name) == _key(domain, name):
@@ -409,6 +595,9 @@ def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
             out.append(existing)
     if not replaced:
         out.append(skill)
+    if len(out) > _SKILLS_MAX:      # keep the most reliable, drop the long tail
+        out = sorted(out, key=lambda s: (s.reliability, s.runs),
+                     reverse=True)[:_SKILLS_MAX]
     _store_skills(out)
     return skill
 
@@ -435,3 +624,210 @@ def list_skills(domain: str = "") -> list[BrowserSkill]:
         d = domain.strip().lower()
         skills = [s for s in skills if d in s.domain.strip().lower()]
     return sorted(skills, key=lambda s: (s.reliability, s.runs), reverse=True)
+
+
+# --- operator: site profiles + gating (HERMES, Phase 1) ------------------
+#
+# A Site Profile is the declarative, per-domain spec the operator acts through:
+# how to log in (selectors) and how to tell it worked (success marker). It is a
+# provenance-stamped, reliability-scored skill — never free-form "do what the
+# page says". See docs/DESIGN_OPERATOR.md.
+
+
+@dataclass
+class SiteProfile:
+    domain: str
+    login_url: str = ""
+    username_selector: str = ""
+    password_selector: str = ""
+    submit_selector: str = ""
+    success_selector: str = ""        # present iff the login succeeded
+    source: str = "agent"
+    author: str = "olympus"
+    created: str = ""
+    runs: int = 0
+    successes: int = 0
+    # Declarative action templates: name -> {"risk", "steps":[{op,selector,value}],
+    # "success_selector"?}. Steps are the ONLY thing the operator will do on a
+    # site — there is no "interpret the page" path.
+    templates: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.created:
+            self.created = datetime.datetime.now(
+                datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+    @property
+    def content_hash(self) -> str:
+        h = hashlib.sha256()
+        h.update("\n".join([
+            self.domain, self.login_url, self.username_selector,
+            self.password_selector, self.submit_selector,
+            self.success_selector,
+            json.dumps(self.templates, sort_keys=True)]).encode("utf-8"))
+        return "sha256:" + h.hexdigest()[:16]
+
+    @property
+    def reliability(self) -> float:
+        return round(self.successes / self.runs, 3) if self.runs else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        d = {f: getattr(self, f) for f in (
+            "domain", "login_url", "username_selector", "password_selector",
+            "submit_selector", "success_selector", "source", "author",
+            "created", "runs", "successes", "templates")}
+        d["content_hash"] = self.content_hash
+        d["reliability"] = self.reliability
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "SiteProfile":
+        return cls(
+            domain=d["domain"], login_url=d.get("login_url", ""),
+            username_selector=d.get("username_selector", ""),
+            password_selector=d.get("password_selector", ""),
+            submit_selector=d.get("submit_selector", ""),
+            success_selector=d.get("success_selector", ""),
+            source=d.get("source", "agent"), author=d.get("author", "olympus"),
+            created=d.get("created", ""), runs=int(d.get("runs", 0)),
+            successes=int(d.get("successes", 0)),
+            templates=d.get("templates") or {})
+
+
+def _profiles_path() -> "config.Path":  # type: ignore[name-defined]
+    return config.MEMORY_DIR / "site_profiles.json"
+
+
+def _load_profiles() -> list[SiteProfile]:
+    path = _profiles_path()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[SiteProfile] = []
+    for d in raw:
+        if not isinstance(d, dict):
+            continue
+        try:
+            out.append(SiteProfile.from_dict(d))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _store_profiles(profiles: list[SiteProfile]) -> None:
+    path = _profiles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps([p.to_dict() for p in profiles], indent=2)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(path)
+
+
+def record_profile(domain: str, *, login_url: str = "",
+                   username_selector: str = "", password_selector: str = "",
+                   submit_selector: str = "", success_selector: str = "",
+                   source: str = "agent", author: str = "olympus") -> SiteProfile:
+    """Insert or replace a site profile (keyed by domain), preserving outcome
+    counts on replacement. Fields are length-capped."""
+    domain = _clip(domain, _SKILL_FIELD_MAX).lower()
+    if not domain:
+        raise ValueError("a site profile needs a non-empty domain")
+    prof = SiteProfile(
+        domain=domain, login_url=_clip(login_url, 2048),
+        username_selector=_clip(username_selector, _SKILL_FIELD_MAX),
+        password_selector=_clip(password_selector, _SKILL_FIELD_MAX),
+        submit_selector=_clip(submit_selector, _SKILL_FIELD_MAX),
+        success_selector=_clip(success_selector, _SKILL_FIELD_MAX),
+        source=_clip(source, _SKILL_FIELD_MAX) or "agent",
+        author=_clip(author, _SKILL_FIELD_MAX) or "olympus")
+    out, replaced = [], False
+    for existing in _load_profiles():
+        if existing.domain == domain:
+            prof.runs, prof.successes = existing.runs, existing.successes
+            prof.created = existing.created
+            out.append(prof)
+            replaced = True
+        else:
+            out.append(existing)
+    if not replaced:
+        out.append(prof)
+    _store_profiles(out)
+    return prof
+
+
+def get_profile(domain: str) -> SiteProfile | None:
+    d = (domain or "").strip().lower()
+    for p in _load_profiles():
+        if p.domain == d:
+            return p
+    return None
+
+
+def list_profiles() -> list[SiteProfile]:
+    return sorted(_load_profiles(), key=lambda p: (p.reliability, p.runs),
+                  reverse=True)
+
+
+def mark_profile_outcome(domain: str, success: bool) -> SiteProfile | None:
+    profiles = _load_profiles()
+    hit = None
+    d = (domain or "").strip().lower()
+    for p in profiles:
+        if p.domain == d:
+            p.runs += 1
+            if success:
+                p.successes += 1
+            hit = p
+    if hit is not None:
+        _store_profiles(profiles)
+    return hit
+
+
+def set_template(domain: str, name: str, risk: str, steps: list[dict],
+                 success_selector: str = "") -> SiteProfile:
+    """Add/replace a declarative action template on a domain's site profile,
+    creating the profile if needed. Outcome counts are preserved."""
+    domain = (domain or "").strip().lower()
+    name = _clip(name, _SKILL_FIELD_MAX)
+    if not domain or not name:
+        raise ValueError("a template needs a non-empty domain and name")
+    if risk not in ("notable", "irreversible", "financial_legal"):
+        raise ValueError(f"unknown template risk: {risk!r}")
+    if not isinstance(steps, list):
+        raise ValueError("template steps must be a list")
+    profiles = _load_profiles()
+    prof = next((p for p in profiles if p.domain == domain), None)
+    if prof is None:
+        prof = SiteProfile(domain=domain)
+        profiles.append(prof)
+    prof.templates = dict(prof.templates or {})
+    prof.templates[name] = {
+        "risk": risk, "steps": steps[:64],
+        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
+    _store_profiles(profiles)
+    return prof
+
+
+def operator_enabled() -> bool:
+    """Master switch. The whole credentialed-operator path is off by default."""
+    return os.environ.get("OLYMPUS_OPERATOR", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def operator_domains() -> list[str]:
+    raw = os.environ.get("OLYMPUS_OPERATOR_DOMAINS", "")
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
+def domain_allowed(domain: str) -> bool:
+    """An operator may only touch domains explicitly listed *and* on the egress
+    allowlist — two independent fences."""
+    d = (domain or "").strip().lower()
+    if not d or d not in operator_domains():
+        return False
+    return security.egress_allowed(d)

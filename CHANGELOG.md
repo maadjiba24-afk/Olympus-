@@ -15,6 +15,62 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — HERMES operator, Phases 2-4: credentialed actions, always-on, self-healing
+
+- **Credentialed actions on the approval spine (Phase 2).** `browser_operate`
+  runs declarative action templates (`site_template_record`) as
+  `actions.ActionType`s — two are registered: `browser_operate` (NOTABLE, can
+  auto-run within a granted `browser.operate` scope + autonomy) and
+  `browser_operate_irreversible` (IRREVERSIBLE, **always** requires explicit
+  approval). They inherit the whole spine: deny-first scopes, daily runaway
+  caps, and the immutable audit log. Templates are ordered assert/click/fill/
+  wait steps — there is no "interpret the page" path.
+- **Always-on operator jobs (Phase 3).** `operator_schedule` stores standing
+  jobs that `heartbeat.tick()` runs via `operator.run_due()`. Every run goes
+  back through the spine, so irreversible templates still wait for approval and
+  everything is scope/budget gated. No-op unless `OLYMPUS_OPERATOR` is on.
+- **METIS/Prometheus weave (Phase 4).** `operator_review` (Metis + daily
+  heartbeat) prunes site profiles that fail consistently; `propose_site_profile`
+  (Prometheus) files human-reviewable profile/selector patches that are never
+  self-applied. Loadouts: Hermes gains operate/template/schedule, Metis gains
+  the review tool, Prometheus the proposal tool.
+- Tools 48 → 53; ActionTypes 11 → 13. THREAT_MODEL.md rows, `capabilities.json`,
+  README counts, and `tests/test_operator_phases.py` added. Real-Chrome smoke
+  still green.
+
+### Added — HERMES browser operator, Phase 1 (`docs/DESIGN_OPERATOR.md`)
+
+- **New specialist HERMES (Operator)** — the first agent that can perform
+  **credentialed** browser actions. It is deliberately **non-ingesting**
+  (`web=False`, and it has neither `browser_open` nor `browser_read`), so it
+  legitimately keeps the actuator while capability separation still holds
+  system-wide: the agent that reads the open web (Argus) never holds the
+  actuator, and the agent that holds the actuator (Hermes) never reads open-web
+  prose as instructions.
+- **Four new tools** (44 → 48), all threat-modeled: `browser_login`
+  (vault-backed login via a declarative site profile), `browser_exists` (a
+  yes/no selector predicate — never page prose), and `site_profile_record` /
+  `site_profiles` (provenance- and reliability-scored login recipes).
+- **Site Profiles** (`browser.SiteProfile`) — declarative per-domain login
+  recipes (login URL + selectors + success marker) with a content hash,
+  provenance, and an outcome-derived reliability score. Stored at
+  `MEMORY_DIR/site_profiles.json`. Credentials are **not** stored here.
+- This is Phase 1 of the operator: login + structured inspection only, **no
+  irreversible actions**. Always-on heartbeat playbooks and METIS/Prometheus
+  weaving are later phases.
+
+### Security — operator is off by default and fails closed
+
+- Master switch `OLYMPUS_OPERATOR` (default off) disables the entire
+  credentialed path. `browser_login` additionally requires the domain to be in
+  `OLYMPUS_OPERATOR_DOMAINS` **and** on the egress allowlist, and a vault entry
+  `site:<domain>` to exist — each missing gate fails closed.
+- Credentials come from the encrypted vault (`vault.get`); the password is
+  filled into the page but **never enters the model context or any output**.
+- `browser_login` is a registered `ACTION_TOOL` (stripped from any ingesting
+  run); a missing post-login success marker (2FA/CAPTCHA/selector drift) makes
+  it stop and report rather than retry.
+
 ### Added — Governed browser harness (`olympus/browser.py`)
 
 - A stateful Chrome-DevTools-Protocol harness that lets a specialist drive a
@@ -50,6 +106,14 @@ carries a migration note here.
   so it is stripped from any run that also ingests untrusted page content. Argus
   reads/learns via the harness but, because it ingests the web, never holds the
   credentialed actuator in the same run — proven in `tests/test_browser.py`.
+- **Hardening pass.** The SSRF/egress gate is re-run against the *landed* URL
+  after navigation (a 3xx redirect or JS navigation onto an internal host is
+  blocked and the tab is sent to `about:blank` instead of surfacing its
+  content); the real transport bounds a single CDP frame (anti-OOM) and times
+  out a stuck reply instead of wedging the agent; `browser_open` waits (bounded)
+  for `readyState=complete` before reading; the CDP ledger is a bounded circular
+  buffer; and the skill store caps field/step lengths, bounds the library
+  (dropping lowest-reliability skills), and skips malformed entries.
 - See [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for the full
   strengths→moats / weaknesses→credibility-assets rationale.
 

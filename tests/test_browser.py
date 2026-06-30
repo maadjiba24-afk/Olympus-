@@ -140,6 +140,76 @@ def test_skill_handlers_roundtrip():
     assert "star repo" in listing and "reliability" in listing
 
 
+# --- hardening: redirect / JS-nav SSRF can't slip past the gate -----------
+
+def test_open_blocks_redirect_to_internal_after_landing():
+    # Initial URL is a public literal IP (passes the gate with no DNS), but the
+    # tab is redirected onto the metadata endpoint. The post-navigation re-check
+    # must refuse to surface that content and navigate away.
+    pages = {"http://169.254.169.254/": {"title": "Internal", "text": "SECRET"}}
+    t = browser.FakeTransport(
+        pages, redirects={"http://93.184.216.34/": "http://169.254.169.254/"})
+    browser.set_transport_factory(lambda: t)
+    try:
+        out = browser.session().open("http://93.184.216.34/")
+        assert out.startswith("Error:") and "SECRET" not in out
+        navs = [c["params"]["url"] for c in browser.session().ledger
+                if c["method"] == "Page.navigate"]
+        assert navs[-1] == "about:blank"      # left the internal page
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_read_refuses_when_current_page_is_blocked():
+    # A session already sitting on an internal URL (e.g. after a JS navigation)
+    # must not let read() exfiltrate it.
+    t = browser.FakeTransport(
+        {"http://169.254.169.254/": {"title": "x", "text": "SECRET"}})
+    t._url = "http://169.254.169.254/"
+    sess = browser.BrowserSession(t)
+    assert sess.read().startswith("Error:")
+
+
+# --- hardening: bounded ledger (no unbounded growth) ----------------------
+
+def test_ledger_is_bounded():
+    sess = browser.BrowserSession(browser.FakeTransport())
+    for _ in range(browser._LEDGER_MAX + 50):
+        sess._call("Runtime.evaluate", expression="1")
+    assert len(sess.ledger) == browser._LEDGER_MAX
+
+
+# --- hardening: skill-store input + library caps --------------------------
+
+def test_skill_inputs_are_capped():
+    s = browser.record_skill("d.com", "n", "x" * (browser._SKILL_STEPS_MAX + 500))
+    assert len(s.steps) == browser._SKILL_STEPS_MAX
+
+
+def test_skill_requires_domain_and_name():
+    with pytest.raises(ValueError):
+        browser.record_skill("   ", "n", "steps")
+
+
+def test_library_is_bounded_dropping_lowest_reliability(monkeypatch):
+    monkeypatch.setattr(browser, "_SKILLS_MAX", 3)
+    for n in ("a", "b", "c"):
+        browser.record_skill(f"{n}.com", n, "s")
+        browser.mark_outcome(f"{n}.com", n, True)      # reliability 1.0
+    browser.record_skill("d.com", "d", "s")            # reliability 0.0 → trimmed
+    names = {s.name for s in browser.list_skills()}
+    assert len(names) == 3 and "d" not in names
+
+
+def test_malformed_skill_entries_are_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    path = browser._skills_path()
+    path.write_text('[{"not":"a skill"}, {"domain":"ok.com","name":"good",'
+                    '"steps":"s"}]', encoding="utf-8")
+    skills = browser.list_skills()
+    assert [s.name for s in skills] == ["good"]
+
+
 # --- the surface stays bound to the threat model + capability counts ------
 
 def test_browser_tools_are_threat_modeled():

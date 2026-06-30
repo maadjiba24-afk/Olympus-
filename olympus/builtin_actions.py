@@ -231,6 +231,9 @@ def register_builtins() -> None:
         preview=_write_file_preview, execute=_write_file_execute,
         undo=sandbox.undo_write,
         description="Create/overwrite a file in the workspace (reversible)."))
+    # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
+    from . import operator
+    operator.register_operator_actions()
 
 
 register_builtins()
