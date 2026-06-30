@@ -52,6 +52,16 @@ Because `OLYMPUS_REQUIRE_LOGIN=1` is set, you'll see a login screen — click
 **Create account** to make the first account. Everyone else does the same; each
 person's memory and actions are private to their account.
 
+This also starts the **always-on learning loop** (the `heartbeat` service): even
+while you're asleep or away, Olympus scans the world, learns from queued videos,
+distills the day's experience into new skills, and runs its weekly self-audit —
+sharing the same memory as the chat app. It spends tokens on your key in the
+background, **bounded by `OLYMPUS_DAILY_BUDGET`** (default $20/day; cycles skip
+once the cap is hit). To turn it off, comment out the `heartbeat` service in
+`docker-compose.yml` (or `docker compose stop heartbeat`) — note that setting
+the budget to `0` means *unlimited*, not off. Watch it with
+`docker compose logs -f heartbeat`.
+
 ## Step 5 — verify it's healthy
 ```bash
 curl https://caelarion.com/healthz        # -> {"status":"ok",...}
@@ -67,9 +77,9 @@ cd Olympus-/deploy && git pull && docker compose up -d --build
 ```
 
 ## Optional
-- **Self-learning loop:** uncomment the `heartbeat` service in
-  `docker-compose.yml` to run opportunity scans / training in the background. It
-  spends tokens on its own schedule, so keep `OLYMPUS_DAILY_BUDGET` set.
+- **Self-learning loop:** runs **by default** (the `heartbeat` service above).
+  Comment it out in `docker-compose.yml` if you want a chat-only instance that
+  learns solely during conversations.
 - **Google (item #3) / WhatsApp (item #4):** the redirect/webhook URLs are
   already `https://caelarion.com/...`; fill the matching env vars in `.env` and
   `docker compose up -d` again.
