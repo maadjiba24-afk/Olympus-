@@ -35,6 +35,11 @@ ACTION_TOOLS = frozenset({
     "browser_act",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
+    # ...as is running a credentialed action template.
+    "browser_operate",
+    # A self-modification proposal (like propose_upgrade) — kept out of any run
+    # that also ingests untrusted content.
+    "propose_site_profile",
 })
 
 # Tools that read untrusted external content.

@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — HERMES operator, Phases 2-4: credentialed actions, always-on, self-healing
+
+- **Credentialed actions on the approval spine (Phase 2).** `browser_operate`
+  runs declarative action templates (`site_template_record`) as
+  `actions.ActionType`s — two are registered: `browser_operate` (NOTABLE, can
+  auto-run within a granted `browser.operate` scope + autonomy) and
+  `browser_operate_irreversible` (IRREVERSIBLE, **always** requires explicit
+  approval). They inherit the whole spine: deny-first scopes, daily runaway
+  caps, and the immutable audit log. Templates are ordered assert/click/fill/
+  wait steps — there is no "interpret the page" path.
+- **Always-on operator jobs (Phase 3).** `operator_schedule` stores standing
+  jobs that `heartbeat.tick()` runs via `operator.run_due()`. Every run goes
+  back through the spine, so irreversible templates still wait for approval and
+  everything is scope/budget gated. No-op unless `OLYMPUS_OPERATOR` is on.
+- **METIS/Prometheus weave (Phase 4).** `operator_review` (Metis + daily
+  heartbeat) prunes site profiles that fail consistently; `propose_site_profile`
+  (Prometheus) files human-reviewable profile/selector patches that are never
+  self-applied. Loadouts: Hermes gains operate/template/schedule, Metis gains
+  the review tool, Prometheus the proposal tool.
+- Tools 48 → 53; ActionTypes 11 → 13. THREAT_MODEL.md rows, `capabilities.json`,
+  README counts, and `tests/test_operator_phases.py` added. Real-Chrome smoke
+  still green.
+
 ### Added — HERMES browser operator, Phase 1 (`docs/DESIGN_OPERATOR.md`)
 
 - **New specialist HERMES (Operator)** — the first agent that can perform

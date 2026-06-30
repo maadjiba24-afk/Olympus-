@@ -47,7 +47,7 @@ import os
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from . import config, security
@@ -377,6 +377,38 @@ class BrowserSession:
                 f"return true;}})()")
         return self._eval_bool(expr)
 
+    def run_template(self, steps: list[dict], params: dict | None = None) -> dict:
+        """Execute a declarative action template step by step. Supported ops:
+        `assert` (selector must exist), `click` (selector), `fill`
+        (selector+value; value '$name' pulls from params), `wait`. Raises on a
+        failed assert or unknown op — the spine turns that into a FAILED action.
+        Page prose is never read as instructions; only selectors are touched."""
+        params = params or {}
+        done: list[str] = []
+        for i, step in enumerate(steps or []):
+            op = (step.get("op") or "").lower()
+            sel = step.get("selector", "")
+            if op == "assert":
+                if not self.exists(sel):
+                    raise RuntimeError(f"step {i}: required element {sel!r} "
+                                       "is missing")
+                done.append(f"assert {sel}")
+            elif op == "click":
+                self.act("click", selector=sel)
+                done.append(f"click {sel}")
+            elif op == "fill":
+                val = step.get("value", "")
+                if isinstance(val, str) and val.startswith("$"):
+                    val = str(params.get(val[1:], ""))
+                self.fill(sel, val)
+                done.append(f"fill {sel}")
+            elif op == "wait":
+                self._wait_ready()
+                done.append("wait")
+            else:
+                raise RuntimeError(f"step {i}: unknown op {op!r}")
+        return {"steps": done}
+
     def login(self, profile: "SiteProfile", creds: dict) -> bool:
         """Drive a declarative login: navigate to the profile's login URL (SSRF/
         egress gated), fill username/password from `creds`, submit, and verify
@@ -615,6 +647,10 @@ class SiteProfile:
     created: str = ""
     runs: int = 0
     successes: int = 0
+    # Declarative action templates: name -> {"risk", "steps":[{op,selector,value}],
+    # "success_selector"?}. Steps are the ONLY thing the operator will do on a
+    # site — there is no "interpret the page" path.
+    templates: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.created:
@@ -627,7 +663,8 @@ class SiteProfile:
         h.update("\n".join([
             self.domain, self.login_url, self.username_selector,
             self.password_selector, self.submit_selector,
-            self.success_selector]).encode("utf-8"))
+            self.success_selector,
+            json.dumps(self.templates, sort_keys=True)]).encode("utf-8"))
         return "sha256:" + h.hexdigest()[:16]
 
     @property
@@ -638,7 +675,7 @@ class SiteProfile:
         d = {f: getattr(self, f) for f in (
             "domain", "login_url", "username_selector", "password_selector",
             "submit_selector", "success_selector", "source", "author",
-            "created", "runs", "successes")}
+            "created", "runs", "successes", "templates")}
         d["content_hash"] = self.content_hash
         d["reliability"] = self.reliability
         return d
@@ -653,7 +690,8 @@ class SiteProfile:
             success_selector=d.get("success_selector", ""),
             source=d.get("source", "agent"), author=d.get("author", "olympus"),
             created=d.get("created", ""), runs=int(d.get("runs", 0)),
-            successes=int(d.get("successes", 0)))
+            successes=int(d.get("successes", 0)),
+            templates=d.get("templates") or {})
 
 
 def _profiles_path() -> "config.Path":  # type: ignore[name-defined]
@@ -748,6 +786,31 @@ def mark_profile_outcome(domain: str, success: bool) -> SiteProfile | None:
     if hit is not None:
         _store_profiles(profiles)
     return hit
+
+
+def set_template(domain: str, name: str, risk: str, steps: list[dict],
+                 success_selector: str = "") -> SiteProfile:
+    """Add/replace a declarative action template on a domain's site profile,
+    creating the profile if needed. Outcome counts are preserved."""
+    domain = (domain or "").strip().lower()
+    name = _clip(name, _SKILL_FIELD_MAX)
+    if not domain or not name:
+        raise ValueError("a template needs a non-empty domain and name")
+    if risk not in ("notable", "irreversible", "financial_legal"):
+        raise ValueError(f"unknown template risk: {risk!r}")
+    if not isinstance(steps, list):
+        raise ValueError("template steps must be a list")
+    profiles = _load_profiles()
+    prof = next((p for p in profiles if p.domain == domain), None)
+    if prof is None:
+        prof = SiteProfile(domain=domain)
+        profiles.append(prof)
+    prof.templates = dict(prof.templates or {})
+    prof.templates[name] = {
+        "risk": risk, "steps": steps[:64],
+        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
+    _store_profiles(profiles)
+    return prof
 
 
 def operator_enabled() -> bool:

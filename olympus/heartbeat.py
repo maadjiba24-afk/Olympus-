@@ -31,6 +31,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Scheduler failed:\n" + traceback.format_exc())
 
+    # Always-on operator jobs (HERMES). No-op unless OLYMPUS_OPERATOR is on; each
+    # job still runs through the approval spine (scope/budget/approval all apply).
+    try:
+        from . import operator
+        for line in operator.run_due(now):
+            log.append("Operator: " + line)
+    except Exception:
+        log.append("Operator failed:\n" + traceback.format_exc())
+
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")
         try:
@@ -73,6 +82,12 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Metis: skills updated; report saved to memory/reports.")
         except Exception:
             log.append("Metis failed:\n" + traceback.format_exc())
+        # Metis also prunes drifted operator site profiles (Phase 4).
+        try:
+            from . import operator
+            log.append("Operator review: " + operator.review_profiles())
+        except Exception:
+            log.append("Operator review failed:\n" + traceback.format_exc())
         state["daily_learning"] = now
 
     if config.TRAIN_EVERY and _due(state, "train", config.TRAIN_EVERY, now):

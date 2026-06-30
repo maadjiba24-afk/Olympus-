@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import (browser, codegraph, config, egress, facts, github, memory,
-               security, skills, vault, youtube)
+               operator, security, skills, vault, youtube)
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
@@ -849,7 +849,99 @@ def _site_profiles(domain: str = "") -> str:
         return "No site profiles recorded yet."
     return "\n".join(
         f"- {p.domain} — login reliability {p.reliability} ({p.runs} runs, "
+        f"templates: {', '.join(sorted(p.templates)) or 'none'}, "
         f"source {p.source}, {p.content_hash})" for p in profs)
+
+
+def _parse_json_arg(raw, default):
+    if isinstance(raw, (dict, list)):
+        return raw
+    if not raw or not str(raw).strip():
+        return default
+    return json.loads(raw)
+
+
+def _browser_operate(domain: str, template: str, params: str = "") -> str:
+    reason = operator._gate(domain)
+    if reason:
+        return f"Error: {reason}."
+    _, tmpl = operator._template(domain, template)
+    if not tmpl:
+        return (f"Error: no template '{template}' for {domain}. Define one with "
+                "site_template_record first.")
+    try:
+        parsed = _parse_json_arg(params, {})
+    except json.JSONDecodeError:
+        return "Error: params must be a JSON object."
+    try:
+        action = operator.run(memory.current_user(), domain, template, parsed)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    if action.status == actions_mod().EXECUTED:
+        return f"Executed '{template}' on {domain}: {action.result.get('steps')}"
+    if action.status == actions_mod().FAILED:
+        return f"Operate failed: {action.error}"
+    return (f"Prepared '{template}' on {domain} (id {action.id}, "
+            f"{action.risk_class}). Awaiting your approval — approve it with "
+            f"`olympus approve {action.id}`.")
+
+
+def _site_template_record(domain: str, name: str, risk: str, steps: str,
+                          success_selector: str = "") -> str:
+    try:
+        parsed = _parse_json_arg(steps, [])
+    except json.JSONDecodeError:
+        return "Error: steps must be a JSON array."
+    if not isinstance(parsed, list):
+        return "Error: steps must be a JSON array of {op, selector} objects."
+    try:
+        prof = browser.set_template(domain, name, risk, parsed, success_selector)
+    except ValueError as err:
+        return f"Error: {err}."
+    return (f"Recorded template '{name}' ({risk}, {len(parsed)} steps) on "
+            f"{prof.domain} ({prof.content_hash}).")
+
+
+def _operator_schedule(name: str, domain: str, template: str, interval: str,
+                       params: str = "") -> str:
+    if not browser.operator_enabled():
+        return "Error: the operator is disabled (set OLYMPUS_OPERATOR=1)."
+    if not browser.domain_allowed(domain):
+        return (f"Error: '{domain}' is not authorized (OLYMPUS_OPERATOR_DOMAINS "
+                "+ egress allowlist).")
+    if operator._template(domain, template)[1] is None:
+        return f"Error: no template '{template}' for {domain}."
+    try:
+        parsed = _parse_json_arg(params, {})
+    except json.JSONDecodeError:
+        return "Error: params must be a JSON object."
+    from . import scheduler
+    secs = scheduler.parse_interval(interval)
+    job = operator.schedule(memory.current_user(), name, domain, template,
+                            secs, parsed)
+    every = f"{job['interval'] // 3600}h" if job["interval"] % 3600 == 0 \
+        else f"{job['interval'] // 60}m"
+    return (f"Scheduled operator job '{name}' to run '{template}' on {domain} "
+            f"every {every}. It runs through the approval spine each time.")
+
+
+def _operator_review() -> str:
+    return operator.review_profiles()
+
+
+def _propose_site_profile(domain: str, rationale: str, login_url: str = "",
+                          username_selector: str = "", password_selector: str = "",
+                          submit_selector: str = "",
+                          success_selector: str = "") -> str:
+    return operator.propose_profile(
+        domain, rationale, login_url=login_url,
+        username_selector=username_selector, password_selector=password_selector,
+        submit_selector=submit_selector, success_selector=success_selector)
+
+
+def actions_mod():
+    from . import actions
+    return actions
 
 
 HANDLERS: dict[str, Callable[..., str]] = {
@@ -888,6 +980,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_login": _browser_login,
     "site_profile_record": _site_profile_record,
     "site_profiles": _site_profiles,
+    "browser_operate": _browser_operate,
+    "site_template_record": _site_template_record,
+    "operator_schedule": _operator_schedule,
+    "operator_review": _operator_review,
+    "propose_site_profile": _propose_site_profile,
     "prepare_action": _prepare_action,
     "propose_playbook": _propose_playbook,
     "current_time": lambda: datetime.datetime.now().astimezone().isoformat(),
@@ -1260,6 +1357,108 @@ SITE_PROFILES = {
     },
 }
 
+# --- operator Phases 2-4: credentialed operate, jobs, review, proposals ----
+
+BROWSER_OPERATE = {
+    "name": "browser_operate",
+    "description": (
+        "Run a saved, declarative action template on an authorized site (e.g. "
+        "'reorder', 'set_quantity'). Goes through the approval spine: reversible "
+        "templates can auto-run within your granted scope/autonomy; irreversible "
+        "ones (purchase, submit) always wait for your explicit approval. Returns "
+        "the result or the id of an action awaiting approval."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string"},
+            "template": {"type": "string", "description": "Template name"},
+            "params": {"type": "string",
+                       "description": "JSON object of template params (optional)"},
+        },
+        "required": ["domain", "template"],
+    },
+}
+
+SITE_TEMPLATE_RECORD = {
+    "name": "site_template_record",
+    "description": (
+        "Define or update a declarative action template on a site profile: an "
+        "ordered list of steps (op = assert/click/fill/wait, with a CSS "
+        "selector; fill value '$name' pulls from params) and a risk level "
+        "(notable | irreversible | financial_legal). Templates are the ONLY "
+        "thing the operator will do on a site."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string"},
+            "name": {"type": "string"},
+            "risk": {"type": "string",
+                     "enum": ["notable", "irreversible", "financial_legal"]},
+            "steps": {"type": "string",
+                      "description": "JSON array of {op, selector, value?} steps"},
+            "success_selector": {"type": "string",
+                                 "description": "Optional marker verifying success"},
+        },
+        "required": ["domain", "name", "risk", "steps"],
+    },
+}
+
+OPERATOR_SCHEDULE = {
+    "name": "operator_schedule",
+    "description": (
+        "Schedule a standing operator job: run a site template on a cadence, "
+        "unattended via the heartbeat. It still goes through the approval spine "
+        "each run, so irreversible templates wait for approval and everything is "
+        "scope/budget gated. Use for recurring tasks on authorized sites."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "domain": {"type": "string"},
+            "template": {"type": "string"},
+            "interval": {"type": "string",
+                         "description": "e.g. '6h', '1d' (min 5m)"},
+            "params": {"type": "string", "description": "JSON params (optional)"},
+        },
+        "required": ["name", "domain", "template", "interval"],
+    },
+}
+
+OPERATOR_REVIEW = {
+    "name": "operator_review",
+    "description": (
+        "Review saved site profiles and prune ones that fail consistently "
+        "(enough runs, low login/operate reliability), so the operator stops "
+        "trusting drifted recipes. Used by Metis in the daily learning cycle."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+PROPOSE_SITE_PROFILE = {
+    "name": "propose_site_profile",
+    "description": (
+        "File a human-reviewable proposal to add or patch a site profile (e.g. a "
+        "selector that drifted). Does NOT apply anything — a human enacts it. "
+        "Used by Prometheus to self-heal the operator."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string"},
+            "rationale": {"type": "string"},
+            "login_url": {"type": "string"},
+            "username_selector": {"type": "string"},
+            "password_selector": {"type": "string"},
+            "submit_selector": {"type": "string"},
+            "success_selector": {"type": "string"},
+        },
+        "required": ["domain", "rationale"],
+    },
+}
+
 SEARCH_SESSIONS = {
     "name": "search_sessions",
     "description": (
@@ -1364,6 +1563,11 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_login": BROWSER_LOGIN,
     "site_profile_record": SITE_PROFILE_RECORD,
     "site_profiles": SITE_PROFILES,
+    "browser_operate": BROWSER_OPERATE,
+    "site_template_record": SITE_TEMPLATE_RECORD,
+    "operator_schedule": OPERATOR_SCHEDULE,
+    "operator_review": OPERATOR_REVIEW,
+    "propose_site_profile": PROPOSE_SITE_PROFILE,
     "create_skill": CREATE_SKILL,
     "gate_skills": GATE_SKILLS,
     "generate_benchmark": GENERATE_BENCHMARK,

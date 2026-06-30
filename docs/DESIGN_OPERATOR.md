@@ -147,17 +147,22 @@ controls are **defense-in-depth, not one magic boundary**:
 
 If any control can't be satisfied, the operator does nothing and asks.
 
-## Phased implementation (each phase shippable, tested, behind the switch)
+## Phased implementation — all four phases shipped
 
-1. **Profiles + predicates + login (dry-run only).** Site Profile model
-   (provenance + score), `browser_exists`, `browser_login` via vault, success
-   verification. No irreversible actions. Master switch off by default.
-2. **`browser_operate` on the spine.** Register operator ActionTypes; wire
-   scopes, budgets, IRREVERSIBLE→approval; full audit.
-3. **Always-on.** Operator Playbooks executed by the heartbeat under
-   scope+budget; approval queue + notifications; kill switch + dry-run.
-4. **METIS/Prometheus.** Daily rescoring/pruning of profiles; Prometheus
-   proposes profile/template patches through approval.
+1. **✅ Profiles + predicates + login.** `SiteProfile` (provenance + score),
+   `browser_exists`, vault-backed `browser_login` with success verification.
+   Master switch off by default.
+2. **✅ `browser_operate` on the spine.** Two operate `ActionType`s
+   (`browser_operate` NOTABLE, `browser_operate_irreversible` IRREVERSIBLE)
+   registered in `builtin_actions`; declarative templates via
+   `site_template_record`; scopes (`browser.operate`), autonomy gating,
+   IRREVERSIBLE→approval, daily caps, and audit all inherited from the spine.
+3. **✅ Always-on.** Operator jobs (`operator_schedule`) run by
+   `heartbeat.tick()` via `operator.run_due()` — each run re-gated by the spine,
+   so nothing irreversible auto-fires. Off entirely unless `OLYMPUS_OPERATOR`.
+4. **✅ METIS/Prometheus.** `operator_review` prunes drifted profiles (run by
+   Metis and on the daily heartbeat); `propose_site_profile` lets Prometheus
+   file human-reviewable profile patches (never self-applied).
 
 Counts, THREAT_MODEL.md rows, README, and tests are updated per phase so CI's
 named-surface and capability bindings stay green throughout.
