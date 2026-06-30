@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Always-on learning runs by default in the cloud deploy
+
+- `deploy/docker-compose.yml` now enables the `heartbeat` service by default, so
+  a standard `docker compose up -d` runs Olympus's self-learning loop (world
+  scans, YouTube learning, daily skill distillation, weekly self-audit, and any
+  scheduled operator jobs) around the clock — not just the chat server. It
+  shares the memory volume, so what it learns is immediately available to chat.
+- Background spend is bounded by `OLYMPUS_DAILY_BUDGET` (deploy `.env.example`
+  ships `=20`; cycles skip once the cap is hit). Documented loudly that
+  `OLYMPUS_DAILY_BUDGET=0` means *unlimited*, not off — to disable the loop you
+  comment out the `heartbeat` service. `deploy/README.md` updated accordingly.
+
 ### Added — Operator interactive layer: secure capture, inline approval, auto-launch, advanced mode
 
 - **Secure credential capture out of the model loop** (`olympus/securecapture.py`

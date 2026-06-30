@@ -40,16 +40,27 @@ services:
     depends_on:
       - olympus
 
-  # The self-learning loop (opportunity scans, training, self-audit). It makes
-  # model calls on its own schedule, so it SPENDS TOKENS in the background —
-  # leave it off until you want it, and set OLYMPUS_DAILY_BUDGET as a guard.
-  # heartbeat:
-  #   build: ..
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   command: ["python", "-m", "olympus", "heartbeat"]
-  #   volumes:
-  #     - olympus-memory:/app/memory
+  # The self-learning loop — ON by default so Olympus keeps learning around the
+  # clock (world scans, YouTube learning, daily skill distillation, weekly
+  # self-audit, plus any scheduled operator jobs), even while you're away.
+  #
+  # It makes model calls on its own schedule, so it SPENDS TOKENS on YOUR key in
+  # the background. That spend is bounded by OLYMPUS_DAILY_BUDGET in .env (set to
+  # 20 = $20/day by default); once a day's budget is hit, cycles SKIP instead of
+  # spending. NOTE: OLYMPUS_DAILY_BUDGET=0 means UNLIMITED, not off.
+  #
+  # To turn the always-on learning OFF: comment this service out, or
+  # `docker compose stop heartbeat`. It shares the memory volume, so whatever it
+  # learns is immediately available to the chat app.
+  heartbeat:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "olympus", "heartbeat"]
+    volumes:
+      - olympus-memory:/app/memory
+    depends_on:
+      - olympus
 
   # Off-droplet backups WITHOUT the token-spending heartbeat: this loop only
   # runs `olympus backup` (no model calls), so it's safe to leave on. Set
