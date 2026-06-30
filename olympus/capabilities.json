@@ -108,7 +108,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 56,
+    "count": 58,
     "names": [
       "browse_page",
       "browser_act",
@@ -133,6 +133,7 @@
       "list_source_files",
       "operator_authorize_site",
       "operator_forget_site",
+      "operator_remember_login",
       "operator_review",
       "operator_schedule",
       "operator_status",
@@ -156,6 +157,7 @@
       "schedule_task",
       "search_sessions",
       "send_email",
+      "set_advanced_mode",
       "site_profile_record",
       "site_profiles",
       "site_template_record",

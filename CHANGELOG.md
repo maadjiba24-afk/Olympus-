@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Operator interactive layer: secure capture, inline approval, auto-launch, advanced mode
+
+- **Secure credential capture out of the model loop** (`olympus/securecapture.py`
+  + `operator_remember_login`): a tool records a pending request (domain only);
+  after the turn a private `getpass` prompt collects the credentials and stores
+  them in the vault. The password never passes through the model or a tool arg.
+- **Plain-English approval** (`olympus/approvals.py` + `interactive.after_turn`):
+  a held action is shown as its preview and confirmed with a simple "yes" —
+  mapped to `actions.approve`/`reject`. No `olympus approve <id>` needed.
+- **Browser auto-launch** (`browser.launch_local` / `_find_chrome` /
+  `_chrome_args`): finds Chrome (PATH or the bundled Playwright build) and starts
+  it with remote debugging, headed by default so manual sign-in is visible.
+  Opt-in via `OLYMPUS_BROWSER_AUTOLAUNCH=1`; `_build_transport` uses it.
+- **Advanced-mode toggle** (`set_advanced_mode` → `operator.advanced`): off by
+  default keeps everything plain-English; the Hermes prompt hides env/CLI/IDs
+  unless it's on.
+- New module `olympus/interactive.py` centralizes the post-turn interactions
+  behind an injectable IO (fully unit-tested); `tui.run` calls it once per turn,
+  guarded. Tools 56 → 58. THREAT_MODEL rows, `capabilities.json`, README, and
+  `tests/test_interactive.py` added.
+
 ### Added — Operator for non-engineers: plain-English setup (`docs/DESIGN_OPERATOR_UX.md`)
 
 - The operator can now be turned on and authorized **per site, through
