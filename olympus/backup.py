@@ -348,29 +348,53 @@ def restore(archive_path: str, into: str | Path | None = None, *,
         members = list(_safe_members(tar, dest))
         tar.extractall(dest, members=members)
 
-    # Move the extracted data/ tree into place and verify file hashes.
+    # Move the extracted data/ tree into place. Two safety properties:
+    #  1. Every manifest path is checked for traversal — the tar layer is
+    #     guarded by _safe_members, but the manifest drives these moves and is
+    #     equally attacker-controlled, so a `../escape` entry must be rejected
+    #     here too (otherwise os.replace could write above the restore root).
+    #  2. All entries are VERIFIED before ANY file is moved, so a corrupt
+    #     archive can't leave the target half-restored (a mix of new + old).
     manifest = json.loads((dest / _MANIFEST_NAME).read_text(encoding="utf-8"))
-    restored, mismatched = 0, []
     data_root = dest / "data"
+    dest_r, data_r = dest.resolve(), data_root.resolve()
+    planned, mismatched = [], []
     for entry in manifest.get("files", []):
-        src = data_root / entry["path"]
+        rel = entry["path"]
+        src, dst = data_root / rel, dest / rel
+        try:
+            src_r, dst_r = src.resolve(), dst.resolve()
+        except (OSError, RuntimeError):
+            mismatched.append(rel + " (unresolvable path)")
+            continue
+        # Reject any entry whose source or destination escapes its root.
+        if (src_r != data_r and data_r not in src_r.parents) or \
+           (dst_r != dest_r and dest_r not in dst_r.parents):
+            mismatched.append(rel + " (path escapes restore root)")
+            continue
         if not src.exists():
-            mismatched.append(entry["path"] + " (missing)")
+            mismatched.append(rel + " (missing)")
             continue
         if _sha256_file(src) != entry["sha256"]:
-            mismatched.append(entry["path"] + " (hash mismatch)")
+            mismatched.append(rel + " (hash mismatch)")
             continue
-        dst = dest / entry["path"]
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(src, dst)
-        restored += 1
+        planned.append((src, dst))
+
+    # Only commit the moves when everything verified (unless insecure override).
+    restored = 0
+    if not mismatched or insecure:
+        for src, dst in planned:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
+            restored += 1
     # tidy the staging tree + manifest copy
     (dest / _MANIFEST_NAME).unlink(missing_ok=True)
     _rmtree(data_root)
 
     if mismatched and not insecure:
         raise BackupError(f"restore integrity check failed for "
-                          f"{len(mismatched)} file(s): {mismatched[:5]}")
+                          f"{len(mismatched)} file(s): {mismatched[:5]} "
+                          f"— nothing was restored.")
     return {"restored": restored, "into": str(dest), "mismatched": mismatched,
             "signature_ok": v["signature_ok"], "signed": v["signed"]}
 

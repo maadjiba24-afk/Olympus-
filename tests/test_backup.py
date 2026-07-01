@@ -81,6 +81,57 @@ def test_path_traversal_member_is_rejected(mem, tmp_path):
     assert not (tmp_path / "escape.txt").exists()  # nothing escaped the dir
 
 
+def _craft_plaintext_archive(manifest_files, members):
+    """Build an unsigned plaintext archive: `members` maps tar member name to
+    bytes; `manifest_files` is the manifest 'files' list (attacker-controlled)."""
+    import json as _json
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        mbytes = _json.dumps({"files": manifest_files}).encode()
+        mi = tarfile.TarInfo(backup._MANIFEST_NAME)
+        mi.size = len(mbytes)
+        tar.addfile(mi, io.BytesIO(mbytes))
+        for name, content in members.items():
+            ti = tarfile.TarInfo(name)
+            ti.size = len(content)
+            tar.addfile(ti, io.BytesIO(content))
+    archive = backup._backups_dir() / "olympus-backup-craft.tar.gz"
+    archive.write_bytes(buf.getvalue())
+    return archive
+
+
+def test_manifest_path_traversal_is_rejected(mem, tmp_path):
+    # The tar layer is guarded, but the MANIFEST also drives file moves and is
+    # equally attacker-controlled: a `../escape` manifest entry must not let
+    # os.replace write above the restore root — even with insecure=True.
+    import hashlib
+    payload = b"pwned"
+    archive = _craft_plaintext_archive(
+        [{"path": "../escape.txt", "sha256": hashlib.sha256(payload).hexdigest()}],
+        {"escape.txt": payload})            # extracts to dest/escape.txt (in-dir)
+    dest = tmp_path / "r"
+    out = backup.restore(str(archive), into=dest, insecure=True)
+    assert out["restored"] == 0
+    assert any("escapes restore root" in m for m in out["mismatched"])
+    assert not (tmp_path / "escape.txt").exists()   # never written above dest
+
+
+def test_restore_is_all_or_nothing_on_integrity_failure(mem, tmp_path):
+    # One bad hash must abort the WHOLE restore — no half-mutated target.
+    import hashlib
+    good = b"AAAA"
+    archive = _craft_plaintext_archive(
+        [{"path": "a.txt", "sha256": hashlib.sha256(good).hexdigest()},
+         {"path": "b.txt", "sha256": "00" * 32}],          # wrong hash
+        {"data/a.txt": good, "data/b.txt": b"BBBB"})
+    dest = tmp_path / "r"
+    dest.mkdir()
+    (dest / "a.txt").write_text("OLD")                     # pre-existing content
+    with pytest.raises(backup.BackupError, match="integrity"):
+        backup.restore(str(archive), into=dest, force=True)
+    assert (dest / "a.txt").read_text() == "OLD"           # not half-overwritten
+
+
 def test_refuses_plaintext_delivery_off_droplet(mem, monkeypatch):
     monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
     monkeypatch.setenv("OLYMPUS_BACKUP_CMD", "true {path}")
