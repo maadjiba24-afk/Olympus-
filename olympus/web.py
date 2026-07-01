@@ -207,14 +207,17 @@ def _daily_limited(key: str, limit: int) -> bool:
 
 
 def _brought_own_key(pset: dict) -> bool:
-    """Did this request supply the user's own credentials (BYOK)?"""
+    """Did this request supply the user's own PRIMARY credential (BYOK)?
+
+    Only a primary `api_key` counts — it is the key the main pipeline actually
+    runs on. A bare `base_url` (no key) falls back to the operator's env key,
+    and an `extra` second-model key doesn't pay for the primary member; treating
+    either as BYOK let a keyless visitor run unlimited chats on the operator's
+    key while bypassing OLYMPUS_REQUIRE_BYOK / the free-chat allowance.
+    """
     if not isinstance(pset, dict):
         return False
-    if (pset.get("api_key") or "").strip() or (pset.get("base_url") or "").strip():
-        return True
-    extra = pset.get("extra") or {}
-    return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
-                                             or (extra.get("base_url") or "").strip()))
+    return bool((pset.get("api_key") or "").strip())
 
 
 def _key_decision(brought: bool, free_used: int) -> str:
@@ -1241,14 +1244,16 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
-        if path in ("/api/register", "/api/login", "/api/logout"):
-            self._handle_auth(path, payload)
-            return
         # Cheap write endpoints get a generous per-IP budget (DoS guard); the
-        # expensive /api/chat keeps its own stricter limit further down.
+        # expensive /api/chat keeps its own stricter limit further down. Auth
+        # endpoints MUST be throttled too — they run a costly PBKDF2 per attempt,
+        # so an unthrottled /api/login is both password brute-force and CPU DoS.
         if path != "/api/chat" and _rate_limited(
                 "w:" + self.client_address[0], 60):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
+            return
+        if path in ("/api/register", "/api/login", "/api/logout"):
+            self._handle_auth(path, payload)
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)

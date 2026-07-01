@@ -1,9 +1,31 @@
 """Central configuration for Olympus."""
 
+import contextvars
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+
+# The credentials the *current* agent run is executing under. Set once per run
+# at the backend choke point so inline delegations (e.g. the spawn_subagent
+# tool) inherit the caller's key/pool instead of silently falling back to the
+# operator's env credentials — the BYOK visitor pays for their own subagents.
+_ACTIVE_SETTINGS: "contextvars.ContextVar[Settings | None]" = contextvars.ContextVar(
+    "olympus_active_settings", default=None)
+
+
+def active_settings() -> "Settings | None":
+    """The settings the current run is executing under, if any."""
+    return _ACTIVE_SETTINGS.get()
+
+
+def use_active_settings(settings: "Settings"):
+    """Bind `settings` as the active run credentials; returns the reset token."""
+    return _ACTIVE_SETTINGS.set(settings)
+
+
+def clear_active_settings(token) -> None:
+    _ACTIVE_SETTINGS.reset(token)
 
 # Default model for the Anthropic backend. Opus 4.8 supports adaptive
 # thinking, effort control, and the server-side web_search/web_fetch tools.
@@ -60,16 +82,20 @@ class Settings:
             return self
         merged = {**self.__dict__, **clean}
         merged["provider"] = merged["provider"].lower()
-        if merged["provider"] != self.provider:
-            # Provider switch: never carry the old provider's model, key, or
-            # endpoint across — that would send credentials to the wrong host.
-            if "model" not in clean:
-                merged["model"] = ("claude-opus-4-8"
-                                   if merged["provider"] == "anthropic" else "")
-            if "api_key" not in clean:
-                merged["api_key"] = None
-            if "base_url" not in clean:
-                merged["base_url"] = None
+        provider_switch = merged["provider"] != self.provider
+        # An endpoint override alone (same provider, new base_url) is just as
+        # dangerous as a provider switch: it would send the inherited key to a
+        # user-supplied host. Treat both the same for credential carry-over.
+        endpoint_switch = merged["base_url"] != self.base_url
+        if provider_switch and "model" not in clean:
+            merged["model"] = ("claude-opus-4-8"
+                               if merged["provider"] == "anthropic" else "")
+        if (provider_switch or endpoint_switch) and "api_key" not in clean:
+            # Never carry the inherited key to a different provider or endpoint —
+            # that would leak the operator's credential to the new host.
+            merged["api_key"] = None
+        if provider_switch and "base_url" not in clean:
+            merged["base_url"] = None
         return Settings(**merged)
 
     def validate(self) -> str | None:

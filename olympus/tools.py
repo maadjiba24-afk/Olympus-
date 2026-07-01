@@ -562,8 +562,12 @@ def _list_source_files() -> str:
 
 
 def _read_source_file(path: str) -> str:
+    root = config.PROJECT_ROOT.resolve()
     target = (config.PROJECT_ROOT / path).resolve()
-    if not str(target).startswith(str(config.PROJECT_ROOT.resolve())):
+    # Use path-component containment, not a string prefix: a bare startswith
+    # would accept a sibling like `<root>-backup/…` whose name merely extends
+    # the root string.
+    if target != root and root not in target.parents:
         return "Error: path escapes the project root."
     if not target.is_file():
         return f"Error: no such file: {path}"

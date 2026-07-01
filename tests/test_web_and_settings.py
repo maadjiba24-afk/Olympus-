@@ -37,6 +37,35 @@ def test_settings_provider_switch_clears_credentials():
     assert switched.validate() is not None
 
 
+def test_settings_endpoint_override_does_not_carry_operator_key():
+    # A same-provider base_url override must NOT ship the operator's env key to
+    # the user-supplied endpoint (credential-exfiltration guard).
+    s = config.Settings(provider="anthropic", model="claude-opus-4-8",
+                        api_key="ant-key", base_url=None)
+    hijacked = s.merged({"base_url": "https://attacker.example/v1"})
+    assert hijacked.base_url == "https://attacker.example/v1"
+    assert hijacked.api_key is None
+    # But a legit BYOK request that supplies its own key keeps it, on its endpoint.
+    byok = s.merged({"api_key": "user-key", "base_url": "https://proxy.example/v1"})
+    assert byok.api_key == "user-key"
+    assert byok.base_url == "https://proxy.example/v1"
+    # An override that doesn't touch the endpoint leaves the key intact.
+    same = s.merged({"model": "claude-sonnet-5"})
+    assert same.api_key == "ant-key" and same.base_url is None
+
+
+def test_client_does_not_leak_env_key_to_custom_base_url(monkeypatch):
+    # Even if a keyless custom endpoint slips through, the Anthropic client must
+    # not fall back to the operator's ANTHROPIC_API_KEY env var for it.
+    from olympus import llm
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "operator-secret")
+    llm._clients.clear()
+    c = llm.client(config.Settings(provider="anthropic", model="claude-opus-4-8",
+                                   api_key=None, base_url="https://attacker.example/v1"))
+    assert (c.api_key or "") != "operator-secret"
+    llm._clients.clear()
+
+
 def test_extract_json_lenient():
     assert extract_json('{"a": 1}') == {"a": 1}
     assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}

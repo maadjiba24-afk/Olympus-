@@ -52,12 +52,18 @@ def run_agent_counted(settings: config.Settings, system: str, task: str,
     the output-contract tool-call cap. Only the Anthropic path reports a count;
     other providers return None (the cap simply doesn't fire — see
     contracts.check)."""
-    if settings.provider == "anthropic":
-        return agent.run_agent_counted(system, task, settings=settings,
-                                       tool_defs=tool_defs,
-                                       mcp_servers=mcp_servers, effort=effort)
-    if settings.provider == "claude-code":
-        return claude_code.run_agent(settings, system, task, tool_defs, effort), None
-    # MCP runs server-side on Anthropic only; other providers still get the
-    # local plugin tools (which are included in tool_defs).
-    return openai_compat.run_agent(settings, system, task, tool_defs, effort), None
+    # Bind these credentials as the active run settings so inline delegations
+    # (spawn_subagent) inherit them instead of the operator's env key.
+    token = config.use_active_settings(settings)
+    try:
+        if settings.provider == "anthropic":
+            return agent.run_agent_counted(system, task, settings=settings,
+                                           tool_defs=tool_defs,
+                                           mcp_servers=mcp_servers, effort=effort)
+        if settings.provider == "claude-code":
+            return claude_code.run_agent(settings, system, task, tool_defs, effort), None
+        # MCP runs server-side on Anthropic only; other providers still get the
+        # local plugin tools (which are included in tool_defs).
+        return openai_compat.run_agent(settings, system, task, tool_defs, effort), None
+    finally:
+        config.clear_active_settings(token)

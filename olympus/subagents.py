@@ -85,6 +85,10 @@ def spawn_many(tasks: list[SubTask],
 
 
 def spawn_tool(specialist: str, task: str) -> str:
-    """Handler for the `spawn_subagent` tool."""
-    out = spawn(specialist, task)
+    """Handler for the `spawn_subagent` tool.
+
+    Inherit the *calling* run's credentials (config.active_settings) so a BYOK
+    visitor's delegated subagent runs on their key, not the operator's env key.
+    Falls back to env when there is no active run (e.g. a script-level spawn)."""
+    out = spawn(specialist, task, settings=config.active_settings())
     return f"### {specialist} subagent result\n{out}"

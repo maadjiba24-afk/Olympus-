@@ -37,6 +37,12 @@ def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
         kwargs: dict[str, Any] = {}
         if key:
             kwargs["api_key"] = key
+        elif base:
+            # A custom endpoint with no explicit key: do NOT let the SDK fall
+            # back to the operator's ANTHROPIC_API_KEY env var and ship it to a
+            # user-supplied base_url. Pass an empty key so it fails closed (401)
+            # instead of leaking the operator's credential to a third party.
+            kwargs["api_key"] = ""
         if base:
             kwargs["base_url"] = base
         _clients[cache_key] = anthropic.Anthropic(**kwargs)
