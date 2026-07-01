@@ -19,10 +19,12 @@ Replay-safety (the whole reason this is careful):
     `llm.complete`, which is frozen/replayed by request hash like every other
     model call. So even "summarize" mode reproduces exactly under replay.
 
-Requirement, documented: a run RECORDED with a given `OLYMPUS_INRUN_COMPACT`
-setting must be REPLAYED with the same setting (the same way replay already
-requires the same model/tools). With the default (off) nothing changes and every
-existing recorded run is unaffected.
+The compaction settings are recorded into the run's `tr.meta`
+(`inrun_compact`/`inrun_budget`/`inrun_keep_recent`) and restored by
+`orchestrator.replay_run` — exactly like `contracts_enabled`/`egress_guard` — so
+replay reproduces the recorded message stream automatically, with no manual
+config matching. The settings are read LIVE from the env (via `config.inrun_*`)
+so that restore takes effect. Default is off; existing runs are unaffected.
 """
 
 from __future__ import annotations
@@ -33,12 +35,12 @@ from . import config
 
 
 def enabled() -> bool:
-    return config.INRUN_COMPACT in ("1", "true", "yes", "on", "elide",
-                                    "summarize")
+    return config.inrun_compact() in ("1", "true", "yes", "on", "elide",
+                                      "summarize")
 
 
 def mode() -> str:
-    return "summarize" if config.INRUN_COMPACT == "summarize" else "elide"
+    return "summarize" if config.inrun_compact() == "summarize" else "elide"
 
 
 _HEAD = 400   # chars of an elided result kept as a breadcrumb
@@ -138,5 +140,5 @@ def maybe_compact(messages: list[dict[str, Any]], settings=None
     if not enabled():
         return messages
     summ = _summarizer(settings) if mode() == "summarize" else None
-    return compact(messages, budget=config.INRUN_COMPACT_BUDGET,
-                   keep_recent=config.INRUN_KEEP_RECENT, summarizer=summ)
+    return compact(messages, budget=config.inrun_budget(),
+                   keep_recent=config.inrun_keep_recent(), summarizer=summ)

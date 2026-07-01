@@ -41,8 +41,18 @@ def _tool_results(messages):
 
 # --- flags ----------------------------------------------------------------
 
+def test_config_reads_env_live(monkeypatch):
+    # The fix: settings are read live (not frozen at import) so replay_run can
+    # restore them via env vars and get deterministic replay.
+    monkeypatch.setenv("OLYMPUS_INRUN_BUDGET", "5000")
+    monkeypatch.setenv("OLYMPUS_INRUN_KEEP_RECENT", "3")
+    assert config.inrun_budget() == 5000 and config.inrun_keep_recent() == 3
+    monkeypatch.setenv("OLYMPUS_INRUN_COMPACT", "summarize")
+    assert transcript.enabled() and transcript.mode() == "summarize"
+
+
 def test_off_by_default(monkeypatch):
-    monkeypatch.setattr(config, "INRUN_COMPACT", "")
+    monkeypatch.delenv("OLYMPUS_INRUN_COMPACT", raising=False)
     assert transcript.enabled() is False
     msgs = _msgs()
     assert transcript.maybe_compact(msgs) is msgs      # exact no-op
@@ -53,7 +63,7 @@ def test_off_by_default(monkeypatch):
     ("summarize", True, "summarize"), ("on", True, "elide"),
 ])
 def test_flag_parsing(monkeypatch, val, on, mode):
-    monkeypatch.setattr(config, "INRUN_COMPACT", val)
+    monkeypatch.setenv("OLYMPUS_INRUN_COMPACT", val)
     assert transcript.enabled() is on
     assert transcript.mode() == mode
 

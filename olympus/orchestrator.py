@@ -458,6 +458,11 @@ class Olympus:
         # and restores the env. meta is NOT part of the diffed decision path.
         tr.meta["contracts_enabled"] = config.contracts_enabled()
         tr.meta["egress_guard_enabled"] = config.egress_guard_enabled()
+        # In-run compaction settings affect the message stream, so record them
+        # for deterministic replay (like the two toggles above).
+        tr.meta["inrun_compact"] = config.inrun_compact()
+        tr.meta["inrun_budget"] = config.inrun_budget()
+        tr.meta["inrun_keep_recent"] = config.inrun_keep_recent()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -854,6 +859,17 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_egress = os.environ.get("OLYMPUS_EGRESS_GUARD")
     rec_egress = bool((original.get("meta") or {}).get("egress_guard_enabled"))
     os.environ["OLYMPUS_EGRESS_GUARD"] = "1" if rec_egress else "0"
+    # In-run compaction settings — same reasoning: reproduce the recorded
+    # message stream so request hashes match.
+    _meta = original.get("meta") or {}
+    prev_inrun = {k: os.environ.get(k) for k in (
+        "OLYMPUS_INRUN_COMPACT", "OLYMPUS_INRUN_BUDGET",
+        "OLYMPUS_INRUN_KEEP_RECENT")}
+    os.environ["OLYMPUS_INRUN_COMPACT"] = str(_meta.get("inrun_compact", ""))
+    if _meta.get("inrun_budget") is not None:
+        os.environ["OLYMPUS_INRUN_BUDGET"] = str(_meta["inrun_budget"])
+    if _meta.get("inrun_keep_recent") is not None:
+        os.environ["OLYMPUS_INRUN_KEEP_RECENT"] = str(_meta["inrun_keep_recent"])
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         fresh = trace_mod.Trace("replay", bot.user)
@@ -872,6 +888,11 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_EGRESS_GUARD", None)
         else:
             os.environ["OLYMPUS_EGRESS_GUARD"] = prev_egress
+        for k, v in prev_inrun.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     fresh.flush()
     diffs = trace_mod.diff_decisions(original.get("decisions", []),
                                      fresh.decisions)
