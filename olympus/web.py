@@ -83,12 +83,25 @@ def _actions_view(user: str) -> list[dict]:
 
 
 class _Session:
+    _EVENTS_CAP = 500
+
     def __init__(self, sid: str) -> None:
         self.sid = sid
         self.lock = threading.Lock()
         self.events: list[str] = []
+        self.events_base = 0        # count of events dropped off the front
         self.fingerprint: tuple | None = None
         self.bot: orchestrator.Olympus | None = None
+
+    def report(self, msg: str) -> None:
+        """Append a progress event, trimming the oldest so a long-lived session
+        can't grow the buffer without bound. `events_base` keeps the global
+        index stable for the /api/status `since` cursor across trims."""
+        self.events.append(msg)
+        overflow = len(self.events) - self._EVENTS_CAP
+        if overflow > 0:
+            del self.events[:overflow]
+            self.events_base += overflow
 
     def bot_for(self, pool: config.ModelPool,
                 user: str | None = None) -> orchestrator.Olympus:
@@ -98,7 +111,7 @@ class _Session:
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
             self.bot = orchestrator.Olympus(
-                report=self.events.append,
+                report=self.report,
                 pool=pool,
                 user=user,
                 conversation_id=user,
@@ -135,8 +148,11 @@ def _resolve_sid(handler: BaseHTTPRequestHandler,
 def _session(sid: str) -> _Session:
     with _SESSIONS_LOCK:
         if sid not in _SESSIONS:
-            if len(_SESSIONS) > 500:  # crude cap against unbounded growth
-                _SESSIONS.clear()
+            # Bound growth by FIFO-evicting the OLDEST session(s), not by
+            # clearing the whole dict — a blanket clear at the 501st visitor
+            # would drop every active user's bot and event stream at once.
+            while len(_SESSIONS) >= 500:
+                _SESSIONS.pop(next(iter(_SESSIONS)))
             _SESSIONS[sid] = _Session(sid)
         return _SESSIONS[sid]
 
@@ -1159,8 +1175,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
-            events = _session(sid).events
-            self._json({"events": events[since:], "next": len(events),
+            sess_obj = _session(sid)
+            events, base = sess_obj.events, sess_obj.events_base
+            # `since` is a global index; translate through the trim offset so the
+            # cursor stays correct even after old events were dropped.
+            start = max(0, since - base)
+            self._json({"events": events[start:], "next": base + len(events),
                         "sovereignty": config.sovereign_status(),
                         "signing": _signing_posture()})
             return
@@ -1374,10 +1394,6 @@ class Handler(BaseHTTPRequestHandler):
         if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
-        if _daily_limited("u:" + user, config.daily_chat_limit()):
-            self._json({"error": "daily limit reached for your account — "
-                                 "try again tomorrow."}, 429)
-            return
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
@@ -1398,6 +1414,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "This instance requires your own API key. "
                                  "Open ⚙ model and add your provider key.",
                         "need_key": True}, 402)
+            return
+        # Charge the per-account daily quota only now that the request has passed
+        # validation and the key/free-allowance wall — a rejected request (400 /
+        # 402) must not burn one of the user's OLYMPUS_DAILY_CHATS.
+        if _daily_limited("u:" + user, config.daily_chat_limit()):
+            self._json({"error": "daily limit reached for your account — "
+                                 "try again tomorrow."}, 429)
             return
         if not brought and config.free_chats() > 0:
             _daily_bump("free:" + user)         # consume one free, operator-funded chat

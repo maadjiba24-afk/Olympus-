@@ -829,8 +829,23 @@ def main(argv: list[str] | None = None) -> int:
         except backup.BackupError as err:
             print(f"✗ restore refused: {err}")
             return 1
+        except Exception as err:
+            # A wrong vault key (Fernet InvalidToken), a corrupt gzip/tar, or bad
+            # manifest JSON otherwise escapes as a raw traceback — surface it as
+            # the documented refusal instead.
+            print(f"✗ restore failed: {type(err).__name__}: {err}")
+            return 1
+        # Distinguish "no signature present" from "signature present but FAILED"
+        # (an --insecure restore of a tampered signed archive) — collapsing both
+        # to 'unsigned' hides a security-relevant fact.
+        if res.get("signature_ok"):
+            sig_state = "signature verified"
+        elif res.get("signed"):
+            sig_state = "signature INVALID — restored via --insecure"
+        else:
+            sig_state = "unsigned"
         print(f"✓ restored {res['restored']} files into {res['into']} "
-              f"({'signature verified' if res['signature_ok'] else 'unsigned'}).")
+              f"({sig_state}).")
         if res["mismatched"]:
             print(f"  ⚠ {len(res['mismatched'])} file(s) failed integrity: "
                   f"{res['mismatched'][:5]}")
@@ -1034,7 +1049,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             job = scheduler.add(args.name, args.interval, prompt,
                                 deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every {job.interval // 60}m.")
+            print(f"Scheduled '{job.name}' every "
+                  f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):

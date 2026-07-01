@@ -15,6 +15,10 @@ import anthropic
 from . import config, replaystore, security, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
+# Bound the cache: on a public BYOK instance each distinct visitor key/base is a
+# new entry (with its own connection pool), so an unbounded dict grows without
+# limit under untrusted input. FIFO-evict the oldest when over the cap.
+_CLIENTS_MAX = 256
 
 
 def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -34,6 +38,8 @@ def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
     base = settings.base_url if settings else None
     cache_key = (key, base)
     if cache_key not in _clients:
+        if len(_clients) >= _CLIENTS_MAX:
+            _clients.pop(next(iter(_clients)))     # evict the oldest entry
         kwargs: dict[str, Any] = {}
         if key:
             kwargs["api_key"] = key
@@ -134,7 +140,8 @@ def complete(
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:
             last_err = err
-            time.sleep(2 ** attempt)
+            if attempt < 3:                 # no point sleeping after the last try
+                time.sleep(2 ** attempt)
     raise last_err  # type: ignore[misc]
 
 

@@ -50,11 +50,13 @@ def test_ungranted_action_is_blocked():
     assert "not granted" in (done.error or "")
 
 
-def test_granting_scope_unblocks():
+def test_granting_scope_unblocks(monkeypatch):
     # With the scope granted the same action can execute (deny-first, not
     # deny-always): proves the block is the *default*, not a dead end.
     actions.grant_scope("u2", "gmail.send")
     # gmail send hits the network; stub the gmail layer so we test the gate only.
+    # Use monkeypatch so the stub is restored — a raw `gmail.send = ...` leaked
+    # into every later test in the session (masked only by file ordering).
     from olympus import gmail
     sent = {}
 
@@ -62,7 +64,7 @@ def test_granting_scope_unblocks():
         sent["ok"] = True
         return {"id": "x"}
 
-    gmail.send = fake_send  # type: ignore[assignment]
+    monkeypatch.setattr(gmail, "send", fake_send)
     a = actions.prepare("u2", "gmail_send",
                         {"to": "x@y.z", "subject": "S", "body": "B"})
     done = actions.approve("u2", a.id)
