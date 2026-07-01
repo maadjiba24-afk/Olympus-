@@ -1,8 +1,9 @@
 {
   "actions": {
-    "count": 13,
+    "count": 14,
     "names": [
       "browser_operate",
+      "browser_operate_financial",
       "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",

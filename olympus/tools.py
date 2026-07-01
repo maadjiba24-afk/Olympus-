@@ -812,11 +812,22 @@ def _browser_read(selector: str = "") -> str:
 
 def _browser_act(action: str, selector: str = "", text: str = "",
                  x: int = 0, y: int = 0) -> str:
+    # Credentialed actuator: gate like browser_login/operate — operator must be
+    # enabled and the CURRENT page's domain authorized, so it can't drive an
+    # arbitrary (possibly logged-in) tab without authorization.
+    from urllib.parse import urlparse
+    user = memory.current_user()
+    if not operator.enabled(user):
+        return "Error: the operator isn't set up — ask me to set up this site first."
     try:
-        return browser.session().act(action, selector=selector, text=text,
-                                     x=int(x), y=int(y))
+        sess = browser.session()
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
+    host = (urlparse(sess._current_url() or "").hostname or "").lower()
+    if not operator.authorized(user, host):
+        return (f"Error: the current page ('{host or 'unknown'}') isn't an "
+                "authorized site for actions.")
+    return sess.act(action, selector=selector, text=text, x=int(x), y=int(y))
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,
