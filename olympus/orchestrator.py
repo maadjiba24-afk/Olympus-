@@ -123,7 +123,7 @@ class Olympus:
 
     def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
         s = self.pool.for_role(role)
-        return {"provider": s.provider, "model": s.model or config.MODEL,
+        return {"provider": s.provider, "model": s.model or config.default_model(),
                 "version": None}
 
     # -- stage 1: Zeus ----------------------------------------------------

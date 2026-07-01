@@ -58,7 +58,7 @@ def complete(
     """One streamed Messages API call; returns the final Message."""
     settings = settings or config.Settings.from_env()
     params: dict[str, Any] = {
-        "model": settings.model or config.MODEL,
+        "model": settings.model or config.default_model(),
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [
             {
@@ -143,7 +143,7 @@ def stream_text(
     """Yield text deltas of a streamed Anthropic completion (no tools)."""
     settings = settings or config.Settings.from_env()
     params: dict[str, Any] = {
-        "model": settings.model or config.MODEL,
+        "model": settings.model or config.default_model(),
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [{"type": "text", "text": system,
                     "cache_control": {"type": "ephemeral"}}],
