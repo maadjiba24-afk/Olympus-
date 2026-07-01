@@ -614,9 +614,12 @@ class Olympus:
 
     def _maybe_compact(self) -> None:
         """Replay compact state, not full history. Compact only when the
-        verbatim history actually exceeds the token budget — so short chats
-        never pay for summarization, and a single huge paste triggers it even
-        at turn one."""
+        verbatim history exceeds the token budget AND there are more turns than
+        the verbatim tail keeps — so short chats never pay for summarization, and
+        there is always an older slice to fold away. (A single huge paste alone
+        does NOT compact at turn one: the recent tail is always replayed
+        verbatim, so compaction waits until history grows past HISTORY_KEEP_TURNS
+        entries.)"""
         if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:

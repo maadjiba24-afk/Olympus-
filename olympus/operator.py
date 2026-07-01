@@ -99,8 +99,11 @@ def forget_site(user: str, domain: str) -> bool:
 
 
 def authorized(user: str, domain: str) -> bool:
-    """Two independent fences: the domain is authorized (by this user OR the env
-    override) AND it passes the network egress allowlist."""
+    """The domain must be authorized (by this user OR the env override). Under
+    sovereign mode it must ALSO pass the network egress allowlist — a second,
+    independent fence. With sovereign mode OFF (the default) egress_allowed is a
+    no-op, so domain authorization is the sole gate; the allowlist fence only
+    engages once sovereign mode is enabled."""
     d = (domain or "").strip().lower()
     if not d:
         return False
