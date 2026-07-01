@@ -7,8 +7,13 @@ is written from raw text without passing the extractor — so memory stays hones
 
 Read path (pure Python, no model call on the hot path): lexically match the
 active memories to the turn, rank by importance × decayed-confidence × recency ×
-overlap, fill a token budget, and drop anything below the relevance floor so
-irrelevant memory never pollutes the prompt.
+overlap, and fill a token budget. The relevance floor is deliberately
+permissive — a memory qualifies if it shares at least one salient (non-stopword)
+term with the turn (Jaccard overlap > 0) and its decayed confidence clears
+MEMORY_RETRIEVAL_FLOOR_CONF — so a strong single-keyword match (an entity or
+project name) isn't lost. It is a precision/recall trade, not a guarantee that
+only strongly-related memory is injected; the token budget bounds how much can
+ride along, and higher-overlap, higher-confidence memories win the budget first.
 """
 
 from __future__ import annotations
@@ -284,7 +289,8 @@ def retrieve(user: str, query: str,
 
 def context_block(user: str, query: str) -> str:
     """A compact, injectable block of the memories relevant to this turn.
-    Returns '' when nothing clears the floor, so it costs no tokens."""
+    Returns '' when nothing shares a salient term with the turn (the permissive
+    relevance floor), so an unrelated turn costs no tokens."""
     mems = retrieve(user, query)
     if not mems:
         return ""
