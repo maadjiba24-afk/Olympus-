@@ -153,8 +153,12 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
         return "held_sensitive"
 
     if verdict == "conflict":
-        # only auto-supersede when clearly confident; else ask the user.
-        if float(cand["confidence"]) >= max(floor, existing["confidence"]):
+        # only auto-supersede when clearly confident; else ask the user. Compare
+        # against the existing memory's DECAYED (effective) confidence, not its
+        # stored value — a stale fact whose confidence has faded should be easy
+        # for a fresh, corroborated fact to replace.
+        existing_conf = usermem.effective_confidence(existing)
+        if float(cand["confidence"]) >= max(floor, existing_conf):
             new = usermem.add_memory(
                 user, type=cand["type"], content=cand["content"],
                 confidence=cand["confidence"], key=cand.get("key"),
