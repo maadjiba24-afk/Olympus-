@@ -150,18 +150,25 @@ def create(*, full: bool = False, label: str = "") -> dict:
         finally:
             tmp_tar.unlink(missing_ok=True)
 
-        # 2) Encrypt at rest if the vault key is configured.
+        # 2) Encrypt at rest if the vault key is configured. Fall back to
+        # plaintext ONLY when no key is set — if a key IS configured but
+        # encryption fails, refuse to write a plaintext backup of the user's
+        # data rather than silently downgrading (the operator believes it's
+        # encrypted).
+        from . import vault
         encrypted = False
         payload = raw
         suffix = ".tar.gz"
-        try:
-            from . import vault
-            if vault.available():
+        if vault.available():
+            try:
                 payload = vault.encrypt_bytes(raw)
-                encrypted = True
-                suffix = ".tar.gz.enc"
-        except Exception:
-            encrypted = False           # fall back to plaintext (flagged below)
+            except Exception as err:
+                raise BackupError(
+                    "encryption is configured (secret key set) but failed — "
+                    "refusing to write a PLAINTEXT backup of your data: "
+                    f"{err}") from err
+            encrypted = True
+            suffix = ".tar.gz.enc"
 
         final = out_dir / (name + suffix)
         tmp_final = out_dir / ("." + name + suffix + ".tmp")

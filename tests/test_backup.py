@@ -40,6 +40,20 @@ def test_roundtrip_encrypted_signed_excludes_replay_cache(mem, tmp_path, monkeyp
     assert not (into / "data").exists()            # staging tree cleaned up
 
 
+def test_encryption_failure_refuses_plaintext_downgrade(mem, monkeypatch):
+    # A key IS configured but encryption throws → must raise, never silently
+    # write a plaintext archive of the user's data.
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
+    from olympus import vault
+    monkeypatch.setattr(vault, "available", lambda: True)
+    monkeypatch.setattr(vault, "encrypt_bytes",
+                        lambda raw: (_ for _ in ()).throw(RuntimeError("kms down")))
+    with pytest.raises(backup.BackupError, match="refusing to write a PLAINTEXT"):
+        backup.create()
+    # nothing plaintext was published
+    assert not list(backup._backups_dir().glob("*.tar.gz"))
+
+
 def test_full_includes_replay_cache(mem, monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
     res = backup.create(full=True)
