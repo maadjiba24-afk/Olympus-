@@ -1033,7 +1033,7 @@ def train_specialists(settings: config.Settings | None = None,
 
 def gate_skills(settings: config.Settings | None = None) -> str:
     """Prove provisional skills with a before/after benchmark; keep the ones
-    that hold or raise the score, revert the rest. The safety net that lets
+    that measurably raise the score, revert the rest. The safety net that lets
     Olympus create skills autonomously.
 
     For a specialist whose domain has no benchmark item yet, one is generated
@@ -1070,6 +1070,13 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     promoted, reverted, skipped = [], [], []
     for name, sp in provisional:
         bench_ids = evals.ids_for([sp]) if _is_scoped(sp) else None  # None = whole bench
+        # A scoped skill whose specialist still has NO benchmark items must not
+        # fall through to `evals.run(only=[])` — an empty list is falsy and would
+        # silently score against the WHOLE benchmark, drowning the skill's real
+        # effect and rubber-stamping it. Skip it instead (can't measure fairly).
+        if _is_scoped(sp) and not bench_ids:
+            skipped.append(f"{name} (no benchmark coverage for '{sp}')")
+            continue
         try:
             after = evals.run(settings, only=bench_ids)["avg"]   # skill visible
             skills.set_hidden(name, True)
@@ -1079,7 +1086,10 @@ def gate_skills(settings: config.Settings | None = None) -> str:
             skills.set_hidden(name, False)  # never leave it hidden on error
             skipped.append(f"{name} ({err})")
             continue
-        if after >= before:
+        # Require a STRICT improvement to keep a skill. A tie is no evidence of
+        # value against a noisy LLM judge, so revert it rather than accumulate
+        # neutral (or coin-flip-harmful) skills.
+        if after > before:
             skills.promote(name)
             promoted.append(f"{name} [{before}→{after}]")
         else:

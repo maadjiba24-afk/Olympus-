@@ -8,7 +8,7 @@ knowledge gained once is applied by the whole council forever.
 
 Autonomously-created skills are written **provisional** and proven by a
 benchmark before they become permanent (see orchestrator.gate_skills): if a
-new/changed skill doesn't hold or raise the affected specialist's score, it is
+new/changed skill doesn't measurably raise the affected specialist's score, it is
 reverted. That makes the autonomous self-improvement path safe enough to run
 without a human in the loop.
 """
