@@ -17,6 +17,75 @@ carries a migration note here.
 
 ## [0.23.0] — 2026-07-01
 
+### Security — deep-diagnostic hardening pass
+
+- **Capability separation closed on `extra_tools` ingestion.** A specialist that
+  reads untrusted content only through its own tools (Angelos via
+  `read_inbox`/`read_email`/`read_calendar`, Mnemosyne via `watch_youtube`) was
+  treated as non-ingesting, so it kept action capability and received global
+  action plugins/MCP servers. `Specialist._ingests` now derives from the full
+  loadout, so any INGESTION tool denies action capability.
+- **Prometheus no longer ingests the live web** while holding self-modifying
+  tools (`update_prompt`, `restore_prompt`, `propose_upgrade`, …); its "scan
+  outward" reads Argus's already-vetted reports from memory instead.
+- **`spawn_subagent` can no longer reach privileged specialists.** Delegation is
+  refused for system specialists and any that hold an actuator in a fresh run
+  (Prometheus, Metis, Hermes, Chronos), so an injected page can't launder a
+  self-modification or credentialed action through a sub-agent.
+- **`send_email` / `call_webhook` route through the approval spine** (prepare →
+  auto-or-hold); nothing world-affecting auto-sends.
+- **SSRF gate** on `browse_page`/`_http_get`/`_call_webhook`, with every redirect
+  hop re-validated (a public URL that 302s to an internal/metadata host is
+  blocked).
+- **`browser_act` is operator-authorization-gated**, and the operator gains a
+  real `FINANCIAL_LEGAL` risk tier (no longer silently downgraded).
+- **Path-traversal guards** on backup restore (manifest-driven moves) and
+  `import_memory`, so a crafted archive can't write outside its target.
+- **Backup restore is all-or-nothing** (verify every hash before moving any
+  file); **backup create refuses to write plaintext** if encryption is
+  configured but fails.
+- **Decision-log verification fails closed** without a crypto backend and gains
+  an explicit pinning path (`OLYMPUS_LOG_PIN`) for third-party verifiers.
+
+### Added
+
+- **`gate_prompt`** — a code-enforced, benchmark-gated prompt upgrade: applies a
+  rewrite only if a before/after benchmark shows no regression and rolls it back
+  automatically otherwise, making the "measured, with rollback" guarantee real
+  (the enforced counterpart to `update_prompt`).
+
+### Fixed
+
+- `tools.py` used `json` with no module-level import → `NameError` on any
+  operator call passing real JSON params.
+- `olympus explain` read the model from the wrong field and printed `model=?`;
+  it now shows the real model per decision.
+- Streamed runs (`ask_stream`) now record their input, so they are replayable.
+- Parallel-dispatch `contract`/`egress` decisions are order-stabilized, removing
+  false replay-gate divergences when contracts or the egress guard are enabled.
+- Atomicity/robustness: the usage ledger (budget could reset to 0 on a torn
+  write) and the verified-facts cache (crash on a malformed line; non-atomic
+  compaction) are now crash-safe; the companion interaction counter no longer
+  loses updates under concurrent turns.
+- `restore_prompt` is now a real rollback stack (was newest-only); the relgraph
+  refuses new nodes at its cap instead of fabricating false edges; memory
+  auto-supersede compares against decayed (not stored) confidence; the scheduler
+  renders intervals in their coarsest unit (`7d`, not `168h`).
+- Chat-gateway dedup evicts oldest-first instead of clearing the whole set (a
+  retry past the cap could be answered twice); Discord/Slack gateways ack fast
+  and run the pipeline off-thread with event de-duplication.
+- A non-positive heartbeat cadence now means "off" instead of "run every tick";
+  `Specialist.run` honors the specialist's configured effort; the default model
+  is read from the environment live.
+
+### Changed
+
+- README: the "verification gate" claim is scoped to the code (the supervisor
+  flags which answers are factual; only those are checked), the Install/Setup
+  sections are de-duplicated, and the Discord/Slack/Signal gateways are
+  documented. Several overstated docstrings corrected (sandbox "confinement",
+  operator "second fence", `_maybe_compact`, OpenAI-compat `effort`).
+
 ### Added — Optional in-run tool-transcript compaction (`olympus/transcript.py`)
 
 - Closes the last context boundary: the chat layer already compacts old
