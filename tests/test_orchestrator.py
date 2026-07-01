@@ -117,3 +117,12 @@ def test_heartbeat_nothing_due():
                                "daily_learning", "train", "evolution_audit",
                                "replay_gate", "backup")}
     assert heartbeat.tick(state) == []
+
+
+def test_due_treats_nonpositive_cadence_as_off():
+    from olympus import heartbeat
+    # interval 0 previously meant "run every tick" (now - last >= 0); it must
+    # mean disabled, so a fresh state with a 0 cadence is NOT due.
+    assert heartbeat._due({}, "x", 0, now=1e18) is False
+    assert heartbeat._due({}, "x", -1, now=1e18) is False
+    assert heartbeat._due({}, "x", 3600, now=1e18) is True   # positive still fires

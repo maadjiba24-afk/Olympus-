@@ -216,6 +216,18 @@ def test_verify_run_reports_unsigned_and_missing(tmp_path, monkeypatch):
     assert witness.verify_run("nope")["found"] is False
 
 
+def test_verify_fails_closed_without_crypto_backend(tmp_path, monkeypatch):
+    # On a host without the cryptography backend, verify_log/verify_run must
+    # return a bool/dict (fail closed), not raise WitnessError.
+    run_id = _signed_run(tmp_path, monkeypatch)
+    run = trace.load_run(run_id)
+    monkeypatch.setattr(witness, "_HAVE_CRYPTO", False)
+    assert witness.verify_log(run["decisions"], run["log_signature"]) is False
+    res = witness.verify_run(run_id)
+    assert res["ok"] is False and res["signed"] is True
+    assert "cryptography backend is unavailable" in res["problems"][0]
+
+
 def test_verify_run_pin_binds_to_expected_key(tmp_path, monkeypatch):
     # The pinning path: a third-party verifier holding the expected public key
     # accepts a log signed by it and REJECTS one signed under a different seed,

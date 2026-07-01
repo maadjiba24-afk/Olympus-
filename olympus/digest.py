@@ -18,11 +18,11 @@ from . import config, memory, skills
 # the cycle to run at all (None = always on); when it's off the digest says
 # "disabled" instead of a misleading "not yet".
 _CYCLES = [
-    ("World scan for opportunities (Argus)", "opportunity_scan", None),
-    ("Learning from queued videos (Mnemosyne)", "watchlist", None),
-    ("Daily skill distillation (Metis)", "daily_learning", None),
+    ("World scan for opportunities (Argus)", "opportunity_scan", "OPPORTUNITY_SCAN_EVERY"),
+    ("Learning from queued videos (Mnemosyne)", "watchlist", "WATCHLIST_EVERY"),
+    ("Daily skill distillation (Metis)", "daily_learning", "DAILY_LEARNING_EVERY"),
     ("Specialist training", "train", "TRAIN_EVERY"),
-    ("Self-audit & self-upgrade (Prometheus)", "evolution_audit", None),
+    ("Self-audit & self-upgrade (Prometheus)", "evolution_audit", "EVOLUTION_AUDIT_EVERY"),
 ]
 
 # (heading, memory category) sections to surface, newest titles only.

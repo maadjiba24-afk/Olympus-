@@ -124,6 +124,25 @@ class Trace:
             self.decisions.append(rec)
         return rec
 
+    def canonicalize_parallel_since(self, start: int) -> None:
+        """Put the decisions recorded since index `start` into a deterministic
+        order. A parallel dispatch level appends its workers' decisions
+        (contract / egress) in thread-completion order, which is not
+        reproducible — so record vs replay could differ purely by timing and the
+        positional diff would report a false divergence. Sorting that slice by
+        content makes the recorded path (and thus replay equality and the
+        signature) stable. Only the parallel slice is touched; every sequential
+        decision keeps its recorded order. Caller invokes this only when the
+        level actually ran >1 worker (a single worker is already deterministic)."""
+        with self._lock:
+            tail = self.decisions[start:]
+            if len(tail) < 2:
+                return
+            tail.sort(key=lambda d: json.dumps(
+                decision_core(d), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False))
+            self.decisions[start:] = tail
+
     def flush(self) -> None:
         path = config.MEMORY_DIR / "traces" / f"{time.strftime('%Y%m%d')}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

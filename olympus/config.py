@@ -7,7 +7,14 @@ from urllib.parse import urlparse
 
 # Default model for the Anthropic backend. Opus 4.8 supports adaptive
 # thinking, effort control, and the server-side web_search/web_fetch tools.
+# `MODEL` is the import-time snapshot; `default_model()` reads OLYMPUS_MODEL
+# LIVE — use it at call sites, because firstrun.load_env_file() loads the saved
+# config.env AFTER this module is imported, so the snapshot can be stale.
 MODEL = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+
+
+def default_model() -> str:
+    return os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
 
 
 @dataclass(frozen=True)

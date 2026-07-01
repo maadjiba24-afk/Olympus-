@@ -45,8 +45,25 @@ class Specialist:
     effort: str = "high"
 
     def _ingests(self, provider: str) -> bool:
-        """Does this specialist's loadout read external/untrusted content?"""
+        """Does this specialist's loadout read external/untrusted content?
+
+        This drives capability separation (allow_action + filter_tools), so it
+        must reflect EVERY way the specialist ingests — not just web=True. A
+        specialist that ingests purely through its own extra_tools (Angelos via
+        read_inbox/email/calendar, Mnemosyne via watch_youtube) is just as
+        exposed to prompt injection as a web scout; missing that let it keep
+        action capability and receive global action plugins/MCP servers while
+        reading attacker-controlled content."""
         if self.web:
+            return True
+        # Check the specialist's own built-in loadout (base + extra_tools + web
+        # tools) for any INGESTION tool. Connector data plugins/MCP are checked
+        # separately below (their attachment can't depend on this result).
+        own = list(tools.BASE_TOOLS)
+        own += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
+        if self.web:
+            own += tools.web_tool_defs(provider)
+        if security.loadout_ingests_external(own):
             return True
         if connectors.specialist_has_data_mcp(self.key):
             return True
@@ -96,16 +113,21 @@ class Specialist:
                 + _UNTRUSTED_NOTE)
 
     def run(self, task: str, settings: config.Settings | None = None,
-            effort: str = "high") -> str:
+            effort: str | None = None) -> str:
         return self.run_counted(task, settings=settings, effort=effort)[0]
 
     def run_counted(self, task: str, settings: config.Settings | None = None,
-                    effort: str = "high") -> tuple[str, int | None]:
+                    effort: str | None = None) -> tuple[str, int | None]:
         """Like `run`, but also returns the count of client-side tool calls the
         specialist made (or None when the provider can't report it — only the
-        Anthropic backend counts). Used by the output-contract tool-call cap."""
+        Anthropic backend counts). Used by the output-contract tool-call cap.
+
+        `effort` defaults to THIS specialist's configured `.effort` (not a
+        hard-coded 'high'), so one-shot routines that call run()/run_counted()
+        without passing effort respect a specialist tuned to a cheaper tier."""
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
+        effort = effort or self.effort
         return backend.run_agent_counted(settings, self.system_prompt(), task,
                                          self.tool_defs(settings.provider),
                                          mcp_servers=self.mcp_defs(settings.provider),

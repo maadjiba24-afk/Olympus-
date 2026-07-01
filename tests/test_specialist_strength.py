@@ -36,6 +36,25 @@ def test_role_and_effort_fields_default_safely():
         assert spec.effort  # non-empty; default "high" preserves behavior
 
 
+def test_run_defaults_to_specialist_configured_effort(monkeypatch):
+    # run()/run_counted() without an explicit effort must use the specialist's
+    # own .effort, not a hard-coded 'high' — else one-shot routines (scan/audit/
+    # learn) ignore a specialist tuned to a cheaper tier.
+    from olympus import backend, specialists
+    captured = {}
+    monkeypatch.setattr(backend, "run_agent_counted",
+                        lambda s, sys, task, tools, mcp_servers=None, effort=None:
+                        (captured.__setitem__("effort", effort), ("out", 0))[1])
+    spec = specialists.Specialist(key="plutus", name="P", title="t",
+                                  description="d", effort="low")
+    spec.run("do it", settings=config.Settings(provider="anthropic",
+                                                model="m", api_key="k"))
+    assert captured["effort"] == "low"                     # used self.effort
+    spec.run("again", settings=config.Settings(provider="anthropic",
+                                               model="m", api_key="k"), effort="high")
+    assert captured["effort"] == "high"                    # explicit override wins
+
+
 def test_hephaestus_routes_to_coding():
     assert SPECIALISTS["hephaestus"].role == "coding"
     assert config.specialist_role("hephaestus") == "coding"

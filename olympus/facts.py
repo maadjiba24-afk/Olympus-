@@ -8,6 +8,7 @@ a source doesn't need re-searching today (until it goes stale).
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -34,6 +35,33 @@ def _norm(claim: str) -> str:
 
 _LOCK = threading.Lock()
 
+# Cached line count per log path, so compaction stays EAGER (checked on every
+# write) without re-scanning the whole file each time: the file is counted once
+# per path per process, then tracked incrementally. Keyed by path string so a
+# changed MEMORY_DIR (e.g. in tests) just starts a fresh count.
+_line_counts: dict[str, int] = {}
+
+
+def _count_lines(path: Path) -> int:
+    try:
+        with path.open(encoding="utf-8") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def _trim(path: Path) -> None:
+    """Atomically keep only the newest MAX_FACTS entries. Temp file + os.replace
+    so a crash mid-compaction can't corrupt/truncate the cache. Caller holds
+    _LOCK."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text("\n".join(lines[-MAX_FACTS:]) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
 
 def record(claim: str, verdict: str, source: str = "") -> str:
     entry = {
@@ -47,12 +75,14 @@ def record(claim: str, verdict: str, source: str = "") -> str:
     with _LOCK:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
-        # Compact when the append-only log grows past 2x the cap: keep the
-        # newest MAX_FACTS lines, drop the rest.
-        if count() > MAX_FACTS * 2:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            path.write_text("\n".join(lines[-MAX_FACTS:]) + "\n",
-                            encoding="utf-8")
+        key = str(path)
+        n = _line_counts.get(key)
+        n = (n + 1) if n is not None else _count_lines(path)
+        # Compact when the append-only log grows past 2x the cap.
+        if n > MAX_FACTS * 2:
+            _trim(path)
+            n = _count_lines(path)
+        _line_counts[key] = n
     return "Fact cached."
 
 
@@ -70,7 +100,9 @@ def lookup(query: str, limit: int = 5) -> str:
             continue
         if now - e.get("ts", 0) > TTL_SECONDS:
             continue
-        score = sum(e["norm"].count(t) for t in terms)
+        # Tolerate legacy / hand-edited / partially-written lines that lack a
+        # field — a single malformed entry must not crash the whole lookup.
+        score = sum(e.get("norm", "").count(t) for t in terms)
         if score:
             scored.append((score, e))
     if not scored:
@@ -78,9 +110,9 @@ def lookup(query: str, limit: int = 5) -> str:
     scored.sort(key=lambda x: -x[0])
     out = []
     for _, e in scored[:limit]:
-        age_days = int((now - e["ts"]) / 86400)
-        out.append(f"- {e['claim']} → {e['verdict']} "
-                   f"(source: {e['source'] or 'n/a'}; {age_days}d old)")
+        age_days = int((now - e.get("ts", 0)) / 86400)
+        out.append(f"- {e.get('claim', '?')} → {e.get('verdict', '?')} "
+                   f"(source: {e.get('source') or 'n/a'}; {age_days}d old)")
     return "\n".join(out)
 
 

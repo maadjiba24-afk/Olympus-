@@ -10,6 +10,21 @@ def test_note_interaction_counts_per_user():
     assert companion.note_interaction("bob") == 1          # independent per user
 
 
+def test_concurrent_note_interaction_loses_no_exchange(tmp_path, monkeypatch):
+    # Concurrent turns for one user must not lose an increment (which would also
+    # skip an EVOLVE_EVERY checkpoint and stall per-user self-improvement).
+    import threading
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    n = 50
+    threads = [threading.Thread(target=companion.note_interaction, args=("race",))
+               for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert companion.load("race")["interactions"] == n
+
+
 def test_due_checkpoints(monkeypatch):
     monkeypatch.setattr(companion, "EVOLVE_EVERY", 6)
     assert companion.due(6) and companion.due(12)

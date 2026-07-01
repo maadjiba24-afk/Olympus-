@@ -18,9 +18,16 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 
 from . import config, memory, usermem
+
+# Serializes read-modify-write of the per-user companion state so concurrent
+# turns (web + Telegram, two tabs) don't lose an exchange increment or let a
+# background evolve() clobber it — which would also skip an EVOLVE_EVERY
+# checkpoint and silently stop the per-user self-improvement.
+_LOCK = threading.Lock()
 
 # Re-distill the working model every N exchanges (per user). An "exchange" is
 # one user↔Olympus turn — note_interaction() is called once per completed turn.
@@ -59,11 +66,12 @@ def save(user: str, state: dict) -> None:
 
 def note_interaction(user: str, now: float | None = None) -> int:
     """Count one exchange (a completed user↔Olympus turn) for this user; return
-    the new total."""
-    state = load(user)
-    state["interactions"] = int(state.get("interactions", 0)) + 1
-    save(user, state)
-    return state["interactions"]
+    the new total. Atomic across concurrent turns."""
+    with _LOCK:
+        state = load(user)
+        state["interactions"] = int(state.get("interactions", 0)) + 1
+        save(user, state)
+        return state["interactions"]
 
 
 def due(count: int) -> bool:
@@ -129,11 +137,16 @@ def evolve(user: str, settings: config.Settings | None = None) -> str:
         return prior
     if not model:
         return prior
-    state["model"] = model[:MODEL_MAX_CHARS]
-    state["evolutions"] = int(state.get("evolutions", 0)) + 1
-    state["updated"] = now_ts()
-    save(user, state)
-    return state["model"]
+    # Re-read under the lock and merge only the model fields, so a concurrent
+    # note_interaction()'s exchange increment isn't clobbered by this (slow,
+    # off-thread) evolution. The model call itself stays outside the lock.
+    with _LOCK:
+        state = load(user)
+        state["model"] = model[:MODEL_MAX_CHARS]
+        state["evolutions"] = int(state.get("evolutions", 0)) + 1
+        state["updated"] = now_ts()
+        save(user, state)
+        return state["model"]
 
 
 def maybe_evolve(user: str, count: int,

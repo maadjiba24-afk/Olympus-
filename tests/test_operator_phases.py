@@ -147,6 +147,24 @@ def test_propose_site_profile_files_for_review():
     assert "proposal" in out.lower() and "shop.com" in out
 
 
+def test_json_string_params_parse_without_nameerror(monkeypatch):
+    # Regression: the JSON-string argument path used `json` with no module-level
+    # import, so a real JSON params/steps string raised NameError instead of
+    # being parsed. Exercise all three handlers with a non-empty JSON string.
+    assert tools._parse_json_arg('{"qty": 2}', {}) == {"qty": 2}
+    assert tools._parse_json_arg('[{"op": "click"}]', []) == [{"op": "click"}]
+    # malformed JSON must surface the friendly error, not a NameError
+    _authorize(monkeypatch)
+    _buy_template()
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    assert "must be a JSON object" in tools._browser_operate("shop.com", "buy",
+                                                             params="{not json")
+    assert "must be a JSON array" in tools._site_template_record(
+        "shop.com", "t", "notable", steps="{not json")
+    assert "must be a JSON object" in tools._operator_schedule(
+        "job", "shop.com", "buy", "daily", params="{not json")
+
+
 def test_operator_tools_threat_modeled():
     from olympus import threatmodel
     documented = threatmodel.documented_tools(

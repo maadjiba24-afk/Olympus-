@@ -123,7 +123,7 @@ class Olympus:
 
     def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
         s = self.pool.for_role(role)
-        return {"provider": s.provider, "model": s.model or config.MODEL,
+        return {"provider": s.provider, "model": s.model or config.default_model(),
                 "version": None}
 
     # -- stage 1: Zeus ----------------------------------------------------
@@ -392,11 +392,17 @@ class Olympus:
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
+        start = len(tr.decisions)
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
-            return list(pool.map(
+            results = list(pool.map(
                 lambda item: (item["specialist"],
                               self._run_one(item["specialist"], item["task"], tr)),
                 assignments))
+        # Workers appended their contract/egress decisions in completion order;
+        # canonicalize this parallel slice so replay is order-stable.
+        if len(assignments) > 1:
+            tr.canonicalize_parallel_since(start)
+        return results
 
     def _dispatch_dag(self, steps: list[dict[str, Any]],
                       tr: "trace_mod.Trace") -> list[tuple[str, str]]:
@@ -438,8 +444,13 @@ class Olympus:
                             f"(build on these, don't redo them)\n{inputs}")
                 return (s["id"], key, self._run_one(key, task, tr))
 
+            start = len(tr.decisions)
             with ThreadPoolExecutor(max_workers=min(4, len(ready))) as pool:
                 level_results = list(pool.map(work, ready))
+            # This level's workers appended their contract/egress decisions in
+            # completion order; canonicalize the slice so replay is order-stable.
+            if len(ready) > 1:
+                tr.canonicalize_parallel_since(start)
 
             for sid, key, out in level_results:
                 done[sid] = (key, out)
@@ -603,9 +614,12 @@ class Olympus:
 
     def _maybe_compact(self) -> None:
         """Replay compact state, not full history. Compact only when the
-        verbatim history actually exceeds the token budget — so short chats
-        never pay for summarization, and a single huge paste triggers it even
-        at turn one."""
+        verbatim history exceeds the token budget AND there are more turns than
+        the verbatim tail keeps — so short chats never pay for summarization, and
+        there is always an older slice to fold away. (A single huge paste alone
+        does NOT compact at turn one: the recent tail is always replayed
+        verbatim, so compaction waits until history grows past HISTORY_KEEP_TURNS
+        entries.)"""
         if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:
@@ -694,6 +708,10 @@ class Olympus:
             return
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask_stream", self.user)
+        # Record the input like ask() does, otherwise every streamed run is
+        # non-replayable (replay_run raises "no recorded input to replay").
+        tr.meta = {"input": user_message,
+                   "conversation_id": self.conversation_id}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -745,6 +763,7 @@ class Olympus:
             self._finish(user_message, "".join(chunks))
         finally:
             tr.flush()
+            self.last_run_id = tr.id      # streamed runs are discoverable too
 
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""

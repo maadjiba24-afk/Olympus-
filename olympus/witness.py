@@ -366,6 +366,11 @@ def verify_log(decisions: list[dict], log_signature: dict,
       (`public_key_hex()`), i.e. the instance verifies its own logs.
     """
     from . import trace
+    # Fail CLOSED without a crypto backend: we cannot verify a signature, so we
+    # must not vouch for it. (verify_signature would raise WitnessError here, so
+    # this both honors the bool contract and avoids an unreachable fallback.)
+    if not _HAVE_CRYPTO:
+        return False
     pub = (log_signature.get("publicKey") or "").strip()
     if not pub:
         return False
@@ -376,7 +381,7 @@ def verify_log(decisions: list[dict], log_signature: dict,
         pin = (os.environ.get("OLYMPUS_LOG_PIN") or "").strip() or None
     if pin:
         return pub.lower() == pin.lower()
-    return (not _HAVE_CRYPTO) or pub == public_key_hex()
+    return pub == public_key_hex()
 
 
 def verify_run(run_id: str, *, pin: str | None = None) -> dict:
@@ -398,6 +403,10 @@ def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     decisions = run.get("decisions", [])
     if verify_log(decisions, sig, pin=pin):
         return {"ok": True, "found": True, "signed": True, "problems": []}
+    if not _HAVE_CRYPTO:
+        return {"ok": False, "found": True, "signed": True,
+                "problems": ["cannot verify the decision-log signature — the "
+                             "cryptography backend is unavailable on this host."]}
     # Distinguish a tampered log from a valid-but-untrusted signer for the report.
     pub = (sig.get("publicKey") or "").strip()
     payload = trace.canonical_log(decisions).encode("utf-8")

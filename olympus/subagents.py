@@ -31,6 +31,23 @@ class SubTask:
     task: str
 
 
+def _is_privileged(key: str) -> bool:
+    """A specialist that must NOT be reachable via delegation: a system
+    specialist (self-modifying / bypasses capability separation) or one that
+    would hold an action tool in a fresh, non-ingesting run (the operator
+    Hermes, Chronos's send_email/call_webhook, ...). Spawn runs a specialist
+    with its FULL loadout, so letting an (untrusted-content-ingesting) caller
+    spawn one of these would launder an injection into a real-world action or a
+    self-modification — the exact escalation capability separation exists to
+    prevent."""
+    from . import security
+    spec = SPECIALISTS[key]
+    if spec.system:
+        return True
+    names = {d.get("name") for d in spec.tool_defs("anthropic")}
+    return bool(names & security.ACTION_TOOLS)
+
+
 def spawn(specialist: str, task: str,
           settings: config.Settings | None = None) -> str:
     """Run one specialist in isolation; return its final text. Failures are
@@ -39,6 +56,10 @@ def spawn(specialist: str, task: str,
     if key not in SPECIALISTS:
         return (f"[unknown specialist '{specialist}'. Available: "
                 f"{', '.join(sorted(SPECIALISTS))}]")
+    if _is_privileged(key):
+        return (f"[refused: '{key}' cannot be spawned as a subagent — "
+                "self-modifying and credentialed specialists run only through "
+                "their own governed routines, never via delegation.]")
     try:
         return SPECIALISTS[key].run(task, settings=settings)
     except Exception as err:                       # isolate this branch

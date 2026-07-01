@@ -136,11 +136,14 @@ def _webhook_recorder(monkeypatch):
         def __exit__(self, *a): return False
         def read(self, n=None): return b"ok"
 
-    def _fake_urlopen(req, timeout=30):
-        calls.append(req)
-        return _FakeResp()
+    class _FakeOpener:                       # _call_webhook uses a safe-redirect
+        def open(self, req, timeout=30):     # opener, not urlopen
+            calls.append(req)
+            return _FakeResp()
 
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(tools._urlreq, "build_opener", lambda *a, **k: _FakeOpener())
+    # Don't do a real DNS lookup for the SSRF gate in tests.
+    monkeypatch.setattr(security, "url_block_reason", lambda url: None)
     monkeypatch.setenv("OLYMPUS_WEBHOOKS", "hook=https://example.com/h")
     return calls
 
@@ -159,6 +162,15 @@ def test_distribution_safety_guard_off_sends_even_sensitive(monkeypatch):
     out2 = tools._call_webhook("hook", {"secret": KEY})
     assert out2.startswith("Webhook 'hook' responded 200")
     assert len(calls) == 1
+
+
+def test_webhook_url_ssrf_gated(monkeypatch):
+    # A webhook pointed at an internal/metadata host is refused before the POST.
+    calls = _webhook_recorder(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason",
+                        lambda url: "refusing to fetch an internal host")
+    out = tools._call_webhook("hook", {"x": 1})
+    assert "blocked" in out.lower() and calls == []       # never sent
 
 
 def test_guard_on_holds_sensitive_email_then_approves_sends_once(monkeypatch):

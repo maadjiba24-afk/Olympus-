@@ -7,6 +7,7 @@ no MCP servers, no extra plumbing. Client-side tools below run locally.
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -699,14 +700,24 @@ def _call_webhook(name: str, payload: dict | None = None, *,
             return (f"[Held for approval: {d.reason}. Approve it with "
                     "`olympus actions`.]")
 
+    # Gate the outbound URL through the same SSRF/egress choke as web fetches: an
+    # operator can misconfigure a webhook to an internal/metadata host, and the
+    # endpoint can 302-redirect to one. Re-validate the initial URL and every hop.
+    reason = security.url_block_reason(hooks[name])
+    if reason:
+        return f"Error: webhook '{name}' URL is blocked ({reason})."
     req = urllib.request.Request(
         hooks[name],
         data=_json.dumps(payload or {}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "olympus-agent"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return (f"Webhook '{name}' responded {resp.status}: "
-                f"{resp.read(500).decode(errors='replace')}")
+    opener = _urlreq.build_opener(_SafeRedirectHandler)
+    try:
+        with opener.open(req, timeout=30) as resp:
+            return (f"Webhook '{name}' responded {resp.status}: "
+                    f"{resp.read(500).decode(errors='replace')}")
+    except _urlerr.HTTPError as err:
+        return f"Webhook '{name}' error: {err}"
 
 
 def _spine_action(type_name: str, payload: dict, title: str, noun: str) -> str:

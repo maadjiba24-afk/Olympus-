@@ -91,6 +91,11 @@ def extract_json(text: str) -> dict[str, Any]:
 
 def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
+    # NOTE: `effort` is accepted for parity with the Anthropic backend's
+    # interface but is NOT applied here — OpenAI-compatible endpoints express
+    # reasoning effort only on specific reasoning models (via `reasoning_effort`),
+    # and blindly sending it would 400 the many models that don't support it. So
+    # on this path effort is a deliberate no-op rather than a silent control.
     resp = _post(settings, {
         "model": settings.model,
         "messages": [{"role": "system", "content": system}, *messages],
