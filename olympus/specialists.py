@@ -45,8 +45,25 @@ class Specialist:
     effort: str = "high"
 
     def _ingests(self, provider: str) -> bool:
-        """Does this specialist's loadout read external/untrusted content?"""
+        """Does this specialist's loadout read external/untrusted content?
+
+        This drives capability separation (allow_action + filter_tools), so it
+        must reflect EVERY way the specialist ingests — not just web=True. A
+        specialist that ingests purely through its own extra_tools (Angelos via
+        read_inbox/email/calendar, Mnemosyne via watch_youtube) is just as
+        exposed to prompt injection as a web scout; missing that let it keep
+        action capability and receive global action plugins/MCP servers while
+        reading attacker-controlled content."""
         if self.web:
+            return True
+        # Check the specialist's own built-in loadout (base + extra_tools + web
+        # tools) for any INGESTION tool. Connector data plugins/MCP are checked
+        # separately below (their attachment can't depend on this result).
+        own = list(tools.BASE_TOOLS)
+        own += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
+        if self.web:
+            own += tools.web_tool_defs(provider)
+        if security.loadout_ingests_external(own):
             return True
         if connectors.specialist_has_data_mcp(self.key):
             return True
