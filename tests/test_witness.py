@@ -105,6 +105,18 @@ def test_verify_fails_on_missing_file(tmp_path):
     assert result["ok"] is False and "a.py" in result["missing"]
 
 
+def test_verify_detects_injected_file(tmp_path):
+    # A tracked file added AFTER signing (e.g. an injected backdoor) must fail
+    # verification even though every signed file still matches.
+    pkg = _make_tree(tmp_path)
+    manifest = _manifest_for(pkg)
+    (pkg / "backdoor.py").write_text("print('pwned')\n")
+    result = witness.verify_manifest(manifest, base=pkg, allow_dev=True)
+    assert result["ok"] is False
+    assert "backdoor.py" in result["added"]
+    assert any("backdoor.py" in p for p in result["problems"])
+
+
 def test_verify_rejects_manifest_resigned_with_foreign_key(tmp_path, monkeypatch):
     pkg = _make_tree(tmp_path)
     pin = witness.public_key_hex()                  # the legitimate key, pinned

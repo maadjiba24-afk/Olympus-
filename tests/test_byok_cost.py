@@ -28,8 +28,12 @@ def test_daily_chat_limit_flag(monkeypatch):
 
 def test_brought_own_key_detects_user_credentials():
     assert web._brought_own_key({"api_key": "sk-123"}) is True
-    assert web._brought_own_key({"base_url": "http://localhost:11434/v1"}) is True
-    assert web._brought_own_key({"extra": {"api_key": "k2"}}) is True
+    # A bare base_url (no key) is NOT BYOK: the primary pipeline would fall back
+    # to the operator's env key and ship it to a user-supplied endpoint.
+    assert web._brought_own_key({"base_url": "http://localhost:11434/v1"}) is False
+    # An `extra` second-model key doesn't pay for the primary member (which
+    # still runs on the operator's key), so it must not unlock the free wall.
+    assert web._brought_own_key({"extra": {"api_key": "k2"}}) is False
     # only a model name / language, no actual key -> not BYOK
     assert web._brought_own_key({"model": "claude-opus-4-8"}) is False
     assert web._brought_own_key({"api_key": "   "}) is False

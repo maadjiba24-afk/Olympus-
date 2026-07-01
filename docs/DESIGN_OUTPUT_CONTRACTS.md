@@ -1,6 +1,6 @@
 # Design — Hard Output Contracts (Primitive)
 
-**Status:** proposed · **Scope:** deliberately minimal · **Depends on:** nothing new
+**Status:** implemented (`olympus/contracts.py`, wired in `orchestrator.py`; off by default, gated by `OLYMPUS_CONTRACTS`) · **Scope:** deliberately minimal · **Depends on:** nothing new
 **Companion doc:** `DESIGN_BOUNDARY_LAYER.md` (phase two — do not read into this one)
 
 ---

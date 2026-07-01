@@ -15,6 +15,10 @@ import anthropic
 from . import config, replaystore, security, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
+# Bound the cache: on a public BYOK instance each distinct visitor key/base is a
+# new entry (with its own connection pool), so an unbounded dict grows without
+# limit under untrusted input. FIFO-evict the oldest when over the cap.
+_CLIENTS_MAX = 256
 
 
 def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -34,9 +38,17 @@ def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
     base = settings.base_url if settings else None
     cache_key = (key, base)
     if cache_key not in _clients:
+        if len(_clients) >= _CLIENTS_MAX:
+            _clients.pop(next(iter(_clients)))     # evict the oldest entry
         kwargs: dict[str, Any] = {}
         if key:
             kwargs["api_key"] = key
+        elif base:
+            # A custom endpoint with no explicit key: do NOT let the SDK fall
+            # back to the operator's ANTHROPIC_API_KEY env var and ship it to a
+            # user-supplied base_url. Pass an empty key so it fails closed (401)
+            # instead of leaking the operator's credential to a third party.
+            kwargs["api_key"] = ""
         if base:
             kwargs["base_url"] = base
         _clients[cache_key] = anthropic.Anthropic(**kwargs)
@@ -128,7 +140,8 @@ def complete(
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:
             last_err = err
-            time.sleep(2 ** attempt)
+            if attempt < 3:                 # no point sleeping after the last try
+                time.sleep(2 ** attempt)
     raise last_err  # type: ignore[misc]
 
 

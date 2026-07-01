@@ -52,8 +52,15 @@ def _verify_run_combined(run_id: str, require_production: bool) -> int:
     except ValueError as err:
         replay_ok, replay_msg = False, str(err)
 
-    # Half 2 — decision-log signature, against the pinned/trusted key.
-    sig = witness.verify_run(run_id)
+    # Half 2 — decision-log signature. A dev-posture run is signed by the public
+    # default seed, so verify its signature against that default key (integrity
+    # only) rather than the local key — otherwise a run recorded in dev fails
+    # here the moment the instance sets OLYMPUS_SIGNING_SEED, and the dev-PASS
+    # branch below becomes unreachable. Authenticity for production runs is still
+    # enforced by the pinned-key check further down.
+    sig = witness.verify_run(
+        run_id,
+        pin=witness.default_public_key_hex() if posture == "dev" else None)
     sig_ok = bool(sig.get("ok"))
     sig_msg = ("decision-log signature valid" if sig_ok
                else "; ".join(sig.get("problems", []) or ["signature invalid"]))
@@ -725,10 +732,14 @@ def main(argv: list[str] | None = None) -> int:
             return _verify_run_combined(args.run, require_prod)
         if args.log:
             from . import trace
-            r = witness.verify_run(args.log)
             run = trace.load_run(args.log)
             dev = (witness.log_signed_by_default(run) if run
                    else witness.is_default_seed())
+            # Verify a dev-posture log against the default seed's key (integrity
+            # only), so it doesn't fail once the instance hardens its own seed.
+            r = witness.verify_run(
+                args.log,
+                pin=witness.default_public_key_hex() if dev else None)
             if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
@@ -818,8 +829,23 @@ def main(argv: list[str] | None = None) -> int:
         except backup.BackupError as err:
             print(f"✗ restore refused: {err}")
             return 1
+        except Exception as err:
+            # A wrong vault key (Fernet InvalidToken), a corrupt gzip/tar, or bad
+            # manifest JSON otherwise escapes as a raw traceback — surface it as
+            # the documented refusal instead.
+            print(f"✗ restore failed: {type(err).__name__}: {err}")
+            return 1
+        # Distinguish "no signature present" from "signature present but FAILED"
+        # (an --insecure restore of a tampered signed archive) — collapsing both
+        # to 'unsigned' hides a security-relevant fact.
+        if res.get("signature_ok"):
+            sig_state = "signature verified"
+        elif res.get("signed"):
+            sig_state = "signature INVALID — restored via --insecure"
+        else:
+            sig_state = "unsigned"
         print(f"✓ restored {res['restored']} files into {res['into']} "
-              f"({'signature verified' if res['signature_ok'] else 'unsigned'}).")
+              f"({sig_state}).")
         if res["mismatched"]:
             print(f"  ⚠ {len(res['mismatched'])} file(s) failed integrity: "
                   f"{res['mismatched'][:5]}")
@@ -1023,7 +1049,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             job = scheduler.add(args.name, args.interval, prompt,
                                 deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every {job.interval // 60}m.")
+            print(f"Scheduled '{job.name}' every "
+                  f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):

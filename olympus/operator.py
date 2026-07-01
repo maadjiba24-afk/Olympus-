@@ -107,8 +107,13 @@ def authorized(user: str, domain: str) -> bool:
     d = (domain or "").strip().lower()
     if not d:
         return False
-    listed = (d in browser.operator_domains()
-              or d in _settings(user).get("sites", {}))
+    authorized_domains = (set(browser.operator_domains())
+                          | set(_settings(user).get("sites", {})))
+    # Match the exact domain OR any subdomain of it: authorizing 'amazon.com'
+    # covers 'www.amazon.com' / regional subdomains, which is where a login
+    # almost always lands. (A bare exact match made the actuator unusable on
+    # the very site the user just authorized.)
+    listed = any(d == a or d.endswith("." + a) for a in authorized_domains)
     return listed and security.egress_allowed(d)
 
 

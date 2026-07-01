@@ -128,8 +128,10 @@ def create(*, full: bool = False, label: str = "") -> dict:
 
     with _LOCK:
         # 1) Build the .tar.gz into a temp file, then read its bytes.
-        tmp_tar = Path(tempfile.mkstemp(prefix=".bk-", suffix=".tar.gz",
-                                        dir=out_dir)[1])
+        _tmp_fd, _tmp_name = tempfile.mkstemp(prefix=".bk-", suffix=".tar.gz",
+                                              dir=out_dir)
+        os.close(_tmp_fd)          # close the mkstemp fd; tarfile reopens by path
+        tmp_tar = Path(_tmp_name)
         try:
             with tarfile.open(tmp_tar, "w:gz") as tar:
                 info = tarfile.TarInfo(_MANIFEST_NAME)

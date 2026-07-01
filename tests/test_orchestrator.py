@@ -34,6 +34,34 @@ def test_invalid_settings_surface_cleanly():
     assert "Configuration problem" in bot.ask("hello")
 
 
+def test_route_treats_unparseable_json_as_delegation_not_refusal(monkeypatch):
+    # A provider that emits unparseable/truncated route JSON must degrade to a
+    # delegation, NOT be reported to the user as a safety refusal.
+    import json as _json
+    from olympus import backend
+    bot = orchestrator.Olympus(user="router-tester")
+    monkeypatch.setattr(backend, "complete_json",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _json.JSONDecodeError("bad", "{trailing,", 0)))
+    route = bot._route("what's a good budget?")
+    assert route["mode"] == "delegate"
+    assert route["direct_reply"] is None
+    assert route["brief"] == "what's a good budget?"
+
+
+def test_route_reports_genuine_refusal(monkeypatch):
+    # A real refusal (backend raises a plain ValueError) still surfaces the
+    # can't-help reply.
+    from olympus import backend
+    bot = orchestrator.Olympus(user="router-tester")
+    monkeypatch.setattr(backend, "complete_json",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            ValueError("model refused the request")))
+    route = bot._route("something disallowed")
+    assert route["mode"] == "direct"
+    assert "can't help" in route["direct_reply"].lower()
+
+
 def test_conversation_trigger(monkeypatch):
     ran = threading.Event()
     monkeypatch.setattr(orchestrator, "evolution_audit",
