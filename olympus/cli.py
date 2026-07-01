@@ -52,8 +52,15 @@ def _verify_run_combined(run_id: str, require_production: bool) -> int:
     except ValueError as err:
         replay_ok, replay_msg = False, str(err)
 
-    # Half 2 — decision-log signature, against the pinned/trusted key.
-    sig = witness.verify_run(run_id)
+    # Half 2 — decision-log signature. A dev-posture run is signed by the public
+    # default seed, so verify its signature against that default key (integrity
+    # only) rather than the local key — otherwise a run recorded in dev fails
+    # here the moment the instance sets OLYMPUS_SIGNING_SEED, and the dev-PASS
+    # branch below becomes unreachable. Authenticity for production runs is still
+    # enforced by the pinned-key check further down.
+    sig = witness.verify_run(
+        run_id,
+        pin=witness.default_public_key_hex() if posture == "dev" else None)
     sig_ok = bool(sig.get("ok"))
     sig_msg = ("decision-log signature valid" if sig_ok
                else "; ".join(sig.get("problems", []) or ["signature invalid"]))
@@ -725,10 +732,14 @@ def main(argv: list[str] | None = None) -> int:
             return _verify_run_combined(args.run, require_prod)
         if args.log:
             from . import trace
-            r = witness.verify_run(args.log)
             run = trace.load_run(args.log)
             dev = (witness.log_signed_by_default(run) if run
                    else witness.is_default_seed())
+            # Verify a dev-posture log against the default seed's key (integrity
+            # only), so it doesn't fail once the instance hardens its own seed.
+            r = witness.verify_run(
+                args.log,
+                pin=witness.default_public_key_hex() if dev else None)
             if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")

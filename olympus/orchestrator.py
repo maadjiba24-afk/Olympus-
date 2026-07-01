@@ -122,10 +122,20 @@ class Olympus:
         return (self.pool.fastest() if config.fast_mode()
                 else self.pool.for_role("reasoning"))
 
-    def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
-        s = self.pool.for_role(role)
+    @staticmethod
+    def _meta_of(s: config.Settings) -> dict[str, Any]:
         return {"provider": s.provider, "model": s.model or config.default_model(),
                 "version": None}
+
+    def _model_meta(self, role: str = "reasoning") -> dict[str, Any]:
+        return self._meta_of(self.pool.for_role(role))
+
+    def _light_meta(self) -> dict[str, Any]:
+        """Model meta for the lightweight stages (route/plan/review) — reflects
+        the model that ACTUALLY ran them, which in fast mode is pool.fastest(),
+        not for_role('reasoning'). Recording the wrong model makes replay_run
+        rebuild the wrong pool and diverge."""
+        return self._meta_of(self._light())
 
     # -- stage 1: Zeus ----------------------------------------------------
 
@@ -229,6 +239,8 @@ class Olympus:
                 self._light(), system,
                 [{"role": "user", "content": prompt}], schema, effort="medium",
             )["steps"]
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
         except Exception:
             steps = []
         clean = []
@@ -485,11 +497,16 @@ class Olympus:
         tr.meta["inrun_compact"] = config.inrun_compact()
         tr.meta["inrun_budget"] = config.inrun_budget()
         tr.meta["inrun_keep_recent"] = config.inrun_keep_recent()
+        # Fast mode changes the decision path (it drops the review decision and
+        # routes route/plan onto pool.fastest()), so it must be reproduced on
+        # replay too — otherwise a fast-recorded run replayed normally (or vice
+        # versa) adds/drops decisions and diverges spuriously.
+        tr.meta["fast_mode"] = config.fast_mode()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
             "route", {"name": "zeus", "role": "router"}, route, status="ok",
-            inputs=user_message, model=self._model_meta(),
+            inputs=user_message, model=self._light_meta(),
             request_hash=replaystore.last_ref(),
             response_ref=replaystore.last_ref())
 
@@ -503,7 +520,7 @@ class Olympus:
         tr.decision(
             "plan", {"name": "athena", "role": "supervisor"}, assignments,
             status="ok", parent_record_id=route_rec["record_id"], inputs=brief,
-            model=self._model_meta(), request_hash=replaystore.last_ref(),
+            model=self._light_meta(), request_hash=replaystore.last_ref(),
             response_ref=replaystore.last_ref())
         has_deps = any(a["depends_on"] for a in assignments)
         tr.event("dispatch", specialists=[a["specialist"] for a in assignments],
@@ -674,8 +691,12 @@ class Olympus:
             return str(err)
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask", self.user)
+        # Freeze the conversation history AS OF run start: _route hashes
+        # `self.history + [user_message]`, so a faithful replay must restore the
+        # same history — otherwise every non-first turn diverges spuriously.
         tr.meta = {"input": user_message,
-                   "conversation_id": self.conversation_id}
+                   "conversation_id": self.conversation_id,
+                   "history": list(self.history)}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -719,10 +740,12 @@ class Olympus:
             return
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask_stream", self.user)
-        # Record the input like ask() does, otherwise every streamed run is
-        # non-replayable (replay_run raises "no recorded input to replay").
+        # Record the input and the history-as-of-run-start like ask() does,
+        # otherwise every streamed run is non-replayable (replay_run raises "no
+        # recorded input to replay") or diverges on the first routing decision.
         tr.meta = {"input": user_message,
-                   "conversation_id": self.conversation_id}
+                   "conversation_id": self.conversation_id,
+                   "history": list(self.history)}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -900,12 +923,26 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
         os.environ["OLYMPUS_INRUN_BUDGET"] = str(_meta["inrun_budget"])
     if _meta.get("inrun_keep_recent") is not None:
         os.environ["OLYMPUS_INRUN_KEEP_RECENT"] = str(_meta["inrun_keep_recent"])
+    # Fast mode changes the decision path (fastest-model routing, no review), so
+    # reproduce the recorded setting or the replay adds/drops decisions.
+    prev_fast = os.environ.get("OLYMPUS_FAST")
+    os.environ["OLYMPUS_FAST"] = "1" if _meta.get("fast_mode") else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
+        # Restore the conversation history AS OF run start so _route hashes the
+        # same `history + user_message` it did when recorded — otherwise every
+        # non-first turn diverges spuriously.
+        recorded_history = _meta.get("history")
+        if isinstance(recorded_history, list):
+            bot.history = list(recorded_history)
         fresh = trace_mod.Trace("replay", bot.user)
         fresh.meta = {"input": user_input, "replays": run_id}
         bot._pipeline(user_input, fresh)
     finally:
+        if prev_fast is None:
+            os.environ.pop("OLYMPUS_FAST", None)
+        else:
+            os.environ["OLYMPUS_FAST"] = prev_fast
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

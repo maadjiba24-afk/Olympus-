@@ -254,7 +254,9 @@ def write_manifest(path: Path | None = None, *, dev: bool = False) -> Path:
 def verify_manifest(manifest: dict, *, base: Path | None = None,
                     pin: str | None = None, allow_dev: bool = False) -> dict:
     """Recompute every file hash and establish trust in the signer. Returns
-    {ok, drifted, missing, signature_ok, pubkey_trusted, is_dev, problems}.
+    {ok, drifted, missing, added, signature_ok, pubkey_trusted, is_dev,
+    problems}. `added` lists tracked files present on disk but absent from the
+    signed manifest (injected-file detection).
 
     Trust model (authenticity, not just internal consistency):
     - A **pinned** key (arg, or `pinned_pubkey()`): the manifest MUST be signed
@@ -275,12 +277,20 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     payload = canonical_json(core_for_sig)
 
     drifted, missing = [], []
+    manifest_paths = set()
     for entry in manifest.get("files", []):
+        manifest_paths.add(entry["path"])
         fp = base / entry["path"]
         if not fp.exists():
             missing.append(entry["path"])
         elif _sha256_file(fp) != entry["sha256"]:
             drifted.append(entry["path"])
+    # Detect files ADDED since signing: a tracked file on disk that the signed
+    # manifest doesn't cover (e.g. an injected olympus/backdoor.py). Checking
+    # only manifest["files"] would let such a file pass verification.
+    added = sorted(
+        str(p.relative_to(base)) for p in tracked_files(base)
+        if str(p.relative_to(base)) not in manifest_paths)
 
     pub = (integrity.get("publicKey") or "").lower()
     signature_ok = bool(pub) and verify_signature(pub, payload,
@@ -294,6 +304,8 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
         problems.append(f"drifted (hash mismatch): {p}")
     for p in missing:
         problems.append(f"missing tracked file: {p}")
+    for p in added:
+        problems.append(f"untracked file NOT covered by the signed manifest: {p}")
 
     pubkey_trusted = False
     if not signature_ok:
@@ -318,7 +330,7 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
 
     return {
         "ok": not problems,
-        "drifted": drifted, "missing": missing,
+        "drifted": drifted, "missing": missing, "added": added,
         "signature_ok": signature_ok, "pubkey_trusted": pubkey_trusted,
         "is_dev": is_dev, "problems": problems,
     }
@@ -330,7 +342,7 @@ def verify_release(manifest_path: Path | None = None, *,
     if not path.exists():
         return {"ok": False, "problems": [f"no manifest at {path} — run "
                                           "`olympus sign` to create one."],
-                "drifted": [], "missing": [], "signature_ok": False,
+                "drifted": [], "missing": [], "added": [], "signature_ok": False,
                 "pubkey_trusted": False, "is_dev": False}
     manifest = json.loads(path.read_text(encoding="utf-8"))
     return verify_manifest(manifest, allow_dev=allow_dev)
