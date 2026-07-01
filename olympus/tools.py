@@ -307,13 +307,40 @@ READ_SOURCE_FILE = {
     },
 }
 
+GATE_PROMPT = {
+    "name": "gate_prompt",
+    "description": (
+        "Safely upgrade an agent prompt: applies the change ONLY if a before/"
+        "after benchmark shows it does not regress that specialist's score, and "
+        "rolls it back automatically if it does. This is the enforced path — "
+        "prefer it over update_prompt so 'measured, with rollback' is guaranteed "
+        "by code, not by remembering to measure. Requires benchmark coverage for "
+        "the agent (user-facing specialists); use generate_benchmark first if a "
+        "domain is thinly covered."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string",
+                      "description": "Prompt file stem, e.g. 'plutus'"},
+            "new_prompt": {"type": "string",
+                           "description": "Complete new prompt text"},
+            "reason": {"type": "string",
+                       "description": "Why this is an improvement"},
+        },
+        "required": ["agent", "new_prompt", "reason"],
+    },
+}
+
 UPDATE_PROMPT = {
     "name": "update_prompt",
     "description": (
-        "Rewrite the system prompt of an Olympus agent. This is the system's "
-        "self-upgrade mechanism: improve a prompt with lessons learned, sharper "
-        "instructions, or missing capabilities. The previous version is backed "
-        "up automatically. Only use it when the new prompt is strictly better."
+        "Rewrite the system prompt of an Olympus agent. A raw primitive: it "
+        "writes the new prompt and auto-backs-up the old one, but does NOT "
+        "measure the change — YOU must run_benchmark before/after and "
+        "restore_prompt on a regression. For a self-enforcing upgrade of a "
+        "benchmarked specialist, prefer gate_prompt, which does that for you. "
+        "Only use it when the new prompt is strictly better."
     ),
     "input_schema": {
         "type": "object",
@@ -454,10 +481,31 @@ _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+import urllib.error as _urlerr
+import urllib.request as _urlreq
+
+
+class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
+    """Re-validate every 3xx hop against the SSRF/egress gate — a public URL
+    that 302-redirects to an internal host must not be followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        reason = security.url_block_reason(newurl)
+        if reason:
+            raise _urlerr.HTTPError(newurl, code,
+                                    f"blocked redirect ({reason})", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _http_get(url: str) -> str:
-    import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
+    initial request AND on every redirect. Raises ValueError if blocked."""
+    reason = security.url_block_reason(url)
+    if reason:
+        raise ValueError(reason)
+    opener = _urlreq.build_opener(_SafeRedirectHandler)
+    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    with opener.open(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -493,10 +541,11 @@ def _ddg_search(query: str) -> str:
 
 
 def _web_fetch(url: str) -> str:
-    reason = security.url_block_reason(url)
-    if reason:
-        return f"Error: {reason}."
-    return _strip_html(_http_get(url))[:20_000]
+    try:
+        html = _http_get(url)          # SSRF/egress gate + redirect re-check
+    except ValueError as err:
+        return f"Error: {err}."
+    return _strip_html(html)[:20_000]
 
 
 def _list_source_files() -> str:
@@ -547,7 +596,8 @@ def _restore_prompt(agent: str) -> str:
     ) if (config.MEMORY_DIR / "prompt_backups").exists() else []
     if not backups:
         return f"Error: no backups exist for '{stem}'."
-    text = backups[0].read_text(encoding="utf-8")
+    newest = backups[0]
+    text = newest.read_text(encoding="utf-8")
     # drop any versioned frontmatter, then the "# <stem>" header memory.save
     # added, and the trailing update-reason comment
     _, text = memory.parse_note(text)
@@ -556,7 +606,15 @@ def _restore_prompt(agent: str) -> str:
         lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
     body = "\n".join(l for l in lines if not l.startswith("<!-- update reason:"))
     path.write_text(body.strip() + "\n", encoding="utf-8")
-    return f"Prompt '{stem}' restored from {backups[0].name}."
+    # Consume the backup we just restored from so this is a real rollback STACK:
+    # a second restore steps back to the prior version instead of re-applying the
+    # same newest one forever (the previous behavior could only ever undo the
+    # most recent update).
+    try:
+        newest.unlink()
+    except OSError:
+        pass
+    return f"Prompt '{stem}' restored from {newest.name}."
 
 
 def _send_email(to: str, subject: str, body: str, *,
@@ -651,6 +709,33 @@ def _call_webhook(name: str, payload: dict | None = None, *,
                 f"{resp.read(500).decode(errors='replace')}")
 
 
+def _spine_action(type_name: str, payload: dict, title: str, noun: str) -> str:
+    """Route a world-affecting tool call through the approval spine instead of
+    executing directly: prepare → run-or-hold per policy. Irreversible types
+    (email/webhook) always hold for explicit approval; nothing auto-sends."""
+    from . import actions, builtin_actions  # noqa: F401 (registers ActionTypes)
+    a = actions.prepare(memory.current_user(), type_name, payload,
+                        title=title, why="requested by a specialist")
+    a = actions.auto_or_hold(a)
+    if a.status == actions.EXECUTED:
+        return str(a.result.get("message", f"{noun} done."))
+    if a.status == actions.FAILED:
+        return f"{noun} failed: {a.error}"
+    return (f"Prepared {noun.lower()} (id {a.id}) — it needs your approval. "
+            f"Approve with `olympus approve {a.id}` or in the UI.")
+
+
+def _send_email_tool(to: str, subject: str, body: str) -> str:
+    return _spine_action("send_email", {"to": to, "subject": subject,
+                                        "body": body},
+                         f"Email to {to}", f"Email to {to}")
+
+
+def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
+    return _spine_action("call_webhook", {"name": name, "payload": payload or {}},
+                         f"Webhook {name}", f"Webhook '{name}'")
+
+
 def _run_benchmark() -> str:
     from . import evals  # local import to avoid a cycle at module load
     return evals.run_and_save()
@@ -719,6 +804,11 @@ def _gate_skills() -> str:
     return orchestrator.gate_skills()
 
 
+def _gate_prompt(agent: str, new_prompt: str, reason: str) -> str:
+    from . import orchestrator  # local import to avoid a cycle at module load
+    return orchestrator.gate_prompt(agent, new_prompt, reason)
+
+
 def _generate_benchmark(specialist: str) -> str:
     from . import evals  # local import to avoid a cycle at module load
     return evals.generate_item(specialist)
@@ -763,11 +853,22 @@ def _browser_read(selector: str = "") -> str:
 
 def _browser_act(action: str, selector: str = "", text: str = "",
                  x: int = 0, y: int = 0) -> str:
+    # Credentialed actuator: gate like browser_login/operate — operator must be
+    # enabled and the CURRENT page's domain authorized, so it can't drive an
+    # arbitrary (possibly logged-in) tab without authorization.
+    from urllib.parse import urlparse
+    user = memory.current_user()
+    if not operator.enabled(user):
+        return "Error: the operator isn't set up — ask me to set up this site first."
     try:
-        return browser.session().act(action, selector=selector, text=text,
-                                     x=int(x), y=int(y))
+        sess = browser.session()
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
+    host = (urlparse(sess._current_url() or "").hostname or "").lower()
+    if not operator.authorized(user, host):
+        return (f"Error: the current page ('{host or 'unknown'}') isn't an "
+                "authorized site for actions.")
+    return sess.act(action, selector=selector, text=text, x=int(x), y=int(y))
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,
@@ -1068,6 +1169,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
     "update_prompt": _update_prompt,
+    "gate_prompt": _gate_prompt,
     "restore_prompt": _restore_prompt,
     "propose_upgrade": _propose_upgrade,
     "read_skill": lambda name: skills.read(name),
@@ -1078,8 +1180,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
                       specialist=specialist, provisional=True),
     "gate_skills": lambda: _gate_skills(),
     "generate_benchmark": lambda specialist: _generate_benchmark(specialist),
-    "send_email": _send_email,
-    "call_webhook": _call_webhook,
+    "send_email": _send_email_tool,      # route through the approval spine
+    "call_webhook": _call_webhook_tool,  # (raw _send_email/_call_webhook run
+                                         #  only from the approved-action path)
     "run_benchmark": _run_benchmark,
     "run_code_benchmark": _run_code_benchmark,
     # code-graph reads over project "self" (Olympus's own source). Safe reads of
@@ -1701,6 +1804,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "list_source_files": LIST_SOURCE_FILES,
     "read_source_file": READ_SOURCE_FILE,
     "update_prompt": UPDATE_PROMPT,
+    "gate_prompt": GATE_PROMPT,
     "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
     "prepare_action": PREPARE_ACTION,

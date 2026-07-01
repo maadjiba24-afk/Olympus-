@@ -1,8 +1,9 @@
 {
   "actions": {
-    "count": 13,
+    "count": 14,
     "names": [
       "browser_operate",
+      "browser_operate_financial",
       "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",
@@ -109,7 +110,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 59,
+    "count": 60,
     "names": [
       "browse_page",
       "browser_act",
@@ -127,6 +128,7 @@
       "codegraph_path",
       "create_skill",
       "current_time",
+      "gate_prompt",
       "gate_skills",
       "generate_benchmark",
       "generate_image",

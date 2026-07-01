@@ -458,6 +458,11 @@ class Olympus:
         # and restores the env. meta is NOT part of the diffed decision path.
         tr.meta["contracts_enabled"] = config.contracts_enabled()
         tr.meta["egress_guard_enabled"] = config.egress_guard_enabled()
+        # In-run compaction settings affect the message stream, so record them
+        # for deterministic replay (like the two toggles above).
+        tr.meta["inrun_compact"] = config.inrun_compact()
+        tr.meta["inrun_budget"] = config.inrun_budget()
+        tr.meta["inrun_keep_recent"] = config.inrun_keep_recent()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -567,7 +572,7 @@ class Olympus:
                 args=(self.user, user_message, reply,
                       self.pool.for_role("reasoning")),
                 daemon=True).start()
-            # Per-user adaptive evolution: count this conversation and, at every
+            # Per-user adaptive evolution: count this exchange and, at every
             # checkpoint, re-distill this user's private working model in the
             # background so Olympus gets measurably better at working with them.
             try:
@@ -854,6 +859,17 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_egress = os.environ.get("OLYMPUS_EGRESS_GUARD")
     rec_egress = bool((original.get("meta") or {}).get("egress_guard_enabled"))
     os.environ["OLYMPUS_EGRESS_GUARD"] = "1" if rec_egress else "0"
+    # In-run compaction settings — same reasoning: reproduce the recorded
+    # message stream so request hashes match.
+    _meta = original.get("meta") or {}
+    prev_inrun = {k: os.environ.get(k) for k in (
+        "OLYMPUS_INRUN_COMPACT", "OLYMPUS_INRUN_BUDGET",
+        "OLYMPUS_INRUN_KEEP_RECENT")}
+    os.environ["OLYMPUS_INRUN_COMPACT"] = str(_meta.get("inrun_compact", ""))
+    if _meta.get("inrun_budget") is not None:
+        os.environ["OLYMPUS_INRUN_BUDGET"] = str(_meta["inrun_budget"])
+    if _meta.get("inrun_keep_recent") is not None:
+        os.environ["OLYMPUS_INRUN_KEEP_RECENT"] = str(_meta["inrun_keep_recent"])
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         fresh = trace_mod.Trace("replay", bot.user)
@@ -872,6 +888,11 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_EGRESS_GUARD", None)
         else:
             os.environ["OLYMPUS_EGRESS_GUARD"] = prev_egress
+        for k, v in prev_inrun.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     fresh.flush()
     diffs = trace_mod.diff_decisions(original.get("decisions", []),
                                      fresh.decisions)
@@ -1012,7 +1033,7 @@ def train_specialists(settings: config.Settings | None = None,
 
 def gate_skills(settings: config.Settings | None = None) -> str:
     """Prove provisional skills with a before/after benchmark; keep the ones
-    that hold or raise the score, revert the rest. The safety net that lets
+    that measurably raise the score, revert the rest. The safety net that lets
     Olympus create skills autonomously.
 
     For a specialist whose domain has no benchmark item yet, one is generated
@@ -1049,6 +1070,13 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     promoted, reverted, skipped = [], [], []
     for name, sp in provisional:
         bench_ids = evals.ids_for([sp]) if _is_scoped(sp) else None  # None = whole bench
+        # A scoped skill whose specialist still has NO benchmark items must not
+        # fall through to `evals.run(only=[])` — an empty list is falsy and would
+        # silently score against the WHOLE benchmark, drowning the skill's real
+        # effect and rubber-stamping it. Skip it instead (can't measure fairly).
+        if _is_scoped(sp) and not bench_ids:
+            skipped.append(f"{name} (no benchmark coverage for '{sp}')")
+            continue
         try:
             after = evals.run(settings, only=bench_ids)["avg"]   # skill visible
             skills.set_hidden(name, True)
@@ -1058,7 +1086,10 @@ def gate_skills(settings: config.Settings | None = None) -> str:
             skills.set_hidden(name, False)  # never leave it hidden on error
             skipped.append(f"{name} ({err})")
             continue
-        if after >= before:
+        # Require a STRICT improvement to keep a skill. A tie is no evidence of
+        # value against a noisy LLM judge, so revert it rather than accumulate
+        # neutral (or coin-flip-harmful) skills.
+        if after > before:
             skills.promote(name)
             promoted.append(f"{name} [{before}→{after}]")
         else:
@@ -1078,6 +1109,63 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     msg = "Skill gate — " + ("; ".join(parts) if parts else "nothing to do")
     memory.save("evals", "skill gate (per-skill)", msg)
     return msg
+
+
+def gate_prompt(agent: str, new_prompt: str, reason: str,
+                settings: config.Settings | None = None) -> str:
+    """Apply a prompt change ONLY if a before/after benchmark shows it does not
+    regress the affected specialist's score; otherwise roll it back. This is the
+    code-enforced counterpart to `update_prompt` — it makes the "measured, with
+    rollback" guarantee real instead of trusting the caller to measure by hand.
+
+    A prompt is an *upgrade* of an existing agent (unlike a new skill, which must
+    justify itself), so the bar is non-regression: keep on after >= before,
+    revert on any drop. When the agent has no benchmark coverage the guarantee
+    cannot be honored, so the change is NOT applied — the caller is told to
+    generate a benchmark or use update_prompt manually.
+    """
+    from pathlib import Path
+
+    from . import evals, tools
+    settings = settings or config.Settings.from_env()
+    memory.set_user("shared")
+
+    stem = Path(agent).stem
+    path = config.PROMPTS_DIR / f"{stem}.md"
+    if not path.is_file():
+        return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
+
+    bench_ids = evals.ids_for([stem])
+    if not bench_ids:
+        return (f"Cannot benchmark-gate '{stem}': no benchmark items cover it "
+                f"(only user-facing specialists are scored). Generate coverage "
+                f"with generate_benchmark first, or use update_prompt + "
+                f"run_benchmark manually and accept it is unmeasured.")
+
+    try:
+        before = evals.run(settings, only=bench_ids)["avg"]
+    except Exception as err:
+        return f"Cannot gate '{stem}': baseline benchmark failed ({err})."
+
+    apply_msg = tools._update_prompt(stem, new_prompt, reason)  # backs up old
+    if apply_msg.startswith("Error"):
+        return apply_msg
+
+    try:
+        after = evals.run(settings, only=bench_ids)["avg"]
+    except Exception as err:
+        restored = tools._restore_prompt(stem)
+        return f"Reverted '{stem}': after-benchmark failed ({err}). {restored}"
+
+    if after >= before:                 # non-regression: keep the upgrade
+        memory.save("evals", f"prompt gate: {stem}",
+                    f"Kept prompt change [{before}→{after}] — {reason}")
+        return f"Prompt '{stem}' gated & kept [{before}→{after}] — {reason}"
+    restored = tools._restore_prompt(stem)   # regression: roll back
+    memory.save("corrections", f"Prompt change reverted: {stem}",
+                f"Benchmark regressed [{before}→{after}]; rolled back. "
+                f"Reason given was: {reason}")
+    return f"Prompt '{stem}' reverted — benchmark regressed [{before}→{after}]. {restored}"
 
 
 def evolution_audit(settings: config.Settings | None = None) -> str:

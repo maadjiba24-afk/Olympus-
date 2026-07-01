@@ -51,6 +51,23 @@ tampered content, and produce a "valid" signature. So:
    # ✓ verified: ... signature is from the trusted key.
    ```
 
+### Decision logs use a separate pin
+
+The **release manifest** pin above (`OLYMPUS_PINNED_PUBKEY` / `witness_pubkey.txt`)
+is the CI production key. **Decision logs** are signed at runtime by each running
+instance's own key (the default dev seed unless you set `OLYMPUS_SIGNING_SEED`),
+which is a different trust domain — so `verify_run`/`verify_log` do NOT pin them
+against the release key (that would reject every default-seed log on a normal
+install). By default an instance verifies its own logs. A third-party auditor who
+holds the expected signer's public key out-of-band can bind verification to it:
+
+```bash
+export OLYMPUS_LOG_PIN="$(olympus pubkey)"   # or pass verify_run(..., pin=<hex>)
+```
+
+With a log pin set, a decision log re-signed under any other seed is rejected,
+even if its own signature is self-consistent.
+
 ## Generating a strong seed
 
 The seed must be high-entropy and stable. Generate one and store it as a secret

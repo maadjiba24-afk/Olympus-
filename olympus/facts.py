@@ -88,4 +88,5 @@ def count() -> int:
     path = _path()
     if not path.exists():
         return 0
-    return sum(1 for _ in path.open(encoding="utf-8"))
+    with path.open(encoding="utf-8") as f:   # explicit close — no leaked handle
+        return sum(1 for _ in f)

@@ -2,7 +2,7 @@
 
 Metis's daily cycle makes the whole council better for *everyone*. This is its
 personal counterpart: the more a given person uses Olympus, the more it adapts
-**to them**. Every few conversations it distills that user's own history —
+**to them**. Every few exchanges it distills that user's own history —
 preferences, recurring goals, domain, communication style, and the corrections
 they've made — into a compact, evolving *working model* that is injected into
 every answer for that user (and nobody else: it is per-user and private). A
@@ -22,7 +22,8 @@ import time
 
 from . import config, memory, usermem
 
-# Re-distill the working model every N finished conversations (per user).
+# Re-distill the working model every N exchanges (per user). An "exchange" is
+# one user↔Olympus turn — note_interaction() is called once per completed turn.
 EVOLVE_EVERY = int(os.environ.get("OLYMPUS_EVOLVE_EVERY", "6"))
 MODEL_MAX_CHARS = 1400        # keep the injected brief small
 
@@ -57,7 +58,8 @@ def save(user: str, state: dict) -> None:
 
 
 def note_interaction(user: str, now: float | None = None) -> int:
-    """Count one finished conversation for this user; return the new total."""
+    """Count one exchange (a completed user↔Olympus turn) for this user; return
+    the new total."""
     state = load(user)
     state["interactions"] = int(state.get("interactions", 0)) + 1
     save(user, state)
@@ -157,7 +159,7 @@ def summary(user: str) -> str:
     count = int(state.get("interactions", 0))
     name, desc = growth_level(count)
     lines = [f"Relationship: {name} — {desc}",
-             f"  conversations: {count}",
+             f"  exchanges: {count}",
              f"  model updates: {state.get('evolutions', 0)}"]
     model = (state.get("model") or "").strip()
     if model:
@@ -166,5 +168,5 @@ def summary(user: str) -> str:
     else:
         nxt = EVOLVE_EVERY - (count % EVOLVE_EVERY) if EVOLVE_EVERY else 0
         lines.append(f"\n(Keep chatting — Olympus adapts to you every "
-                     f"{EVOLVE_EVERY} conversations; next update in ~{nxt}.)")
+                     f"{EVOLVE_EVERY} exchanges; next update in ~{nxt}.)")
     return "\n".join(lines)

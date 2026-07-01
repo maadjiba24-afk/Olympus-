@@ -47,7 +47,24 @@ def test_summarizes_cycles_and_recent_memory(monkeypatch):
     assert "verify before claiming" in out     # recent lesson title surfaced
 
 
+def test_disabled_cycle_shows_disabled_not_not_yet(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(config, "TRAIN_EVERY", 0)     # training turned off
+    monkeypatch.setattr(memory, "load_state", lambda: {"opportunity_scan": now})
+    out = digest.learned_recently(now=now)
+    assert "Specialist training: disabled" in out
+    assert "Specialist training: last ran not yet" not in out
+
+
 # --- surfaces: CLI command, TUI command, agent tool ----------------------
+
+def test_recent_titles_preserve_leading_hash():
+    # Regression: lstrip("# ") mangled titles like "#1 priority" -> "1 priority".
+    memory.save("reports", "#1 priority: ship it", "body")
+    memory.save("reports", "Normal Title", "body")
+    titles = memory.recent_titles("reports", 5)
+    assert "#1 priority: ship it" in titles and "Normal Title" in titles
+
 
 def test_learned_is_a_cli_command():
     assert "learned" in cli.command_names()

@@ -119,12 +119,17 @@ def test_gate_isolates_each_skill_no_riding_along(monkeypatch):
     skills.create("Harmful", "x", "y", specialist="peitho", provisional=True)
 
     def scorer(settings, only=None):
+        # Model each skill's marginal effect INDEPENDENTLY so the gate's verdict
+        # doesn't depend on the (filesystem-glob) order skills are processed in:
+        # Helpful genuinely raises the score, Harmful genuinely lowers it, and
+        # neither's contribution hinges on the other being present. This keeps a
+        # helpful skill promotable even after the harmful one is already reverted
+        # (a coupled scorer made Helpful's marginal effect a tie in that order,
+        # which the strict-improvement rule then reverts).
         idx = skills.index()
-        if "Harmful" not in idx:    # removing Harmful scores BETTER -> revert it
-            return {"avg": 8.0, "items": []}
-        if "Helpful" not in idx:    # removing Helpful scores WORSE -> keep it
-            return {"avg": 6.0, "items": []}
-        return {"avg": 7.0, "items": []}   # both visible
+        score = 6.0 + (1.0 if "Helpful" in idx else 0.0) \
+                    - (1.0 if "Harmful" in idx else 0.0)
+        return {"avg": score, "items": []}
 
     monkeypatch.setattr(evals, "run", scorer)
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["x"])

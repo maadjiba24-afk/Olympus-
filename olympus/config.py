@@ -317,9 +317,24 @@ MAX_AGENT_ITERATIONS = 16
 # the contents of OLDER tool_result blocks are shrunk in place (recent ones kept
 # verbatim) so a tool-heavy run doesn't drown in its own scrollback. Set to
 # "elide" / "1" (deterministic) or "summarize" (LLM summary of old results).
-INRUN_COMPACT = os.environ.get("OLYMPUS_INRUN_COMPACT", "").strip().lower()
-INRUN_COMPACT_BUDGET = int(os.environ.get("OLYMPUS_INRUN_BUDGET", "24000"))
-INRUN_KEEP_RECENT = int(os.environ.get("OLYMPUS_INRUN_KEEP_RECENT", "2"))
+# Read live (like contracts_enabled/egress_guard_enabled) so replay_run can
+# restore the recorded setting via the env var and get deterministic replay.
+def inrun_compact() -> str:
+    return os.environ.get("OLYMPUS_INRUN_COMPACT", "").strip().lower()
+
+
+def inrun_budget() -> int:
+    try:
+        return int(os.environ.get("OLYMPUS_INRUN_BUDGET", "24000"))
+    except ValueError:
+        return 24000
+
+
+def inrun_keep_recent() -> int:
+    try:
+        return int(os.environ.get("OLYMPUS_INRUN_KEEP_RECENT", "2"))
+    except ValueError:
+        return 2
 
 # Process-wide cap on concurrent model calls (backpressure vs rate limits).
 MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))

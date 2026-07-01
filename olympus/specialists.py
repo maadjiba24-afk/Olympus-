@@ -216,9 +216,17 @@ SPECIALISTS: dict[str, Specialist] = {
                         "finds what is missing, upgrades agent prompts (measured "
                         "by benchmark, with rollback), and files upgrade "
                         "proposals so the product keeps improving.",
-            web=True, system=True,
+            # Deliberately NOT web=True. Prometheus holds self-modifying action
+            # tools (update_prompt, restore_prompt, propose_upgrade, ...) and is
+            # system=True, so capability separation does not strip them. Letting
+            # it also ingest live open-web content would let an injected page
+            # steer a self-modification. Its "scan outward" is instead sourced
+            # from Argus's already-processed world-scan reports in memory
+            # (trusted, enveloped upstream) — see prompts/prometheus.md.
+            system=True,
             extra_tools=("list_source_files", "read_source_file",
-                         "update_prompt", "restore_prompt", "run_benchmark",
+                         "update_prompt", "gate_prompt", "restore_prompt",
+                         "run_benchmark",
                          "run_code_benchmark", "propose_upgrade",
                          "create_skill", "gate_skills", "generate_benchmark",
                          "query_codegraph", "codegraph_neighbors",

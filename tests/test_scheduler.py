@@ -29,6 +29,20 @@ def test_add_replaces_by_name():
     assert len(js) == 1 and js[0].prompt == "b" and js[0].interval == 86400
 
 
+def test_summary_renders_coarse_intervals():
+    # weekly/daily must read as days, not 168h/24h; sub-minute keeps seconds.
+    assert scheduler._human_interval(7 * 86400) == "7d"
+    assert scheduler._human_interval(86400) == "1d"
+    assert scheduler._human_interval(2 * 86400) == "2d"
+    assert scheduler._human_interval(6 * 3600) == "6h"
+    assert scheduler._human_interval(1800) == "30m"
+    assert scheduler._human_interval(45) == "45s"
+
+    scheduler.add("weekly-report", "weekly", "summarize the week", now=0.0)
+    out = scheduler.summary()
+    assert "every 7d" in out and "168h" not in out
+
+
 def test_due_and_next_due_in():
     scheduler.add("j", "hourly", "x", now=0.0)
     assert scheduler.due(now=10.0) == []                    # not yet

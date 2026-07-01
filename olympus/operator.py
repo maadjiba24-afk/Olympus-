@@ -127,10 +127,15 @@ def remember_credentials(user: str, domain: str, username: str,
 # --- risk → spine ActionType ---------------------------------------------
 
 def type_for_risk(risk: str) -> str:
-    """Reversible/notable templates use the auto-eligible type; everything more
-    serious uses the irreversible type that always requires approval."""
-    return ("browser_operate" if (risk or "").lower() == "notable"
-            else "browser_operate_irreversible")
+    """Map a template's risk to its spine ActionType. Notable can auto-run within
+    scope; irreversible always needs approval; financial_legal maps to the
+    tightest tier (pay/sign/delete — cap 10), not the looser irreversible one."""
+    r = (risk or "").lower()
+    if r == "notable":
+        return "browser_operate"
+    if r == "financial_legal":
+        return "browser_operate_financial"
+    return "browser_operate_irreversible"
 
 
 def _gate(user: str, domain: str) -> str | None:
@@ -202,6 +207,11 @@ def register_operator_actions() -> None:
         scope=OPERATE_SCOPE, preview=preview, execute=execute,
         description="Run an irreversible operator template; always requires "
                     "explicit approval."))
+    actions.register(actions.ActionType(
+        name="browser_operate_financial", risk_class=actions.FINANCIAL_LEGAL,
+        scope=OPERATE_SCOPE, preview=preview, execute=execute,
+        description="Run a financial/legal operator template (pay/sign/delete): "
+                    "always explicit approval, tightest daily cap."))
 
 
 def run(user: str, domain: str, template: str, params: dict) -> actions.Action:

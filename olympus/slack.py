@@ -24,11 +24,12 @@ import json
 import os
 import time
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import gateway
 
 _BOTS: dict = {}
+_DISPATCH = gateway.Dispatcher()
 
 
 def _post(method: str, payload: dict) -> dict:
@@ -74,25 +75,33 @@ def verify_signature(secret: str, timestamp: str, body: bytes,
 
 
 def handle_event(payload: dict) -> dict:
-    """Return the JSON body Slack expects. For the url_verification handshake
-    returns {challenge}; for a user message runs the pipeline and posts the
-    reply, returning {ok: True}."""
+    """The *fast* synchronous body Slack expects. For the url_verification
+    handshake returns {challenge}; for everything else returns {ok: True}
+    immediately WITHOUT running the (slow) pipeline — that happens in the
+    background via `process_event`, so Slack's ~3s deadline is always met and it
+    never retries into a duplicate reply."""
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
+    return {"ok": True}
+
+
+def process_event(payload: dict, bots: dict | None = None) -> None:
+    """Run the pipeline for a Slack message event and post the reply. Called on
+    a background worker after the webhook has already acked. Ignores the bot's
+    own messages and non-message events to avoid reply loops."""
+    bots = _BOTS if bots is None else bots
     event = payload.get("event") or {}
-    # Ignore bot's own messages / non-message events to avoid loops.
     if event.get("type") not in ("message", "app_mention") or event.get("bot_id"):
-        return {"ok": True}
+        return
     text = event.get("text", "")
     channel = event.get("channel", "")
     user_key = event.get("user", "anon")
-    reply = "\n".join(gateway.reply_for(_BOTS, user_key, text, prefix="sl"))
+    reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="sl"))
     if channel:
         try:
             send(channel, reply)
         except Exception:
             pass
-    return {"ok": True}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -109,20 +118,29 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            resp = handle_event(json.loads(body))
-        except Exception:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             return
+        # Ack fast (handshake or {ok:true}), then run the pipeline off-thread.
+        resp = handle_event(payload)
         data = json.dumps(resp).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(data)
 
+        if payload.get("type") == "event_callback":
+            # Slack retries carry the same event_id — drop the duplicate.
+            if _DISPATCH.seen(payload.get("event_id")):
+                return
+            user_key = (payload.get("event") or {}).get("user", "anon")
+            _DISPATCH.submit(user_key, lambda p=payload: process_event(p))
+
 
 def run_server(host: str = "0.0.0.0", port: int = 8487) -> None:
     if not os.environ.get("SLACK_SIGNING_SECRET"):
         raise SystemExit("Set SLACK_SIGNING_SECRET (from your Slack app config).")
     print(f"⚡ Olympus Slack events endpoint on {host}:{port}")
-    HTTPServer((host, port), _Handler).serve_forever()
+    ThreadingHTTPServer((host, port), _Handler).serve_forever()

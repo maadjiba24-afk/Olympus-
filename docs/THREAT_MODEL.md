@@ -63,10 +63,10 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_calendar` | Read calendar events | ingests untrusted | Read-only; wrapped | Event-text injection — wrapped |
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
-| `browse_page` | Fetch a page as text + extract links | ingests untrusted | Output treated as untrusted; wrapped | SSRF / injected page content — `should_wrap` wraps it |
+| `browse_page` | Fetch a page as text + extract links | ingests untrusted | SSRF/egress gate on the URL and every redirect (`_http_get`); output wrapped | SSRF (incl. redirect-to-internal) — refused by `url_block_reason`; injected content — wrapped |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
-| `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any run that ingests untrusted content (capability separation) | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run |
+| `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any ingesting run (capability separation) AND gated: operator must be enabled and the current page's domain authorized | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run and refused on an unauthorized domain |
 | `browser_skill_record` | Save a browser skill with provenance + score | first-party write | Steps sanitized at write; provenance + content hash recorded | Skill poisoning via injection-shaped steps — `sanitize_for_memory` |
 | `browser_skills` | List browser skills ranked by reliability | first-party read | Read-only; own recorded skills | None significant — own content, scored not trusted blindly |
 | `browser_exists` | Probe whether a CSS selector is present | structured predicate | Returns a bool, never page prose | Not an ingestion vector — no page text crosses into instructions |
@@ -94,7 +94,8 @@ longer exists. So the surface and its threat model can't drift apart.
 | `create_skill` | Add a provisional skill | self-modifying | **Provisional** until benchmark-gated; sanitized | Malicious/weak skill — gated and reverted if it doesn't help |
 | `gate_skills` | Benchmark-gate provisional skills | self-modifying | Internal evaluation | Promoting a weak skill — only measured wins survive |
 | `generate_benchmark` | Generate a specialist benchmark | first-party write | Internal | Weak benchmark — bounded by the gate it feeds |
-| `update_prompt` | Edit an agent prompt | self-modifying | Auto-backup + benchmark-gated + rollback | Prompt sabotage — reverted automatically if it regresses |
+| `update_prompt` | Edit an agent prompt (raw) | self-modifying | Auto-backup of the prior version; caller must measure (see `gate_prompt`) | Prompt sabotage — recoverable via the backup; measure/rollback is the caller's duty |
+| `gate_prompt` | Benchmark-gated prompt upgrade | self-modifying | Before/after benchmark; applied only on non-regression, else auto-rolled-back | Prompt sabotage — a regressing change is reverted automatically by code |
 | `restore_prompt` | Restore a backed-up prompt | self-modifying | Reverts to a prior backup | Reverting to a weaker prompt — bounded to saved versions |
 | `propose_upgrade` | File an upgrade proposal | first-party write | Proposal only | Proposal spam — bounded, human-reviewed |
 | `run_benchmark` | Run the quality benchmark | first-party (cost) | Internal; budget-guarded | Token/cost burn — daily budget guard |

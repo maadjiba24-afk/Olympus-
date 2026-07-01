@@ -59,8 +59,10 @@ def _save(ns: str, user: str, data: list) -> None:
 
 # --- nodes & edges -------------------------------------------------------
 
-def add_node(user: str, label: str, kind: str = OTHER) -> dict:
-    """Add an entity, or return the existing one (matched case-insensitively)."""
+def add_node(user: str, label: str, kind: str = OTHER) -> dict | None:
+    """Add an entity, or return the existing one (matched case-insensitively).
+    Returns None if the graph is at its node cap and the label is new — the
+    caller must NOT treat that as a real node (see add_edge)."""
     label = _clean_label(label)
     if not label:
         raise ValueError("a node needs a label")
@@ -72,8 +74,11 @@ def add_node(user: str, label: str, kind: str = OTHER) -> dict:
                     n["kind"] = kind          # upgrade an unknown kind
                     _save(_NODES, user, nodes)
                 return dict(n)
-        if len(nodes) >= _MAX_NODES:          # bounded: refuse new beyond cap
-            return dict(nodes[0])             # (existing graph is preserved)
+        if len(nodes) >= _MAX_NODES:
+            # At cap: refuse the new entity rather than aliasing it to nodes[0].
+            # Returning an arbitrary existing node here would fabricate false
+            # edges to it in add_edge; the existing graph is preserved instead.
+            return None
         node = {"id": uuid.uuid4().hex[:12], "label": label, "kind": kind}
         nodes.append(node)
         _save(_NODES, user, nodes)
@@ -90,6 +95,8 @@ def add_edge(user: str, src_label: str, rel: str, dst_label: str,
         return None
     src = add_node(user, src_label, src_kind)
     dst = add_node(user, dst_label, dst_kind)
+    if src is None or dst is None:      # graph at cap — don't invent an edge
+        return None
     if src["id"] == dst["id"]:
         return None
     with _LOCK:

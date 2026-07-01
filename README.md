@@ -11,7 +11,7 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->59<!--/cap--> agent tools, and <!--cap:commands-->67<!--/cap-->
+<!--cap:tools-->60<!--/cap--> agent tools, and <!--cap:commands-->67<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -141,7 +141,7 @@ from that registry):
 | **Argus** | Opportunity Scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
 | **Mnemosyne** | YouTube Learner — watches videos via transcript, summarizes what it understood, stores lessons |
 | **Metis** | Learning Synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
-| **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
+| **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts (`gate_prompt`: **applied only if a before/after benchmark shows no regression, else auto-rolled-back**), files improvement proposals |
 | **Hermes** | Operator — acts on your behalf on **explicitly authorized** sites: logs in with vaulted credentials and operates declarative site profiles. Never browses the open web; credentialed actions are scope/approval-gated and off by default (`OLYMPUS_OPERATOR`). See [docs/DESIGN_OPERATOR.md](docs/DESIGN_OPERATOR.md) |
 
 ### Self-* properties
@@ -154,11 +154,14 @@ from that registry):
 - **Self-improving** — three feedback loops:
   1. Aletheia records every correction as a lesson in persistent memory.
   2. Specialists recall lessons before answering (`recall_memory`).
-  3. Prometheus reads recurring corrections + Olympus's own source, rewrites
-     agent prompts (`update_prompt`, with automatic backups), and files
+  3. Prometheus reads recurring corrections + Olympus's own source and rewrites
+     agent prompts. For benchmarked specialists it uses `gate_prompt`, which
+     applies a rewrite only if a before/after benchmark shows no regression and
+     rolls it back automatically otherwise (raw `update_prompt` — auto-backup,
+     measure-by-hand — remains for un-benchmarked agents), and files
      `propose_upgrade` notes for changes that need code.
 - **Evolves with you** — beyond the shared loops above, Olympus adapts to *each
-  person*: every few conversations it distills your own history (facts, 👍/👎,
+  person*: every few exchanges it distills your own history (facts, 👍/👎,
   corrections) into a private, evolving **working model** that tailors every
   answer to you, with a growth level that deepens the more you use it
   (`olympus growth`). It's per-user and never leaks across people.
@@ -580,8 +583,10 @@ Hephaestus isn't graded on whether his code *looks* right — his code is **run
 against real tests** and scored on whether it actually passes. `python -m
 olympus code-eval` has him solve real tasks (merge intervals, an LRU cache, a
 bug fix, debounce, deep flatten, Go word-count, …); each solution is extracted,
-executed in an isolated sandbox with a timeout, and scored pass/fail. Languages
-whose runtime isn't installed are skipped, not failed.
+executed in an isolated temp directory with a wall-clock timeout, and scored
+pass/fail. (This runs Olympus's *own* generated code in a dev/eval context, never
+user input; for OS-level isolation of untrusted code use the docker exec
+backend.) Languages whose runtime isn't installed are skipped, not failed.
 
 This objective signal feeds the self-improvement loop: Prometheus runs
 `run_code_benchmark` before and after changing Hephaestus's prompt or coding
@@ -801,6 +806,49 @@ Optional: `WHATSAPP_ALLOWED_NUMBERS=15551234567,...` restricts who may talk to
 it; `WHATSAPP_APP_SECRET=...` makes Olympus verify Meta's payload signatures.
 Each sender gets a private memory namespace, and the same `/scan`, `/audit`,
 `/watch`, `/good`, `/lang`, `/contribute` commands as Telegram work.
+
+### Discord, Slack, and Signal
+
+The same council answers on Discord, Slack, and Signal — all zero-dependency
+(raw HTTP over `urllib`, stdlib request-signing), all sharing one command set
+(`/scan`, `/audit`, `/watch`, `/good`, `/lang`, `/contribute`, `/growth`) and a
+private per-user memory namespace.
+
+- **Discord** — create an app, copy its **public key**, and point the
+  *Interactions Endpoint URL* at `https://your-host/`.
+  ```bash
+  export DISCORD_PUBLIC_KEY=...            # verifies inbound (Ed25519)
+  export DISCORD_WEBHOOK_URL=...           # optional: heartbeat push to a channel
+  python -m olympus discord               # interactions endpoint on :8486
+  ```
+  Discord gives an interaction only ~3 seconds to answer, far less than a full
+  council turn takes, so Olympus **acks immediately with a deferred response**
+  and then edits in the real reply through the interaction follow-up webhook.
+
+- **Slack** — create an app with the Events API, copy its **signing secret**,
+  and set the *Request URL* to `https://your-host/`.
+  ```bash
+  export SLACK_BOT_TOKEN=xoxb-...
+  export SLACK_SIGNING_SECRET=...          # verifies inbound (HMAC-SHA256)
+  export SLACK_NOTIFY_CHANNEL=C0123        # optional: heartbeat push
+  python -m olympus slack                 # events endpoint on :8487
+  ```
+  Slack retries any event it doesn't hear back on within ~3 seconds, so Olympus
+  **acks the webhook instantly** and runs the pipeline on a background worker;
+  Slack's `event_id` is de-duplicated so a retry never produces a second reply.
+
+- **Signal** — talk to a `signal-cli` daemon (no cloud account).
+  ```bash
+  export SIGNAL_NUMBER=+15551234567             # your registered Signal number
+  export SIGNAL_CLI_REST_URL=http://localhost:8080   # signal-cli-rest-api endpoint
+  python -m olympus signal
+  ```
+
+All three webhook servers are multi-threaded (`ThreadingHTTPServer`) and, like
+WhatsApp and Telegram, use one serial worker per user — ordered within a
+conversation, concurrent across users — so one slow answer never blocks anyone
+else. Put the Discord/Slack endpoints behind HTTPS (both platforms require a
+public `https://` URL), the same reverse-proxy note as the web UI.
 
 ### Remembering you — the profile card
 
