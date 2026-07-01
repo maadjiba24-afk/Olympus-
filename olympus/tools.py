@@ -7,6 +7,7 @@ no MCP servers, no extra plumbing. Client-side tools below run locally.
 from __future__ import annotations
 
 import datetime
+import json
 from pathlib import Path
 from typing import Any, Callable
 
