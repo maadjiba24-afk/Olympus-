@@ -15,6 +15,10 @@ from . import config, gateway, memory, orchestrator, scheduler
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
+    # A non-positive cadence means the cycle is OFF, not "run every tick" — with
+    # interval <= 0 the `>=` test would be true on every heartbeat.
+    if interval <= 0:
+        return False
     return now - state.get(key, 0.0) >= interval
 
 
