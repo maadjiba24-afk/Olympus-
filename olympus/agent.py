@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import config, llm, replaystore, security, tools
+from . import config, llm, replaystore, security, tools, transcript
 
 
 def _assistant_turn(response) -> dict[str, Any]:
@@ -94,6 +94,10 @@ def run_agent_counted(
                    if block.type == "tool_use"]
         tool_calls += len(results)
         messages.append({"role": "user", "content": results})
+        # Optional in-run compaction: shrink OLD tool-result contents so a
+        # tool-heavy run stays bounded. No-op unless OLYMPUS_INRUN_COMPACT is on;
+        # pure w.r.t. the frozen message stream, so replay stays byte-identical.
+        messages = transcript.maybe_compact(messages, settings=settings)
 
     return (
         "[Agent stopped: tool-use iteration limit reached. Partial work above "

@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Optional in-run tool-transcript compaction (`olympus/transcript.py`)
+
+- Closes the last context boundary: the chat layer already compacts old
+  *conversation* turns; this compacts within a **single agent run** so a
+  tool-heavy loop (many/large `web_fetch`/`read_file`/codegraph results) doesn't
+  drown in its own scrollback. When the run's messages exceed a budget, the
+  **contents of older `tool_result` blocks are shrunk in place** while the most
+  recent ones stay verbatim. **Off by default** (`OLYMPUS_INRUN_COMPACT`;
+  `elide`/`1` = deterministic, `summarize` = LLM summary of old results;
+  `OLYMPUS_INRUN_BUDGET`, `OLYMPUS_INRUN_KEEP_RECENT`).
+- **Replay-safe by construction:** it never removes/reorders messages and never
+  separates a `tool_use` from its `tool_result` (only the content string of old
+  tool_results changes), so pairing/alternation invariants hold; and it is a
+  pure function of the message stream, which is identical under replay (tool
+  results are frozen) — so downstream request hashes match and replay stays
+  byte-identical. The optional summarizer routes through the already-frozen
+  `backend.complete_text`, so "summarize" mode replays deterministically too.
+  Documented requirement: replay a recorded run with the same
+  `OLYMPUS_INRUN_COMPACT` setting it was recorded with (moot at the default).
+- Not needed today (the 16-iteration cap already bounds a run); this is for when
+  you raise `MAX_AGENT_ITERATIONS` for deep autonomous single-runs. Covered by
+  `tests/test_transcript.py`. No capability-count change.
+
 ### Changed — Strengthen the 13 specialists (three levers)
 
 1. **Sharper prompts.** The seven thinnest specialist prompts (plutus, peitho,
