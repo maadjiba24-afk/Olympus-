@@ -15,6 +15,8 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-07-01
+
 ### Added — Optional in-run tool-transcript compaction (`olympus/transcript.py`)
 
 - Closes the last context boundary: the chat layer already compacts old
@@ -567,7 +569,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
