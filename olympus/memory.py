@@ -507,6 +507,16 @@ def import_memory(archive, *, overwrite: bool = True) -> dict:
             if entry.get("sha256") and _sha256(data) == entry["sha256"]:
                 verified += 1
             dest = config.MEMORY_DIR / rel
+            # Importing an archive is a trust boundary (the data-sovereignty
+            # contract supports archives produced elsewhere), and entry["path"]
+            # is attacker-controlled — reject any path that escapes MEMORY_DIR so
+            # a crafted `../../` or absolute entry can't overwrite files outside.
+            try:
+                dest_r, mem_r = dest.resolve(), config.MEMORY_DIR.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if dest_r != mem_r and mem_r not in dest_r.parents:
+                continue
             if dest.exists() and not overwrite:
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
