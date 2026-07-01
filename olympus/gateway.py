@@ -12,6 +12,10 @@ instances (private memory + persisted history per user).
 
 from __future__ import annotations
 
+import queue
+import threading
+import traceback
+
 from . import memory, orchestrator
 
 CHUNK = 3500
@@ -82,3 +86,61 @@ def reply_for(bots: dict, user_key: str, text: str,
         return chunk(companion.summary(uid))
 
     return chunk(bot.ask(text))
+
+
+# --- background dispatch for webhook gateways -----------------------------
+#
+# Webhook platforms (Slack, Discord) require a fast acknowledgement — Slack
+# retries an event if the endpoint doesn't answer within ~3s; Discord marks an
+# interaction failed on the same window. The Olympus pipeline is far slower than
+# that, so the HTTP handler must ack immediately and run the pipeline in the
+# background. This shared dispatcher gives every webhook gateway the same
+# proven shape the WhatsApp gateway uses: one serial worker per user (ordered
+# within a conversation, concurrent across users) plus event de-duplication so a
+# platform retry is dropped instead of answered twice.
+
+
+class _Worker(threading.Thread):
+    def __init__(self) -> None:
+        super().__init__(daemon=True)
+        self.q: queue.Queue = queue.Queue()
+
+    def run(self) -> None:
+        while True:
+            fn = self.q.get()
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+
+
+class Dispatcher:
+    """Per-key serial background workers + event de-dup for webhook gateways."""
+
+    def __init__(self, max_seen: int = 2000) -> None:
+        self._workers: dict[str, _Worker] = {}
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+        self._max_seen = max_seen
+
+    def seen(self, event_id: str | None) -> bool:
+        """Record `event_id` and report whether it was already seen (a retry).
+        Empty/None ids are never treated as duplicates (nothing to key on)."""
+        if not event_id:
+            return False
+        with self._lock:
+            if event_id in self._seen:
+                return True
+            if len(self._seen) > self._max_seen:
+                self._seen.clear()
+            self._seen.add(event_id)
+            return False
+
+    def submit(self, key: str, fn) -> None:
+        """Run `fn()` on the background worker serial to `key`."""
+        with self._lock:
+            worker = self._workers.get(key)
+            if worker is None:
+                worker = self._workers[key] = _Worker()
+                worker.start()
+        worker.q.put(fn)

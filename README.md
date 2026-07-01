@@ -802,6 +802,49 @@ it; `WHATSAPP_APP_SECRET=...` makes Olympus verify Meta's payload signatures.
 Each sender gets a private memory namespace, and the same `/scan`, `/audit`,
 `/watch`, `/good`, `/lang`, `/contribute` commands as Telegram work.
 
+### Discord, Slack, and Signal
+
+The same council answers on Discord, Slack, and Signal — all zero-dependency
+(raw HTTP over `urllib`, stdlib request-signing), all sharing one command set
+(`/scan`, `/audit`, `/watch`, `/good`, `/lang`, `/contribute`, `/growth`) and a
+private per-user memory namespace.
+
+- **Discord** — create an app, copy its **public key**, and point the
+  *Interactions Endpoint URL* at `https://your-host/`.
+  ```bash
+  export DISCORD_PUBLIC_KEY=...            # verifies inbound (Ed25519)
+  export DISCORD_WEBHOOK_URL=...           # optional: heartbeat push to a channel
+  python -m olympus discord               # interactions endpoint on :8486
+  ```
+  Discord gives an interaction only ~3 seconds to answer, far less than a full
+  council turn takes, so Olympus **acks immediately with a deferred response**
+  and then edits in the real reply through the interaction follow-up webhook.
+
+- **Slack** — create an app with the Events API, copy its **signing secret**,
+  and set the *Request URL* to `https://your-host/`.
+  ```bash
+  export SLACK_BOT_TOKEN=xoxb-...
+  export SLACK_SIGNING_SECRET=...          # verifies inbound (HMAC-SHA256)
+  export SLACK_NOTIFY_CHANNEL=C0123        # optional: heartbeat push
+  python -m olympus slack                 # events endpoint on :8487
+  ```
+  Slack retries any event it doesn't hear back on within ~3 seconds, so Olympus
+  **acks the webhook instantly** and runs the pipeline on a background worker;
+  Slack's `event_id` is de-duplicated so a retry never produces a second reply.
+
+- **Signal** — talk to a `signal-cli` daemon (no cloud account).
+  ```bash
+  export SIGNAL_NUMBER=+15551234567             # your registered Signal number
+  export SIGNAL_CLI_REST_URL=http://localhost:8080   # signal-cli-rest-api endpoint
+  python -m olympus signal
+  ```
+
+All three webhook servers are multi-threaded (`ThreadingHTTPServer`) and, like
+WhatsApp and Telegram, use one serial worker per user — ordered within a
+conversation, concurrent across users — so one slow answer never blocks anyone
+else. Put the Discord/Slack endpoints behind HTTPS (both platforms require a
+public `https://` URL), the same reverse-proxy note as the web UI.
+
 ### Remembering you — the profile card
 
 Olympus keeps a small, editable **profile card** — who you are and how you like

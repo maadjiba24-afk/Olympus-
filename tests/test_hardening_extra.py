@@ -62,16 +62,19 @@ def test_slack_handles_app_mention(monkeypatch):
     monkeypatch.setattr(slack, "send", lambda ch, txt: sent.append((ch, txt)))
     monkeypatch.setattr(gateway, "reply_for",
                         lambda bots, uk, text, prefix="": ["mention reply"])
-    resp = slack.handle_event({"event": {"type": "app_mention", "text": "<@U> hi",
-                                         "channel": "C9", "user": "U2"}})
-    assert resp == {"ok": True} and sent == [("C9", "mention reply")]
+    # app_mention is routed by the background processor (the webhook only acks).
+    slack.process_event({"event": {"type": "app_mention", "text": "<@U> hi",
+                                    "channel": "C9", "user": "U2"}})
+    assert sent == [("C9", "mention reply")]
 
 
 def test_discord_non_ask_command_maps_to_slash(monkeypatch):
     captured = {}
     monkeypatch.setattr(gateway, "reply_for",
                         lambda bots, uk, text, prefix="": captured.setdefault("t", text) or ["ok"])
-    payload = {"type": 2, "member": {"user": {"id": "7"}},
+    monkeypatch.setattr(discord, "_followup", lambda *a: None)
+    payload = {"type": 2, "id": "i", "application_id": "a", "token": "t",
+               "member": {"user": {"id": "7"}},
                "data": {"name": "scan", "options": []}}
-    discord.handle_interaction(payload)
+    discord.process_command(payload)
     assert captured["t"] == "/scan"

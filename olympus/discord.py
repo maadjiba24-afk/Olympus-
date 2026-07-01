@@ -5,9 +5,11 @@ Two integration points, both standard Discord:
   * notify()  — push a message to a channel via an Incoming Webhook URL
                 (DISCORD_WEBHOOK_URL). Used by the heartbeat/scheduler.
   * Interactions endpoint — Discord POSTs slash-command interactions to your
-                public URL. `handle_interaction(payload)` returns the JSON
-                response; PING (type 1) is answered with PONG (type 1), and a
-                slash command (type 2) runs through the Olympus pipeline.
+                public URL. PING (type 1) is answered synchronously with PONG;
+                a slash command (type 2) is acked with a DEFERRED response
+                (type 5) within Discord's 3s deadline, then the Olympus pipeline
+                runs in the background and `process_command` delivers the real
+                reply via the interaction follow-up webhook.
 
 Discord requires Ed25519 request-signature verification on the interactions
 endpoint; `verify_signature()` does it with the `cryptography` dependency
@@ -24,15 +26,21 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import gateway
 
 PING, PONG = 1, 1
 APPLICATION_COMMAND = 2
-CHANNEL_MESSAGE = 4
+# Interaction response type 5: "acknowledge, a reply will follow." Discord shows
+# a thinking state and gives us up to 15 minutes to PATCH in the real content —
+# the only way to run a pipeline slower than Discord's 3s interaction deadline.
+DEFERRED_CHANNEL_MESSAGE = 5
+
+API = "https://discord.com/api/v10"
 
 _BOTS: dict = {}
+_DISPATCH = gateway.Dispatcher()
 
 
 def notify(text: str) -> bool:
@@ -80,18 +88,55 @@ def _command_text(data: dict) -> str:
     return f"/{name} {arg}".strip()
 
 
-def handle_interaction(payload: dict) -> dict:
-    """Produce the JSON response for a Discord interaction payload."""
+def _user_key(payload: dict) -> str:
+    user = (((payload.get("member") or {}).get("user")) or
+            payload.get("user") or {})
+    return str(user.get("id", "anon"))
+
+
+def sync_response(payload: dict) -> dict:
+    """The *immediate* JSON response for an interaction. PING is answered with
+    PONG; a slash command is acked with a DEFERRED response so Discord's 3s
+    deadline is met, and the real content follows via `process_command`."""
     if payload.get("type") == PING:
         return {"type": PONG}
     if payload.get("type") == APPLICATION_COMMAND:
-        user = (((payload.get("member") or {}).get("user")) or
-                payload.get("user") or {})
-        user_key = str(user.get("id", "anon"))
-        text = _command_text(payload.get("data") or {})
-        reply = "\n".join(gateway.reply_for(_BOTS, user_key, text, prefix="dc"))
-        return {"type": CHANNEL_MESSAGE, "data": {"content": reply[:1990]}}
+        return {"type": DEFERRED_CHANNEL_MESSAGE}
     return {"type": PONG}
+
+
+def _followup(application_id: str, token: str, text: str) -> None:
+    """Deliver the real reply after a deferred ack. The first chunk edits the
+    deferred placeholder (@original); any further chunks are posted as follow-up
+    messages so a long reply isn't truncated at Discord's 2000-char limit."""
+    if not application_id or not token:
+        return
+    parts = gateway.chunk(text, 1900) or ["(empty reply)"]
+    for i, part in enumerate(parts):
+        if i == 0:
+            url = f"{API}/webhooks/{application_id}/{token}/messages/@original"
+            method = "PATCH"
+        else:
+            url = f"{API}/webhooks/{application_id}/{token}"
+            method = "POST"
+        req = urllib.request.Request(
+            url, data=json.dumps({"content": part}).encode(),
+            headers={"Content-Type": "application/json"}, method=method)
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+        except Exception:
+            break
+
+
+def process_command(payload: dict, bots: dict | None = None) -> None:
+    """Run the pipeline for a slash command and deliver the reply via the
+    interaction follow-up webhook. Runs on a background worker after the
+    deferred ack has already been sent."""
+    bots = _BOTS if bots is None else bots
+    text = _command_text(payload.get("data") or {})
+    reply = "\n".join(gateway.reply_for(bots, _user_key(payload), text,
+                                        prefix="dc"))
+    _followup(payload.get("application_id", ""), payload.get("token", ""), reply)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -108,20 +153,30 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            resp = handle_interaction(json.loads(body))
-        except Exception:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             return
+        # Ack immediately (PONG, or a DEFERRED for a command), then run the
+        # pipeline off-thread and deliver via the follow-up webhook.
+        resp = sync_response(payload)
         data = json.dumps(resp).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(data)
 
+        if payload.get("type") == APPLICATION_COMMAND:
+            # Discord retries an interaction with the same id — drop duplicates.
+            if _DISPATCH.seen(payload.get("id")):
+                return
+            _DISPATCH.submit(_user_key(payload),
+                             lambda p=payload: process_command(p))
+
 
 def run_server(host: str = "0.0.0.0", port: int = 8486) -> None:
     if not os.environ.get("DISCORD_PUBLIC_KEY"):
         raise SystemExit("Set DISCORD_PUBLIC_KEY (your Discord app's public key).")
     print(f"⚡ Olympus Discord interactions endpoint on {host}:{port}")
-    HTTPServer((host, port), _Handler).serve_forever()
+    ThreadingHTTPServer((host, port), _Handler).serve_forever()
