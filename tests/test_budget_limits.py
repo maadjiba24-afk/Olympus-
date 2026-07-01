@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from olympus import actions, builtin_actions, config, usage, prefs  # noqa: F401
+from olympus import actions, builtin_actions, config, memory, usage, prefs  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +25,26 @@ def _spend(amount):
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"__all__": {"cost": amount}}))
+
+
+def test_concurrent_record_keeps_ledger_consistent_and_atomic():
+    # Many concurrent record() calls must not lose an update or leave a torn
+    # ledger; today_spend() reads a single consistent total, and no temp file
+    # is left behind by the atomic write.
+    import threading
+    memory.set_user("concur")
+    n = 40
+    threads = [threading.Thread(target=usage.record,
+                                args=("claude-opus-4-8", 1000, 500))
+               for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    per_call = usage.estimate_cost("claude-opus-4-8", 1000, 500)
+    assert abs(usage.today_spend() - n * per_call) < 1e-6      # no lost updates
+    usage_dir = config.MEMORY_DIR / "usage"
+    assert not list(usage_dir.glob(".*tmp*"))                  # no torn temp file
 
 
 def test_no_budget_means_no_cap():

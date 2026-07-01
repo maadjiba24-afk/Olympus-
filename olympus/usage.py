@@ -14,6 +14,7 @@ spend reaches it — a seatbelt on their provider bill, not a charge from us.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -53,6 +54,15 @@ def estimate_cost(model: str, in_tokens: int, out_tokens: int) -> float:
     return (in_tokens * price_in + out_tokens * price_out) / 1_000_000
 
 
+def _atomic_write_json(path: Path, obj) -> None:
+    """Write JSON via a temp file + os.replace so a reader (or a crash) never
+    sees a torn ledger — a truncated ledger would silently reset the day's spend
+    to 0 and disable the budget guard."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def record(model: str, in_tokens: int, out_tokens: int) -> None:
     """Append usage to the per-day ledger, attributed to the active user."""
     cost = estimate_cost(model, in_tokens, out_tokens)
@@ -74,7 +84,7 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
             row["in"] += in_tokens
             row["out"] += out_tokens
             row["cost"] = round(row["cost"] + cost, 6)
-        path.write_text(json.dumps(ledger, indent=1), encoding="utf-8")
+        _atomic_write_json(path, ledger)
 
 
 # --- the budget guard (protects the user's own API bill) -----------------
@@ -85,10 +95,13 @@ def today_spend() -> float:
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     if not path.exists():
         return 0.0
-    try:
-        ledger = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return 0.0
+    # Read under the same lock as record() so the budget guard never races a
+    # write; the atomic write already prevents torn reads, this pairs with it.
+    with _TOTALS_LOCK:
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return 0.0
     return float(ledger.get("__all__", {}).get("cost", 0.0))
 
 
