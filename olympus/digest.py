@@ -11,15 +11,18 @@ from __future__ import annotations
 
 import time
 
-from . import memory, skills
+from . import config, memory, skills
 
-# (label, heartbeat_state_key) for each autonomous cycle, in reading order.
+# (label, heartbeat_state_key, config_toggle) for each autonomous cycle, in
+# reading order. `config_toggle` names a config attribute that must be truthy for
+# the cycle to run at all (None = always on); when it's off the digest says
+# "disabled" instead of a misleading "not yet".
 _CYCLES = [
-    ("World scan for opportunities (Argus)", "opportunity_scan"),
-    ("Learning from queued videos (Mnemosyne)", "watchlist"),
-    ("Daily skill distillation (Metis)", "daily_learning"),
-    ("Specialist training", "train"),
-    ("Self-audit & self-upgrade (Prometheus)", "evolution_audit"),
+    ("World scan for opportunities (Argus)", "opportunity_scan", None),
+    ("Learning from queued videos (Mnemosyne)", "watchlist", None),
+    ("Daily skill distillation (Metis)", "daily_learning", None),
+    ("Specialist training", "train", "TRAIN_EVERY"),
+    ("Self-audit & self-upgrade (Prometheus)", "evolution_audit", None),
 ]
 
 # (heading, memory category) sections to surface, newest titles only.
@@ -49,13 +52,19 @@ def learned_recently(now: float | None = None) -> str:
     state = memory.load_state()
     lines = ["What Olympus has been doing on its own:", ""]
 
-    if not any(state.get(key) for _, key in _CYCLES):
+    def _enabled(toggle) -> bool:
+        return toggle is None or bool(getattr(config, toggle, 0))
+
+    if not any(state.get(key) for _, key, _ in _CYCLES):
         lines.append("  The autonomous loop hasn't run yet. Run the `heartbeat` "
                      "service (on by default in the cloud deploy) and Olympus "
                      "keeps learning while you're away.")
     else:
-        for label, key in _CYCLES:
-            lines.append(f"  • {label}: last ran {_ago(state.get(key), now)}")
+        for label, key, toggle in _CYCLES:
+            if not _enabled(toggle):
+                lines.append(f"  • {label}: disabled")
+            else:
+                lines.append(f"  • {label}: last ran {_ago(state.get(key), now)}")
 
     try:
         n_skills = skills.count()
