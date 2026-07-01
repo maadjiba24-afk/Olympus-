@@ -15,6 +15,7 @@ from __future__ import annotations
 import queue
 import threading
 import traceback
+from collections import OrderedDict
 
 from . import memory, orchestrator
 
@@ -141,7 +142,10 @@ class Dispatcher:
 
     def __init__(self, max_seen: int = 2000) -> None:
         self._workers: dict[str, _Worker] = {}
-        self._seen: set[str] = set()
+        # Ordered so we can evict the OLDEST id when full (a bounded FIFO),
+        # rather than clearing the whole set — which would let a retry arriving
+        # right after the cap be treated as new and processed twice.
+        self._seen: "OrderedDict[str, None]" = OrderedDict()
         self._lock = threading.Lock()
         self._max_seen = max_seen
 
@@ -153,9 +157,9 @@ class Dispatcher:
         with self._lock:
             if event_id in self._seen:
                 return True
+            self._seen[event_id] = None
             if len(self._seen) > self._max_seen:
-                self._seen.clear()
-            self._seen.add(event_id)
+                self._seen.popitem(last=False)      # drop only the oldest id
             return False
 
     def submit(self, key: str, fn) -> None:

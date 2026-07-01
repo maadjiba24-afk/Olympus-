@@ -56,6 +56,17 @@ def test_dispatcher_dedups_retries():
     assert d.seen(None) is False
 
 
+def test_dispatcher_eviction_is_fifo_not_full_clear():
+    # At the cap, only the OLDEST id is evicted; a recent id is still deduped.
+    d = gateway.Dispatcher(max_seen=3)
+    for e in ("a", "b", "c"):
+        assert d.seen(e) is False
+    assert d.seen("d") is False         # 'd' added, oldest 'a' evicted
+    assert d.seen("c") is True          # recent id still remembered (not cleared)
+    assert d.seen("b") is True          # ditto
+    assert d.seen("a") is False         # evicted → looks new (acceptable, bounded)
+
+
 def test_dispatcher_runs_work_on_a_worker():
     import threading
     d = gateway.Dispatcher()
