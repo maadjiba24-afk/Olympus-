@@ -1,6 +1,8 @@
 # Design — Boundary-Enforcement Layer (Egress Gateway Spine)
 
-**Status:** proposed · **Scope:** large, phased · **Depends on:** the existing
+**Status:** phase A implemented (`olympus/egress.py`, off by default, gated by
+`OLYMPUS_EGRESS_GUARD`; `email_egress_held`/`webhook_egress_held` ActionTypes) ·
+**Scope:** large, phased · **Depends on:** the existing
 actions spine (`actions.py`), the signed decision log (`trace.py`),
 `security.py`, and — conceptually — Document 1's `contracts.py`.
 **Companion doc:** `DESIGN_OUTPUT_CONTRACTS.md` (Document 1 — build that first).

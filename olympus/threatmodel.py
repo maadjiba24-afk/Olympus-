@@ -16,6 +16,9 @@ from pathlib import Path
 # A documented tool is a table row whose first cell is a `backtick` name.
 _ROW_RE = re.compile(r"^\|\s*`([a-z0-9_]+)`\s*\|")
 
+# The headline "the N tools in `tools.HANDLERS`" prose count.
+_COUNT_RE = re.compile(r"the (\d+) tools in\s*\n?`tools\.HANDLERS`")
+
 
 def doc_path() -> Path:
     return Path(__file__).resolve().parent.parent / "docs" / "THREAT_MODEL.md"
@@ -42,6 +45,11 @@ def check(text: str) -> list[str]:
     for tool in sorted(documented - exposed):
         problems.append(f"THREAT_MODEL.md documents '{tool}', which is not an "
                         "exposed tool (stale entry — remove it).")
+    m = _COUNT_RE.search(text)
+    if m and int(m.group(1)) != len(exposed):
+        problems.append(
+            f"THREAT_MODEL.md headline says {m.group(1)} tools, but "
+            f"tools.HANDLERS exposes {len(exposed)} — update the count.")
     return problems
 
 

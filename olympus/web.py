@@ -471,7 +471,7 @@ PAGE = """<!doctype html>
 </div>
 <header>
   <h1>OLYMPUS</h1>
-  <span>main agent · supervisor · hallucination controller · 12 specialists</span>
+  <span>main agent · supervisor · hallucination controller · __OLYMPUS_NSPEC__ specialists</span>
   <button id="connect" title="Connect your Google account" style="display:none">🔗 connect Google</button>
   <button id="actbtn" title="Actions awaiting your approval">📋 actions
     <span id="actcount"></span></button>
@@ -549,7 +549,7 @@ PAGE = """<!doctype html>
 </div>
 <div id="log"><div id="welcome">
   <p class="sys">The council is assembled — a main agent, a supervisor, a
-  hallucination-checker, and 12 specialists. Ask anything; rate answers with
+  hallucination-checker, and __OLYMPUS_NSPEC__ specialists. Ask anything; rate answers with
   👍/👎 so Olympus learns. It <b>prepares</b> actions like sending email and
   waits for your approval before doing anything irreversible.</p>
   <div id="cost"></div>
@@ -1115,7 +1115,9 @@ class Handler(BaseHTTPRequestHandler):
             cfg = {"free_chats": config.free_chats(),
                    "require_byok": config.require_byok(),
                    "has_server_key": config.Settings.from_env().usable()}
-            page = PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+            from .specialists import SPECIALISTS
+            page = (PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+                        .replace("__OLYMPUS_NSPEC__", str(len(SPECIALISTS))))
             self._send(200, page.encode(), "text/html; charset=utf-8")
             return
         if url.path in ("/privacy", "/terms"):

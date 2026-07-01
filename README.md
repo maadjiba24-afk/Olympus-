@@ -6,9 +6,9 @@
 
 A self-sufficient, self-recurring, **self-improving** multi-agent AI system
 built on frontier LLM APIs. A main agent
-commands a supervised council of specialists, every answer passes through a
-hallucination controller, and the system continuously scans the world, learns
-from YouTube, and upgrades itself.
+commands a supervised council of specialists, answers the supervisor flags as
+factual pass through a hallucination controller, and the system continuously
+scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
 <!--cap:tools-->60<!--/cap--> agent tools, and <!--cap:commands-->67<!--/cap-->
@@ -95,7 +95,7 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
                                │ outputs
                                ▼
                 ┌─────────────────────────────┐
-                │  ALETHEIA · Hallucination    │  verifies every claim with
+                │  ALETHEIA · Hallucination    │  verifies flagged claims with
                 │  Controller                  │  web search, flags/corrects,
                 └──────────────┬──────────────┘  records lessons
                                │ verified findings
@@ -126,7 +126,7 @@ from that registry):
 |---|---|
 | **Plutus** | Financial Specialist |
 | **Peitho** | Marketing Specialist |
-| **Hephaestus** | Coding Specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
+| **Hephaestus** | Coding Specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language; executes code under an approval-gated action spine (opt-in Docker isolation) |
 | **Aegis** | Cybersecurity Specialist (strictly defensive) |
 | **Iris** | Social Network Assistant |
 | **Chiron** | Coaching Specialist |
@@ -165,8 +165,9 @@ from that registry):
   CLI, web, and Telegram; the audit runs in the background on the server's
   own credentials, never on a visitor's BYOK key). With `GITHUB_TOKEN` +
   `GITHUB_REPO` set, his upgrade proposals are **auto-filed as GitHub
-  issues** — and the optional `upgrade-agent` workflow lets a coding agent
-  implement them as pull requests automatically.
+  issues** — and the optional Auto-Upgrade workflow
+  (`.github/workflows/auto-upgrade.yml`) lets a coding agent implement them as
+  pull requests automatically.
 
 ### Reasoning over serial problems (dependency-graph planning)
 
@@ -215,8 +216,10 @@ user-facing specialist and trains the weakest on a cadence:
 
 - **Full coverage.** Every user-facing specialist (Plutus, Peitho, Hephaestus,
   Aegis, Iris, Chiron, Chronos, Angelos, Argus, Mnemosyne) has benchmark items; any gap
-  is auto-filled with a generated one. (Metis and Prometheus are internal —
-  their quality is their effect on the system.)
+  is auto-filled with a generated one. (Metis, Prometheus, and Hermes are
+  internal — Hermes is the operator/browser actuator, the other two the
+  planner and self-improver — so their quality is their effect on the system,
+  not a benchmarked answer.)
 - **`python -m olympus scores`** shows every specialist's current score,
   lowest first. **`python -m olympus train`** scores them all, then has
   Prometheus focus on the weakest — building skills and sharpening prompts,
@@ -286,8 +289,10 @@ user-facing specialist and trains the weakest on a cadence:
   (`OLYMPUS_ACCESS_TOKEN`). Final answers stream token-by-token.
 - **Action tools are off until allowlisted** — email sends only to
   `OLYMPUS_EMAIL_ALLOWLIST` recipients; webhooks only to operator-defined
-  `OLYMPUS_WEBHOOKS` URLs; Hephaestus's code runs in Anthropic's server-side
-  sandbox, never on your machine.
+  `OLYMPUS_WEBHOOKS` URLs; Hephaestus can only *prepare* code execution as an
+  approval-gated action — a human (or explicit policy) approves before anything
+  runs. The default local backend runs with your OS privileges once approved;
+  set `OLYMPUS_EXEC_BACKEND=docker` for OS-level isolation of untrusted code.
 - **Accurate by design** — answers the supervisor flags as factual pass through
   the hallucination controller before you see them; uncertain claims are
   flagged, never laundered.
@@ -378,7 +383,8 @@ limits, and per-user memory, the relationship graph, and playbooks are all
 bounded (weakest memories are pruned past the cap) so storage and prompt size
 stay in check. **Monitoring.** `GET /healthz` is an unauthenticated liveness probe for load
 balancers and uptime checks; `GET /api/metrics` (behind the access token)
-reports uptime, request/error counts per path, and today's spend vs budget.
+reports uptime, per-path request counts, process-wide error counts, and today's
+spend vs budget.
 From a shell, `olympus status` shows the provider, whether a key is configured,
 the daily budget, the account mode, and recent usage.
 
@@ -482,8 +488,10 @@ olympus verify --run <RUN_ID>        # replays the decision path AND checks the 
 #   RESULT    : PASS — replay-identical and signed by the trusted production key.
 ```
 
-A run id comes back in the `X-Olympus-Run-Id` header of every `/v1` answer, and
-`/api/status` reports the signing posture. **Honesty about trust:** with no secret
+A run id comes back in the `X-Olympus-Run-Id` header of every *non-streaming*
+`/v1` answer (a streamed response can't carry it — the run id is only assigned
+once the run completes; use `/api/status` or a non-streaming request to get it),
+and `/api/status` reports the signing posture. **Honesty about trust:** with no secret
 signing seed configured, runs are signed by a *public default key* — verification
 still passes but is loudly labeled `DEV / UNVERIFIED` (integrity, not
 authenticity), and `olympus verify --run … --require-production` rejects it. Set a

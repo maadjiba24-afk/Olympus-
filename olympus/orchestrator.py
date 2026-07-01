@@ -1055,7 +1055,7 @@ def train_specialists(settings: config.Settings | None = None,
     """Systematically strengthen the council: ensure every user-facing
     specialist is benchmarked, score them all, and have Prometheus focus on
     improving the weakest — measured, with rollback. This is the routine that
-    makes all 11 specialists strong and keeps them improving.
+    keeps the user-facing specialists strong and improving.
     """
     from . import evals
     settings = settings or config.Settings.from_env()

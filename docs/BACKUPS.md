@@ -16,19 +16,31 @@ manifest recording every file's SHA-256. Included by default:
 - `traces/` — the signed decision log
 - `reports/`, `errors/`, `usage/` — operational records
 
+> **Backend caveat.** `olympus backup` archives the `OLYMPUS_MEMORY_DIR`
+> filesystem tree. When `OLYMPUS_DATABASE_URL` is set, the vault and per-user
+> memory are stored in Postgres (`store.backend()`), **not** under the memory
+> dir — so they are **not** in the archive. Back the database up separately.
+
 Excluded by default (large and **reproducible** — losing them only forfeits
 replay of *old* runs, never user data): the replay caches `responses/`,
 `tool_results/`, `context/`. Pass `--full` to include them.
 
 ## How it's hardened
 
-- **Encrypted at rest.** With `OLYMPUS_SECRET_KEY` set, the archive is encrypted
-  (Fernet / AES-128) before it ever leaves memory — the off-machine copy is not
-  plaintext PII or tokens. Delivering an *unencrypted* archive off-droplet is
-  **refused** unless you opt in with `OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1`.
+- **Encrypted before delivery.** With `OLYMPUS_SECRET_KEY` set, the archive is
+  encrypted (Fernet / AES-128) before it is delivered off the machine — the
+  off-machine copy is not plaintext PII or tokens. (The plaintext `.tar.gz` is
+  written to a temp file under the backups dir and encrypted from there, so it
+  briefly touches local disk before delivery.) Delivering an *unencrypted*
+  archive off-droplet is **refused** unless you opt in with
+  `OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1`.
 - **Tamper-evident.** The archive's SHA-256 is signed with the same Ed25519
   witness key Olympus uses for releases (`<archive>.sig.json`). Restore verifies
-  it and refuses an altered archive.
+  the signature and refuses an altered archive **when the signature is present**.
+  A Fernet-encrypted archive is additionally HMAC-authenticated, so tampering
+  fails regardless. For a plaintext archive whose `.sig.json` sidecar is missing,
+  restore proceeds on manifest hashes alone — keep the sidecar to retain the
+  authenticity guarantee.
 - **Integrity-checked on restore.** Every file's hash is re-checked against the
   manifest; a corrupt archive fails loudly instead of restoring garbage.
 - **Safe extraction.** Path-traversal (`../`), absolute paths, and links in an
