@@ -113,16 +113,21 @@ class Specialist:
                 + _UNTRUSTED_NOTE)
 
     def run(self, task: str, settings: config.Settings | None = None,
-            effort: str = "high") -> str:
+            effort: str | None = None) -> str:
         return self.run_counted(task, settings=settings, effort=effort)[0]
 
     def run_counted(self, task: str, settings: config.Settings | None = None,
-                    effort: str = "high") -> tuple[str, int | None]:
+                    effort: str | None = None) -> tuple[str, int | None]:
         """Like `run`, but also returns the count of client-side tool calls the
         specialist made (or None when the provider can't report it — only the
-        Anthropic backend counts). Used by the output-contract tool-call cap."""
+        Anthropic backend counts). Used by the output-contract tool-call cap.
+
+        `effort` defaults to THIS specialist's configured `.effort` (not a
+        hard-coded 'high'), so one-shot routines that call run()/run_counted()
+        without passing effort respect a specialist tuned to a cheaper tier."""
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
+        effort = effort or self.effort
         return backend.run_agent_counted(settings, self.system_prompt(), task,
                                          self.tool_defs(settings.provider),
                                          mcp_servers=self.mcp_defs(settings.provider),
