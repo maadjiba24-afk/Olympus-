@@ -596,7 +596,8 @@ def _restore_prompt(agent: str) -> str:
     ) if (config.MEMORY_DIR / "prompt_backups").exists() else []
     if not backups:
         return f"Error: no backups exist for '{stem}'."
-    text = backups[0].read_text(encoding="utf-8")
+    newest = backups[0]
+    text = newest.read_text(encoding="utf-8")
     # drop any versioned frontmatter, then the "# <stem>" header memory.save
     # added, and the trailing update-reason comment
     _, text = memory.parse_note(text)
@@ -605,7 +606,15 @@ def _restore_prompt(agent: str) -> str:
         lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
     body = "\n".join(l for l in lines if not l.startswith("<!-- update reason:"))
     path.write_text(body.strip() + "\n", encoding="utf-8")
-    return f"Prompt '{stem}' restored from {backups[0].name}."
+    # Consume the backup we just restored from so this is a real rollback STACK:
+    # a second restore steps back to the prior version instead of re-applying the
+    # same newest one forever (the previous behavior could only ever undo the
+    # most recent update).
+    try:
+        newest.unlink()
+    except OSError:
+        pass
+    return f"Prompt '{stem}' restored from {newest.name}."
 
 
 def _send_email(to: str, subject: str, body: str, *,
