@@ -36,7 +36,7 @@ See [docs/SUPPORT.md](docs/SUPPORT.md) for the versioning/LTS policy and
    to a dated `[X.Y.Z]` section, adds a fresh `[Unreleased]`, fixes the compare
    links). Use `--dry-run` to preview. Then polish the new changelog notes by
    hand (a MAJOR bump needs a migration note).
-4. **Run the gates locally** (the same checks CI enforces):
+3. **Run the gates locally** (the same checks CI enforces):
    ```bash
    pip install --require-hashes -r requirements.lock
    python scripts/check_no_prerelease.py requirements.lock   # no pre-release pins
@@ -44,7 +44,7 @@ See [docs/SUPPORT.md](docs/SUPPORT.md) for the versioning/LTS policy and
    python scripts/check_threat_model.py                      # threat model covers tools
    pytest -q
    ```
-5. **Run the reliability gate** on a real key (operator-run; needs
+4. **Run the reliability gate** on a real key (operator-run; needs
    `ANTHROPIC_API_KEY`) so the release is proven to run unattended end-to-end:
    ```bash
    python scripts/reliability_gate.py
@@ -52,9 +52,9 @@ See [docs/SUPPORT.md](docs/SUPPORT.md) for the versioning/LTS policy and
    Exit 0 = all three prompts replayed reproducibly under the spend cap. An
    `INCONCLUSIVE` (provider/credit problem) is not a pass — fix the account and
    re-run.
-6. **Open a release PR** with the version + changelog bump and let CI go green.
+5. **Open a release PR** with the version + changelog bump and let CI go green.
    Merge it to `main`.
-7. **Tag and push** from the merged commit:
+6. **Tag and push** from the merged commit:
    ```bash
    git checkout main && git pull
    git tag v0.16.0          # match pyproject.toml exactly

@@ -1,8 +1,17 @@
-# Auto-implements upgrade proposals: when an "[Olympus upgrade]" issue is
-# opened, a coding agent implements it on a branch and opens a PR for review.
+# Auto-implements upgrade proposals: when an "[Olympus upgrade]" issue is opened
+# BY A TRUSTED AUTHOR, a coding agent implements it on a branch and opens a PR
+# for review.
 #
-# Setup (one time): add ANTHROPIC_API_KEY to the repo's Actions secrets.
-# Without the secret this workflow simply no-ops — it never blocks CI.
+# Security: this feeds the issue title/body straight into a coding agent that
+# holds contents/pull-requests write. Anyone can open an issue, so the job is
+# gated on author_association — only the repo owner, org members, and
+# collaborators can trigger it. Without that gate, an attacker-controlled issue
+# body is a prompt-injection path to branch/PR write and API-budget burn.
+#
+# Setup (one time): add ANTHROPIC_API_KEY to the repo's Actions secrets. This
+# workflow runs only on "[Olympus upgrade]" issues from trusted authors and
+# never on push/PR, so it cannot block CI. (Without the secret the
+# claude-code-action step fails, but that failure is confined to this workflow.)
 
 name: Auto-Upgrade
 
@@ -12,7 +21,10 @@ on:
 
 jobs:
   implement:
-    if: startsWith(github.event.issue.title, '[Olympus upgrade]')
+    if: >
+      startsWith(github.event.issue.title, '[Olympus upgrade]') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+               github.event.issue.author_association)
     runs-on: ubuntu-latest
     permissions:
       contents: write

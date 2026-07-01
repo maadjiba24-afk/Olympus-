@@ -1,13 +1,14 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 26 tools in
+Olympus exposes a **finite, named** tool surface — the 60 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
 
 This document is **enforced**: `scripts/check_threat_model.py` (run in CI) fails
-if any exposed tool is missing here, or if this file documents a tool that no
-longer exists. So the surface and its threat model can't drift apart.
+if any exposed tool is missing here, if this file documents a tool that no
+longer exists, or if the count in this sentence drifts from the live tool
+surface. So the surface and its threat model can't drift apart.
 
 ## Principles
 
@@ -55,7 +56,7 @@ longer exists. So the surface and its threat model can't drift apart.
 | `verify_code_claim` | Check a structural claim against EXTRACTED graph edges | first-party read | Read-only; ground-truth (EXTRACTED) only, INFERRED never authoritative | None significant — verifies, never asserts on a guess |
 | `cache_fact` | Store a fact in memory | first-party write | Sanitized at write | Cache poisoning via injection-shaped text |
 | `save_lesson` | Store a lesson in memory | first-party write | Sanitized at write | Memory poisoning — `sanitize_for_memory` strips injections |
-| `web_search` | Server-side web search | ingests untrusted | Output treated as untrusted | Prompt injection from web results — wrapped, not trusted |
+| `web_search` | Web search (server-side on Anthropic; client-side DuckDuckGo elsewhere) | ingests untrusted | Output treated as untrusted | Prompt injection from web results — wrapped, not trusted |
 | `web_fetch` | Fetch a URL's contents | ingests untrusted | Output treated as untrusted | SSRF / injected page content — wrapped, not trusted |
 | `watch_youtube` | Fetch a video transcript | ingests untrusted | Output treated as untrusted | Malicious transcript injection — wrapped |
 | `read_inbox` | List inbox messages | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — `should_wrap` wraps it |
@@ -99,7 +100,7 @@ longer exists. So the surface and its threat model can't drift apart.
 | `restore_prompt` | Restore a backed-up prompt | self-modifying | Reverts to a prior backup | Reverting to a weaker prompt — bounded to saved versions |
 | `propose_upgrade` | File an upgrade proposal | first-party write | Proposal only | Proposal spam — bounded, human-reviewed |
 | `run_benchmark` | Run the quality benchmark | first-party (cost) | Internal; budget-guarded | Token/cost burn — daily budget guard |
-| `run_code_benchmark` | Execute code benchmarks | self-modifying (exec) | Server-side sandbox | Sandbox escape — code runs server-isolated |
+| `run_code_benchmark` | Execute code benchmarks | self-modifying (exec) | Runs model-written code as a local subprocess (temp dir + wall-clock timeout) — NOT an OS sandbox on the default backend | Arbitrary code execution — bound the benchmark inputs; use `OLYMPUS_EXEC_BACKEND=docker` for OS isolation |
 | `send_email` | Send an email | external actuator | **Irreversible**: requires `gmail.send`/`email` scope; never auto; rate-limited | Spam / data exfil — scope-gated, human-approved, capped |
 | `call_webhook` | POST to an external URL | external actuator | Requires scope; never auto; rate-limited | SSRF / exfil — scope-gated, human-approved, capped |
 

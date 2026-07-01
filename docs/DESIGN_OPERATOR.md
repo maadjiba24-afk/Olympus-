@@ -3,8 +3,12 @@
 This specs a dedicated operator that can perform **autonomous logins and
 credentialed actions**, run **always-on** on the heartbeat, and feed
 **METIS/Prometheus** — *without* dismantling the capability-separation moat the
-browser harness was built on. It is a design document; nothing here is wired up
-until it is built behind the master switch (`OLYMPUS_OPERATOR`, default off).
+browser harness was built on. **Status: implemented** (all four phases shipped —
+see the phase list below), gated behind the master switch (`OLYMPUS_OPERATOR`,
+default off). Where this design and the code diverge, the code (and
+`docs/THREAT_MODEL.md`) is authoritative — e.g. `browser_login` ships as an
+`operator._gate`-guarded tool under the coarse `browser.operate` scope, not as a
+spine ActionType with a per-domain `operate:<domain>` scope.
 
 See [BROWSER_HARNESS.md](BROWSER_HARNESS.md) for the read-only harness this
 extends, and [THREAT_MODEL.md](THREAT_MODEL.md) for the tool-surface binding.

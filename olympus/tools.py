@@ -16,12 +16,18 @@ from . import (browser, codegraph, config, egress, facts, github, memory,
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
-# Use the stable web_search version WITHOUT dynamic filtering. The _20260209
-# version filters results via server-side code execution, which spins up a
-# container the API then requires us to track across turns — a fragile
-# dependency for a multi-turn agent loop. Plain search is all the scouts need.
+# Use the stable web_search / web_fetch versions WITHOUT dynamic filtering. The
+# _20260209 variants filter results via server-side code execution, which spins
+# up a container the API then requires us to track across turns — a fragile
+# dependency for a multi-turn agent loop. The basic variants (web_search
+# _20250305 + web_fetch_20250910) are all the scouts need, and web_fetch is what
+# lets Aletheia/Argus actually open a source to verify a claim rather than
+# reason from search snippets alone. web_fetch only retrieves URLs already
+# present in the conversation (e.g. a web_search result) — exactly the
+# verify-a-cited-source flow.
 WEB_TOOLS: list[dict[str, Any]] = [
     {"type": "web_search_20250305", "name": "web_search"},
+    {"type": "web_fetch_20250910", "name": "web_fetch"},
 ]
 
 # --- client-side web fallback (used on non-Anthropic providers) -------------
@@ -562,8 +568,12 @@ def _list_source_files() -> str:
 
 
 def _read_source_file(path: str) -> str:
+    root = config.PROJECT_ROOT.resolve()
     target = (config.PROJECT_ROOT / path).resolve()
-    if not str(target).startswith(str(config.PROJECT_ROOT.resolve())):
+    # Use path-component containment, not a string prefix: a bare startswith
+    # would accept a sibling like `<root>-backup/…` whose name merely extends
+    # the root string.
+    if target != root and root not in target.parents:
         return "Error: path escapes the project root."
     if not target.is_file():
         return f"Error: no such file: {path}"
@@ -579,9 +589,13 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
         return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
     old = path.read_text(encoding="utf-8")
     # Body is the verbatim old prompt (restore_prompt depends on this);
-    # the update reason rides in a trailing comment that restore strips.
+    # the update reason rides in a SINGLE-LINE trailing comment that restore
+    # strips. Flatten any newlines in the (free-form model) reason so the
+    # comment can't span multiple lines and leave a stray `... -->` behind on
+    # restore.
+    flat_reason = " ".join((reason or "").split())
     memory.save("prompt_backups", stem,
-                f"{old}\n<!-- update reason: {reason} -->")
+                f"{old}\n<!-- update reason: {flat_reason} -->")
     path.write_text(new_prompt.strip() + "\n", encoding="utf-8")
     return f"Prompt '{stem}' updated. Previous version backed up to memory/prompt_backups."
 
@@ -605,7 +619,13 @@ def _restore_prompt(agent: str) -> str:
     lines = text.splitlines()
     if lines and lines[0].startswith("# "):
         lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
-    body = "\n".join(l for l in lines if not l.startswith("<!-- update reason:"))
+    # The update-reason comment is always appended last; drop it and anything
+    # after it (robust to an old multi-line reason, not just its first line).
+    for i, l in enumerate(lines):
+        if l.startswith("<!-- update reason:"):
+            lines = lines[:i]
+            break
+    body = "\n".join(lines)
     path.write_text(body.strip() + "\n", encoding="utf-8")
     # Consume the backup we just restored from so this is a real rollback STACK:
     # a second restore steps back to the prior version instead of re-applying the
@@ -1033,8 +1053,7 @@ def _operator_schedule(name: str, domain: str, template: str, interval: str,
     secs = scheduler.parse_interval(interval)
     job = operator.schedule(memory.current_user(), name, domain, template,
                             secs, parsed)
-    every = f"{job['interval'] // 3600}h" if job["interval"] % 3600 == 0 \
-        else f"{job['interval'] // 60}m"
+    every = scheduler._human_interval(job["interval"])
     return (f"Scheduled operator job '{name}' to run '{template}' on {domain} "
             f"every {every}. It runs through the approval spine each time.")
 
@@ -1204,9 +1223,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
         codegraph.neighbors("self", _cg_first_id("self", symbol))),
     "codegraph_impact": lambda symbol: _fmt_cg_nodes(
         codegraph.impact("self", _cg_first_id("self", symbol))),
-    "codegraph_path": lambda from_symbol, to_symbol: _fmt_cg_path(
-        codegraph.shortest_path("self", _cg_first_id("self", from_symbol),
-                                _cg_first_id("self", to_symbol))),
+    "codegraph_path": lambda from_symbol, to_symbol: _codegraph_path(
+        from_symbol, to_symbol),
     "verify_code_claim": lambda claim: _fmt_cg_verdict(
         codegraph.verify_claim("self", claim)),
 }
@@ -1217,6 +1235,19 @@ HANDLERS: dict[str, Callable[..., str]] = {
 def _cg_first_id(project: str, symbol: str) -> str:
     hits = codegraph.find(project, symbol)
     return hits[0]["id"] if hits else ""
+
+
+def _codegraph_path(from_symbol: str, to_symbol: str) -> str:
+    # Resolve both endpoints first: an unknown symbol resolves to "" and
+    # shortest_path("", "") hits the a==b fast path returning [""], which the
+    # formatter would render as an empty string instead of a useful message.
+    a, b = _cg_first_id("self", from_symbol), _cg_first_id("self", to_symbol)
+    missing = [s for s, i in ((from_symbol, a), (to_symbol, b)) if not i]
+    if missing:
+        return ("No such symbol in the code graph: "
+                + ", ".join(f"'{m}'" for m in missing)
+                + " (run `olympus codegraph build`, or check the name).")
+    return _fmt_cg_path(codegraph.shortest_path("self", a, b))
 
 
 def _fmt_cg_nodes(nodes_: list) -> str:
@@ -1897,8 +1928,7 @@ def _schedule_task(name: str, interval: str, prompt: str,
     from . import scheduler
     user = memory.current_user()
     job = scheduler.add(name, interval, prompt, deliver_to=deliver_to, user=user)
-    every = (f"{job.interval // 3600}h" if job.interval % 3600 == 0
-             else f"{job.interval // 60}m")
+    every = scheduler._human_interval(job.interval)
     to = f", delivering to {job.deliver_to}" if job.deliver_to else ""
     return (f"Scheduled '{job.name}' to run every {every}{to}. It runs "
             "unattended via the heartbeat.")

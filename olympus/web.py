@@ -83,12 +83,25 @@ def _actions_view(user: str) -> list[dict]:
 
 
 class _Session:
+    _EVENTS_CAP = 500
+
     def __init__(self, sid: str) -> None:
         self.sid = sid
         self.lock = threading.Lock()
         self.events: list[str] = []
+        self.events_base = 0        # count of events dropped off the front
         self.fingerprint: tuple | None = None
         self.bot: orchestrator.Olympus | None = None
+
+    def report(self, msg: str) -> None:
+        """Append a progress event, trimming the oldest so a long-lived session
+        can't grow the buffer without bound. `events_base` keeps the global
+        index stable for the /api/status `since` cursor across trims."""
+        self.events.append(msg)
+        overflow = len(self.events) - self._EVENTS_CAP
+        if overflow > 0:
+            del self.events[:overflow]
+            self.events_base += overflow
 
     def bot_for(self, pool: config.ModelPool,
                 user: str | None = None) -> orchestrator.Olympus:
@@ -98,7 +111,7 @@ class _Session:
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
             self.bot = orchestrator.Olympus(
-                report=self.events.append,
+                report=self.report,
                 pool=pool,
                 user=user,
                 conversation_id=user,
@@ -135,8 +148,11 @@ def _resolve_sid(handler: BaseHTTPRequestHandler,
 def _session(sid: str) -> _Session:
     with _SESSIONS_LOCK:
         if sid not in _SESSIONS:
-            if len(_SESSIONS) > 500:  # crude cap against unbounded growth
-                _SESSIONS.clear()
+            # Bound growth by FIFO-evicting the OLDEST session(s), not by
+            # clearing the whole dict — a blanket clear at the 501st visitor
+            # would drop every active user's bot and event stream at once.
+            while len(_SESSIONS) >= 500:
+                _SESSIONS.pop(next(iter(_SESSIONS)))
             _SESSIONS[sid] = _Session(sid)
         return _SESSIONS[sid]
 
@@ -207,14 +223,17 @@ def _daily_limited(key: str, limit: int) -> bool:
 
 
 def _brought_own_key(pset: dict) -> bool:
-    """Did this request supply the user's own credentials (BYOK)?"""
+    """Did this request supply the user's own PRIMARY credential (BYOK)?
+
+    Only a primary `api_key` counts — it is the key the main pipeline actually
+    runs on. A bare `base_url` (no key) falls back to the operator's env key,
+    and an `extra` second-model key doesn't pay for the primary member; treating
+    either as BYOK let a keyless visitor run unlimited chats on the operator's
+    key while bypassing OLYMPUS_REQUIRE_BYOK / the free-chat allowance.
+    """
     if not isinstance(pset, dict):
         return False
-    if (pset.get("api_key") or "").strip() or (pset.get("base_url") or "").strip():
-        return True
-    extra = pset.get("extra") or {}
-    return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
-                                             or (extra.get("base_url") or "").strip()))
+    return bool((pset.get("api_key") or "").strip())
 
 
 def _key_decision(brought: bool, free_used: int) -> str:
@@ -468,7 +487,7 @@ PAGE = """<!doctype html>
 </div>
 <header>
   <h1>OLYMPUS</h1>
-  <span>main agent · supervisor · hallucination controller · 12 specialists</span>
+  <span>main agent · supervisor · hallucination controller · __OLYMPUS_NSPEC__ specialists</span>
   <button id="connect" title="Connect your Google account" style="display:none">🔗 connect Google</button>
   <button id="actbtn" title="Actions awaiting your approval">📋 actions
     <span id="actcount"></span></button>
@@ -546,7 +565,7 @@ PAGE = """<!doctype html>
 </div>
 <div id="log"><div id="welcome">
   <p class="sys">The council is assembled — a main agent, a supervisor, a
-  hallucination-checker, and 12 specialists. Ask anything; rate answers with
+  hallucination-checker, and __OLYMPUS_NSPEC__ specialists. Ask anything; rate answers with
   👍/👎 so Olympus learns. It <b>prepares</b> actions like sending email and
   waits for your approval before doing anything irreversible.</p>
   <div id="cost"></div>
@@ -1112,7 +1131,9 @@ class Handler(BaseHTTPRequestHandler):
             cfg = {"free_chats": config.free_chats(),
                    "require_byok": config.require_byok(),
                    "has_server_key": config.Settings.from_env().usable()}
-            page = PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+            from .specialists import SPECIALISTS
+            page = (PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+                        .replace("__OLYMPUS_NSPEC__", str(len(SPECIALISTS))))
             self._send(200, page.encode(), "text/html; charset=utf-8")
             return
         if url.path in ("/privacy", "/terms"):
@@ -1154,8 +1175,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
-            events = _session(sid).events
-            self._json({"events": events[since:], "next": len(events),
+            sess_obj = _session(sid)
+            events, base = sess_obj.events, sess_obj.events_base
+            # `since` is a global index; translate through the trim offset so the
+            # cursor stays correct even after old events were dropped.
+            start = max(0, since - base)
+            self._json({"events": events[start:], "next": base + len(events),
                         "sovereignty": config.sovereign_status(),
                         "signing": _signing_posture()})
             return
@@ -1241,14 +1266,16 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
-        if path in ("/api/register", "/api/login", "/api/logout"):
-            self._handle_auth(path, payload)
-            return
         # Cheap write endpoints get a generous per-IP budget (DoS guard); the
-        # expensive /api/chat keeps its own stricter limit further down.
+        # expensive /api/chat keeps its own stricter limit further down. Auth
+        # endpoints MUST be throttled too — they run a costly PBKDF2 per attempt,
+        # so an unthrottled /api/login is both password brute-force and CPU DoS.
         if path != "/api/chat" and _rate_limited(
                 "w:" + self.client_address[0], 60):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
+            return
+        if path in ("/api/register", "/api/login", "/api/logout"):
+            self._handle_auth(path, payload)
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)
@@ -1367,10 +1394,6 @@ class Handler(BaseHTTPRequestHandler):
         if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
-        if _daily_limited("u:" + user, config.daily_chat_limit()):
-            self._json({"error": "daily limit reached for your account — "
-                                 "try again tomorrow."}, 429)
-            return
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
@@ -1391,6 +1414,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "This instance requires your own API key. "
                                  "Open ⚙ model and add your provider key.",
                         "need_key": True}, 402)
+            return
+        # Charge the per-account daily quota only now that the request has passed
+        # validation and the key/free-allowance wall — a rejected request (400 /
+        # 402) must not burn one of the user's OLYMPUS_DAILY_CHATS.
+        if _daily_limited("u:" + user, config.daily_chat_limit()):
+            self._json({"error": "daily limit reached for your account — "
+                                 "try again tomorrow."}, 429)
             return
         if not brought and config.free_chats() > 0:
             _daily_bump("free:" + user)         # consume one free, operator-funded chat
