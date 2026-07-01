@@ -19,6 +19,18 @@ def test_spawn_returns_specialist_output(monkeypatch):
     assert subagents.spawn("plutus", "price it") == "PLUTUS:price it"
 
 
+def test_spawn_refuses_privileged_specialists():
+    # Delegation must not launder an injection into self-modification or a
+    # credentialed action: system + actuator specialists are unspawnable.
+    for key in ("prometheus", "metis", "hermes", "chronos"):
+        out = subagents.spawn(key, "do something")
+        assert "refused" in out.lower() and key in out
+        assert subagents._is_privileged(key) is True
+    # normal read/reason specialists are still spawnable
+    for key in ("plutus", "peitho", "aegis", "argus"):
+        assert subagents._is_privileged(key) is False
+
+
 def test_spawn_contains_failures(monkeypatch):
     def boom(self, task, settings=None):
         raise RuntimeError("kaboom")
