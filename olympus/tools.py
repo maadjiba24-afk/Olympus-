@@ -651,6 +651,33 @@ def _call_webhook(name: str, payload: dict | None = None, *,
                 f"{resp.read(500).decode(errors='replace')}")
 
 
+def _spine_action(type_name: str, payload: dict, title: str, noun: str) -> str:
+    """Route a world-affecting tool call through the approval spine instead of
+    executing directly: prepare → run-or-hold per policy. Irreversible types
+    (email/webhook) always hold for explicit approval; nothing auto-sends."""
+    from . import actions, builtin_actions  # noqa: F401 (registers ActionTypes)
+    a = actions.prepare(memory.current_user(), type_name, payload,
+                        title=title, why="requested by a specialist")
+    a = actions.auto_or_hold(a)
+    if a.status == actions.EXECUTED:
+        return str(a.result.get("message", f"{noun} done."))
+    if a.status == actions.FAILED:
+        return f"{noun} failed: {a.error}"
+    return (f"Prepared {noun.lower()} (id {a.id}) — it needs your approval. "
+            f"Approve with `olympus approve {a.id}` or in the UI.")
+
+
+def _send_email_tool(to: str, subject: str, body: str) -> str:
+    return _spine_action("send_email", {"to": to, "subject": subject,
+                                        "body": body},
+                         f"Email to {to}", f"Email to {to}")
+
+
+def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
+    return _spine_action("call_webhook", {"name": name, "payload": payload or {}},
+                         f"Webhook {name}", f"Webhook '{name}'")
+
+
 def _run_benchmark() -> str:
     from . import evals  # local import to avoid a cycle at module load
     return evals.run_and_save()
@@ -1078,8 +1105,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
                       specialist=specialist, provisional=True),
     "gate_skills": lambda: _gate_skills(),
     "generate_benchmark": lambda specialist: _generate_benchmark(specialist),
-    "send_email": _send_email,
-    "call_webhook": _call_webhook,
+    "send_email": _send_email_tool,      # route through the approval spine
+    "call_webhook": _call_webhook_tool,  # (raw _send_email/_call_webhook run
+                                         #  only from the approved-action path)
     "run_benchmark": _run_benchmark,
     "run_code_benchmark": _run_code_benchmark,
     # code-graph reads over project "self" (Olympus's own source). Safe reads of
