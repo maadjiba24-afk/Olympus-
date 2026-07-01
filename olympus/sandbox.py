@@ -2,26 +2,37 @@
 
 Until now Hephaestus could only run code in Anthropic's *server-side* sandbox:
 it could never touch a real file, run a real shell command, or operate on a
-host. This module adds a confined, host-side execution environment so Olympus
-can actually *do* things — edit files, run commands, build and test — while
-keeping the safety model intact.
+host. This module adds a host-side execution environment so Olympus can actually
+*do* things — edit files, run commands, build and test.
 
-Two design rules make this safe enough to ship:
+Be precise about what protects you, because the two mechanisms cover different
+threats and the **local backend is NOT an OS sandbox**:
 
-1. **Confinement.** Every path is resolved and forced to stay inside a single
-   workdir root (`OLYMPUS_EXEC_WORKDIR`, default `<MEMORY_DIR>/workspace`); a
-   path that escapes is refused, not clamped. Commands run *in* that root with
-   a wall-clock timeout and a capped output.
-2. **It runs behind the Action spine.** `run_command` / `write_file` are
-   registered as approval-gated ActionTypes (see builtin_actions), so an agent
-   that has ingested untrusted content physically cannot execute — it can only
-   PREPARE an action a human (or an explicit policy) approves. Reads
+1. **The Action spine is the primary control.** `run_command` / `write_file`
+   are registered as approval-gated ActionTypes (see builtin_actions), so an
+   agent that has ingested untrusted content physically cannot execute — it can
+   only PREPARE an action a human (or an explicit policy) approves. Reads
    (`read_file`, `list_dir`) are side-effect-free and exposed as plain tools.
+   This is what makes the feature safe to ship; do not rely on OS confinement.
+2. **Path confinement covers the file tools only.** `read_file` / `write_file`
+   / `list_dir` resolve their path under a single workdir root
+   (`OLYMPUS_EXEC_WORKDIR`, default `<MEMORY_DIR>/workspace`) and refuse — not
+   clamp — a path that escapes it. This bounds *where files land*; it does NOT
+   sandbox a shell. A `run_command` command runs with `cwd` set to that root
+   and a wall-clock timeout + output cap, but on the **local** backend it has
+   the invoking user's full OS privileges and network — it can read outside the
+   root, reach the network, and spawn processes. Confinement here means the
+   file-path tools and the process's starting directory, nothing stronger.
+
+For genuine OS-level isolation of untrusted code, use the **docker** backend,
+which runs the command inside `docker run --rm --network none` with only the
+workdir bind-mounted at /work.
 
 Backends (`OLYMPUS_EXEC_BACKEND`):
-    local   subprocess in the confined workdir (default)
+    local   subprocess started in the workdir (default) — NOT OS-isolated;
+            safety rests on the Action spine approval gate above.
     docker  the same command inside `docker run --rm --network none`, the
-            workdir bind-mounted at /work — isolation for untrusted builds.
+            workdir bind-mounted at /work — real isolation for untrusted builds.
 The remaining Hermes backends (ssh / modal / daytona / singularity) are thin
 transports over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
 `OLYMPUS_EXEC_NETWORK=1` tune the container.
@@ -48,7 +59,9 @@ def backend() -> str:
 
 
 def workdir() -> Path:
-    """The single root every command and file path is confined to."""
+    """The root the file tools confine paths to, and the starting `cwd` for
+    commands. Note: it bounds the file-path tools and where a command begins,
+    not what a local shell command can reach (see the module docstring)."""
     d = Path(os.environ.get("OLYMPUS_EXEC_WORKDIR",
                             str(config.MEMORY_DIR / "workspace")))
     d.mkdir(parents=True, exist_ok=True)

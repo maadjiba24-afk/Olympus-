@@ -583,8 +583,10 @@ Hephaestus isn't graded on whether his code *looks* right — his code is **run
 against real tests** and scored on whether it actually passes. `python -m
 olympus code-eval` has him solve real tasks (merge intervals, an LRU cache, a
 bug fix, debounce, deep flatten, Go word-count, …); each solution is extracted,
-executed in an isolated sandbox with a timeout, and scored pass/fail. Languages
-whose runtime isn't installed are skipped, not failed.
+executed in an isolated temp directory with a wall-clock timeout, and scored
+pass/fail. (This runs Olympus's *own* generated code in a dev/eval context, never
+user input; for OS-level isolation of untrusted code use the docker exec
+backend.) Languages whose runtime isn't installed are skipped, not failed.
 
 This objective signal feeds the self-improvement loop: Prometheus runs
 `run_code_benchmark` before and after changing Hephaestus's prompt or coding
