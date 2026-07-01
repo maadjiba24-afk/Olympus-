@@ -232,6 +232,24 @@ def test_replay_run_diffs_recorded_run(monkeypatch):
     assert trace.diff_decisions(loaded["decisions"], fresh.decisions) == []
 
 
+def test_explain_prints_the_real_model_per_decision(capsys):
+    # Regression: `olympus explain` read the model from the agent dict ({name,
+    # role} — no model key), so every line printed 'model=?'. It lives in the
+    # top-level decision field (d['model'] = {provider, model, version}).
+    from olympus import cli
+    tr = trace.Trace("chat", "shared")
+    tr.meta = {"input": "hello"}
+    tr.decision("route", {"name": "zeus", "role": "main"}, {"mode": "direct"},
+                status="ok",
+                model={"provider": "anthropic", "model": "claude-opus-4-8",
+                       "version": None})
+    tr.flush()
+    rc = cli.main(["explain", tr.id])
+    out = capsys.readouterr().out
+    assert (rc or 0) == 0
+    assert "claude-opus-4-8" in out and "model=?" not in out
+
+
 # --- 3. a changed request makes replay diverge, naming the record ---------
 
 def test_mutated_prompt_raises_replay_divergence(monkeypatch):

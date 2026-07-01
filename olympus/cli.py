@@ -634,11 +634,15 @@ def main(argv: list[str] | None = None) -> int:
             if inp:
                 print(f"  input: {inp[:200]}")
             for d in decisions:
-                agent = (d.get("agent") or {}).get("model", "?")
+                # The model lives in the top-level decision field
+                # (d['model'] = {provider, model, version}, from _model_meta) —
+                # the agent dict is {name, role} with no model key, so reading it
+                # there printed 'model=?' on every line.
+                model = (d.get("model") or {}).get("model") or "?"
                 ref = d.get("model_response_ref") or "—"
                 out = (d.get("outcome") or {}).get("status", "?")
                 print(f"\n  [{d.get('record_id')}] {d.get('decision_type')} "
-                      f"({out}, model={agent}, response={ref[:12]})")
+                      f"({out}, model={model}, response={ref[:12]})")
                 rat = d.get("rationale")
                 if rat is not None:
                     text = rat if isinstance(rat, str) else \
