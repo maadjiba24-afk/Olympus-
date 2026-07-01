@@ -16,12 +16,18 @@ from . import (browser, codegraph, config, egress, facts, github, memory,
 
 # --- server-side (Anthropic-hosted; this is how Olympus surfs the internet) --
 
-# Use the stable web_search version WITHOUT dynamic filtering. The _20260209
-# version filters results via server-side code execution, which spins up a
-# container the API then requires us to track across turns — a fragile
-# dependency for a multi-turn agent loop. Plain search is all the scouts need.
+# Use the stable web_search / web_fetch versions WITHOUT dynamic filtering. The
+# _20260209 variants filter results via server-side code execution, which spins
+# up a container the API then requires us to track across turns — a fragile
+# dependency for a multi-turn agent loop. The basic variants (web_search
+# _20250305 + web_fetch_20250910) are all the scouts need, and web_fetch is what
+# lets Aletheia/Argus actually open a source to verify a claim rather than
+# reason from search snippets alone. web_fetch only retrieves URLs already
+# present in the conversation (e.g. a web_search result) — exactly the
+# verify-a-cited-source flow.
 WEB_TOOLS: list[dict[str, Any]] = [
     {"type": "web_search_20250305", "name": "web_search"},
+    {"type": "web_fetch_20250910", "name": "web_fetch"},
 ]
 
 # --- client-side web fallback (used on non-Anthropic providers) -------------

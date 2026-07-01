@@ -23,6 +23,7 @@ to Claude (full capability) or any OpenAI-compatible endpoint (BYOK).
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import traceback
@@ -147,14 +148,24 @@ class Olympus:
                                          messages, ROUTE_SCHEMA, effort="medium")
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
+        except json.JSONDecodeError:
+            # The provider produced unparseable/truncated route JSON (common on
+            # OpenAI-compatible/local models where JSON is only prompt-enforced,
+            # or when the route response is cut off at max_tokens). This is NOT
+            # a refusal — degrade gracefully to a full delegation with the raw
+            # message as the brief. (JSONDecodeError subclasses ValueError, so
+            # it must be caught BEFORE the refusal branch below.)
+            return {"mode": "delegate", "direct_reply": None,
+                    "specialists": [], "brief": user_message,
+                    "needs_verification": True}
         except ValueError:
+            # A genuine model refusal (backend.complete_json raises ValueError).
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
                     "specialists": [], "brief": None,
                     "needs_verification": False}
         except Exception:
-            # Provider couldn't produce routable JSON — degrade gracefully to
-            # a full delegation with the raw message as the brief.
+            # Any other provider failure — degrade gracefully to delegation.
             return {"mode": "delegate", "direct_reply": None,
                     "specialists": [], "brief": user_message,
                     "needs_verification": True}
