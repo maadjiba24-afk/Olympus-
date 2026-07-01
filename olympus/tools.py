@@ -454,10 +454,31 @@ _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+import urllib.error as _urlerr
+import urllib.request as _urlreq
+
+
+class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
+    """Re-validate every 3xx hop against the SSRF/egress gate — a public URL
+    that 302-redirects to an internal host must not be followed."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        reason = security.url_block_reason(newurl)
+        if reason:
+            raise _urlerr.HTTPError(newurl, code,
+                                    f"blocked redirect ({reason})", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _http_get(url: str) -> str:
-    import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
+    initial request AND on every redirect. Raises ValueError if blocked."""
+    reason = security.url_block_reason(url)
+    if reason:
+        raise ValueError(reason)
+    opener = _urlreq.build_opener(_SafeRedirectHandler)
+    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    with opener.open(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -493,10 +514,11 @@ def _ddg_search(query: str) -> str:
 
 
 def _web_fetch(url: str) -> str:
-    reason = security.url_block_reason(url)
-    if reason:
-        return f"Error: {reason}."
-    return _strip_html(_http_get(url))[:20_000]
+    try:
+        html = _http_get(url)          # SSRF/egress gate + redirect re-check
+    except ValueError as err:
+        return f"Error: {err}."
+    return _strip_html(html)[:20_000]
 
 
 def _list_source_files() -> str:

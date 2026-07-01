@@ -63,7 +63,7 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_calendar` | Read calendar events | ingests untrusted | Read-only; wrapped | Event-text injection — wrapped |
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
-| `browse_page` | Fetch a page as text + extract links | ingests untrusted | Output treated as untrusted; wrapped | SSRF / injected page content — `should_wrap` wraps it |
+| `browse_page` | Fetch a page as text + extract links | ingests untrusted | SSRF/egress gate on the URL and every redirect (`_http_get`); output wrapped | SSRF (incl. redirect-to-internal) — refused by `url_block_reason`; injected content — wrapped |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
 | `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any run that ingests untrusted content (capability separation) | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run |
