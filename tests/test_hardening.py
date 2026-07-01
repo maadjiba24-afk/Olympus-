@@ -68,6 +68,30 @@ def test_facts_cache_roundtrip():
     assert "No matching" in facts.lookup("unrelated quantum widget")
 
 
+def test_facts_lookup_tolerates_malformed_lines():
+    # A legacy / hand-edited / partially-written line lacking fields must not
+    # crash the whole lookup (was a hard KeyError on 'norm'/'ts').
+    facts.record("Water boils at 100C at sea level", "true", "src")
+    path = facts._path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"claim": "no norm field here"}\n')      # missing norm + ts
+        f.write("not even json\n")
+    out = facts.lookup("water boils")
+    assert "Water boils" in out                            # good entry survives
+
+
+def test_facts_compaction_bounds_the_log(monkeypatch):
+    # The append-only log must stay bounded near ~2x the cap, atomically.
+    monkeypatch.setattr(facts, "MAX_FACTS", 5)
+    facts._line_counts.clear()
+    for i in range(40):
+        facts.record(f"factoid{i}x is verified", "true", "src")
+    assert facts.count() <= facts.MAX_FACTS * 2             # trimmed
+    assert "factoid39x" in facts.lookup("factoid39x")       # newest kept
+    assert "No matching" in facts.lookup("factoid0x")       # oldest dropped
+    assert not list(facts._path().parent.glob(".*tmp*"))    # atomic, no temp left
+
+
 # --- cost accounting -----------------------------------------------------
 
 def test_usage_records_and_reports(monkeypatch):
