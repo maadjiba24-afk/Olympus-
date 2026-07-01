@@ -31,6 +31,20 @@ def test_chunk_splits_long_text():
     assert len(parts) == 3 and "".join(parts) == "x" * 8000
 
 
+# --- proactive fan-out (heartbeat/backup push to every channel) ------------
+
+def test_notify_all_fans_out_and_reports_delivered(monkeypatch):
+    from olympus import discord, signal as signal_gw, slack, telegram
+    monkeypatch.setattr(telegram, "notify", lambda t: True)
+    monkeypatch.setattr(discord, "notify", lambda t: False)   # not configured
+    monkeypatch.setattr(slack, "notify", lambda t: True)
+    # a broken channel must not abort the fan-out to the others
+    monkeypatch.setattr(signal_gw, "notify",
+                        lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+    delivered = gateway.notify_all("heads up")
+    assert delivered == ["telegram", "slack"]
+
+
 # --- background dispatcher (fast-ack + de-dup) -----------------------------
 
 def test_dispatcher_dedups_retries():

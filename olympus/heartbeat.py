@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import traceback
 
-from . import config, memory, orchestrator, scheduler, telegram
+from . import config, gateway, memory, orchestrator, scheduler
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
@@ -45,8 +45,9 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         try:
             report = orchestrator.opportunity_scan()
             log.append("Argus: report saved to memory/reports.")
-            if telegram.notify("🌐 Olympus opportunity scan:\n\n" + report):
-                log.append("Argus: report pushed to Telegram.")
+            pushed = gateway.notify_all("🌐 Olympus opportunity scan:\n\n" + report)
+            if pushed:
+                log.append(f"Argus: report pushed to {', '.join(pushed)}.")
         except Exception:
             log.append("Argus failed:\n" + traceback.format_exc())
         state["opportunity_scan"] = now
@@ -104,8 +105,9 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         try:
             report = orchestrator.evolution_audit()
             log.append("Prometheus: audit saved to memory/reports.")
-            if telegram.notify("🔧 Olympus self-audit:\n\n" + report):
-                log.append("Prometheus: audit pushed to Telegram.")
+            pushed = gateway.notify_all("🔧 Olympus self-audit:\n\n" + report)
+            if pushed:
+                log.append(f"Prometheus: audit pushed to {', '.join(pushed)}.")
         except Exception:
             log.append("Prometheus failed:\n" + traceback.format_exc())
         state["evolution_audit"] = now
@@ -145,8 +147,8 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             else:
                 log.append(f"Backup FAILED at {res.get('stage')}: "
                            f"{res.get('error')}")
-                telegram.notify("⚠️ Olympus backup failed at "
-                                f"{res.get('stage')}: {res.get('error')}")
+                gateway.notify_all("⚠️ Olympus backup failed at "
+                                   f"{res.get('stage')}: {res.get('error')}")
         except Exception:
             log.append("Backup errored:\n" + traceback.format_exc())
         state["backup"] = now

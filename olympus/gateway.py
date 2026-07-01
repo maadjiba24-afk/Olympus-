@@ -40,6 +40,28 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
     return [text[i:i + size] for i in range(0, len(text), size)]
 
 
+# Every chat platform that exposes an ambient notify() for proactive pushes.
+NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal")
+
+
+def notify_all(text: str) -> list[str]:
+    """Push a proactive message to EVERY configured chat channel and return the
+    channels that accepted it. Each gateway's notify() is a no-op returning
+    False when that platform isn't configured, so this fans out only where
+    credentials exist — the heartbeat/backup no longer reach Telegram alone."""
+    from . import discord, signal as signal_gw, slack, telegram
+    fns = {"telegram": telegram.notify, "discord": discord.notify,
+           "slack": slack.notify, "signal": signal_gw.notify}
+    delivered = []
+    for name in NOTIFY_CHANNELS:
+        try:
+            if fns[name](text):
+                delivered.append(name)
+        except Exception:
+            pass
+    return delivered
+
+
 def reply_for(bots: dict, user_key: str, text: str,
               prefix: str = "ol") -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
