@@ -1111,6 +1111,63 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     return msg
 
 
+def gate_prompt(agent: str, new_prompt: str, reason: str,
+                settings: config.Settings | None = None) -> str:
+    """Apply a prompt change ONLY if a before/after benchmark shows it does not
+    regress the affected specialist's score; otherwise roll it back. This is the
+    code-enforced counterpart to `update_prompt` — it makes the "measured, with
+    rollback" guarantee real instead of trusting the caller to measure by hand.
+
+    A prompt is an *upgrade* of an existing agent (unlike a new skill, which must
+    justify itself), so the bar is non-regression: keep on after >= before,
+    revert on any drop. When the agent has no benchmark coverage the guarantee
+    cannot be honored, so the change is NOT applied — the caller is told to
+    generate a benchmark or use update_prompt manually.
+    """
+    from pathlib import Path
+
+    from . import evals, tools
+    settings = settings or config.Settings.from_env()
+    memory.set_user("shared")
+
+    stem = Path(agent).stem
+    path = config.PROMPTS_DIR / f"{stem}.md"
+    if not path.is_file():
+        return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
+
+    bench_ids = evals.ids_for([stem])
+    if not bench_ids:
+        return (f"Cannot benchmark-gate '{stem}': no benchmark items cover it "
+                f"(only user-facing specialists are scored). Generate coverage "
+                f"with generate_benchmark first, or use update_prompt + "
+                f"run_benchmark manually and accept it is unmeasured.")
+
+    try:
+        before = evals.run(settings, only=bench_ids)["avg"]
+    except Exception as err:
+        return f"Cannot gate '{stem}': baseline benchmark failed ({err})."
+
+    apply_msg = tools._update_prompt(stem, new_prompt, reason)  # backs up old
+    if apply_msg.startswith("Error"):
+        return apply_msg
+
+    try:
+        after = evals.run(settings, only=bench_ids)["avg"]
+    except Exception as err:
+        restored = tools._restore_prompt(stem)
+        return f"Reverted '{stem}': after-benchmark failed ({err}). {restored}"
+
+    if after >= before:                 # non-regression: keep the upgrade
+        memory.save("evals", f"prompt gate: {stem}",
+                    f"Kept prompt change [{before}→{after}] — {reason}")
+        return f"Prompt '{stem}' gated & kept [{before}→{after}] — {reason}"
+    restored = tools._restore_prompt(stem)   # regression: roll back
+    memory.save("corrections", f"Prompt change reverted: {stem}",
+                f"Benchmark regressed [{before}→{after}]; rolled back. "
+                f"Reason given was: {reason}")
+    return f"Prompt '{stem}' reverted — benchmark regressed [{before}→{after}]. {restored}"
+
+
 def evolution_audit(settings: config.Settings | None = None) -> str:
     """Prometheus audits Olympus, upgrades prompts, files proposals."""
     # System work runs in the SHARED namespace — never a triggering user's.

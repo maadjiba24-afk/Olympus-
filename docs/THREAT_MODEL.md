@@ -94,7 +94,8 @@ longer exists. So the surface and its threat model can't drift apart.
 | `create_skill` | Add a provisional skill | self-modifying | **Provisional** until benchmark-gated; sanitized | Malicious/weak skill — gated and reverted if it doesn't help |
 | `gate_skills` | Benchmark-gate provisional skills | self-modifying | Internal evaluation | Promoting a weak skill — only measured wins survive |
 | `generate_benchmark` | Generate a specialist benchmark | first-party write | Internal | Weak benchmark — bounded by the gate it feeds |
-| `update_prompt` | Edit an agent prompt | self-modifying | Auto-backup + benchmark-gated + rollback | Prompt sabotage — reverted automatically if it regresses |
+| `update_prompt` | Edit an agent prompt (raw) | self-modifying | Auto-backup of the prior version; caller must measure (see `gate_prompt`) | Prompt sabotage — recoverable via the backup; measure/rollback is the caller's duty |
+| `gate_prompt` | Benchmark-gated prompt upgrade | self-modifying | Before/after benchmark; applied only on non-regression, else auto-rolled-back | Prompt sabotage — a regressing change is reverted automatically by code |
 | `restore_prompt` | Restore a backed-up prompt | self-modifying | Reverts to a prior backup | Reverting to a weaker prompt — bounded to saved versions |
 | `propose_upgrade` | File an upgrade proposal | first-party write | Proposal only | Proposal spam — bounded, human-reviewed |
 | `run_benchmark` | Run the quality benchmark | first-party (cost) | Internal; budget-guarded | Token/cost burn — daily budget guard |

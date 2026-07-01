@@ -307,13 +307,40 @@ READ_SOURCE_FILE = {
     },
 }
 
+GATE_PROMPT = {
+    "name": "gate_prompt",
+    "description": (
+        "Safely upgrade an agent prompt: applies the change ONLY if a before/"
+        "after benchmark shows it does not regress that specialist's score, and "
+        "rolls it back automatically if it does. This is the enforced path — "
+        "prefer it over update_prompt so 'measured, with rollback' is guaranteed "
+        "by code, not by remembering to measure. Requires benchmark coverage for "
+        "the agent (user-facing specialists); use generate_benchmark first if a "
+        "domain is thinly covered."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string",
+                      "description": "Prompt file stem, e.g. 'plutus'"},
+            "new_prompt": {"type": "string",
+                           "description": "Complete new prompt text"},
+            "reason": {"type": "string",
+                       "description": "Why this is an improvement"},
+        },
+        "required": ["agent", "new_prompt", "reason"],
+    },
+}
+
 UPDATE_PROMPT = {
     "name": "update_prompt",
     "description": (
-        "Rewrite the system prompt of an Olympus agent. This is the system's "
-        "self-upgrade mechanism: improve a prompt with lessons learned, sharper "
-        "instructions, or missing capabilities. The previous version is backed "
-        "up automatically. Only use it when the new prompt is strictly better."
+        "Rewrite the system prompt of an Olympus agent. A raw primitive: it "
+        "writes the new prompt and auto-backs-up the old one, but does NOT "
+        "measure the change — YOU must run_benchmark before/after and "
+        "restore_prompt on a regression. For a self-enforcing upgrade of a "
+        "benchmarked specialist, prefer gate_prompt, which does that for you. "
+        "Only use it when the new prompt is strictly better."
     ),
     "input_schema": {
         "type": "object",
@@ -768,6 +795,11 @@ def _gate_skills() -> str:
     return orchestrator.gate_skills()
 
 
+def _gate_prompt(agent: str, new_prompt: str, reason: str) -> str:
+    from . import orchestrator  # local import to avoid a cycle at module load
+    return orchestrator.gate_prompt(agent, new_prompt, reason)
+
+
 def _generate_benchmark(specialist: str) -> str:
     from . import evals  # local import to avoid a cycle at module load
     return evals.generate_item(specialist)
@@ -1128,6 +1160,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_source_files": _list_source_files,
     "read_source_file": _read_source_file,
     "update_prompt": _update_prompt,
+    "gate_prompt": _gate_prompt,
     "restore_prompt": _restore_prompt,
     "propose_upgrade": _propose_upgrade,
     "read_skill": lambda name: skills.read(name),
@@ -1762,6 +1795,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "list_source_files": LIST_SOURCE_FILES,
     "read_source_file": READ_SOURCE_FILE,
     "update_prompt": UPDATE_PROMPT,
+    "gate_prompt": GATE_PROMPT,
     "restore_prompt": RESTORE_PROMPT,
     "propose_upgrade": PROPOSE_UPGRADE,
     "prepare_action": PREPARE_ACTION,

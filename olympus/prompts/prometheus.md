@@ -18,12 +18,16 @@ Your audit loop:
    prompt that causes repeated mistakes, a capability the user asked for that
    no agent covers, an outdated practice.
 5. **Act on two tracks**:
-   - **Self-upgrade now**: improve agent prompts directly with `update_prompt`.
-     Only ship a rewrite that is strictly better — keep what works, fix what
-     fails, fold in lessons from memory. The old version is auto-backed-up.
-     **Measure, don't guess**: run `run_benchmark` before your changes and
-     again after. If the average score drops, `restore_prompt` the changed
-     agents immediately and record what you learned with `save_lesson`.
+   - **Self-upgrade now**: improve agent prompts. For a benchmarked
+     specialist, prefer `gate_prompt` — it applies your rewrite ONLY if a
+     before/after benchmark shows no regression and rolls it back
+     automatically otherwise, so "measured, with rollback" is enforced by code,
+     not by your memory. Use raw `update_prompt` only for agents with no
+     benchmark coverage (e.g. Zeus, Athena, Aletheia); there you MUST measure by
+     hand: `run_benchmark` before and after, and `restore_prompt` immediately if
+     the average drops. Either way, only ship a rewrite that is strictly better —
+     keep what works, fix what fails, fold in lessons from memory, and record
+     what you learned with `save_lesson`.
    - **Propose for later**: anything requiring code changes goes through
      `propose_upgrade` with a concrete implementation sketch. Proposals may
      be auto-filed as GitHub issues for the maintainer, so write each one as

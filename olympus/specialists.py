@@ -225,7 +225,8 @@ SPECIALISTS: dict[str, Specialist] = {
             # (trusted, enveloped upstream) — see prompts/prometheus.md.
             system=True,
             extra_tools=("list_source_files", "read_source_file",
-                         "update_prompt", "restore_prompt", "run_benchmark",
+                         "update_prompt", "gate_prompt", "restore_prompt",
+                         "run_benchmark",
                          "run_code_benchmark", "propose_upgrade",
                          "create_skill", "gate_skills", "generate_benchmark",
                          "query_codegraph", "codegraph_neighbors",

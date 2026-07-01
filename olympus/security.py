@@ -27,8 +27,8 @@ from urllib.parse import urlparse
 # Tools that act on the world or mutate Olympus itself. They are stripped from
 # any agent run that also has web/file ingestion enabled.
 ACTION_TOOLS = frozenset({
-    "send_email", "call_webhook", "update_prompt", "restore_prompt",
-    "propose_upgrade", "run_benchmark",
+    "send_email", "call_webhook", "update_prompt", "gate_prompt",
+    "restore_prompt", "propose_upgrade", "run_benchmark",
     # The browser actuator can click/type on a *credentialed* session, so it is
     # an action: capability separation strips it from any run that also ingests
     # untrusted page content (an injected page can't reach your logged-in tabs).
