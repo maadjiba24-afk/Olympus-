@@ -392,11 +392,17 @@ class Olympus:
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
+        start = len(tr.decisions)
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
-            return list(pool.map(
+            results = list(pool.map(
                 lambda item: (item["specialist"],
                               self._run_one(item["specialist"], item["task"], tr)),
                 assignments))
+        # Workers appended their contract/egress decisions in completion order;
+        # canonicalize this parallel slice so replay is order-stable.
+        if len(assignments) > 1:
+            tr.canonicalize_parallel_since(start)
+        return results
 
     def _dispatch_dag(self, steps: list[dict[str, Any]],
                       tr: "trace_mod.Trace") -> list[tuple[str, str]]:
@@ -438,8 +444,13 @@ class Olympus:
                             f"(build on these, don't redo them)\n{inputs}")
                 return (s["id"], key, self._run_one(key, task, tr))
 
+            start = len(tr.decisions)
             with ThreadPoolExecutor(max_workers=min(4, len(ready))) as pool:
                 level_results = list(pool.map(work, ready))
+            # This level's workers appended their contract/egress decisions in
+            # completion order; canonicalize the slice so replay is order-stable.
+            if len(ready) > 1:
+                tr.canonicalize_parallel_since(start)
 
             for sid, key, out in level_results:
                 done[sid] = (key, out)

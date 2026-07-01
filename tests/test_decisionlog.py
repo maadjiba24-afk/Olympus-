@@ -171,6 +171,29 @@ def test_replay_makes_zero_api_calls_and_is_byte_identical(monkeypatch):
     assert trace.diff_decisions(rec.decisions, fresh.decisions) == []
 
 
+def test_parallel_decisions_canonicalized_for_stable_replay():
+    # A parallel dispatch level appends worker decisions in completion order,
+    # which differs run-to-run. canonicalize_parallel_since must make the slice
+    # order-stable so record vs replay don't diff purely by thread timing —
+    # while leaving the preceding sequential decision in place.
+    def build(order):
+        tr = trace.Trace("t")
+        tr.decision("route", {"name": "athena"}, {"plan": "x"}, status="ok")
+        start = len(tr.decisions)
+        for key in order:                       # parallel siblings, some order
+            tr.decision("contract",
+                        {"name": key, "key": key, "role": "specialist"},
+                        {"violations": []}, status="ok")
+        tr.canonicalize_parallel_since(start)
+        return tr
+
+    a = build(["plutus", "peitho"])
+    b = build(["peitho", "plutus"])             # opposite completion order
+    assert trace.canonical_log(a.decisions) == trace.canonical_log(b.decisions)
+    assert trace.diff_decisions(a.decisions, b.decisions) == []
+    assert a.decisions[0]["decision_type"] == "route"    # sequential unmoved
+
+
 def test_ask_stream_records_input_for_replay(monkeypatch):
     # A streamed run must record its input (and run id), or it is non-replayable
     # — replay_run raises "no recorded input to replay".
