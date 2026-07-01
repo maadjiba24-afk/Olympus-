@@ -187,7 +187,10 @@ def recent_titles(category: str, n: int = 5) -> list[str]:
     for p in files:
         body = parse_note(p.read_text(encoding="utf-8", errors="replace"))[1]
         first = body.lstrip().splitlines()[0] if body.strip() else ""
-        out.append(first.lstrip("# ").strip() or p.stem)
+        # Strip only the single leading "# " heading marker — NOT a character
+        # class (lstrip("# ") would mangle a title like "#1 priority").
+        title = first[2:] if first.startswith("# ") else first
+        out.append(title.strip() or p.stem)
     return out
 
 
