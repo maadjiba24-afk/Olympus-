@@ -347,20 +347,44 @@ def sign_log(decisions: list[dict]) -> dict:
             "seedDerivation": SEED_DERIVATION}
 
 
-def verify_log(decisions: list[dict], log_signature: dict) -> bool:
-    """True if `log_signature` is a valid signature over these decisions by the
-    trusted key. Any tampering with the decision path breaks this."""
+def verify_log(decisions: list[dict], log_signature: dict,
+               *, pin: str | None = None) -> bool:
+    """True if `log_signature` is a valid signature over these decisions by a
+    TRUSTED key. Any tampering with the decision path breaks the signature.
+
+    Trust model (note: decision logs are signed at RUNTIME by the running
+    instance's key, a different trust domain from the CI-signed *release*
+    manifest — so this deliberately does NOT auto-consult the release
+    `pinned_pubkey()`, which would reject every default-seed log on a normal
+    install):
+
+    - With an explicit **pin**: the log MUST be signed by exactly that key — a
+      log re-signed under any other seed is rejected even if its own signature
+      checks out. This is the pinning path for a third-party verifier who holds
+      the expected public key out-of-band (e.g. `OLYMPUS_LOG_PIN`).
+    - With no pin: bind to the locally-configured signing key
+      (`public_key_hex()`), i.e. the instance verifies its own logs.
+    """
     from . import trace
-    pub = log_signature.get("publicKey", "")
-    if not pub or (_HAVE_CRYPTO and pub != public_key_hex()):
+    pub = (log_signature.get("publicKey") or "").strip()
+    if not pub:
         return False
     payload = trace.canonical_log(decisions).encode("utf-8")
-    return verify_signature(pub, payload, log_signature.get("signature", ""))
+    if not verify_signature(pub, payload, log_signature.get("signature", "")):
+        return False
+    if pin is None:
+        pin = (os.environ.get("OLYMPUS_LOG_PIN") or "").strip() or None
+    if pin:
+        return pub.lower() == pin.lower()
+    return (not _HAVE_CRYPTO) or pub == public_key_hex()
 
 
-def verify_run(run_id: str) -> dict:
+def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     """Verify the decision-log signature of a recorded run. Returns
-    {ok, found, signed, problems}."""
+    {ok, found, signed, problems}. Pass `pin` (or set OLYMPUS_LOG_PIN) to bind
+    verification to an expected public key held out-of-band, so a log re-signed
+    under a different seed is rejected even though its own signature is
+    self-consistent; with no pin the instance verifies its own signing key."""
     from . import trace
     run = trace.load_run(run_id)
     if not run:
@@ -371,8 +395,17 @@ def verify_run(run_id: str) -> dict:
         return {"ok": False, "found": True, "signed": False,
                 "problems": ["run has no decision-log signature "
                              "(recorded before signing, or crypto unavailable)"]}
-    ok = verify_log(run.get("decisions", []), sig)
-    return {"ok": ok, "found": True, "signed": True,
-            "problems": [] if ok else
-            ["decision-log signature INVALID — the recorded decisions were "
-             "altered since the run."]}
+    decisions = run.get("decisions", [])
+    if verify_log(decisions, sig, pin=pin):
+        return {"ok": True, "found": True, "signed": True, "problems": []}
+    # Distinguish a tampered log from a valid-but-untrusted signer for the report.
+    pub = (sig.get("publicKey") or "").strip()
+    payload = trace.canonical_log(decisions).encode("utf-8")
+    sig_ok = bool(pub) and verify_signature(pub, payload, sig.get("signature", ""))
+    if not sig_ok:
+        problem = ("decision-log signature INVALID — the recorded decisions were "
+                   "altered since the run.")
+    else:
+        problem = ("decision-log signed by an UNTRUSTED key (does not match the "
+                   "pinned public key).")
+    return {"ok": False, "found": True, "signed": True, "problems": [problem]}

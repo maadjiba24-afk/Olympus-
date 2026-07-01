@@ -214,3 +214,22 @@ def test_tampered_decision_log_fails_signature(tmp_path, monkeypatch):
 def test_verify_run_reports_unsigned_and_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     assert witness.verify_run("nope")["found"] is False
+
+
+def test_verify_run_pin_binds_to_expected_key(tmp_path, monkeypatch):
+    # The pinning path: a third-party verifier holding the expected public key
+    # accepts a log signed by it and REJECTS one signed under a different seed,
+    # even though that other log's own signature is self-consistent.
+    run_id = _signed_run(tmp_path, monkeypatch)
+    assert witness.verify_run(run_id, pin=witness.public_key_hex())["ok"] is True
+    res = witness.verify_run(run_id, pin="00" * 32)      # a different key
+    assert res["ok"] is False
+    assert any("UNTRUSTED" in p for p in res["problems"])
+
+
+def test_verify_log_pin_via_env(tmp_path, monkeypatch):
+    run_id = _signed_run(tmp_path, monkeypatch)
+    monkeypatch.setenv("OLYMPUS_LOG_PIN", "ff" * 32)     # wrong pin → reject
+    assert witness.verify_run(run_id)["ok"] is False
+    monkeypatch.setenv("OLYMPUS_LOG_PIN", witness.public_key_hex())
+    assert witness.verify_run(run_id)["ok"] is True
