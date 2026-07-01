@@ -79,7 +79,7 @@ def test_summary_shows_level_and_model():
     companion.save("s", {"interactions": 12, "evolutions": 3,
                          "model": "- likes diagrams", "updated": 1.0})
     out = companion.summary("s")
-    assert "familiar" in out and "conversations: 12" in out
+    assert "familiar" in out and "exchanges: 12" in out
     assert "likes diagrams" in out
 
 

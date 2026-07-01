@@ -572,7 +572,7 @@ class Olympus:
                 args=(self.user, user_message, reply,
                       self.pool.for_role("reasoning")),
                 daemon=True).start()
-            # Per-user adaptive evolution: count this conversation and, at every
+            # Per-user adaptive evolution: count this exchange and, at every
             # checkpoint, re-distill this user's private working model in the
             # background so Olympus gets measurably better at working with them.
             try:
