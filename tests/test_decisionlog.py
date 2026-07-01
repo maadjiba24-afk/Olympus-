@@ -171,6 +171,21 @@ def test_replay_makes_zero_api_calls_and_is_byte_identical(monkeypatch):
     assert trace.diff_decisions(rec.decisions, fresh.decisions) == []
 
 
+def test_ask_stream_records_input_for_replay(monkeypatch):
+    # A streamed run must record its input (and run id), or it is non-replayable
+    # — replay_run raises "no recorded input to replay".
+    from olympus import orchestrator
+    bot = orchestrator.Olympus(
+        settings=config.Settings(provider="anthropic", model="x", api_key="k"),
+        user="streamer")
+    monkeypatch.setattr(bot, "_pipeline",
+                        lambda msg, tr: ("direct", None, "the answer"))
+    out = "".join(bot.ask_stream("what is the plan?"))
+    assert "the answer" in out
+    run = trace.load_run(bot.last_run_id)
+    assert run is not None and run["meta"]["input"] == "what is the plan?"
+
+
 def test_replay_run_diffs_recorded_run(monkeypatch):
     """The orchestrator entry point: replay_run loads the recorded run, re-runs
     the pipeline against frozen responses, and reports an empty diff."""

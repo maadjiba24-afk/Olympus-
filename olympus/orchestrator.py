@@ -694,6 +694,10 @@ class Olympus:
             return
         memory.set_user(self.user)
         tr = trace_mod.Trace("ask_stream", self.user)
+        # Record the input like ask() does, otherwise every streamed run is
+        # non-replayable (replay_run raises "no recorded input to replay").
+        tr.meta = {"input": user_message,
+                   "conversation_id": self.conversation_id}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -745,6 +749,7 @@ class Olympus:
             self._finish(user_message, "".join(chunks))
         finally:
             tr.flush()
+            self.last_run_id = tr.id      # streamed runs are discoverable too
 
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""
