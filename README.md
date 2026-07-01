@@ -29,13 +29,7 @@ Pick your OS, paste one line, then type `olympus`. The first run asks which API
 key you're bringing (Anthropic, OpenAI, or any compatible provider), saves it
 securely, and drops you into chat. Requires **Python 3.10+**.
 
-**Linux**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
-```
-
-**macOS**
+**Linux / macOS**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
@@ -294,14 +288,15 @@ user-facing specialist and trains the weakest on a cadence:
   `OLYMPUS_EMAIL_ALLOWLIST` recipients; webhooks only to operator-defined
   `OLYMPUS_WEBHOOKS` URLs; Hephaestus's code runs in Anthropic's server-side
   sandbox, never on your machine.
-- **Accurate by design** — nothing reaches the user without passing the
-  hallucination controller; uncertain claims are flagged, never laundered.
+- **Accurate by design** — answers the supervisor flags as factual pass through
+  the hallucination controller before you see them; uncertain claims are
+  flagged, never laundered.
 
 ## Why Olympus vs Hermes / OpenClaw
 
 | | Hermes | OpenClaw | **Olympus** |
 |---|---|---|---|
-| Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
+| Hallucination control | none | none | **built-in verification gate** — factual answers are web-checked (the supervisor flags what needs checking) before you see them |
 | Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->13<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
@@ -311,40 +306,20 @@ user-facing specialist and trains the weakest on a cadence:
 
 ## Setup
 
-**One line.** Paste this in your terminal:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
-```
-
-**On Windows**, paste this in PowerShell instead:
-
-```powershell
-irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
-```
-
-Both create a private Python environment, install Olympus, and put an `olympus`
-command on your PATH. Then type `olympus`. The first run asks one question — which API key you're
-bringing (Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter,
-or a local Ollama) — saves it securely (`~/.olympus/config.env`, owner-only),
-and drops you into chat. From then on it's just:
+Installation is covered in [Install](#install) above — the one-liner creates a
+private Python environment, installs Olympus, and puts an `olympus` command on
+your PATH. The first run asks one question (which API key you're bringing —
+Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter, or a local
+Ollama), saves it securely (`~/.olympus/config.env`, owner-only), and drops you
+into chat. From then on it's just:
 
 ```
 olympus
 you ▸ find me 30 minutes with Sarah next week and draft the invite
 ```
 
-Plain English. No bash, no pip, no environment variables. Add more keys
-anytime with `olympus setup` — Olympus composes multiple models into one
-brain. Uninstall: `rm -rf ~/.olympus ~/.local/bin/olympus`.
-
-**Prefer a package manager?** Olympus is on PyPI:
-
-```bash
-pipx install olympus-council     # isolated, gets you the `olympus` command
-# or:  pip install olympus-council
-olympus                          # same one-question setup wizard
-```
+Plain English. No bash, no pip, no environment variables. Add more keys anytime
+with `olympus setup` — Olympus composes multiple models into one brain.
 
 <details>
 <summary>Manual install (developers)</summary>
