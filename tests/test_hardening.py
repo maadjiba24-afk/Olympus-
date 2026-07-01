@@ -45,9 +45,15 @@ def test_web_specialist_loses_action_tools():
     # Chronos has no web -> keeps its actuators
     chronos_names = {d.get("name") for d in SPECIALISTS["chronos"].tool_defs()}
     assert {"send_email", "call_webhook"} <= chronos_names
-    # System specialists keep their self-modification tools despite web
-    prom_names = {d.get("name") for d in SPECIALISTS["prometheus"].tool_defs()}
+    # Prometheus keeps its self-modification tools (it is system=True and does
+    # NOT ingest untrusted content), but it must not ingest the open web in the
+    # same run — otherwise an injected page could steer a self-modification.
+    prom_defs = SPECIALISTS["prometheus"].tool_defs()
+    prom_names = {d.get("name") for d in prom_defs}
     assert "update_prompt" in prom_names
+    assert not SPECIALISTS["prometheus"]._ingests("anthropic")
+    assert not security.loadout_ingests_external(prom_defs)
+    assert "web_search" not in prom_names and "web_fetch" not in prom_names
 
 
 # --- verified-facts cache ------------------------------------------------
