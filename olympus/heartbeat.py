@@ -115,6 +115,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Training failed:\n" + traceback.format_exc())
         state["train"] = now
 
+    from . import curator
+    if _due(state, "skill_curation", curator.curation_every(), now):
+        log.append("Curator: grading and pruning the skill library...")
+        try:
+            log.append("Curator: " + curator.curate())
+        except Exception:
+            log.append("Curator failed:\n" + traceback.format_exc())
+        state["skill_curation"] = now
+
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
         try:

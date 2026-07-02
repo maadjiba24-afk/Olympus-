@@ -288,6 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
+    sub.add_parser("curate", help="grade the skill library; prune what a "
+                                  "benchmark proves safe to remove")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
     p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
@@ -897,6 +899,9 @@ def main(argv: list[str] | None = None) -> int:
         print(skills.index())
     elif args.command == "gate":
         print(orchestrator.gate_skills())
+    elif args.command == "curate":
+        from . import curator
+        print(curator.curate())
     elif args.command == "train":
         print(orchestrator.train_specialists(focus=args.focus))
     elif args.command == "models":

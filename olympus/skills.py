@@ -135,6 +135,38 @@ def count() -> int:
     return len(list(_dir().glob("*.md")))
 
 
+def list_all() -> list[dict]:
+    """Metadata for every visible skill — the curator's working set."""
+    out = []
+    for path in sorted(_dir().glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        desc = next((ln[2:].strip() for ln in text.splitlines()
+                     if ln.startswith("> ")), "")
+        m = re.search(r"_Last updated: (.*?)_", text)
+        out.append({"name": _title(text) or path.stem,
+                    "specialist": _meta(text, "specialist"),
+                    "provisional": "<!-- provisional -->" in text,
+                    "description": desc,
+                    "updated": m.group(1) if m else "",
+                    "chars": len(text)})
+    return out
+
+
+def archive(name: str, reason: str = "") -> str:
+    """Retire a skill: move it into skill_backups/ as pruned-<date>-<slug>.md
+    (recoverable by hand) instead of deleting outright."""
+    path = _dir() / f"{_slug(name)}.md"
+    if not path.exists():
+        return f"no skill named '{name}'"
+    dest = _backup_dir() / f"pruned-{time.strftime('%Y%m%d')}-{path.name}"
+    body = path.read_text(encoding="utf-8", errors="replace")
+    if reason:
+        body = f"<!-- pruned: {reason} -->\n" + body
+    dest.write_text(body, encoding="utf-8")
+    path.unlink()
+    return f"archived '{name}' → skill_backups/{dest.name}"
+
+
 # --- provisional lifecycle (benchmark gating) ----------------------------
 
 def list_provisional() -> list[tuple[str, str | None]]:

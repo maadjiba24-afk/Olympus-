@@ -26,6 +26,7 @@ from . import config, memory, scheduler
 def _cadences() -> dict[str, int]:
     """The heartbeat's internal task cadences (seconds). Mirrors heartbeat.tick;
     a 0/falsey interval means the task is disabled and is skipped here."""
+    from . import curator
     items = {
         "opportunity_scan": config.OPPORTUNITY_SCAN_EVERY,
         "watchlist": config.WATCHLIST_EVERY,
@@ -33,6 +34,7 @@ def _cadences() -> dict[str, int]:
         "daily_learning": config.DAILY_LEARNING_EVERY,
         "train": config.TRAIN_EVERY,
         "evolution_audit": config.EVOLUTION_AUDIT_EVERY,
+        "skill_curation": curator.curation_every(),
         "replay_gate": config.REPLAY_GATE_EVERY,
         "backup": config.BACKUP_EVERY,
     }
