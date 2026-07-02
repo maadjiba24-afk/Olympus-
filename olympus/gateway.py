@@ -17,7 +17,7 @@ import threading
 import traceback
 from collections import OrderedDict
 
-from . import memory, orchestrator
+from . import config, memory, orchestrator, steering
 
 CHUNK = 3500
 
@@ -30,6 +30,10 @@ HELP = (
     "/queue <youtube-url> — queue a video for the autonomous loop\n"
     "/audit — Olympus audits and upgrades itself\n"
     "/good or /bad [comment] — rate the last answer\n"
+    "/steer <note> — nudge the task that's currently running\n"
+    "/undo [N] — remove the last N exchanges from the conversation\n"
+    "/goal <text> [:: done-means] — set a standing goal the heartbeat works\n"
+    "/goal list · /goal drop <id> — review or retire standing goals\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
@@ -43,6 +47,78 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
 
 # Every chat platform that exposes an ambient notify() for proactive pushes.
 NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal")
+
+
+# --- in-flight work journal (session auto-resume) --------------------------
+#
+# Conversation *history* already survives a restart (persisted per turn); the
+# request being processed WHEN the gateway died did not — it vanished
+# silently. Each long-poll gateway marks the message it is working on and
+# clears the mark on completion; on boot it takes the stale marks back and
+# re-runs them, telling the user. An entry is retried at most once (a message
+# that kills the gateway twice must not become a crash loop).
+
+_INFLIGHT_MAX_ATTEMPTS = 2
+_INFLIGHT_MAX_AGE = 24 * 3600
+
+
+def _inflight_dir():
+    d = config.MEMORY_DIR / "inflight"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def inflight_mark(uid: str, deliver_key, text: str) -> None:
+    """Record that `text` is being processed for `uid` (best-effort).
+    `deliver_key` is whatever the platform needs to send a message back
+    (chat id, sender number)."""
+    import json as _json
+    import time as _time
+    try:
+        path = _inflight_dir() / f"{memory.safe_id(uid)}.json"
+        attempts = 1
+        if path.exists():
+            try:
+                prior = _json.loads(path.read_text(encoding="utf-8"))
+                if prior.get("text") == text:
+                    attempts = int(prior.get("attempts", 1)) + 1
+            except (ValueError, OSError):
+                pass
+        path.write_text(_json.dumps(
+            {"uid": uid, "key": deliver_key, "text": text,
+             "attempts": attempts, "ts": _time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def inflight_clear(uid: str) -> None:
+    try:
+        (_inflight_dir() / f"{memory.safe_id(uid)}.json").unlink(
+            missing_ok=True)
+    except OSError:
+        pass
+
+
+def inflight_take(prefix: str) -> list[dict]:
+    """Pop and return the resumable entries whose uid starts with `prefix`.
+    Entries that are too old or already retried are dropped, not returned."""
+    import json as _json
+    import time as _time
+    out = []
+    for path in sorted(_inflight_dir().glob("*.json")):
+        try:
+            entry = _json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            path.unlink(missing_ok=True)
+            continue
+        if not str(entry.get("uid", "")).startswith(prefix):
+            continue
+        path.unlink(missing_ok=True)      # taken either way
+        fresh = _time.time() - float(entry.get("ts", 0)) <= _INFLIGHT_MAX_AGE
+        if fresh and int(entry.get("attempts", 1)) < _INFLIGHT_MAX_ATTEMPTS \
+                and entry.get("text"):
+            out.append(entry)
+    return out
 
 
 def notify_all(text: str) -> list[str]:
@@ -63,6 +139,23 @@ def notify_all(text: str) -> list[str]:
     return delivered
 
 
+def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
+    """Fast-path `/steer`: handle it synchronously (BEFORE the per-user serial
+    worker queue) so the note reaches a pipeline that is already mid-run —
+    queued behind the running task it would only be seen after the run ends.
+    Returns reply chunks when the message was a /steer, else None."""
+    cmd, _, arg = (text or "").strip().partition(" ")
+    if cmd.lower() != "/steer":
+        return None
+    if not arg.strip():
+        return chunk("Usage: /steer <note> — nudge the task that's running")
+    uid = f"{prefix}-{memory.safe_id(user_key)}"
+    if steering.put(uid, arg):
+        return chunk("Noted — the running task will see this after its "
+                     "next tool call.")
+    return chunk("Steering queue is full; note dropped.")
+
+
 def reply_for(bots: dict, user_key: str, text: str,
               prefix: str = "ol") -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
@@ -76,6 +169,9 @@ def reply_for(bots: dict, user_key: str, text: str,
 
     if cmd in ("/start", "/help"):
         return chunk(HELP)
+    if cmd == "/steer":
+        # Fallback for transports that didn't fast-path it; same behavior.
+        return try_steer(user_key, text, prefix)  # type: ignore[return-value]
     if cmd == "/scan":
         return chunk(orchestrator.opportunity_scan())
     if cmd == "/audit":
@@ -91,10 +187,29 @@ def reply_for(bots: dict, user_key: str, text: str,
         return chunk("Queued — the heartbeat will watch it on its next pass.")
 
     uid = f"{prefix}-{memory.safe_id(user_key)}"
+    if cmd == "/goal":
+        from . import goals
+        sub, _, rest = arg.strip().partition(" ")
+        if not arg.strip() or sub == "list":
+            return chunk(goals.summary(uid))
+        if sub == "drop":
+            return chunk(goals.set_status(rest.strip(), "dropped"))
+        if sub == "done":
+            return chunk(goals.set_status(rest.strip(), "done",
+                                          evidence="closed manually"))
+        text, _, contract = arg.partition("::")
+        return chunk(goals.add(uid, text.strip(), contract.strip()))
+
     bot = bots.get(uid)
     if bot is None:
         bot = bots[uid] = orchestrator.Olympus(user=uid, conversation_id=uid)
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            return chunk("Usage: /undo [N]")
+        return chunk(bot.undo(n))
     if cmd in ("/good", "/bad"):
         return chunk(bot.feedback("up" if cmd == "/good" else "down", arg))
     if cmd == "/lang":

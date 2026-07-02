@@ -106,20 +106,60 @@ def valid_signature(raw_body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(digest, header.split("=", 1)[1])
 
 
-def extract_messages(payload: dict) -> list[tuple[str, str, str]]:
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(media_id: str) -> str | None:
+    """Download a WhatsApp audio/voice message via the Graph API and
+    transcribe it. None when unavailable (no media key, too big, errors)."""
+    try:
+        req = urllib.request.Request(
+            f"{GRAPH}/{media_id}",
+            headers={"Authorization": f"Bearer {_access_token()}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            info = json.loads(resp.read())
+        url = info.get("url")
+        if not url:
+            return None
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {_access_token()}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            blob = resp.read(MAX_VOICE_BYTES + 1)
+        if len(blob) > MAX_VOICE_BYTES:
+            return None
+        from . import media as media_tools
+        transcript = media_tools.transcribe_bytes(blob, filename="voice.ogg")
+    except Exception:
+        return None
+    if transcript.startswith("Error"):
+        return None
+    return f"[voice note] {transcript}"
+
+
+def extract_messages(payload: dict,
+                     transcribe=None) -> list[tuple[str, str, str]]:
     """Pull (sender, text, message_id) tuples from a webhook payload, ignoring
-    everything else (delivery/read status callbacks, non-text message types).
-    The message id lets the server drop Meta's webhook retries."""
+    everything else (delivery/read status callbacks, unsupported types).
+    Voice/audio messages become text via transcription when a media API key
+    is configured (injectable via `transcribe` for tests). The message id
+    lets the server drop Meta's webhook retries."""
+    transcribe = transcribe or _voice_text
     out: list[tuple[str, str, str]] = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for msg in value.get("messages", []):
+                sender = msg.get("from", "")
+                body = ""
                 if msg.get("type") == "text":
-                    sender = msg.get("from", "")
                     body = (msg.get("text") or {}).get("body", "")
-                    if sender and body:
-                        out.append((sender, body, msg.get("id", "")))
+                elif msg.get("type") in ("audio", "voice"):
+                    media_id = (msg.get("audio") or msg.get("voice")
+                                or {}).get("id", "")
+                    if media_id:
+                        body = transcribe(media_id) or ""
+                if sender and body:
+                    out.append((sender, body, msg.get("id", "")))
     return out
 
 
@@ -163,6 +203,14 @@ def _process(bots: dict, sender: str, text: str) -> None:
     bot = bots.setdefault(sender, orchestrator.Olympus(
         user=f"wa-{sender}", conversation_id=f"wa-{sender}"))
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            _send(sender, "Usage: /undo [N]")
+            return
+        _send(sender, bot.undo(n))
+        return
     if cmd in ("/good", "/bad"):
         _send(sender, bot.feedback("up" if cmd == "/good" else "down", arg))
         return
@@ -177,7 +225,13 @@ def _process(bots: dict, sender: str, text: str) -> None:
         _send(sender, bot.set_contribute(on))
         return
 
-    _send(sender, bot.ask(text))
+    # Journal the in-flight request so a gateway restart resumes it.
+    from . import gateway
+    gateway.inflight_mark(f"wa-{sender}", sender, text)
+    try:
+        _send(sender, bot.ask(text))
+    finally:
+        gateway.inflight_clear(f"wa-{sender}")
 
 
 class _SenderWorker(threading.Thread):
@@ -253,6 +307,19 @@ class Handler(BaseHTTPRequestHandler):
                 if worker is None:
                     worker = workers[sender] = _SenderWorker(bots, sender)
                     worker.start()
+            # /steer is answered on the webhook thread (not queued) so the
+            # note reaches a pipeline already running on this sender's worker.
+            if text.split(" ", 1)[0].lower() == "/steer":
+                from . import steering
+                note = text.partition(" ")[2].strip()
+                if not note:
+                    _send(sender, "Usage: /steer <note>")
+                elif steering.put(f"wa-{sender}", note):
+                    _send(sender, "Noted — the running task will see this "
+                                  "after its next tool call.")
+                else:
+                    _send(sender, "Steering queue is full; note dropped.")
+                continue
             worker.q.put(text)
 
 
@@ -265,6 +332,22 @@ def run_server(host: str = "0.0.0.0", port: int = 8485) -> None:
     httpd._bots, httpd._workers = {}, {}
     httpd._seen = set()
     httpd._lock = threading.Lock()
+    # Session auto-resume: re-run what a previous process died holding.
+    from . import gateway as _gw
+    for entry in _gw.inflight_take("wa-"):
+        sender = str(entry.get("key") or "")
+        if not sender:
+            continue
+        try:
+            _send(sender, "⚡ I was restarted while working on your last "
+                          "request — picking it back up now.")
+        except Exception:
+            pass
+        worker = httpd._workers.get(sender)
+        if worker is None:
+            worker = httpd._workers[sender] = _SenderWorker(httpd._bots, sender)
+            worker.start()
+        worker.q.put(entry["text"])
     print(f"⚡ Olympus WhatsApp webhook on http://{host}:{port}/webhook "
           f"(put it behind HTTPS; Ctrl-C to stop)")
     try:

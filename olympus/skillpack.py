@@ -89,16 +89,40 @@ def export(name: str, dest_dir: str) -> str:
     return str(path)
 
 
+def scan_reason(parsed: dict) -> str | None:
+    """Security scan for an imported skill; reason string when it must be
+    refused, None when clean. A skill is durable agent *instructions*, so an
+    injection payload here poisons every future run that loads it — imports
+    are scanned the way live web content is, and fail closed."""
+    from . import security
+    body = "\n".join(str(parsed.get(k, ""))
+                     for k in ("name", "description", "instructions"))
+    if security.looks_like_injection(body):
+        return ("it contains prompt-injection markers (e.g. 'ignore previous "
+                "instructions', tool commands). Edit the file and re-import "
+                "if it is legitimate")
+    if security._KEYISH.search(body) or security._URL_CRED.search(body):
+        return ("it contains something shaped like a credential — skills are "
+                "shared instructions and must never embed secrets")
+    return None
+
+
 def import_file(path: str, *, provisional: bool = False) -> str:
     """Import a SKILL.md (or a directory containing one) into the Olympus
     library. Imported skills are permanent by default (they're curated); pass
-    provisional=True to route them through the benchmark gate instead."""
+    provisional=True to route them through the benchmark gate instead.
+    Every import is security-scanned first (injection markers, embedded
+    credentials) and refused — not sanitized — on a hit."""
     p = Path(path)
     if p.is_dir():
         p = p / "SKILL.md"
     if not p.is_file():
         return f"Error: no SKILL.md found at {path}"
     parsed = parse_skill_md(p.read_text(encoding="utf-8", errors="replace"))
+    reason = scan_reason(parsed)
+    if reason:
+        return (f"Error: refused to import '{parsed.get('name') or p.name}' — "
+                f"{reason}.")
     return skills.create(parsed["name"], parsed["description"],
                          parsed["instructions"],
                          specialist=parsed["specialist"],

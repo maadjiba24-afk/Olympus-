@@ -159,3 +159,51 @@ def test_new_tools_threat_modeled():
 def test_hermes_has_interactive_tools():
     names = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
     assert {"operator_remember_login", "set_advanced_mode"} <= names
+
+
+# --- @file / @url context injection (Hermes v0.4) --------------------------
+
+def test_expand_file_reference(tmp_path, monkeypatch):
+    from olympus import tui
+    f = tmp_path / "report.md"
+    f.write_text("Q3 revenue was up 12%", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    out, notes = tui.expand_references("summarize @report.md please")
+    assert "summarize report.md please" in out
+    assert "[context from file report.md]" in out
+    assert "Q3 revenue was up 12%" in out
+    assert notes and "injected report.md" in notes[0]
+
+
+def test_expand_url_reference_wraps_untrusted():
+    from olympus import tui
+    out, notes = tui.expand_references(
+        "what does @https://example.com/page say?",
+        fetch=lambda url: "PAGE BODY")
+    assert "PAGE BODY" in out
+    assert "untrusted" in out.lower()      # wrapped as untrusted content
+    assert "[context from https://example.com/page]" in out
+
+
+def test_non_file_handles_pass_through():
+    from olympus import tui
+    out, notes = tui.expand_references("ping @teknium1 about this")
+    assert out == "ping @teknium1 about this"
+    assert notes == []
+
+
+def test_failed_fetch_is_reported_not_fatal():
+    from olympus import tui
+    def boom(url):
+        raise ValueError("blocked: internal host")
+    out, notes = tui.expand_references("check @https://169.254.169.254/x",
+                                       fetch=boom)
+    assert "@https://169.254.169.254/x" in out    # token left in place
+    assert notes and "could not fetch" in notes[0]
+
+
+def test_email_addresses_are_not_references():
+    from olympus import tui
+    out, notes = tui.expand_references("mail bob@example.com the doc")
+    assert out == "mail bob@example.com the doc"
+    assert notes == []

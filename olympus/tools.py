@@ -506,7 +506,12 @@ class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
 
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
-    initial request AND on every redirect. Raises ValueError if blocked."""
+    initial request AND on every redirect, and refusing a URL that carries a
+    stored secret (raw or encoded) — the classic injection exfil channel.
+    Raises ValueError if blocked."""
+    leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
+    if leak:
+        raise ValueError(f"blocked: {leak}")
     reason = security.url_block_reason(url)
     if reason:
         raise ValueError(reason)
@@ -657,6 +662,15 @@ def _send_email(to: str, subject: str, body: str, *,
     if to.strip().lower() not in allow:
         return f"Error: '{to}' is not in the recipient allowlist."
 
+    # Always-on exfiltration floor (independent of the opt-in egress guard):
+    # a stored secret in an outbound email never auto-sends. An explicit human
+    # approval (_approved=True) can still release it — the spine is the gate.
+    if not _approved:
+        leak = security.secret_exfil_reason(
+            f"{subject}\n\n{body}", user or memory.current_user())
+        if leak:
+            return f"Error: refused to send — {leak}."
+
     # Egress gateway (off by default). `_approved=True` is the bypass for the
     # approved-action path (_email_execute) — approval IS the gate clearing, so
     # re-guarding there would loop forever (held → execute → send → held → ...).
@@ -706,6 +720,13 @@ def _call_webhook(name: str, payload: dict | None = None, *,
         configured = ", ".join(hooks) or "none configured"
         return (f"Error: no webhook named '{name}'. Configured webhooks: "
                 f"{configured}. The operator defines them via OLYMPUS_WEBHOOKS.")
+
+    # Always-on exfiltration floor (independent of the opt-in egress guard).
+    if not _approved:
+        leak = security.secret_exfil_reason(
+            _json.dumps(payload or {}), user or memory.current_user())
+        if leak:
+            return f"Error: refused to call webhook — {leak}."
 
     # Egress gateway (off by default). `_approved=True` bypasses on the approved
     # path (_webhook_execute) to avoid the held→execute→held loop.
@@ -1172,6 +1193,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
         text, filename),
+    "transcribe_audio": lambda path: _media().transcribe_audio(path),
     "browse_page": lambda url: _media().browse_page(url),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
@@ -1399,6 +1421,21 @@ TEXT_TO_SPEECH = {
                          "description": "Optional output filename (.mp3)"},
         },
         "required": ["text"],
+    },
+}
+
+TRANSCRIBE_AUDIO = {
+    "name": "transcribe_audio",
+    "description": "Transcribe an audio file from the workspace (a voice "
+                   "note, meeting recording, or downloaded clip) to text. "
+                   "Returns the transcript.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Audio file path inside the workspace"},
+        },
+        "required": ["path"],
     },
 }
 
@@ -1861,6 +1898,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "search_sessions": SEARCH_SESSIONS,
     "generate_image": GENERATE_IMAGE,
     "text_to_speech": TEXT_TO_SPEECH,
+    "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,

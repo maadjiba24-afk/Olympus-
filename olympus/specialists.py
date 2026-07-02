@@ -148,7 +148,8 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Marketing strategy, branding, copywriting, growth, "
                         "audience research, campaigns, SEO.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech", "browse_page"),
+            extra_tools=("generate_image", "text_to_speech",
+                         "transcribe_audio", "browse_page"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",

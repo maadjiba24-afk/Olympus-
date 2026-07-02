@@ -189,3 +189,39 @@ def test_scheduler_delivers_to_discord(monkeypatch):
     job = scheduler.Job(name="j", interval=60, prompt="p", deliver_to="discord")
     scheduler._deliver(job, "the answer")
     assert "the answer" in pushed["d"]
+
+
+# --- in-flight journal / session auto-resume (Hermes v0.13/v0.18) -----------
+
+def test_inflight_mark_take_clear():
+    from olympus import gateway
+    gateway.inflight_mark("tg-123", 123, "long question")
+    taken = gateway.inflight_take("tg-")
+    assert len(taken) == 1
+    assert taken[0]["key"] == 123 and taken[0]["text"] == "long question"
+    assert gateway.inflight_take("tg-") == []       # popped
+
+
+def test_inflight_clear_removes_entry():
+    from olympus import gateway
+    gateway.inflight_mark("wa-555", "555", "q")
+    gateway.inflight_clear("wa-555")
+    assert gateway.inflight_take("wa-") == []
+
+
+def test_inflight_second_attempt_is_dropped():
+    from olympus import gateway
+    # Same message marked twice = it already crashed the gateway once.
+    gateway.inflight_mark("tg-9", 9, "poison message")
+    gateway.inflight_mark("tg-9", 9, "poison message")
+    assert gateway.inflight_take("tg-") == []       # not retried again
+
+
+def test_inflight_prefix_scoping():
+    from olympus import gateway
+    gateway.inflight_mark("tg-1", 1, "telegram work")
+    gateway.inflight_mark("wa-2", "2", "whatsapp work")
+    tg = gateway.inflight_take("tg-")
+    assert [e["text"] for e in tg] == ["telegram work"]
+    wa = gateway.inflight_take("wa-")
+    assert [e["text"] for e in wa] == ["whatsapp work"]

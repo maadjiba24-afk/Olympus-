@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import config, llm, replaystore, security, tools, transcript
+from . import (config, connectors, llm, replaystore, security, steering,
+               tools, transcript)
 
 
 def _assistant_turn(response) -> dict[str, Any]:
@@ -90,9 +91,29 @@ def run_agent_counted(
 
         # Client-side tool calls.
         messages.append(_assistant_turn(response))
-        results = [_tool_result(block) for block in response.content
-                   if block.type == "tool_use"]
+        tool_blocks = [b for b in response.content if b.type == "tool_use"]
+        results: list[dict[str, Any]] = [_tool_result(b) for b in tool_blocks]
         tool_calls += len(results)
+        # Mid-run steering (/steer): drain any notes queued for this
+        # conversation and ride them along with the tool results, so the model
+        # sees the nudge on its very next request. Notes are frozen per tool
+        # round (keyed by the model-issued tool_use id, stable across replay)
+        # so a recorded run replays byte-identically, notes included; a round
+        # with no recorded notes simply replays with none.
+        slot = f"steer:{tool_blocks[0].id}"
+        if replaystore.replaying():
+            try:
+                notes = json.loads(replaystore.frozen_context(slot, list))
+            except replaystore.ReplayDivergence:
+                notes = []            # recorded round had no steering notes
+        else:
+            notes = steering.drain_current()
+            if notes:                 # freeze only when there's something
+                replaystore.frozen_context(slot, lambda: json.dumps(notes))
+        results.extend(
+            {"type": "text",
+             "text": f"[steering note from the user — adjust course]: {n}"}
+            for n in notes)
         messages.append({"role": "user", "content": results})
         # Optional in-run compaction: shrink OLD tool-result contents so a
         # tool-heavy run stays bounded. No-op unless OLYMPUS_INRUN_COMPACT is on;
@@ -132,14 +153,24 @@ def _tool_result(block) -> dict[str, Any]:
     if handler is None:
         content, is_error = f"Error: no handler for tool '{block.name}'", True
     else:
-        try:
-            output = handler(**(block.input or {}))
-        except Exception as err:
-            content, is_error = f"Error: {err}", True
+        # Plugin lifecycle hooks: pre_tool may rewrite the input or block the
+        # call outright (policy can only get stricter — this runs before the
+        # approval spine ever sees the action, never instead of it).
+        params, block_reason = connectors.emit_pre_tool(
+            block.name, dict(block.input or {}))
+        if block_reason:
+            content, is_error = (
+                f"Blocked by plugin policy: {block_reason}", True)
         else:
-            content = str(output)
-            if security.should_wrap(block.name):
-                content = security.wrap_untrusted(content, source=block.name)
-            is_error = False
+            try:
+                output = handler(**params)
+            except Exception as err:
+                content, is_error = f"Error: {err}", True
+            else:
+                content = connectors.emit_post_tool(
+                    block.name, params, str(output))
+                if security.should_wrap(block.name):
+                    content = security.wrap_untrusted(content, source=block.name)
+                is_error = False
     replaystore.put_tool(block.id, content, is_error)
     return block_result(content, is_error)

@@ -30,6 +30,8 @@ from . import sandbox
 IMAGE_MODEL = os.environ.get("OLYMPUS_IMAGE_MODEL", "gpt-image-1")
 TTS_MODEL = os.environ.get("OLYMPUS_TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE = os.environ.get("OLYMPUS_TTS_VOICE", "alloy")
+STT_MODEL = os.environ.get("OLYMPUS_STT_MODEL", "whisper-1")
+MAX_AUDIO_BYTES = 25 * 1024 * 1024      # OpenAI transcription upload limit
 
 
 def _api_key() -> str:
@@ -69,6 +71,81 @@ def generate_image(prompt: str, filename: str = "") -> str:
     with open(res["path"], "wb") as f:
         f.write(base64.b64decode(b64))
     return f"Image saved to workspace: {name}"
+
+
+def _post_multipart(path: str, fields: dict[str, str],
+                    file_field: str, filename: str, blob: bytes,
+                    timeout: int = 120) -> bytes:
+    """multipart/form-data POST (stdlib-only) — audio uploads need it."""
+    import uuid
+    boundary = f"olympus-{uuid.uuid4().hex}"
+    body = bytearray()
+    for k, v in fields.items():
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f'name="{k}"\r\n\r\n{v}\r\n').encode()
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+             f'name="{file_field}"; filename="{filename}"\r\n'
+             "Content-Type: application/octet-stream\r\n\r\n").encode()
+    body += blob + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"{_base()}{path}", data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Authorization": f"Bearer {_api_key()}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def transcribe_audio(path: str) -> str:
+    """Transcribe an audio file (voice note, recording) from the workspace.
+    Returns the transcript text, or a clear non-fatal error message."""
+    if not _api_key():
+        return ("Error: transcription needs an API key "
+                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
+    blob = _read_audio(path)
+    if isinstance(blob, str):
+        return blob                                    # error message
+    try:
+        raw = _post_multipart("/audio/transcriptions", {"model": STT_MODEL},
+                              "file", os.path.basename(path) or "audio.ogg",
+                              blob)
+        data = json.loads(raw)
+    except Exception as err:
+        return f"Error transcribing audio: {str(err)[:200]}"
+    text = (data.get("text") or "").strip()
+    return text or "Error transcribing audio: the provider returned no text."
+
+
+def _read_audio(path: str) -> bytes | str:
+    """Read an audio file from the confined workspace (bytes), or an error."""
+    try:
+        target = sandbox._confine(path)
+    except ValueError as err:
+        return f"Error: {err}"
+    if not target.is_file():
+        return f"Error: no such audio file in workspace: {path}"
+    blob = target.read_bytes()
+    if len(blob) > MAX_AUDIO_BYTES:
+        return (f"Error: audio file is {len(blob) // (1024 * 1024)} MB — the "
+                f"transcription limit is {MAX_AUDIO_BYTES // (1024 * 1024)} MB.")
+    return blob
+
+
+def transcribe_bytes(blob: bytes, filename: str = "voice.ogg") -> str:
+    """Transcribe raw audio bytes (a gateway voice note) without touching the
+    workspace. Same graceful degradation as transcribe_audio."""
+    if not _api_key():
+        return ("Error: transcription needs an API key "
+                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
+    if len(blob) > MAX_AUDIO_BYTES:
+        return "Error: voice note is too large to transcribe."
+    try:
+        raw = _post_multipart("/audio/transcriptions", {"model": STT_MODEL},
+                              "file", filename, blob)
+        data = json.loads(raw)
+    except Exception as err:
+        return f"Error transcribing audio: {str(err)[:200]}"
+    text = (data.get("text") or "").strip()
+    return text or "Error transcribing audio: the provider returned no text."
 
 
 def text_to_speech(text: str, filename: str = "") -> str:

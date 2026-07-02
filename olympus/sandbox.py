@@ -41,9 +41,13 @@ transports over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import signal
 import subprocess
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
@@ -82,10 +86,14 @@ class Result:
     ok: bool
     code: int
     output: str
+    watched: tuple[str, ...] = field(default=())
 
     def render(self) -> str:
         head = f"[exit {self.code}]" if not self.ok else "[ok]"
-        return f"{head}\n{self.output}".strip()
+        body = f"{head}\n{self.output}".strip()
+        if self.watched:
+            body += "\n[watch] " + "\n[watch] ".join(self.watched)
+        return body
 
 
 def _docker_cmd(command: str, root: Path, timeout: int) -> list[str]:
@@ -100,11 +108,40 @@ def _docker_cmd(command: str, root: Path, timeout: int) -> list[str]:
     return args
 
 
+def _kill(proc: subprocess.Popen) -> None:
+    """Kill the process (group, where we started one) and reap it."""
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run(command: str, *, timeout: int | None = None,
-        be: str | None = None) -> Result:
+        be: str | None = None, watch: str | None = None) -> Result:
     """Run a shell command in the confined workspace. Never raises on a
     non-zero exit — that's reported in the Result; only truly broken setups
-    (missing docker, etc.) surface as ok=False with the error in output."""
+    (missing docker, etc.) surface as ok=False with the error in output.
+
+    The timeout is activity-based: `timeout` seconds of *silence* kills the
+    command, but a command that is still producing output keeps its lease,
+    up to the MAX_TIMEOUT wall-clock ceiling. A silent `sleep 5` with
+    timeout=1 still dies at 1s; a chatty build with timeout=60 can run to
+    the ceiling. On timeout the partial output captured so far is returned
+    instead of being discarded.
+
+    `watch` is an optional regex; output lines matching it are collected
+    into Result.watched so a caller (or the agent) can alert on markers
+    like "ERROR" or "listening on" without re-parsing the full log."""
     if not (command or "").strip():
         return Result(False, 2, "empty command")
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
@@ -115,30 +152,123 @@ def run(command: str, *, timeout: int | None = None,
     else:
         argv, shell = command, True
     try:
-        proc = subprocess.run(
-            argv, shell=shell, cwd=str(root), capture_output=True, text=True,
-            timeout=timeout,
+        proc = subprocess.Popen(
+            argv, shell=shell, cwd=str(root), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
             env={**os.environ, "OLYMPUS_IN_SANDBOX": "1"})
-    except subprocess.TimeoutExpired:
-        return Result(False, 124, f"timed out after {timeout}s")
     except FileNotFoundError as err:               # e.g. docker not installed
         return Result(False, 127, f"backend '{be}' unavailable: {err}")
-    out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+    lock = threading.Lock()
+    last_activity = [time.monotonic()]
+
+    def _pump(stream, sink):
+        for line in stream:
+            with lock:
+                sink.append(line)
+                last_activity[0] = time.monotonic()
+        stream.close()
+
+    pumps = [threading.Thread(target=_pump, args=(proc.stdout, out_lines), daemon=True),
+             threading.Thread(target=_pump, args=(proc.stderr, err_lines), daemon=True)]
+    for t in pumps:
+        t.start()
+
+    start = time.monotonic()
+    timed_out = False
+    while proc.poll() is None:
+        now = time.monotonic()
+        with lock:
+            idle_deadline = last_activity[0] + timeout
+        if now >= min(start + MAX_TIMEOUT, idle_deadline):
+            timed_out = True
+            _kill(proc)
+            break
+        time.sleep(0.05)
+    for t in pumps:
+        t.join(timeout=2)
+
+    with lock:
+        out = "".join(out_lines) + (("\n" + "".join(err_lines)) if err_lines else "")
+    watched: tuple[str, ...] = ()
+    if watch:
+        try:
+            pattern = re.compile(watch)
+            watched = tuple(ln.rstrip("\n") for ln in out.splitlines()
+                            if pattern.search(ln))[:50]
+        except re.error as err:
+            watched = (f"invalid watch pattern: {err}",)
+    if timed_out:
+        elapsed = int(time.monotonic() - start)
+        msg = (f"timed out after {elapsed}s "
+               f"(no output for {timeout}s; ceiling {MAX_TIMEOUT}s)")
+        partial = out.strip()
+        if partial:
+            if len(partial) > OUTPUT_CAP:
+                partial = partial[:OUTPUT_CAP] + "\n…[truncated]"
+            msg += "\npartial output:\n" + partial
+        return Result(False, 124, msg, watched)
     if len(out) > OUTPUT_CAP:
         out = out[:OUTPUT_CAP] + f"\n…[truncated, {len(out)} bytes total]"
-    return Result(proc.returncode == 0, proc.returncode, out.strip())
+    return Result(proc.returncode == 0, proc.returncode, out.strip(), watched)
+
+
+def check_written(target: Path, content: str) -> str:
+    """Post-write verification: confirm the bytes actually landed, then run a
+    parse-only syntax check for the formats we can validate without executing
+    anything (py/json/toml/yaml). A silent partial write or a file that no
+    longer parses is exactly the failure an agent won't notice on its own —
+    the result string is surfaced to it in the action result."""
+    try:
+        on_disk = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as err:
+        return f"write verification FAILED: cannot read back file ({err})"
+    if on_disk != content:
+        return (f"write verification FAILED: file has {len(on_disk)} chars, "
+                f"expected {len(content)}")
+    suffix = target.suffix.lower()
+    try:
+        if suffix == ".py":
+            compile(content, str(target), "exec")
+            return "verified: python syntax OK"
+        if suffix == ".json":
+            import json
+            json.loads(content)
+            return "verified: valid JSON"
+        if suffix == ".toml":
+            import tomllib
+            tomllib.loads(content)
+            return "verified: valid TOML"
+        if suffix in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                return "verified: written (yaml parser unavailable)"
+            yaml.safe_load(content)
+            return "verified: valid YAML"
+    except SyntaxError as err:
+        return f"syntax check FAILED: line {err.lineno}: {err.msg}"
+    except Exception as err:
+        return f"syntax check FAILED: {err}"
+    return "verified: written"
 
 
 def write_file(path: str, content: str) -> dict:
     """Create/overwrite a file inside the workspace. Returns a result dict
-    carrying the prior content (if any) so the action can be undone."""
+    carrying the prior content (if any) so the action can be undone, plus a
+    post-write verification (`check`) so silent failures and syntax errors
+    are visible to the agent in the same turn."""
     target = _confine(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.is_file()
     prior = target.read_text(encoding="utf-8", errors="replace") if existed else None
     target.write_text(content, encoding="utf-8")
     return {"path": str(target), "existed": existed, "prior": prior,
-            "bytes": len(content.encode("utf-8"))}
+            "bytes": len(content.encode("utf-8")),
+            "check": check_written(target, content)}
 
 
 def undo_write(result: dict) -> str:

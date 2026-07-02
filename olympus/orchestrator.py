@@ -32,7 +32,8 @@ from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
                contracts, contrib, i18n, llm, memory, playbooks, profile,
-               recall, relgraph, replaystore, trace as trace_mod, tools, usage)
+               recall, relgraph, replaystore, steering,
+               trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -115,6 +116,7 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
         """Settings for the lightweight stages (route/plan/review). In fast mode
@@ -697,6 +699,11 @@ class Olympus:
         tr.meta = {"input": user_message,
                    "conversation_id": self.conversation_id,
                    "history": list(self.history)}
+        # Mid-run steering: notes queued under this conversation's key reach
+        # every specialist run inside this pipeline (contextvar-scoped).
+        steer_token = steering.set_current(
+            self.conversation_id or f"user-{self.user}")
+        connectors.emit("run_start", self.user, user_message)
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -718,8 +725,10 @@ class Olympus:
                     reply = (result or "").strip() or (
                         f"[Could not complete the request: {str(err)[:200]}]")
         finally:
+            steering.reset(steer_token)
             tr.flush()
             self.last_run_id = tr.id
+        connectors.emit("run_end", self.user, reply)
         self._finish(user_message, reply)
         return reply
 
@@ -746,6 +755,8 @@ class Olympus:
         tr.meta = {"input": user_message,
                    "conversation_id": self.conversation_id,
                    "history": list(self.history)}
+        steer_token = steering.set_current(
+            self.conversation_id or f"user-{self.user}")
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -796,8 +807,31 @@ class Olympus:
                 chunks = [fallback]
             self._finish(user_message, "".join(chunks))
         finally:
+            steering.reset(steer_token)
             tr.flush()
             self.last_run_id = tr.id      # streamed runs are discoverable too
+
+    def undo(self, turns: int = 1) -> str:
+        """Remove the last N user+assistant exchanges from the conversation
+        (Hermes /undo): the model stops seeing them on future turns. Only whole
+        pairs are removed, and never across a compaction boundary (a folded
+        state block isn't a turn), so the history stays well-formed. Long-term
+        memory already written by those turns is not unwound — this rewrites
+        what the conversation *continues from*, not the audit trail."""
+        turns = max(1, int(turns))
+        removed = 0
+        while (turns and len(self.history) >= 2
+               and self.history[-1].get("role") == "assistant"
+               and self.history[-2].get("role") == "user"):
+            self.history = self.history[:-2]
+            removed += 1
+            turns -= 1
+        if not removed:
+            return "Nothing to undo."
+        if self.conversation_id:
+            memory.save_conversation(self.conversation_id, self.history)
+        return (f"Removed the last {removed} exchange(s) from the "
+                "conversation. The next question continues from before them.")
 
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""

@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 67,
+    "count": 70,
     "names": [
       "actions",
       "add-mcp",
@@ -52,6 +52,7 @@
       "code-eval",
       "connectors",
       "contrib",
+      "curate",
       "dashboard",
       "discord",
       "edit",
@@ -60,6 +61,7 @@
       "explain",
       "export-trajectories",
       "gate",
+      "goal",
       "grant",
       "graph",
       "growth",
@@ -68,6 +70,7 @@
       "learn",
       "learned",
       "limit",
+      "mcp-serve",
       "memory",
       "models",
       "next-wake",
@@ -110,7 +113,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 60,
+    "count": 61,
     "names": [
       "browse_page",
       "browser_act",
@@ -167,6 +170,7 @@
       "site_template_record",
       "spawn_subagent",
       "text_to_speech",
+      "transcribe_audio",
       "update_prompt",
       "verify_code_claim",
       "watch_youtube",

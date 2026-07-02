@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 60 tools in
+Olympus exposes a **finite, named** tool surface — the 61 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -90,6 +90,7 @@ surface. So the surface and its threat model can't drift apart.
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |
 | `generate_image` | Generate an image into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn / disallowed content — key-gated, confined output |
 | `text_to_speech` | Synthesize audio into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn — key-gated, confined output |
+| `transcribe_audio` | Transcribe a workspace audio file to text | ingestion | Reads only from the confined workspace; key-gated; transcript is wrapped as untrusted content | Injection via spoken/recorded content — transcript is data, capability separation applies |
 | `prepare_action` | Stage an action for approval | first-party (gated) | **Never executes** — human approval required | Self-authorizing actions — execution is human-gated |
 | `propose_playbook` | Propose a repeatable workflow | first-party (gated) | Proposal only — approval required | Malicious playbook — approval-gated before it can run |
 | `create_skill` | Add a provisional skill | self-modifying | **Provisional** until benchmark-gated; sanitized | Malicious/weak skill — gated and reverted if it doesn't help |

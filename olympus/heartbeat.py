@@ -44,6 +44,17 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Operator failed:\n" + traceback.format_exc())
 
+    # Standing goals: one unit of work + an evidence-based completion judgment
+    # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
+    try:
+        from . import goals
+        for line in goals.run_due(now):
+            log.append("Goals: " + line)
+            if "COMPLETE" in line or "STALLED" in line:
+                gateway.notify_all("🎯 " + line)
+    except Exception:
+        log.append("Goals failed:\n" + traceback.format_exc())
+
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")
         try:
@@ -103,6 +114,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         except Exception:
             log.append("Training failed:\n" + traceback.format_exc())
         state["train"] = now
+
+    from . import curator
+    if _due(state, "skill_curation", curator.curation_every(), now):
+        log.append("Curator: grading and pruning the skill library...")
+        try:
+            log.append("Curator: " + curator.curate())
+        except Exception:
+            log.append("Curator failed:\n" + traceback.format_exc())
+        state["skill_curation"] = now
 
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")

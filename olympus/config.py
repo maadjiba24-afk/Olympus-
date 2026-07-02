@@ -100,9 +100,9 @@ class Settings:
 
     def validate(self) -> str | None:
         """Return an error message if unusable, else None."""
-        if self.provider not in ("anthropic", "openai", "claude-code"):
+        if self.provider not in ("anthropic", "openai", "claude-code", "moa"):
             return (f"Unknown provider '{self.provider}' "
-                    "(use anthropic, openai, or claude-code).")
+                    "(use anthropic, openai, claude-code, or moa).")
         if self.provider == "openai" and not self.model:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
         return None
@@ -111,8 +111,9 @@ class Settings:
         if self.validate() is not None:
             return False
         # anthropic reads its key from the env; claude-code authenticates via the
-        # local `claude` CLI (your subscription); others need a key/url.
-        return (self.provider in ("anthropic", "claude-code")
+        # local `claude` CLI (your subscription); moa rides the pool members'
+        # own credentials; others need a key/url.
+        return (self.provider in ("anthropic", "claude-code", "moa")
                 or bool(self.api_key) or bool(self.base_url))
 
 
@@ -322,6 +323,16 @@ MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", _default_memory))
 
 # Per-call output ceiling. Streaming is used everywhere, so this can be large.
 MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
+
+
+# Prompt-cache TTL for the stable request prefix (system prompt + tool schemas)
+# on the Anthropic backend. "5m" is the API default; "1h" keeps the cache warm
+# across sessions that are minutes apart (heartbeat cycles, gateway chats), so
+# the large system prompt and skill library are billed once per hour instead of
+# once per lull. Read live so tests and replay can flip it per-run.
+def prompt_cache_ttl() -> str:
+    ttl = os.environ.get("OLYMPUS_CACHE_TTL", "5m").strip().lower()
+    return ttl if ttl in ("5m", "1h") else "5m"
 
 # Conversation state compaction: when the verbatim history exceeds this many
 # estimated tokens, older turns are folded into a compact running "state" block
