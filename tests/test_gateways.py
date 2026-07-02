@@ -225,3 +225,108 @@ def test_inflight_prefix_scoping():
     assert [e["text"] for e in tg] == ["telegram work"]
     wa = gateway.inflight_take("wa-")
     assert [e["text"] for e in wa] == ["whatsapp work"]
+
+
+# --- voice notes on the remaining gateways (Signal / Discord / Slack) --------
+
+def test_signal_voice_note_becomes_text():
+    from olympus import signal
+    raw = [{"envelope": {"source": "+15550001111", "dataMessage": {
+        "message": None,
+        "attachments": [{"contentType": "audio/aac", "id": "att1",
+                         "size": 1000}]}}}]
+    out = signal.parse_messages(
+        raw, transcribe=lambda att: f"[voice note] hi ({att['id']})")
+    assert out == [("+15550001111", "[voice note] hi (att1)")]
+
+
+def test_signal_non_audio_attachment_ignored():
+    from olympus import signal
+    assert signal._voice_text({"contentType": "image/png", "id": "x"}) is None
+    raw = [{"envelope": {"source": "+1555", "dataMessage": {
+        "attachments": [{"contentType": "image/png", "id": "x"}]}}}]
+    assert signal.parse_messages(raw, transcribe=signal._voice_text) == []
+
+
+def test_discord_command_text_includes_voice(monkeypatch):
+    from olympus import discord
+    monkeypatch.setattr(discord, "_voice_text",
+                        lambda data: "[voice note] play it back")
+    data = {"name": "ask",
+            "options": [{"type": 11, "value": "12345"}],   # attachment id
+            "resolved": {"attachments": {"12345": {
+                "content_type": "audio/ogg", "url": "https://cdn/x.ogg"}}}}
+    text = discord._command_text(data)
+    assert text == "[voice note] play it back"    # id never leaks into text
+
+
+def test_discord_voice_text_skips_non_audio():
+    from olympus import discord
+    data = {"resolved": {"attachments": {"1": {
+        "content_type": "image/png", "url": "https://cdn/x.png"}}}}
+    assert discord._voice_text(data) is None      # no network touched
+
+
+def test_slack_voice_message_processed(monkeypatch):
+    from olympus import slack
+    seen = {}
+    monkeypatch.setattr(slack, "_voice_text",
+                        lambda event: "[voice note] status update")
+    monkeypatch.setattr(slack.gateway, "reply_for",
+                        lambda bots, u, t, prefix: seen.update(text=t) or ["ok"])
+    monkeypatch.setattr(slack, "send", lambda channel, text: None)
+    slack.process_event({"event": {"type": "message", "user": "U1",
+                                   "channel": "C1", "files": [{}]}}, bots={})
+    assert seen["text"] == "[voice note] status update"
+
+
+def test_slack_non_audio_file_only_message_is_ignored(monkeypatch):
+    from olympus import slack
+    called = []
+    monkeypatch.setattr(slack.gateway, "reply_for",
+                        lambda *a, **k: called.append(1) or ["x"])
+    slack.process_event({"event": {"type": "message", "user": "U1",
+                                   "channel": "C1",
+                                   "files": [{"mimetype": "image/png"}]}},
+                        bots={})
+    assert called == []
+
+
+# --- auto-resume on Slack and Discord ----------------------------------------
+
+def test_slack_resume_inflight_redelivers(monkeypatch):
+    from olympus import gateway, slack
+    gateway.inflight_mark("sl-U7", {"user": "U7", "channel": "C9"},
+                          "long analysis please")
+    sent, asked = [], []
+    monkeypatch.setattr(slack, "send",
+                        lambda channel, text: sent.append((channel, text)))
+    monkeypatch.setattr(slack.gateway, "reply_for",
+                        lambda bots, u, t, prefix: asked.append((u, t))
+                        or ["the answer"])
+    slack.resume_inflight()
+    assert asked == [("U7", "long analysis please")]
+    assert sent[0][0] == "C9" and "restarted" in sent[0][1]
+    assert sent[1] == ("C9", "the answer")
+    assert gateway.inflight_take("sl-") == []      # consumed
+
+
+def test_discord_resume_uses_notify_webhook(monkeypatch):
+    from olympus import discord, gateway
+    gateway.inflight_mark("dc-77", "77", "what happened?")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord/webhook")
+    posted = []
+    monkeypatch.setattr(discord, "notify", lambda text: posted.append(text))
+    monkeypatch.setattr(discord.gateway, "reply_for",
+                        lambda bots, u, t, prefix: ["recovered answer"])
+    discord.resume_inflight()
+    assert posted and "<@77>" in posted[0] and "recovered answer" in posted[0]
+
+
+def test_discord_resume_without_webhook_drops_visibly(monkeypatch, capsys):
+    from olympus import discord, gateway
+    gateway.inflight_mark("dc-88", "88", "lost request")
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    discord.resume_inflight()
+    assert "cannot be re-delivered" in capsys.readouterr().out
+    assert gateway.inflight_take("dc-") == []      # not retried forever

@@ -55,8 +55,38 @@ def notify(text: str) -> bool:
     return send(recipient, text)
 
 
-def parse_messages(raw: list) -> list[tuple[str, str]]:
-    """Extract (source_number, text) pairs from a signal-cli /v1/receive list."""
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(attachment: dict) -> str | None:
+    """Download a signal-cli attachment and transcribe it. None when it isn't
+    audio, is too big, or transcription is unavailable."""
+    if not str(attachment.get("contentType", "")).startswith("audio/"):
+        return None
+    att_id = attachment.get("id")
+    if not att_id or int(attachment.get("size") or 0) > MAX_VOICE_BYTES:
+        return None
+    try:
+        req = urllib.request.Request(f"{_base()}/v1/attachments/{att_id}")
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            blob = resp.read(MAX_VOICE_BYTES + 1)
+        if len(blob) > MAX_VOICE_BYTES:
+            return None
+        from . import media
+        transcript = media.transcribe_bytes(
+            blob, filename=str(attachment.get("filename") or "voice.aac"))
+    except Exception:
+        return None
+    if transcript.startswith("Error"):
+        return None
+    return f"[voice note] {transcript}"
+
+
+def parse_messages(raw: list, transcribe=None) -> list[tuple[str, str]]:
+    """Extract (source_number, text) pairs from a signal-cli /v1/receive list.
+    Voice notes become text via transcription when a media API key is
+    configured (injectable via `transcribe` for tests)."""
+    transcribe = transcribe or _voice_text
     out = []
     for item in raw or []:
         env = item.get("envelope") if isinstance(item, dict) else None
@@ -65,6 +95,11 @@ def parse_messages(raw: list) -> list[tuple[str, str]]:
         msg = env.get("dataMessage") or {}
         text = msg.get("message")
         source = env.get("source") or env.get("sourceNumber")
+        if not text:
+            for att in msg.get("attachments") or []:
+                text = transcribe(att) if isinstance(att, dict) else None
+                if text:
+                    break
         if text and source:
             out.append((source, text))
     return out
