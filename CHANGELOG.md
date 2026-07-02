@@ -24,6 +24,18 @@ carries a migration note here.
 > when a release is actually cut. `pyproject.toml` currently reads `0.23.0` as
 > the in-development version, not a shipped one.
 
+### Added
+
+- **Operator admin panel, Phase 1 (read-only)** — `/admin` on the web server
+  is a single-pane overview of a running instance: channels configured, model
+  pool + role assignment, budget and per-model spend, every heartbeat cycle
+  with last-run/next-due, standing goals, pending approvals across users,
+  skills, scheduled tasks, connectors (MCP/plugins/hooks), security posture,
+  and recent errors. Strictly read-only; secrets appear only as booleans and
+  hosts. Data rides `GET /api/admin`, gated by `OLYMPUS_ACCESS_TOKEN` — or
+  loopback-only when no token is set (never open on a public bind or behind
+  a proxy). See docs/ADMIN_PANEL.md.
+
 ### Added — capabilities adopted from the Hermes-agent analysis (docs/HERMES_WATCH.md)
 
 - **Standing goals with completion contracts** (`olympus/goals.py`) — `/goal`
