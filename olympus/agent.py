@@ -95,12 +95,20 @@ def run_agent_counted(
         tool_calls += len(results)
         # Mid-run steering (/steer): drain any notes queued for this
         # conversation and ride them along with the tool results, so the model
-        # sees the nudge on its very next request. Frozen per tool round
-        # (keyed by the model-issued tool_use id, stable across replay) so a
-        # recorded run replays byte-identically, notes included.
-        notes = json.loads(replaystore.frozen_context(
-            f"steer:{tool_blocks[0].id}",
-            lambda: json.dumps(steering.drain_current())))
+        # sees the nudge on its very next request. Notes are frozen per tool
+        # round (keyed by the model-issued tool_use id, stable across replay)
+        # so a recorded run replays byte-identically, notes included; a round
+        # with no recorded notes simply replays with none.
+        slot = f"steer:{tool_blocks[0].id}"
+        if replaystore.replaying():
+            try:
+                notes = json.loads(replaystore.frozen_context(slot, list))
+            except replaystore.ReplayDivergence:
+                notes = []            # recorded round had no steering notes
+        else:
+            notes = steering.drain_current()
+            if notes:                 # freeze only when there's something
+                replaystore.frozen_context(slot, lambda: json.dumps(notes))
         results.extend(
             {"type": "text",
              "text": f"[steering note from the user — adjust course]: {n}"}
