@@ -157,8 +157,12 @@ def _run_command_preview(p: dict) -> str:
 
 
 def _run_command_execute(p: dict) -> dict:
-    res = sandbox.run(p.get("command", ""), timeout=p.get("timeout"))
-    return {"code": res.code, "ok": res.ok, "output": res.output}
+    res = sandbox.run(p.get("command", ""), timeout=p.get("timeout"),
+                      watch=p.get("watch"))
+    out = {"code": res.code, "ok": res.ok, "output": res.output}
+    if res.watched:
+        out["watched"] = list(res.watched)
+    return out
 
 
 def _write_file_preview(p: dict) -> str:

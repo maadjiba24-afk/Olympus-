@@ -323,6 +323,16 @@ MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", _default_memory))
 # Per-call output ceiling. Streaming is used everywhere, so this can be large.
 MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
 
+
+# Prompt-cache TTL for the stable request prefix (system prompt + tool schemas)
+# on the Anthropic backend. "5m" is the API default; "1h" keeps the cache warm
+# across sessions that are minutes apart (heartbeat cycles, gateway chats), so
+# the large system prompt and skill library are billed once per hour instead of
+# once per lull. Read live so tests and replay can flip it per-run.
+def prompt_cache_ttl() -> str:
+    ttl = os.environ.get("OLYMPUS_CACHE_TTL", "5m").strip().lower()
+    return ttl if ttl in ("5m", "1h") else "5m"
+
 # Conversation state compaction: when the verbatim history exceeds this many
 # estimated tokens, older turns are folded into a compact running "state" block
 # and only the most recent turns are replayed verbatim. Token-based (not turn-

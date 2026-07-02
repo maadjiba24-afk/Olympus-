@@ -21,6 +21,19 @@ _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 _CLIENTS_MAX = 256
 
 
+def _cache_control() -> dict[str, str]:
+    """Cache-breakpoint marker honouring the configured TTL. The 5-minute
+    default needs no extra fields; the 1-hour tier is requested per-block
+    (and needs the extended-TTL beta header, added in complete())."""
+    if config.prompt_cache_ttl() == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
+# Beta header for the 1-hour prompt-cache tier.
+_EXTENDED_TTL_BETA = "extended-cache-ttl-2025-04-11"
+
+
 def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     """Add a cache breakpoint to the tool list so the (often large) tool
     schemas are billed once and then read from cache on every later turn of
@@ -29,7 +42,7 @@ def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | N
     if not tools:
         return tools
     out = [dict(t) for t in tools]
-    out[-1] = {**out[-1], "cache_control": {"type": "ephemeral"}}
+    out[-1] = {**out[-1], "cache_control": _cache_control()}
     return out
 
 
@@ -76,7 +89,7 @@ def complete(
             {
                 "type": "text",
                 "text": system,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": _cache_control(),
             }
         ],
         "messages": messages,
@@ -100,6 +113,10 @@ def complete(
     if mcp_servers:
         params["mcp_servers"] = mcp_servers
         params["betas"] = ["mcp-client-2025-11-20"]
+    # The 1-hour cache tier also rides the beta endpoint.
+    if config.prompt_cache_ttl() == "1h":
+        params.setdefault("betas", []).append(_EXTENDED_TTL_BETA)
+        use_beta = True
 
     # Re-executable replay: hash this exact request. In replay mode return the
     # frozen response with NO network; a missing hash means the orchestration
@@ -159,14 +176,18 @@ def stream_text(
         "model": settings.model or config.default_model(),
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [{"type": "text", "text": system,
-                    "cache_control": {"type": "ephemeral"}}],
+                    "cache_control": _cache_control()}],
         "messages": messages,
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": effort},
     }
+    endpoint = client(settings).messages
+    if config.prompt_cache_ttl() == "1h":
+        params["betas"] = [_EXTENDED_TTL_BETA]
+        endpoint = client(settings).beta.messages
     security.assert_egress_allowed(config.member_host(settings))
     with usage.slot():
-        with client(settings).messages.stream(**params) as stream:
+        with endpoint.stream(**params) as stream:
             for text in stream.text_stream:
                 yield text
             final = stream.get_final_message()
