@@ -134,6 +134,11 @@ def complete(
     # sovereign is off, so the normal path is unchanged.
     security.assert_egress_allowed(config.member_host(settings))
 
+    # Observe-only plugin hooks (telemetry/guardrails); mutation is not
+    # honoured here — it would silently diverge the replay hash.
+    from . import connectors
+    connectors.emit("pre_llm_call", params)
+
     last_err: Exception | None = None
     for attempt in range(4):
         try:
@@ -153,6 +158,7 @@ def complete(
                 )
             replaystore.put(req_hash, message)   # freeze for re-executable replay
             replaystore.note_call(req_hash)
+            connectors.emit("post_llm_call", params, message)
             return message
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:

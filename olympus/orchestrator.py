@@ -116,6 +116,7 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
         """Settings for the lightweight stages (route/plan/review). In fast mode
@@ -702,6 +703,7 @@ class Olympus:
         # every specialist run inside this pipeline (contextvar-scoped).
         steer_token = steering.set_current(
             self.conversation_id or f"user-{self.user}")
+        connectors.emit("run_start", self.user, user_message)
         try:
             mode, brief, result = self._pipeline(user_message, tr)
             if mode == "direct":
@@ -726,6 +728,7 @@ class Olympus:
             steering.reset(steer_token)
             tr.flush()
             self.last_run_id = tr.id
+        connectors.emit("run_end", self.user, reply)
         self._finish(user_message, reply)
         return reply
 

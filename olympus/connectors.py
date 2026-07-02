@@ -138,6 +138,101 @@ def plugin_data_names_for(specialist_key: str) -> set[str]:
                                  or specialist_key in p.specialists)}
 
 
+# ─────────────────────────── lifecycle hooks ───────────────────────────
+#
+# Plugins can also observe and (for tools) intercept the agent loop without
+# forking Olympus. Events:
+#
+#   session_start(user, conversation_id)      an Olympus instance came up
+#   run_start(user, message) / run_end(user, reply)   one ask() pipeline
+#   pre_llm_call(params) / post_llm_call(params, response)   observe-only
+#   pre_tool(name, params)     may BLOCK ({"block": reason}) or REWRITE the
+#                              input ({"params": {...}}); None = pass through
+#   post_tool(name, params, result)   may REWRITE the result by returning a
+#                                     string; None = pass through
+#
+# pre/post_llm_call are deliberately observe-only: mutating the request there
+# would silently change the replay hash and break byte-identical replay. Tool
+# interception runs BEFORE execution, so a block composes with (never
+# bypasses) the approval spine — it can only make policy stricter. A raising
+# hook is logged and skipped: a broken plugin must not take down the agent.
+
+HOOK_EVENTS = ("session_start", "run_start", "run_end",
+               "pre_llm_call", "post_llm_call", "pre_tool", "post_tool")
+
+_HOOKS: dict[str, list[Callable]] = {}
+
+
+def hook(event: str):
+    """Decorator registering a plugin lifecycle hook.
+
+    Example (block a tool against a denylist):
+        @hook("pre_tool")
+        def no_prod_writes(name, params):
+            if name == "call_webhook" and "prod" in str(params):
+                return {"block": "prod webhooks are off-limits from plugins"}
+    """
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unknown hook event '{event}' "
+                         f"(expected one of {', '.join(HOOK_EVENTS)})")
+
+    def deco(fn: Callable) -> Callable:
+        _HOOKS.setdefault(event, []).append(fn)
+        return fn
+    return deco
+
+
+def emit(event: str, *args) -> None:
+    """Fire observe-only hooks; exceptions are contained."""
+    load_plugins()
+    for fn in _HOOKS.get(event, ()):
+        try:
+            fn(*args)
+        except Exception as err:
+            print(f"[connectors] {event} hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+
+
+def emit_pre_tool(name: str, params: dict) -> tuple[dict, str | None]:
+    """Run pre_tool hooks. Returns (possibly-rewritten params, block_reason).
+    The first hook that blocks wins; rewrites chain in registration order."""
+    load_plugins()
+    for fn in _HOOKS.get("pre_tool", ()):
+        try:
+            verdict = fn(name, params)
+        except Exception as err:
+            print(f"[connectors] pre_tool hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+            continue
+        if not isinstance(verdict, dict):
+            continue
+        if verdict.get("block"):
+            return params, str(verdict["block"])
+        if isinstance(verdict.get("params"), dict):
+            params = verdict["params"]
+    return params, None
+
+
+def emit_post_tool(name: str, params: dict, result: str) -> str:
+    """Run post_tool hooks; a hook returning a string replaces the result."""
+    load_plugins()
+    for fn in _HOOKS.get("post_tool", ()):
+        try:
+            out = fn(name, params, result)
+        except Exception as err:
+            print(f"[connectors] post_tool hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+            continue
+        if isinstance(out, str):
+            result = out
+    return result
+
+
+def clear_hooks() -> None:
+    """Testing aid: forget every registered hook."""
+    _HOOKS.clear()
+
+
 # ─────────────────────────── MCP servers ───────────────────────────
 
 @dataclass(frozen=True)

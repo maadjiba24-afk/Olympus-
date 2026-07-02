@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import config, llm, replaystore, security, steering, tools, transcript
+from . import (config, connectors, llm, replaystore, security, steering,
+               tools, transcript)
 
 
 def _assistant_turn(response) -> dict[str, Any]:
@@ -152,14 +153,24 @@ def _tool_result(block) -> dict[str, Any]:
     if handler is None:
         content, is_error = f"Error: no handler for tool '{block.name}'", True
     else:
-        try:
-            output = handler(**(block.input or {}))
-        except Exception as err:
-            content, is_error = f"Error: {err}", True
+        # Plugin lifecycle hooks: pre_tool may rewrite the input or block the
+        # call outright (policy can only get stricter — this runs before the
+        # approval spine ever sees the action, never instead of it).
+        params, block_reason = connectors.emit_pre_tool(
+            block.name, dict(block.input or {}))
+        if block_reason:
+            content, is_error = (
+                f"Blocked by plugin policy: {block_reason}", True)
         else:
-            content = str(output)
-            if security.should_wrap(block.name):
-                content = security.wrap_untrusted(content, source=block.name)
-            is_error = False
+            try:
+                output = handler(**params)
+            except Exception as err:
+                content, is_error = f"Error: {err}", True
+            else:
+                content = connectors.emit_post_tool(
+                    block.name, params, str(output))
+                if security.should_wrap(block.name):
+                    content = security.wrap_untrusted(content, source=block.name)
+                is_error = False
     replaystore.put_tool(block.id, content, is_error)
     return block_result(content, is_error)
