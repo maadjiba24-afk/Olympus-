@@ -225,7 +225,13 @@ def _process(bots: dict, sender: str, text: str) -> None:
         _send(sender, bot.set_contribute(on))
         return
 
-    _send(sender, bot.ask(text))
+    # Journal the in-flight request so a gateway restart resumes it.
+    from . import gateway
+    gateway.inflight_mark(f"wa-{sender}", sender, text)
+    try:
+        _send(sender, bot.ask(text))
+    finally:
+        gateway.inflight_clear(f"wa-{sender}")
 
 
 class _SenderWorker(threading.Thread):
@@ -326,6 +332,22 @@ def run_server(host: str = "0.0.0.0", port: int = 8485) -> None:
     httpd._bots, httpd._workers = {}, {}
     httpd._seen = set()
     httpd._lock = threading.Lock()
+    # Session auto-resume: re-run what a previous process died holding.
+    from . import gateway as _gw
+    for entry in _gw.inflight_take("wa-"):
+        sender = str(entry.get("key") or "")
+        if not sender:
+            continue
+        try:
+            _send(sender, "⚡ I was restarted while working on your last "
+                          "request — picking it back up now.")
+        except Exception:
+            pass
+        worker = httpd._workers.get(sender)
+        if worker is None:
+            worker = httpd._workers[sender] = _SenderWorker(httpd._bots, sender)
+            worker.start()
+        worker.q.put(entry["text"])
     print(f"⚡ Olympus WhatsApp webhook on http://{host}:{port}/webhook "
           f"(put it behind HTTPS; Ctrl-C to stop)")
     try:

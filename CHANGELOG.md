@@ -15,6 +15,76 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — capabilities adopted from the Hermes-agent analysis (docs/HERMES_WATCH.md)
+
+- **Standing goals with completion contracts** (`olympus/goals.py`) — `/goal`
+  (chat) and `olympus goal add/list/check/work/drop/done` set objectives that
+  outlive the conversation. The heartbeat works each active goal on a cadence
+  (`OLYMPUS_GOALS_EVERY`, default 6h) and a verify-role judge closes it **only
+  on concrete evidence in the progress log** — assertions are not evidence.
+  Goals stall (with a push notification) instead of looping forever.
+- **Skill-library curation** (`olympus/curator.py`, `olympus curate`,
+  `OLYMPUS_CURATION_EVERY` default 7d) — the retirement half of
+  self-improvement: a scoped, tool-free model call grades every proven skill;
+  a prune candidate is archived (recoverably) only if hiding it doesn't lower
+  the affected benchmark — the admission gate run in reverse; consolidations
+  are queued as lessons for Metis.
+- **Mixture-of-Agents provider** (`OLYMPUS_PROVIDER=moa`) — the configured
+  model pool becomes an ensemble: every completion fans out to the members as
+  reference models and the strongest member aggregates their drafts into one
+  answer. Tool-using runs route to the aggregator member.
+- **Provider failover chains** — a provider-side failure (auth/rate/outage) on
+  an operator-pool member now retries the other pool members in order
+  (`OLYMPUS_FALLBACK=0` disables). BYOK/per-request credentials never fail
+  over; refusals and replay divergences surface unchanged.
+- **Voice input** — `transcribe_audio` tool (OpenAI-compatible
+  `/audio/transcriptions`, `OLYMPUS_STT_MODEL`) plus Telegram/WhatsApp voice
+  notes transcribed into the normal text pipeline as `[voice note] …`.
+  Registered as an INGESTION tool: spoken injection is still injection.
+- **MCP server mode** (`olympus mcp-serve`) — Olympus as an MCP server on
+  stdio, exposing `ask_olympus` (the full fact-checked pipeline) and
+  `olympus_goals` to Claude Desktop, IDEs, and other MCP clients.
+- **`/steer <note>`** — mid-run steering: gateways handle it outside the
+  per-user serial worker so the note reaches the *running* pipeline after its
+  next tool round (frozen per round, so replays stay byte-identical).
+- **`/undo [N]`** — removes the last N exchanges from the persisted
+  conversation (TUI, gateways, Telegram, WhatsApp), stopping at compaction
+  boundaries.
+- **Plugin lifecycle hooks** — `@hook("pre_tool")` can block or rewrite a tool
+  call (composing with, never bypassing, the approval spine); `post_tool` can
+  rewrite results; `session_start`/`run_start`/`run_end`/`pre_llm_call`/
+  `post_llm_call` observe. Broken hooks are contained.
+- **`@file` / `@url` context references** in the interactive TUI — expanded
+  into delimited context blocks; URL content rides the SSRF-guarded fetcher
+  and is wrapped as untrusted.
+- **Cross-session prompt caching** — `OLYMPUS_CACHE_TTL=1h` extends the
+  Anthropic cache breakpoints (system prompt + tool schemas) to the 1-hour
+  tier, keeping the cache warm across heartbeat cycles and gateway chats.
+- **Activity-based exec timeouts + watch patterns** — `sandbox.run` now kills
+  on *silence*, not elapsed time (output extends the lease up to the 600s
+  ceiling), returns partial output on timeout, and an optional `watch` regex
+  collects matching output lines.
+- **Post-write verification** — `write_file` verifies the bytes landed and
+  parse-checks py/json/toml/yaml, surfacing the verdict to the agent in the
+  action result (catches silent write failures in the same turn).
+- **Session auto-resume** — Telegram/WhatsApp journal the request they are
+  processing; after a gateway restart the stale entry is re-run once and the
+  user is told, instead of the request vanishing silently.
+
+### Security
+
+- **Outbound secret-exfiltration scanning** (`security.secret_exfil_reason`)
+  — the actual secrets this process holds (vault entries + key-shaped env
+  vars) are detected leaving in outbound content, raw or base64/hex/
+  url-encoded. Always-on floor in web fetches, `send_email`, `call_webhook`,
+  the contribution pool, and `egress.guard` (HOLD on every channel; an
+  explicit human approval can still release).
+- **Skill imports are scanned, not trusted** — `skill-import` refuses
+  SKILL.md files carrying prompt-injection markers or embedded credentials.
+- **MCP connector definitions are validated on the way in** — non-https URLs,
+  credentials-in-URL, SSRF-blocked hosts, and literal tokens in `auth_env`
+  (instead of an env-var name) are refused before they persist.
+
 ## [0.23.0] — 2026-07-01
 
 ### Security — deep-diagnostic hardening pass

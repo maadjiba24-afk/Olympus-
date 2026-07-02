@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 69,
+    "count": 70,
     "names": [
       "actions",
       "add-mcp",
@@ -70,6 +70,7 @@
       "learn",
       "learned",
       "limit",
+      "mcp-serve",
       "memory",
       "models",
       "next-wake",

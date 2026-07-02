@@ -191,7 +191,14 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
         return
 
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")
-    _send(token, chat_id, bot.ask(text))
+    # Journal the in-flight request so a gateway restart resumes it instead
+    # of losing it silently.
+    from . import gateway
+    gateway.inflight_mark(f"tg-{chat_id}", chat_id, text)
+    try:
+        _send(token, chat_id, bot.ask(text))
+    finally:
+        gateway.inflight_clear(f"tg-{chat_id}")
 
 
 class _ChatWorker(threading.Thread):
@@ -224,6 +231,27 @@ def run_bot() -> None:
 
     bots: dict[int, orchestrator.Olympus] = {}
     workers: dict[int, _ChatWorker] = {}
+
+    # Session auto-resume: re-run whatever a previous gateway process was
+    # working on when it died (at most one retry per message).
+    from . import gateway as _gw
+    for entry in _gw.inflight_take("tg-"):
+        try:
+            chat_id = int(entry["key"])
+        except (TypeError, ValueError):
+            continue
+        try:
+            _send(token, chat_id,
+                  "⚡ I was restarted while working on your last request — "
+                  "picking it back up now.")
+        except Exception:
+            pass
+        worker = workers.get(chat_id)
+        if worker is None:
+            worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)
+            worker.start()
+        worker.q.put(entry["text"])
+
     offset = 0
     while True:
         try:

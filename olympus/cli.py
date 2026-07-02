@@ -290,6 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
+    sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
+                                     "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
     p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
@@ -902,6 +904,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "curate":
         from . import curator
         print(curator.curate())
+    elif args.command == "mcp-serve":
+        from . import mcp_server
+        try:
+            mcp_server.serve_stdio()
+        except KeyboardInterrupt:
+            pass
     elif args.command == "train":
         print(orchestrator.train_specialists(focus=args.focus))
     elif args.command == "models":

@@ -17,7 +17,7 @@ import threading
 import traceback
 from collections import OrderedDict
 
-from . import memory, orchestrator, steering
+from . import config, memory, orchestrator, steering
 
 CHUNK = 3500
 
@@ -47,6 +47,78 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
 
 # Every chat platform that exposes an ambient notify() for proactive pushes.
 NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal")
+
+
+# --- in-flight work journal (session auto-resume) --------------------------
+#
+# Conversation *history* already survives a restart (persisted per turn); the
+# request being processed WHEN the gateway died did not — it vanished
+# silently. Each long-poll gateway marks the message it is working on and
+# clears the mark on completion; on boot it takes the stale marks back and
+# re-runs them, telling the user. An entry is retried at most once (a message
+# that kills the gateway twice must not become a crash loop).
+
+_INFLIGHT_MAX_ATTEMPTS = 2
+_INFLIGHT_MAX_AGE = 24 * 3600
+
+
+def _inflight_dir():
+    d = config.MEMORY_DIR / "inflight"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def inflight_mark(uid: str, deliver_key, text: str) -> None:
+    """Record that `text` is being processed for `uid` (best-effort).
+    `deliver_key` is whatever the platform needs to send a message back
+    (chat id, sender number)."""
+    import json as _json
+    import time as _time
+    try:
+        path = _inflight_dir() / f"{memory.safe_id(uid)}.json"
+        attempts = 1
+        if path.exists():
+            try:
+                prior = _json.loads(path.read_text(encoding="utf-8"))
+                if prior.get("text") == text:
+                    attempts = int(prior.get("attempts", 1)) + 1
+            except (ValueError, OSError):
+                pass
+        path.write_text(_json.dumps(
+            {"uid": uid, "key": deliver_key, "text": text,
+             "attempts": attempts, "ts": _time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def inflight_clear(uid: str) -> None:
+    try:
+        (_inflight_dir() / f"{memory.safe_id(uid)}.json").unlink(
+            missing_ok=True)
+    except OSError:
+        pass
+
+
+def inflight_take(prefix: str) -> list[dict]:
+    """Pop and return the resumable entries whose uid starts with `prefix`.
+    Entries that are too old or already retried are dropped, not returned."""
+    import json as _json
+    import time as _time
+    out = []
+    for path in sorted(_inflight_dir().glob("*.json")):
+        try:
+            entry = _json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            path.unlink(missing_ok=True)
+            continue
+        if not str(entry.get("uid", "")).startswith(prefix):
+            continue
+        path.unlink(missing_ok=True)      # taken either way
+        fresh = _time.time() - float(entry.get("ts", 0)) <= _INFLIGHT_MAX_AGE
+        if fresh and int(entry.get("attempts", 1)) < _INFLIGHT_MAX_ATTEMPTS \
+                and entry.get("text"):
+            out.append(entry)
+    return out
 
 
 def notify_all(text: str) -> list[str]:
