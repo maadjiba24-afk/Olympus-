@@ -606,3 +606,4 @@ then re-rank the candidate table.
 | Date | Covered | By |
 |------|---------|----|
 | 2026-07-02 | Initial pass: all 19 releases (v0.2.0 → v0.18.0), full Olympus capability mapping | Claude session (hermes-release-tracking) |
+| 2026-07-02 | **Adoption wave shipped**: candidates 1–9 and 11–16 implemented (standing goals w/ completion contracts, skill curation, prompt caching, STT + voice notes, post-write verification, exfil scanning, /steer + /undo, MCP server mode, plugin hooks, dashboard admin deferred (#10 — large web-UI project), session auto-resume, activity timeouts + watch patterns, provider failover, MoA provider, @file/@url, import/MCP scanning). See CHANGELOG.md [Unreleased] | Claude session (hermes-release-tracking) |
