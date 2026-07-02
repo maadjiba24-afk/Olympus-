@@ -52,6 +52,10 @@ def next_due_in(state: dict | None = None, now: float | None = None) -> float:
     job_wait = scheduler.next_due_in(now)
     if job_wait is not None:
         waits.append(job_wait)
+    from . import goals
+    goal_wait = goals.next_due_in(now)
+    if goal_wait is not None:
+        waits.append(goal_wait)
     return min(waits) if waits else float(config.DAILY_LEARNING_EVERY)
 
 

@@ -275,6 +275,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
                          help="deliver result to: telegram|discord|slack|signal")
+    p_goal = sub.add_parser("goal", help="standing goals with completion "
+                                         "contracts (worked by the heartbeat)")
+    p_goal.add_argument("action", nargs="?", default="list",
+                        choices=["list", "add", "check", "work", "drop", "done"])
+    p_goal.add_argument("detail", nargs="*",
+                        help='add: <goal text> [:: <what done means>] · '
+                             'check/work/drop/done: <goal id>')
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
@@ -1059,6 +1066,35 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "run":
             ran = scheduler.run_due()
             print("\n".join(ran) if ran else "Nothing due right now.")
+    elif args.command == "goal":
+        from . import goals
+        detail = " ".join(args.detail).strip()
+        if args.action == "list":
+            print(goals.summary())
+        elif args.action == "add":
+            text, _, contract = detail.partition("::")
+            print(goals.add("cli", text.strip(), contract.strip()))
+        elif args.action == "check":
+            g = goals.get(detail)
+            if g is None:
+                print(f"No goal with id '{detail}'.")
+                return 1
+            v = goals.judge(g)
+            state = "DONE" if v["done"] else "not done"
+            print(f"[{g.id}] {state} (confidence {v['confidence']:.2f})\n"
+                  f"evidence: {v['evidence'] or '(none)'}\n"
+                  f"missing:  {v['missing'] or '(nothing)'}")
+        elif args.action == "work":
+            g = goals.get(detail)
+            if g is None:
+                print(f"No goal with id '{detail}'.")
+                return 1
+            print(goals.work_one(g))
+        elif args.action == "drop":
+            print(goals.set_status(detail, "dropped"))
+        elif args.action == "done":
+            print(goals.set_status(detail, "done",
+                                   evidence="closed manually by the operator"))
     elif args.command in ("web", "serve"):
         from . import web
         try:

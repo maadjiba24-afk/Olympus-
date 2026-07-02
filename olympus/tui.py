@@ -28,6 +28,7 @@ COMMANDS: dict[str, str] = {
     "/queue": "queue a YouTube video for the autonomous loop: /queue <url>",
     "/good": "rate the last answer good (optionally /good <comment>)",
     "/bad": "rate the last answer bad (optionally /bad <comment>)",
+    "/goal": "standing goals: /goal <text> [:: done-means] · /goal list|drop <id>",
     "/undo": "remove the last N exchanges from the conversation: /undo [N]",
     "/steer": "nudge the current/next task mid-run: /steer <note>",
     "/lang": "set reply language: /lang <language|auto>",
@@ -125,6 +126,19 @@ def dispatch_command(bot, raw: str):
             return (True, "Usage: /queue <youtube-url>", False)
         memory.watchlist_add(arg)
         return (True, "Queued for the heartbeat.", False)
+    if name == "/goal":
+        from . import goals
+        sub, _, rest = arg.strip().partition(" ")
+        user = getattr(bot, "user", "cli")
+        if not arg.strip() or sub == "list":
+            return (True, goals.summary(user), False)
+        if sub == "drop":
+            return (True, goals.set_status(rest.strip(), "dropped"), False)
+        if sub == "done":
+            return (True, goals.set_status(rest.strip(), "done",
+                                           evidence="closed manually"), False)
+        text, _, contract = arg.partition("::")
+        return (True, goals.add(user, text.strip(), contract.strip()), False)
     if name == "/undo":
         try:
             n = int(arg) if arg.strip() else 1

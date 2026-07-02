@@ -32,6 +32,8 @@ HELP = (
     "/good or /bad [comment] — rate the last answer\n"
     "/steer <note> — nudge the task that's currently running\n"
     "/undo [N] — remove the last N exchanges from the conversation\n"
+    "/goal <text> [:: done-means] — set a standing goal the heartbeat works\n"
+    "/goal list · /goal drop <id> — review or retire standing goals\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
@@ -113,6 +115,19 @@ def reply_for(bots: dict, user_key: str, text: str,
         return chunk("Queued — the heartbeat will watch it on its next pass.")
 
     uid = f"{prefix}-{memory.safe_id(user_key)}"
+    if cmd == "/goal":
+        from . import goals
+        sub, _, rest = arg.strip().partition(" ")
+        if not arg.strip() or sub == "list":
+            return chunk(goals.summary(uid))
+        if sub == "drop":
+            return chunk(goals.set_status(rest.strip(), "dropped"))
+        if sub == "done":
+            return chunk(goals.set_status(rest.strip(), "done",
+                                          evidence="closed manually"))
+        text, _, contract = arg.partition("::")
+        return chunk(goals.add(uid, text.strip(), contract.strip()))
+
     bot = bots.get(uid)
     if bot is None:
         bot = bots[uid] = orchestrator.Olympus(user=uid, conversation_id=uid)
