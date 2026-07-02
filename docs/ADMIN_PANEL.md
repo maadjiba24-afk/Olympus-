@@ -1,8 +1,8 @@
 # The operator admin panel (`/admin`)
 
-A **read-only** overview of a running Olympus instance, served by the web
-process (`olympus serve`). One page answers what previously took a handful
-of CLI commands on the box:
+An overview and control surface for a running Olympus instance, served by
+the web process (`olympus serve`). One page answers what previously took a
+handful of CLI commands on the box:
 
 | Section | Shows |
 | --- | --- |
@@ -20,9 +20,30 @@ of CLI commands on the box:
 | Security posture | sovereign snapshot, egress allowlist size, egress guard |
 | Recent errors | last captured errors with age and location |
 
-**Phase 1 is deliberately read-only.** Nothing on the panel mutates state;
-approvals, goals, schedules, and configuration still change through the CLI
-and the approval spine. Mutations are a later phase with its own review.
+## Phase 2 — acting on running state
+
+The panel can also drive the operations the CLI already exposes, via
+`POST /api/admin/act` (op + params):
+
+- **Approvals**: approve-and-execute or deny any held action, across users —
+  this IS the approval spine's human step, now one click instead of
+  `olympus actions` on the box.
+- **Goals**: add a standing goal (with an optional completion contract),
+  mark done, drop.
+- **Schedules**: add / enable / disable / remove natural-language tasks.
+- **Maintenance**: trigger the skill gate, curation, or a backup — long jobs
+  run in a background thread and report into reports/health.
+- **Autonomy dial**: set a user's L0–L4 level.
+
+Nothing here bypasses a gate that existed before: approving an action runs
+the same `actions.approve` the CLI calls, and irreversible actions still
+require exactly this explicit human step. **Configuration (credentials,
+channels, models) remains CLI-only — that's Phase 3, with its own review.**
+
+Mutation requests must carry the `X-Olympus-Admin: 1` header in addition to
+the auth below. Browsers only attach custom headers after a CORS preflight
+this server never approves, so a hostile web page cannot fire cross-origin
+mutations at a loopback panel (CSRF defense).
 
 ## Access model
 

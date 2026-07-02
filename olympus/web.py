@@ -1276,7 +1276,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/register", "/api/login",
-                        "/api/logout", "/api/report"):
+                        "/api/logout", "/api/report", "/api/admin/act"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -1285,6 +1285,23 @@ class Handler(BaseHTTPRequestHandler):
         payload = self._read_json()
         if payload is None:
             self._json({"error": "bad request"}, 400)
+            return
+        if path == "/api/admin/act":
+            # Operator mutations (Phase 2). Same gate as the snapshot, PLUS a
+            # required custom header: browsers only attach custom headers after
+            # a CORS preflight we never approve, so a hostile page cannot fire
+            # cross-origin mutations at a loopback panel (CSRF defense).
+            ok, code, msg = self._admin_authorized()
+            if not ok:
+                self._json({"error": msg}, code)
+                return
+            if self.headers.get("X-Olympus-Admin") != "1":
+                self._json({"error": "missing X-Olympus-Admin header"}, 403)
+                return
+            from . import adminpanel
+            result = adminpanel.act(str(payload.get("op", "")),
+                                    payload.get("params") or {})
+            self._json(result, 200 if result["ok"] else 400)
             return
         # Cheap write endpoints get a generous per-IP budget (DoS guard); the
         # expensive /api/chat keeps its own stricter limit further down. Auth
