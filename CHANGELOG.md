@@ -15,7 +15,70 @@ carries a migration note here.
 
 ## [Unreleased]
 
-## [0.23.0] — 2026-07-01
+> **Release-state note.** As of this writing the latest *published* release is
+> **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
+> and `0.23.0` sections below were prepared and dated but **never tagged or
+> published** — so they are not releases yet, and everything from `0.22.0`
+> down to this note is effectively unreleased pending a tagging decision (see
+> RELEASING.md). The dated headers are kept for review; re-date and tag them
+> when a release is actually cut. `pyproject.toml` currently reads `0.23.0` as
+> the in-development version, not a shipped one.
+
+### Security — close operator API-key exfiltration and BYOK bypass
+
+- `Settings.merged` dropped inherited credentials only on a *provider* switch,
+  so a same-provider `base_url` override kept the operator's env key and sent it
+  to a visitor-supplied host; the Anthropic SDK also fell back to
+  `ANTHROPIC_API_KEY` when the key was cleared. Now an endpoint change drops the
+  inherited key, and `llm.client` passes an empty key to a custom `base_url` so
+  it fails closed. `web._brought_own_key` counts only a *primary* `api_key` as
+  BYOK (a bare `base_url` or an `extra`-model key no longer unlocks the free /
+  `OLYMPUS_REQUIRE_BYOK` wall while the primary pipeline runs on the operator's
+  key). `/api/login|register|logout` are now rate-limited (were dispatched
+  before the limiter — password brute-force + PBKDF2 CPU-DoS).
+  `tools._read_source_file` uses path-component containment (a string-prefix
+  check accepted sibling dirs like `<root>-backup/`). `spawn_subagent` inherits
+  the calling run's credentials so a BYOK visitor's subagent runs on their key.
+- Packaging: added `.dockerignore` (keeps `.env`/`deploy/.env`/`keys.sh`, `.git`,
+  and local `memory/` out of the image); the Dockerfile now installs the
+  hash-pinned `requirements.lock` and the package itself; the Auto-Upgrade
+  workflow is gated on `author_association` so an issue body can't drive its
+  write-capable coding agent.
+
+### Fixed — replay/verify, routing, and a batch of correctness bugs
+
+- Replay now freezes and restores conversation history and fast-mode and records
+  the model that actually ran each stage, so `olympus replay` / `verify --log`
+  no longer diverge spuriously on multi-turn or fast-mode runs; `_plan` no
+  longer swallows a `ReplayDivergence`.
+- `olympus verify` now detects files *added* since signing (injected-file
+  detection), and dev-posture runs verify against the default seed's key so they
+  don't fail once the instance sets `OLYMPUS_SIGNING_SEED`.
+- Added the server-side `web_fetch` tool on the Anthropic provider (the
+  verifiers were told to call it but it wasn't declared); the router no longer
+  reports unparseable route JSON as a safety refusal.
+- Misc: prompt-restore no longer corrupts a prompt on a multi-line update
+  reason; `operator.authorized` matches subdomains of an authorized site;
+  schedule confirmations render the coarsest unit (`7d`, not `168h`); backup
+  closes a leaked temp fd; `cli restore` reports failures instead of a raw
+  traceback and distinguishes an invalid signature from unsigned;
+  `codegraph_path` returns a message for unknown symbols; the LLM client cache
+  is bounded and the final retry no longer sleeps; the web session cap
+  FIFO-evicts instead of wiping every user's session; the per-session event
+  buffer is bounded; and a rejected chat (400/402) no longer burns a daily-chat
+  quota slot.
+
+### Changed — documentation honesty and drift guards
+
+- Corrected the "server-side sandbox, never on your machine" claim across README,
+  `docs/THREAT_MODEL.md`, and the code-eval path — model code runs approval-gated
+  as a local subprocess by default (opt-in `OLYMPUS_EXEC_BACKEND=docker` for OS
+  isolation). Fixed the "26 tools" → 60 count and the "12/11 specialists" → live
+  count, and added CI-enforced guards (`threatmodel.check`, interpolated UI
+  count) so both can't drift again. Marked the shipped design docs as
+  implemented (were "proposed"/"not wired up").
+
+## [0.23.0] — unreleased (prepared; not tagged or published)
 
 ### Security — deep-diagnostic hardening pass
 
@@ -314,7 +377,7 @@ carries a migration note here.
 - See [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for the full
   strengths→moats / weaknesses→credibility-assets rationale.
 
-## [0.22.0] — 2026-06-29
+## [0.22.0] — unreleased (prepared; not tagged or published)
 
 ### Added — OpenAI-compatible inbound endpoint (SPEC-01)
 
@@ -638,9 +701,7 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.23.0...HEAD
-[0.23.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.22.0...v0.23.0
-[0.22.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...v0.22.0
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...HEAD
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0
