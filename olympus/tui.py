@@ -156,6 +156,73 @@ def dispatch_command(bot, raw: str):
     return (False, None, False)
 
 
+MAX_REF_CHARS = 20_000       # per injected reference, keeps prompts bounded
+_REF_RE = None               # compiled lazily (import re only when needed)
+
+
+def expand_references(text: str, *, read=None, fetch=None) -> tuple[str, list[str]]:
+    """Expand `@file` and `@https://url` references into context blocks.
+
+    `@path` (an existing local file) and `@http(s)://…` tokens are replaced
+    inline by their bare name, and the referenced content is appended as a
+    clearly delimited context block. Tokens that are neither an existing file
+    nor a URL (e.g. an @handle) pass through untouched. Returns the expanded
+    text and a list of notes describing what was injected (for the UI).
+
+    `read`/`fetch` are injectable for tests; production uses the filesystem
+    and the SSRF-guarded web fetcher. URL content is wrapped as untrusted —
+    a page must not be able to steer the council."""
+    global _REF_RE
+    import re
+    if _REF_RE is None:
+        _REF_RE = re.compile(r"(?:(?<=\s)|^)@(\S+)")
+    from pathlib import Path
+
+    def _read(path: str) -> str:
+        return Path(path).expanduser().read_text(encoding="utf-8",
+                                                 errors="replace")
+
+    def _fetch(url: str) -> str:
+        from . import tools
+        return tools._strip_html(tools._http_get(url))
+
+    read = read or _read
+    fetch = fetch or _fetch
+    blocks: list[str] = []
+    notes: list[str] = []
+
+    def _sub(match) -> str:
+        ref = match.group(1).rstrip(".,;:!?)")
+        if ref.startswith(("http://", "https://")):
+            from . import security
+            try:
+                body = fetch(ref)[:MAX_REF_CHARS]
+            except Exception as err:
+                notes.append(f"could not fetch {ref}: {err}")
+                return match.group(0)
+            blocks.append(f"[context from {ref}]\n"
+                          + security.wrap_untrusted(body, source=ref)
+                          + "\n[end context]")
+            notes.append(f"injected {ref} ({len(body)} chars)")
+            return ref
+        p = Path(ref).expanduser()
+        if p.is_file():
+            try:
+                body = read(ref)[:MAX_REF_CHARS]
+            except Exception as err:
+                notes.append(f"could not read {ref}: {err}")
+                return match.group(0)
+            blocks.append(f"[context from file {ref}]\n{body}\n[end context]")
+            notes.append(f"injected {ref} ({len(body)} chars)")
+            return ref
+        return match.group(0)          # not a file, not a URL — leave it
+
+    expanded = _REF_RE.sub(_sub, text)
+    if blocks:
+        expanded = expanded + "\n\n" + "\n\n".join(blocks)
+    return expanded, notes
+
+
 def _install_readline() -> None:
     try:
         import readline
@@ -248,6 +315,14 @@ def run(pool=None) -> None:
             if output:
                 print(f"\nolympus ▸ {output}\n")
             continue
+        # @file / @url references: inject their content as context blocks.
+        if "@" in text:
+            try:
+                text, notes = expand_references(text)
+                for note in notes:
+                    print(f"  [{note}]")
+            except Exception as err:
+                print(f"  [reference expansion failed: {err}]")
         # A real question → stream the final answer token-by-token.
         try:
             sys.stdout.write("\nolympus ▸ ")
