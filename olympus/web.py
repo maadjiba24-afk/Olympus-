@@ -1142,6 +1142,14 @@ class Handler(BaseHTTPRequestHandler):
                     else legal.terms_html())
             self._send(200, html.encode(), "text/html; charset=utf-8")
             return
+        if url.path == "/admin":
+            # The operator panel SHELL: static HTML/JS with NO data in it.
+            # The data lives behind /api/admin below, which carries the real
+            # gate — so serving the shell itself is as safe as serving "/".
+            from . import adminpanel
+            self._send(200, adminpanel.page().encode(),
+                       "text/html; charset=utf-8")
+            return
         if url.path == "/oauth/google/start":
             self._oauth_start(url)
             return
@@ -1159,6 +1167,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
+            return
+        if url.path == "/api/admin":
+            # Operator overview (read-only). _authorized above already
+            # enforced the access token when one is configured; without a
+            # token this endpoint is additionally loopback-only — an admin
+            # surface must never be open just because auth was left unset.
+            ok, code, msg = self._admin_authorized()
+            if not ok:
+                self._json({"error": msg}, code)
+                return
+            from . import adminpanel
+            self._json(adminpanel.snapshot())
             return
         if url.path == "/api/metrics":
             snap = metrics.snapshot()          # instance ops, not per-user
@@ -1488,6 +1508,30 @@ class Handler(BaseHTTPRequestHandler):
         if auth[:7].lower() == "bearer ":
             return auth[7:].strip()
         return ""
+
+    def _admin_authorized(self) -> tuple[bool, int, str]:
+        """Gate /api/admin. With OLYMPUS_ACCESS_TOKEN configured, the
+        `_authorized` check (already applied on this path) IS the operator
+        credential. With no token, the panel is on-box only — same posture as
+        the /v1 endpoint: peer must be loopback, the server must be bound to
+        loopback, and no reverse-proxy forwarding header may be present."""
+        if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
+            return True, 200, ""
+        if not self._peer_is_loopback():
+            return (False, 403,
+                    "the admin panel is loopback-only until "
+                    "OLYMPUS_ACCESS_TOKEN is set.")
+        if not self._bound_to_loopback():
+            return (False, 401,
+                    "set OLYMPUS_ACCESS_TOKEN: the server is bound to a "
+                    "non-loopback address, so the admin panel needs the "
+                    "operator token.")
+        if _forwarding_headers_present(self.headers):
+            return (False, 401,
+                    "set OLYMPUS_ACCESS_TOKEN: a reverse-proxy forwarding "
+                    "header is present, so this request is relayed from "
+                    "off-box and needs the operator token.")
+        return True, 200, ""
 
     def _v1_authorized(self) -> tuple[bool, int, str]:
         """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid

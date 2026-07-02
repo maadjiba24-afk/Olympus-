@@ -180,6 +180,23 @@ def history(user: str, limit: int = 50) -> list[Action]:
     return items[:limit]
 
 
+def pending_all() -> list[Action]:
+    """Pending/approved actions across EVERY user — the operator overview
+    (a user still only ever sees their own via pending()). Read-only."""
+    root = config.MEMORY_DIR / "actions"
+    if not root.is_dir():
+        return []
+    out: list[Action] = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir():
+            try:
+                out.extend(pending(d.name))
+            except (json.JSONDecodeError, OSError, TypeError):
+                continue           # one corrupt record must not hide the rest
+    out.sort(key=lambda a: a.created_at, reverse=True)
+    return out
+
+
 # --- permission scopes (per user) ----------------------------------------
 
 def granted_scopes(user: str) -> set[str]:
