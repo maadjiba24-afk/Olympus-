@@ -15,8 +15,9 @@ across models — each would issue different calls).
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from . import config
 
@@ -79,6 +80,26 @@ def _aggregate_messages(messages: list[dict[str, Any]],
     return list(messages) + [tail]
 
 
+def _save_trace(question: str, refs: list[config.Settings],
+                drafts: list[str], final: str) -> None:
+    """Optional full-turn trace (OLYMPUS_MOA_SAVE_TRACES=1): every reference
+    draft plus the aggregate, saved to memory/reports for later comparison of
+    what each member contributed."""
+    if os.environ.get("OLYMPUS_MOA_SAVE_TRACES", "").lower() not in (
+            "1", "true", "yes", "on"):
+        return
+    try:
+        from . import memory
+        body = [f"## Question\n{question[:2000]}", ""]
+        for m, d in zip(refs, drafts):
+            body += [f"## Draft — {m.provider}/{m.model or 'default'}",
+                     d[:4000], ""]
+        body += ["## Aggregate", final[:4000]]
+        memory.save("reports", "moa trace", "\n".join(body))
+    except Exception:
+        pass                               # tracing must never break a reply
+
+
 def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
     from . import backend
@@ -86,9 +107,58 @@ def complete_text(settings: config.Settings, system: str,
     if len(refs) == 1:                    # ensemble of one = just that model
         return backend.complete_text(refs[0], system, messages, effort=effort)
     drafts = _drafts(refs, system, messages, effort)
-    return backend.complete_text(
+    final = backend.complete_text(
         _aggregator(refs), system + "\n\n" + _AGGREGATE_NOTE,
         _aggregate_messages(messages, refs, drafts), effort=effort)
+    question = str(messages[-1].get("content", "")) if messages else ""
+    _save_trace(question, refs, drafts, final)
+    return final
+
+
+def one_shot(prompt: str, *, show_drafts: bool = True,
+             runner: Callable[..., str] | None = None) -> str:
+    """`/moa <prompt>`: run ONE prompt through the ensemble regardless of the
+    configured provider (the session's model is untouched). With
+    `show_drafts`, each reference model's answer appears as a labelled block
+    before the aggregate — the Hermes-style visible ensemble."""
+    from . import backend
+    runner = runner or backend.complete_text
+    refs = _members()
+    system = "Answer the user's question well. Be concrete."
+    messages = [{"role": "user", "content": prompt}]
+    if len(refs) == 1:
+        only = runner(refs[0], system, messages)
+        return (f"(ensemble of one — {refs[0].provider}/{refs[0].model})\n\n"
+                + only)
+    labelled_drafts, drafts = [], []
+    with ThreadPoolExecutor(max_workers=len(refs)) as ex:
+        results = list(ex.map(
+            lambda m: _safe(runner, m, system, messages), refs))
+    for m, d in zip(refs, results):
+        if d is None:
+            labelled_drafts.append(
+                f"── {m.provider}/{m.model or 'default'} ── (failed)")
+            continue
+        drafts.append(d)
+        labelled_drafts.append(
+            f"── {m.provider}/{m.model or 'default'} ──\n{d}")
+    live = [m for m, d in zip(refs, results) if d is not None]
+    if not drafts:
+        return "Every moa reference model failed."
+    final = runner(_aggregator(live), system + "\n\n" + _AGGREGATE_NOTE,
+                   _aggregate_messages(messages, live, drafts))
+    _save_trace(prompt, live, drafts, final)
+    out = ""
+    if show_drafts:
+        out = "\n\n".join(labelled_drafts) + "\n\n══ aggregate ══\n"
+    return out + final
+
+
+def _safe(runner, member, system, messages) -> str | None:
+    try:
+        return runner(member, system, messages)
+    except Exception:
+        return None
 
 
 def complete_json(settings: config.Settings, system: str,

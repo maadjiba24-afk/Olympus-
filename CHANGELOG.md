@@ -26,6 +26,28 @@ carries a migration note here.
 
 ### Added
 
+- **`/learn <anything>`** (`olympus distill`, `/learn` in chat) — distill a
+  reusable skill on command from a URL (SSRF-guarded, wrapped untrusted), a
+  local file/directory (operator-only: CLI/TUI — chat users cannot read
+  server paths), or a described workflow. The distillate rides the existing
+  safety machinery: created provisional (benchmark-gated), scanned with the
+  same injection/credential scan as skill imports, sanitized before write.
+- **`/journey`** (`olympus journey`) — the browsable timeline of everything
+  learned: skills (with provisional status), lessons, corrections, feedback,
+  prompt upgrades. `journey show <ref>` inspects an entry; `journey rm
+  <ref>` removes one (skills archive recoverably) so a wrong lesson stops
+  shaping future answers.
+- **MoA polish** — `/moa <question>` (and `olympus moa`) runs one prompt
+  through the ensemble regardless of the configured provider, showing each
+  reference model's answer as a labelled block before the aggregate;
+  `OLYMPUS_MOA_SAVE_TRACES=1` persists full ensemble traces to reports.
+- **`/goal wait <id> <pid>`** — park a standing goal's work cycles while a
+  long-running process (build, backtest) finishes; the heartbeat resumes
+  the goal with a progress note when the process exits.
+- **TUI conveniences** — `/prompt` composes a multi-line question in
+  `$EDITOR`; `/reasoning` shows how the last answer was produced (the run's
+  recorded pipeline trace: routing, specialist spans, verification
+  decisions — also available in chat gateways); `/timestamps on|off`.
 - **Voice notes on every gateway** — Signal (signal-cli attachments),
   Discord (slash-command audio attachments), and Slack (voice clips /
   audio uploads, fetched with the bot token) now transcribe into the text

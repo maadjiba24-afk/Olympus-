@@ -33,7 +33,11 @@ HELP = (
     "/steer <note> — nudge the task that's currently running\n"
     "/undo [N] — remove the last N exchanges from the conversation\n"
     "/goal <text> [:: done-means] — set a standing goal the heartbeat works\n"
-    "/goal list · /goal drop <id> — review or retire standing goals\n"
+    "/goal list · /goal drop <id> · /goal wait <id> <pid> — manage goals\n"
+    "/learn <url or workflow> — distill a reusable skill from it\n"
+    "/journey — the timeline of everything Olympus has learned\n"
+    "/moa <question> — one-shot mixture-of-agents across the model pool\n"
+    "/reasoning — how the last answer was produced (pipeline trace)\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
@@ -197,8 +201,33 @@ def reply_for(bots: dict, user_key: str, text: str,
         if sub == "done":
             return chunk(goals.set_status(rest.strip(), "done",
                                           evidence="closed manually"))
+        if sub == "wait":
+            parts = rest.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                return chunk("Usage: /goal wait <goal id> <pid>")
+            return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/learn":
+        from . import learn
+        # Chat users must never read server paths — URLs/workflows only.
+        return chunk(learn.distill(arg, allow_paths=False))
+    if cmd == "/journey":
+        from . import journey
+        sub, _, ref = arg.strip().partition(" ")
+        if sub == "show":
+            return chunk(journey.show(ref.strip(), uid))
+        if sub == "rm":
+            return chunk(journey.remove(ref.strip(), uid))
+        return chunk(journey.timeline(uid))
+    if cmd == "/moa":
+        from . import moa
+        if not arg.strip():
+            return chunk("Usage: /moa <question>")
+        try:
+            return chunk(moa.one_shot(arg.strip()))
+        except Exception as err:
+            return chunk(f"moa failed: {err}")
 
     bot = bots.get(uid)
     if bot is None:
@@ -210,6 +239,9 @@ def reply_for(bots: dict, user_key: str, text: str,
         except ValueError:
             return chunk("Usage: /undo [N]")
         return chunk(bot.undo(n))
+    if cmd == "/reasoning":
+        from . import tui
+        return chunk(tui.reasoning_view(bot))
     if cmd in ("/good", "/bad"):
         return chunk(bot.feedback("up" if cmd == "/good" else "down", arg))
     if cmd == "/lang":
