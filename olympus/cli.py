@@ -278,10 +278,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
-                        choices=["list", "add", "check", "work", "drop", "done"])
+                        choices=["list", "add", "check", "work", "drop",
+                                 "done", "wait"])
     p_goal.add_argument("detail", nargs="*",
                         help='add: <goal text> [:: <what done means>] · '
-                             'check/work/drop/done: <goal id>')
+                             'check/work/drop/done: <goal id> · '
+                             'wait: <goal id> <pid>')
+    p_dist = sub.add_parser("distill", help="learn a reusable skill from a "
+                                            "URL, path, or described workflow")
+    p_dist.add_argument("source", nargs="+", help="url | file/dir | description")
+    p_jour = sub.add_parser("journey", help="the timeline of what Olympus "
+                                            "has learned (show/rm entries)")
+    p_jour.add_argument("action", nargs="?", default="list",
+                        choices=["list", "show", "rm"])
+    p_jour.add_argument("ref", nargs="?", default="",
+                        help="entry ref from the timeline")
+    p_moa = sub.add_parser("moa", help="one-shot mixture-of-agents: every "
+                                       "pool member answers, strongest "
+                                       "aggregates")
+    p_moa.add_argument("prompt", nargs="+", help="the question")
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
@@ -1113,6 +1128,26 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "done":
             print(goals.set_status(detail, "done",
                                    evidence="closed manually by the operator"))
+        elif args.action == "wait":
+            parts = detail.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                print("Usage: olympus goal wait <goal id> <pid>")
+                return 1
+            print(goals.wait_on(parts[0], int(parts[1])))
+    elif args.command == "distill":
+        from . import learn
+        print(learn.distill(" ".join(args.source), allow_paths=True))
+    elif args.command == "journey":
+        from . import journey
+        if args.action == "list":
+            print(journey.timeline())
+        elif args.action == "show":
+            print(journey.show(args.ref))
+        elif args.action == "rm":
+            print(journey.remove(args.ref))
+    elif args.command == "moa":
+        from . import moa
+        print(moa.one_shot(" ".join(args.prompt)))
     elif args.command in ("web", "serve"):
         from . import web
         try:

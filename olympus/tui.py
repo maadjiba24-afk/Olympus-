@@ -17,6 +17,7 @@ terminal.
 
 from __future__ import annotations
 
+import os
 import sys
 
 # name → one-line help. Drives /help, Tab-completion, and dispatch.
@@ -28,7 +29,13 @@ COMMANDS: dict[str, str] = {
     "/queue": "queue a YouTube video for the autonomous loop: /queue <url>",
     "/good": "rate the last answer good (optionally /good <comment>)",
     "/bad": "rate the last answer bad (optionally /bad <comment>)",
-    "/goal": "standing goals: /goal <text> [:: done-means] · /goal list|drop <id>",
+    "/goal": "standing goals: /goal <text> [:: done-means] · /goal list|drop|wait <id> [pid]",
+    "/learn": "distill a reusable skill from a url/path/workflow: /learn <source>",
+    "/journey": "timeline of everything learned: /journey [show|rm <ref>]",
+    "/moa": "one-shot mixture-of-agents (labeled drafts + aggregate): /moa <question>",
+    "/prompt": "compose a multi-line question in $EDITOR",
+    "/reasoning": "show how the last answer was produced (pipeline trace)",
+    "/timestamps": "toggle timestamps on replies: /timestamps on|off",
     "/undo": "remove the last N exchanges from the conversation: /undo [N]",
     "/steer": "nudge the current/next task mid-run: /steer <note>",
     "/lang": "set reply language: /lang <language|auto>",
@@ -137,8 +144,41 @@ def dispatch_command(bot, raw: str):
         if sub == "done":
             return (True, goals.set_status(rest.strip(), "done",
                                            evidence="closed manually"), False)
+        if sub == "wait":
+            parts = rest.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                return (True, "Usage: /goal wait <goal id> <pid>", False)
+            return (True, goals.wait_on(parts[0], int(parts[1])), False)
         text, _, contract = arg.partition("::")
         return (True, goals.add(user, text.strip(), contract.strip()), False)
+    if name == "/learn":
+        from . import learn
+        # The TUI runs on the operator's own machine — paths are fair game.
+        return (True, learn.distill(arg, allow_paths=True), False)
+    if name == "/journey":
+        from . import journey
+        sub, _, ref = arg.strip().partition(" ")
+        user = getattr(bot, "user", "cli")
+        if sub == "show":
+            return (True, journey.show(ref.strip(), user), False)
+        if sub == "rm":
+            return (True, journey.remove(ref.strip(), user), False)
+        return (True, journey.timeline(user), False)
+    if name == "/moa":
+        from . import moa
+        if not arg.strip():
+            return (True, "Usage: /moa <question> — every pool member "
+                          "answers; the strongest aggregates.", False)
+        try:
+            return (True, moa.one_shot(arg.strip()), False)
+        except Exception as err:
+            return (True, f"moa failed: {err}", False)
+    if name == "/reasoning":
+        return (True, reasoning_view(bot), False)
+    if name == "/timestamps":
+        on = arg.strip().lower() not in ("off", "0", "false", "no")
+        bot._show_timestamps = on
+        return (True, f"Timestamps {'on' if on else 'off'}.", False)
     if name == "/undo":
         try:
             n = int(arg) if arg.strip() else 1
@@ -237,6 +277,70 @@ def expand_references(text: str, *, read=None, fetch=None) -> tuple[str, list[st
     return expanded, notes
 
 
+def reasoning_view(bot) -> str:
+    """How the last answer was produced: the run's recorded pipeline trace —
+    routing, specialist spans, verification decisions. Olympus's honest
+    analog of Hermes's /reasoning: what's shown is the signed decision path
+    that actually ran, not free-form model musings."""
+    run_id = getattr(bot, "last_run_id", None)
+    if not run_id:
+        return "No run yet — ask something first, then /reasoning."
+    from . import trace as trace_mod
+    rec = trace_mod.load_run(run_id)
+    if rec is None:
+        return f"Run {run_id} isn't recorded (traces may have been pruned)."
+    lines = [f"Run {rec.get('id')} — {rec.get('kind')} · "
+             f"{rec.get('total_secs', '?')}s"]
+    events = rec.get("events") or []
+    if events:
+        lines.append("pipeline:")
+        for e in events[:40]:
+            stage = e.get("stage", "?")
+            extra = {k: v for k, v in e.items()
+                     if k not in ("stage", "t") and isinstance(v, (str, int))}
+            tail = ("  " + ", ".join(f"{k}={str(v)[:60]}"
+                                     for k, v in list(extra.items())[:3])
+                    if extra else "")
+            lines.append(f"  · {stage}{tail}")
+    decisions = rec.get("decisions") or []
+    if decisions:
+        lines.append("decisions:")
+        for d in decisions[:20]:
+            who = (d.get("agent") or {}).get("role") or \
+                (d.get("agent") or {}).get("channel") or "?"
+            lines.append(f"  ⚖ {d.get('type', d.get('decision_type', '?'))} "
+                         f"[{who}] → {str(d.get('status', ''))[:40]}")
+    lines.append(f"(full detail: olympus explain {run_id})"
+                 if rec.get("decisions") else "")
+    return "\n".join(l for l in lines if l)
+
+
+def editor_compose(run_editor=None) -> str:
+    """/prompt: open $EDITOR on a temp file and return what was written.
+    `run_editor(path)` is injectable for tests; production shells out."""
+    import subprocess
+    import tempfile
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+
+    def _default(path: str) -> None:
+        subprocess.run(f"{editor} {path}", shell=True)
+
+    run_editor = run_editor or _default
+    with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False,
+                                     prefix="olympus-prompt-") as f:
+        path = f.name
+        f.write("")
+    try:
+        run_editor(path)
+        text = open(path, encoding="utf-8").read().strip()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return text
+
+
 def _install_readline() -> None:
     try:
         import readline
@@ -322,6 +426,13 @@ def run(pool=None) -> None:
             continue
         if text in ("exit", "quit"):
             break
+        if text == "/prompt":
+            # Compose a long question in $EDITOR, then run it as a question.
+            text = editor_compose()
+            if not text:
+                print("  (empty — nothing sent)")
+                continue
+            print(f"\nyou ▸ {text[:200]}{'…' if len(text) > 200 else ''}")
         handled, output, should_exit = dispatch_command(bot, text)
         if should_exit:
             break
@@ -339,6 +450,8 @@ def run(pool=None) -> None:
                 print(f"  [reference expansion failed: {err}]")
         # A real question → stream the final answer token-by-token.
         try:
+            if getattr(bot, "_show_timestamps", False):
+                print("\n  [" + time.strftime("%H:%M:%S") + "]", end="")
             sys.stdout.write("\nolympus ▸ ")
             sys.stdout.flush()
             t0 = time.time()

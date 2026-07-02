@@ -65,6 +65,7 @@ class Goal:
     checks: int = 0
     progress: list = field(default_factory=list)   # [{"ts", "note"}]
     evidence: str = ""            # what closed it (or why it stalled)
+    wait_pid: int = 0             # /goal wait: park cycles while this runs
 
 
 def _path():
@@ -133,6 +134,41 @@ def note_progress(goal_id: str, note: str) -> None:
             g.progress = g.progress[-MAX_PROGRESS:]
             g.last_worked = time.time()
     _save(goals)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)            # signal 0: existence check, no effect
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True                # exists, owned by someone else
+    except OSError:
+        return False
+
+
+def wait_on(goal_id: str, pid: int) -> str:
+    """Park a goal's work cycles while `pid` runs (Hermes `/goal wait`): the
+    heartbeat skips it until the process exits, then resumes with a progress
+    note — so a goal that spawned a long build/backtest doesn't burn cycles
+    re-checking before there's anything new to judge."""
+    goals = _load()
+    for g in goals:
+        if g.id == goal_id:
+            if g.status != "active":
+                return f"Goal {goal_id} is {g.status} — nothing to wait on."
+            if not _pid_alive(pid):
+                return f"Process {pid} isn't running — goal left as-is."
+            g.wait_pid = int(pid)
+            g.progress.append({"ts": time.time(),
+                               "note": f"[waiting on process {pid}]"})
+            _save(goals)
+            return (f"Goal {g.id} is parked on process {pid}; work cycles "
+                    "resume when it exits.")
+    return f"No goal with id '{goal_id}'."
 
 
 def set_status(goal_id: str, status: str, evidence: str = "") -> str:
@@ -283,6 +319,18 @@ def run_due(now: float | None = None,
     now = now or time.time()
     out = []
     for g in active():
+        if g.wait_pid:
+            if _pid_alive(g.wait_pid):
+                continue           # parked on a still-running process
+            note_progress(g.id, f"[process {g.wait_pid} finished — resuming]")
+            goals = _load()
+            for stored in goals:
+                if stored.id == g.id:
+                    stored.wait_pid = 0
+            _save(goals)
+            g = get(g.id) or g
+            out.append(work_one(g, runner=runner, judge_fn=judge_fn))
+            continue
         if now - max(g.last_worked, g.created) >= interval or not g.progress:
             out.append(work_one(g, runner=runner, judge_fn=judge_fn))
     return out

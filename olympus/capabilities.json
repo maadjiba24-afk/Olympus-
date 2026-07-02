@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 70,
+    "count": 73,
     "names": [
       "actions",
       "add-mcp",
@@ -55,6 +55,7 @@
       "curate",
       "dashboard",
       "discord",
+      "distill",
       "edit",
       "errors",
       "eval",
@@ -67,11 +68,13 @@
       "growth",
       "heartbeat",
       "import-agent",
+      "journey",
       "learn",
       "learned",
       "limit",
       "mcp-serve",
       "memory",
+      "moa",
       "models",
       "next-wake",
       "outcomes",
