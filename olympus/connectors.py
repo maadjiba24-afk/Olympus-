@@ -385,6 +385,25 @@ def add_mcp_server(name: str, url: str, type: str = "data",
     return f"MCP server '{name}' saved ({type})."
 
 
+def remove_mcp_server(name: str) -> str:
+    """Delete an MCP server definition from memory/connectors.json. Live
+    everywhere immediately — definitions are re-read from the file per call."""
+    path = _config_path()
+    if not path.exists():
+        return f"Error: no MCP server named '{name}'."
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "Error: connectors.json is unreadable."
+    servers = data.get("servers", [])
+    kept = [s for s in servers if s.get("name") != name]
+    if len(kept) == len(servers):
+        return f"Error: no MCP server named '{name}'."
+    data["servers"] = kept
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return f"MCP server '{name}' removed."
+
+
 def summary() -> str:
     load_plugins()
     lines = ["MCP servers:"]

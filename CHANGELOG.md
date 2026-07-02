@@ -26,6 +26,20 @@ carries a migration note here.
 
 ### Added
 
+- **Operator admin panel, Phase 3 (configuration from the browser)** — a
+  strict allowlist of settings (channels, SMTP/webhooks, model pool,
+  connector policy; `olympus/opconfig.py`) is now editable from `/admin`.
+  Secrets are stored in the encrypted vault (`OLYMPUS_SECRET_KEY`; the panel
+  refuses rather than ever writing a secret to disk in the clear, and evicts
+  stale plaintext copies from config.env); non-secrets go to the setup
+  wizard's `~/.olympus/config.env`. Values hydrate into every `olympus`
+  process at start with env-wins precedence, and every change reports
+  honestly where it's live now and which processes need a restart — a saved
+  value shadowed by a real env var is flagged. MCP servers can be added
+  (same security scan as `add-mcp`) and removed, live everywhere with no
+  restart. The panel's own auth and process-weaponizing keys
+  (plugins dir, exec backend, memory dir, sovereign policy) are deliberately
+  NOT editable from the browser.
 - **Operator admin panel, Phase 2 (act on running state)** — the panel can
   now drive what the CLI already exposes, via `POST /api/admin/act`:
   approve/deny held actions across users (the approval spine's human step,

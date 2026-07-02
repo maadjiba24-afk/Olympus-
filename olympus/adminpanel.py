@@ -264,6 +264,13 @@ def _security() -> dict:
     }
 
 
+def _config() -> dict:
+    from . import opconfig
+    return {"vault_ready": opconfig.vault_ready(),
+            "sections": opconfig.SECTIONS,
+            "settings": opconfig.status()}
+
+
 def _errors() -> list[dict]:
     from . import errors
     recent = errors.recent(10)
@@ -299,6 +306,7 @@ def snapshot() -> dict:
         "skills": _section(_skills),
         "schedules": _section(_schedules),
         "connectors": _section(_connectors),
+        "config": _section(_config),
         "security": _section(_security),
         "health": _section(_dashboard),
         "errors": _section(_errors),
@@ -557,7 +565,8 @@ function render(d) {
                 : '<span class="off">inert</span>') +
       ' <span class="badge">' + esc(s.type) + '</span> ' +
       '<span class="muted">' + esc(s.url) + ' &middot; ' +
-      esc((s.specialists || []).join(', ')) + '</span>'))
+      esc((s.specialists || []).join(', ')) + '</span> ' +
+      btn('remove', 'mcp_remove', {name: s.name}, true)))
     .concat((co.plugins || []).map(p => tr(
       'plugin: ' + esc(p.name),
       '<span class="badge">' + (p.action ? 'action' : 'data') + '</span> ' +
@@ -565,7 +574,53 @@ function render(d) {
       '</span>')))) +
     (Object.keys(co.hooks || {}).length ? '<p class="muted">hooks: ' +
       Object.entries(co.hooks).map(([k, n]) => esc(k) + '&times;' + n)
-        .join(' &middot; ') + '</p>' : '')));
+        .join(' &middot; ') + '</p>' : '') +
+    '<p><input class="act" id="mcp_name" size="8" placeholder="name"> ' +
+    '<input class="act" id="mcp_url" size="22" placeholder="https://..."> ' +
+    '<select class="act" id="mcp_type"><option value="data">data</option>' +
+    '<option value="action">action</option></select> ' +
+    '<input class="act" id="mcp_auth" size="12" ' +
+    'placeholder="auth env NAME (opt)"> ' +
+    '<button class="act" onclick="act(\\'mcp_add\\', {name: val(\\'mcp_name\\'),' +
+    ' url: val(\\'mcp_url\\'), type: val(\\'mcp_type\\'),' +
+    ' auth_env: val(\\'mcp_auth\\')})">add MCP server</button></p>' +
+    '<p class="muted">definitions are security-scanned on save and live in ' +
+    'every process immediately; action servers stay inert until allowlisted ' +
+    '(OLYMPUS_MCP_ACTION_ALLOWLIST in Configuration).</p>'));
+  const cf = d.config || {};
+  const secTitles = {channels: 'Channels', email: 'Email &amp; webhooks',
+                     models: 'Model pool', connectors: 'Connector policy'};
+  (cf.sections || []).forEach(sec => {
+    const rows = (cf.settings || []).filter(s => s.section === sec);
+    if (!rows.length) return;
+    g.push(card('Configure: ' + (secTitles[sec] || esc(sec)),
+      table(rows.map(s => {
+        const id = 'cfg_' + s.key;
+        const src = s.set
+          ? '<span class="ok">' + esc(s.source || 'set') + '</span>'
+          : '<span class="off">unset</span>';
+        const shadowed = (s.source || '').indexOf('shadows') >= 0
+          ? ' <span class="bad">shadowed by process env</span>' : '';
+        const restart = s.consumers && s.consumers.length
+          ? '<br><span class="muted">restart to apply: ' +
+            esc(s.consumers.join(', ')) + '</span>' : '';
+        return tr(esc(s.label) + '<br><span class="muted">' + esc(s.key) +
+          '</span>',
+          src + shadowed + '<br>' +
+          '<input class="act" id="' + id + '" size="24" type="' +
+          (s.secret ? 'password' : 'text') + '" placeholder="' +
+          (s.secret ? (s.set ? 'set — enter to replace' : 'enter value')
+                    : esc(s.value != null ? s.value : 'enter value')) + '"> ' +
+          '<button class="act" onclick=\\'act("config_set", {key: "' + s.key +
+          '", value: val("' + id + '")})\\'>set</button> ' +
+          '<button class="act danger" onclick=\\'act("config_unset", ' +
+          '{key: "' + s.key + '"})\\'>clear</button>' + restart);
+      })) +
+      (sec === 'models' && !cf.vault_ready
+        ? '<p class="bad">Secrets need OLYMPUS_SECRET_KEY set on the server ' +
+          'before they can be stored (encrypted vault). Non-secret settings ' +
+          'work now.</p>' : '')));
+  });
   const se = d.security || {}, he = d.health || {};
   g.push(card('Security posture', table([
     tr('sovereign', yn((se.sovereign || {}).sovereign, 'ON', 'off')),
@@ -727,6 +782,37 @@ def _act_run_backup(_p: dict) -> str:
     return _spawn("backup", backup.run)
 
 
+def _act_config_set(p: dict) -> str:
+    from . import opconfig
+    return opconfig.set_value(str(p.get("key", "")), str(p.get("value", "")))
+
+
+def _act_config_unset(p: dict) -> str:
+    from . import opconfig
+    return opconfig.unset(str(p.get("key", "")))
+
+
+def _act_mcp_add(p: dict) -> str:
+    from . import connectors
+    out = connectors.add_mcp_server(
+        str(p.get("name", "")).strip(), str(p.get("url", "")).strip(),
+        type=str(p.get("type") or "data").strip().lower(),
+        auth_env=(str(p.get("auth_env", "")).strip() or None),
+        specialists=[s.strip() for s in str(p.get("specialists", "")).split(",")
+                     if s.strip()] or None)
+    if out.startswith("Error"):
+        raise ValueError(out[len("Error: "):].rstrip("."))
+    return out + " Live everywhere immediately (definitions are read per call)."
+
+
+def _act_mcp_remove(p: dict) -> str:
+    from . import connectors
+    out = connectors.remove_mcp_server(str(p.get("name", "")).strip())
+    if out.startswith("Error"):
+        raise ValueError(out[len("Error: "):].rstrip("."))
+    return out
+
+
 _OPS = {
     "approve_action": _act_approve,
     "reject_action": _act_reject,
@@ -741,6 +827,10 @@ _OPS = {
     "run_gate": _act_run_gate,
     "run_curate": _act_run_curate,
     "run_backup": _act_run_backup,
+    "config_set": _act_config_set,
+    "config_unset": _act_config_unset,
+    "mcp_add": _act_mcp_add,
+    "mcp_remove": _act_mcp_remove,
 }
 
 

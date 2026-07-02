@@ -400,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import firstrun
     firstrun.load_env_file()        # saved keys apply to every command
+    try:                            # vault-stored settings too (env wins)
+        from . import opconfig
+        opconfig.apply_secrets()
+    except Exception:
+        pass                        # a broken vault must never block the CLI
 
     if args.command == "setup":
         firstrun.wizard()

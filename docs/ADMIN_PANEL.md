@@ -37,13 +37,47 @@ The panel can also drive the operations the CLI already exposes, via
 
 Nothing here bypasses a gate that existed before: approving an action runs
 the same `actions.approve` the CLI calls, and irreversible actions still
-require exactly this explicit human step. **Configuration (credentials,
-channels, models) remains CLI-only — that's Phase 3, with its own review.**
+require exactly this explicit human step.
 
 Mutation requests must carry the `X-Olympus-Admin: 1` header in addition to
 the auth below. Browsers only attach custom headers after a CORS preflight
 this server never approves, so a hostile web page cannot fire cross-origin
 mutations at a loopback panel (CSRF defense).
+
+## Phase 3 — configuration from the browser
+
+The panel can edit a **strict allowlist** of settings (`olympus/opconfig.py`
+registry): channel credentials and policy (Telegram, Discord, Slack,
+WhatsApp, Signal, SMTP, named webhooks), the model pool (provider, model,
+keys, base URL, extra members, fast mode, failover, cache TTL), and
+connector policy — plus adding/removing MCP servers (still passing the
+same security scan as `olympus add-mcp`).
+
+**Where values go.** Secret-classed values are stored in the encrypted
+vault (Fernet, keyed by `OLYMPUS_SECRET_KEY`) and are **never written to
+disk in the clear** — without a secret key the panel refuses and says so.
+Non-secret values go to `~/.olympus/config.env` (0600), the same file the
+setup wizard writes. A stale plaintext copy of a secret in `config.env` is
+removed when the vault takes ownership.
+
+**How values load.** Every `olympus <command>` process hydrates saved
+values at start (`config.env`, then vault), with real environment variables
+always winning — same precedence the wizard documents. The panel applies a
+change to its own process immediately.
+
+**Restart honesty.** Every set/unset response and every row in the
+Configuration cards says exactly where the change is live (this process,
+now) and which other processes read it only at their next restart —
+per key ("telegram gateway", "heartbeat (notify)", …). A saved value
+shadowed by a differing real environment variable is flagged, not hidden.
+MCP server definitions are the exception that needs no restart anywhere:
+they're re-read from `connectors.json` on every call.
+
+**What is deliberately NOT editable from the browser:** the panel's own
+auth (`OLYMPUS_ACCESS_TOKEN`, `OLYMPUS_API_KEYS` — changing the lock from
+inside the room), and anything that could weaponize the process
+(`OLYMPUS_PLUGINS_DIR`, `OLYMPUS_EXEC_BACKEND`, `OLYMPUS_MEMORY_DIR`,
+`OLYMPUS_SECRET_KEY`, sovereign/egress policy). Those remain CLI/env-only.
 
 ## Access model
 
