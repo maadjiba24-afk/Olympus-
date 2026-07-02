@@ -26,6 +26,17 @@ carries a migration note here.
 
 ### Added
 
+- **Voice notes on every gateway** — Signal (signal-cli attachments),
+  Discord (slash-command audio attachments), and Slack (voice clips /
+  audio uploads, fetched with the bot token) now transcribe into the text
+  pipeline as `[voice note] …`, completing the Telegram/WhatsApp coverage.
+  Non-audio attachments are ignored; oversized audio is skipped.
+- **Session auto-resume on Slack and Discord** — both now journal the
+  request they are processing. Slack re-runs it after a restart and
+  delivers to the same channel (chat.postMessage doesn't expire). Discord
+  interaction tokens DO expire, so the honest fallback re-runs the request
+  and posts the answer via the notify webhook naming the requester — or,
+  with no webhook configured, logs the loss visibly instead of silently.
 - **Operator admin panel, Phase 3 (configuration from the browser)** — a
   strict allowlist of settings (channels, SMTP/webhooks, model pool,
   connector policy; `olympus/opconfig.py`) is now editable from `/admin`.

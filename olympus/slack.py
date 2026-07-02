@@ -85,6 +85,39 @@ def handle_event(payload: dict) -> dict:
     return {"ok": True}
 
 
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(event: dict) -> str | None:
+    """Transcribe an audio file on a Slack message (voice clips / uploads).
+    Downloads url_private with the bot token. None when there is no audio or
+    transcription is unavailable."""
+    for f in event.get("files") or []:
+        if not str(f.get("mimetype", "")).startswith("audio/"):
+            continue
+        if int(f.get("size") or 0) > MAX_VOICE_BYTES:
+            continue
+        url = str(f.get("url_private_download") or f.get("url_private") or "")
+        if not url.startswith("https://"):
+            continue
+        try:
+            token = os.environ.get("SLACK_BOT_TOKEN", "")
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                blob = resp.read(MAX_VOICE_BYTES + 1)
+            if len(blob) > MAX_VOICE_BYTES:
+                continue
+            from . import media
+            transcript = media.transcribe_bytes(
+                blob, filename=str(f.get("name") or "voice.m4a"))
+        except Exception:
+            continue
+        if not transcript.startswith("Error"):
+            return f"[voice note] {transcript}"
+    return None
+
+
 def process_event(payload: dict, bots: dict | None = None) -> None:
     """Run the pipeline for a Slack message event and post the reply. Called on
     a background worker after the webhook has already acked. Ignores the bot's
@@ -94,11 +127,44 @@ def process_event(payload: dict, bots: dict | None = None) -> None:
     if event.get("type") not in ("message", "app_mention") or event.get("bot_id"):
         return
     text = event.get("text", "")
+    if not text.strip():
+        text = _voice_text(event) or ""
+    if not text.strip():
+        return
     channel = event.get("channel", "")
     user_key = event.get("user", "anon")
-    reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="sl"))
+    # Journal the in-flight request so a restart resumes it (delivered back
+    # to the same channel via the bot token, which doesn't expire).
+    from . import memory
+    uid = f"sl-{memory.safe_id(user_key)}"
+    gateway.inflight_mark(uid, {"user": user_key, "channel": channel}, text)
+    try:
+        reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="sl"))
+    finally:
+        gateway.inflight_clear(uid)
     if channel:
         try:
+            send(channel, reply)
+        except Exception:
+            pass
+
+
+def resume_inflight() -> None:
+    """Re-run requests a previous process died holding and deliver to the
+    same channel (chat.postMessage works any time, unlike Discord's
+    interaction tokens)."""
+    for entry in gateway.inflight_take("sl-"):
+        key = entry.get("key") or {}
+        channel = str(key.get("channel") or "") if isinstance(key, dict) else ""
+        user_key = str(key.get("user") or "anon") if isinstance(key, dict) \
+            else str(key)
+        if not channel:
+            continue
+        try:
+            send(channel, "⚡ I was restarted while working on your last "
+                          "request — picking it back up now.")
+            reply = "\n".join(gateway.reply_for(
+                _BOTS, user_key, str(entry["text"]), prefix="sl"))
             send(channel, reply)
         except Exception:
             pass
@@ -155,4 +221,6 @@ def run_server(host: str = "0.0.0.0", port: int = 8487) -> None:
     if not os.environ.get("SLACK_SIGNING_SECRET"):
         raise SystemExit("Set SLACK_SIGNING_SECRET (from your Slack app config).")
     print(f"⚡ Olympus Slack events endpoint on {host}:{port}")
+    import threading
+    threading.Thread(target=resume_inflight, daemon=True).start()
     ThreadingHTTPServer((host, port), _Handler).serve_forever()

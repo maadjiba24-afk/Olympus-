@@ -77,11 +77,46 @@ def verify_signature(public_key: str, signature: str, timestamp: str,
         return False
 
 
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(data: dict) -> str | None:
+    """Transcribe an audio attachment on a slash command (an ATTACHMENT-type
+    option resolves into data.resolved.attachments). None when there is no
+    audio or transcription is unavailable."""
+    attachments = (data.get("resolved") or {}).get("attachments") or {}
+    for att in attachments.values():
+        if not str(att.get("content_type", "")).startswith("audio/"):
+            continue
+        if int(att.get("size") or 0) > MAX_VOICE_BYTES:
+            continue
+        url = att.get("url", "")
+        if not url.startswith("https://"):
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:
+                blob = resp.read(MAX_VOICE_BYTES + 1)
+            if len(blob) > MAX_VOICE_BYTES:
+                continue
+            from . import media
+            transcript = media.transcribe_bytes(
+                blob, filename=str(att.get("filename") or "voice.ogg"))
+        except Exception:
+            continue
+        if not transcript.startswith("Error"):
+            return f"[voice note] {transcript}"
+    return None
+
+
 def _command_text(data: dict) -> str:
     """Flatten a slash-command interaction into the text the pipeline expects."""
     name = data.get("name", "")
     opts = data.get("options") or []
-    arg = " ".join(str(o.get("value", "")) for o in opts)
+    arg = " ".join(str(o.get("value", "")) for o in opts
+                   if o.get("type") != 11)     # 11 = ATTACHMENT (an id, not text)
+    voice = _voice_text(data)
+    if voice:
+        arg = f"{arg} {voice}".strip() if arg else voice
     # /ask <prompt> → just the prompt; other commands map to /name <arg>
     if name == "ask":
         return arg
@@ -133,10 +168,44 @@ def process_command(payload: dict, bots: dict | None = None) -> None:
     interaction follow-up webhook. Runs on a background worker after the
     deferred ack has already been sent."""
     bots = _BOTS if bots is None else bots
+    user_key = _user_key(payload)
     text = _command_text(payload.get("data") or {})
-    reply = "\n".join(gateway.reply_for(bots, _user_key(payload), text,
-                                        prefix="dc"))
+    # Journal the in-flight request so a restart can recover it (delivery on
+    # resume goes via the notify webhook — the interaction token will have
+    # expired by then).
+    from . import memory
+    uid = f"dc-{memory.safe_id(user_key)}"
+    gateway.inflight_mark(uid, user_key, text)
+    try:
+        reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="dc"))
+    finally:
+        gateway.inflight_clear(uid)
     _followup(payload.get("application_id", ""), payload.get("token", ""), reply)
+
+
+def resume_inflight() -> None:
+    """Best-effort recovery of requests lost to a restart. Discord interaction
+    tokens are long dead by the time a new process is up, so the ORIGINAL
+    interaction can't be answered — the honest fallback is the notify webhook
+    (when configured): re-run the request and post the answer there, saying
+    whose it was. Without a webhook the loss is at least made visible."""
+    entries = gateway.inflight_take("dc-")
+    if not entries:
+        return
+    if not os.environ.get("DISCORD_WEBHOOK_URL", "").strip():
+        print(f"[discord] {len(entries)} in-flight request(s) were lost in a "
+              "restart and cannot be re-delivered (no DISCORD_WEBHOOK_URL; "
+              "interaction tokens expire).")
+        return
+    for entry in entries:
+        user_key = str(entry.get("key") or "anon")
+        try:
+            reply = "\n".join(gateway.reply_for(
+                _BOTS, user_key, str(entry["text"]), prefix="dc"))
+            notify("⚡ I was restarted while answering a request from "
+                   f"<@{user_key}> — here is the answer:\n\n{reply}")
+        except Exception:
+            pass
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -187,4 +256,6 @@ def run_server(host: str = "0.0.0.0", port: int = 8486) -> None:
     if not os.environ.get("DISCORD_PUBLIC_KEY"):
         raise SystemExit("Set DISCORD_PUBLIC_KEY (your Discord app's public key).")
     print(f"⚡ Olympus Discord interactions endpoint on {host}:{port}")
+    import threading
+    threading.Thread(target=resume_inflight, daemon=True).start()
     ThreadingHTTPServer((host, port), _Handler).serve_forever()
