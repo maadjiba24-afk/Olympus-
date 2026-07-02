@@ -185,3 +185,120 @@ def test_admin_auth_refuses_public_bind_without_token(monkeypatch):
 
     ok, code, _msg = _H()._admin_authorized()
     assert not ok and code == 401
+
+
+# --- Phase 2: act on running state -------------------------------------------
+
+def test_act_unknown_op_is_in_band_error():
+    r = adminpanel.act("teleport", {})
+    assert not r["ok"] and "unknown op" in r["message"]
+
+
+def test_act_goal_lifecycle():
+    r = adminpanel.act("goal_add", {"text": "ship the deck",
+                                    "contract": "deck emailed"})
+    assert r["ok"]
+    gid = goals.active("admin")[0].id
+    assert adminpanel.act("goal_done", {"id": gid})["ok"]
+    assert goals.get(gid).status == "done"
+    r = adminpanel.act("goal_drop", {"id": "nope"})
+    assert r["ok"] and "No goal" in r["message"]     # message passthrough
+
+
+def test_act_schedule_lifecycle():
+    r = adminpanel.act("schedule_add", {"name": "digest", "interval": "daily",
+                                        "prompt": "summarize the news"})
+    assert r["ok"]
+    assert adminpanel.act("schedule_disable", {"name": "digest"})["ok"]
+    assert not [j for j in scheduler._load() if j.enabled]
+    assert adminpanel.act("schedule_enable", {"name": "digest"})["ok"]
+    assert adminpanel.act("schedule_remove", {"name": "digest"})["ok"]
+    assert scheduler._load() == []
+    r = adminpanel.act("schedule_remove", {"name": "digest"})
+    assert not r["ok"]                                # gone -> in-band error
+    r = adminpanel.act("schedule_add", {"name": "", "prompt": ""})
+    assert not r["ok"] and "needs" in r["message"]
+
+
+def test_act_approve_and_reject_held_actions(monkeypatch):
+    from olympus import actions
+    monkeypatch.setenv("OLYMPUS_MEMORY_DIR", "")     # isolated_memory rules
+    a1 = actions.prepare("alice", "save_note", {"title": "t", "content": "c"},
+                         why="test")
+    a2 = actions.prepare("alice", "save_note", {"title": "t2", "content": "c"})
+    r = adminpanel.act("approve_action", {"user": "alice", "id": a1.id})
+    assert r["ok"], r
+    assert actions.get("alice", a1.id).status in ("executed", "failed")
+    r = adminpanel.act("reject_action", {"user": "alice", "id": a2.id})
+    assert r["ok"]
+    assert actions.get("alice", a2.id).status == "rejected"
+    # Double-approve is an in-band error, not a crash.
+    r = adminpanel.act("approve_action", {"user": "alice", "id": a1.id})
+    assert not r["ok"]
+
+
+def test_act_set_autonomy():
+    from olympus import actions
+    r = adminpanel.act("set_autonomy", {"user": "alice", "level": 3})
+    assert r["ok"] and "L3" in r["message"]
+    assert actions.autonomy_level("alice") == 3
+    assert not adminpanel.act("set_autonomy", {"level": 2})["ok"]  # no user
+
+
+def test_act_background_triggers(monkeypatch):
+    import threading
+    ran = threading.Event()
+    from olympus import curator
+    monkeypatch.setattr(curator, "curate", lambda: ran.set())
+    r = adminpanel.act("run_curate", {})
+    assert r["ok"] and "background" in r["message"]
+    assert ran.wait(5)                               # actually executed
+
+
+# --- Phase 2 route + CSRF/auth posture ----------------------------------------
+
+def _post(url, payload, headers=None):
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST")
+    return urllib.request.urlopen(req)
+
+
+def test_admin_act_route_requires_csrf_header(server, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(server + "/api/admin/act", {"op": "goal_add",
+                                          "params": {"text": "x"}})
+    assert err.value.code == 403                     # custom header missing
+
+
+def test_admin_act_route_works_with_header(server, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+    resp = _post(server + "/api/admin/act",
+                 {"op": "goal_add", "params": {"text": "from the panel"}},
+                 headers={"X-Olympus-Admin": "1"})
+    body = json.loads(resp.read())
+    assert body["ok"]
+    assert any(g.text == "from the panel" for g in goals.active("admin"))
+
+
+def test_admin_act_route_bad_op_is_400(server, monkeypatch):
+    monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(server + "/api/admin/act", {"op": "nope"},
+              headers={"X-Olympus-Admin": "1"})
+    assert err.value.code == 400
+
+
+def test_admin_act_route_requires_token_when_configured(server, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_ACCESS_TOKEN", "op-tok")
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(server + "/api/admin/act", {"op": "goal_add",
+                                          "params": {"text": "x"}},
+              headers={"X-Olympus-Admin": "1"})
+    assert err.value.code == 401
+    resp = _post(server + "/api/admin/act",
+                 {"op": "goal_add", "params": {"text": "with token"}},
+                 headers={"X-Olympus-Admin": "1", "X-Olympus-Token": "op-tok"})
+    assert json.loads(resp.read())["ok"]

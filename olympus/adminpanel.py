@@ -344,11 +344,24 @@ tr + tr td { border-top:1px solid var(--line); }
 #gate button { margin-top:10px; padding:8px 22px; background:var(--gold);
                border:0; border-radius:6px; cursor:pointer; }
 #err { color:var(--bad); }
+button.act { background:none; border:1px solid var(--line); color:var(--fg);
+             border-radius:6px; padding:1px 10px; cursor:pointer;
+             font:inherit; font-size:.85em; }
+button.act:hover { border-color:var(--gold); color:var(--gold); }
+button.act.danger:hover { border-color:var(--bad); color:var(--bad); }
+input.act, select.act { background:var(--bg); color:var(--fg); padding:3px 6px;
+             border:1px solid var(--line); border-radius:6px; font:inherit;
+             font-size:.85em; }
+#flash { position:fixed; bottom:18px; right:18px; max-width:440px;
+         background:var(--card); border:1px solid var(--gold);
+         border-radius:8px; padding:10px 14px; display:none; }
+#flash.bad { border-color:var(--bad); }
 </style></head><body>
 <h1>&#9889; <span>OLYMPUS</span> &mdash; operator panel
   <span class="badge" id="stamp"></span></h1>
-<p class="muted">Read-only overview. Changes still happen via the CLI and the
-approval spine.</p>
+<p class="muted">Approvals, goals, schedules and maintenance can be driven
+from here; configuration still changes via the CLI.</p>
+<div id="flash"></div>
 <div id="gate">
   <p>This instance requires the operator access token.</p>
   <input id="tok" type="password" placeholder="OLYMPUS_ACCESS_TOKEN">
@@ -381,6 +394,33 @@ function table(rows) { return '<table>' + rows.join('') + '</table>'; }
 function tr(k, v) { return '<tr><th>' + k + '</th><td>' + v + '</td></tr>'; }
 function card(title, body) {
   return '<div class="card"><h2>' + title + '</h2>' + body + '</div>'; }
+
+function flash(msg, bad) {
+  const el = document.getElementById('flash');
+  el.textContent = msg; el.className = bad ? 'bad' : '';
+  el.style.display = 'block';
+  clearTimeout(el._t); el._t = setTimeout(() => el.style.display = 'none', 6000);
+}
+async function act(op, params) {
+  const h = {'Content-Type': 'application/json', 'X-Olympus-Admin': '1'};
+  const tok = localStorage.getItem(KEY) || '';
+  if (tok) h['X-Olympus-Token'] = tok;
+  let r, body;
+  try {
+    r = await fetch('/api/admin/act', {method: 'POST', headers: h,
+      body: JSON.stringify({op: op, params: params || {}})});
+    body = await r.json();
+  } catch (e) { flash('request failed: ' + e, true); return; }
+  flash(body.message || body.error || ('HTTP ' + r.status), !body.ok);
+  if (body.ok) load();
+}
+function btn(label, op, params, danger) {
+  return '<button class="act' + (danger ? ' danger' : '') +
+    '" onclick=\\'act("' + op + '", ' +
+    JSON.stringify(params || {}).replace(/'/g, '&#39;') + ')\\'>' +
+    label + '</button>';
+}
+function val(id) { return (document.getElementById(id) || {value:''}).value.trim(); }
 
 function render(d) {
   const g = [];
@@ -444,20 +484,32 @@ function render(d) {
       ' &middot; goal cycle due in ' + dur(hb.goals_due_in) : '') + '</p>'));
   const goals = d.goals || [];
   g.push(card('Standing goals (' + goals.length + ')',
-    goals.length ? table(goals.map(x => tr(
+    (goals.length ? table(goals.map(x => tr(
       '[' + esc(x.id) + '] <span class="badge">' + esc(x.status) + '</span>',
       esc(x.text) + (x.last_progress ? '<br><span class="muted">last: ' +
         esc(x.last_progress) + '</span>' : '') +
       (x.evidence ? '<br><span class="muted">' + esc(x.evidence) + '</span>'
-                  : '')))) : '<p class="muted">none</p>'));
+                  : '') +
+      (x.status === 'active' ? '<br>' +
+        btn('mark done', 'goal_done', {id: x.id}) + ' ' +
+        btn('drop', 'goal_drop', {id: x.id}, true) : '')))) :
+      '<p class="muted">none</p>') +
+    '<p><input class="act" id="goal_text" size="26" ' +
+    'placeholder="new goal"> <input class="act" id="goal_contract" ' +
+    'size="20" placeholder="done means (optional)"> ' +
+    '<button class="act" onclick="act(\\'goal_add\\', {text: val(\\'goal_text\\'),' +
+    ' contract: val(\\'goal_contract\\')})">add goal</button></p>'));
   const ap = d.approvals || {}; const held = ap.pending || [];
   g.push(card('Pending approvals (' + held.length + ')',
     (held.length ? table(held.map(a => tr(
       esc(a.type) + ' <span class="badge">' + esc(a.risk) + '</span>',
       esc(a.title) + '<br><span class="muted">' + esc(a.user) + ' &middot; ' +
       ago(a.created_at) + (a.why ? ' &middot; ' + esc(a.why) : '') +
-      '</span>'))) : '<p class="muted">nothing waiting</p>') +
-    '<p class="muted">approve/deny via <code>olympus actions</code> or the chat UI</p>'));
+      '</span>' + (a.status === 'prepared' ? '<br>' +
+        btn('approve &amp; execute', 'approve_action',
+            {user: a.user, id: a.id}) + ' ' +
+        btn('deny', 'reject_action', {user: a.user, id: a.id}, true) : '')))) :
+      '<p class="muted">nothing waiting</p>')));
   const sk = d.skills || {};
   g.push(card('Skills (' + esc(sk.count) + ', ' + esc(sk.provisional) +
     ' provisional)',
@@ -467,12 +519,36 @@ function render(d) {
       esc(s.description) + '</span>')))));
   const sc = d.schedules || [];
   g.push(card('Scheduled tasks (' + sc.length + ')',
-    sc.length ? table(sc.map(j => tr(
+    (sc.length ? table(sc.map(j => tr(
       esc(j.name) + (j.enabled ? '' : ' <span class="off">(off)</span>'),
       'every ' + dur(j.interval_seconds) + ' &middot; ' + esc(j.prompt) +
       (j.deliver_to ? ' &rarr; ' + esc(j.deliver_to) : '') +
-      '<br><span class="muted">last ' + ago(j.last_run) + '</span>'))) :
-    '<p class="muted">none</p>'));
+      '<br><span class="muted">last ' + ago(j.last_run) + '</span><br>' +
+      (j.enabled ? btn('disable', 'schedule_disable', {name: j.name})
+                 : btn('enable', 'schedule_enable', {name: j.name})) + ' ' +
+      btn('remove', 'schedule_remove', {name: j.name}, true)))) :
+      '<p class="muted">none</p>') +
+    '<p><input class="act" id="sch_name" size="10" placeholder="name"> ' +
+    '<input class="act" id="sch_interval" size="8" placeholder="daily"> ' +
+    '<input class="act" id="sch_prompt" size="24" placeholder="prompt"> ' +
+    '<button class="act" onclick="act(\\'schedule_add\\', ' +
+    '{name: val(\\'sch_name\\'), interval: val(\\'sch_interval\\') || \\'daily\\',' +
+    ' prompt: val(\\'sch_prompt\\')})">add task</button></p>'));
+  g.push(card('Maintenance',
+    '<p>' + btn('run skill gate now', 'run_gate') + ' ' +
+    btn('run curation now', 'run_curate') + ' ' +
+    btn('run backup now', 'run_backup') + '</p>' +
+    '<p class="muted">long jobs run in the background; results land in ' +
+    'reports/health.</p>' +
+    '<p><input class="act" id="aut_user" size="14" placeholder="user"> ' +
+    '<select class="act" id="aut_level">' +
+    '<option value="0">L0 suggest</option><option value="1" selected>' +
+    'L1 prepare</option><option value="2">L2 approve-to-act</option>' +
+    '<option value="3">L3 auto safe</option><option value="4">L4 standing' +
+    '</option></select> ' +
+    '<button class="act" onclick="act(\\'set_autonomy\\', ' +
+    '{user: val(\\'aut_user\\'), level: val(\\'aut_level\\')})">set autonomy' +
+    '</button></p>'));
   const co = d.connectors || {};
   g.push(card('Connectors',
     table((co.mcp_servers || []).map(s => tr(
@@ -537,3 +613,146 @@ setInterval(load, 30000);
 def page() -> str:
     """The data-free HTML shell for /admin."""
     return PAGE
+
+
+# --- Phase 2: act on running state -------------------------------------------
+#
+# A small, closed set of operations — each one is a code path the CLI already
+# exposes to the operator, surfaced behind the same gate as the snapshot.
+# Approving a held action here IS the approval spine's human step (the panel
+# is where the human says yes); nothing bypasses a gate that existed before.
+# Configuration (credentials, channels, models) is deliberately NOT here —
+# that's Phase 3.
+
+def _act_approve(p: dict) -> str:
+    from . import actions
+    a = actions.approve(str(p.get("user", "")), str(p.get("id", "")))
+    return f"Approved and executed '{a.title}' ({a.status})."
+
+
+def _act_reject(p: dict) -> str:
+    from . import actions
+    a = actions.reject(str(p.get("user", "")), str(p.get("id", "")),
+                       str(p.get("reason", "") or "declined from admin panel"))
+    return f"Rejected '{a.title}'."
+
+
+def _act_goal_add(p: dict) -> str:
+    from . import goals
+    return goals.add(str(p.get("user") or "admin"),
+                     str(p.get("text", "")), str(p.get("contract", "")))
+
+
+def _act_goal_drop(p: dict) -> str:
+    from . import goals
+    return goals.set_status(str(p.get("id", "")), "dropped")
+
+
+def _act_goal_done(p: dict) -> str:
+    from . import goals
+    return goals.set_status(str(p.get("id", "")), "done",
+                            evidence="closed manually from the admin panel")
+
+
+def _act_schedule_add(p: dict) -> str:
+    from . import scheduler
+    name = str(p.get("name", "")).strip()
+    prompt = str(p.get("prompt", "")).strip()
+    if not name or not prompt:
+        raise ValueError("schedule_add needs 'name' and 'prompt'")
+    job = scheduler.add(name, str(p.get("interval", "daily")), prompt,
+                        deliver_to=str(p.get("deliver_to", "")),
+                        user=str(p.get("user") or "admin"))
+    return f"Scheduled '{job.name}'."
+
+
+def _act_schedule_remove(p: dict) -> str:
+    from . import scheduler
+    ok = scheduler.remove(str(p.get("name", "")))
+    if not ok:
+        raise ValueError(f"no schedule named '{p.get('name')}'")
+    return f"Removed schedule '{p.get('name')}'."
+
+
+def _act_schedule_enabled(p: dict, on: bool) -> str:
+    from . import scheduler
+    ok = scheduler.set_enabled(str(p.get("name", "")), on)
+    if not ok:
+        raise ValueError(f"no schedule named '{p.get('name')}'")
+    return f"Schedule '{p.get('name')}' {'enabled' if on else 'disabled'}."
+
+
+def _act_set_autonomy(p: dict) -> str:
+    from . import actions
+    user = str(p.get("user", "")).strip()
+    if not user:
+        raise ValueError("set_autonomy needs 'user'")
+    return actions.set_autonomy(user, int(p.get("level", 1)))
+
+
+def _spawn(label: str, fn) -> str:
+    """Run a long maintenance job off-thread; the panel is not a job queue,
+    so we return immediately and the result lands in memory/reports (visible
+    on the next snapshot refresh)."""
+    import threading
+
+    def runner():
+        try:
+            fn()
+        except Exception as err:                   # pragma: no cover
+            try:
+                from . import errors
+                errors.capture(f"admin:{label}", err,
+                               context="triggered from the admin panel")
+            except Exception:
+                pass
+
+    threading.Thread(target=runner, daemon=True, name=f"admin-{label}").start()
+    return (f"{label} started in the background — results appear in "
+            "reports/health on the next refresh.")
+
+
+def _act_run_gate(_p: dict) -> str:
+    from . import orchestrator
+    return _spawn("skill gate", orchestrator.gate_skills)
+
+
+def _act_run_curate(_p: dict) -> str:
+    from . import curator
+    return _spawn("skill curation", curator.curate)
+
+
+def _act_run_backup(_p: dict) -> str:
+    from . import backup
+    return _spawn("backup", backup.run)
+
+
+_OPS = {
+    "approve_action": _act_approve,
+    "reject_action": _act_reject,
+    "goal_add": _act_goal_add,
+    "goal_drop": _act_goal_drop,
+    "goal_done": _act_goal_done,
+    "schedule_add": _act_schedule_add,
+    "schedule_remove": _act_schedule_remove,
+    "schedule_enable": lambda p: _act_schedule_enabled(p, True),
+    "schedule_disable": lambda p: _act_schedule_enabled(p, False),
+    "set_autonomy": _act_set_autonomy,
+    "run_gate": _act_run_gate,
+    "run_curate": _act_run_curate,
+    "run_backup": _act_run_backup,
+}
+
+
+def act(op: str, params: dict | None = None) -> dict:
+    """Execute one admin operation. Returns {"ok", "message"} — errors are
+    reported in-band (the panel shows them), never as a 500."""
+    fn = _OPS.get(op)
+    if fn is None:
+        return {"ok": False,
+                "message": f"unknown op '{op}' "
+                           f"(expected one of {', '.join(sorted(_OPS))})"}
+    try:
+        return {"ok": True, "message": fn(params or {})}
+    except Exception as err:
+        return {"ok": False, "message": f"{type(err).__name__}: {err}"}

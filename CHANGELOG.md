@@ -26,6 +26,15 @@ carries a migration note here.
 
 ### Added
 
+- **Operator admin panel, Phase 2 (act on running state)** — the panel can
+  now drive what the CLI already exposes, via `POST /api/admin/act`:
+  approve/deny held actions across users (the approval spine's human step,
+  one click), add/complete/drop standing goals, add/enable/disable/remove
+  scheduled tasks, trigger the skill gate/curation/backup in the background,
+  and set a user's autonomy level. Mutations require an `X-Olympus-Admin`
+  header on top of the operator auth (custom headers force a CORS preflight
+  this server never approves, so cross-origin pages can't fire mutations at
+  a loopback panel). Configuration stays CLI-only (Phase 3).
 - **Operator admin panel, Phase 1 (read-only)** — `/admin` on the web server
   is a single-pane overview of a running instance: channels configured, model
   pool + role assignment, budget and per-model spend, every heartbeat cycle
