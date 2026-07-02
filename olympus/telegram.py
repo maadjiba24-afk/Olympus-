@@ -132,6 +132,14 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
     bot = bots.setdefault(chat_id, orchestrator.Olympus(
         user=f"tg-{chat_id}", conversation_id=f"tg-{chat_id}"))
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            _send(token, chat_id, "Usage: /undo [N]")
+            return
+        _send(token, chat_id, bot.undo(n))
+        return
     if cmd in ("/good", "/bad"):
         _send(token, chat_id,
               bot.feedback("up" if cmd == "/good" else "down", arg))
@@ -197,6 +205,21 @@ def run_bot() -> None:
             if not text or "id" not in chat:
                 continue
             chat_id = chat["id"]
+            # /steer is answered here, on the polling thread, so the note can
+            # reach a pipeline already running on this chat's serial worker.
+            # Keyed exactly like the bot's conversation_id (raw chat id — group
+            # ids are negative, which safe_id would mangle).
+            if text.split(" ", 1)[0].lower() == "/steer":
+                from . import steering
+                note = text.partition(" ")[2].strip()
+                if not note:
+                    _send(token, chat_id, "Usage: /steer <note>")
+                elif steering.put(f"tg-{chat_id}", note):
+                    _send(token, chat_id, "Noted — the running task will see "
+                                          "this after its next tool call.")
+                else:
+                    _send(token, chat_id, "Steering queue is full; note dropped.")
+                continue
             worker = workers.get(chat_id)
             if worker is None:
                 worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)

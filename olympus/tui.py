@@ -28,6 +28,8 @@ COMMANDS: dict[str, str] = {
     "/queue": "queue a YouTube video for the autonomous loop: /queue <url>",
     "/good": "rate the last answer good (optionally /good <comment>)",
     "/bad": "rate the last answer bad (optionally /bad <comment>)",
+    "/undo": "remove the last N exchanges from the conversation: /undo [N]",
+    "/steer": "nudge the current/next task mid-run: /steer <note>",
     "/lang": "set reply language: /lang <language|auto>",
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
@@ -123,6 +125,21 @@ def dispatch_command(bot, raw: str):
             return (True, "Usage: /queue <youtube-url>", False)
         memory.watchlist_add(arg)
         return (True, "Queued for the heartbeat.", False)
+    if name == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            return (True, "Usage: /undo [N]", False)
+        return (True, bot.undo(n), False)
+    if name == "/steer":
+        from . import steering
+        if not arg.strip():
+            return (True, "Usage: /steer <note> — the running (or next) task "
+                          "sees it after its next tool call", False)
+        key = getattr(bot, "conversation_id", None) or f"user-{bot.user}"
+        ok = steering.put(key, arg)
+        return (True, "Noted — the task will see this after its next tool call."
+                if ok else "Steering queue is full; note dropped.", False)
     if name in ("/good", "/bad"):
         return (True, bot.feedback("up" if name == "/good" else "down", arg), False)
     if name == "/lang":

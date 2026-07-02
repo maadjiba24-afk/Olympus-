@@ -17,7 +17,7 @@ import threading
 import traceback
 from collections import OrderedDict
 
-from . import memory, orchestrator
+from . import memory, orchestrator, steering
 
 CHUNK = 3500
 
@@ -30,6 +30,8 @@ HELP = (
     "/queue <youtube-url> — queue a video for the autonomous loop\n"
     "/audit — Olympus audits and upgrades itself\n"
     "/good or /bad [comment] — rate the last answer\n"
+    "/steer <note> — nudge the task that's currently running\n"
+    "/undo [N] — remove the last N exchanges from the conversation\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
@@ -63,6 +65,23 @@ def notify_all(text: str) -> list[str]:
     return delivered
 
 
+def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
+    """Fast-path `/steer`: handle it synchronously (BEFORE the per-user serial
+    worker queue) so the note reaches a pipeline that is already mid-run —
+    queued behind the running task it would only be seen after the run ends.
+    Returns reply chunks when the message was a /steer, else None."""
+    cmd, _, arg = (text or "").strip().partition(" ")
+    if cmd.lower() != "/steer":
+        return None
+    if not arg.strip():
+        return chunk("Usage: /steer <note> — nudge the task that's running")
+    uid = f"{prefix}-{memory.safe_id(user_key)}"
+    if steering.put(uid, arg):
+        return chunk("Noted — the running task will see this after its "
+                     "next tool call.")
+    return chunk("Steering queue is full; note dropped.")
+
+
 def reply_for(bots: dict, user_key: str, text: str,
               prefix: str = "ol") -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
@@ -76,6 +95,9 @@ def reply_for(bots: dict, user_key: str, text: str,
 
     if cmd in ("/start", "/help"):
         return chunk(HELP)
+    if cmd == "/steer":
+        # Fallback for transports that didn't fast-path it; same behavior.
+        return try_steer(user_key, text, prefix)  # type: ignore[return-value]
     if cmd == "/scan":
         return chunk(orchestrator.opportunity_scan())
     if cmd == "/audit":
@@ -95,6 +117,12 @@ def reply_for(bots: dict, user_key: str, text: str,
     if bot is None:
         bot = bots[uid] = orchestrator.Olympus(user=uid, conversation_id=uid)
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            return chunk("Usage: /undo [N]")
+        return chunk(bot.undo(n))
     if cmd in ("/good", "/bad"):
         return chunk(bot.feedback("up" if cmd == "/good" else "down", arg))
     if cmd == "/lang":

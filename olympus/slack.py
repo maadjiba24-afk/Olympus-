@@ -135,7 +135,19 @@ class _Handler(BaseHTTPRequestHandler):
             # Slack retries carry the same event_id — drop the duplicate.
             if _DISPATCH.seen(payload.get("event_id")):
                 return
-            user_key = (payload.get("event") or {}).get("user", "anon")
+            event = payload.get("event") or {}
+            user_key = event.get("user", "anon")
+            # /steer is handled here, OUTSIDE the serial worker, so the note
+            # can reach a pipeline that is already running for this user.
+            steer = gateway.try_steer(user_key, event.get("text", ""),
+                                      prefix="sl")
+            if steer is not None:
+                if event.get("channel"):
+                    try:
+                        send(event["channel"], "\n".join(steer))
+                    except Exception:
+                        pass
+                return
             _DISPATCH.submit(user_key, lambda p=payload: process_event(p))
 
 

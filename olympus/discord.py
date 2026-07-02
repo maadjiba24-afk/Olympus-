@@ -171,6 +171,14 @@ class _Handler(BaseHTTPRequestHandler):
             # Discord retries an interaction with the same id — drop duplicates.
             if _DISPATCH.seen(payload.get("id")):
                 return
+            # /steer bypasses the serial worker so it lands mid-run.
+            steer = gateway.try_steer(
+                _user_key(payload), _command_text(payload.get("data") or {}),
+                prefix="dc")
+            if steer is not None:
+                _followup(payload.get("application_id", ""),
+                          payload.get("token", ""), "\n".join(steer))
+                return
             _DISPATCH.submit(_user_key(payload),
                              lambda p=payload: process_command(p))
 

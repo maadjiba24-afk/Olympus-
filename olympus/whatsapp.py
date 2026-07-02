@@ -163,6 +163,14 @@ def _process(bots: dict, sender: str, text: str) -> None:
     bot = bots.setdefault(sender, orchestrator.Olympus(
         user=f"wa-{sender}", conversation_id=f"wa-{sender}"))
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            _send(sender, "Usage: /undo [N]")
+            return
+        _send(sender, bot.undo(n))
+        return
     if cmd in ("/good", "/bad"):
         _send(sender, bot.feedback("up" if cmd == "/good" else "down", arg))
         return
@@ -253,6 +261,19 @@ class Handler(BaseHTTPRequestHandler):
                 if worker is None:
                     worker = workers[sender] = _SenderWorker(bots, sender)
                     worker.start()
+            # /steer is answered on the webhook thread (not queued) so the
+            # note reaches a pipeline already running on this sender's worker.
+            if text.split(" ", 1)[0].lower() == "/steer":
+                from . import steering
+                note = text.partition(" ")[2].strip()
+                if not note:
+                    _send(sender, "Usage: /steer <note>")
+                elif steering.put(f"wa-{sender}", note):
+                    _send(sender, "Noted — the running task will see this "
+                                  "after its next tool call.")
+                else:
+                    _send(sender, "Steering queue is full; note dropped.")
+                continue
             worker.q.put(text)
 
 
