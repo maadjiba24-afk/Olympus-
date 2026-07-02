@@ -106,20 +106,60 @@ def valid_signature(raw_body: bytes, header: str | None) -> bool:
     return hmac.compare_digest(digest, header.split("=", 1)[1])
 
 
-def extract_messages(payload: dict) -> list[tuple[str, str, str]]:
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(media_id: str) -> str | None:
+    """Download a WhatsApp audio/voice message via the Graph API and
+    transcribe it. None when unavailable (no media key, too big, errors)."""
+    try:
+        req = urllib.request.Request(
+            f"{GRAPH}/{media_id}",
+            headers={"Authorization": f"Bearer {_access_token()}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            info = json.loads(resp.read())
+        url = info.get("url")
+        if not url:
+            return None
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {_access_token()}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            blob = resp.read(MAX_VOICE_BYTES + 1)
+        if len(blob) > MAX_VOICE_BYTES:
+            return None
+        from . import media as media_tools
+        transcript = media_tools.transcribe_bytes(blob, filename="voice.ogg")
+    except Exception:
+        return None
+    if transcript.startswith("Error"):
+        return None
+    return f"[voice note] {transcript}"
+
+
+def extract_messages(payload: dict,
+                     transcribe=None) -> list[tuple[str, str, str]]:
     """Pull (sender, text, message_id) tuples from a webhook payload, ignoring
-    everything else (delivery/read status callbacks, non-text message types).
-    The message id lets the server drop Meta's webhook retries."""
+    everything else (delivery/read status callbacks, unsupported types).
+    Voice/audio messages become text via transcription when a media API key
+    is configured (injectable via `transcribe` for tests). The message id
+    lets the server drop Meta's webhook retries."""
+    transcribe = transcribe or _voice_text
     out: list[tuple[str, str, str]] = []
     for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for msg in value.get("messages", []):
+                sender = msg.get("from", "")
+                body = ""
                 if msg.get("type") == "text":
-                    sender = msg.get("from", "")
                     body = (msg.get("text") or {}).get("body", "")
-                    if sender and body:
-                        out.append((sender, body, msg.get("id", "")))
+                elif msg.get("type") in ("audio", "voice"):
+                    media_id = (msg.get("audio") or msg.get("voice")
+                                or {}).get("id", "")
+                    if media_id:
+                        body = transcribe(media_id) or ""
+                if sender and body:
+                    out.append((sender, body, msg.get("id", "")))
     return out
 
 

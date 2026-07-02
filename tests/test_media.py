@@ -62,3 +62,62 @@ def test_media_tools_registered():
     for name in ("generate_image", "text_to_speech", "browse_page"):
         assert name in tools.HANDLERS
         assert name in tools.EXTRA_TOOLS
+
+
+# --- speech-to-text (Hermes v0.3/v0.9 voice input) --------------------------
+
+def test_transcribe_needs_key(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
+    from olympus import media
+    assert "API key" in media.transcribe_audio("note.ogg")
+    assert "API key" in media.transcribe_bytes(b"xxx")
+
+
+def test_transcribe_audio_from_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    from olympus import media
+    (tmp_path / "note.ogg").write_bytes(b"fake-audio")
+    seen = {}
+
+    def fake_multipart(path, fields, file_field, filename, blob, timeout=120):
+        seen.update(path=path, model=fields["model"], blob=blob)
+        return b'{"text": "hello from the voice note"}'
+
+    monkeypatch.setattr(media, "_post_multipart", fake_multipart)
+    out = media.transcribe_audio("note.ogg")
+    assert out == "hello from the voice note"
+    assert seen["path"] == "/audio/transcriptions"
+    assert seen["blob"] == b"fake-audio"
+
+
+def test_transcribe_audio_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    from olympus import media
+    assert "no such audio file" in media.transcribe_audio("nope.ogg")
+
+
+def test_transcribe_audio_confined(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    from olympus import media
+    assert "escapes the workspace" in media.transcribe_audio("../../etc/passwd")
+
+
+def test_transcribe_tool_registered_and_ingestion():
+    from olympus import security, tools
+    assert "transcribe_audio" in tools.HANDLERS
+    assert "transcribe_audio" in tools.EXTRA_TOOLS
+    assert "transcribe_audio" in security.INGESTION_TOOLS
+
+
+def test_whatsapp_voice_note_becomes_text():
+    from olympus import whatsapp
+    payload = {"entry": [{"changes": [{"value": {"messages": [
+        {"type": "audio", "from": "15550001111",
+         "audio": {"id": "MEDIA1"}, "id": "wamid.1"}]}}]}]}
+    out = whatsapp.extract_messages(
+        payload, transcribe=lambda mid: f"[voice note] hi ({mid})")
+    assert out == [("15550001111", "[voice note] hi (MEDIA1)", "wamid.1")]

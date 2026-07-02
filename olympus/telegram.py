@@ -85,6 +85,40 @@ def notify(text: str) -> bool:
         return False
 
 
+MAX_VOICE_BYTES = 20 * 1024 * 1024      # Bot API getFile download ceiling
+
+
+def _voice_text(token: str, message: dict) -> str | None:
+    """Transcribe a voice note / audio message to text, or None when the
+    message carries no audio (or transcription is unavailable). The
+    transcript rides the normal text pipeline, prefixed so the agent knows
+    it heard, not read."""
+    media = message.get("voice") or message.get("audio")
+    if not media or not media.get("file_id"):
+        return None
+    if int(media.get("file_size") or 0) > MAX_VOICE_BYTES:
+        return None
+    try:
+        info = _call(token, "getFile", file_id=media["file_id"])
+        file_path = (info.get("result") or {}).get("file_path")
+        if not file_path:
+            return None
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/file/bot{token}/{file_path}",
+                timeout=60) as resp:
+            blob = resp.read(MAX_VOICE_BYTES + 1)
+        if len(blob) > MAX_VOICE_BYTES:
+            return None
+        from . import media as media_tools
+        transcript = media_tools.transcribe_bytes(
+            blob, filename=file_path.rsplit("/", 1)[-1] or "voice.oga")
+    except Exception:
+        return None
+    if transcript.startswith("Error"):
+        return None
+    return f"[voice note] {transcript}"
+
+
 def _allowed(chat_id: int) -> bool:
     raw = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
     if not raw:
@@ -202,6 +236,10 @@ def run_bot() -> None:
             message = update.get("message") or {}
             text = message.get("text")
             chat = message.get("chat") or {}
+            if not text:
+                # A voice note becomes text via transcription (needs a media
+                # API key; silently skipped otherwise, as before).
+                text = _voice_text(token, message)
             if not text or "id" not in chat:
                 continue
             chat_id = chat["id"]

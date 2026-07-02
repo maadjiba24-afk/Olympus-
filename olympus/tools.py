@@ -1193,6 +1193,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
         text, filename),
+    "transcribe_audio": lambda path: _media().transcribe_audio(path),
     "browse_page": lambda url: _media().browse_page(url),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
@@ -1420,6 +1421,21 @@ TEXT_TO_SPEECH = {
                          "description": "Optional output filename (.mp3)"},
         },
         "required": ["text"],
+    },
+}
+
+TRANSCRIBE_AUDIO = {
+    "name": "transcribe_audio",
+    "description": "Transcribe an audio file from the workspace (a voice "
+                   "note, meeting recording, or downloaded clip) to text. "
+                   "Returns the transcript.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Audio file path inside the workspace"},
+        },
+        "required": ["path"],
     },
 }
 
@@ -1882,6 +1898,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "search_sessions": SEARCH_SESSIONS,
     "generate_image": GENERATE_IMAGE,
     "text_to_speech": TEXT_TO_SPEECH,
+    "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,

@@ -47,7 +47,10 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
                              "browse_page",
                              # The governed CDP harness loads real web pages.
-                             "browser_open", "browser_read"})
+                             "browser_open", "browser_read",
+                             # A transcript of arbitrary audio is external
+                             # content too — spoken injection is still injection.
+                             "transcribe_audio"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"
