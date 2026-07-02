@@ -95,6 +95,14 @@ def guard(text: str, channel: ChannelKind, *, user: str,
     On HOLD, if `action_type` is registered, route the egress to the approval
     spine as a prepared action (the caller must then NOT send directly).
     """
+    # A stored secret (raw or encoded) in the payload is an exfiltration, not
+    # a classification question — held for approval on EVERY channel,
+    # including POOLED (redaction can't be trusted to strip an exact value).
+    leak = security.secret_exfil_reason(text, user)
+    if leak:
+        return _record(Decision(Verdict.HOLD, DataClass.SENSITIVE, channel,
+                                leak))
+
     cls = classify(text, asserted=asserted)
     ceiling = _MAX_AUTO[channel]
 

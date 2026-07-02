@@ -506,7 +506,12 @@ class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
 
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
-    initial request AND on every redirect. Raises ValueError if blocked."""
+    initial request AND on every redirect, and refusing a URL that carries a
+    stored secret (raw or encoded) — the classic injection exfil channel.
+    Raises ValueError if blocked."""
+    leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
+    if leak:
+        raise ValueError(f"blocked: {leak}")
     reason = security.url_block_reason(url)
     if reason:
         raise ValueError(reason)
@@ -657,6 +662,15 @@ def _send_email(to: str, subject: str, body: str, *,
     if to.strip().lower() not in allow:
         return f"Error: '{to}' is not in the recipient allowlist."
 
+    # Always-on exfiltration floor (independent of the opt-in egress guard):
+    # a stored secret in an outbound email never auto-sends. An explicit human
+    # approval (_approved=True) can still release it — the spine is the gate.
+    if not _approved:
+        leak = security.secret_exfil_reason(
+            f"{subject}\n\n{body}", user or memory.current_user())
+        if leak:
+            return f"Error: refused to send — {leak}."
+
     # Egress gateway (off by default). `_approved=True` is the bypass for the
     # approved-action path (_email_execute) — approval IS the gate clearing, so
     # re-guarding there would loop forever (held → execute → send → held → ...).
@@ -706,6 +720,13 @@ def _call_webhook(name: str, payload: dict | None = None, *,
         configured = ", ".join(hooks) or "none configured"
         return (f"Error: no webhook named '{name}'. Configured webhooks: "
                 f"{configured}. The operator defines them via OLYMPUS_WEBHOOKS.")
+
+    # Always-on exfiltration floor (independent of the opt-in egress guard).
+    if not _approved:
+        leak = security.secret_exfil_reason(
+            _json.dumps(payload or {}), user or memory.current_user())
+        if leak:
+            return f"Error: refused to call webhook — {leak}."
 
     # Egress gateway (off by default). `_approved=True` bypasses on the approved
     # path (_webhook_execute) to avoid the held→execute→held loop.

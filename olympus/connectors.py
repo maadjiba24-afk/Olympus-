@@ -325,10 +325,46 @@ def specialist_has_data_mcp(specialist_key: str) -> bool:
                for s in mcp_servers())
 
 
+_ENV_NAME = None      # compiled lazily
+
+
+def mcp_scan_reason(name: str, url: str, auth_env: str | None = None) -> str | None:
+    """Security scan for an MCP server definition; reason string when it must
+    be refused, None when clean. Persisted connector config is a durable
+    attack surface — a poisoned entry exfiltrates every future request's
+    context — so definitions are validated on the way IN, not trusted later."""
+    global _ENV_NAME
+    import re
+    from . import security
+    if _ENV_NAME is None:
+        _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    if not url.lower().startswith("https://"):
+        return "MCP server URLs must be https (tokens ride on every request)"
+    if security._URL_CRED.search(url):
+        return "the URL embeds credentials — use auth_env instead"
+    reason = security.url_block_reason(url)
+    if reason:
+        return f"the URL is blocked ({reason})"
+    if security.looks_like_injection(name):
+        return "the server name contains prompt-injection markers"
+    if auth_env and not _ENV_NAME.match(auth_env):
+        return ("auth_env must be an environment variable NAME (e.g. "
+                "MY_MCP_TOKEN), never a literal token — tokens don't belong "
+                "in the config file")
+    if auth_env and security._KEYISH.search(auth_env):
+        return ("auth_env looks like a literal credential — set the token in "
+                "the environment and pass its variable name instead")
+    return None
+
+
 def add_mcp_server(name: str, url: str, type: str = "data",
                    auth_env: str | None = None,
                    specialists: list[str] | None = None) -> str:
-    """Persist a new MCP server definition to memory/connectors.json."""
+    """Persist a new MCP server definition to memory/connectors.json.
+    Definitions are security-scanned and refused on a hit."""
+    reason = mcp_scan_reason(name, url, auth_env)
+    if reason:
+        return f"Error: refused to save MCP server '{name}' — {reason}."
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"servers": []}

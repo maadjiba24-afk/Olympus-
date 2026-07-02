@@ -153,6 +153,78 @@ def anonymize(text: str) -> str:
     return text
 
 
+# --- outbound secret-exfiltration scanning --------------------------------
+# The regexes above catch things *shaped* like secrets. This layer catches the
+# ACTUAL secrets this process holds — vault entries and key-shaped environment
+# variables — leaving in outbound content, including base64/hex/url-encoded
+# forms (the classic laundering step of an injection attack). Deterministic,
+# no LLM; used by the web fetcher, email/webhook actuators, and egress.guard.
+
+_SECRETISH_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASS|CRED)", re.IGNORECASE)
+_MIN_SECRET_LEN = 8            # shorter values are too collision-prone to match
+
+
+def _flatten_strings(value) -> list[str]:
+    """String leaves of a vault entry (str, or dict/list of token bundles)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _flatten_strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _flatten_strings(v)]
+    return []
+
+
+def _held_secrets(user: str | None) -> list[tuple[str, str]]:
+    """(label, value) pairs of secrets this process must never emit."""
+    import os
+    out = [(k, v) for k, v in os.environ.items()
+           if _SECRETISH_ENV.search(k) and len(v or "") >= _MIN_SECRET_LEN]
+    if user:
+        try:
+            from . import vault
+            for name in vault.names(user):
+                for s in _flatten_strings(vault.get(user, name)):
+                    if len(s) >= _MIN_SECRET_LEN:
+                        out.append((f"vault:{name}", s))
+        except Exception:
+            pass                # no vault key / no entries — nothing to match
+    return out
+
+
+def _encodings(value: str) -> tuple[str, ...]:
+    import base64
+    from urllib.parse import quote
+    forms = [value,
+             base64.b64encode(value.encode()).decode().rstrip("="),
+             value.encode().hex()]
+    quoted = quote(value, safe="")
+    if quoted != value:
+        forms.append(quoted)
+    return tuple(forms)
+
+
+def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
+    """Reason string when `text` carries a stored secret (raw or encoded)
+    that must not leave the process; None when clean. `user` scopes which
+    vault to check (defaults to the current memory namespace)."""
+    if not text:
+        return None
+    if user is None:
+        try:
+            from . import memory
+            user = memory.current_user()
+        except Exception:
+            user = None
+    lowered = text.lower()
+    for label, value in _held_secrets(user):
+        for form in _encodings(value):
+            if form.lower() in lowered:
+                return (f"outbound content contains the stored secret "
+                        f"'{label}' (or an encoded form of it)")
+    return None
+
+
 # --- sovereign egress choke point (SPEC-02) ------------------------------
 # Single function every outbound call funnels through under sovereign mode. With
 # sovereign OFF, egress_allowed() is a pure no-op (True for everything), so all
