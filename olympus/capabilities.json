@@ -31,7 +31,7 @@
     ]
   },
   "commands": {
-    "count": 68,
+    "count": 70,
     "names": [
       "actions",
       "add-mcp",
@@ -51,6 +51,7 @@
       "discord",
       "doctor",
       "edit",
+      "email",
       "errors",
       "eval",
       "explain",
@@ -99,6 +100,7 @@
       "version",
       "watch",
       "web",
+      "webhook",
       "whatsapp",
       "witness-pubkey"
     ]

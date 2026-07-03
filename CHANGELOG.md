@@ -15,6 +15,64 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-07-03
+
+A trust-and-adaptation release distilled from a close study of the Hermes agent:
+adopt the best of its UX, but build the Olympus-native step beyond — verified,
+lightweight, cost-aware, headless-first. See `docs/VISION.md` for the full
+screen-by-screen analysis and the backlog these changes came from.
+
+### Added — trust core
+
+- **Command security gate** (`olympus/cmdguard.py`) — a deterministic,
+  dependency-free classifier that screens every shell command before
+  `sandbox.run()` executes it, refusing catastrophic ones (`rm -rf /`, `mkfs`,
+  fork bombs, disk writes, host power-off) **even after human approval**.
+  Fail-closed: an unknown `OLYMPUS_EXEC_SECURITY` mode falls back to `enforce`.
+  The shell analogue of the Aletheia hallucination gate.
+- **`clarify` route** — Zeus can ask 1–2 crisp questions on a genuinely
+  ambiguous request instead of guessing (gated in the prompt so it won't nag).
+- **`analyze_image` tool** — vision analysis over an OpenAI-compatible endpoint
+  (URL or workspace file; path-confined, size-capped, output treated as
+  untrusted). Closes the one real capability gap vs. Hermes.
+
+### Added — cost & pool intelligence
+
+- **Pricing-aware routing** — a `$/Mtok` table (with live OpenRouter pricing via
+  `providers.fetch_pricing`) breaks genuine capability ties toward the cheaper
+  model; `ModelPool.assignment()` shows per-role price.
+- **Per-provider credential rotation** — `Settings` carries a key pool; the
+  OpenAI-compatible backend rotates to the next key on 429/quota and remembers
+  the exhausted one, with masked provenance via `rotation_report()`.
+- **Context-fraction history budget** — compaction now scales to each model's
+  context window (`OLYMPUS_HISTORY_CONTEXT_FRACTION`), with the absolute
+  `OLYMPUS_HISTORY_TOKEN_BUDGET` kept as an override.
+
+### Added — CLI, readiness & UX
+
+- **`olympus doctor`** — a readiness check (provider, sandbox, command gate,
+  workspace, memory, optional media/gateways) with a ✓/⚠/✗ summary and a
+  capability dashboard; reused at the end of `olympus setup`. Also `/doctor`.
+- **`olympus config show|set|edit`** (secrets masked, never echoed) and
+  **`olympus setup <model|terminal|gateway|tools>`** section editors.
+- **Progress verbosity modes** — `OLYMPUS_PROGRESS` / in-chat `/progress`
+  (`off|stages|all|verbose`); verification activity always shows from `stages`.
+- **Distill-then-clear `/reset`** — folds a conversation into durable state,
+  then starts fresh; idle gateway sessions are swept on a cadence.
+- **Live DAG checklist**, a **context-usage status line**, and a smoother
+  **setup wizard** (Quick/Full fork, env key auto-detection, merged Anthropic
+  auth-mode entry, "get one at" key URLs + save-now note, trade-off labels).
+
+### Added — personality, content & reach
+
+- **`~/.olympus/soul.md`** — an editable owner personality directive injected
+  into Zeus at routing and synthesis (`olympus soul [show|edit]`).
+- **Cron-attached skills** — a scheduled job can name a skill to load before it
+  runs (`schedule_task(..., skill=...)`).
+- **Curated starter-skill pack** (`olympus skills-starter`, provisional/gated)
+  and **email + inbound-webhook gateways** (`olympus email`, `olympus webhook`)
+  reusing the shared gateway pipeline.
+
 ## [0.21.0] — 2026-06-27
 
 ### Added — guided onboarding (Hermes-style)

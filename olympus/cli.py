@@ -288,6 +288,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
+    p_email = sub.add_parser("email", help="run the email gateway — answer "
+                                           "unread mail via the Gmail adapter")
+    p_email.add_argument("--interval", type=int, default=60,
+                         help="seconds between inbox polls (default 60)")
+    p_hook = sub.add_parser("webhook", help="serve the inbound webhook gateway "
+                                            "(POST {user,text} → {reply})")
+    p_hook.add_argument("--host", default="0.0.0.0")
+    p_hook.add_argument("--port", type=int, default=8487)
 
     return parser
 
@@ -950,6 +958,18 @@ def main(argv: list[str] | None = None) -> int:
             signal_gw.run_bot()
         except KeyboardInterrupt:
             print("\nSignal gateway stopped.")
+    elif args.command == "email":
+        from . import email_gateway
+        try:
+            email_gateway.run(poll_seconds=args.interval)
+        except KeyboardInterrupt:
+            print("\nEmail gateway stopped.")
+    elif args.command == "webhook":
+        from . import webhook_gateway
+        try:
+            webhook_gateway.run_server(host=args.host, port=args.port)
+        except KeyboardInterrupt:
+            print("\nWebhook gateway stopped.")
     return 0
 
 
