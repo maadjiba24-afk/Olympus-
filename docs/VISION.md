@@ -54,3 +54,48 @@ We borrow Hermes's best UX, but keep our soul.
 3. `~/.olympus/soul.md` editable personality, injected into Zeus.
 4. (Consider) a tiny curated starter-skill pack, clearly marked provisional/importable.
 5. Headless-first messaging in README/install as a deliberate contrast to Hermes.
+
+---
+
+## Screens 2–4 — setup depth choice, provider picker, key entry
+
+### What Hermes did
+- **Screen 2:** first question is *depth*, not content: `Quick setup — provider,
+  model & messaging (recommended)` vs `Full setup — configure everything`.
+  One keystroke commits the user to a short or long path.
+- **Screen 3:** provider picker is **auth-mode-first**: subscription (Nous
+  Portal), pay-per-use (OpenRouter), API key or CLI login (Anthropic — "API key
+  or Claude Code" as ONE entry), OAuth reuse of other tools' logins (OpenAI
+  Codex, Qwen CLI, GitHub Copilot via GITHUB_TOKEN/gh). Long tail folded behind
+  `More providers...`, plus explicit `Cancel`.
+- **Screen 4 (key entry):**
+  - **Configuration Location** block up front: config file, secrets file, data
+    folder, install dir — *before* asking for a secret. Transparency first.
+  - A **Warning** when no provider is configured that names the exact fixes
+    (`hermes model`, or set OPENROUTER_API_KEY/OPENAI_API_KEY in ~/.hermes/.env)
+    and says it will "fall back to auto provider detection".
+  - Shows **Current model / Active provider: none** as visible state.
+  - Key prompt includes **"Get one at: https://openrouter.ai/keys"** and
+    **"(or Enter to cancel)"** — never a dead end.
+  - Note: key input is **visible** (not hidden) — Olympus's getpass hiding is
+    actually better here.
+
+### Verdicts + Olympus-native ideas
+| Hermes feature | Verdict | Olympus move |
+|---|---|---|
+| Quick vs Full setup fork | **ADOPT** | First wizard question: `1) Quick — one provider and go` vs `2) Full — compose a pool, gateway, backend, fast mode`. Quick = pick provider → key → auto-model → done. |
+| Auth-mode-first provider list ("API key **or** Claude Code" as one entry) | **ADAPT** | Merge our two Claude rows into one: `Anthropic (Claude) — API key or Claude Code subscription`, then ask which auth inside. Keeps the list short and puts *how you pay* first. |
+| `More providers...` folding | **ADOPT** | Show top ~6 + `More providers...` → full catalog. Shorter first impression. |
+| "Get a key at <url>" on every key prompt | **ADOPT (tiny, high value)** | Add `key_url` to each catalog Provider; print it at the key prompt. |
+| "(or Enter to cancel)" escape on every prompt | **ADOPT** | Ensure every wizard prompt is skippable without Ctrl+C. |
+| Configuration Location block before secrets | **ADOPT** | Print config.env path + memory dir at wizard start ("saved owner-only; env vars override"). |
+| Visible state: "Current model / Active provider: none" + warning naming exact fixes | **ADOPT** | Wizard re-runs show current pool first; `doctor` warns with the exact env-var/command fix (matches Screen-1 backlog). |
+| Auto provider detection fallback (uses any recognizable key in env) | **ADAPT** | On startup with no config, scan env for known keys (ANTHROPIC/OPENAI/DEEPSEEK/GROQ/OPENROUTER...) and offer: "Found DEEPSEEK_API_KEY — use it? [Y/n]". |
+| Key typed in the clear | **SKIP (we're better)** | Keep getpass-hidden input. |
+
+### Build backlog additions (batched)
+6. Quick/Full fork at the top of the wizard.
+7. `key_url` per provider + "Get one at ..." on key prompts; every prompt cancelable.
+8. Config-location block at wizard start; show current pool on re-run.
+9. Env-scan auto-detection fallback ("Found X_API_KEY — use it?").
+10. Merge Anthropic entries into one auth-mode-first row.
