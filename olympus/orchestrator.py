@@ -135,6 +135,14 @@ class Olympus:
         # on its strongest model). A single Settings becomes a pool of one.
         self.pool = pool or config.ModelPool.of(
             settings or config.Settings.from_env())
+        # A conversation-level model pin (/model opus) narrows the pool to the
+        # pinned member — but only for default env-pool sessions: a caller who
+        # brought explicit settings/pool (BYOK) is never silently switched.
+        if settings is None and pool is None:
+            from . import modelpin
+            pinned = modelpin.resolve(user)
+            if pinned is not None:
+                self.pool = config.ModelPool.of(pinned)
         self.settings = self.pool.primary()
         self.user = memory.safe_id(user)
         self.conversation_id = conversation_id

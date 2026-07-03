@@ -209,6 +209,25 @@ def specialist_role(key: str) -> str:
     return SPECIALIST_ROLE.get(key, "reasoning")
 
 
+def specialist_model_overrides() -> dict[str, str]:
+    """Per-council-member model pins from OLYMPUS_SPECIALIST_MODELS, e.g.
+    '{"hephaestus": "deepseek", "aletheia": "opus"}'. Values are matched as
+    case-insensitive substrings of a configured member's provider/model.
+    Malformed input is ignored."""
+    raw = os.environ.get("OLYMPUS_SPECIALIST_MODELS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).strip().lower(): str(v).strip().lower()
+            for k, v in data.items() if str(v).strip()}
+
+
 def role_fallback_overrides() -> dict[str, list[str]]:
     """Explicit per-role fallback order from OLYMPUS_ROLE_FALLBACKS, e.g.
     '{"coding": ["openai/gpt-5", "haiku"]}'. Tokens are case-insensitive
@@ -391,6 +410,14 @@ class ModelPool:
             round(price_per_mtok(m.model), 2)))
 
     def for_specialist(self, key: str) -> Settings:
+        # An explicit per-council-member pin wins over role scoring:
+        # OLYMPUS_SPECIALIST_MODELS='{"hephaestus": "deepseek"}' routes that
+        # specialist to the matching configured member (shorthands fine).
+        token = specialist_model_overrides().get(key)
+        if token:
+            for member in self.members:
+                if token in f"{member.provider}/{member.model}".lower():
+                    return member
         return self.for_role(specialist_role(key))
 
     def fastest(self) -> Settings:

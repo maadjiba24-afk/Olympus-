@@ -234,6 +234,15 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/model":
+        from . import modelpin
+        if not arg.strip():
+            return chunk(modelpin.status(uid))
+        reply = modelpin.set_pin(uid, arg)
+        # The session's pool is chosen at construction; rebuild it so the
+        # pin (or unpin) takes effect on the next message, not next restart.
+        bots.pop(uid, None)
+        return chunk(reply)
     if cmd == "/profile":
         # View-only: a conversation can see its boundary, never widen it
         # (assignment is operator-side via `olympus restrict`).
