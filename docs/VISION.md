@@ -373,3 +373,33 @@ command security scanner**.
     (Also: `olympus config set/edit/show` reinforces #2; version+short-sha in
     banner for provenance. `clarify` confirmed real → keep #20; vision still a
     gap → keep #21.)
+
+---
+
+## Build log — shipped in 0.22.0
+
+The full 27-item backlog above was built, tested, and released as **0.22.0**
+(747 tests passing; wheel builds clean). Sequenced into six tiers:
+
+- **Tier A — trust core** (`2676111`): command security gate (#25), clarify
+  (#20), analyze_image (#21), per-provider credential rotation (#12).
+- **Tier B — pool & cost** (`cc030c9`): pricing-aware routing (#11),
+  context-fraction budget (#18), distill-then-clear `/reset` + idle gateway
+  resets (#17).
+- **Tier C — CLI/readiness** (`17101e4`): `olympus doctor` (#1), `config
+  show/set/edit` + `setup <section>` (#2), capability dashboard (#26), status
+  line (#27), progress modes (#14), live DAG checklist (#22).
+- **Tier D — wizard UX** (`a8f3484`): Quick/Full fork (#6), key URLs +
+  save-now + cancelable (#7, #24), config-location + current pool (#8), env
+  auto-detect (#9), merged Anthropic auth-first (#10), state confirmations +
+  `← in use` (#13), trade-off labels + free defaults (#15), keep-current + knob
+  explanations (#16).
+- **Tier E — personality & content** (`7e07bb1`): `soul.md` (#3), cron-attached
+  skills (#23), headless-first README (#5), starter skill pack (#4).
+- **Tier F — reach & ship** (`4e83c1b`): email gateway + inbound webhook
+  gateway (#19), version bump, CHANGELOG, manifest.
+
+The positioning thesis held: every item was **adopt-and-surpass**, not clone —
+the security gate fails *closed* where Hermes falls back to patterns; pricing is
+*acted on* (routing) not just shown; the wizard defaults to *free/no-setup*; and
+the whole thing stays headless, dependency-light, and verified.
