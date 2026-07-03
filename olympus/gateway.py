@@ -232,6 +232,11 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/profile":
+        # View-only: a conversation can see its boundary, never widen it
+        # (assignment is operator-side via `olympus restrict`).
+        from . import capprofile
+        return chunk(capprofile.summary(uid))
     if cmd == "/onexit":
         from . import scheduler
         pid_str, _, prompt = arg.strip().partition(" ")

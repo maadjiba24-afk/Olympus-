@@ -403,6 +403,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_restrict = sub.add_parser(
+        "restrict", help="scope a conversation/user to a capability profile "
+                         "(full | reader | guest | custom)")
+    p_restrict.add_argument("user", nargs="?", default="",
+                            help="conversation/user id (e.g. tg-12345)")
+    p_restrict.add_argument("profile", nargs="?", default="",
+                            help="profile name; omit to show current")
+    p_restrict.add_argument("--clear", action="store_true",
+                            help="remove the explicit restriction")
+    p_restrict.add_argument("--profiles", action="store_true",
+                            dest="list_profiles", help="list known profiles")
     p_pair = sub.add_parser(
         "pair", help="mint a one-time pairing code so a chat can talk to "
                      "Olympus (channels are untrusted by default)")
@@ -1239,6 +1250,24 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "restrict":
+        from . import capprofile
+        if args.list_profiles:
+            for name, spec in sorted(capprofile.profiles().items()):
+                denied = (f"{len(spec['deny'])} tools denied" if spec["deny"]
+                          else "no restriction")
+                print(f"{name:8s} {denied}, autonomy cap "
+                      f"L{spec.get('max_autonomy', 4)}")
+        elif not args.user:
+            print("Usage: olympus restrict <user> <profile> "
+                  "| --clear | --profiles")
+            return 1
+        elif args.clear:
+            print(capprofile.clear(args.user))
+        elif args.profile:
+            print(capprofile.assign(args.user, args.profile))
+        else:
+            print(capprofile.summary(args.user))
     elif args.command == "pair":
         from . import pairing
         if args.list_paired:

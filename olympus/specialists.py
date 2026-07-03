@@ -87,6 +87,12 @@ class Specialist:
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)
+            # Per-conversation capability profile: the active conversation's
+            # boundary (a chat guest, a restricted group) further scopes what
+            # this run may reach. System specialists stay exempt — they run
+            # Olympus's own maintenance, never a visitor's request.
+            from . import capprofile
+            defs = capprofile.filter_tools(defs)
         if not codegraph.enabled():            # graph off → its tools vanish
             _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
                    "codegraph_path", "verify_code_claim"}
