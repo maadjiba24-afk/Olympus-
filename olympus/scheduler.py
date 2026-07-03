@@ -73,6 +73,7 @@ class Job:
     enabled: bool = True
     last_run: float = 0.0
     created: float = field(default=0.0)
+    skill: str = ""              # optional skill loaded before the job's prompt
 
     def due(self, now: float) -> bool:
         return self.enabled and (now - self.last_run) >= self.interval
@@ -95,12 +96,13 @@ def _save(jobs: list[Job]) -> None:
 
 def add(name: str, interval: str | int, prompt: str,
         deliver_to: str = "", user: str = "shared",
-        now: float | None = None) -> Job:
+        now: float | None = None, skill: str = "") -> Job:
     now = now if now is not None else time.time()
     secs = interval if isinstance(interval, int) else parse_interval(interval)
     jobs = [j for j in _load() if j.name != name]    # replace by name
     job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)), prompt=prompt,
-              deliver_to=deliver_to.strip().lower(), user=user, created=now)
+              deliver_to=deliver_to.strip().lower(), user=user, created=now,
+              skill=(skill or "").strip())
     jobs.append(job)
     # Bound storage: keep the most-recently-created MAX_JOBS.
     if len(jobs) > MAX_JOBS:
@@ -172,6 +174,23 @@ def _deliver(job: Job, answer: str) -> None:
         pass
 
 
+def _effective_prompt(job: Job) -> str:
+    """The prompt actually run for a job. When a job has an attached skill, its
+    instructions are loaded and prepended so the run starts already primed with
+    that playbook — 'every Monday, using the weekly-report skill, …'."""
+    if not job.skill:
+        return job.prompt
+    try:
+        from . import skills
+        body = skills.read(job.skill)
+    except Exception:
+        body = ""
+    if not body or body.lower().startswith(("no skill", "error")):
+        return job.prompt
+    return (f"Use the '{job.skill}' skill for this task:\n\n{body}\n\n"
+            f"---\nTask:\n{job.prompt}")
+
+
 def run_due(now: float | None = None, runner=None) -> list[str]:
     """Execute every due job through the Olympus pipeline; deliver + log.
     `runner(prompt, user) -> str` is injectable for tests."""
@@ -186,7 +205,7 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
             return orchestrator.Olympus(user=user).ask(prompt)
     for job in ready:
         try:
-            answer = runner(job.prompt, job.user)
+            answer = runner(_effective_prompt(job), job.user)
             _deliver(job, answer)
             memory.set_user("shared")
             memory.save("reports", f"Scheduled: {job.name}", answer)
@@ -221,5 +240,7 @@ def summary() -> str:
         every = _human_interval(j.interval)
         state = "" if j.enabled else " (disabled)"
         to = f" → {j.deliver_to}" if j.deliver_to else ""
-        lines.append(f"  {j.name}: every {every}{to}{state}\n     {j.prompt[:80]}")
+        using = f" [skill: {j.skill}]" if getattr(j, "skill", "") else ""
+        lines.append(f"  {j.name}: every {every}{to}{using}{state}"
+                     f"\n     {j.prompt[:80]}")
     return "\n".join(lines)

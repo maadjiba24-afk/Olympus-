@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 73,
+    "count": 79,
     "names": [
       "actions",
       "add-mcp",
@@ -50,13 +50,16 @@
       "capabilities",
       "chat",
       "code-eval",
+      "config",
       "connectors",
       "contrib",
       "curate",
       "dashboard",
       "discord",
       "distill",
+      "doctor",
       "edit",
+      "email",
       "errors",
       "eval",
       "explain",
@@ -98,7 +101,9 @@
       "skill-export",
       "skill-import",
       "skills",
+      "skills-starter",
       "slack",
+      "soul",
       "status",
       "telegram",
       "tick",
@@ -110,14 +115,16 @@
       "version",
       "watch",
       "web",
+      "webhook",
       "whatsapp",
       "witness-pubkey"
     ]
   },
   "schema_version": 1,
   "tools": {
-    "count": 61,
+    "count": 62,
     "names": [
+      "analyze_image",
       "browse_page",
       "browser_act",
       "browser_exists",

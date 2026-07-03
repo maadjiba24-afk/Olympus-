@@ -158,19 +158,57 @@ def list_inbox(query: str = "in:inbox", max_results: int = 10) -> str:
     return "\n\n".join(out)
 
 
-def get_message(message_id: str) -> str:
-    m = _request("GET", f"/messages/{message_id}?format=full")
-    body = ""
+def _plain_body(m: dict) -> str:
     payload = m.get("payload", {})
     parts = payload.get("parts", [payload])
     for p in parts:
         data = p.get("body", {}).get("data")
         if data and p.get("mimeType", "").startswith("text/plain"):
-            body = base64.urlsafe_b64decode(data + "===").decode(
+            return base64.urlsafe_b64decode(data + "===").decode(
                 "utf-8", errors="replace")
-            break
+    return m.get("snippet", "")
+
+
+def get_message(message_id: str) -> str:
+    m = _request("GET", f"/messages/{message_id}?format=full")
+    body = _plain_body(m)
     return (f"From: {_header(m, 'From')}\nDate: {_received(m)}\n"
             f"Subject: {_header(m, 'Subject')}\n\n{body[:4000]}")
+
+
+def parse_address(from_header: str) -> str:
+    """Extract the bare email address from a 'Name <addr@x>' From header."""
+    from email.utils import parseaddr
+    return parseaddr(from_header or "")[1].lower()
+
+
+def list_unread(max_results: int = 10) -> list[dict]:
+    """Structured list of unread inbox messages, for the email gateway.
+    Each dict: {id, from, sender, subject, body}. Best-effort per message."""
+    q = urllib.parse.urlencode({"q": "in:inbox is:unread",
+                                "maxResults": max_results})
+    listing = _request("GET", f"/messages?{q}")
+    out: list[dict] = []
+    for ref in listing.get("messages", []):
+        mid = ref.get("id")
+        if not mid:
+            continue
+        m = _request("GET", f"/messages/{mid}?format=full")
+        frm = _header(m, "From")
+        out.append({
+            "id": mid,
+            "from": frm,
+            "sender": parse_address(frm),
+            "subject": _header(m, "Subject"),
+            "body": _plain_body(m)[:4000],
+        })
+    return out
+
+
+def mark_read(message_id: str) -> dict:
+    """Remove the UNREAD label so the gateway doesn't re-answer a message."""
+    return _request("POST", f"/messages/{message_id}/modify",
+                    {"removeLabelIds": ["UNREAD"]})
 
 
 # --- operations (used by gated Action types) ----------------------------

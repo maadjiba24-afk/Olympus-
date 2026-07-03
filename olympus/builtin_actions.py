@@ -152,8 +152,13 @@ def _cal_create_undo(result: dict) -> str:
 # before anything runs on the host.
 
 def _run_command_preview(p: dict) -> str:
+    from . import cmdguard
+    cmd = p.get("command", "")
+    verdict = cmdguard.scan(cmd)
+    risk = ("" if verdict.level == cmdguard.SAFE
+            else f"\n  {verdict.render()}")
     return (f"Run command in the workspace ({sandbox.backend()} backend):\n"
-            f"  $ {p.get('command', '')}")
+            f"  $ {cmd}{risk}")
 
 
 def _run_command_execute(p: dict) -> dict:

@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 61 tools in
+Olympus exposes a **finite, named** tool surface — the 62 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -65,6 +65,7 @@ surface. So the surface and its threat model can't drift apart.
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
 | `browse_page` | Fetch a page as text + extract links | ingests untrusted | SSRF/egress gate on the URL and every redirect (`_http_get`); output wrapped | SSRF (incl. redirect-to-internal) — refused by `url_block_reason`; injected content — wrapped |
+| `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
 | `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any ingesting run (capability separation) AND gated: operator must be enabled and the current page's domain authorized | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run and refused on an unauthorized domain |

@@ -12,6 +12,7 @@ instances (private memory + persisted history per user).
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import traceback
@@ -20,6 +21,13 @@ from collections import OrderedDict
 from . import config, memory, orchestrator, steering
 
 CHUNK = 3500
+
+# Idle gateway sessions are distilled-and-cleared after this many seconds so a
+# long-running gateway process doesn't accumulate unbounded per-user history
+# (cost + context drift). 0 disables the sweep. The heartbeat calls
+# reset_idle_sessions() on a cadence; the distilled state is preserved.
+GATEWAY_SESSION_MAX_AGE = int(
+    os.environ.get("OLYMPUS_GATEWAY_SESSION_MAX_AGE", str(6 * 3600)))
 
 HELP = (
     "⚡ OLYMPUS — your council of AI specialists.\n\n"
@@ -41,6 +49,7 @@ HELP = (
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
+    "/reset — start fresh (keeps a distilled summary of what we covered)\n"
 )
 
 
@@ -232,6 +241,8 @@ def reply_for(bots: dict, user_key: str, text: str,
     bot = bots.get(uid)
     if bot is None:
         bot = bots[uid] = orchestrator.Olympus(user=uid, conversation_id=uid)
+    import time
+    bot._last_active = time.time()   # for idle-session reset sweeps
 
     if cmd == "/undo":
         try:
@@ -254,8 +265,33 @@ def reply_for(bots: dict, user_key: str, text: str,
     if cmd == "/growth":
         from . import companion
         return chunk(companion.summary(uid))
+    if cmd == "/reset":
+        return chunk(bot.reset())
 
     return chunk(bot.ask(text))
+
+
+def reset_idle_sessions(bots: dict, max_age_secs: int | None = None) -> int:
+    """Distill-and-clear gateway sessions that have gone quiet, so a long-lived
+    gateway process doesn't carry unbounded per-user history (cost + drift).
+    Returns how many sessions were reset. Called on a cadence by the heartbeat;
+    the distilled state is preserved (see Olympus.reset)."""
+    import time
+    max_age = max_age_secs if max_age_secs is not None else GATEWAY_SESSION_MAX_AGE
+    if max_age <= 0:
+        return 0
+    now = time.time()
+    reset = 0
+    for uid, bot in list(bots.items()):
+        last = getattr(bot, "_last_active", None)
+        if last is not None and (now - last) >= max_age and bot.history:
+            try:
+                bot.reset()
+                bot._last_active = now   # distilled now → fresh; don't re-sweep
+                reset += 1
+            except Exception:
+                pass
+    return reset
 
 
 # --- background dispatch for webhook gateways -----------------------------

@@ -20,6 +20,54 @@ from . import config, security, tools, usage
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
+# Per-endpoint credential rotation state. When a key hits a rate limit or quota
+# wall we mark it exhausted and advance a shared cursor, so subsequent calls
+# start from the next healthy key instead of re-hitting the dead one. Keyed by
+# base_url so different providers rotate independently.
+_key_cursor: dict[str, int] = {}
+_key_stats: dict[str, dict[str, int]] = {}   # base -> {"<masked>": success_count}
+_exhausted: dict[str, set[str]] = {}         # base -> {masked keys seen exhausted}
+
+# Status codes / body markers that mean "this key is spent — try another".
+_QUOTA_CODES = frozenset({402, 429})
+_QUOTA_MARKERS = ("insufficient", "quota", "exceeded your current",
+                  "billing", "rate limit", "out of credit", "balance")
+
+
+def _is_quota_error(code: int, detail: str) -> bool:
+    if code in _QUOTA_CODES:
+        return True
+    low = (detail or "").lower()
+    return any(m in low for m in _QUOTA_MARKERS)
+
+
+def _record_key_use(base: str, masked: str) -> None:
+    _key_stats.setdefault(base, {})
+    _key_stats[base][masked] = _key_stats[base].get(masked, 0) + 1
+
+
+def rotation_report(settings: config.Settings) -> str:
+    """Human-readable provenance of key rotation for `olympus models`. Never
+    prints a secret — only masked tails and per-key success counts."""
+    keys = settings.all_keys()
+    if len(keys) <= 1:
+        return ""
+    base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
+    stats = _key_stats.get(base, {})
+    spent = _exhausted.get(base, set())
+    lines = [f"Credential rotation ({len(keys)} keys for {settings.provider}):"]
+    for i, k in enumerate(keys):
+        masked = config.mask_key(k)
+        flags = []
+        if masked in spent:
+            flags.append("exhausted")
+        if i == _key_cursor.get(base, 0) % len(keys):
+            flags.append("active")
+        used = stats.get(masked, 0)
+        tag = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"  {masked}: {used} calls{tag}")
+    return "\n".join(lines)
+
 
 def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -28,34 +76,58 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     # non-allowlisted host fails closed here (no-op when sovereign is off).
     security.assert_egress_allowed(urlparse(url).hostname or "")
     body = json.dumps(payload).encode()
-    headers = {"Content-Type": "application/json"}
-    if settings.api_key:
-        headers["Authorization"] = f"Bearer {settings.api_key}"
+
+    keys = list(settings.all_keys())
+    # No credentials (e.g. a keyless local endpoint) — one unauthenticated pass
+    # through the same retry logic.
+    key_ring: list[str | None] = keys or [None]
+    n = len(key_ring)
+    start = _key_cursor.get(base, 0) if keys else 0
 
     last_err: Exception | None = None
-    for attempt in range(4):
-        req = urllib.request.Request(url, data=body, headers=headers)
-        try:
-            with usage.slot():
-                with urllib.request.urlopen(req, timeout=600) as resp:
-                    data = json.loads(resp.read())
-            u = data.get("usage") or {}
-            usage.record(payload.get("model", "unknown"),
-                         int(u.get("prompt_tokens", 0)),
-                         int(u.get("completion_tokens", 0)))
-            return data
-        except urllib.error.HTTPError as err:
-            detail = err.read().decode(errors="replace")[:500]
-            if err.code in (408, 429, 500, 502, 503, 529) and attempt < 3:
-                last_err = RuntimeError(f"HTTP {err.code}: {detail}")
+    # Try each key in turn; each key gets the full transient-error backoff loop.
+    for k_off in range(n):
+        idx = (start + k_off) % n
+        key = key_ring[idx]
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        masked = config.mask_key(key) if key else "(no key)"
+
+        for attempt in range(4):
+            req = urllib.request.Request(url, data=body, headers=headers)
+            try:
+                with usage.slot():
+                    with urllib.request.urlopen(req, timeout=600) as resp:
+                        data = json.loads(resp.read())
+                u = data.get("usage") or {}
+                usage.record(payload.get("model", "unknown"),
+                             int(u.get("prompt_tokens", 0)),
+                             int(u.get("completion_tokens", 0)))
+                if keys:
+                    _key_cursor[base] = idx        # remember the healthy key
+                    _record_key_use(base, masked)
+                return data
+            except urllib.error.HTTPError as err:
+                detail = err.read().decode(errors="replace")[:500]
+                # Quota/rate-limit on THIS key with another available → rotate
+                # to the next key immediately instead of burning backoff on a
+                # key that's already spent.
+                if keys and n > 1 and _is_quota_error(err.code, detail):
+                    _exhausted.setdefault(base, set()).add(masked)
+                    last_err = RuntimeError(f"HTTP {err.code} (key {masked}): "
+                                            f"{detail}")
+                    break                          # advance to the next key
+                if err.code in (408, 429, 500, 502, 503, 529) and attempt < 3:
+                    last_err = RuntimeError(f"HTTP {err.code}: {detail}")
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(
+                    f"Provider error HTTP {err.code} from {url}: {detail}"
+                ) from None
+            except (urllib.error.URLError, TimeoutError, OSError) as err:
+                last_err = err
                 time.sleep(2 ** attempt)
-                continue
-            raise RuntimeError(
-                f"Provider error HTTP {err.code} from {url}: {detail}"
-            ) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as err:
-            last_err = err
-            time.sleep(2 ** attempt)
     raise RuntimeError(f"Provider unreachable at {url}: {last_err}")
 
 

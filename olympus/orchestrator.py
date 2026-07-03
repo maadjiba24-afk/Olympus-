@@ -39,7 +39,7 @@ from .specialists import SPECIALISTS, roster
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "mode": {"type": "string", "enum": ["direct", "delegate"]},
+        "mode": {"type": "string", "enum": ["direct", "delegate", "clarify"]},
         "direct_reply": {
             "type": ["string", "null"],
             "description": "The complete reply when mode is 'direct', else null",
@@ -53,6 +53,13 @@ ROUTE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Task brief for the supervisor when mode is 'delegate'",
         },
+        "clarifying_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "1-2 crisp questions when mode is 'clarify' — only "
+            "when the request is genuinely ambiguous AND you cannot proceed on "
+            "a reasonable assumption. Empty otherwise.",
+        },
         "needs_verification": {
             "type": "boolean",
             "description": "True when the answer will contain factual claims "
@@ -60,9 +67,18 @@ ROUTE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["mode", "direct_reply", "specialists", "brief",
-                 "needs_verification"],
+                 "clarifying_questions", "needs_verification"],
     "additionalProperties": False,
 }
+
+
+def _format_clarify(questions: list[str]) -> str:
+    """Render 1-2 clarifying questions as Zeus's reply to the user."""
+    lines = ["Before I dive in, a couple of quick things so I get this right:"]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"  {i}. {q}")
+    lines.append("\n(Answer what you can — I'll take it from there.)")
+    return "\n".join(lines)
 
 Reporter = Callable[[str], None]
 
@@ -152,7 +168,9 @@ class Olympus:
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)
             + codegraph.context_block("self", user_message)))
-        system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
+        from . import soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
@@ -175,12 +193,12 @@ class Olympus:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
                     "specialists": [], "brief": None,
-                    "needs_verification": False}
+                    "clarifying_questions": [], "needs_verification": False}
         except Exception:
             # Any other provider failure — degrade gracefully to delegation.
             return {"mode": "delegate", "direct_reply": None,
                     "specialists": [], "brief": user_message,
-                    "needs_verification": True}
+                    "clarifying_questions": [], "needs_verification": True}
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
@@ -326,7 +344,9 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+        from . import soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
@@ -442,6 +462,18 @@ class Olympus:
         remaining = dict(by_id)
         level = 0
 
+        # Show the whole plan up front as a checklist, so the user can watch it
+        # tick off. Each line: ☐ Specialist — task (← after any upstream deps).
+        if len(steps) > 1:
+            plan_lines = ["🦉 Athena's plan:"]
+            for s in steps:
+                dep = (f"  ← after {', '.join(SPECIALISTS[by_id[d]['specialist']].name for d in s['depends_on'] if d in by_id)}"
+                       if s["depends_on"] else "")
+                plan_lines.append(
+                    f"   ☐ {SPECIALISTS[s['specialist']].name}: "
+                    f"{s['task'][:60]}{dep}")
+            self.report("\n".join(plan_lines))
+
         while remaining:
             ready = [s for s in remaining.values()
                      if all(d in done for d in s["depends_on"])]
@@ -481,6 +513,10 @@ class Olympus:
                 done[sid] = (key, out)
                 outputs.append((key, out))
                 remaining.pop(sid, None)
+            # Tick the completed steps off the checklist.
+            self.report("   ☑ " + ", ".join(
+                f"{SPECIALISTS[s['specialist']].name}" for s in ready)
+                + f"  ({len(done)}/{len(by_id)} done)")
 
         return outputs
 
@@ -514,6 +550,18 @@ class Olympus:
 
         if route.get("mode") == "direct" and route.get("direct_reply"):
             return "direct", "", route["direct_reply"]
+
+        # Clarify: the request is genuinely ambiguous — ask 1-2 questions instead
+        # of guessing. Gated on Zeus choosing this mode (see zeus.md), so it
+        # doesn't nag on requests it can reasonably proceed with.
+        if route.get("mode") == "clarify":
+            qs = [q.strip() for q in (route.get("clarifying_questions") or [])
+                  if isinstance(q, str) and q.strip()][:2]
+            if qs:
+                tr.event("clarify", questions=qs)
+                return "clarify", "", _format_clarify(qs)
+            # Model asked to clarify but gave no questions — fall through to a
+            # normal delegation rather than replying with nothing.
 
         brief = route.get("brief") or user_message
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
@@ -649,8 +697,10 @@ class Olympus:
         there is always an older slice to fold away. (A single huge paste alone
         does NOT compact at turn one: the recent tail is always replayed
         verbatim, so compaction waits until history grows past HISTORY_KEEP_TURNS
-        entries.)"""
-        if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
+        entries.) The budget scales to the active model's context window; an
+        explicit OLYMPUS_HISTORY_TOKEN_BUDGET overrides it absolutely."""
+        budget = config.history_token_budget(self.settings.model)
+        if self._estimate_tokens(self.history) <= budget:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:
             return  # everything is in the verbatim tail; nothing to fold away
@@ -706,7 +756,7 @@ class Olympus:
         connectors.emit("run_start", self.user, user_message)
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 reply = result
             else:
                 self.report("⚡ Zeus composes the final answer...")
@@ -759,12 +809,14 @@ class Olympus:
             self.conversation_id or f"user-{self.user}")
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 yield result
                 self._finish(user_message, result)
                 return
             self.report("⚡ Zeus composes the final answer...")
-            system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+            from . import soul
+            system = (agent.load_prompt("zeus") + soul.block()
+                      + i18n.directive(self.user)
                       + profile.card(self.user)
                       + recall.context_block(self.user, user_message)
                       + playbooks.context_block(self.user, user_message)
@@ -832,6 +884,48 @@ class Olympus:
             memory.save_conversation(self.conversation_id, self.history)
         return (f"Removed the last {removed} exchange(s) from the "
                 "conversation. The next question continues from before them.")
+
+    def reset(self) -> str:
+        """Distill the conversation into durable state, then clear it.
+
+        Unlike a plain wipe, this *keeps what matters*: before dropping the
+        turns it folds the whole conversation into a compact state block (facts,
+        decisions, preferences, open threads) and seeds the fresh history with
+        it, so the next turn starts clean but not amnesiac. Durable per-user
+        memory (lessons/facts) is untouched — only the working transcript is
+        distilled. Used by /reset and by scheduled gateway session resets."""
+        memory.set_user(self.user)
+        turns = len([m for m in self.history if m.get("role") == "user"])
+        if not self.history:
+            return "Nothing to reset — the conversation is already empty."
+        as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
+                            for m in self.history)
+        summary = ""
+        try:
+            summary = backend.complete_text(
+                self.settings,
+                "Distill this conversation into a compact durable state — facts, "
+                "decisions, user preferences, and open threads only. This will be "
+                "the sole memory of the chat, so keep everything that matters and "
+                "nothing that doesn't.",
+                [{"role": "user", "content": as_text}], effort="low").strip()
+        except Exception:
+            summary = ""
+        if summary:
+            self.history = [
+                {"role": "user",
+                 "content": "[Conversation state — distilled from a prior "
+                            "session]\n" + summary},
+                {"role": "assistant",
+                 "content": "Understood — continuing with that context."},
+            ]
+            tail = "kept a distilled summary of what we covered"
+        else:
+            self.history = []
+            tail = "cleared the transcript"
+        if self.conversation_id:
+            memory.save_conversation(self.conversation_id, self.history)
+        return f"Fresh start — {tail} ({turns} turn(s) folded away)."
 
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""

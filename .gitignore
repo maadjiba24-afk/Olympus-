@@ -8,3 +8,8 @@ memory/
 keys.sh
 deploy/.env
 olympus/verification.json
+
+# Python build artifacts (never commit)
+build/
+dist/
+*.egg-info/

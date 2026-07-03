@@ -149,7 +149,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "audience research, campaigns, SEO.",
             web=True,
             extra_tools=("generate_image", "text_to_speech",
-                         "transcribe_audio", "browse_page"),
+                         "transcribe_audio", "browse_page", "analyze_image"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
@@ -160,7 +160,7 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "read_file", "list_dir", "prepare_action",
-                         "spawn_subagent"),
+                         "spawn_subagent", "analyze_image"),
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
@@ -173,7 +173,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
-            extra_tools=("generate_image", "browse_page"),
+            extra_tools=("generate_image", "browse_page", "analyze_image"),
             # Social copy should stay tight — guard against a wall-of-text reply.
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_chars=8000),
@@ -212,8 +212,9 @@ SPECIALISTS: dict[str, Specialist] = {
             # actuator (browser_act) from its live loadout — it can read/learn
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
-            extra_tools=("browse_page", "browser_open", "browser_read",
-                         "browser_act", "browser_skills", "browser_skill_record"),
+            extra_tools=("browse_page", "analyze_image", "browser_open",
+                         "browser_read", "browser_act", "browser_skills",
+                         "browser_skill_record"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),

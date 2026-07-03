@@ -104,7 +104,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("chat", help="interactive conversation (default)")
-    sub.add_parser("setup", help="choose your AI provider & save your API key")
+    p_setup = sub.add_parser(
+        "setup", help="choose your AI provider & save your API key; or edit one "
+                      "section: setup <model|terminal|gateway|tools>")
+    p_setup.add_argument("section", nargs="?",
+                         help="edit just one part (model/terminal/gateway/tools)")
+    p_cfg = sub.add_parser(
+        "config", help="view or change saved settings (secrets are masked)")
+    p_cfg.add_argument("action", nargs="?", default="show",
+                       choices=["show", "set", "edit"])
+    p_cfg.add_argument("kv", nargs="*",
+                       help="for set: <KEY> <VALUE>")
+    sub.add_parser("doctor", help="check readiness: provider, sandbox, security, "
+                                  "memory, optional capabilities")
+    p_soul = sub.add_parser(
+        "soul", help="view or edit Olympus's personality (~/.olympus/soul.md), "
+                     "injected into every reply")
+    p_soul.add_argument("action", nargs="?", default="show",
+                        choices=["show", "edit"])
     sub.add_parser("version", help="show the installed Olympus version")
     sub.add_parser("growth", help="show how Olympus has adapted to you over time")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
@@ -302,6 +319,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
+    sub.add_parser("skills-starter",
+                   help="install a small curated starter-skill pack "
+                        "(provisional — benchmark-gated like any other skill)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
@@ -396,6 +416,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
+    p_email = sub.add_parser("email", help="run the email gateway — answer "
+                                           "unread mail via the Gmail adapter")
+    p_email.add_argument("--interval", type=int, default=60,
+                         help="seconds between inbox polls (default 60)")
+    p_hook = sub.add_parser("webhook", help="serve the inbound webhook gateway "
+                                            "(POST {user,text} → {reply})")
+    p_hook.add_argument("--host", default="0.0.0.0")
+    p_hook.add_argument("--port", type=int, default=8487)
 
     return parser
 
@@ -422,7 +450,27 @@ def main(argv: list[str] | None = None) -> int:
         pass                        # a broken vault must never block the CLI
 
     if args.command == "setup":
-        firstrun.wizard()
+        if getattr(args, "section", None):
+            firstrun.setup_section(args.section)
+        else:
+            firstrun.wizard()
+    elif args.command == "config":
+        if args.action == "show":
+            print(firstrun.show_config())
+        elif args.action == "edit":
+            print(firstrun.open_in_editor())
+        elif args.action == "set":
+            if len(args.kv) < 2:
+                print("Usage: olympus config set <KEY> <VALUE>")
+                return 1
+            print(firstrun.config_set(args.kv[0], " ".join(args.kv[1:])))
+    elif args.command == "doctor":
+        from . import doctor
+        print(doctor.render())
+        return 0 if doctor.is_ready() else 1
+    elif args.command == "soul":
+        from . import soul
+        print(soul.edit() if args.action == "edit" else soul.show())
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")
@@ -919,6 +967,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skills":
         from . import skills
         print(skills.index())
+    elif args.command == "skills-starter":
+        from . import skillpack
+        msgs = skillpack.install_starter_pack()
+        print("Installed the starter pack (provisional — run `olympus gate` to "
+              "benchmark them):")
+        for m in msgs:
+            print(f"  · {m}")
     elif args.command == "gate":
         print(orchestrator.gate_skills())
     elif args.command == "curate":
@@ -1184,6 +1239,18 @@ def main(argv: list[str] | None = None) -> int:
             signal_gw.run_bot()
         except KeyboardInterrupt:
             print("\nSignal gateway stopped.")
+    elif args.command == "email":
+        from . import email_gateway
+        try:
+            email_gateway.run(poll_seconds=args.interval)
+        except KeyboardInterrupt:
+            print("\nEmail gateway stopped.")
+    elif args.command == "webhook":
+        from . import webhook_gateway
+        try:
+            webhook_gateway.run_server(host=args.host, port=args.port)
+        except KeyboardInterrupt:
+            print("\nWebhook gateway stopped.")
     return 0
 
 

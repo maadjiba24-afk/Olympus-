@@ -46,6 +46,9 @@ ACTION_TOOLS = frozenset({
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
                              "browse_page",
+                             # A vision model's read of an image is external
+                             # content — text-in-image injection is injection.
+                             "analyze_image",
                              # The governed CDP harness loads real web pages.
                              "browser_open", "browser_read",
                              # A transcript of arbitrary audio is external

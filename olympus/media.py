@@ -30,8 +30,15 @@ from . import sandbox
 IMAGE_MODEL = os.environ.get("OLYMPUS_IMAGE_MODEL", "gpt-image-1")
 TTS_MODEL = os.environ.get("OLYMPUS_TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE = os.environ.get("OLYMPUS_TTS_VOICE", "alloy")
+VISION_MODEL = os.environ.get("OLYMPUS_VISION_MODEL", "gpt-4o-mini")
 STT_MODEL = os.environ.get("OLYMPUS_STT_MODEL", "whisper-1")
 MAX_AUDIO_BYTES = 25 * 1024 * 1024      # OpenAI transcription upload limit
+
+# Cap how big an image we'll inline as a data URL (base64 bloats ~1.33x, and a
+# huge upload just wastes tokens and time). 8 MB of source bytes is generous.
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_IMAGE_EXTS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+               ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp"}
 
 
 def _api_key() -> str:
@@ -163,6 +170,67 @@ def text_to_speech(text: str, filename: str = "") -> str:
     with open(res["path"], "wb") as f:
         f.write(audio)
     return f"Audio saved to workspace: {name}"
+
+
+def _image_source(image: str) -> dict | str:
+    """Resolve an image reference to an OpenAI-compat `image_url` value.
+
+    * http(s) URL → passed through by reference (the provider fetches it).
+    * workspace file → read, size-checked, and inlined as a base64 data URL.
+    Returns a `{"url": ...}` dict on success, or an error string to surface.
+    """
+    ref = (image or "").strip()
+    if ref.startswith(("http://", "https://")):
+        return {"url": ref}
+    try:
+        target = sandbox._confine(ref)
+    except ValueError as err:
+        return f"Error: {err}"
+    if not target.is_file():
+        return f"Error: no such image in workspace: {ref}"
+    mime = _IMAGE_EXTS.get(target.suffix.lower())
+    if not mime:
+        return (f"Error: unsupported image type '{target.suffix}' "
+                f"(expected one of {', '.join(sorted(_IMAGE_EXTS))}).")
+    raw = target.read_bytes()
+    if len(raw) > _MAX_IMAGE_BYTES:
+        return (f"Error: image is {len(raw) // 1024} KB, over the "
+                f"{_MAX_IMAGE_BYTES // (1024 * 1024)} MB inline limit.")
+    b64 = base64.b64encode(raw).decode()
+    return {"url": f"data:{mime};base64,{b64}"}
+
+
+def analyze_image(image: str, question: str = "") -> str:
+    """Describe or answer a question about an image using a vision-capable model.
+
+    `image` is either an http(s) URL or a filename in the confined workspace.
+    Fills the one real capability gap vs Hermes: Olympus could *generate* images
+    but never *read* them. The model's answer is external content, so callers
+    wrap it as untrusted (analyze_image is an INGESTION tool).
+    """
+    if not _api_key():
+        return ("Error: image analysis needs an API key "
+                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
+    src = _image_source(image)
+    if isinstance(src, str):        # an error message
+        return src
+    prompt = (question or "").strip() or (
+        "Describe this image in detail: what it shows, any text present, and "
+        "anything notable.")
+    try:
+        raw = _post("/chat/completions", {
+            "model": VISION_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": src},
+            ]}],
+            "max_tokens": 1000,
+        })
+        data = json.loads(raw)
+        answer = (data["choices"][0]["message"].get("content") or "").strip()
+    except Exception as err:
+        return f"Error analyzing image: {str(err)[:200]}"
+    return answer or "(the vision model returned no description)"
 
 
 _LINK_RE = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
