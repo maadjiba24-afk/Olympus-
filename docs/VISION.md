@@ -172,3 +172,42 @@ We borrow Hermes's best UX, but keep our soul.
     `/progress`; verification activity highlighted at all+.
 15. Trade-off labels on all pickers; free/no-setup options as defaults.
 16. `Keep current` pre-selection + inline knob explanations in full setup.
+
+---
+
+## Screens 15–19 — context compression, session reset policy, gateway breadth
+
+### What Hermes did
+- **Context Compression threshold as a fraction (0.5–0.95)**: "Automatically
+  summarizes old messages when context gets too long. Higher threshold =
+  compress later (use more context). Lower = compress sooner." User set 0.75.
+  Note it's *relative to the model's context window*, not an absolute token
+  count.
+- **Session Reset Policy** (for messaging sessions): explained with the COST
+  framing — "Each message adds to the conversation history, which means
+  growing API costs." Options: `Inactivity + daily reset (recommended — reset
+  whichever comes first)` / inactivity-only / daily-only / never / keep
+  current. Defaults: inactivity 1440 min, daily reset hour 4 (off-peak).
+- **The killer detail**: "When a reset happens, the agent **saves important
+  things to its persistent memory first** — but the conversation context is
+  cleared." Reset ≠ forget. Plus a manual `/reset` chat command.
+- **Messaging platform multi-select: 16 platforms** — Telegram, Discord,
+  Slack, Signal, Email, SMS (Twilio), Matrix, Mattermost, WhatsApp, DingTalk,
+  Feishu/Lark, WeCom (+Callback), Weixin/WeChat, BlueBubbles (iMessage),
+  **Webhooks (GitHub, GitLab, etc.)**.
+
+### Verdicts + Olympus-native ideas
+| Hermes feature | Verdict | Olympus move |
+|---|---|---|
+| Compression threshold as fraction of context window | **ADAPT** | Olympus compacts at an absolute HISTORY_TOKEN_BUDGET (3000). Better: budget = fraction × model context (per pool member), so a 200k-context model isn't compacted like an 8k one. Keep absolute override. |
+| **Memory-preserving reset** ("saves important things first") | **ADOPT — fits us perfectly** | `/reset` command: run recall extraction + fold history into the conversation-state block + (checkpoint) companion evolve, THEN clear. Olympus twist: reset feeds the *learning loops* — a reset literally makes Olympus smarter about you before it forgets the transcript. |
+| Scheduled session resets (inactivity + daily hour) for gateways | **ADOPT** | Gateway sessions: OLYMPUS_SESSION_IDLE_RESET / OLYMPUS_SESSION_DAILY_RESET_HOUR; reset = distill-then-clear. Big cost saver on long-lived Telegram chats. |
+| Cost-framed explanations ("growing API costs") | **ADOPT** | Reuse the framing in wizard/docs for history budget + resets. |
+| 16 messaging platforms | **DIFFERENTIATE (mostly)** | Breadth is Hermes's game. We keep 5 solid gateways + web. Worth stealing selectively: **Email as a gateway** (reuse gmail adapter: poll inbox → pipeline → reply) and **inbound Webhooks gateway** (GitHub/GitLab events → council; pairs with Prometheus's auto-filed issues). Matrix/DingTalk/WeCom etc.: skip. |
+| `/reset` manual command | **ADOPT** | Add `/reset` to TUI + gateways. |
+
+### Build backlog additions (batched)
+17. **Distill-then-clear `/reset`** + scheduled gateway session resets
+    (inactivity + daily hour) — reset feeds memory/companion first.
+18. Context budget as fraction-of-model-context (absolute override kept).
+19. (Later) Email gateway via existing gmail adapter; inbound webhooks gateway.
