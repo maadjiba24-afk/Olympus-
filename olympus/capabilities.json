@@ -31,7 +31,7 @@
     ]
   },
   "commands": {
-    "count": 64,
+    "count": 66,
     "names": [
       "actions",
       "add-mcp",
@@ -44,10 +44,12 @@
       "capabilities",
       "chat",
       "code-eval",
+      "config",
       "connectors",
       "contrib",
       "dashboard",
       "discord",
+      "doctor",
       "edit",
       "errors",
       "eval",

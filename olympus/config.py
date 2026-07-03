@@ -464,6 +464,36 @@ def backup_allow_plaintext() -> bool:
         "1", "true", "yes", "on")
 
 
+def progress_mode() -> str:
+    """How much of the pipeline's live progress to show while it works:
+        off      no progress lines — just the final answer
+        stages   only the major pipeline stages (route/plan/verify/synthesize)
+        all      every progress line (default)
+        verbose  everything, including per-tool activity
+    Verification (Aletheia) activity is always shown from `stages` up, because a
+    fact-check running is exactly what a trust-first system wants to surface.
+    Set with OLYMPUS_PROGRESS or the /progress in-chat command."""
+    m = os.environ.get("OLYMPUS_PROGRESS", "all").strip().lower()
+    return m if m in ("off", "stages", "all", "verbose") else "all"
+
+
+# Progress lines the orchestrator emits are prefixed with these markers; the
+# reporter uses them to decide what to show at each verbosity level.
+_STAGE_MARKERS = ("⚡", "🦉", "🔍")     # Zeus, Athena, Aletheia — the pipeline
+_VERIFY_MARKER = "🔍"                    # always shown from `stages` up
+
+
+def progress_allows(line: str, mode: str | None = None) -> bool:
+    """Whether a progress line should be shown under the given verbosity mode."""
+    mode = mode or progress_mode()
+    if mode in ("all", "verbose"):
+        return True
+    if mode == "off":
+        return False
+    # stages: major pipeline markers (and always verification).
+    return any(line.lstrip().startswith(mk) for mk in _STAGE_MARKERS)
+
+
 def fast_mode() -> bool:
     """Latency mode: run the lightweight pipeline stages (route/plan) on the
     pool's fastest model and skip the optional Athena review stage. Trades a

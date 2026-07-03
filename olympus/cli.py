@@ -23,7 +23,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("chat", help="interactive conversation (default)")
-    sub.add_parser("setup", help="choose your AI provider & save your API key")
+    p_setup = sub.add_parser(
+        "setup", help="choose your AI provider & save your API key; or edit one "
+                      "section: setup <model|terminal|gateway|tools>")
+    p_setup.add_argument("section", nargs="?",
+                         help="edit just one part (model/terminal/gateway/tools)")
+    p_cfg = sub.add_parser(
+        "config", help="view or change saved settings (secrets are masked)")
+    p_cfg.add_argument("action", nargs="?", default="show",
+                       choices=["show", "set", "edit"])
+    p_cfg.add_argument("kv", nargs="*",
+                       help="for set: <KEY> <VALUE>")
+    sub.add_parser("doctor", help="check readiness: provider, sandbox, security, "
+                                  "memory, optional capabilities")
     sub.add_parser("version", help="show the installed Olympus version")
     sub.add_parser("growth", help="show how Olympus has adapted to you over time")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
@@ -289,7 +301,24 @@ def main(argv: list[str] | None = None) -> int:
     firstrun.load_env_file()        # saved keys apply to every command
 
     if args.command == "setup":
-        firstrun.wizard()
+        if getattr(args, "section", None):
+            firstrun.setup_section(args.section)
+        else:
+            firstrun.wizard()
+    elif args.command == "config":
+        if args.action == "show":
+            print(firstrun.show_config())
+        elif args.action == "edit":
+            print(firstrun.open_in_editor())
+        elif args.action == "set":
+            if len(args.kv) < 2:
+                print("Usage: olympus config set <KEY> <VALUE>")
+                return 1
+            print(firstrun.config_set(args.kv[0], " ".join(args.kv[1:])))
+    elif args.command == "doctor":
+        from . import doctor
+        print(doctor.render())
+        return 0 if doctor.is_ready() else 1
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")

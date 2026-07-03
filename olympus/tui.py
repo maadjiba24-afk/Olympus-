@@ -32,6 +32,8 @@ COMMANDS: dict[str, str] = {
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
     "/reset": "start fresh — distill this chat into durable state, then clear it",
+    "/progress": "set how much live progress to show: off|stages|all|verbose",
+    "/doctor": "check readiness (provider, sandbox, security, capabilities)",
     "/exit": "leave Olympus",
 }
 
@@ -135,6 +137,18 @@ def dispatch_command(bot, raw: str):
         return (True, companion.summary("cli"), False)
     if name == "/reset":
         return (True, bot.reset(), False)
+    if name == "/progress":
+        import os
+        from . import config
+        choice = arg.strip().lower()
+        if choice not in ("off", "stages", "all", "verbose"):
+            return (True, f"Progress mode is '{config.progress_mode()}'. "
+                    "Set with: /progress off|stages|all|verbose", False)
+        os.environ["OLYMPUS_PROGRESS"] = choice
+        return (True, f"Progress mode set to '{choice}'.", False)
+    if name == "/doctor":
+        from . import doctor
+        return (True, doctor.render(), False)
     return (False, None, False)
 
 
@@ -185,9 +199,13 @@ def welcome_banner(pool) -> str:
 
 
 def status_line(model: str, secs: float, *, fast: bool = False,
-                spend: float | None = None) -> str:
-    """A compact per-turn status bar: model · time · spend · mode."""
-    parts = [f"⚡ {model}", f"{secs:.1f}s"]
+                spend: float | None = None,
+                ctx_frac: float | None = None) -> str:
+    """A compact per-turn status bar: model · context · time · spend · mode."""
+    parts = [f"⚡ {model}"]
+    if ctx_frac is not None:
+        parts.append(f"ctx {min(ctx_frac, 9.99):.0%}")
+    parts.append(f"{secs:.1f}s")
     if spend is not None:
         parts.append(f"${spend:.4f} today")
     if fast:
@@ -202,7 +220,13 @@ def run(pool=None) -> None:
     _install_readline()
     print(welcome_banner(pool))
     print()
-    bot = orchestrator.Olympus(report=lambda m: print(f"  {m}"),
+
+    def report(m: str) -> None:
+        # Honor the progress-verbosity mode (off / stages / all / verbose).
+        if config.progress_allows(m):
+            print(f"  {m}")
+
+    bot = orchestrator.Olympus(report=report,
                                user="cli", conversation_id="cli-default",
                                pool=pool)
 
@@ -243,8 +267,15 @@ def run(pool=None) -> None:
                 spend = usage.today_spend()
             except Exception:
                 spend = None
+            try:
+                budget = config.history_token_budget(pool.primary().model)
+                used = orchestrator.Olympus._estimate_tokens(bot.history)
+                ctx_frac = used / budget if budget else None
+            except Exception:
+                ctx_frac = None
             print("\n" + status_line(
                 f"{pool.primary().provider}/{pool.primary().model or 'default'}",
-                secs, fast=config.fast_mode(), spend=spend) + "\n")
+                secs, fast=config.fast_mode(), spend=spend,
+                ctx_frac=ctx_frac) + "\n")
         except Exception as err:
             print(f"\n  [error] {err}\n")

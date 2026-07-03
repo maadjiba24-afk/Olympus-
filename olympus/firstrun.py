@@ -97,6 +97,135 @@ def save_env_value(key: str, value: str) -> None:
     _save(values)
 
 
+# Keys whose values are secrets — masked when shown, never printed in full.
+_SECRET_HINT = ("KEY", "TOKEN", "SECRET", "PASSWORD", "SEED")
+
+
+def _is_secret(key: str) -> bool:
+    return any(h in key.upper() for h in _SECRET_HINT)
+
+
+def show_config() -> str:
+    """Render the saved config with any secret values masked. Read-only."""
+    from . import config as cfg
+    saved = _read_saved()
+    if not saved:
+        return (f"No saved config at {CONFIG_ENV}.\n"
+                "Run `olympus setup` to create one.")
+    lines = [f"Saved config ({CONFIG_ENV}, owner-only):", ""]
+    for k in sorted(saved):
+        v = saved[k]
+        shown = cfg.mask_key(v) if _is_secret(k) else v
+        overridden = k in os.environ and os.environ[k] != v
+        tag = "   ← overridden by an env var" if overridden else ""
+        lines.append(f"  {k}={shown}{tag}")
+    return "\n".join(lines)
+
+
+def config_set(key: str, value: str) -> str:
+    """Set one config value (owner-only file). Never echoes a secret back."""
+    key = key.strip()
+    if not key:
+        return "Usage: olympus config set <KEY> <VALUE>"
+    # A genuine external override is an env var that differs from our saved
+    # value (env loaded from our own file matches, so it isn't an override).
+    external = key in os.environ and os.environ[key] != _read_saved().get(key)
+    save_env_value(key, value)
+    from . import config as cfg
+    shown = cfg.mask_key(value) if _is_secret(key) else value
+    note = ("  (a real environment variable of the same name is set and will "
+            "still override this)") if external else ""
+    return f"Saved {key}={shown} to {CONFIG_ENV}.{note}"
+
+
+def open_in_editor() -> str:
+    """Open the saved config in $EDITOR (nano fallback). Returns a status line."""
+    import shutil
+    import subprocess
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_ENV.exists():
+        _save({})
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not editor:
+        editor = "nano" if shutil.which("nano") else "vi"
+    try:
+        subprocess.call([editor, str(CONFIG_ENV)])
+    except Exception as err:
+        return (f"Could not launch '{editor}': {err}\n"
+                f"Edit it yourself: {CONFIG_ENV}")
+    return f"Edited {CONFIG_ENV}."
+
+
+def _configure_providers() -> list:
+    """The provider-composition loop, shared by the full wizard and
+    `setup model`. Returns the chosen Members (possibly empty)."""
+    from . import providers
+    members = []
+    while True:
+        print("  Add a provider:")
+        prov = providers.CATALOG[_choose(
+            "Choose a provider", [p.label for p in providers.CATALOG], 1) - 1]
+        member = _configure_member(prov)
+        if member:
+            members.append(member)
+            print(f"  ✓ Added {prov.label.split(' —')[0]}"
+                  + (f"  ({member.model})" if member.model else ""))
+        if not _yes("Add another provider to compose a pool?", default_yes=False):
+            break
+    return members
+
+
+def setup_section(section: str) -> bool:
+    """Edit ONE part of the config without re-running the whole wizard —
+    mirrors `olympus setup model|terminal|gateway|tools`. Returns True if saved."""
+    section = (section or "").strip().lower()
+    values = _read_saved()
+
+    if section in ("model", "models", "provider"):
+        members = _configure_providers()
+        if not members:
+            print("  Nothing chosen — no changes.")
+            return False
+        from . import providers
+        for k in ("OLYMPUS_PROVIDER", "OLYMPUS_MODEL", "OLYMPUS_API_KEY",
+                  "OLYMPUS_BASE_URL", "OLYMPUS_MODELS", "ANTHROPIC_API_KEY"):
+            values.pop(k, None)
+        values.update(providers.build_pool_config(members))
+        _save(values)
+        print(f"  ✓ Pool updated ({len(members)} provider(s)).")
+        return True
+
+    if section in ("gateway", "gateways", "messaging"):
+        _configure_gateway(values)
+        _save(values)
+        return True
+
+    if section in ("terminal", "exec", "sandbox", "tools"):
+        if _yes("Allow Olympus to run commands/edit files in a sandbox?", True):
+            be = _choose("Execution backend",
+                         ["local (this machine)", "docker (isolated container)"], 1)
+            values["OLYMPUS_EXEC_BACKEND"] = "docker" if be == 2 else "local"
+        modes = ["enforce (block catastrophic commands — recommended)",
+                 "paranoid (also block risky commands)",
+                 "audit (classify only, never block)",
+                 "off (no screening — not recommended)"]
+        pick = _choose("Command security gate", modes, 1)
+        values["OLYMPUS_EXEC_SECURITY"] = ["enforce", "paranoid", "audit",
+                                           "off"][pick - 1]
+        if section == "tools":
+            key = _ask_secret("  Media/vision API key (OPENAI_API_KEY) — "
+                              "enables image gen, TTS, analyze_image (blank to skip)")
+            if key:
+                values["OPENAI_API_KEY"] = key
+        _save(values)
+        print("  ✓ Saved.")
+        return True
+
+    print(f"  Unknown section '{section}'. "
+          "Try: model | terminal | gateway | tools  (or `olympus setup` for all).")
+    return False
+
+
 def _choose(prompt: str, labels: list[str], default: int = 1) -> int:
     """Numbered picker (1-based). Robust everywhere — SSH, WSL, dumb terminals."""
     for i, label in enumerate(labels, 1):
@@ -213,19 +342,7 @@ def wizard() -> bool:
     print("  into one brain (each model used where it's strongest).")
     print()
 
-    members = []
-    while True:
-        print("  Add a provider:")
-        prov = providers.CATALOG[_choose(
-            "Choose a provider", [p.label for p in providers.CATALOG], 1) - 1]
-        member = _configure_member(prov)
-        if member:
-            members.append(member)
-            print(f"  ✓ Added {prov.label.split(' —')[0]}"
-                  + (f"  ({member.model})" if member.model else ""))
-        if not _yes("Add another provider to compose a pool?",
-                    default_yes=False):
-            break
+    members = _configure_providers()
 
     if not members:
         print("  Nothing configured — setup cancelled.")
@@ -255,6 +372,13 @@ def wizard() -> bool:
     print(f"  ✓ Pool: {len(members)} provider(s) composed into one brain.")
     print("  ✓ You're set — type `olympus` to chat. `olympus models` shows the pool.")
     print()
+    # End on the same readiness picture `olympus doctor` shows.
+    try:
+        from . import doctor
+        print(doctor.render())
+        print()
+    except Exception:
+        pass
     return True
 
 

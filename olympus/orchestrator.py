@@ -378,6 +378,18 @@ class Olympus:
         remaining = dict(by_id)
         level = 0
 
+        # Show the whole plan up front as a checklist, so the user can watch it
+        # tick off. Each line: ☐ Specialist — task (← after any upstream deps).
+        if len(steps) > 1:
+            plan_lines = ["🦉 Athena's plan:"]
+            for s in steps:
+                dep = (f"  ← after {', '.join(SPECIALISTS[by_id[d]['specialist']].name for d in s['depends_on'] if d in by_id)}"
+                       if s["depends_on"] else "")
+                plan_lines.append(
+                    f"   ☐ {SPECIALISTS[s['specialist']].name}: "
+                    f"{s['task'][:60]}{dep}")
+            self.report("\n".join(plan_lines))
+
         while remaining:
             ready = [s for s in remaining.values()
                      if all(d in done for d in s["depends_on"])]
@@ -412,6 +424,10 @@ class Olympus:
                 done[sid] = (key, out)
                 outputs.append((key, out))
                 remaining.pop(sid, None)
+            # Tick the completed steps off the checklist.
+            self.report("   ☑ " + ", ".join(
+                f"{SPECIALISTS[s['specialist']].name}" for s in ready)
+                + f"  ({len(done)}/{len(by_id)} done)")
 
         return outputs
 
