@@ -405,3 +405,66 @@ The positioning thesis held: every item was **adopt-and-surpass**, not clone —
 the security gate fails *closed* where Hermes falls back to patterns; pricing is
 *acted on* (routing) not just shown; the wizard defaults to *free/no-setup*; and
 the whole thing stays headless, dependency-light, and verified.
+
+---
+
+# Round 2 — watching resumes (baseline: 0.24.0 + main's operator wave)
+
+Everything below is judged against the *merged* tree: the 27-item build above
+PLUS main's parallel adoptions (/learn, /journey, /moa, /steer, /undo, goals,
+admin panel, browser harness, voice notes). Round-2 rule: only *genuinely new*
+capability makes the backlog.
+
+## Screens 35–39 — Top-10 CLI, Top-10 slash, file layout, delta-setup
+
+### What Hermes did
+- **"Top 10 CLI — muscle memory"**: `hermes` (TUI), `hermes -c` (continue last
+  session), `status`, `model`, `insights` (tokens/cost/activity),
+  **`sessions browse` (curses picker to resume)**, `skills browse`
+  (discover+install), `config show`, `doctor`, `update`.
+- **"Top 10 slash"**: `/new`, **`/model <name>` (swap model mid-session)**,
+  **`/fast` (priority routing toggle)**, **`/bg <prompt>` (background task,
+  keep chatting)**, **`/btw <question>` (ephemeral side question)**,
+  **`/queue <prompt>` (next-turn queue)**, `/compress` (manual compaction),
+  `/skills`, **`/yolo` (toggle dangerous-command approvals)**, `/help`.
+- **"Where stuff lives"**: everything under `~/.hermes/` — `config.yaml` +
+  `.env` + `memories/` (MEMORY.md, USER.md) marked *editable*; `sessions/`,
+  `skills/`, `logs/`, `cron/` marked hands-off.
+- **`hermes setup` re-run menu**: **"Quick Setup — configure missing items
+  only"** (a delta-setup), Full (reconfigure everything), then per-section
+  entries — all in one radio menu, ESC cancels.
+
+### Where Olympus already matches (round-2 strictness)
+`status`+`doctor`+`insights` (status/usage/dashboard/doctor), `model`
+(setup model), `config show`, `update` (upgrade), `/new`-ish (`/reset`, and
+ours distills first), `/compress` trigger condition (auto, model-fraction),
+`/skills` (skills CLI + read_skill), `/help`, skills discover/install
+(skill-import, agentskills.io, starter pack). `/steer` and `/undo` (from
+main) cover mid-run nudging and history repair Hermes doesn't list.
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| **`sessions browse` + `-c` continue** | **ADOPT — real gap** | Our CLI is single-session (`cli-default`). Add named sessions: `olympus sessions` (list/resume picker over saved conversations, newest first, first-line preview), `olympus -c` (continue last), `/new [name]` in chat. We already persist every conversation by id — this is surfacing, not new storage. Olympus twist: the picker shows each session's distilled state line (from /reset-style distillation), not just its first message. |
+| **`/bg <prompt>` background task** | **ADOPT — real gap** | Run a one-shot task through the full pipeline in a background thread while chat stays live; result is announced in-chat when done (and lands in reports). We already have every piece (threads, scheduler one-shots, reports) — compose them. Verified as always: background answers still pass Aletheia. |
+| **`/btw <question>` ephemeral side question** | **ADOPT — cheap + clever** | Answer OUTSIDE the session: no history append, no memory extraction, no companion count. One flag through ask() — prevents "what's the capital of X" from polluting a work session's distilled state. |
+| **`/model <name>` mid-session swap + `/fast` toggle** | **ADOPT** | In-chat `/model` re-points the pool primary (validating the name against the provider's model list) and `/fast on\|off` flips fast mode for the session. State-confirmation line shows the new assignment. No restart, no wizard. |
+| **`/queue <prompt>` next-turn queue** | **SKIP (covered)** | `/steer` already reaches the *running* task; queuing the next turn is what a terminal input buffer does anyway. No real gap. |
+| **`/yolo`** | **DIFFERENTIATE — validates our gate** | One keystroke to disable dangerous-command approvals is the anti-pattern our cmdguard exists to prevent. Olympus's equivalent is *governed*: per-scope autonomy grants on the action spine + OLYMPUS_EXEC_SECURITY modes, and DENY-level commands stay blocked **even with approvals off**. Document the contrast; build nothing. |
+| **"Where stuff lives" transparency** | **ADAPT — small** | Add a `paths` block to `olympus doctor`/`config show`: config.env, soul.md, memory dir, workspace, sessions — with the same editable/hands-off labeling. One print block; big orientation win for new users. |
+| **Delta-setup ("configure missing items only")** | **ADOPT — better Quick** | Their re-run Quick only prompts for what's *missing*. Ours re-asks. Wire doctor's readiness gaps into setup: `olympus setup` on a configured install offers "Fix what's missing (N items)" driven by the ✗/⚠ list — doctor finds it, setup fixes it, doctor confirms it. Closes the loop our two commands already imply. |
+| `insights` (tokens/cost/activity) | **SKIP (covered)** | status + usage report + dashboard + admin panel already cover it. |
+
+### Build backlog additions (Round 2, batched — NOT building yet)
+28. **Named sessions + browse/resume** — `olympus sessions` picker, `olympus -c`,
+    `/new [name]`; picker lines show each session's distilled-state summary.
+29. **`/bg`** — one-shot background task through the full verified pipeline;
+    announces completion in-chat; result saved to reports.
+30. **`/btw`** — ephemeral side question: no history, no memory writes.
+31. **In-chat `/model <name>` + `/fast on|off`** — live pool re-point with
+    validation + state-confirmation line.
+32. **Delta-setup** — `olympus setup` offers "fix what's missing" from doctor's
+    gap list on a configured install.
+33. **`paths` transparency block** in doctor/config show (editable vs
+    hands-off labeling). (Also: document the /yolo contrast in THREAT_MODEL —
+    DENY survives autonomy grants by design.)
