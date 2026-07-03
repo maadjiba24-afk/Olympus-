@@ -468,3 +468,23 @@ main) cover mid-run nudging and history repair Hermes doesn't list.
 33. **`paths` transparency block** in doctor/config show (editable vs
     hands-off labeling). (Also: document the /yolo contrast in THREAT_MODEL —
     DENY survives autonomy grants by design.)
+
+---
+
+## Screens 40–44 — setup re-run detail (provider zoo, reauth, model search, backends, platform multi-select)
+
+Re-visits of the setup surface, now in re-run form. Round-2 check against what
+we've built — pattern by pattern:
+
+| Hermes screen | Olympus status |
+|---|---|
+| 32-provider picker | ✓ pattern done (catalog + trade-off labels + custom endpoint); breadth is a **deliberate skip** — our `custom` OpenAI-compatible entry covers the tail without per-vendor code |
+| "Use existing credentials / Reauthenticate / Cancel" | ✓ equivalent done for keys: env-scan ("Found X_API_KEY — use it?"), keep-current pool line, delta-setup; OAuth reauth N/A (subscription auth reuses the `claude` CLI login) |
+| Model picker with **/ search** | ✓ auto-discovery + numbered pick done; **△ small gap: no type-to-filter** — matters only for OpenRouter-scale lists (300+) |
+| Terminal backends (local/docker/modal/ssh/daytona/singularity) + Keep current | ✓ local/docker + keep-current done; the rest are thin transports over the same run() contract — **deliberate skip** until someone needs one |
+| Platform **multi-select checklist with "(not configured)" status** | ✓ single-pick configure done (telegram/discord/slack/signal/email/webhook); **△ small gap: multi-select + configured-status labels** in one screen; 26-platform breadth = deliberate skip |
+
+### Remaining micro-items (batched, NOT building yet)
+34. Model picker type-to-filter when the discovered list is large (>20).
+35. Gateway step: one checklist showing all six channels with
+    configured/not-configured status; toggle several in one pass.
