@@ -91,9 +91,22 @@ def run(command: str, *, timeout: int | None = None,
         be: str | None = None) -> Result:
     """Run a shell command in the confined workspace. Never raises on a
     non-zero exit — that's reported in the Result; only truly broken setups
-    (missing docker, etc.) surface as ok=False with the error in output."""
+    (missing docker, etc.) surface as ok=False with the error in output.
+
+    Before anything executes, the command passes through the security gate
+    (cmdguard). A catastrophic command (rm -rf /, mkfs, fork bomb, …) is
+    refused here — fail-closed — even if a human already approved the action.
+    This protects *every* caller of run() (interactive, scheduled, heartbeat),
+    not just the approval prompt."""
     if not (command or "").strip():
         return Result(False, 2, "empty command")
+    from . import cmdguard
+    allowed, verdict = cmdguard.check(command)
+    if not allowed:
+        return Result(False, 126,
+                      f"blocked by the command security gate — {verdict.reason} "
+                      f"[rule: {verdict.rule}]. Set OLYMPUS_EXEC_SECURITY=off to "
+                      "override (not recommended).")
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
     root = workdir()
     be = (be or backend()).lower()

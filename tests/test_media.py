@@ -59,6 +59,71 @@ def test_browse_page_is_ingestion_and_wrapped():
 
 
 def test_media_tools_registered():
-    for name in ("generate_image", "text_to_speech", "browse_page"):
+    for name in ("generate_image", "text_to_speech", "browse_page",
+                 "analyze_image"):
         assert name in tools.HANDLERS
         assert name in tools.EXTRA_TOOLS
+
+
+# --- analyze_image (the vision gap we closed vs Hermes) -------------------
+
+def test_analyze_image_without_key_is_graceful(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
+    out = media.analyze_image("https://x/pic.png")
+    assert out.startswith("Error") and "API key" in out
+
+
+def test_analyze_image_url_calls_vision_model(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    seen = {}
+
+    def fake_post(path, payload, timeout=120):
+        seen["path"] = path
+        seen["content"] = payload["messages"][0]["content"]
+        return b'{"choices":[{"message":{"content":"a red circle"}}]}'
+
+    monkeypatch.setattr(media, "_post", fake_post)
+    out = media.analyze_image("https://x/pic.png", "what shape?")
+    assert out == "a red circle"
+    assert seen["path"] == "/chat/completions"
+    # URL is passed by reference (provider fetches it), not inlined.
+    img = [c for c in seen["content"] if c["type"] == "image_url"][0]
+    assert img["image_url"] == {"url": "https://x/pic.png"}
+
+
+def test_analyze_image_workspace_file_is_inlined(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG realish bytes")
+    captured = {}
+
+    def fake_post(path, payload, timeout=120):
+        captured["content"] = payload["messages"][0]["content"]
+        return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+    monkeypatch.setattr(media, "_post", fake_post)
+    out = media.analyze_image("shot.png")
+    assert out == "ok"
+    img = [c for c in captured["content"] if c["type"] == "image_url"][0]
+    assert img["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_analyze_image_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    out = media.analyze_image("nope.png")
+    assert out.startswith("Error") and "no such image" in out
+
+
+def test_analyze_image_rejects_unsupported_type(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    (tmp_path / "data.txt").write_text("not an image")
+    out = media.analyze_image("data.txt")
+    assert out.startswith("Error") and "unsupported image type" in out
+
+
+def test_analyze_image_is_ingestion_and_wrapped():
+    assert "analyze_image" in security.INGESTION_TOOLS
+    assert security.should_wrap("analyze_image") is True

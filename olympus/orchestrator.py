@@ -37,7 +37,7 @@ from .specialists import SPECIALISTS, roster
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "mode": {"type": "string", "enum": ["direct", "delegate"]},
+        "mode": {"type": "string", "enum": ["direct", "delegate", "clarify"]},
         "direct_reply": {
             "type": ["string", "null"],
             "description": "The complete reply when mode is 'direct', else null",
@@ -51,6 +51,13 @@ ROUTE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Task brief for the supervisor when mode is 'delegate'",
         },
+        "clarifying_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "1-2 crisp questions when mode is 'clarify' — only "
+            "when the request is genuinely ambiguous AND you cannot proceed on "
+            "a reasonable assumption. Empty otherwise.",
+        },
         "needs_verification": {
             "type": "boolean",
             "description": "True when the answer will contain factual claims "
@@ -58,9 +65,18 @@ ROUTE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["mode", "direct_reply", "specialists", "brief",
-                 "needs_verification"],
+                 "clarifying_questions", "needs_verification"],
     "additionalProperties": False,
 }
+
+
+def _format_clarify(questions: list[str]) -> str:
+    """Render 1-2 clarifying questions as Zeus's reply to the user."""
+    lines = ["Before I dive in, a couple of quick things so I get this right:"]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"  {i}. {q}")
+    lines.append("\n(Answer what you can — I'll take it from there.)")
+    return "\n".join(lines)
 
 Reporter = Callable[[str], None]
 
@@ -151,13 +167,13 @@ class Olympus:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
                     "specialists": [], "brief": None,
-                    "needs_verification": False}
+                    "clarifying_questions": [], "needs_verification": False}
         except Exception:
             # Provider couldn't produce routable JSON — degrade gracefully to
             # a full delegation with the raw message as the brief.
             return {"mode": "delegate", "direct_reply": None,
                     "specialists": [], "brief": user_message,
-                    "needs_verification": True}
+                    "clarifying_questions": [], "needs_verification": True}
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
@@ -414,6 +430,18 @@ class Olympus:
         if route.get("mode") == "direct" and route.get("direct_reply"):
             return "direct", "", route["direct_reply"]
 
+        # Clarify: the request is genuinely ambiguous — ask 1-2 questions instead
+        # of guessing. Gated on Zeus choosing this mode (see zeus.md), so it
+        # doesn't nag on requests it can reasonably proceed with.
+        if route.get("mode") == "clarify":
+            qs = [q.strip() for q in (route.get("clarifying_questions") or [])
+                  if isinstance(q, str) and q.strip()][:2]
+            if qs:
+                tr.event("clarify", questions=qs)
+                return "clarify", "", _format_clarify(qs)
+            # Model asked to clarify but gave no questions — fall through to a
+            # normal delegation rather than replying with nothing.
+
         brief = route.get("brief") or user_message
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
         with tr.span("plan"):
@@ -593,7 +621,7 @@ class Olympus:
                    "conversation_id": self.conversation_id}
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 reply = result
             else:
                 self.report("⚡ Zeus composes the final answer...")
@@ -636,7 +664,7 @@ class Olympus:
         tr = trace_mod.Trace("ask_stream", self.user)
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 yield result
                 self._finish(user_message, result)
                 return

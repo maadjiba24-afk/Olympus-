@@ -105,7 +105,8 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Marketing strategy, branding, copywriting, growth, "
                         "audience research, campaigns, SEO.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech", "browse_page"),
+            extra_tools=("generate_image", "text_to_speech", "browse_page",
+                         "analyze_image"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
@@ -116,7 +117,7 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "read_file", "list_dir", "prepare_action",
-                         "spawn_subagent"),
+                         "spawn_subagent", "analyze_image"),
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
@@ -129,7 +130,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
-            extra_tools=("generate_image", "browse_page"),
+            extra_tools=("generate_image", "browse_page", "analyze_image"),
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
@@ -159,7 +160,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "search) to find business opportunities, emerging trends, "
                         "and what is happening in the world right now.",
             web=True,
-            extra_tools=("browse_page",),
+            extra_tools=("browse_page", "analyze_image"),
         ),
         Specialist(
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",

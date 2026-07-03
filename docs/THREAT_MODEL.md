@@ -64,6 +64,7 @@ longer exists. So the surface and its threat model can't drift apart.
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
 | `browse_page` | Fetch a page as text + extract links | ingests untrusted | Output treated as untrusted; wrapped | SSRF / injected page content — `should_wrap` wraps it |
+| `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `search_sessions` | Full-text search past conversations | first-party read | Read-only; this user's own history | None significant — own content; per-user namespaced |
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |

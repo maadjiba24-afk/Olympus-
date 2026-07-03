@@ -1,12 +1,33 @@
 """Central configuration for Olympus."""
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 # Default model for the Anthropic backend. Opus 4.8 supports adaptive
 # thinking, effort control, and the server-side web_search/web_fetch tools.
 MODEL = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+
+
+def _split_keys(raw: str) -> tuple[str, ...]:
+    """Parse a comma/whitespace-separated list of API keys, de-duplicated."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for part in re.split(r"[,\s]+", raw or ""):
+        k = part.strip()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return tuple(out)
+
+
+def mask_key(key: str) -> str:
+    """Show only enough of a key to recognize it — never the secret itself."""
+    k = (key or "").strip()
+    if not k:
+        return "(none)"
+    return f"…{k[-4:]}" if len(k) > 8 else "…" + "•" * max(1, len(k) - 1)
 
 
 @dataclass(frozen=True)
@@ -25,6 +46,21 @@ class Settings:
     model: str = "claude-opus-4-8"
     api_key: str | None = None
     base_url: str | None = None
+    # Extra credentials for the same provider. When the active key hits a rate
+    # limit or quota wall (429/402/"insufficient balance"), the backend rotates
+    # to the next one instead of failing — so several free-tier keys compose
+    # into one durable allowance. Primary key first; api_key is a member too.
+    api_keys: tuple[str, ...] = ()
+
+    def all_keys(self) -> tuple[str, ...]:
+        """Every usable key for this provider, primary first, de-duplicated."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for k in (self.api_key, *self.api_keys):
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return tuple(out)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -36,11 +72,14 @@ class Settings:
             model = os.environ.get("OLYMPUS_MODEL", "")
             key = (os.environ.get("OLYMPUS_API_KEY")
                    or os.environ.get("OPENAI_API_KEY"))
+        extra = _split_keys(os.environ.get("OLYMPUS_API_KEYS", ""))
+        keys = tuple(k for k in ([key] if key else []) if k) + extra
         return cls(
             provider=provider,
             model=model,
-            api_key=key,
+            api_key=(keys[0] if keys else key),
             base_url=os.environ.get("OLYMPUS_BASE_URL"),
+            api_keys=keys,
         )
 
     def merged(self, overrides: dict) -> "Settings":
@@ -60,8 +99,16 @@ class Settings:
                                    if merged["provider"] == "anthropic" else "")
             if "api_key" not in clean:
                 merged["api_key"] = None
+            # The rotation pool belongs to the old provider — drop it too.
+            merged["api_keys"] = ()
             if "base_url" not in clean:
                 merged["base_url"] = None
+        else:
+            # Same provider, explicit new primary key → keep it consistent with
+            # the rotation pool (the override becomes the primary member).
+            if "api_key" in clean:
+                merged["api_keys"] = (clean["api_key"],) + tuple(
+                    k for k in self.api_keys if k != clean["api_key"])
         return Settings(**merged)
 
     def validate(self) -> str | None:
@@ -152,11 +199,18 @@ class ModelPool:
             import json
             try:
                 for d in json.loads(raw):
+                    # A member may bring its own rotation pool via "api_keys"
+                    # (list) in addition to the primary "api_key".
+                    pool_keys = tuple(k for k in (d.get("api_keys") or []) if k)
+                    member_key = d.get("api_key")
+                    keys = tuple(k for k in ([member_key] if member_key else []) if k)
+                    keys += tuple(k for k in pool_keys if k not in keys)
                     extra.append(Settings(
                         provider=(d.get("provider") or "anthropic").lower(),
                         model=d.get("model", ""),
-                        api_key=d.get("api_key"),
-                        base_url=d.get("base_url")))
+                        api_key=(keys[0] if keys else member_key),
+                        base_url=d.get("base_url"),
+                        api_keys=keys))
             except (json.JSONDecodeError, AttributeError, TypeError):
                 pass
         return cls.of(primary, *extra)
