@@ -27,20 +27,20 @@ def _fingerprint(s: config.Settings) -> tuple:
 
 
 def _fallback_chain(settings: config.Settings) -> list[config.Settings]:
-    """Alternate members to try when `settings` fails. Only operator-pool
-    members are eligible, and only when `settings` itself IS one of them."""
+    """Alternate members to try when `settings` fails, strongest-for-the-
+    failing-member's-role first (or the explicit OLYMPUS_ROLE_FALLBACKS
+    order). Only operator-pool members are eligible, and only when `settings`
+    itself IS one of them."""
     if not _fallback_enabled():
         return []
     try:
-        members = config.ModelPool.from_env().members
+        pool = config.ModelPool.from_env()
     except Exception:
         return []
-    fps = {_fingerprint(m) for m in members}
+    fps = {_fingerprint(m) for m in pool.members}
     if _fingerprint(settings) not in fps:
         return []          # per-request/BYOK creds: never silently switch
-    return [m for m in members
-            if _fingerprint(m) != _fingerprint(settings)
-            and m.provider != "moa"]
+    return [m for m in pool.fallbacks_for(settings) if m.provider != "moa"]
 
 
 def _should_failover(err: Exception) -> bool:

@@ -209,6 +209,30 @@ def specialist_role(key: str) -> str:
     return SPECIALIST_ROLE.get(key, "reasoning")
 
 
+def role_fallback_overrides() -> dict[str, list[str]]:
+    """Explicit per-role fallback order from OLYMPUS_ROLE_FALLBACKS, e.g.
+    '{"coding": ["openai/gpt-5", "haiku"]}'. Tokens are case-insensitive
+    substrings matched against "provider/model". Malformed input is ignored
+    (capability ordering still applies) rather than breaking calls."""
+    raw = os.environ.get("OLYMPUS_ROLE_FALLBACKS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for role, tokens in data.items():
+        if isinstance(tokens, list):
+            cleaned = [str(t).strip().lower() for t in tokens if str(t).strip()]
+            if cleaned:
+                out[str(role).strip().lower()] = cleaned
+    return out
+
+
 def capability_score(model: str, role: str) -> float:
     m = (model or "").lower()
     for key, caps in _CAPABILITIES.items():
@@ -327,6 +351,44 @@ class ModelPool:
             return self.members[0]
         return self._role_map().get(role) or max(
             self.members, key=lambda s: capability_score(s.model, role))
+
+    def role_of(self, member: Settings) -> str:
+        """The pipeline role this member is assigned to (first match), so a
+        failure can be retried on the next-best model *for that kind of work*.
+        Members outside the role map default to reasoning."""
+        fp = (member.provider, member.model, member.api_key, member.base_url)
+        rmap = self._role_map()
+        for role in ("coding", "verify", "reasoning"):
+            s = rmap.get(role)
+            if s and (s.provider, s.model, s.api_key, s.base_url) == fp:
+                return role
+        return "reasoning"
+
+    def fallbacks_for(self, member: Settings,
+                      role: str | None = None) -> list[Settings]:
+        """Ordered alternates to try when `member` fails a call: an explicit
+        OLYMPUS_ROLE_FALLBACKS order wins; otherwise strongest-for-role first,
+        genuine ties toward the cheaper model. The failing member's own role
+        is inferred when not given, so a coding-call failure retries on the
+        next-best *coder*, not whatever happens to sit next in the pool."""
+        def fp(s: Settings) -> tuple:
+            return (s.provider, s.model, s.api_key, s.base_url)
+        others = [m for m in self.members if fp(m) != fp(member)]
+        if not others:
+            return []
+        role = (role or self.role_of(member)).lower()
+        explicit = role_fallback_overrides().get(role)
+        if explicit:
+            def rank(m: Settings) -> tuple:
+                tag = f"{m.provider}/{m.model}".lower()
+                for i, token in enumerate(explicit):
+                    if token in tag:
+                        return (0, i, 0.0)
+                return (1, 0, -capability_score(m.model, role))
+            return sorted(others, key=rank)
+        return sorted(others, key=lambda m: (
+            -capability_score(m.model, role),
+            round(price_per_mtok(m.model), 2)))
 
     def for_specialist(self, key: str) -> Settings:
         return self.for_role(specialist_role(key))
