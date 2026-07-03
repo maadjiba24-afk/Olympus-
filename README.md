@@ -6,20 +6,20 @@
 
 A self-sufficient, self-recurring, **self-improving** multi-agent AI system
 built on frontier LLM APIs. A main agent
-commands a supervised council of specialists, every answer passes through a
-hallucination controller, and the system continuously scans the world, learns
-from YouTube, and upgrades itself.
+commands a supervised council of specialists, answers the supervisor flags as
+factual pass through a hallucination controller, and the system continuously
+scans the world, learns from YouTube, and upgrades itself.
 
-Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->40<!--/cap--> agent tools, and <!--cap:commands-->70<!--/cap-->
+Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
+<!--cap:tools-->61<!--/cap--> agent tools, and <!--cap:commands-->73<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
 
 **Headless-first and lightweight.** Olympus installs with three pure-Python
 dependencies and runs anywhere Python does — a server, a droplet, WSL, a CI job,
-an SSH session — with no desktop browser, no bundled media stack, and no OAuth
-dance to get started. Web access is server-side (with a client-side fallback),
+an SSH session — with no bundled browser or media stack and no OAuth dance to
+get started (the optional operator harness can attach your own Chrome). Web access is server-side (with a client-side fallback),
 the sandbox is confined and approval-gated, and every command is screened by a
 [security gate](docs/THREAT_MODEL.md) before it can run. What you get for that
 small footprint is a *verified* council (every answer fact-checked before you
@@ -28,9 +28,11 @@ that measurably improves at working with you over time — trust and adaptation
 over breadth.
 
 > **Status:** the full architecture is implemented and covered by a
-> comprehensive passing test suite. Install with the one-liner below, type
-> `olympus`, and you're chatting; `olympus scores` shows each specialist's
-> measured quality.
+> comprehensive passing test suite. The test suite covers architecture, gates,
+> and security logic; AI-output quality is measured separately by
+> `olympus eval` / `olympus scores`, not by `pytest`. Install with the
+> one-liner below, type `olympus`, and you're chatting; `olympus scores` shows
+> each specialist's measured quality.
 
 ## Install
 
@@ -38,13 +40,7 @@ Pick your OS, paste one line, then type `olympus`. The first run asks which API
 key you're bringing (Anthropic, OpenAI, or any compatible provider), saves it
 securely, and drops you into chat. Requires **Python 3.10+**.
 
-**Linux**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
-```
-
-**macOS**
+**Linux / macOS**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
@@ -56,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/instal
 irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
 ```
 
-**Any OS, via pip/pipx** (once published to PyPI):
+**Any OS, via pip/pipx:**
 
 ```bash
 pipx install olympus-council     # isolated; gives the `olympus` command
@@ -104,13 +100,13 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
    CHIRON     CHRONOS     ARGUS      MNEMOSYNE     PROMETHEUS
    Coaching   Scheduling  Opportunity YouTube       Evolution /
                           Scout 🌐    Learner 🎥    Self-Upgrade 🔧
-                      METIS · Learning Synthesizer 🧠
+          ANGELOS · Inbox & Calendar 📬      METIS · Learning Synthesizer 🧠
                  (daily cycle: experience → skill library)
         └──────────┴──────────┴──────────┴──────────────┘
                                │ outputs
                                ▼
                 ┌─────────────────────────────┐
-                │  ALETHEIA · Hallucination    │  verifies every claim with
+                │  ALETHEIA · Hallucination    │  verifies flagged claims with
                 │  Controller                  │  web search, flags/corrects,
                 └──────────────┬──────────────┘  records lessons
                                │ verified findings
@@ -123,22 +119,35 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 
 ### The council
 
-| Agent | Role |
+**Orchestration pipeline.** These three run every request — they route, plan,
+and verify — and are **not** counted among the <!--cap:agents-->13<!--/cap-->
+specialists.
+
+| Stage | Role |
 |---|---|
 | **Zeus** | Main agent — the user's single interface; routes or answers |
 | **Athena** | Supervisor — plans a **dependency graph** of specialist steps (parallel where independent, serial where one step needs another's output) and gates quality |
 | **Aletheia** | Hallucination controller — verifies claims, fixes/flags, learns from mistakes |
-| **Plutus** | Financial specialist |
-| **Peitho** | Marketing specialist |
-| **Hephaestus** | Coding specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language, with a server-side code sandbox |
-| **Aegis** | Cybersecurity specialist (strictly defensive) |
-| **Iris** | Social network assistant |
-| **Chiron** | Coaching specialist |
-| **Chronos** | Scheduling management |
-| **Argus** | Opportunity scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
-| **Mnemosyne** | YouTube learner — watches videos via transcript, summarizes what it understood, stores lessons |
-| **Metis** | Learning synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
-| **Prometheus** | Evolution specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts **measured by benchmark with automatic rollback**, files improvement proposals |
+
+**The <!--cap:agents-->13<!--/cap--> specialists.** The permanent domain experts
+registered in `olympus/specialists.py` (names and titles below come straight
+from that registry):
+
+| Agent | Role |
+|---|---|
+| **Plutus** | Financial Specialist |
+| **Peitho** | Marketing Specialist |
+| **Hephaestus** | Coding Specialist — polyglot (Python, Go, Rust, TypeScript, Java, SQL, …), idiomatic per language; executes code under an approval-gated action spine (opt-in Docker isolation) |
+| **Aegis** | Cybersecurity Specialist (strictly defensive) |
+| **Iris** | Social Network Assistant |
+| **Chiron** | Coaching Specialist |
+| **Chronos** | Scheduling Manager |
+| **Angelos** | Inbox & Calendar Manager |
+| **Argus** | Opportunity Scout — surfs the internet via Anthropic's **server-side web search** (no MCP connections required) for business opportunities and world events |
+| **Mnemosyne** | YouTube Learner — watches videos via transcript, summarizes what it understood, stores lessons |
+| **Metis** | Learning Synthesizer — runs the **daily learning cycle**, distilling lessons, corrections, and user feedback into the self-built skill library |
+| **Prometheus** | Evolution Specialist — audits Olympus, finds what's missing inside it, upgrades agent prompts (`gate_prompt`: **applied only if a before/after benchmark shows no regression, else auto-rolled-back**), files improvement proposals |
+| **Hermes** | Operator — acts on your behalf on **explicitly authorized** sites: logs in with vaulted credentials and operates declarative site profiles. Never browses the open web; credentialed actions are scope/approval-gated and off by default (`OLYMPUS_OPERATOR`). See [docs/DESIGN_OPERATOR.md](docs/DESIGN_OPERATOR.md) |
 
 ### Self-* properties
 
@@ -150,11 +159,14 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
 - **Self-improving** — three feedback loops:
   1. Aletheia records every correction as a lesson in persistent memory.
   2. Specialists recall lessons before answering (`recall_memory`).
-  3. Prometheus reads recurring corrections + Olympus's own source, rewrites
-     agent prompts (`update_prompt`, with automatic backups), and files
+  3. Prometheus reads recurring corrections + Olympus's own source and rewrites
+     agent prompts. For benchmarked specialists it uses `gate_prompt`, which
+     applies a rewrite only if a before/after benchmark shows no regression and
+     rolls it back automatically otherwise (raw `update_prompt` — auto-backup,
+     measure-by-hand — remains for un-benchmarked agents), and files
      `propose_upgrade` notes for changes that need code.
 - **Evolves with you** — beyond the shared loops above, Olympus adapts to *each
-  person*: every few conversations it distills your own history (facts, 👍/👎,
+  person*: every few exchanges it distills your own history (facts, 👍/👎,
   corrections) into a private, evolving **working model** that tailors every
   answer to you, with a growth level that deepens the more you use it
   (`olympus growth`). It's per-user and never leaks across people.
@@ -164,8 +176,9 @@ or on Windows remove `%USERPROFILE%\.olympus` and the `olympus.cmd` shim.)
   CLI, web, and Telegram; the audit runs in the background on the server's
   own credentials, never on a visitor's BYOK key). With `GITHUB_TOKEN` +
   `GITHUB_REPO` set, his upgrade proposals are **auto-filed as GitHub
-  issues** — and the optional `upgrade-agent` workflow lets a coding agent
-  implement them as pull requests automatically.
+  issues** — and the optional Auto-Upgrade workflow
+  (`.github/workflows/auto-upgrade.yml`) lets a coding agent implement them as
+  pull requests automatically.
 
 ### Reasoning over serial problems (dependency-graph planning)
 
@@ -207,15 +220,17 @@ The result is something neither Hermes nor OpenClaw has: a system that gets
 collectively smarter by distilling the best of every frontier model its users
 bring — with consent, anonymization, and quality-gating built in.
 
-### Keeping all <!--cap:agents-->12<!--/cap--> specialists strong (systematic training)
+### Keeping all <!--cap:agents-->13<!--/cap--> specialists strong (systematic training)
 
 A specialist only improves at what's *measured* — so Olympus measures every
 user-facing specialist and trains the weakest on a cadence:
 
 - **Full coverage.** Every user-facing specialist (Plutus, Peitho, Hephaestus,
-  Aegis, Iris, Chiron, Chronos, Argus, Mnemosyne) has benchmark items; any gap
-  is auto-filled with a generated one. (Metis and Prometheus are internal —
-  their quality is their effect on the system.)
+  Aegis, Iris, Chiron, Chronos, Angelos, Argus, Mnemosyne) has benchmark items; any gap
+  is auto-filled with a generated one. (Metis, Prometheus, and Hermes are
+  internal — Hermes is the operator/browser actuator, the other two the
+  planner and self-improver — so their quality is their effect on the system,
+  not a benchmarked answer.)
 - **`python -m olympus scores`** shows every specialist's current score,
   lowest first. **`python -m olympus train`** scores them all, then has
   Prometheus focus on the weakest — building skills and sharpening prompts,
@@ -236,7 +251,8 @@ user-facing specialist and trains the weakest on a cadence:
    before working — knowledge gained once is applied by the whole council
    forever.
 3. **Measurement** — `python -m olympus eval` runs a benchmark scored by a
-   strict, *separate* LLM judge. Prometheus runs it before/after every prompt
+   strict, *separate* LLM judge (on the Anthropic backend; other providers
+   judge in-model). Prometheus runs it before/after every prompt
    upgrade and **rolls back changes that lower the score**. Improvement is
    measured, not assumed.
 3b. **Benchmark-gated skills** — autonomously-created skills are written
@@ -276,66 +292,50 @@ user-facing specialist and trains the weakest on a cadence:
 - **Verified-facts cache** — Aletheia caches what she verifies, so fact-checks
   get faster and cheaper over time (`recall_fact` / `cache_fact`).
 - **Measured self-upgrades, ungameable judge** — the benchmark is scored by a
-  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned, so
-  Prometheus can't optimize against his own scorer.
+  *different* model (`OLYMPUS_JUDGE_MODEL`) than the one being tuned (on the
+  Anthropic backend; other providers judge in-model), so Prometheus can't
+  optimize against his own scorer.
 - **Web instance protection** — per-IP rate limiting
   (`OLYMPUS_RATE_LIMIT`/min) and an optional shared access token
   (`OLYMPUS_ACCESS_TOKEN`). Final answers stream token-by-token.
 - **Action tools are off until allowlisted** — email sends only to
   `OLYMPUS_EMAIL_ALLOWLIST` recipients; webhooks only to operator-defined
-  `OLYMPUS_WEBHOOKS` URLs; Hephaestus's code runs in Anthropic's server-side
-  sandbox, never on your machine.
-- **Accurate by design** — nothing reaches the user without passing the
-  hallucination controller; uncertain claims are flagged, never laundered.
+  `OLYMPUS_WEBHOOKS` URLs; Hephaestus can only *prepare* code execution as an
+  approval-gated action — a human (or explicit policy) approves before anything
+  runs. The default local backend runs with your OS privileges once approved;
+  set `OLYMPUS_EXEC_BACKEND=docker` for OS-level isolation of untrusted code.
+- **Accurate by design** — answers the supervisor flags as factual pass through
+  the hallucination controller before you see them; uncertain claims are
+  flagged, never laundered.
 
 ## Why Olympus vs Hermes / OpenClaw
 
 | | Hermes | OpenClaw | **Olympus** |
 |---|---|---|---|
-| Hallucination control | none | none | **mandatory verification gate** — every factual claim web-checked before you see it |
-| Specialists | generic per-task workers | one assistant + plug-in skills | **10 permanent domain experts** with crafted identities |
+| Hallucination control | none | none | **built-in verification gate** — factual answers are web-checked (the supervisor flags what needs checking) before you see them |
+| Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->13<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
 | Models | model-agnostic | model-agnostic | **model-agnostic** — Claude first-class, plus any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama/local) with **bring-your-own-key in the web UI** |
-| Footprint | full server stack | persistent Node.js service | **~2.5K lines of readable Python**, stdlib-only interfaces |
+| Footprint | full server stack | persistent Node.js service | **single Python package · 3 runtime deps · stdlib-only interfaces** |
 
 ## Setup
 
-**One line.** Paste this in your terminal:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.sh | sh
-```
-
-**On Windows**, paste this in PowerShell instead:
-
-```powershell
-irm https://raw.githubusercontent.com/maadjiba24-afk/Olympus-/main/install.ps1 | iex
-```
-
-Both create a private Python environment, install Olympus, and put an `olympus`
-command on your PATH. Then type `olympus`. The first run asks one question — which API key you're
-bringing (Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter,
-or a local Ollama) — saves it securely (`~/.olympus/config.env`, owner-only),
-and drops you into chat. From then on it's just:
+Installation is covered in [Install](#install) above — the one-liner creates a
+private Python environment, installs Olympus, and puts an `olympus` command on
+your PATH. The first run asks one question (which API key you're bringing —
+Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter, or a local
+Ollama), saves it securely (`~/.olympus/config.env`, owner-only), and drops you
+into chat. From then on it's just:
 
 ```
 olympus
 you ▸ find me 30 minutes with Sarah next week and draft the invite
 ```
 
-Plain English. No bash, no pip, no environment variables. Add more keys
-anytime with `olympus setup` — Olympus composes multiple models into one
-brain. Uninstall: `rm -rf ~/.olympus ~/.local/bin/olympus`.
-
-**Prefer a package manager?** Olympus is on PyPI:
-
-```bash
-pipx install olympus-council     # isolated, gets you the `olympus` command
-# or:  pip install olympus-council
-olympus                          # same one-question setup wizard
-```
+Plain English. No bash, no pip, no environment variables. Add more keys anytime
+with `olympus setup` — Olympus composes multiple models into one brain.
 
 <details>
 <summary>Manual install (developers)</summary>
@@ -394,7 +394,8 @@ limits, and per-user memory, the relationship graph, and playbooks are all
 bounded (weakest memories are pruned past the cap) so storage and prompt size
 stay in check. **Monitoring.** `GET /healthz` is an unauthenticated liveness probe for load
 balancers and uptime checks; `GET /api/metrics` (behind the access token)
-reports uptime, request/error counts per path, and today's spend vs budget.
+reports uptime, per-path request counts, process-wide error counts, and today's
+spend vs budget.
 From a shell, `olympus status` shows the provider, whether a key is configured,
 the daily budget, the account mode, and recent usage.
 
@@ -410,6 +411,7 @@ are opt-in, so local single-user runs need nothing.
 ```bash
 python -m olympus                  # interactive chat (default)
 python -m olympus web              # browser chat UI at http://localhost:8484
+python -m olympus serve            # HTTP API incl. OpenAI-compatible /v1/* endpoints
 python -m olympus telegram         # Telegram gateway (zero extra deps)
 python -m olympus whatsapp         # WhatsApp Cloud API gateway (webhook)
 python -m olympus profile "I run a bakery called Crumb; keep replies short"
@@ -430,6 +432,84 @@ python -m olympus heartbeat        # run the autonomous recurring loop
 ```
 
 (`pip install .` also gives you a plain `olympus` command.)
+
+### Use Olympus from any OpenAI client
+
+Olympus exposes an **OpenAI-compatible inbound endpoint**, so any existing
+OpenAI client, IDE, or app can drive the full council by changing only
+`base_url`, `model`, and `api_key` — every request runs the same
+route → plan → dispatch → verify → review → synthesize pipeline.
+
+```bash
+export OLYMPUS_API_KEYS=sk-my-secret-key   # comma-separated; gates /v1/*
+python -m olympus serve --host 127.0.0.1 --port 8484
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8484/v1", api_key="sk-my-secret-key")
+resp = client.chat.completions.create(
+    model="olympus-council",
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+)
+print(resp.choices[0].message.content)
+```
+
+`GET /v1/models`, non-streaming and streaming (`stream=true`)
+`POST /v1/chat/completions` are all supported. When `OLYMPUS_API_KEYS` is unset
+the `/v1/*` routes answer on **loopback only** (never a silent open relay). Full
+details, `curl` examples, and the auth/loopback notes live in
+[docs/OPENAI_ENDPOINT.md](docs/OPENAI_ENDPOINT.md).
+
+### Sovereignty: provable zero-egress mode
+
+Set `OLYMPUS_SOVEREIGN=1` and Olympus runs **fully local with an enforced,
+fail-closed guarantee**: remote models are excluded from selection entirely,
+every model call / tool fetch funnels through a single egress check
+(`security.assert_egress_allowed`) that raises rather than leaking, and routing
+honors a `public` / `internal` / `restricted` data class (a `restricted` request
+stays local even when sovereign mode is off). If no local model is configured it
+**fails closed** instead of downgrading to a remote one.
+
+```bash
+export OLYMPUS_SOVEREIGN=1
+export OLYMPUS_PROVIDER=openai OLYMPUS_BASE_URL=http://localhost:11434/v1 OLYMPUS_MODEL=qwen2.5
+olympus status          # shows sovereign=ON, allowlist, eligible local models
+```
+
+This is application-layer enforcement at Olympus's own egress choke — not an OS
+firewall (pair it with one for a host-wide guarantee). The threat model, the
+fully-local recipe (Ollama/vLLM), the data-class policy table, and an honest
+statement of the boundary are in
+[docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md).
+
+### Every decision is replayable and signed — verify it yourself
+
+Olympus records every orchestration decision, freezes the exact model responses
+that produced it, and **signs the decision path** with an Ed25519 key. Anyone can
+re-execute a past run against those frozen responses and confirm the reasoning is
+**byte-identical**, and check the signature against a pinned public key — no trust
+in us required:
+
+```bash
+olympus verify --run <RUN_ID>        # replays the decision path AND checks the signature
+#   replay    : PASS — N decision(s) replayed byte-identically
+#   signature : PASS — decision-log signature valid
+#   RESULT    : PASS — replay-identical and signed by the trusted production key.
+```
+
+A run id comes back in the `X-Olympus-Run-Id` header of every *non-streaming*
+`/v1` answer (a streamed response can't carry it — the run id is only assigned
+once the run completes; use `/api/status` or a non-streaming request to get it),
+and `/api/status` reports the signing posture. **Honesty about trust:** with no secret
+signing seed configured, runs are signed by a *public default key* — verification
+still passes but is loudly labeled `DEV / UNVERIFIED` (integrity, not
+authenticity), and `olympus verify --run … --require-production` rejects it. Set a
+real `OLYMPUS_SIGNING_SEED` (HSM/KMS recommended) and pin the derived key to make
+it a genuine guarantee. Step-by-step for a skeptical evaluator:
+[docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
+[docs/SIGNING.md](docs/SIGNING.md).
 
 ### Connectors: MCP servers & custom plugins
 
@@ -497,8 +577,10 @@ Hephaestus isn't graded on whether his code *looks* right — his code is **run
 against real tests** and scored on whether it actually passes. `python -m
 olympus code-eval` has him solve real tasks (merge intervals, an LRU cache, a
 bug fix, debounce, deep flatten, Go word-count, …); each solution is extracted,
-executed in an isolated sandbox with a timeout, and scored pass/fail. Languages
-whose runtime isn't installed are skipped, not failed.
+executed in an isolated temp directory with a wall-clock timeout, and scored
+pass/fail. (This runs Olympus's *own* generated code in a dev/eval context, never
+user input; for OS-level isolation of untrusted code use the docker exec
+backend.) Languages whose runtime isn't installed are skipped, not failed.
 
 This objective signal feeds the self-improvement loop: Prometheus runs
 `run_code_benchmark` before and after changing Hephaestus's prompt or coding
@@ -718,6 +800,49 @@ Optional: `WHATSAPP_ALLOWED_NUMBERS=15551234567,...` restricts who may talk to
 it; `WHATSAPP_APP_SECRET=...` makes Olympus verify Meta's payload signatures.
 Each sender gets a private memory namespace, and the same `/scan`, `/audit`,
 `/watch`, `/good`, `/lang`, `/contribute` commands as Telegram work.
+
+### Discord, Slack, and Signal
+
+The same council answers on Discord, Slack, and Signal — all zero-dependency
+(raw HTTP over `urllib`, stdlib request-signing), all sharing one command set
+(`/scan`, `/audit`, `/watch`, `/good`, `/lang`, `/contribute`, `/growth`) and a
+private per-user memory namespace.
+
+- **Discord** — create an app, copy its **public key**, and point the
+  *Interactions Endpoint URL* at `https://your-host/`.
+  ```bash
+  export DISCORD_PUBLIC_KEY=...            # verifies inbound (Ed25519)
+  export DISCORD_WEBHOOK_URL=...           # optional: heartbeat push to a channel
+  python -m olympus discord               # interactions endpoint on :8486
+  ```
+  Discord gives an interaction only ~3 seconds to answer, far less than a full
+  council turn takes, so Olympus **acks immediately with a deferred response**
+  and then edits in the real reply through the interaction follow-up webhook.
+
+- **Slack** — create an app with the Events API, copy its **signing secret**,
+  and set the *Request URL* to `https://your-host/`.
+  ```bash
+  export SLACK_BOT_TOKEN=xoxb-...
+  export SLACK_SIGNING_SECRET=...          # verifies inbound (HMAC-SHA256)
+  export SLACK_NOTIFY_CHANNEL=C0123        # optional: heartbeat push
+  python -m olympus slack                 # events endpoint on :8487
+  ```
+  Slack retries any event it doesn't hear back on within ~3 seconds, so Olympus
+  **acks the webhook instantly** and runs the pipeline on a background worker;
+  Slack's `event_id` is de-duplicated so a retry never produces a second reply.
+
+- **Signal** — talk to a `signal-cli` daemon (no cloud account).
+  ```bash
+  export SIGNAL_NUMBER=+15551234567             # your registered Signal number
+  export SIGNAL_CLI_REST_URL=http://localhost:8080   # signal-cli-rest-api endpoint
+  python -m olympus signal
+  ```
+
+All three webhook servers are multi-threaded (`ThreadingHTTPServer`) and, like
+WhatsApp and Telegram, use one serial worker per user — ordered within a
+conversation, concurrent across users — so one slow answer never blocks anyone
+else. Put the Discord/Slack endpoints behind HTTPS (both platforms require a
+public `https://` URL), the same reverse-proxy note as the web UI.
 
 ### Remembering you — the profile card
 

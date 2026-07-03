@@ -17,6 +17,7 @@ terminal.
 
 from __future__ import annotations
 
+import os
 import sys
 
 # name → one-line help. Drives /help, Tab-completion, and dispatch.
@@ -28,12 +29,22 @@ COMMANDS: dict[str, str] = {
     "/queue": "queue a YouTube video for the autonomous loop: /queue <url>",
     "/good": "rate the last answer good (optionally /good <comment>)",
     "/bad": "rate the last answer bad (optionally /bad <comment>)",
+    "/goal": "standing goals: /goal <text> [:: done-means] · /goal list|drop|wait <id> [pid]",
+    "/learn": "distill a reusable skill from a url/path/workflow: /learn <source>",
+    "/journey": "timeline of everything learned: /journey [show|rm <ref>]",
+    "/moa": "one-shot mixture-of-agents (labeled drafts + aggregate): /moa <question>",
+    "/prompt": "compose a multi-line question in $EDITOR",
+    "/reasoning": "show how the last answer was produced (pipeline trace)",
+    "/timestamps": "toggle timestamps on replies: /timestamps on|off",
+    "/undo": "remove the last N exchanges from the conversation: /undo [N]",
+    "/steer": "nudge the current/next task mid-run: /steer <note>",
     "/lang": "set reply language: /lang <language|auto>",
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
     "/reset": "start fresh — distill this chat into durable state, then clear it",
     "/progress": "set how much live progress to show: off|stages|all|verbose",
     "/doctor": "check readiness (provider, sandbox, security, capabilities)",
+    "/learned": "see what Olympus learned/did on its own while you were away",
     "/exit": "leave Olympus",
 }
 
@@ -125,6 +136,67 @@ def dispatch_command(bot, raw: str):
             return (True, "Usage: /queue <youtube-url>", False)
         memory.watchlist_add(arg)
         return (True, "Queued for the heartbeat.", False)
+    if name == "/goal":
+        from . import goals
+        sub, _, rest = arg.strip().partition(" ")
+        user = getattr(bot, "user", "cli")
+        if not arg.strip() or sub == "list":
+            return (True, goals.summary(user), False)
+        if sub == "drop":
+            return (True, goals.set_status(rest.strip(), "dropped"), False)
+        if sub == "done":
+            return (True, goals.set_status(rest.strip(), "done",
+                                           evidence="closed manually"), False)
+        if sub == "wait":
+            parts = rest.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                return (True, "Usage: /goal wait <goal id> <pid>", False)
+            return (True, goals.wait_on(parts[0], int(parts[1])), False)
+        text, _, contract = arg.partition("::")
+        return (True, goals.add(user, text.strip(), contract.strip()), False)
+    if name == "/learn":
+        from . import learn
+        # The TUI runs on the operator's own machine — paths are fair game.
+        return (True, learn.distill(arg, allow_paths=True), False)
+    if name == "/journey":
+        from . import journey
+        sub, _, ref = arg.strip().partition(" ")
+        user = getattr(bot, "user", "cli")
+        if sub == "show":
+            return (True, journey.show(ref.strip(), user), False)
+        if sub == "rm":
+            return (True, journey.remove(ref.strip(), user), False)
+        return (True, journey.timeline(user), False)
+    if name == "/moa":
+        from . import moa
+        if not arg.strip():
+            return (True, "Usage: /moa <question> — every pool member "
+                          "answers; the strongest aggregates.", False)
+        try:
+            return (True, moa.one_shot(arg.strip()), False)
+        except Exception as err:
+            return (True, f"moa failed: {err}", False)
+    if name == "/reasoning":
+        return (True, reasoning_view(bot), False)
+    if name == "/timestamps":
+        on = arg.strip().lower() not in ("off", "0", "false", "no")
+        bot._show_timestamps = on
+        return (True, f"Timestamps {'on' if on else 'off'}.", False)
+    if name == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            return (True, "Usage: /undo [N]", False)
+        return (True, bot.undo(n), False)
+    if name == "/steer":
+        from . import steering
+        if not arg.strip():
+            return (True, "Usage: /steer <note> — the running (or next) task "
+                          "sees it after its next tool call", False)
+        key = getattr(bot, "conversation_id", None) or f"user-{bot.user}"
+        ok = steering.put(key, arg)
+        return (True, "Noted — the task will see this after its next tool call."
+                if ok else "Steering queue is full; note dropped.", False)
     if name in ("/good", "/bad"):
         return (True, bot.feedback("up" if name == "/good" else "down", arg), False)
     if name == "/lang":
@@ -149,7 +221,141 @@ def dispatch_command(bot, raw: str):
     if name == "/doctor":
         from . import doctor
         return (True, doctor.render(), False)
+    if name == "/learned":
+        from . import digest
+        return (True, digest.learned_recently(), False)
     return (False, None, False)
+
+
+MAX_REF_CHARS = 20_000       # per injected reference, keeps prompts bounded
+_REF_RE = None               # compiled lazily (import re only when needed)
+
+
+def expand_references(text: str, *, read=None, fetch=None) -> tuple[str, list[str]]:
+    """Expand `@file` and `@https://url` references into context blocks.
+
+    `@path` (an existing local file) and `@http(s)://…` tokens are replaced
+    inline by their bare name, and the referenced content is appended as a
+    clearly delimited context block. Tokens that are neither an existing file
+    nor a URL (e.g. an @handle) pass through untouched. Returns the expanded
+    text and a list of notes describing what was injected (for the UI).
+
+    `read`/`fetch` are injectable for tests; production uses the filesystem
+    and the SSRF-guarded web fetcher. URL content is wrapped as untrusted —
+    a page must not be able to steer the council."""
+    global _REF_RE
+    import re
+    if _REF_RE is None:
+        _REF_RE = re.compile(r"(?:(?<=\s)|^)@(\S+)")
+    from pathlib import Path
+
+    def _read(path: str) -> str:
+        return Path(path).expanduser().read_text(encoding="utf-8",
+                                                 errors="replace")
+
+    def _fetch(url: str) -> str:
+        from . import tools
+        return tools._strip_html(tools._http_get(url))
+
+    read = read or _read
+    fetch = fetch or _fetch
+    blocks: list[str] = []
+    notes: list[str] = []
+
+    def _sub(match) -> str:
+        ref = match.group(1).rstrip(".,;:!?)")
+        if ref.startswith(("http://", "https://")):
+            from . import security
+            try:
+                body = fetch(ref)[:MAX_REF_CHARS]
+            except Exception as err:
+                notes.append(f"could not fetch {ref}: {err}")
+                return match.group(0)
+            blocks.append(f"[context from {ref}]\n"
+                          + security.wrap_untrusted(body, source=ref)
+                          + "\n[end context]")
+            notes.append(f"injected {ref} ({len(body)} chars)")
+            return ref
+        p = Path(ref).expanduser()
+        if p.is_file():
+            try:
+                body = read(ref)[:MAX_REF_CHARS]
+            except Exception as err:
+                notes.append(f"could not read {ref}: {err}")
+                return match.group(0)
+            blocks.append(f"[context from file {ref}]\n{body}\n[end context]")
+            notes.append(f"injected {ref} ({len(body)} chars)")
+            return ref
+        return match.group(0)          # not a file, not a URL — leave it
+
+    expanded = _REF_RE.sub(_sub, text)
+    if blocks:
+        expanded = expanded + "\n\n" + "\n\n".join(blocks)
+    return expanded, notes
+
+
+def reasoning_view(bot) -> str:
+    """How the last answer was produced: the run's recorded pipeline trace —
+    routing, specialist spans, verification decisions. Olympus's honest
+    analog of Hermes's /reasoning: what's shown is the signed decision path
+    that actually ran, not free-form model musings."""
+    run_id = getattr(bot, "last_run_id", None)
+    if not run_id:
+        return "No run yet — ask something first, then /reasoning."
+    from . import trace as trace_mod
+    rec = trace_mod.load_run(run_id)
+    if rec is None:
+        return f"Run {run_id} isn't recorded (traces may have been pruned)."
+    lines = [f"Run {rec.get('id')} — {rec.get('kind')} · "
+             f"{rec.get('total_secs', '?')}s"]
+    events = rec.get("events") or []
+    if events:
+        lines.append("pipeline:")
+        for e in events[:40]:
+            stage = e.get("stage", "?")
+            extra = {k: v for k, v in e.items()
+                     if k not in ("stage", "t") and isinstance(v, (str, int))}
+            tail = ("  " + ", ".join(f"{k}={str(v)[:60]}"
+                                     for k, v in list(extra.items())[:3])
+                    if extra else "")
+            lines.append(f"  · {stage}{tail}")
+    decisions = rec.get("decisions") or []
+    if decisions:
+        lines.append("decisions:")
+        for d in decisions[:20]:
+            who = (d.get("agent") or {}).get("role") or \
+                (d.get("agent") or {}).get("channel") or "?"
+            lines.append(f"  ⚖ {d.get('type', d.get('decision_type', '?'))} "
+                         f"[{who}] → {str(d.get('status', ''))[:40]}")
+    lines.append(f"(full detail: olympus explain {run_id})"
+                 if rec.get("decisions") else "")
+    return "\n".join(l for l in lines if l)
+
+
+def editor_compose(run_editor=None) -> str:
+    """/prompt: open $EDITOR on a temp file and return what was written.
+    `run_editor(path)` is injectable for tests; production shells out."""
+    import subprocess
+    import tempfile
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+
+    def _default(path: str) -> None:
+        subprocess.run(f"{editor} {path}", shell=True)
+
+    run_editor = run_editor or _default
+    with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False,
+                                     prefix="olympus-prompt-") as f:
+        path = f.name
+        f.write("")
+    try:
+        run_editor(path)
+        text = open(path, encoding="utf-8").read().strip()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return text
 
 
 def _install_readline() -> None:
@@ -247,6 +453,13 @@ def run(pool=None) -> None:
             continue
         if text in ("exit", "quit"):
             break
+        if text == "/prompt":
+            # Compose a long question in $EDITOR, then run it as a question.
+            text = editor_compose()
+            if not text:
+                print("  (empty — nothing sent)")
+                continue
+            print(f"\nyou ▸ {text[:200]}{'…' if len(text) > 200 else ''}")
         handled, output, should_exit = dispatch_command(bot, text)
         if should_exit:
             break
@@ -254,8 +467,18 @@ def run(pool=None) -> None:
             if output:
                 print(f"\nolympus ▸ {output}\n")
             continue
+        # @file / @url references: inject their content as context blocks.
+        if "@" in text:
+            try:
+                text, notes = expand_references(text)
+                for note in notes:
+                    print(f"  [{note}]")
+            except Exception as err:
+                print(f"  [reference expansion failed: {err}]")
         # A real question → stream the final answer token-by-token.
         try:
+            if getattr(bot, "_show_timestamps", False):
+                print("\n  [" + time.strftime("%H:%M:%S") + "]", end="")
             sys.stdout.write("\nolympus ▸ ")
             sys.stdout.flush()
             t0 = time.time()
@@ -279,3 +502,10 @@ def run(pool=None) -> None:
                 ctx_frac=ctx_frac) + "\n")
         except Exception as err:
             print(f"\n  [error] {err}\n")
+        # Post-turn interactions outside the model loop: secure credential
+        # capture (remember mode) and plain-English approval of held actions.
+        try:
+            from . import interactive
+            interactive.after_turn(getattr(bot, "user", "cli"))
+        except Exception:
+            pass

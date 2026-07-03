@@ -11,10 +11,14 @@ from __future__ import annotations
 import time
 import traceback
 
-from . import config, memory, orchestrator, scheduler, telegram
+from . import config, gateway, memory, orchestrator, scheduler
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
+    # A non-positive cadence means the cycle is OFF, not "run every tick" — with
+    # interval <= 0 the `>=` test would be true on every heartbeat.
+    if interval <= 0:
+        return False
     return now - state.get(key, 0.0) >= interval
 
 
@@ -31,13 +35,34 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Scheduler failed:\n" + traceback.format_exc())
 
+    # Always-on operator jobs (HERMES). No-op unless OLYMPUS_OPERATOR is on; each
+    # job still runs through the approval spine (scope/budget/approval all apply).
+    try:
+        from . import operator
+        for line in operator.run_due(now):
+            log.append("Operator: " + line)
+    except Exception:
+        log.append("Operator failed:\n" + traceback.format_exc())
+
+    # Standing goals: one unit of work + an evidence-based completion judgment
+    # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
+    try:
+        from . import goals
+        for line in goals.run_due(now):
+            log.append("Goals: " + line)
+            if "COMPLETE" in line or "STALLED" in line:
+                gateway.notify_all("🎯 " + line)
+    except Exception:
+        log.append("Goals failed:\n" + traceback.format_exc())
+
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")
         try:
             report = orchestrator.opportunity_scan()
             log.append("Argus: report saved to memory/reports.")
-            if telegram.notify("🌐 Olympus opportunity scan:\n\n" + report):
-                log.append("Argus: report pushed to Telegram.")
+            pushed = gateway.notify_all("🌐 Olympus opportunity scan:\n\n" + report)
+            if pushed:
+                log.append(f"Argus: report pushed to {', '.join(pushed)}.")
         except Exception:
             log.append("Argus failed:\n" + traceback.format_exc())
         state["opportunity_scan"] = now
@@ -73,6 +98,12 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Metis: skills updated; report saved to memory/reports.")
         except Exception:
             log.append("Metis failed:\n" + traceback.format_exc())
+        # Metis also prunes drifted operator site profiles (Phase 4).
+        try:
+            from . import operator
+            log.append("Operator review: " + operator.review_profiles())
+        except Exception:
+            log.append("Operator review failed:\n" + traceback.format_exc())
         state["daily_learning"] = now
 
     if config.TRAIN_EVERY and _due(state, "train", config.TRAIN_EVERY, now):
@@ -84,13 +115,23 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Training failed:\n" + traceback.format_exc())
         state["train"] = now
 
+    from . import curator
+    if _due(state, "skill_curation", curator.curation_every(), now):
+        log.append("Curator: grading and pruning the skill library...")
+        try:
+            log.append("Curator: " + curator.curate())
+        except Exception:
+            log.append("Curator failed:\n" + traceback.format_exc())
+        state["skill_curation"] = now
+
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
         try:
             report = orchestrator.evolution_audit()
             log.append("Prometheus: audit saved to memory/reports.")
-            if telegram.notify("🔧 Olympus self-audit:\n\n" + report):
-                log.append("Prometheus: audit pushed to Telegram.")
+            pushed = gateway.notify_all("🔧 Olympus self-audit:\n\n" + report)
+            if pushed:
+                log.append(f"Prometheus: audit pushed to {', '.join(pushed)}.")
         except Exception:
             log.append("Prometheus failed:\n" + traceback.format_exc())
         state["evolution_audit"] = now
@@ -130,8 +171,8 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             else:
                 log.append(f"Backup FAILED at {res.get('stage')}: "
                            f"{res.get('error')}")
-                telegram.notify("⚠️ Olympus backup failed at "
-                                f"{res.get('stage')}: {res.get('error')}")
+                gateway.notify_all("⚠️ Olympus backup failed at "
+                                   f"{res.get('stage')}: {res.get('error')}")
         except Exception:
             log.append("Backup errored:\n" + traceback.format_exc())
         state["backup"] = now

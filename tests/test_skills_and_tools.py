@@ -31,6 +31,29 @@ def test_prompt_update_and_restore(tmp_path, monkeypatch):
     assert "update reason" not in restored
 
 
+def test_restore_prompt_walks_back_the_chain(tmp_path, monkeypatch):
+    # A rollback STACK: each restore steps back one update, not just the newest.
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(config, "PROMPTS_DIR", tmp_path / "prompts")
+    config.PROMPTS_DIR.mkdir()
+    p = config.PROMPTS_DIR / "argus.md"
+    p.write_text("# Argus\n\nv0\n")
+
+    # Distinct backup filenames require distinct second-resolution timestamps.
+    import time as _t
+    tools._update_prompt("argus", "# Argus\n\nv1", "to v1")
+    _t.sleep(1.05)
+    tools._update_prompt("argus", "# Argus\n\nv2", "to v2")
+    assert "v2" in p.read_text()
+
+    tools._restore_prompt("argus")            # v2 -> v1
+    assert "v1" in p.read_text() and "v2" not in p.read_text()
+    tools._restore_prompt("argus")            # v1 -> v0 (not stuck at v1)
+    assert "v0" in p.read_text() and "v1" not in p.read_text()
+    # backups exhausted
+    assert "no backups exist" in tools._restore_prompt("argus")
+
+
 def test_email_disabled_without_config(monkeypatch):
     monkeypatch.delenv("SMTP_HOST", raising=False)
     assert "not configured" in tools._send_email("a@b.c", "s", "b")

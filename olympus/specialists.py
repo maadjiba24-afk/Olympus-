@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import agent, codegraph, config, connectors, security, skills, tools
+from . import (agent, codegraph, config, connectors, contracts, security,
+               skills, tools)
 
 _UNTRUSTED_NOTE = (
     "\n\n## Handling external content (security)\n"
@@ -29,10 +30,40 @@ class Specialist:
     code_exec: bool = False  # Anthropic server-side code sandbox
     system: bool = False     # internal agent (self-modification tools allowed)
     extra_tools: tuple[str, ...] = field(default_factory=tuple)
+    # Optional hard output contract enforced at orchestrator._run_one when
+    # config.contracts_enabled(). None = no contract = no behavior change; every
+    # existing entry omits it and ships at None (see docs/DESIGN_OUTPUT_CONTRACTS.md).
+    contract: contracts.OutputContract | None = None
+    # Model role for pool routing: in a multi-model pool, this specialist runs on
+    # whichever member is strongest for this role ("reasoning" | "coding" |
+    # "verify"). Single-model pools ignore it. Data-driven here instead of a
+    # hardcoded map so tiering is per-specialist and extensible.
+    role: str = "reasoning"
+    # Reasoning effort for this specialist's runs. Default "high" preserves
+    # today's behavior; lets the hard specialists stay deep while light ones can
+    # be dialed down for cost without touching the rest.
+    effort: str = "high"
 
     def _ingests(self, provider: str) -> bool:
-        """Does this specialist's loadout read external/untrusted content?"""
+        """Does this specialist's loadout read external/untrusted content?
+
+        This drives capability separation (allow_action + filter_tools), so it
+        must reflect EVERY way the specialist ingests — not just web=True. A
+        specialist that ingests purely through its own extra_tools (Angelos via
+        read_inbox/email/calendar, Mnemosyne via watch_youtube) is just as
+        exposed to prompt injection as a web scout; missing that let it keep
+        action capability and receive global action plugins/MCP servers while
+        reading attacker-controlled content."""
         if self.web:
+            return True
+        # Check the specialist's own built-in loadout (base + extra_tools + web
+        # tools) for any INGESTION tool. Connector data plugins/MCP are checked
+        # separately below (their attachment can't depend on this result).
+        own = list(tools.BASE_TOOLS)
+        own += [tools.EXTRA_TOOLS[name] for name in self.extra_tools]
+        if self.web:
+            own += tools.web_tool_defs(provider)
+        if security.loadout_ingests_external(own):
             return True
         if connectors.specialist_has_data_mcp(self.key):
             return True
@@ -82,13 +113,25 @@ class Specialist:
                 + _UNTRUSTED_NOTE)
 
     def run(self, task: str, settings: config.Settings | None = None,
-            effort: str = "high") -> str:
+            effort: str | None = None) -> str:
+        return self.run_counted(task, settings=settings, effort=effort)[0]
+
+    def run_counted(self, task: str, settings: config.Settings | None = None,
+                    effort: str | None = None) -> tuple[str, int | None]:
+        """Like `run`, but also returns the count of client-side tool calls the
+        specialist made (or None when the provider can't report it — only the
+        Anthropic backend counts). Used by the output-contract tool-call cap.
+
+        `effort` defaults to THIS specialist's configured `.effort` (not a
+        hard-coded 'high'), so one-shot routines that call run()/run_counted()
+        without passing effort respect a specialist tuned to a cheaper tier."""
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
-        return backend.run_agent(settings, self.system_prompt(), task,
-                                 self.tool_defs(settings.provider),
-                                 mcp_servers=self.mcp_defs(settings.provider),
-                                 effort=effort)
+        effort = effort or self.effort
+        return backend.run_agent_counted(settings, self.system_prompt(), task,
+                                         self.tool_defs(settings.provider),
+                                         mcp_servers=self.mcp_defs(settings.provider),
+                                         effort=effort)
 
 
 SPECIALISTS: dict[str, Specialist] = {
@@ -105,15 +148,15 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Marketing strategy, branding, copywriting, growth, "
                         "audience research, campaigns, SEO.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech", "browse_page",
-                         "analyze_image"),
+            extra_tools=("generate_image", "text_to_speech",
+                         "transcribe_audio", "browse_page", "analyze_image"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
             description="Software design, writing and reviewing code, debugging, "
                         "architecture, DevOps questions. Can execute and test "
                         "code in a sandbox.",
-            web=True, code_exec=True,
+            web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "read_file", "list_dir", "prepare_action",
@@ -131,6 +174,9 @@ SPECIALISTS: dict[str, Specialist] = {
                         "management, platform best practices, trends.",
             web=True,
             extra_tools=("generate_image", "browse_page", "analyze_image"),
+            # Social copy should stay tight — guard against a wall-of-text reply.
+            # Enforced only when contracts are enabled (off by default).
+            contract=contracts.OutputContract(max_chars=8000),
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
@@ -158,9 +204,20 @@ SPECIALISTS: dict[str, Specialist] = {
             key="argus", name="Argus", title="Opportunity Scout",
             description="Surfs the internet (no MCP needed — server-side web "
                         "search) to find business opportunities, emerging trends, "
-                        "and what is happening in the world right now.",
+                        "and what is happening in the world right now. Can drive "
+                        "a real browser to read sites that need it.",
             web=True,
-            extra_tools=("browse_page", "analyze_image"),
+            # Granted the full browser loadout. Because Argus ingests untrusted
+            # web content, capability separation strips the credentialed
+            # actuator (browser_act) from its live loadout — it can read/learn
+            # via the harness but never act on a logged-in session in the same
+            # run. The read/learn tools (open/read/skills) remain.
+            extra_tools=("browse_page", "analyze_image", "browser_open",
+                         "browser_read", "browser_act", "browser_skills",
+                         "browser_skill_record"),
+            # Safety ceiling on a runaway scan loop (well above a normal scan).
+            # Enforced only when contracts are enabled (off by default).
+            contract=contracts.OutputContract(max_tool_calls=24),
         ),
         Specialist(
             key="mnemosyne", name="Mnemosyne", title="YouTube Learner",
@@ -174,7 +231,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "lessons, corrections, and user feedback into reusable "
                         "skills so the whole council gets smarter every day.",
             system=True,
-            extra_tools=("create_skill", "gate_skills"),
+            extra_tools=("create_skill", "gate_skills", "operator_review",
+                         "recent_learning"),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",
@@ -182,13 +240,41 @@ SPECIALISTS: dict[str, Specialist] = {
                         "finds what is missing, upgrades agent prompts (measured "
                         "by benchmark, with rollback), and files upgrade "
                         "proposals so the product keeps improving.",
-            web=True, system=True,
+            # Deliberately NOT web=True. Prometheus holds self-modifying action
+            # tools (update_prompt, restore_prompt, propose_upgrade, ...) and is
+            # system=True, so capability separation does not strip them. Letting
+            # it also ingest live open-web content would let an injected page
+            # steer a self-modification. Its "scan outward" is instead sourced
+            # from Argus's already-processed world-scan reports in memory
+            # (trusted, enveloped upstream) — see prompts/prometheus.md.
+            system=True,
             extra_tools=("list_source_files", "read_source_file",
-                         "update_prompt", "restore_prompt", "run_benchmark",
+                         "update_prompt", "gate_prompt", "restore_prompt",
+                         "run_benchmark",
                          "run_code_benchmark", "propose_upgrade",
                          "create_skill", "gate_skills", "generate_benchmark",
                          "query_codegraph", "codegraph_neighbors",
-                         "codegraph_impact", "codegraph_path"),
+                         "codegraph_impact", "codegraph_path",
+                         "propose_site_profile"),
+        ),
+        Specialist(
+            key="hermes", name="Hermes", title="Operator",
+            description="Acts on your behalf on sites you've explicitly "
+                        "authorized: logs in with vaulted credentials and "
+                        "operates declarative site profiles. Does NOT browse the "
+                        "open web; credentialed actions are scope/approval gated "
+                        "and off by default (OLYMPUS_OPERATOR).",
+            # Deliberately non-ingesting (web=False, no data MCP): _ingests() is
+            # False, so it legitimately keeps the actuator (browser_login). It is
+            # NOT given browser_open/browser_read — it never reads open-web prose
+            # as instructions. That is what lets it hold credentials safely while
+            # capability separation still holds across the system.
+            extra_tools=("browser_exists", "browser_login",
+                         "site_profiles", "site_profile_record",
+                         "browser_operate", "site_template_record",
+                         "operator_schedule", "operator_authorize_site",
+                         "operator_forget_site", "operator_status",
+                         "operator_remember_login", "set_advanced_mode"),
         ),
     ]
 }

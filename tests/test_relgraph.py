@@ -27,6 +27,23 @@ def test_add_edge_creates_nodes_and_dedupes():
     assert len(relgraph.edges("u")) == 1
 
 
+def test_add_node_refuses_new_at_cap(monkeypatch):
+    monkeypatch.setattr(relgraph, "_MAX_NODES", 2)
+    relgraph.add_node("u", "A"); relgraph.add_node("u", "B")
+    assert relgraph.add_node("u", "C") is None      # refused, not aliased to A
+    assert len(relgraph.nodes("u")) == 2
+
+
+def test_add_edge_at_cap_does_not_fabricate_false_edge(monkeypatch):
+    # With the graph full, a new (src, dst) pair must NOT be aliased onto an
+    # existing node and joined by a bogus edge.
+    monkeypatch.setattr(relgraph, "_MAX_NODES", 2)
+    relgraph.add_node("u", "A"); relgraph.add_node("u", "B")
+    assert relgraph.add_edge("u", "New1", "knows", "New2") is None
+    assert relgraph.edges("u") == []                 # no false relationship
+    assert len(relgraph.nodes("u")) == 2
+
+
 def test_relation_normalized():
     e = relgraph.add_edge("u", "A", "Works At", "B")
     assert e["rel"] == "works_at"

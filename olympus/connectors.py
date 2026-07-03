@@ -138,6 +138,101 @@ def plugin_data_names_for(specialist_key: str) -> set[str]:
                                  or specialist_key in p.specialists)}
 
 
+# ─────────────────────────── lifecycle hooks ───────────────────────────
+#
+# Plugins can also observe and (for tools) intercept the agent loop without
+# forking Olympus. Events:
+#
+#   session_start(user, conversation_id)      an Olympus instance came up
+#   run_start(user, message) / run_end(user, reply)   one ask() pipeline
+#   pre_llm_call(params) / post_llm_call(params, response)   observe-only
+#   pre_tool(name, params)     may BLOCK ({"block": reason}) or REWRITE the
+#                              input ({"params": {...}}); None = pass through
+#   post_tool(name, params, result)   may REWRITE the result by returning a
+#                                     string; None = pass through
+#
+# pre/post_llm_call are deliberately observe-only: mutating the request there
+# would silently change the replay hash and break byte-identical replay. Tool
+# interception runs BEFORE execution, so a block composes with (never
+# bypasses) the approval spine — it can only make policy stricter. A raising
+# hook is logged and skipped: a broken plugin must not take down the agent.
+
+HOOK_EVENTS = ("session_start", "run_start", "run_end",
+               "pre_llm_call", "post_llm_call", "pre_tool", "post_tool")
+
+_HOOKS: dict[str, list[Callable]] = {}
+
+
+def hook(event: str):
+    """Decorator registering a plugin lifecycle hook.
+
+    Example (block a tool against a denylist):
+        @hook("pre_tool")
+        def no_prod_writes(name, params):
+            if name == "call_webhook" and "prod" in str(params):
+                return {"block": "prod webhooks are off-limits from plugins"}
+    """
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unknown hook event '{event}' "
+                         f"(expected one of {', '.join(HOOK_EVENTS)})")
+
+    def deco(fn: Callable) -> Callable:
+        _HOOKS.setdefault(event, []).append(fn)
+        return fn
+    return deco
+
+
+def emit(event: str, *args) -> None:
+    """Fire observe-only hooks; exceptions are contained."""
+    load_plugins()
+    for fn in _HOOKS.get(event, ()):
+        try:
+            fn(*args)
+        except Exception as err:
+            print(f"[connectors] {event} hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+
+
+def emit_pre_tool(name: str, params: dict) -> tuple[dict, str | None]:
+    """Run pre_tool hooks. Returns (possibly-rewritten params, block_reason).
+    The first hook that blocks wins; rewrites chain in registration order."""
+    load_plugins()
+    for fn in _HOOKS.get("pre_tool", ()):
+        try:
+            verdict = fn(name, params)
+        except Exception as err:
+            print(f"[connectors] pre_tool hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+            continue
+        if not isinstance(verdict, dict):
+            continue
+        if verdict.get("block"):
+            return params, str(verdict["block"])
+        if isinstance(verdict.get("params"), dict):
+            params = verdict["params"]
+    return params, None
+
+
+def emit_post_tool(name: str, params: dict, result: str) -> str:
+    """Run post_tool hooks; a hook returning a string replaces the result."""
+    load_plugins()
+    for fn in _HOOKS.get("post_tool", ()):
+        try:
+            out = fn(name, params, result)
+        except Exception as err:
+            print(f"[connectors] post_tool hook "
+                  f"{getattr(fn, '__name__', '?')} failed: {err}")
+            continue
+        if isinstance(out, str):
+            result = out
+    return result
+
+
+def clear_hooks() -> None:
+    """Testing aid: forget every registered hook."""
+    _HOOKS.clear()
+
+
 # ─────────────────────────── MCP servers ───────────────────────────
 
 @dataclass(frozen=True)
@@ -230,10 +325,46 @@ def specialist_has_data_mcp(specialist_key: str) -> bool:
                for s in mcp_servers())
 
 
+_ENV_NAME = None      # compiled lazily
+
+
+def mcp_scan_reason(name: str, url: str, auth_env: str | None = None) -> str | None:
+    """Security scan for an MCP server definition; reason string when it must
+    be refused, None when clean. Persisted connector config is a durable
+    attack surface — a poisoned entry exfiltrates every future request's
+    context — so definitions are validated on the way IN, not trusted later."""
+    global _ENV_NAME
+    import re
+    from . import security
+    if _ENV_NAME is None:
+        _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    if not url.lower().startswith("https://"):
+        return "MCP server URLs must be https (tokens ride on every request)"
+    if security._URL_CRED.search(url):
+        return "the URL embeds credentials — use auth_env instead"
+    reason = security.url_block_reason(url)
+    if reason:
+        return f"the URL is blocked ({reason})"
+    if security.looks_like_injection(name):
+        return "the server name contains prompt-injection markers"
+    if auth_env and not _ENV_NAME.match(auth_env):
+        return ("auth_env must be an environment variable NAME (e.g. "
+                "MY_MCP_TOKEN), never a literal token — tokens don't belong "
+                "in the config file")
+    if auth_env and security._KEYISH.search(auth_env):
+        return ("auth_env looks like a literal credential — set the token in "
+                "the environment and pass its variable name instead")
+    return None
+
+
 def add_mcp_server(name: str, url: str, type: str = "data",
                    auth_env: str | None = None,
                    specialists: list[str] | None = None) -> str:
-    """Persist a new MCP server definition to memory/connectors.json."""
+    """Persist a new MCP server definition to memory/connectors.json.
+    Definitions are security-scanned and refused on a hit."""
+    reason = mcp_scan_reason(name, url, auth_env)
+    if reason:
+        return f"Error: refused to save MCP server '{name}' — {reason}."
     path = _config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"servers": []}
@@ -252,6 +383,25 @@ def add_mcp_server(name: str, url: str, type: str = "data",
     data["servers"].append(entry)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return f"MCP server '{name}' saved ({type})."
+
+
+def remove_mcp_server(name: str) -> str:
+    """Delete an MCP server definition from memory/connectors.json. Live
+    everywhere immediately — definitions are re-read from the file per call."""
+    path = _config_path()
+    if not path.exists():
+        return f"Error: no MCP server named '{name}'."
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "Error: connectors.json is unreadable."
+    servers = data.get("servers", [])
+    kept = [s for s in servers if s.get("name") != name]
+    if len(kept) == len(servers):
+        return f"Error: no MCP server named '{name}'."
+    data["servers"] = kept
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return f"MCP server '{name}' removed."
 
 
 def summary() -> str:

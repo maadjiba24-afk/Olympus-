@@ -217,14 +217,27 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     return log
 
 
+def _human_interval(secs: int) -> str:
+    """Render an interval in its coarsest whole unit: a weekly job reads as '7d'
+    and a daily one as '1d', not '168h'/'24h'; sub-minute intervals keep their
+    seconds instead of collapsing to '0m'."""
+    secs = int(secs)
+    if secs % DAY == 0:
+        return f"{secs // DAY}d"
+    if secs % 3600 == 0:
+        return f"{secs // 3600}h"
+    if secs % 60 == 0:
+        return f"{secs // 60}m"
+    return f"{secs}s"
+
+
 def summary() -> str:
     js = _load()
     if not js:
         return "No scheduled jobs. Add one: olympus schedule add <name> <interval> <prompt>"
     lines = ["Scheduled jobs:"]
     for j in js:
-        every = (f"{j.interval // 3600}h" if j.interval % 3600 == 0
-                 else f"{j.interval // 60}m")
+        every = _human_interval(j.interval)
         state = "" if j.enabled else " (disabled)"
         to = f" → {j.deliver_to}" if j.deliver_to else ""
         using = f" [skill: {j.skill}]" if getattr(j, "skill", "") else ""

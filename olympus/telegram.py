@@ -85,6 +85,40 @@ def notify(text: str) -> bool:
         return False
 
 
+MAX_VOICE_BYTES = 20 * 1024 * 1024      # Bot API getFile download ceiling
+
+
+def _voice_text(token: str, message: dict) -> str | None:
+    """Transcribe a voice note / audio message to text, or None when the
+    message carries no audio (or transcription is unavailable). The
+    transcript rides the normal text pipeline, prefixed so the agent knows
+    it heard, not read."""
+    media = message.get("voice") or message.get("audio")
+    if not media or not media.get("file_id"):
+        return None
+    if int(media.get("file_size") or 0) > MAX_VOICE_BYTES:
+        return None
+    try:
+        info = _call(token, "getFile", file_id=media["file_id"])
+        file_path = (info.get("result") or {}).get("file_path")
+        if not file_path:
+            return None
+        with urllib.request.urlopen(
+                f"https://api.telegram.org/file/bot{token}/{file_path}",
+                timeout=60) as resp:
+            blob = resp.read(MAX_VOICE_BYTES + 1)
+        if len(blob) > MAX_VOICE_BYTES:
+            return None
+        from . import media as media_tools
+        transcript = media_tools.transcribe_bytes(
+            blob, filename=file_path.rsplit("/", 1)[-1] or "voice.oga")
+    except Exception:
+        return None
+    if transcript.startswith("Error"):
+        return None
+    return f"[voice note] {transcript}"
+
+
 def _allowed(chat_id: int) -> bool:
     raw = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
     if not raw:
@@ -132,6 +166,14 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
     bot = bots.setdefault(chat_id, orchestrator.Olympus(
         user=f"tg-{chat_id}", conversation_id=f"tg-{chat_id}"))
 
+    if cmd == "/undo":
+        try:
+            n = int(arg) if arg.strip() else 1
+        except ValueError:
+            _send(token, chat_id, "Usage: /undo [N]")
+            return
+        _send(token, chat_id, bot.undo(n))
+        return
     if cmd in ("/good", "/bad"):
         _send(token, chat_id,
               bot.feedback("up" if cmd == "/good" else "down", arg))
@@ -149,7 +191,14 @@ def _handle(token: str, bots: dict[int, orchestrator.Olympus],
         return
 
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")
-    _send(token, chat_id, bot.ask(text))
+    # Journal the in-flight request so a gateway restart resumes it instead
+    # of losing it silently.
+    from . import gateway
+    gateway.inflight_mark(f"tg-{chat_id}", chat_id, text)
+    try:
+        _send(token, chat_id, bot.ask(text))
+    finally:
+        gateway.inflight_clear(f"tg-{chat_id}")
 
 
 class _ChatWorker(threading.Thread):
@@ -183,6 +232,27 @@ def run_bot() -> None:
     from . import gateway
     bots: dict[int, orchestrator.Olympus] = {}
     workers: dict[int, _ChatWorker] = {}
+
+    # Session auto-resume: re-run whatever a previous gateway process was
+    # working on when it died (at most one retry per message).
+    from . import gateway as _gw
+    for entry in _gw.inflight_take("tg-"):
+        try:
+            chat_id = int(entry["key"])
+        except (TypeError, ValueError):
+            continue
+        try:
+            _send(token, chat_id,
+                  "⚡ I was restarted while working on your last request — "
+                  "picking it back up now.")
+        except Exception:
+            pass
+        worker = workers.get(chat_id)
+        if worker is None:
+            worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)
+            worker.start()
+        worker.q.put(entry["text"])
+
     offset = 0
     last_sweep = time.time()
     while True:
@@ -201,9 +271,28 @@ def run_bot() -> None:
             message = update.get("message") or {}
             text = message.get("text")
             chat = message.get("chat") or {}
+            if not text:
+                # A voice note becomes text via transcription (needs a media
+                # API key; silently skipped otherwise, as before).
+                text = _voice_text(token, message)
             if not text or "id" not in chat:
                 continue
             chat_id = chat["id"]
+            # /steer is answered here, on the polling thread, so the note can
+            # reach a pipeline already running on this chat's serial worker.
+            # Keyed exactly like the bot's conversation_id (raw chat id — group
+            # ids are negative, which safe_id would mangle).
+            if text.split(" ", 1)[0].lower() == "/steer":
+                from . import steering
+                note = text.partition(" ")[2].strip()
+                if not note:
+                    _send(token, chat_id, "Usage: /steer <note>")
+                elif steering.put(f"tg-{chat_id}", note):
+                    _send(token, chat_id, "Noted — the running task will see "
+                                          "this after its next tool call.")
+                else:
+                    _send(token, chat_id, "Steering queue is full; note dropped.")
+                continue
             worker = workers.get(chat_id)
             if worker is None:
                 worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)

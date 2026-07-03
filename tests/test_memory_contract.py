@@ -132,6 +132,19 @@ def test_import_refuses_unknown_schema_version(tmp_path):
         memory.import_memory(archive)
 
 
+def test_import_rejects_path_traversal(tmp_path):
+    # A crafted archive whose manifest path escapes MEMORY_DIR must not write
+    # outside it — importing is a trust boundary for archives made elsewhere.
+    archive = tmp_path / "evil.tar.gz"
+    _make_archive(archive,
+                  {"schema_version": memory.ARCHIVE_SCHEMA_VERSION,
+                   "files": [{"path": "../escape.txt", "sha256": ""}]},
+                  files=[("../escape.txt", b"pwned")])
+    result = memory.import_memory(archive)
+    assert result["count"] == 0                                # entry skipped
+    assert not (config.MEMORY_DIR.parent / "escape.txt").exists()
+
+
 def test_import_refuses_non_export_tarball(tmp_path):
     archive = tmp_path / "random.tar.gz"
     buf = io.BytesIO()

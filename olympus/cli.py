@@ -7,10 +7,91 @@ import sys
 
 from . import heartbeat, memory, orchestrator
 
+# The label every surface MUST attach to a pass produced under the public
+# default seed — a default-seed pass proves integrity, never authenticity.
+_DEV_LABEL = ("DEV / UNVERIFIED — signed by the public default key; proves the "
+              "log is internally consistent, not that it came from a trusted "
+              "signer.")
+
 
 def _chat() -> None:
     from . import tui
     tui.run()
+
+
+def _verify_run_combined(run_id: str, require_production: bool) -> int:
+    """Auditor-facing single PASS/FAIL for a recorded run: BOTH halves of the
+    guarantee — replay (byte-identical decision path) AND decision-log signature
+    against the trusted key. Reuses orchestrator.replay_run and
+    witness.verify_run; adds the pinned-key authenticity and dev-seed posture
+    gates. Returns a process exit code (0 = PASS)."""
+    from . import witness, trace, replaystore, orchestrator as orch
+    run = trace.load_run(run_id)
+    if not run:
+        print(f"[verify] FAIL: no recorded run '{run_id}' in the traces.")
+        return 1
+
+    posture = "dev" if witness.log_signed_by_default(run) else "production"
+
+    # Half 1 — replay the reasoning against the frozen responses.
+    replay_ok, replay_msg = True, ""
+    try:
+        original, _fresh, diffs = orch.replay_run(run_id)
+        if diffs:
+            replay_ok = False
+            d0 = diffs[0]
+            o = (d0.get("original") or {}).get("decision_type", "∅")
+            r = (d0.get("replayed") or {}).get("decision_type", "∅")
+            replay_msg = (f"decision #{d0['index']} DIVERGED ({o} → {r}); "
+                          f"{len(diffs)} decision(s) differ from the recording")
+        else:
+            n = len(original.get("decisions", []))
+            replay_msg = f"{n} decision(s) replayed byte-identically"
+    except replaystore.ReplayDivergence as err:
+        replay_ok, replay_msg = False, str(err)
+    except ValueError as err:
+        replay_ok, replay_msg = False, str(err)
+
+    # Half 2 — decision-log signature. A dev-posture run is signed by the public
+    # default seed, so verify its signature against that default key (integrity
+    # only) rather than the local key — otherwise a run recorded in dev fails
+    # here the moment the instance sets OLYMPUS_SIGNING_SEED, and the dev-PASS
+    # branch below becomes unreachable. Authenticity for production runs is still
+    # enforced by the pinned-key check further down.
+    sig = witness.verify_run(
+        run_id,
+        pin=witness.default_public_key_hex() if posture == "dev" else None)
+    sig_ok = bool(sig.get("ok"))
+    sig_msg = ("decision-log signature valid" if sig_ok
+               else "; ".join(sig.get("problems", []) or ["signature invalid"]))
+    # Pinned-key authenticity applies to PRODUCTION runs only: a dev-posture run
+    # (signed by the public default key) is integrity-only by definition and is
+    # handled by the dev label / --require-production gate below, not by the pin
+    # (which is the production trust anchor).
+    pin = witness.pinned_pubkey()
+    signer = ((run.get("log_signature") or {}).get("publicKey") or "").lower()
+    if sig_ok and posture == "production" and pin and signer != pin.lower():
+        sig_ok = False
+        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that does not "
+                   f"match the pinned public key {pin.lower()[:16]}…")
+
+    print(f"Run {run_id} — verification ({posture} signing posture)")
+    print(f"  replay    : {'PASS' if replay_ok else 'FAIL'} — {replay_msg}")
+    print(f"  signature : {'PASS' if sig_ok else 'FAIL'} — {sig_msg}")
+
+    if require_production and posture == "dev":
+        print(f"  RESULT    : FAIL — {_DEV_LABEL}\n"
+              "              --require-production forbids a default-seed run.")
+        return 1
+    if not (replay_ok and sig_ok):
+        print("  RESULT    : FAIL — this run is NOT verifiable as recorded.")
+        return 1
+    if posture == "dev":
+        print(f"  RESULT    : PASS (integrity only) — {_DEV_LABEL}")
+    else:
+        print("  RESULT    : PASS — replay-identical and signed by the trusted "
+              "production key.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    sub.add_parser("learned", help="what Olympus learned/did on its own "
+                                   "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
     sub.add_parser("errors", help="recent captured runtime errors (operator view)")
     sub.add_parser("dashboard", help="one consolidated operator health view "
@@ -152,14 +235,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--log", metavar="RUN_ID",
                           help="instead, verify a recorded run's "
                                "decision-log signature")
+    p_verify.add_argument("--run", metavar="RUN_ID",
+                          help="verify a recorded run END TO END: replay "
+                               "(byte-identical decision path) AND decision-log "
+                               "signature, reported as one PASS/FAIL")
     p_verify.add_argument("--allow-dev", action="store_true",
                           help="accept a dev manifest (signed by the public "
                                "default seed) for local use")
-    sub.add_parser("witness-pubkey", help="print the Ed25519 public key for the "
+    p_verify.add_argument("--require-production", action="store_true",
+                          help="FAIL (exit non-zero) if the artifact was signed "
+                               "under the public default seed, regardless of "
+                               "internal validity (the inverse of --allow-dev)")
+    sub.add_parser("witness-pubkey", aliases=["pubkey"],
+                   help="print the Ed25519 public key for the "
                                           "current signing seed (to pin it)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
+    p_ask.add_argument("--data-class", choices=("public", "internal", "restricted"),
+                       default=None,
+                       help="data-sensitivity class for routing; 'restricted' "
+                            "stays local even with sovereign mode off")
 
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
@@ -196,6 +292,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
                          help="deliver result to: telegram|discord|slack|signal")
+    p_goal = sub.add_parser("goal", help="standing goals with completion "
+                                         "contracts (worked by the heartbeat)")
+    p_goal.add_argument("action", nargs="?", default="list",
+                        choices=["list", "add", "check", "work", "drop",
+                                 "done", "wait"])
+    p_goal.add_argument("detail", nargs="*",
+                        help='add: <goal text> [:: <what done means>] · '
+                             'check/work/drop/done: <goal id> · '
+                             'wait: <goal id> <pid>')
+    p_dist = sub.add_parser("distill", help="learn a reusable skill from a "
+                                            "URL, path, or described workflow")
+    p_dist.add_argument("source", nargs="+", help="url | file/dir | description")
+    p_jour = sub.add_parser("journey", help="the timeline of what Olympus "
+                                            "has learned (show/rm entries)")
+    p_jour.add_argument("action", nargs="?", default="list",
+                        choices=["list", "show", "rm"])
+    p_jour.add_argument("ref", nargs="?", default="",
+                        help="entry ref from the timeline")
+    p_moa = sub.add_parser("moa", help="one-shot mixture-of-agents: every "
+                                       "pool member answers, strongest "
+                                       "aggregates")
+    p_moa.add_argument("prompt", nargs="+", help="the question")
     sub.add_parser("learn", help="Metis: run the daily learning cycle now")
     sub.add_parser("eval", help="run the quality benchmark and save the score")
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
@@ -205,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="install a small curated starter-skill pack "
                         "(provisional — benchmark-gated like any other skill)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
+    sub.add_parser("curate", help="grade the skill library; prune what a "
+                                  "benchmark proves safe to remove")
+    sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
+                                     "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
     p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
@@ -269,6 +391,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8484)
 
+    p_serve = sub.add_parser(
+        "serve", help="serve the HTTP API incl. the OpenAI-compatible "
+                      "/v1/* endpoints (set OLYMPUS_API_KEYS to expose it)")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8484)
+
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
@@ -315,6 +443,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import firstrun
     firstrun.load_env_file()        # saved keys apply to every command
+    try:                            # vault-stored settings too (env wins)
+        from . import opconfig
+        opconfig.apply_secrets()
+    except Exception:
+        pass                        # a broken vault must never block the CLI
 
     if args.command == "setup":
         if getattr(args, "section", None):
@@ -523,6 +656,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"{s['rejected']} rejected, {s['undone']} undone.")
             for ins in outcomes.insights(user):
                 print(f"\n  💡 {ins['message']}")
+    elif args.command == "learned":
+        from . import digest
+        firstrun.load_env_file()
+        print(digest.learned_recently())
     elif args.command == "status":
         from . import config, usage, accounts
         firstrun.load_env_file()
@@ -537,6 +674,17 @@ def main(argv: list[str] | None = None) -> int:
                  if b["enabled"] else "off"))
         print(f"  accounts       : "
               + ("required (login)" if accounts.require_login() else "open"))
+        sov = config.sovereign_status()
+        print(f"  sovereign mode : "
+              + ("ON — zero-egress, local-only" if sov["sovereign"] else "off"))
+        if sov["sovereign"] or sov["allowlist"]:
+            print(f"  egress allowlist: "
+                  + (", ".join(sov["allowlist"]) or "(loopback + local only)"))
+        print(f"  default class  : {sov['default_data_class']}")
+        print(f"  models         : " + (", ".join(sov["members"]) or "(none)"))
+        print(f"  eligible local : "
+              + (", ".join(sov["eligible_local"]) or "(none — sovereign would "
+                 "fail closed)"))
         print()
         print(usage.report(7))
     elif args.command == "replay":
@@ -572,11 +720,15 @@ def main(argv: list[str] | None = None) -> int:
             if inp:
                 print(f"  input: {inp[:200]}")
             for d in decisions:
-                agent = (d.get("agent") or {}).get("model", "?")
+                # The model lives in the top-level decision field
+                # (d['model'] = {provider, model, version}, from _model_meta) —
+                # the agent dict is {name, role} with no model key, so reading it
+                # there printed 'model=?' on every line.
+                model = (d.get("model") or {}).get("model") or "?"
                 ref = d.get("model_response_ref") or "—"
                 out = (d.get("outcome") or {}).get("status", "?")
                 print(f"\n  [{d.get('record_id')}] {d.get('decision_type')} "
-                      f"({out}, model={agent}, response={ref[:12]})")
+                      f"({out}, model={model}, response={ref[:12]})")
                 rat = d.get("rationale")
                 if rat is not None:
                     text = rat if isinstance(rat, str) else \
@@ -619,39 +771,87 @@ def main(argv: list[str] | None = None) -> int:
         kind = "DEV (local use only)" if witness.is_default_seed() else "release"
         print(f"Wrote signed {kind} manifest: {path}")
         print(f"  signing key (public): {witness.public_key_hex()}")
-    elif args.command == "witness-pubkey":
+    elif args.command in ("witness-pubkey", "pubkey"):
         from . import witness
         if not witness.available():
             print("Cannot derive key: the cryptography backend is unavailable.")
             return 1
-        print(witness.public_key_hex())
+        pub = witness.public_key_hex()
+        print(pub)
+        # Key-custody guidance on stderr so `olympus pubkey` still pipes the bare
+        # key on stdout (e.g. into witness_pubkey.txt) while telling an operator
+        # how to make it a real root of trust.
+        if witness.is_default_seed():
+            print("\nposture: DEV — this is the PUBLIC default key; anyone can "
+                  "forge signatures with it.\n"
+                  "To make signatures authentic:\n"
+                  "  export OLYMPUS_SIGNING_SEED=\"$(python -c 'import secrets;"
+                  "print(secrets.token_hex(32))')\"\n"
+                  "  olympus pubkey > olympus/witness_pubkey.txt   # pin the "
+                  "derived key\n"
+                  "  # or set OLYMPUS_PINNED_PUBKEY to this value\n"
+                  "See docs/SIGNING.md (HSM/KMS recommended for the seed).",
+                  file=sys.stderr)
+        else:
+            pin = witness.pinned_pubkey()
+            state = ("matches the pinned key" if pin and pin.lower() == pub.lower()
+                     else "NOT yet pinned — add it to witness_pubkey.txt / "
+                          "OLYMPUS_PINNED_PUBKEY" if not pin
+                     else "DIFFERS from the pinned key (rotation in progress?)")
+            print(f"\nposture: PRODUCTION — derived from OLYMPUS_SIGNING_SEED; "
+                  f"{state}.", file=sys.stderr)
     elif args.command == "verify":
         from pathlib import Path
         from . import witness
         if not witness.available():
             print("Cannot verify: the cryptography backend is unavailable.")
             return 1
+        require_prod = getattr(args, "require_production", False)
+        if args.run:
+            return _verify_run_combined(args.run, require_prod)
         if args.log:
-            r = witness.verify_run(args.log)
-            if r["ok"]:
-                print(f"✓ run {args.log}: decision log is intact and signed by "
-                      "the trusted key.")
-            else:
+            from . import trace
+            run = trace.load_run(args.log)
+            dev = (witness.log_signed_by_default(run) if run
+                   else witness.is_default_seed())
+            # Verify a dev-posture log against the default seed's key (integrity
+            # only), so it doesn't fail once the instance hardens its own seed.
+            r = witness.verify_run(
+                args.log,
+                pin=witness.default_public_key_hex() if dev else None)
+            if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
                 return 1
+            if dev and require_prod:
+                print(f"[verify] FAIL: run {args.log} is {_DEV_LABEL} "
+                      "--require-production forbids it.")
+                return 1
+            if dev:
+                print(f"✓ run {args.log}: decision log is internally consistent.")
+                print(f"  {_DEV_LABEL}")
+            else:
+                print(f"✓ run {args.log}: decision log is intact and signed by "
+                      "the trusted (production) key.")
         else:
             r = witness.verify_release(
                 Path(args.manifest) if args.manifest else None,
                 allow_dev=args.allow_dev)
-            if r["ok"]:
-                note = " (dev manifest, accepted for local use)" if r.get("is_dev") else ""
-                print("✓ verified: every tracked file matches the signed "
-                      f"manifest and the signature is from the trusted key{note}.")
-            else:
+            if not r["ok"]:
                 for p in r["problems"]:
                     print(f"[verify] {p}")
                 return 1
+            if r.get("is_dev") and require_prod:
+                print(f"[verify] FAIL: manifest is {_DEV_LABEL} "
+                      "--require-production forbids it.")
+                return 1
+            if r.get("is_dev"):
+                print("✓ verified: every tracked file matches the signed "
+                      "manifest and its signature is internally consistent.")
+                print(f"  {_DEV_LABEL}")
+            else:
+                print("✓ verified: every tracked file matches the signed "
+                      "manifest and the signature is from the trusted key.")
     elif args.command == "reports":
         from . import support
         items = support.recent(100)
@@ -708,8 +908,23 @@ def main(argv: list[str] | None = None) -> int:
         except backup.BackupError as err:
             print(f"✗ restore refused: {err}")
             return 1
+        except Exception as err:
+            # A wrong vault key (Fernet InvalidToken), a corrupt gzip/tar, or bad
+            # manifest JSON otherwise escapes as a raw traceback — surface it as
+            # the documented refusal instead.
+            print(f"✗ restore failed: {type(err).__name__}: {err}")
+            return 1
+        # Distinguish "no signature present" from "signature present but FAILED"
+        # (an --insecure restore of a tampered signed archive) — collapsing both
+        # to 'unsigned' hides a security-relevant fact.
+        if res.get("signature_ok"):
+            sig_state = "signature verified"
+        elif res.get("signed"):
+            sig_state = "signature INVALID — restored via --insecure"
+        else:
+            sig_state = "unsigned"
         print(f"✓ restored {res['restored']} files into {res['into']} "
-              f"({'signature verified' if res['signature_ok'] else 'unsigned'}).")
+              f"({sig_state}).")
         if res["mismatched"]:
             print(f"  ⚠ {len(res['mismatched'])} file(s) failed integrity: "
                   f"{res['mismatched'][:5]}")
@@ -720,10 +935,17 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "ask":
         if not firstrun.ensure_ready():
             return 1
-        from . import config
+        from . import config, security
+        try:
+            pool = config.ModelPool.from_env()
+            if config.data_class_local_only(args.data_class):
+                pool = pool.local_only()      # fail-closed if no local member
+        except security.SovereigntyError as err:
+            print(f"[sovereign] {err}", file=sys.stderr)
+            return 1
         bot = orchestrator.Olympus(
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
-            pool=config.ModelPool.from_env())
+            pool=pool)
         print(bot.ask(" ".join(args.question)))
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
@@ -754,6 +976,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  · {m}")
     elif args.command == "gate":
         print(orchestrator.gate_skills())
+    elif args.command == "curate":
+        from . import curator
+        print(curator.curate())
+    elif args.command == "mcp-serve":
+        from . import mcp_server
+        try:
+            mcp_server.serve_stdio()
+        except KeyboardInterrupt:
+            pass
     elif args.command == "train":
         print(orchestrator.train_specialists(focus=args.focus))
     elif args.command == "models":
@@ -913,7 +1144,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             job = scheduler.add(args.name, args.interval, prompt,
                                 deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every {job.interval // 60}m.")
+            print(f"Scheduled '{job.name}' every "
+                  f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):
@@ -922,7 +1154,56 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "run":
             ran = scheduler.run_due()
             print("\n".join(ran) if ran else "Nothing due right now.")
-    elif args.command == "web":
+    elif args.command == "goal":
+        from . import goals
+        detail = " ".join(args.detail).strip()
+        if args.action == "list":
+            print(goals.summary())
+        elif args.action == "add":
+            text, _, contract = detail.partition("::")
+            print(goals.add("cli", text.strip(), contract.strip()))
+        elif args.action == "check":
+            g = goals.get(detail)
+            if g is None:
+                print(f"No goal with id '{detail}'.")
+                return 1
+            v = goals.judge(g)
+            state = "DONE" if v["done"] else "not done"
+            print(f"[{g.id}] {state} (confidence {v['confidence']:.2f})\n"
+                  f"evidence: {v['evidence'] or '(none)'}\n"
+                  f"missing:  {v['missing'] or '(nothing)'}")
+        elif args.action == "work":
+            g = goals.get(detail)
+            if g is None:
+                print(f"No goal with id '{detail}'.")
+                return 1
+            print(goals.work_one(g))
+        elif args.action == "drop":
+            print(goals.set_status(detail, "dropped"))
+        elif args.action == "done":
+            print(goals.set_status(detail, "done",
+                                   evidence="closed manually by the operator"))
+        elif args.action == "wait":
+            parts = detail.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                print("Usage: olympus goal wait <goal id> <pid>")
+                return 1
+            print(goals.wait_on(parts[0], int(parts[1])))
+    elif args.command == "distill":
+        from . import learn
+        print(learn.distill(" ".join(args.source), allow_paths=True))
+    elif args.command == "journey":
+        from . import journey
+        if args.action == "list":
+            print(journey.timeline())
+        elif args.action == "show":
+            print(journey.show(args.ref))
+        elif args.action == "rm":
+            print(journey.remove(args.ref))
+    elif args.command == "moa":
+        from . import moa
+        print(moa.one_shot(" ".join(args.prompt)))
+    elif args.command in ("web", "serve"):
         from . import web
         try:
             web.serve(args.host, args.port)

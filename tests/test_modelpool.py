@@ -94,3 +94,12 @@ def test_assignment_is_readable():
     text = pool.assignment()
     assert "reasoning" in text and "coding" in text
     assert "claude-opus-4-8" in text and "gpt-4o" in text
+
+
+def test_default_model_reads_env_live(monkeypatch):
+    # default_model() must read OLYMPUS_MODEL live (config.env is loaded AFTER
+    # this module is imported, so the MODEL snapshot can be stale).
+    monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8-custom")
+    assert config.default_model() == "claude-opus-4-8-custom"
+    monkeypatch.delenv("OLYMPUS_MODEL", raising=False)
+    assert config.default_model() == "claude-opus-4-8"

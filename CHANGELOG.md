@@ -15,7 +15,16 @@ carries a migration note here.
 
 ## [Unreleased]
 
-## [0.22.0] — 2026-07-03
+> **Release-state note.** As of this writing the latest *published* release is
+> **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
+> through `0.24.0` sections below were prepared and dated but **never tagged or
+> published** — so they are not releases yet, and everything from `0.22.0`
+> down to this note is effectively unreleased pending a tagging decision (see
+> RELEASING.md). The dated headers are kept for review; re-date and tag them
+> when a release is actually cut. `pyproject.toml` currently reads `0.24.0` as
+> the in-development version, not a shipped one.
+
+## [0.24.0] — 2026-07-03
 
 A trust-and-adaptation release distilled from a close study of the Hermes agent:
 adopt the best of its UX, but build the Olympus-native step beyond — verified,
@@ -72,6 +81,590 @@ screen-by-screen analysis and the backlog these changes came from.
 - **Curated starter-skill pack** (`olympus skills-starter`, provisional/gated)
   and **email + inbound-webhook gateways** (`olympus email`, `olympus webhook`)
   reusing the shared gateway pipeline.
+
+### Added
+
+- **`/learn <anything>`** (`olympus distill`, `/learn` in chat) — distill a
+  reusable skill on command from a URL (SSRF-guarded, wrapped untrusted), a
+  local file/directory (operator-only: CLI/TUI — chat users cannot read
+  server paths), or a described workflow. The distillate rides the existing
+  safety machinery: created provisional (benchmark-gated), scanned with the
+  same injection/credential scan as skill imports, sanitized before write.
+- **`/journey`** (`olympus journey`) — the browsable timeline of everything
+  learned: skills (with provisional status), lessons, corrections, feedback,
+  prompt upgrades. `journey show <ref>` inspects an entry; `journey rm
+  <ref>` removes one (skills archive recoverably) so a wrong lesson stops
+  shaping future answers.
+- **MoA polish** — `/moa <question>` (and `olympus moa`) runs one prompt
+  through the ensemble regardless of the configured provider, showing each
+  reference model's answer as a labelled block before the aggregate;
+  `OLYMPUS_MOA_SAVE_TRACES=1` persists full ensemble traces to reports.
+- **`/goal wait <id> <pid>`** — park a standing goal's work cycles while a
+  long-running process (build, backtest) finishes; the heartbeat resumes
+  the goal with a progress note when the process exits.
+- **TUI conveniences** — `/prompt` composes a multi-line question in
+  `$EDITOR`; `/reasoning` shows how the last answer was produced (the run's
+  recorded pipeline trace: routing, specialist spans, verification
+  decisions — also available in chat gateways); `/timestamps on|off`.
+- **Voice notes on every gateway** — Signal (signal-cli attachments),
+  Discord (slash-command audio attachments), and Slack (voice clips /
+  audio uploads, fetched with the bot token) now transcribe into the text
+  pipeline as `[voice note] …`, completing the Telegram/WhatsApp coverage.
+  Non-audio attachments are ignored; oversized audio is skipped.
+- **Session auto-resume on Slack and Discord** — both now journal the
+  request they are processing. Slack re-runs it after a restart and
+  delivers to the same channel (chat.postMessage doesn't expire). Discord
+  interaction tokens DO expire, so the honest fallback re-runs the request
+  and posts the answer via the notify webhook naming the requester — or,
+  with no webhook configured, logs the loss visibly instead of silently.
+- **Operator admin panel, Phase 3 (configuration from the browser)** — a
+  strict allowlist of settings (channels, SMTP/webhooks, model pool,
+  connector policy; `olympus/opconfig.py`) is now editable from `/admin`.
+  Secrets are stored in the encrypted vault (`OLYMPUS_SECRET_KEY`; the panel
+  refuses rather than ever writing a secret to disk in the clear, and evicts
+  stale plaintext copies from config.env); non-secrets go to the setup
+  wizard's `~/.olympus/config.env`. Values hydrate into every `olympus`
+  process at start with env-wins precedence, and every change reports
+  honestly where it's live now and which processes need a restart — a saved
+  value shadowed by a real env var is flagged. MCP servers can be added
+  (same security scan as `add-mcp`) and removed, live everywhere with no
+  restart. The panel's own auth and process-weaponizing keys
+  (plugins dir, exec backend, memory dir, sovereign policy) are deliberately
+  NOT editable from the browser.
+- **Operator admin panel, Phase 2 (act on running state)** — the panel can
+  now drive what the CLI already exposes, via `POST /api/admin/act`:
+  approve/deny held actions across users (the approval spine's human step,
+  one click), add/complete/drop standing goals, add/enable/disable/remove
+  scheduled tasks, trigger the skill gate/curation/backup in the background,
+  and set a user's autonomy level. Mutations require an `X-Olympus-Admin`
+  header on top of the operator auth (custom headers force a CORS preflight
+  this server never approves, so cross-origin pages can't fire mutations at
+  a loopback panel). Configuration stays CLI-only (Phase 3).
+- **Operator admin panel, Phase 1 (read-only)** — `/admin` on the web server
+  is a single-pane overview of a running instance: channels configured, model
+  pool + role assignment, budget and per-model spend, every heartbeat cycle
+  with last-run/next-due, standing goals, pending approvals across users,
+  skills, scheduled tasks, connectors (MCP/plugins/hooks), security posture,
+  and recent errors. Strictly read-only; secrets appear only as booleans and
+  hosts. Data rides `GET /api/admin`, gated by `OLYMPUS_ACCESS_TOKEN` — or
+  loopback-only when no token is set (never open on a public bind or behind
+  a proxy). See docs/ADMIN_PANEL.md.
+
+### Added — capabilities adopted from the Hermes-agent analysis (docs/HERMES_WATCH.md)
+
+- **Standing goals with completion contracts** (`olympus/goals.py`) — `/goal`
+  (chat) and `olympus goal add/list/check/work/drop/done` set objectives that
+  outlive the conversation. The heartbeat works each active goal on a cadence
+  (`OLYMPUS_GOALS_EVERY`, default 6h) and a verify-role judge closes it **only
+  on concrete evidence in the progress log** — assertions are not evidence.
+  Goals stall (with a push notification) instead of looping forever.
+- **Skill-library curation** (`olympus/curator.py`, `olympus curate`,
+  `OLYMPUS_CURATION_EVERY` default 7d) — the retirement half of
+  self-improvement: a scoped, tool-free model call grades every proven skill;
+  a prune candidate is archived (recoverably) only if hiding it doesn't lower
+  the affected benchmark — the admission gate run in reverse; consolidations
+  are queued as lessons for Metis.
+- **Mixture-of-Agents provider** (`OLYMPUS_PROVIDER=moa`) — the configured
+  model pool becomes an ensemble: every completion fans out to the members as
+  reference models and the strongest member aggregates their drafts into one
+  answer. Tool-using runs route to the aggregator member.
+- **Provider failover chains** — a provider-side failure (auth/rate/outage) on
+  an operator-pool member now retries the other pool members in order
+  (`OLYMPUS_FALLBACK=0` disables). BYOK/per-request credentials never fail
+  over; refusals and replay divergences surface unchanged.
+- **Voice input** — `transcribe_audio` tool (OpenAI-compatible
+  `/audio/transcriptions`, `OLYMPUS_STT_MODEL`) plus Telegram/WhatsApp voice
+  notes transcribed into the normal text pipeline as `[voice note] …`.
+  Registered as an INGESTION tool: spoken injection is still injection.
+- **MCP server mode** (`olympus mcp-serve`) — Olympus as an MCP server on
+  stdio, exposing `ask_olympus` (the full fact-checked pipeline) and
+  `olympus_goals` to Claude Desktop, IDEs, and other MCP clients.
+- **`/steer <note>`** — mid-run steering: gateways handle it outside the
+  per-user serial worker so the note reaches the *running* pipeline after its
+  next tool round (frozen per round, so replays stay byte-identical).
+- **`/undo [N]`** — removes the last N exchanges from the persisted
+  conversation (TUI, gateways, Telegram, WhatsApp), stopping at compaction
+  boundaries.
+- **Plugin lifecycle hooks** — `@hook("pre_tool")` can block or rewrite a tool
+  call (composing with, never bypassing, the approval spine); `post_tool` can
+  rewrite results; `session_start`/`run_start`/`run_end`/`pre_llm_call`/
+  `post_llm_call` observe. Broken hooks are contained.
+- **`@file` / `@url` context references** in the interactive TUI — expanded
+  into delimited context blocks; URL content rides the SSRF-guarded fetcher
+  and is wrapped as untrusted.
+- **Cross-session prompt caching** — `OLYMPUS_CACHE_TTL=1h` extends the
+  Anthropic cache breakpoints (system prompt + tool schemas) to the 1-hour
+  tier, keeping the cache warm across heartbeat cycles and gateway chats.
+- **Activity-based exec timeouts + watch patterns** — `sandbox.run` now kills
+  on *silence*, not elapsed time (output extends the lease up to the 600s
+  ceiling), returns partial output on timeout, and an optional `watch` regex
+  collects matching output lines.
+- **Post-write verification** — `write_file` verifies the bytes landed and
+  parse-checks py/json/toml/yaml, surfacing the verdict to the agent in the
+  action result (catches silent write failures in the same turn).
+- **Session auto-resume** — Telegram/WhatsApp journal the request they are
+  processing; after a gateway restart the stale entry is re-run once and the
+  user is told, instead of the request vanishing silently.
+
+### Security
+
+- **Outbound secret-exfiltration scanning** (`security.secret_exfil_reason`)
+  — the actual secrets this process holds (vault entries + key-shaped env
+  vars) are detected leaving in outbound content, raw or base64/hex/
+  url-encoded. Always-on floor in web fetches, `send_email`, `call_webhook`,
+  the contribution pool, and `egress.guard` (HOLD on every channel; an
+  explicit human approval can still release).
+- **Skill imports are scanned, not trusted** — `skill-import` refuses
+  SKILL.md files carrying prompt-injection markers or embedded credentials.
+- **MCP connector definitions are validated on the way in** — non-https URLs,
+  credentials-in-URL, SSRF-blocked hosts, and literal tokens in `auth_env`
+  (instead of an env-var name) are refused before they persist.
+
+
+### Security — close operator API-key exfiltration and BYOK bypass
+
+- `Settings.merged` dropped inherited credentials only on a *provider* switch,
+  so a same-provider `base_url` override kept the operator's env key and sent it
+  to a visitor-supplied host; the Anthropic SDK also fell back to
+  `ANTHROPIC_API_KEY` when the key was cleared. Now an endpoint change drops the
+  inherited key, and `llm.client` passes an empty key to a custom `base_url` so
+  it fails closed. `web._brought_own_key` counts only a *primary* `api_key` as
+  BYOK (a bare `base_url` or an `extra`-model key no longer unlocks the free /
+  `OLYMPUS_REQUIRE_BYOK` wall while the primary pipeline runs on the operator's
+  key). `/api/login|register|logout` are now rate-limited (were dispatched
+  before the limiter — password brute-force + PBKDF2 CPU-DoS).
+  `tools._read_source_file` uses path-component containment (a string-prefix
+  check accepted sibling dirs like `<root>-backup/`). `spawn_subagent` inherits
+  the calling run's credentials so a BYOK visitor's subagent runs on their key.
+- Packaging: added `.dockerignore` (keeps `.env`/`deploy/.env`/`keys.sh`, `.git`,
+  and local `memory/` out of the image); the Dockerfile now installs the
+  hash-pinned `requirements.lock` and the package itself; the Auto-Upgrade
+  workflow is gated on `author_association` so an issue body can't drive its
+  write-capable coding agent.
+
+### Fixed — replay/verify, routing, and a batch of correctness bugs
+
+- Replay now freezes and restores conversation history and fast-mode and records
+  the model that actually ran each stage, so `olympus replay` / `verify --log`
+  no longer diverge spuriously on multi-turn or fast-mode runs; `_plan` no
+  longer swallows a `ReplayDivergence`.
+- `olympus verify` now detects files *added* since signing (injected-file
+  detection), and dev-posture runs verify against the default seed's key so they
+  don't fail once the instance sets `OLYMPUS_SIGNING_SEED`.
+- Added the server-side `web_fetch` tool on the Anthropic provider (the
+  verifiers were told to call it but it wasn't declared); the router no longer
+  reports unparseable route JSON as a safety refusal.
+- Misc: prompt-restore no longer corrupts a prompt on a multi-line update
+  reason; `operator.authorized` matches subdomains of an authorized site;
+  schedule confirmations render the coarsest unit (`7d`, not `168h`); backup
+  closes a leaked temp fd; `cli restore` reports failures instead of a raw
+  traceback and distinguishes an invalid signature from unsigned;
+  `codegraph_path` returns a message for unknown symbols; the LLM client cache
+  is bounded and the final retry no longer sleeps; the web session cap
+  FIFO-evicts instead of wiping every user's session; the per-session event
+  buffer is bounded; and a rejected chat (400/402) no longer burns a daily-chat
+  quota slot.
+
+### Changed — documentation honesty and drift guards
+
+- Corrected the "server-side sandbox, never on your machine" claim across README,
+  `docs/THREAT_MODEL.md`, and the code-eval path — model code runs approval-gated
+  as a local subprocess by default (opt-in `OLYMPUS_EXEC_BACKEND=docker` for OS
+  isolation). Fixed the "26 tools" → 60 count and the "12/11 specialists" → live
+  count, and added CI-enforced guards (`threatmodel.check`, interpolated UI
+  count) so both can't drift again. Marked the shipped design docs as
+  implemented (were "proposed"/"not wired up").
+
+## [0.23.0] — unreleased (prepared; not tagged or published)
+
+### Security — deep-diagnostic hardening pass
+
+- **Capability separation closed on `extra_tools` ingestion.** A specialist that
+  reads untrusted content only through its own tools (Angelos via
+  `read_inbox`/`read_email`/`read_calendar`, Mnemosyne via `watch_youtube`) was
+  treated as non-ingesting, so it kept action capability and received global
+  action plugins/MCP servers. `Specialist._ingests` now derives from the full
+  loadout, so any INGESTION tool denies action capability.
+- **Prometheus no longer ingests the live web** while holding self-modifying
+  tools (`update_prompt`, `restore_prompt`, `propose_upgrade`, …); its "scan
+  outward" reads Argus's already-vetted reports from memory instead.
+- **`spawn_subagent` can no longer reach privileged specialists.** Delegation is
+  refused for system specialists and any that hold an actuator in a fresh run
+  (Prometheus, Metis, Hermes, Chronos), so an injected page can't launder a
+  self-modification or credentialed action through a sub-agent.
+- **`send_email` / `call_webhook` route through the approval spine** (prepare →
+  auto-or-hold); nothing world-affecting auto-sends.
+- **SSRF gate** on `browse_page`/`_http_get`/`_call_webhook`, with every redirect
+  hop re-validated (a public URL that 302s to an internal/metadata host is
+  blocked).
+- **`browser_act` is operator-authorization-gated**, and the operator gains a
+  real `FINANCIAL_LEGAL` risk tier (no longer silently downgraded).
+- **Path-traversal guards** on backup restore (manifest-driven moves) and
+  `import_memory`, so a crafted archive can't write outside its target.
+- **Backup restore is all-or-nothing** (verify every hash before moving any
+  file); **backup create refuses to write plaintext** if encryption is
+  configured but fails.
+- **Decision-log verification fails closed** without a crypto backend and gains
+  an explicit pinning path (`OLYMPUS_LOG_PIN`) for third-party verifiers.
+
+### Added
+
+- **`gate_prompt`** — a code-enforced, benchmark-gated prompt upgrade: applies a
+  rewrite only if a before/after benchmark shows no regression and rolls it back
+  automatically otherwise, making the "measured, with rollback" guarantee real
+  (the enforced counterpart to `update_prompt`).
+
+### Fixed
+
+- `tools.py` used `json` with no module-level import → `NameError` on any
+  operator call passing real JSON params.
+- `olympus explain` read the model from the wrong field and printed `model=?`;
+  it now shows the real model per decision.
+- Streamed runs (`ask_stream`) now record their input, so they are replayable.
+- Parallel-dispatch `contract`/`egress` decisions are order-stabilized, removing
+  false replay-gate divergences when contracts or the egress guard are enabled.
+- Atomicity/robustness: the usage ledger (budget could reset to 0 on a torn
+  write) and the verified-facts cache (crash on a malformed line; non-atomic
+  compaction) are now crash-safe; the companion interaction counter no longer
+  loses updates under concurrent turns.
+- `restore_prompt` is now a real rollback stack (was newest-only); the relgraph
+  refuses new nodes at its cap instead of fabricating false edges; memory
+  auto-supersede compares against decayed (not stored) confidence; the scheduler
+  renders intervals in their coarsest unit (`7d`, not `168h`).
+- Chat-gateway dedup evicts oldest-first instead of clearing the whole set (a
+  retry past the cap could be answered twice); Discord/Slack gateways ack fast
+  and run the pipeline off-thread with event de-duplication.
+- A non-positive heartbeat cadence now means "off" instead of "run every tick";
+  `Specialist.run` honors the specialist's configured effort; the default model
+  is read from the environment live.
+
+### Changed
+
+- README: the "verification gate" claim is scoped to the code (the supervisor
+  flags which answers are factual; only those are checked), the Install/Setup
+  sections are de-duplicated, and the Discord/Slack/Signal gateways are
+  documented. Several overstated docstrings corrected (sandbox "confinement",
+  operator "second fence", `_maybe_compact`, OpenAI-compat `effort`).
+
+### Added — Optional in-run tool-transcript compaction (`olympus/transcript.py`)
+
+- Closes the last context boundary: the chat layer already compacts old
+  *conversation* turns; this compacts within a **single agent run** so a
+  tool-heavy loop (many/large `web_fetch`/`read_file`/codegraph results) doesn't
+  drown in its own scrollback. When the run's messages exceed a budget, the
+  **contents of older `tool_result` blocks are shrunk in place** while the most
+  recent ones stay verbatim. **Off by default** (`OLYMPUS_INRUN_COMPACT`;
+  `elide`/`1` = deterministic, `summarize` = LLM summary of old results;
+  `OLYMPUS_INRUN_BUDGET`, `OLYMPUS_INRUN_KEEP_RECENT`).
+- **Replay-safe by construction:** it never removes/reorders messages and never
+  separates a `tool_use` from its `tool_result` (only the content string of old
+  tool_results changes), so pairing/alternation invariants hold; and it is a
+  pure function of the message stream, which is identical under replay (tool
+  results are frozen) — so downstream request hashes match and replay stays
+  byte-identical. The optional summarizer routes through the already-frozen
+  `backend.complete_text`, so "summarize" mode replays deterministically too.
+  Documented requirement: replay a recorded run with the same
+  `OLYMPUS_INRUN_COMPACT` setting it was recorded with (moot at the default).
+- Not needed today (the 16-iteration cap already bounds a run); this is for when
+  you raise `MAX_AGENT_ITERATIONS` for deep autonomous single-runs. Covered by
+  `tests/test_transcript.py`. No capability-count change.
+
+### Changed — Strengthen the 13 specialists (three levers)
+
+1. **Sharper prompts.** The seven thinnest specialist prompts (plutus, peitho,
+   aegis, chiron, chronos, argus, mnemosyne) gain a focused "nail these" block
+   tied to the concrete behaviors the deepened benchmark rewards — e.g. Plutus's
+   match→high-APR-debt→buffer→invest ordering and break-even rule, Aegis's
+   "never click the link / ordered incident response", Chronos's "no perfect
+   cross-timezone time → rotate". Additive, identity-preserving sharpening.
+2. **Per-specialist model role + effort (data-driven tiering).** `Specialist`
+   gains `role` ("reasoning" | "coding" | "verify") and `effort` fields; model
+   routing (`ModelPool.for_specialist`) now reads the role from the registry
+   instead of a hardcoded map, and the orchestrator passes each specialist's
+   effort. Defaults preserve today's behavior (single-model pools are a no-op,
+   effort stays "high"); the value shows in a multi-model pool, where each
+   specialist routes to the member strongest for its kind of work.
+3. **Output contracts in use.** The previously-unused contract hook now carries
+   real (off-by-default) guards: Iris caps reply length (concise social copy),
+   Argus caps tool calls (runaway-scan ceiling). Enforced only when
+   `OLYMPUS_CONTRACTS` is enabled; inert otherwise.
+
+`tests/test_specialist_strength.py` covers all three. No capability-count change.
+
+### Changed — Deeper specialist benchmark (strengthens the self-improvement loop)
+
+- Expanded `olympus/benchmarks.json` from 17 items to **50** — **5 per
+  user-facing specialist** (was as low as 1 for plutus/iris/chiron/chronos/
+  argus/mnemosyne). The benchmark is the signal Prometheus's measured-training
+  loop optimizes against and the basis for `olympus scores`; with one item per
+  specialist the score was too noisy to tell a good prompt from a bad one and to
+  catch regressions. Deeper, varied, harshly-gradeable items give every
+  specialist real signal to be strengthened against — no engine change needed,
+  the existing train-with-rollback loop now has something to push on.
+- `tests/test_benchmarks.py` guards depth (≥5 per user-facing specialist),
+  unique ids, valid specialist keys, and well-formed task/criteria.
+
+### Added — "What Olympus learned on its own" readout (`olympus/digest.py`)
+
+- A plain-language summary of the autonomous loop's recent activity: when each
+  cycle last ran (world scan, video learning, daily skill distillation,
+  training, self-audit), the skill count, and recent world reports / lessons /
+  self-upgrades. Read-only over the heartbeat's persisted state + memory — no
+  model calls. Surfaced three ways: the `olympus learned` CLI command, the
+  `/learned` chat command, and the `recent_learning` agent tool (granted to
+  Metis) so you can just ask "what did you learn while I was away?".
+- New `memory.recent_titles(category, n)` helper. Tools 58 → 59; commands
+  66 → 67. THREAT_MODEL row, `capabilities.json`, README counts, and
+  `tests/test_digest.py` added.
+
+### Changed — Always-on learning runs by default in the cloud deploy
+
+- `deploy/docker-compose.yml` now enables the `heartbeat` service by default, so
+  a standard `docker compose up -d` runs Olympus's self-learning loop (world
+  scans, YouTube learning, daily skill distillation, weekly self-audit, and any
+  scheduled operator jobs) around the clock — not just the chat server. It
+  shares the memory volume, so what it learns is immediately available to chat.
+- Background spend is bounded by `OLYMPUS_DAILY_BUDGET` (deploy `.env.example`
+  ships `=20`; cycles skip once the cap is hit). Documented loudly that
+  `OLYMPUS_DAILY_BUDGET=0` means *unlimited*, not off — to disable the loop you
+  comment out the `heartbeat` service. `deploy/README.md` updated accordingly.
+
+### Added — Operator interactive layer: secure capture, inline approval, auto-launch, advanced mode
+
+- **Secure credential capture out of the model loop** (`olympus/securecapture.py`
+  + `operator_remember_login`): a tool records a pending request (domain only);
+  after the turn a private `getpass` prompt collects the credentials and stores
+  them in the vault. The password never passes through the model or a tool arg.
+- **Plain-English approval** (`olympus/approvals.py` + `interactive.after_turn`):
+  a held action is shown as its preview and confirmed with a simple "yes" —
+  mapped to `actions.approve`/`reject`. No `olympus approve <id>` needed.
+- **Browser auto-launch** (`browser.launch_local` / `_find_chrome` /
+  `_chrome_args`): finds Chrome (PATH or the bundled Playwright build) and starts
+  it with remote debugging, headed by default so manual sign-in is visible.
+  Opt-in via `OLYMPUS_BROWSER_AUTOLAUNCH=1`; `_build_transport` uses it.
+- **Advanced-mode toggle** (`set_advanced_mode` → `operator.advanced`): off by
+  default keeps everything plain-English; the Hermes prompt hides env/CLI/IDs
+  unless it's on.
+- New module `olympus/interactive.py` centralizes the post-turn interactions
+  behind an injectable IO (fully unit-tested); `tui.run` calls it once per turn,
+  guarded. Tools 56 → 58. THREAT_MODEL rows, `capabilities.json`, README, and
+  `tests/test_interactive.py` added.
+
+### Added — Operator for non-engineers: plain-English setup (`docs/DESIGN_OPERATOR_UX.md`)
+
+- The operator can now be turned on and authorized **per site, through
+  conversation** — no env vars, no CLI, no "vault" for a normal user. Settings
+  persist per-user in `prefs`; `enabled(user)` is `env OR the user's opt-in` and
+  `authorized(user, domain)` is `(env domains OR their authorized sites) AND the
+  egress allowlist`. The `OLYMPUS_OPERATOR*` env vars remain as an additive
+  engineer/admin override.
+- **Manual sign-in is the default and works end to end with no password
+  handling:** the person signs in themselves and Olympus reuses the session —
+  it never sees or stores a password. An opt-in **remember** mode stores
+  credentials in the vault via a secure local prompt (primitive shipped;
+  in-chat secure capture is the next interactive step).
+- **Three conversational tools** for HERMES (53 → 56): `operator_authorize_site`
+  (manual | remember), `operator_forget_site`, `operator_status`. The Hermes
+  prompt leads with manual sign-in and never tells a non-technical user to set
+  env vars or run commands.
+- All operator gating (`browser_login`, `browser_operate`, `operator_schedule`,
+  scheduled jobs, and the spine `execute`) is now per-user; scheduled jobs are a
+  silent no-op for users who haven't enabled the operator. THREAT_MODEL rows,
+  `capabilities.json`, README count, and `tests/test_operator_ux.py` added.
+
+### Added — HERMES operator, Phases 2-4: credentialed actions, always-on, self-healing
+
+- **Credentialed actions on the approval spine (Phase 2).** `browser_operate`
+  runs declarative action templates (`site_template_record`) as
+  `actions.ActionType`s — two are registered: `browser_operate` (NOTABLE, can
+  auto-run within a granted `browser.operate` scope + autonomy) and
+  `browser_operate_irreversible` (IRREVERSIBLE, **always** requires explicit
+  approval). They inherit the whole spine: deny-first scopes, daily runaway
+  caps, and the immutable audit log. Templates are ordered assert/click/fill/
+  wait steps — there is no "interpret the page" path.
+- **Always-on operator jobs (Phase 3).** `operator_schedule` stores standing
+  jobs that `heartbeat.tick()` runs via `operator.run_due()`. Every run goes
+  back through the spine, so irreversible templates still wait for approval and
+  everything is scope/budget gated. No-op unless `OLYMPUS_OPERATOR` is on.
+- **METIS/Prometheus weave (Phase 4).** `operator_review` (Metis + daily
+  heartbeat) prunes site profiles that fail consistently; `propose_site_profile`
+  (Prometheus) files human-reviewable profile/selector patches that are never
+  self-applied. Loadouts: Hermes gains operate/template/schedule, Metis gains
+  the review tool, Prometheus the proposal tool.
+- Tools 48 → 53; ActionTypes 11 → 13. THREAT_MODEL.md rows, `capabilities.json`,
+  README counts, and `tests/test_operator_phases.py` added. Real-Chrome smoke
+  still green.
+
+### Added — HERMES browser operator, Phase 1 (`docs/DESIGN_OPERATOR.md`)
+
+- **New specialist HERMES (Operator)** — the first agent that can perform
+  **credentialed** browser actions. It is deliberately **non-ingesting**
+  (`web=False`, and it has neither `browser_open` nor `browser_read`), so it
+  legitimately keeps the actuator while capability separation still holds
+  system-wide: the agent that reads the open web (Argus) never holds the
+  actuator, and the agent that holds the actuator (Hermes) never reads open-web
+  prose as instructions.
+- **Four new tools** (44 → 48), all threat-modeled: `browser_login`
+  (vault-backed login via a declarative site profile), `browser_exists` (a
+  yes/no selector predicate — never page prose), and `site_profile_record` /
+  `site_profiles` (provenance- and reliability-scored login recipes).
+- **Site Profiles** (`browser.SiteProfile`) — declarative per-domain login
+  recipes (login URL + selectors + success marker) with a content hash,
+  provenance, and an outcome-derived reliability score. Stored at
+  `MEMORY_DIR/site_profiles.json`. Credentials are **not** stored here.
+- This is Phase 1 of the operator: login + structured inspection only, **no
+  irreversible actions**. Always-on heartbeat playbooks and METIS/Prometheus
+  weaving are later phases.
+
+### Security — operator is off by default and fails closed
+
+- Master switch `OLYMPUS_OPERATOR` (default off) disables the entire
+  credentialed path. `browser_login` additionally requires the domain to be in
+  `OLYMPUS_OPERATOR_DOMAINS` **and** on the egress allowlist, and a vault entry
+  `site:<domain>` to exist — each missing gate fails closed.
+- Credentials come from the encrypted vault (`vault.get`); the password is
+  filled into the page but **never enters the model context or any output**.
+- `browser_login` is a registered `ACTION_TOOL` (stripped from any ingesting
+  run); a missing post-login success marker (2FA/CAPTCHA/selector drift) makes
+  it stop and report rather than retry.
+
+### Added — Governed browser harness (`olympus/browser.py`)
+
+- A stateful Chrome-DevTools-Protocol harness that lets a specialist drive a
+  **real** browser — Olympus's answer to the open-web "agent + CDP" pattern,
+  built so the browser inherits Olympus's governance instead of bypassing it.
+  The transport is pluggable: a lazy WebSocket transport attaches to Chrome
+  (`OLYMPUS_BROWSER_CDP_URL`, optional `websockets` extra), while an in-memory
+  `FakeTransport` keeps tests and headless CI fully offline — the core
+  dependency set is unchanged.
+- **Five named, threat-modeled tools** (39 → 44): `browser_open`,
+  `browser_read`, `browser_act`, `browser_skill_record`, `browser_skills`.
+  Granted to **Argus**.
+- **Provenance-scored skill library.** A browser skill carries its source,
+  author, creation time, a content hash, and an outcome-derived reliability
+  score (`successes/runs`); `browser_skills` ranks by measured reliability, not
+  blind trust. Stored at `MEMORY_DIR/browser_skills.json`.
+- **Replayable session ledger.** Every CDP call is appended to a per-session
+  ledger, so a browser session is auditable rather than a black box.
+- **Real-browser attach + opt-in smoke test.** `OLYMPUS_BROWSER_CDP_URL` accepts
+  a DevTools base (`http://host:port`, auto-discovering a page target) or a
+  `ws://` page URL; `tests/test_browser_smoke.py` drives real headless Chrome
+  through the live transport, skipped unless `OLYMPUS_BROWSER_SMOKE=1`.
+
+### Security
+
+- **Egress + SSRF gate on every navigation.** `browser_open` routes through
+  `security.url_block_reason` — no internal/metadata address, and under
+  sovereign mode no non-allowlisted host, can be reached. `browser_open` /
+  `browser_read` join `INGESTION_TOOLS`, so their output is wrapped as
+  untrusted.
+- **Capability separation closes the credential kill-chain.** `browser_act`
+  (click/type on a possibly logged-in session) is a registered `ACTION_TOOL`,
+  so it is stripped from any run that also ingests untrusted page content. Argus
+  reads/learns via the harness but, because it ingests the web, never holds the
+  credentialed actuator in the same run — proven in `tests/test_browser.py`.
+- **Hardening pass.** The SSRF/egress gate is re-run against the *landed* URL
+  after navigation (a 3xx redirect or JS navigation onto an internal host is
+  blocked and the tab is sent to `about:blank` instead of surfacing its
+  content); the real transport bounds a single CDP frame (anti-OOM) and times
+  out a stuck reply instead of wedging the agent; `browser_open` waits (bounded)
+  for `readyState=complete` before reading; the CDP ledger is a bounded circular
+  buffer; and the skill store caps field/step lengths, bounds the library
+  (dropping lowest-reliability skills), and skips malformed entries.
+- See [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for the full
+  strengths→moats / weaknesses→credibility-assets rationale.
+
+## [0.22.0] — unreleased (prepared; not tagged or published)
+
+### Added — OpenAI-compatible inbound endpoint (SPEC-01)
+
+- **`olympus/openai_server.py`** (new) + the `web.py` handler — expose Olympus
+  as an OpenAI Chat Completions API: `POST /v1/chat/completions` (streaming and
+  non-streaming) and `GET /v1/models`, so any OpenAI client/IDE/app can drive
+  the full council by changing only `base_url` + `model` + `api_key`. Pure
+  stdlib request/response translation (messages→prompt, `chat.completion` /
+  `chat.completion.chunk` shaping, SSE ending in `data: [DONE]`, a usage
+  estimate); each request runs the existing `orchestrator` pipeline — no new
+  framework, no parallel pipeline.
+- **`config.api_keys()`** (`OLYMPUS_API_KEYS`) gates it: `/v1/*` is
+  **loopback-only** when unset (never a silent open relay), `401` on a bad
+  bearer token, `403` for a remote peer. `olympus serve` mounts the same
+  handler. See [docs/OPENAI_ENDPOINT.md](docs/OPENAI_ENDPOINT.md).
+
+### Added — provable zero-egress sovereignty mode (SPEC-02, off by default)
+
+- **`security.py`** — a single egress choke point `assert_egress_allowed(host)`
+  (typed `EgressBlocked`) with `host_on_allowlist()` / `egress_allowed()`.
+  Loopback, local providers, and `OLYMPUS_EGRESS_ALLOWLIST` (hosts/IPs/CIDRs)
+  are permitted; the existing SSRF guard routes through the same choke. A pure
+  no-op when sovereign mode is off — behaviour byte-for-byte unchanged.
+- **`config.py`** — `OLYMPUS_SOVEREIGN` / `OLYMPUS_EGRESS_ALLOWLIST`; the
+  `ModelPool` filters non-local members **before** model selection and **fails
+  closed** if none remain (no silent remote fallback), plus per-request
+  data-class routing (`olympus ask --data-class`, the `X-Olympus-Data-Class`
+  header). `olympus status` shows the mode, allowlist, and eligible models. See
+  [docs/SOVEREIGNTY.md](docs/SOVEREIGNTY.md).
+
+### Added — production-real audit & verification (SPEC-03)
+
+- **`olympus verify --run <id>`** — one PASS/FAIL that combines `replay_run`
+  (the byte-identical decision path) **and** the decision-log signature against
+  the trusted key, exiting non-zero and naming the divergence/signature failure.
+  `--require-production` fails a run signed under the public default seed, and a
+  default-seed pass is loudly labelled `DEV / UNVERIFIED`.
+- **`web.py`** — `/api/status` reports a `signing` posture object, and an OpenAI
+  endpoint answer carries `X-Olympus-Run-Id` + `X-Olympus-Audit` so a caller can
+  locate and verify the run behind it. New [docs/VERIFY.md](docs/VERIFY.md);
+  `docs/SIGNING.md` gains seed generation, HSM/KMS guidance, and a key-rotation
+  procedure.
+
+### Security
+
+- **Hardened the `/v1/*` loopback boundary** against header spoofing and the
+  reverse-proxy open-relay trap. The remoteness decision reads only the kernel
+  peer socket (never a forwarding header), unwraps IPv4-mapped IPv6, and — when
+  no `OLYMPUS_API_KEYS` are set — refuses non-loopback peers and requires a key
+  whenever a proxy forwarding header is present. Header values are never
+  trusted, only their presence, and only to deny.
+
+### Added — egress gateway, Phase A (boundary layer, off by default)
+
+- **`olympus/egress.py`** — the unified egress chokepoint. `classify()` (pure,
+  regex-based, reusing `security.py`'s `_KEYISH`/`_URL_CRED`/`_EMAIL`/`_PHONE`/
+  `_LONGNUM`) labels a payload PUBLIC/OPERATIONAL/SENSITIVE; `guard()` checks it
+  against a per-channel policy matrix and returns ALLOW / REDACT (POOLED only) /
+  HOLD. No LLM, no new dependency.
+- **`config.egress_guard_enabled()`** (`OLYMPUS_EGRESS_GUARD`, off by default,
+  matching `require_byok`) wires the guard into the two raw actuators
+  `tools._send_email` and `tools._call_webhook` (Phase A only). A SENSITIVE
+  payload is HELD and routed to the existing actions spine via two new
+  `IRREVERSIBLE` action types (`email_egress_held`, `webhook_egress_held`,
+  reusing the existing executors); within-policy sends are unchanged.
+- The approved-execution path bypasses the guard (`_approved=True`) so an
+  approved HOLD sends exactly once (no held→execute→held loop).
+- Each decision is recorded as a new `decision_type="egress"` record in the
+  existing signed Trace (via a per-thread current-Trace accessor in `trace.py`);
+  the mode is stamped into `tr.meta` and restored by `replay_run`. Off by
+  default — zero change to a fresh install. See
+  [docs/DESIGN_BOUNDARY_LAYER.md](docs/DESIGN_BOUNDARY_LAYER.md).
+
+### Added — hard output contracts (primitive, off by default)
+
+- **`olympus/contracts.py`** — a pure, dependency-free check of a specialist's
+  final output against an optional `OutputContract` (size ceiling, must-be-JSON
+  + shallow required-keys/top-level-type schema check, client-side tool-call
+  cap). Returns a `ContractResult(ok, violations)`; no I/O, no config reads.
+- **`config.contracts_enabled()`** (`OLYMPUS_CONTRACTS`, off by default,
+  matching the `require_byok` convention) gates enforcement at
+  `orchestrator._run_one`. A violation **fails closed** but degrades gracefully,
+  returning the same "treat this part as missing" placeholder the existing
+  failure path uses, so verify/synthesis tolerate it unchanged.
+- Each check is recorded as a new `decision_type="contract"` record in the
+  existing signed, re-executable decision log (`trace.py`) — no parallel log.
+  The enforcement mode is stamped into `tr.meta` and restored by `replay_run`
+  so a contracts-on run replays in the same mode. Ships with every specialist
+  at `contract=None` (zero behaviour change). See
+  [docs/DESIGN_OUTPUT_CONTRACTS.md](docs/DESIGN_OUTPUT_CONTRACTS.md).
 
 ## [0.21.0] — 2026-06-27
 

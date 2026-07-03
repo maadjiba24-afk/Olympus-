@@ -120,6 +120,26 @@ def test_gate_supersedes_conflict_when_confident():
     assert len(active) == 1 and "Postgres" in active[0]["content"]
 
 
+def test_gate_supersedes_when_existing_confidence_has_decayed():
+    # A high-confidence but STALE memory: its stored confidence is 0.9, but it
+    # hasn't been used in ages, so its effective (decayed) confidence is ~0.
+    m = usermem.add_memory("u", type="project", content="DB is MySQL",
+                           confidence=0.9, key="db")
+    old = time.time() - 100_000 * 86400
+    usermem._mutate("u", m["id"],
+                    lambda mm: mm.update({"created_at": old, "last_used_at": old}))
+    assert usermem.effective_confidence(usermem.get_memory("u", m["id"])) < 0.6
+
+    # A fresh, only-moderately-confident fact should now win. Under the old code
+    # (comparing to the stored 0.9) it would be held as a conflict instead.
+    action = recall._gate("u", {"type": "project", "content": "DB is Postgres",
+                                "confidence": 0.65, "sensitivity": "normal",
+                                "key": "db"}, "e9")
+    assert action == "superseded"
+    active = usermem.active_memories("u")
+    assert len(active) == 1 and "Postgres" in active[0]["content"]
+
+
 # --- extractor end-to-end (model mocked) --------------------------------
 
 def test_extract_commits_from_model(monkeypatch):

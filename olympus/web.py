@@ -30,7 +30,8 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import accounts, actions, builtin_actions, config, metrics, orchestrator, usage  # noqa: F401
+from . import (accounts, actions, builtin_actions, config, metrics,  # noqa: F401
+               openai_server, orchestrator, usage)
 
 
 def _user_for(sid: str) -> str:
@@ -82,12 +83,25 @@ def _actions_view(user: str) -> list[dict]:
 
 
 class _Session:
+    _EVENTS_CAP = 500
+
     def __init__(self, sid: str) -> None:
         self.sid = sid
         self.lock = threading.Lock()
         self.events: list[str] = []
+        self.events_base = 0        # count of events dropped off the front
         self.fingerprint: tuple | None = None
         self.bot: orchestrator.Olympus | None = None
+
+    def report(self, msg: str) -> None:
+        """Append a progress event, trimming the oldest so a long-lived session
+        can't grow the buffer without bound. `events_base` keeps the global
+        index stable for the /api/status `since` cursor across trims."""
+        self.events.append(msg)
+        overflow = len(self.events) - self._EVENTS_CAP
+        if overflow > 0:
+            del self.events[:overflow]
+            self.events_base += overflow
 
     def bot_for(self, pool: config.ModelPool,
                 user: str | None = None) -> orchestrator.Olympus:
@@ -97,7 +111,7 @@ class _Session:
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
             self.bot = orchestrator.Olympus(
-                report=self.events.append,
+                report=self.report,
                 pool=pool,
                 user=user,
                 conversation_id=user,
@@ -134,8 +148,11 @@ def _resolve_sid(handler: BaseHTTPRequestHandler,
 def _session(sid: str) -> _Session:
     with _SESSIONS_LOCK:
         if sid not in _SESSIONS:
-            if len(_SESSIONS) > 500:  # crude cap against unbounded growth
-                _SESSIONS.clear()
+            # Bound growth by FIFO-evicting the OLDEST session(s), not by
+            # clearing the whole dict — a blanket clear at the 501st visitor
+            # would drop every active user's bot and event stream at once.
+            while len(_SESSIONS) >= 500:
+                _SESSIONS.pop(next(iter(_SESSIONS)))
             _SESSIONS[sid] = _Session(sid)
         return _SESSIONS[sid]
 
@@ -206,14 +223,17 @@ def _daily_limited(key: str, limit: int) -> bool:
 
 
 def _brought_own_key(pset: dict) -> bool:
-    """Did this request supply the user's own credentials (BYOK)?"""
+    """Did this request supply the user's own PRIMARY credential (BYOK)?
+
+    Only a primary `api_key` counts — it is the key the main pipeline actually
+    runs on. A bare `base_url` (no key) falls back to the operator's env key,
+    and an `extra` second-model key doesn't pay for the primary member; treating
+    either as BYOK let a keyless visitor run unlimited chats on the operator's
+    key while bypassing OLYMPUS_REQUIRE_BYOK / the free-chat allowance.
+    """
     if not isinstance(pset, dict):
         return False
-    if (pset.get("api_key") or "").strip() or (pset.get("base_url") or "").strip():
-        return True
-    extra = pset.get("extra") or {}
-    return bool(isinstance(extra, dict) and ((extra.get("api_key") or "").strip()
-                                             or (extra.get("base_url") or "").strip()))
+    return bool((pset.get("api_key") or "").strip())
 
 
 def _key_decision(brought: bool, free_used: int) -> str:
@@ -249,6 +269,90 @@ def _https_request(handler: BaseHTTPRequestHandler) -> bool:
         return True
     proto = handler.headers.get("X-Forwarded-Proto", "")
     return proto.split(",")[0].strip().lower() == "https"
+
+
+def _signing_posture() -> dict:
+    """Verification posture for /api/status — lets a prospective buyer confirm
+    the audit guarantee from the running server. Never exposes the seed itself.
+    `posture` is 'production' (a secret signing seed is configured) or 'dev'
+    (the public default key — integrity only); `pinned` is whether a trusted
+    public key is pinned; `public_key` is the derived verifying key (public)."""
+    from . import witness
+    if not witness.available():
+        return {"posture": "unavailable", "pinned": False, "public_key": None,
+                "verify_hint": "cryptography backend unavailable — cannot sign "
+                               "or verify on this instance."}
+    pub = None
+    try:
+        pub = witness.public_key_hex()
+    except Exception:
+        pass
+    return {
+        "posture": witness.posture(),
+        "pinned": bool(witness.pinned_pubkey()),
+        "public_key": pub,
+        "verify_hint": "Verify any answer's reasoning with: "
+                       "`olympus verify --run <run_id>` (replays the decision "
+                       "path AND checks the decision-log signature). The run id "
+                       "is returned in the X-Olympus-Run-Id response header.",
+    }
+
+
+# --- /v1/* loopback boundary (security primitive, header-independent) --------
+# The remoteness decision for the OpenAI-compatible endpoints is made from the
+# kernel-reported peer address ONLY — never from a client-controllable header
+# (Host / X-Forwarded-For / X-Real-IP / Forwarded), which would be spoofable and
+# would turn the "loopback-only" guarantee into an open relay. This module-level
+# predicate is the single source of truth for that decision.
+
+# Header names that signal a reverse proxy is relaying a request. Their PRESENCE
+# (not their value — values are attacker-controlled) means the loopback peer is
+# a proxy fronting a real remote client; see _forwarding_headers_present.
+_FORWARDING_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded",
+                       "X-Forwarded-Host", "X-Forwarded-Proto")
+
+
+def _is_loopback(ip: str) -> bool:
+    """True iff `ip` (a peer address from self.client_address[0]) is loopback.
+
+    Decided purely from the kernel-reported peer address. IPv4 loopback is the
+    whole 127.0.0.0/8 block; IPv6 loopback is ::1; IPv4-mapped-IPv6 forms
+    (::ffff:127.x) are unwrapped first so a mapped public address can't sneak
+    through. No header is consulted."""
+    ip = (ip or "").strip().lower()
+    if ip.startswith("::ffff:"):          # IPv4-mapped IPv6 → compare the v4 part
+        ip = ip[len("::ffff:"):]
+    if ip in ("::1", "0:0:0:0:0:0:0:1"):
+        return True
+    return ip.startswith("127.")
+
+
+def _forwarding_headers_present(headers) -> bool:
+    """Whether any reverse-proxy forwarding header is present. A loopback peer
+    that carries one of these is a proxy relaying an external client — so a
+    loopback peer alone must NOT be treated as 'trusted local' when it appears.
+    Only presence is checked; the (spoofable) value is never trusted."""
+    if not headers:
+        return False
+    return any(headers.get(h) for h in _FORWARDING_HEADERS)
+
+
+def _v1_allowed(peer_ip: str, headers) -> bool:
+    """The /v1/* allow decision when OLYMPUS_API_KEYS is unset, as a pure
+    function of the kernel peer address and the request headers' shape.
+
+    This is the single predicate both the request handler (`_v1_authorized`)
+    and the boundary tests consult. A no-key deployment only ever serves when
+    the server is bound to loopback, so this assumes that binding and answers
+    the two remaining dimensions:
+      * the peer must be loopback (decided from client_address, never a header);
+      * no reverse-proxy forwarding header may be present (its presence proves
+        the loopback peer is a proxy relaying an off-box client — the Caddy
+        trap), so we refuse and require a key instead.
+    Header *values* are never trusted; only the *presence* of a forwarding
+    header is used, and only to deny. Returns True iff the request may be served
+    without a configured API key."""
+    return _is_loopback(peer_ip) and not _forwarding_headers_present(headers)
 
 
 PAGE = """<!doctype html>
@@ -383,7 +487,7 @@ PAGE = """<!doctype html>
 </div>
 <header>
   <h1>OLYMPUS</h1>
-  <span>main agent · supervisor · hallucination controller · 12 specialists</span>
+  <span>main agent · supervisor · hallucination controller · __OLYMPUS_NSPEC__ specialists</span>
   <button id="connect" title="Connect your Google account" style="display:none">🔗 connect Google</button>
   <button id="actbtn" title="Actions awaiting your approval">📋 actions
     <span id="actcount"></span></button>
@@ -461,7 +565,7 @@ PAGE = """<!doctype html>
 </div>
 <div id="log"><div id="welcome">
   <p class="sys">The council is assembled — a main agent, a supervisor, a
-  hallucination-checker, and 12 specialists. Ask anything; rate answers with
+  hallucination-checker, and __OLYMPUS_NSPEC__ specialists. Ask anything; rate answers with
   👍/👎 so Olympus learns. It <b>prepares</b> actions like sending email and
   waits for your approval before doing anything irreversible.</p>
   <div id="cost"></div>
@@ -926,7 +1030,8 @@ checkAuth();
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str,
+              extra_headers: dict | None = None) -> None:
         try:
             metrics.record_response(urlparse(self.path).path, code)
         except Exception:
@@ -934,6 +1039,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         cookie = getattr(self, "_set_cookie", None)
         if cookie:
             self.send_header("Set-Cookie", self._cookie_header(cookie))
@@ -951,8 +1058,10 @@ class Handler(BaseHTTPRequestHandler):
         return (f"olympus_sid={value}; HttpOnly; SameSite=Lax; "
                 f"Path=/; Max-Age=31536000{secure}")
 
-    def _json(self, payload: dict, code: int = 200) -> None:
-        self._send(code, json.dumps(payload).encode(), "application/json")
+    def _json(self, payload: dict, code: int = 200,
+              extra_headers: dict | None = None) -> None:
+        self._send(code, json.dumps(payload).encode(), "application/json",
+                   extra_headers=extra_headers)
 
     def _read_json(self) -> dict | None:
         try:
@@ -1022,7 +1131,9 @@ class Handler(BaseHTTPRequestHandler):
             cfg = {"free_chats": config.free_chats(),
                    "require_byok": config.require_byok(),
                    "has_server_key": config.Settings.from_env().usable()}
-            page = PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+            from .specialists import SPECIALISTS
+            page = (PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
+                        .replace("__OLYMPUS_NSPEC__", str(len(SPECIALISTS))))
             self._send(200, page.encode(), "text/html; charset=utf-8")
             return
         if url.path in ("/privacy", "/terms"):
@@ -1031,17 +1142,48 @@ class Handler(BaseHTTPRequestHandler):
                     else legal.terms_html())
             self._send(200, html.encode(), "text/html; charset=utf-8")
             return
+        if url.path == "/admin":
+            # The operator panel SHELL: static HTML/JS with NO data in it.
+            # The data lives behind /api/admin below, which carries the real
+            # gate — so serving the shell itself is as safe as serving "/".
+            from . import adminpanel
+            self._send(200, adminpanel.page().encode(),
+                       "text/html; charset=utf-8")
+            return
         if url.path == "/oauth/google/start":
             self._oauth_start(url)
             return
         if url.path == "/oauth/google/callback":
             self._oauth_callback(url)
             return
+        if url.path == "/v1/models":
+            # OpenAI-compatible: bearer-gated (its own scheme), not the
+            # dashboard's X-Olympus-Token.
+            ok, code, msg = self._v1_authorized()
+            if not ok:
+                self._v1_error(code, msg)
+                return
+            self._json(openai_server.models_response())
+            return
         if not _authorized(self):
             self._json({"error": "missing or wrong access token"}, 401)
             return
+        if url.path == "/api/admin":
+            # Operator overview (read-only). _authorized above already
+            # enforced the access token when one is configured; without a
+            # token this endpoint is additionally loopback-only — an admin
+            # surface must never be open just because auth was left unset.
+            ok, code, msg = self._admin_authorized()
+            if not ok:
+                self._json({"error": msg}, code)
+                return
+            from . import adminpanel
+            self._json(adminpanel.snapshot())
+            return
         if url.path == "/api/metrics":
-            self._json(metrics.snapshot())     # instance ops, not per-user
+            snap = metrics.snapshot()          # instance ops, not per-user
+            snap["sovereignty"] = config.sovereign_status()
+            self._json(snap)
             return
         params = parse_qs(url.query)
         sid = self._session_id(params.get("session", [None])[0])
@@ -1053,8 +1195,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/api/status":
             since = int(params.get("since", ["0"])[0])
-            events = _session(sid).events
-            self._json({"events": events[since:], "next": len(events)})
+            sess_obj = _session(sid)
+            events, base = sess_obj.events, sess_obj.events_base
+            # `since` is a global index; translate through the trim offset so the
+            # cursor stays correct even after old events were dropped.
+            start = max(0, since - base)
+            self._json({"events": events[start:], "next": base + len(events),
+                        "sovereignty": config.sovereign_status(),
+                        "signing": _signing_posture()})
             return
         user = self._principal(sid)
         if user is None:
@@ -1123,9 +1271,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/v1/chat/completions":
+            self._handle_v1_chat()
+            return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/register", "/api/login",
-                        "/api/logout", "/api/report"):
+                        "/api/logout", "/api/report", "/api/admin/act"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -1135,14 +1286,33 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
-        if path in ("/api/register", "/api/login", "/api/logout"):
-            self._handle_auth(path, payload)
+        if path == "/api/admin/act":
+            # Operator mutations (Phase 2). Same gate as the snapshot, PLUS a
+            # required custom header: browsers only attach custom headers after
+            # a CORS preflight we never approve, so a hostile page cannot fire
+            # cross-origin mutations at a loopback panel (CSRF defense).
+            ok, code, msg = self._admin_authorized()
+            if not ok:
+                self._json({"error": msg}, code)
+                return
+            if self.headers.get("X-Olympus-Admin") != "1":
+                self._json({"error": "missing X-Olympus-Admin header"}, 403)
+                return
+            from . import adminpanel
+            result = adminpanel.act(str(payload.get("op", "")),
+                                    payload.get("params") or {})
+            self._json(result, 200 if result["ok"] else 400)
             return
         # Cheap write endpoints get a generous per-IP budget (DoS guard); the
-        # expensive /api/chat keeps its own stricter limit further down.
+        # expensive /api/chat keeps its own stricter limit further down. Auth
+        # endpoints MUST be throttled too — they run a costly PBKDF2 per attempt,
+        # so an unthrottled /api/login is both password brute-force and CPU DoS.
         if path != "/api/chat" and _rate_limited(
                 "w:" + self.client_address[0], 60):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
+            return
+        if path in ("/api/register", "/api/login", "/api/logout"):
+            self._handle_auth(path, payload)
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)
@@ -1261,10 +1431,6 @@ class Handler(BaseHTTPRequestHandler):
         if _rate_limited("chat:" + self.client_address[0], _chat_limit()):
             self._json({"error": "rate limit exceeded — slow down"}, 429)
             return
-        if _daily_limited("u:" + user, config.daily_chat_limit()):
-            self._json({"error": "daily limit reached for your account — "
-                                 "try again tomorrow."}, 429)
-            return
         message = payload.get("message")
         if not isinstance(message, str) or not message.strip():
             self._json({"error": "bad request"}, 400)
@@ -1285,6 +1451,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "This instance requires your own API key. "
                                  "Open ⚙ model and add your provider key.",
                         "need_key": True}, 402)
+            return
+        # Charge the per-account daily quota only now that the request has passed
+        # validation and the key/free-allowance wall — a rejected request (400 /
+        # 402) must not burn one of the user's OLYMPUS_DAILY_CHATS.
+        if _daily_limited("u:" + user, config.daily_chat_limit()):
+            self._json({"error": "daily limit reached for your account — "
+                                 "try again tomorrow."}, 429)
             return
         if not brought and config.free_chats() > 0:
             _daily_bump("free:" + user)         # consume one free, operator-funded chat
@@ -1328,6 +1501,162 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # --- OpenAI-compatible inbound endpoint (/v1/*) ----------------------
+
+    def _peer_is_loopback(self) -> bool:
+        """Whether the request came from this machine — decided from the kernel
+        peer socket (self.client_address[0]) ONLY, never a header. Delegates to
+        the module-level `_is_loopback`, the single source of truth."""
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        return _is_loopback(peer)
+
+    def _bound_to_loopback(self) -> bool:
+        """Whether the server socket is bound to a loopback address. If it's
+        bound to anything else (0.0.0.0, a LAN IP, ...), the process is reachable
+        off-box and 'no key' can't be safe — we don't infer safety from the
+        per-connection peer. Defaults to False (treat as exposed) if unknown."""
+        try:
+            return _is_loopback(self.server.server_address[0])
+        except Exception:
+            return False
+
+    def _bearer_token(self) -> str:
+        auth = self.headers.get("Authorization", "") or ""
+        if auth[:7].lower() == "bearer ":
+            return auth[7:].strip()
+        return ""
+
+    def _admin_authorized(self) -> tuple[bool, int, str]:
+        """Gate /api/admin. With OLYMPUS_ACCESS_TOKEN configured, the
+        `_authorized` check (already applied on this path) IS the operator
+        credential. With no token, the panel is on-box only — same posture as
+        the /v1 endpoint: peer must be loopback, the server must be bound to
+        loopback, and no reverse-proxy forwarding header may be present."""
+        if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
+            return True, 200, ""
+        if not self._peer_is_loopback():
+            return (False, 403,
+                    "the admin panel is loopback-only until "
+                    "OLYMPUS_ACCESS_TOKEN is set.")
+        if not self._bound_to_loopback():
+            return (False, 401,
+                    "set OLYMPUS_ACCESS_TOKEN: the server is bound to a "
+                    "non-loopback address, so the admin panel needs the "
+                    "operator token.")
+        if _forwarding_headers_present(self.headers):
+            return (False, 401,
+                    "set OLYMPUS_ACCESS_TOKEN: a reverse-proxy forwarding "
+                    "header is present, so this request is relayed from "
+                    "off-box and needs the operator token.")
+        return True, 200, ""
+
+    def _v1_authorized(self) -> tuple[bool, int, str]:
+        """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid
+        bearer key. With none set, serve loopback-only — and never an open relay:
+        the remoteness decision comes from the peer socket (not headers), and a
+        process bound off-loopback must carry a key even for a 'local'-looking
+        peer (a reverse proxy connects from loopback while fronting the world).
+        Returns (ok, http_status, message)."""
+        keys = config.api_keys()
+        if keys:
+            token = self._bearer_token()
+            if token and any(hmac.compare_digest(token, k) for k in keys):
+                return True, 200, ""
+            return (False, 401,
+                    "missing or invalid API key — pass a configured "
+                    "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
+        # No keys configured: loopback-only, and never an open relay.
+        if not self._peer_is_loopback():
+            return (False, 403,
+                    "the OpenAI-compatible API is loopback-only until "
+                    "OLYMPUS_API_KEYS is configured (no open relay).")
+        if not self._bound_to_loopback():
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: the server is bound to a non-loopback "
+                    "address, so the OpenAI-compatible API needs an API key "
+                    "(safety is not inferred from the connection).")
+        if _forwarding_headers_present(self.headers):
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
+                    "present, so this request is being relayed from off-box and "
+                    "needs an API key (no open relay behind a proxy).")
+        return True, 200, ""
+
+    def _v1_error(self, code: int, message: str) -> None:
+        """An OpenAI-shaped error envelope."""
+        self._json({"error": {"message": message, "type": "invalid_request_error",
+                              "code": None}}, code)
+
+    def _handle_v1_chat(self) -> None:
+        ok, code, msg = self._v1_authorized()
+        if not ok:
+            self._v1_error(code, msg)
+            return
+        payload = self._read_json()
+        if not isinstance(payload, dict) or not isinstance(
+                payload.get("messages"), list):
+            self._v1_error(400, "invalid request: 'messages' must be a list.")
+            return
+        model = payload.get("model") or openai_server.MODEL_ID
+        stream = bool(payload.get("stream"))
+        prompt = openai_server.messages_to_prompt(payload["messages"])
+        if not prompt.strip():
+            self._v1_error(400, "invalid request: no user message content.")
+            return
+        # Data-class routing: an X-Olympus-Data-Class header (public/internal/
+        # restricted) selects the destination policy. `restricted` stays local
+        # even with sovereign mode off; an unspecified class defaults to
+        # local-only when sovereign mode is on.
+        data_class = config.normalize_data_class(
+            self.headers.get("X-Olympus-Data-Class"))
+        from . import security
+        # Any `model` value maps to the one council pipeline for v1; unsupported
+        # params (temperature, tools, ...) are accepted and ignored by design.
+        try:
+            pool = config.ModelPool.from_env()
+            if config.data_class_local_only(data_class):
+                pool = pool.local_only()        # fail-closed if no local member
+            bot = orchestrator.Olympus(pool=pool, user="api-v1")
+            if stream:
+                self._stream_v1(bot, prompt, model)
+            else:
+                answer = bot.ask(prompt)
+                # Audit headers: let the caller locate and verify the reasoning
+                # behind this answer — `olympus verify --run <X-Olympus-Run-Id>`.
+                from . import witness
+                hdrs = {"X-Olympus-Audit": "signed-" + witness.posture()}
+                run_id = getattr(bot, "last_run_id", None)
+                if run_id:
+                    hdrs["X-Olympus-Run-Id"] = run_id
+                self._json(openai_server.completion_response(
+                    answer, model, prompt_text=prompt), extra_headers=hdrs)
+        except security.SovereigntyError as err:
+            # Fail closed with a clear, non-leaky message (never downgrade).
+            self._v1_error(403, str(err))
+        except Exception as err:
+            from . import errors
+            errors.capture("web /v1/chat/completions", err,
+                           context=prompt[:200])
+            try:
+                self._v1_error(500, str(err))
+            except Exception:
+                pass
+
+    def _stream_v1(self, bot, prompt: str, model: str) -> None:
+        from . import witness
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        # Posture is known up front; the run id is only assigned once the run
+        # completes, so it isn't available as a header on the streamed response
+        # (use /api/status or a non-streaming request to obtain it).
+        self.send_header("X-Olympus-Audit", "signed-" + witness.posture())
+        self.end_headers()
+        pieces = bot.ask_stream(prompt)
+        for frame in openai_server.stream_events(pieces, model):
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
     def _stream_reply(self, bot, message: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -1345,6 +1674,9 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host: str = "127.0.0.1", port: int = 8484) -> None:
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"⚡ Olympus web UI: http://{host}:{port}  (Ctrl-C to stop)")
+    print(f"   OpenAI-compatible API: http://{host}:{port}/v1  "
+          + ("(bearer-gated via OLYMPUS_API_KEYS)" if config.api_keys()
+             else "(loopback-only — set OLYMPUS_API_KEYS to expose it)"))
     if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
         print("   access token required (OLYMPUS_ACCESS_TOKEN is set)")
     server.serve_forever()

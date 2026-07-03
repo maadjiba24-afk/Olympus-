@@ -27,14 +27,33 @@ from urllib.parse import urlparse
 # Tools that act on the world or mutate Olympus itself. They are stripped from
 # any agent run that also has web/file ingestion enabled.
 ACTION_TOOLS = frozenset({
-    "send_email", "call_webhook", "update_prompt", "restore_prompt",
-    "propose_upgrade", "run_benchmark",
+    "send_email", "call_webhook", "update_prompt", "gate_prompt",
+    "restore_prompt", "propose_upgrade", "run_benchmark",
+    # The browser actuator can click/type on a *credentialed* session, so it is
+    # an action: capability separation strips it from any run that also ingests
+    # untrusted page content (an injected page can't reach your logged-in tabs).
+    "browser_act",
+    # The operator's vault-backed login is likewise a credentialed actuator.
+    "browser_login",
+    # ...as is running a credentialed action template.
+    "browser_operate",
+    # A self-modification proposal (like propose_upgrade) — kept out of any run
+    # that also ingests untrusted content.
+    "propose_site_profile",
 })
 
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
-                             "browse_page", "analyze_image"})
+                             "browse_page",
+                             # A vision model's read of an image is external
+                             # content — text-in-image injection is injection.
+                             "analyze_image",
+                             # The governed CDP harness loads real web pages.
+                             "browser_open", "browser_read",
+                             # A transcript of arbitrary audio is external
+                             # content too — spoken injection is still injection.
+                             "transcribe_audio"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"
@@ -140,6 +159,170 @@ def anonymize(text: str) -> str:
     return text
 
 
+# --- outbound secret-exfiltration scanning --------------------------------
+# The regexes above catch things *shaped* like secrets. This layer catches the
+# ACTUAL secrets this process holds — vault entries and key-shaped environment
+# variables — leaving in outbound content, including base64/hex/url-encoded
+# forms (the classic laundering step of an injection attack). Deterministic,
+# no LLM; used by the web fetcher, email/webhook actuators, and egress.guard.
+
+_SECRETISH_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASS|CRED)", re.IGNORECASE)
+_MIN_SECRET_LEN = 8            # shorter values are too collision-prone to match
+
+
+def _flatten_strings(value) -> list[str]:
+    """String leaves of a vault entry (str, or dict/list of token bundles)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _flatten_strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [s for v in value for s in _flatten_strings(v)]
+    return []
+
+
+def _held_secrets(user: str | None) -> list[tuple[str, str]]:
+    """(label, value) pairs of secrets this process must never emit."""
+    import os
+    out = [(k, v) for k, v in os.environ.items()
+           if _SECRETISH_ENV.search(k) and len(v or "") >= _MIN_SECRET_LEN]
+    if user:
+        try:
+            from . import vault
+            for name in vault.names(user):
+                for s in _flatten_strings(vault.get(user, name)):
+                    if len(s) >= _MIN_SECRET_LEN:
+                        out.append((f"vault:{name}", s))
+        except Exception:
+            pass                # no vault key / no entries — nothing to match
+    return out
+
+
+def _encodings(value: str) -> tuple[str, ...]:
+    import base64
+    from urllib.parse import quote
+    forms = [value,
+             base64.b64encode(value.encode()).decode().rstrip("="),
+             value.encode().hex()]
+    quoted = quote(value, safe="")
+    if quoted != value:
+        forms.append(quoted)
+    return tuple(forms)
+
+
+def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
+    """Reason string when `text` carries a stored secret (raw or encoded)
+    that must not leave the process; None when clean. `user` scopes which
+    vault to check (defaults to the current memory namespace)."""
+    if not text:
+        return None
+    if user is None:
+        try:
+            from . import memory
+            user = memory.current_user()
+        except Exception:
+            user = None
+    lowered = text.lower()
+    for label, value in _held_secrets(user):
+        for form in _encodings(value):
+            if form.lower() in lowered:
+                return (f"outbound content contains the stored secret "
+                        f"'{label}' (or an encoded form of it)")
+    return None
+
+
+# --- sovereign egress choke point (SPEC-02) ------------------------------
+# Single function every outbound call funnels through under sovereign mode. With
+# sovereign OFF, egress_allowed() is a pure no-op (True for everything), so all
+# call paths are byte-for-byte unchanged. With sovereign ON, only allowlisted
+# destinations pass and everything else fails closed via EgressBlocked.
+
+
+class SovereigntyError(RuntimeError):
+    """Base for sovereign-mode policy refusals (always fail-closed)."""
+
+
+class EgressBlocked(SovereigntyError):
+    """A network egress to a non-allowlisted host was refused under sovereign
+    mode — Olympus stops rather than letting data leave the box."""
+
+
+class NoLocalModelError(SovereigntyError):
+    """Sovereign / local-only routing required a local model but none is
+    eligible. Raised instead of silently falling back to a remote model."""
+
+
+def _host_is_loopback(host: str) -> bool:
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return False
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _entry_matches(host: str, entry: str) -> bool:
+    """Whether `host` matches an allowlist `entry` (hostname, IP, or CIDR)."""
+    host = (host or "").lower()
+    entry = (entry or "").strip().lower()
+    if not entry:
+        return False
+    try:
+        net = ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        net = None
+    if net is not None:                     # IP / CIDR entry
+        try:
+            return ipaddress.ip_address(host) in net
+        except ValueError:                  # host is a name → resolve (guarded)
+            try:
+                for info in socket.getaddrinfo(host, None,
+                                               proto=socket.IPPROTO_TCP):
+                    if ipaddress.ip_address(info[4][0]) in net:
+                        return True
+            except (socket.gaierror, ValueError, UnicodeError, OSError):
+                return False
+            return False
+    return host == entry or host.endswith("." + entry)   # hostname / subdomain
+
+
+def host_on_allowlist(host: str) -> bool:
+    """Whether `host` may receive our data — independent of the sovereign flag.
+    Loopback is always allowed; plus known local-provider hosts (providers.py
+    auth="local", reusing that catalog's notion of "local" rather than
+    redefining it); plus every OLYMPUS_EGRESS_ALLOWLIST entry."""
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return False
+    if _host_is_loopback(h):
+        return True
+    from . import config, providers      # local imports avoid an import cycle
+    if h in providers.local_provider_hosts():
+        return True
+    return any(_entry_matches(h, e) for e in config.egress_allowlist())
+
+
+def egress_allowed(host: str) -> bool:
+    """With sovereign OFF: always True (no-op → unchanged behavior). With
+    sovereign ON: True only for allowlisted hosts."""
+    from . import config
+    if not config.sovereign_mode():
+        return True
+    return host_on_allowlist(host)
+
+
+def assert_egress_allowed(host: str) -> None:
+    """Raise EgressBlocked if `host` must not receive our data under sovereign
+    mode. The single choke every model call / tool fetch funnels through."""
+    if not egress_allowed(host):
+        raise EgressBlocked(
+            f"sovereign mode: refusing egress to '{host}' — not on the "
+            "allowlist (loopback + OLYMPUS_EGRESS_ALLOWLIST + local providers).")
+
+
 # --- SSRF guard (outbound fetches) ---------------------------------------
 
 # Hostnames that name an internal/metadata service directly. Blocked by name as
@@ -199,4 +382,9 @@ def url_block_reason(url: str) -> str | None:
             return f"unparseable address for host: {host}"
         if not _ip_is_public(ip):
             return f"refusing to fetch a non-public address ({ip})"
+    # Under sovereign mode the same guard also enforces the egress allowlist:
+    # a public host that is not explicitly allowlisted may not receive our data.
+    if not egress_allowed(host):
+        return (f"sovereign mode: egress to '{host}' is not on the allowlist "
+                "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None

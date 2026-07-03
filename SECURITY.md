@@ -48,9 +48,12 @@ These are design properties you can rely on, not promises of perfection:
 - **Untrusted content is treated as data.** Specialist outputs and fetched web
   content are explicitly flagged as untrusted in the verifier's prompt — never
   obeyed as instructions (prompt-injection defence).
-- **Secrets stay out of memory.** Memory extraction is gated so secrets,
-  passwords, and key-shaped strings are not stored; OAuth tokens are encrypted
-  at rest with a key the operator controls.
+- **Memory hygiene.** The memory-extraction model is instructed not to store
+  secrets, passwords, or key-shaped strings, and injection-marker lines are
+  stripped before a write (`sanitize_for_memory`). This is best-effort
+  extraction guidance, not a guaranteed secret filter on the write path — treat
+  it as hygiene, not a hard boundary. OAuth tokens are encrypted at rest with a
+  key the operator controls.
 - **Cost & abuse limits.** Per-minute and per-day rate limits, a daily budget,
   and bring-your-own-key (as a wall or a free allowance) bound spend and abuse on
   a public instance.

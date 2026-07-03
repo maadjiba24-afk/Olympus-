@@ -62,6 +62,10 @@ def offer(user: str, model: str, question: str, answer: str) -> bool:
     a = security.anonymize(str(answer))[:MAX_SNAPSHOT_CHARS]
     if not q.strip() or not a.strip():
         return False
+    # A stored secret that survives anonymization (raw or encoded) must never
+    # reach the shared pool — drop the snapshot entirely, don't trust redaction.
+    if security.secret_exfil_reason(q + "\n" + a, user):
+        return False
     entry = {"model": model or "unknown", "q": q, "a": a, "ts": int(time.time())}
     path = _path()
     with _LOCK:

@@ -1,12 +1,38 @@
 """Central configuration for Olympus."""
 
+import contextvars
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+
+# The credentials the *current* agent run is executing under. Set once per run
+# at the backend choke point so inline delegations (e.g. the spawn_subagent
+# tool) inherit the caller's key/pool instead of silently falling back to the
+# operator's env credentials — the BYOK visitor pays for their own subagents.
+_ACTIVE_SETTINGS: "contextvars.ContextVar[Settings | None]" = contextvars.ContextVar(
+    "olympus_active_settings", default=None)
+
+
+def active_settings() -> "Settings | None":
+    """The settings the current run is executing under, if any."""
+    return _ACTIVE_SETTINGS.get()
+
+
+def use_active_settings(settings: "Settings"):
+    """Bind `settings` as the active run credentials; returns the reset token."""
+    return _ACTIVE_SETTINGS.set(settings)
+
+
+def clear_active_settings(token) -> None:
+    _ACTIVE_SETTINGS.reset(token)
 
 # Default model for the Anthropic backend. Opus 4.8 supports adaptive
 # thinking, effort control, and the server-side web_search/web_fetch tools.
+# `MODEL` is the import-time snapshot; `default_model()` reads OLYMPUS_MODEL
+# LIVE — use it at call sites, because firstrun.load_env_file() loads the saved
+# config.env AFTER this module is imported, so the snapshot can be stale.
 MODEL = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
 
 
@@ -28,6 +54,10 @@ def mask_key(key: str) -> str:
     if not k:
         return "(none)"
     return f"…{k[-4:]}" if len(k) > 8 else "…" + "•" * max(1, len(k) - 1)
+
+
+def default_model() -> str:
+    return os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
 
 
 @dataclass(frozen=True)
@@ -91,31 +121,35 @@ class Settings:
             return self
         merged = {**self.__dict__, **clean}
         merged["provider"] = merged["provider"].lower()
-        if merged["provider"] != self.provider:
-            # Provider switch: never carry the old provider's model, key, or
-            # endpoint across — that would send credentials to the wrong host.
-            if "model" not in clean:
-                merged["model"] = ("claude-opus-4-8"
-                                   if merged["provider"] == "anthropic" else "")
-            if "api_key" not in clean:
-                merged["api_key"] = None
-            # The rotation pool belongs to the old provider — drop it too.
+        provider_switch = merged["provider"] != self.provider
+        # An endpoint override alone (same provider, new base_url) is just as
+        # dangerous as a provider switch: it would send the inherited key to a
+        # user-supplied host. Treat both the same for credential carry-over.
+        endpoint_switch = merged["base_url"] != self.base_url
+        if provider_switch and "model" not in clean:
+            merged["model"] = ("claude-opus-4-8"
+                               if merged["provider"] == "anthropic" else "")
+        if (provider_switch or endpoint_switch) and "api_key" not in clean:
+            # Never carry the inherited key to a different provider or endpoint —
+            # that would leak the operator's credential to the new host.
+            merged["api_key"] = None
+        if provider_switch or endpoint_switch:
+            # The rotation pool belongs to the old provider/endpoint — drop it.
             merged["api_keys"] = ()
-            if "base_url" not in clean:
-                merged["base_url"] = None
-        else:
-            # Same provider, explicit new primary key → keep it consistent with
-            # the rotation pool (the override becomes the primary member).
-            if "api_key" in clean:
-                merged["api_keys"] = (clean["api_key"],) + tuple(
-                    k for k in self.api_keys if k != clean["api_key"])
+        elif "api_key" in clean:
+            # Same provider+endpoint, explicit new primary key → keep it
+            # consistent with the rotation pool (override becomes the primary).
+            merged["api_keys"] = (clean["api_key"],) + tuple(
+                k for k in self.api_keys if k != clean["api_key"])
+        if provider_switch and "base_url" not in clean:
+            merged["base_url"] = None
         return Settings(**merged)
 
     def validate(self) -> str | None:
         """Return an error message if unusable, else None."""
-        if self.provider not in ("anthropic", "openai", "claude-code"):
+        if self.provider not in ("anthropic", "openai", "claude-code", "moa"):
             return (f"Unknown provider '{self.provider}' "
-                    "(use anthropic, openai, or claude-code).")
+                    "(use anthropic, openai, claude-code, or moa).")
         if self.provider == "openai" and not self.model:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
         return None
@@ -124,8 +158,9 @@ class Settings:
         if self.validate() is not None:
             return False
         # anthropic reads its key from the env; claude-code authenticates via the
-        # local `claude` CLI (your subscription); others need a key/url.
-        return (self.provider in ("anthropic", "claude-code")
+        # local `claude` CLI (your subscription); moa rides the pool members'
+        # own credentials; others need a key/url.
+        return (self.provider in ("anthropic", "claude-code", "moa")
                 or bool(self.api_key) or bool(self.base_url))
 
 
@@ -157,7 +192,21 @@ _CAPABILITIES: dict[str, dict[str, float]] = {
 _DEFAULT_CAP = {"reasoning": 5, "coding": 5, "general": 5, "verify": 5}
 
 # Which capability each pipeline role / specialist wants.
-SPECIALIST_ROLE = {"hephaestus": "coding"}  # everyone else: "reasoning"
+SPECIALIST_ROLE = {"hephaestus": "coding"}  # legacy fallback; registry wins
+
+
+def specialist_role(key: str) -> str:
+    """The model role a specialist routes on. Read from the specialist registry
+    (data-driven, per-specialist); falls back to the legacy map / 'reasoning'.
+    Lazy import keeps config free of a specialists import cycle."""
+    try:
+        from . import specialists
+        spec = specialists.SPECIALISTS.get(key)
+        if spec is not None:
+            return spec.role
+    except Exception:
+        pass
+    return SPECIALIST_ROLE.get(key, "reasoning")
 
 
 def capability_score(model: str, role: str) -> float:
@@ -186,12 +235,30 @@ class ModelPool:
                 if fp not in seen:
                     seen.add(fp)
                     members.append(s)
+        # Sovereign mode constrains *which members are eligible* before the
+        # existing capability-score selection runs — it never touches scoring.
+        # A remote frontier model can never be selected (not even as a tie-break
+        # or fallback); if no local member remains we FAIL CLOSED rather than
+        # reaching for a remote one.
+        if sovereign_mode():
+            eligible = [m for m in members if member_is_local(m)]
+            if not eligible:
+                from . import security
+                raise security.NoLocalModelError(
+                    "sovereign mode is on but no local model is configured — "
+                    "no pool member's host is on the egress allowlist "
+                    "(loopback + OLYMPUS_EGRESS_ALLOWLIST + local providers). "
+                    "Refusing to fall back to a remote model.")
+            members = eligible
         if not members:                       # fall back to the first given/env
             members = [settings[0] if settings else Settings.from_env()]
         return cls(tuple(members))
 
     @classmethod
-    def from_env(cls) -> "ModelPool":
+    def _env_members(cls) -> list[Settings]:
+        """The raw member list from env (primary + OLYMPUS_MODELS pool), BEFORE
+        any sovereign eligibility filtering — used by status surfaces to report
+        every configured member and which of them are local."""
         primary = Settings.from_env()
         extra = []
         raw = os.environ.get("OLYMPUS_MODELS")
@@ -213,7 +280,23 @@ class ModelPool:
                         api_keys=keys))
             except (json.JSONDecodeError, AttributeError, TypeError):
                 pass
-        return cls.of(primary, *extra)
+        return [primary, *extra]
+
+    @classmethod
+    def from_env(cls) -> "ModelPool":
+        return cls.of(*cls._env_members())
+
+    def local_only(self) -> "ModelPool":
+        """A pool restricted to local/allowlisted members — used to honor a
+        data class that must stay local (e.g. `restricted`) even when the global
+        sovereign flag is OFF. Fails closed if no eligible member remains."""
+        eligible = tuple(m for m in self.members if member_is_local(m))
+        if not eligible:
+            from . import security
+            raise security.NoLocalModelError(
+                "this request's data class requires a local model, but none is "
+                "configured (no member's host is on the egress allowlist).")
+        return ModelPool(eligible)
 
     def primary(self) -> Settings:
         return self.members[0]
@@ -246,7 +329,7 @@ class ModelPool:
             self.members, key=lambda s: capability_score(s.model, role))
 
     def for_specialist(self, key: str) -> Settings:
-        return self.for_role(SPECIALIST_ROLE.get(key, "reasoning"))
+        return self.for_role(specialist_role(key))
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints
@@ -300,6 +383,16 @@ MEMORY_DIR = Path(os.environ.get("OLYMPUS_MEMORY_DIR", _default_memory))
 
 # Per-call output ceiling. Streaming is used everywhere, so this can be large.
 MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
+
+
+# Prompt-cache TTL for the stable request prefix (system prompt + tool schemas)
+# on the Anthropic backend. "5m" is the API default; "1h" keeps the cache warm
+# across sessions that are minutes apart (heartbeat cycles, gateway chats), so
+# the large system prompt and skill library are billed once per hour instead of
+# once per lull. Read live so tests and replay can flip it per-run.
+def prompt_cache_ttl() -> str:
+    ttl = os.environ.get("OLYMPUS_CACHE_TTL", "5m").strip().lower()
+    return ttl if ttl in ("5m", "1h") else "5m"
 
 # Conversation state compaction: when the verbatim history exceeds this many
 # estimated tokens, older turns are folded into a compact running "state" block
@@ -393,6 +486,30 @@ MEMORY_SEMANTIC_THRESHOLD = 0.55       # min cosine to count as semantically rel
 
 # Max tool-use iterations for a single specialist run (guards against loops).
 MAX_AGENT_ITERATIONS = 16
+
+# In-run tool-transcript compaction (olympus/transcript.py). OFF by default.
+# When on, once a single agent run's messages exceed INRUN_COMPACT_BUDGET chars,
+# the contents of OLDER tool_result blocks are shrunk in place (recent ones kept
+# verbatim) so a tool-heavy run doesn't drown in its own scrollback. Set to
+# "elide" / "1" (deterministic) or "summarize" (LLM summary of old results).
+# Read live (like contracts_enabled/egress_guard_enabled) so replay_run can
+# restore the recorded setting via the env var and get deterministic replay.
+def inrun_compact() -> str:
+    return os.environ.get("OLYMPUS_INRUN_COMPACT", "").strip().lower()
+
+
+def inrun_budget() -> int:
+    try:
+        return int(os.environ.get("OLYMPUS_INRUN_BUDGET", "24000"))
+    except ValueError:
+        return 24000
+
+
+def inrun_keep_recent() -> int:
+    try:
+        return int(os.environ.get("OLYMPUS_INRUN_KEEP_RECENT", "2"))
+    except ValueError:
+        return 2
 
 # Process-wide cap on concurrent model calls (backpressure vs rate limits).
 MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
@@ -502,10 +619,125 @@ def fast_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+# --- sovereignty: provable zero-egress mode (SPEC-02) --------------------
+# Sovereign mode turns Olympus's *capability* to run fully local into an
+# enforced, fail-closed *guarantee*: remote models are excluded from selection,
+# every egress is funneled through security.assert_egress_allowed, and a blocked
+# destination raises rather than leaking. OFF by default → behavior unchanged.
+
+DATA_CLASSES = ("public", "internal", "restricted")
+
+
+def sovereign_mode() -> bool:
+    """Whether zero-egress sovereignty is enforced (OLYMPUS_SOVEREIGN). When on,
+    the egress invariant holds: data leaves only to allowlisted hosts, remote
+    models are never selected, and a forbidden egress fails closed."""
+    return os.environ.get("OLYMPUS_SOVEREIGN", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def egress_allowlist() -> list[str]:
+    """Hosts/CIDRs permitted to receive data under sovereign mode
+    (OLYMPUS_EGRESS_ALLOWLIST, comma-separated). Loopback and known local
+    providers are always allowed implicitly and need not be listed."""
+    raw = os.environ.get("OLYMPUS_EGRESS_ALLOWLIST", "")
+    return [h.strip().lower() for h in raw.split(",") if h.strip()]
+
+
+def member_host(s: "Settings") -> str:
+    """The egress host a pool member would talk to: the base_url host if set,
+    else the provider's default endpoint. (claude-code shells to the `claude`
+    CLI, which itself egresses to Anthropic, so it counts as remote.)"""
+    if s.base_url:
+        return (urlparse(s.base_url).hostname or "").lower()
+    return {"anthropic": "api.anthropic.com",
+            "claude-code": "api.anthropic.com",
+            "openai": "api.openai.com"}.get(s.provider, "")
+
+
+def member_is_local(s: "Settings") -> bool:
+    """Whether a member is sovereign-eligible: its egress host is on the
+    allowlist (loopback / local provider / OLYMPUS_EGRESS_ALLOWLIST). Independent
+    of the global sovereign flag so data-class routing can use it too."""
+    from . import security
+    return security.host_on_allowlist(member_host(s))
+
+
+def normalize_data_class(value) -> str | None:
+    """Return a valid data class (public/internal/restricted) or None."""
+    v = (value or "").strip().lower() if isinstance(value, str) else ""
+    return v if v in DATA_CLASSES else None
+
+
+def default_data_class() -> str:
+    """Class for an unspecified request: most-permissive (`public`) only when
+    sovereign mode is OFF; when ON, default to at least `internal` (local-only).
+    """
+    return "internal" if sovereign_mode() else "public"
+
+
+def data_class_local_only(value) -> bool:
+    """Policy table → whether a request of this data class must stay local:
+      restricted ⇒ local-only regardless of the global sovereign flag;
+      internal   ⇒ local-only when sovereign is on;
+      public     ⇒ may use remote only when sovereign is off.
+    An unspecified class resolves via default_data_class()."""
+    dc = normalize_data_class(value) or default_data_class()
+    if dc == "restricted":
+        return True
+    return sovereign_mode()
+
+
+def sovereign_status() -> dict:
+    """Auditor-facing snapshot: mode, the active allowlist, every configured
+    member, and which members are eligible (local). Never raises — it reports
+    the raw configuration even when sovereign mode would fail closed."""
+    members = ModelPool._env_members()
+    usable = [m for m in members if m.usable()]
+
+    def desc(m: "Settings") -> str:
+        host = member_host(m) or "local"
+        return f"{m.provider}/{m.model or '(default)'} @ {host}"
+
+    eligible = [m for m in usable if member_is_local(m)]
+    return {
+        "sovereign": sovereign_mode(),
+        "allowlist": egress_allowlist(),
+        "default_data_class": default_data_class(),
+        "members": [desc(m) for m in usable],
+        "eligible_local": [desc(m) for m in eligible],
+    }
+
+
 def require_byok() -> bool:
     """When set, every web chat must carry the user's own API key — so a public
     instance never spends the operator's key on visitors (OLYMPUS_REQUIRE_BYOK)."""
     return os.environ.get("OLYMPUS_REQUIRE_BYOK", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def api_keys() -> list[str]:
+    """Bearer keys that authorize the OpenAI-compatible `/v1/*` endpoints
+    (OLYMPUS_API_KEYS, comma-separated). When this is empty the `/v1/*` routes
+    answer on loopback only — never a silent open relay: a remote caller with no
+    configured key is refused outright."""
+    raw = os.environ.get("OLYMPUS_API_KEYS", "")
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def contracts_enabled() -> bool:
+    """Enforce hard output contracts on specialist outputs (OLYMPUS_CONTRACTS=1).
+    OFF BY DEFAULT: contracts are inert until an operator opts in, so the
+    feature can't surprise a fresh install or a public BYOK instance."""
+    return os.environ.get("OLYMPUS_CONTRACTS", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def egress_guard_enabled() -> bool:
+    """Route outbound data through the egress gateway (OLYMPUS_EGRESS_GUARD=1).
+    OFF BY DEFAULT — inert until an operator opts in, so it can't surprise a
+    fresh install or a public BYOK instance."""
+    return os.environ.get("OLYMPUS_EGRESS_GUARD", "").strip().lower() in (
         "1", "true", "yes", "on")
 
 

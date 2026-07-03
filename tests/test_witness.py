@@ -105,6 +105,18 @@ def test_verify_fails_on_missing_file(tmp_path):
     assert result["ok"] is False and "a.py" in result["missing"]
 
 
+def test_verify_detects_injected_file(tmp_path):
+    # A tracked file added AFTER signing (e.g. an injected backdoor) must fail
+    # verification even though every signed file still matches.
+    pkg = _make_tree(tmp_path)
+    manifest = _manifest_for(pkg)
+    (pkg / "backdoor.py").write_text("print('pwned')\n")
+    result = witness.verify_manifest(manifest, base=pkg, allow_dev=True)
+    assert result["ok"] is False
+    assert "backdoor.py" in result["added"]
+    assert any("backdoor.py" in p for p in result["problems"])
+
+
 def test_verify_rejects_manifest_resigned_with_foreign_key(tmp_path, monkeypatch):
     pkg = _make_tree(tmp_path)
     pin = witness.public_key_hex()                  # the legitimate key, pinned
@@ -214,3 +226,34 @@ def test_tampered_decision_log_fails_signature(tmp_path, monkeypatch):
 def test_verify_run_reports_unsigned_and_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "memory")
     assert witness.verify_run("nope")["found"] is False
+
+
+def test_verify_fails_closed_without_crypto_backend(tmp_path, monkeypatch):
+    # On a host without the cryptography backend, verify_log/verify_run must
+    # return a bool/dict (fail closed), not raise WitnessError.
+    run_id = _signed_run(tmp_path, monkeypatch)
+    run = trace.load_run(run_id)
+    monkeypatch.setattr(witness, "_HAVE_CRYPTO", False)
+    assert witness.verify_log(run["decisions"], run["log_signature"]) is False
+    res = witness.verify_run(run_id)
+    assert res["ok"] is False and res["signed"] is True
+    assert "cryptography backend is unavailable" in res["problems"][0]
+
+
+def test_verify_run_pin_binds_to_expected_key(tmp_path, monkeypatch):
+    # The pinning path: a third-party verifier holding the expected public key
+    # accepts a log signed by it and REJECTS one signed under a different seed,
+    # even though that other log's own signature is self-consistent.
+    run_id = _signed_run(tmp_path, monkeypatch)
+    assert witness.verify_run(run_id, pin=witness.public_key_hex())["ok"] is True
+    res = witness.verify_run(run_id, pin="00" * 32)      # a different key
+    assert res["ok"] is False
+    assert any("UNTRUSTED" in p for p in res["problems"])
+
+
+def test_verify_log_pin_via_env(tmp_path, monkeypatch):
+    run_id = _signed_run(tmp_path, monkeypatch)
+    monkeypatch.setenv("OLYMPUS_LOG_PIN", "ff" * 32)     # wrong pin → reject
+    assert witness.verify_run(run_id)["ok"] is False
+    monkeypatch.setenv("OLYMPUS_LOG_PIN", witness.public_key_hex())
+    assert witness.verify_run(run_id)["ok"] is True

@@ -1,0 +1,36 @@
+# Keep secrets, local state, and VCS metadata out of the build context so they
+# can't be baked into the image (the Dockerfile does `COPY . .`).
+.git
+.gitignore
+
+# Secrets and operator config
+.env
+.env.*
+!.env.example
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
+keys.sh
+olympus/verification.json
+
+# Local runtime state / user data
+memory/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python build/cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Dev-only trees that don't belong in a runtime image
+tests/
+docs/
+examples/
+.github/

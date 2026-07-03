@@ -45,9 +45,15 @@ def test_web_specialist_loses_action_tools():
     # Chronos has no web -> keeps its actuators
     chronos_names = {d.get("name") for d in SPECIALISTS["chronos"].tool_defs()}
     assert {"send_email", "call_webhook"} <= chronos_names
-    # System specialists keep their self-modification tools despite web
-    prom_names = {d.get("name") for d in SPECIALISTS["prometheus"].tool_defs()}
+    # Prometheus keeps its self-modification tools (it is system=True and does
+    # NOT ingest untrusted content), but it must not ingest the open web in the
+    # same run — otherwise an injected page could steer a self-modification.
+    prom_defs = SPECIALISTS["prometheus"].tool_defs()
+    prom_names = {d.get("name") for d in prom_defs}
     assert "update_prompt" in prom_names
+    assert not SPECIALISTS["prometheus"]._ingests("anthropic")
+    assert not security.loadout_ingests_external(prom_defs)
+    assert "web_search" not in prom_names and "web_fetch" not in prom_names
 
 
 # --- verified-facts cache ------------------------------------------------
@@ -60,6 +66,30 @@ def test_facts_cache_roundtrip():
     hit = facts.lookup("EU AI Act effect")
     assert "true" in hit and "example.eu" in hit
     assert "No matching" in facts.lookup("unrelated quantum widget")
+
+
+def test_facts_lookup_tolerates_malformed_lines():
+    # A legacy / hand-edited / partially-written line lacking fields must not
+    # crash the whole lookup (was a hard KeyError on 'norm'/'ts').
+    facts.record("Water boils at 100C at sea level", "true", "src")
+    path = facts._path()
+    with path.open("a", encoding="utf-8") as f:
+        f.write('{"claim": "no norm field here"}\n')      # missing norm + ts
+        f.write("not even json\n")
+    out = facts.lookup("water boils")
+    assert "Water boils" in out                            # good entry survives
+
+
+def test_facts_compaction_bounds_the_log(monkeypatch):
+    # The append-only log must stay bounded near ~2x the cap, atomically.
+    monkeypatch.setattr(facts, "MAX_FACTS", 5)
+    facts._line_counts.clear()
+    for i in range(40):
+        facts.record(f"factoid{i}x is verified", "true", "src")
+    assert facts.count() <= facts.MAX_FACTS * 2             # trimmed
+    assert "factoid39x" in facts.lookup("factoid39x")       # newest kept
+    assert "No matching" in facts.lookup("factoid0x")       # oldest dropped
+    assert not list(facts._path().parent.glob(".*tmp*"))    # atomic, no temp left
 
 
 # --- cost accounting -----------------------------------------------------

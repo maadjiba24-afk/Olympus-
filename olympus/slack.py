@@ -24,11 +24,12 @@ import json
 import os
 import time
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import gateway
 
 _BOTS: dict = {}
+_DISPATCH = gateway.Dispatcher()
 
 
 def _post(method: str, payload: dict) -> dict:
@@ -74,25 +75,99 @@ def verify_signature(secret: str, timestamp: str, body: bytes,
 
 
 def handle_event(payload: dict) -> dict:
-    """Return the JSON body Slack expects. For the url_verification handshake
-    returns {challenge}; for a user message runs the pipeline and posts the
-    reply, returning {ok: True}."""
+    """The *fast* synchronous body Slack expects. For the url_verification
+    handshake returns {challenge}; for everything else returns {ok: True}
+    immediately WITHOUT running the (slow) pipeline — that happens in the
+    background via `process_event`, so Slack's ~3s deadline is always met and it
+    never retries into a duplicate reply."""
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
+    return {"ok": True}
+
+
+MAX_VOICE_BYTES = 20 * 1024 * 1024
+
+
+def _voice_text(event: dict) -> str | None:
+    """Transcribe an audio file on a Slack message (voice clips / uploads).
+    Downloads url_private with the bot token. None when there is no audio or
+    transcription is unavailable."""
+    for f in event.get("files") or []:
+        if not str(f.get("mimetype", "")).startswith("audio/"):
+            continue
+        if int(f.get("size") or 0) > MAX_VOICE_BYTES:
+            continue
+        url = str(f.get("url_private_download") or f.get("url_private") or "")
+        if not url.startswith("https://"):
+            continue
+        try:
+            token = os.environ.get("SLACK_BOT_TOKEN", "")
+            req = urllib.request.Request(
+                url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                blob = resp.read(MAX_VOICE_BYTES + 1)
+            if len(blob) > MAX_VOICE_BYTES:
+                continue
+            from . import media
+            transcript = media.transcribe_bytes(
+                blob, filename=str(f.get("name") or "voice.m4a"))
+        except Exception:
+            continue
+        if not transcript.startswith("Error"):
+            return f"[voice note] {transcript}"
+    return None
+
+
+def process_event(payload: dict, bots: dict | None = None) -> None:
+    """Run the pipeline for a Slack message event and post the reply. Called on
+    a background worker after the webhook has already acked. Ignores the bot's
+    own messages and non-message events to avoid reply loops."""
+    bots = _BOTS if bots is None else bots
     event = payload.get("event") or {}
-    # Ignore bot's own messages / non-message events to avoid loops.
     if event.get("type") not in ("message", "app_mention") or event.get("bot_id"):
-        return {"ok": True}
+        return
     text = event.get("text", "")
+    if not text.strip():
+        text = _voice_text(event) or ""
+    if not text.strip():
+        return
     channel = event.get("channel", "")
     user_key = event.get("user", "anon")
-    reply = "\n".join(gateway.reply_for(_BOTS, user_key, text, prefix="sl"))
+    # Journal the in-flight request so a restart resumes it (delivered back
+    # to the same channel via the bot token, which doesn't expire).
+    from . import memory
+    uid = f"sl-{memory.safe_id(user_key)}"
+    gateway.inflight_mark(uid, {"user": user_key, "channel": channel}, text)
+    try:
+        reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="sl"))
+    finally:
+        gateway.inflight_clear(uid)
     if channel:
         try:
             send(channel, reply)
         except Exception:
             pass
-    return {"ok": True}
+
+
+def resume_inflight() -> None:
+    """Re-run requests a previous process died holding and deliver to the
+    same channel (chat.postMessage works any time, unlike Discord's
+    interaction tokens)."""
+    for entry in gateway.inflight_take("sl-"):
+        key = entry.get("key") or {}
+        channel = str(key.get("channel") or "") if isinstance(key, dict) else ""
+        user_key = str(key.get("user") or "anon") if isinstance(key, dict) \
+            else str(key)
+        if not channel:
+            continue
+        try:
+            send(channel, "⚡ I was restarted while working on your last "
+                          "request — picking it back up now.")
+            reply = "\n".join(gateway.reply_for(
+                _BOTS, user_key, str(entry["text"]), prefix="sl"))
+            send(channel, reply)
+        except Exception:
+            pass
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -109,20 +184,43 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         try:
-            resp = handle_event(json.loads(body))
-        except Exception:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
             self.send_response(400)
             self.end_headers()
             return
+        # Ack fast (handshake or {ok:true}), then run the pipeline off-thread.
+        resp = handle_event(payload)
         data = json.dumps(resp).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(data)
 
+        if payload.get("type") == "event_callback":
+            # Slack retries carry the same event_id — drop the duplicate.
+            if _DISPATCH.seen(payload.get("event_id")):
+                return
+            event = payload.get("event") or {}
+            user_key = event.get("user", "anon")
+            # /steer is handled here, OUTSIDE the serial worker, so the note
+            # can reach a pipeline that is already running for this user.
+            steer = gateway.try_steer(user_key, event.get("text", ""),
+                                      prefix="sl")
+            if steer is not None:
+                if event.get("channel"):
+                    try:
+                        send(event["channel"], "\n".join(steer))
+                    except Exception:
+                        pass
+                return
+            _DISPATCH.submit(user_key, lambda p=payload: process_event(p))
+
 
 def run_server(host: str = "0.0.0.0", port: int = 8487) -> None:
     if not os.environ.get("SLACK_SIGNING_SECRET"):
         raise SystemExit("Set SLACK_SIGNING_SECRET (from your Slack app config).")
     print(f"⚡ Olympus Slack events endpoint on {host}:{port}")
-    HTTPServer((host, port), _Handler).serve_forever()
+    import threading
+    threading.Thread(target=resume_inflight, daemon=True).start()
+    ThreadingHTTPServer((host, port), _Handler).serve_forever()

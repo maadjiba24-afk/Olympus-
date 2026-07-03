@@ -137,3 +137,15 @@ def test_angelos_loadout_is_ingesting():
     from olympus import security
     defs = SPECIALISTS["angelos"].tool_defs("anthropic")
     assert security.loadout_ingests_external(defs)
+
+
+def test_extra_tools_ingestion_gates_capability_separation():
+    # Angelos (email) and Mnemosyne (youtube) ingest untrusted content purely
+    # through extra_tools, not web=True. _ingests() must catch that so they are
+    # denied action capability (allow_action=False); Hermes, which holds the
+    # actuator but ingests nothing, must stay non-ingesting.
+    assert SPECIALISTS["angelos"]._ingests("anthropic") is True
+    assert SPECIALISTS["mnemosyne"]._ingests("anthropic") is True
+    assert SPECIALISTS["hermes"]._ingests("anthropic") is False   # keeps browser_login
+    assert "browser_login" in {
+        d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}

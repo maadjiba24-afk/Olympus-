@@ -34,6 +34,34 @@ def test_invalid_settings_surface_cleanly():
     assert "Configuration problem" in bot.ask("hello")
 
 
+def test_route_treats_unparseable_json_as_delegation_not_refusal(monkeypatch):
+    # A provider that emits unparseable/truncated route JSON must degrade to a
+    # delegation, NOT be reported to the user as a safety refusal.
+    import json as _json
+    from olympus import backend
+    bot = orchestrator.Olympus(user="router-tester")
+    monkeypatch.setattr(backend, "complete_json",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            _json.JSONDecodeError("bad", "{trailing,", 0)))
+    route = bot._route("what's a good budget?")
+    assert route["mode"] == "delegate"
+    assert route["direct_reply"] is None
+    assert route["brief"] == "what's a good budget?"
+
+
+def test_route_reports_genuine_refusal(monkeypatch):
+    # A real refusal (backend raises a plain ValueError) still surfaces the
+    # can't-help reply.
+    from olympus import backend
+    bot = orchestrator.Olympus(user="router-tester")
+    monkeypatch.setattr(backend, "complete_json",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            ValueError("model refused the request")))
+    route = bot._route("something disallowed")
+    assert route["mode"] == "direct"
+    assert "can't help" in route["direct_reply"].lower()
+
+
 def test_conversation_trigger(monkeypatch):
     ran = threading.Event()
     monkeypatch.setattr(orchestrator, "evolution_audit",
@@ -92,7 +120,7 @@ def test_reverify_divergence_is_not_masked(monkeypatch):
     monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
         {"id": "s1", "specialist": "argus", "task": "t", "depends_on": []}])
     monkeypatch.setattr(bot, "_dispatch_dag", lambda steps, tr: [("argus", "out")])
-    monkeypatch.setattr(bot, "_dispatch", lambda redo: [("argus", "redone")])
+    monkeypatch.setattr(bot, "_dispatch", lambda redo, tr: [("argus", "redone")])
     # First verify succeeds; Athena orders a retry; the reverify call diverges.
     calls = {"verify": 0}
 
@@ -115,5 +143,14 @@ def test_heartbeat_nothing_due():
     from olympus import heartbeat
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
                                "daily_learning", "train", "evolution_audit",
-                               "replay_gate", "backup")}
+                               "skill_curation", "replay_gate", "backup")}
     assert heartbeat.tick(state) == []
+
+
+def test_due_treats_nonpositive_cadence_as_off():
+    from olympus import heartbeat
+    # interval 0 previously meant "run every tick" (now - last >= 0); it must
+    # mean disabled, so a fresh state with a 0 cadence is NOT due.
+    assert heartbeat._due({}, "x", 0, now=1e18) is False
+    assert heartbeat._due({}, "x", -1, now=1e18) is False
+    assert heartbeat._due({}, "x", 3600, now=1e18) is True   # positive still fires
