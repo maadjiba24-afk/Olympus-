@@ -885,6 +885,58 @@ class Olympus:
         return (f"Removed the last {removed} exchange(s) from the "
                 "conversation. The next question continues from before them.")
 
+    def ask_ephemeral(self, question: str) -> str:
+        """Answer a side question WITHOUT leaving a trace: nothing is appended
+        to history, persisted, extracted into memory, or counted toward the
+        companion's evolution. The pipeline still sees the current history as
+        read-only context, so 'btw, what did we just decide?' works — but the
+        session's distilled state stays about the actual work."""
+        error = self.settings.validate()
+        if error:
+            return f"Configuration problem: {error}"
+        try:
+            usage.check_budget()
+        except usage.BudgetExceeded as err:
+            return str(err)
+        memory.set_user(self.user)
+        tr = trace_mod.Trace("ask_ephemeral", self.user)
+        tr.meta = {"input": question, "conversation_id": None}
+        try:
+            mode, brief, result = self._pipeline(question, tr)
+            if mode in ("direct", "clarify"):
+                return result
+            try:
+                with tr.span("synthesize"):
+                    return self._synthesize(question, brief, result)
+            except replaystore.ReplayDivergence:
+                raise
+            except Exception as err:
+                tr.event("synthesize.failed", error=str(err)[:200])
+                return (result or "").strip() or (
+                    f"[Could not complete the request: {str(err)[:200]}]")
+        finally:
+            tr.flush()
+            self.last_run_id = tr.id
+
+    def set_model(self, name: str) -> str:
+        """Re-point the pool's PRIMARY model mid-session (in-chat /model).
+        Keeps the provider/key/endpoint — only the model name changes, so a
+        credential can never silently migrate to a different host. Other pool
+        members are untouched; role assignment recomputes automatically."""
+        import dataclasses
+        name = (name or "").strip()
+        if not name:
+            return (f"Current pool:\n{self.pool.assignment()}\n"
+                    "Usage: /model <model-name>")
+        old = self.pool.primary()
+        new_primary = dataclasses.replace(old, model=name)
+        members = (new_primary,) + tuple(m for m in self.pool.members
+                                         if m is not old)
+        self.pool = config.ModelPool(members)
+        self.settings = self.pool.primary()
+        return (f"Primary model → {new_primary.provider}/{name} "
+                f"(was {old.model or 'default'}).\n{self.pool.assignment()}")
+
     def reset(self) -> str:
         """Distill the conversation into durable state, then clear it.
 

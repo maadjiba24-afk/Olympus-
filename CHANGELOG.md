@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — session & flow ergonomics (Hermes round 2)
+
+- **Named sessions + browse/resume** — `olympus sessions` (list newest-first
+  with a distilled-state preview line, pick to resume), `olympus -c` (continue
+  the last session), `olympus chat --session <id>`, and `/new [name]` in chat
+  (the old session stays resumable).
+- **`/bg <task>`** — run a one-shot task through the full verified pipeline in
+  the background while you keep chatting; the answer announces itself in-chat
+  and is saved to reports.
+- **`/btw <question>`** — an ephemeral side question: answered with the current
+  context visible but leaving NO trace (no history, no memory extraction, no
+  companion count).
+- **`/model <name>` and `/fast on|off`** — swap the pool's primary model or
+  toggle fast mode mid-session; `/model` keeps the provider/key/endpoint so a
+  credential can never silently migrate hosts.
+- **Delta-setup** — on a configured install, `olympus setup` offers "Fix what's
+  missing", driven by `olympus doctor`'s ✗/⚠ gaps, and ends on the doctor
+  summary (find → fix → confirm).
+- **"Where stuff lives"** — doctor now prints the key paths (config, soul,
+  memory, sessions, workspace) labeled editable vs managed.
+- THREAT_MODEL: documented the no-/yolo stance — DENY-tier commands stay
+  blocked even when approvals are granted.
+
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
 > through `0.24.0` sections below were prepared and dated but **never tagged or

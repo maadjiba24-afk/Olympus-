@@ -120,6 +120,30 @@ def run_checks() -> list[Check]:
     return checks
 
 
+def paths_block() -> str:
+    """Where stuff lives — with editable vs hands-off labeling, so a new user
+    knows what's safe to cat/edit and what the system manages itself."""
+    from . import firstrun, soul
+    try:
+        from . import sandbox
+        workspace = str(sandbox.workdir())
+    except Exception:
+        workspace = "(unavailable)"
+    rows = [
+        ("config", str(firstrun.CONFIG_ENV), "editable — keys & settings"),
+        ("soul", str(soul.soul_path()), "editable — your personality directive"),
+        ("memory", str(config.MEMORY_DIR), "managed — use `olympus memory`"),
+        ("sessions", str(config.MEMORY_DIR / "conversations"),
+         "managed — use `olympus sessions`"),
+        ("workspace", workspace, "sandbox output — safe to inspect"),
+    ]
+    lines = ["Where stuff lives"]
+    for name, path, note in rows:
+        lines.append(f"  {name:9s} {path}")
+        lines.append(f"            {note}")
+    return "\n".join(lines)
+
+
 def capability_summary() -> str:
     """A compact 'what I can do now' overview drawn from the live manifest —
     the launch capability dashboard, grouped and counted."""
@@ -154,7 +178,7 @@ def render(checks: list[Check] | None = None, *, with_caps: bool = True) -> str:
     else:
         lines.append(f"  {_ICON[OK]} All systems go.")
     if with_caps:
-        lines += ["", capability_summary()]
+        lines += ["", capability_summary(), "", paths_block()]
     return "\n".join(lines)
 
 

@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 79,
+    "count": 80,
     "names": [
       "actions",
       "add-mcp",
@@ -95,6 +95,7 @@
       "scores",
       "search",
       "serve",
+      "sessions",
       "setup",
       "sign",
       "signal",

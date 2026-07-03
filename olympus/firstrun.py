@@ -399,6 +399,44 @@ def _configure_gateway(values: dict) -> None:
     print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
 
 
+def _doctor_gaps() -> list:
+    """The ✗/⚠ readiness items delta-setup can actually fix, mapped to a
+    section: [(check, section)]. Purely informational checks are skipped."""
+    from . import doctor
+    fixable = {"provider": "model", "command gate": "terminal",
+               "media / vision": "tools", "gateways": "gateway"}
+    out = []
+    for c in doctor.run_checks():
+        if c.status in (doctor.FAIL, doctor.WARN) and c.name in fixable:
+            out.append((c, fixable[c.name]))
+    return out
+
+
+def setup_missing() -> bool:
+    """Delta-setup: fix ONLY what `olympus doctor` flags, instead of re-running
+    the whole wizard. Walks each gap, offers the matching section, and ends on
+    the doctor summary so the loop closes: doctor finds it → setup fixes it →
+    doctor confirms it. Returns True if anything was configured."""
+    gaps = _doctor_gaps()
+    if not gaps:
+        print("  ✓ Nothing missing — doctor reports all systems go.")
+        return False
+    changed = False
+    for check, section in gaps:
+        icon = "✗" if check.status == "fail" else "⚠"
+        print(f"\n  {icon} {check.name}: {check.detail}")
+        if _yes(f"Fix this now? (opens the '{section}' setup)",
+                check.status == "fail"):
+            changed = bool(setup_section(section)) or changed
+    try:
+        from . import doctor
+        print()
+        print(doctor.render(with_caps=False))
+    except Exception:
+        pass
+    return changed
+
+
 def _current_pool_line() -> str:
     """One-line view of the currently-configured pool, for a re-run."""
     from . import config as cfg
@@ -429,12 +467,33 @@ def wizard() -> bool:
             print(line)
     print()
 
-    # Quick / Full fork — most people want one provider and sane defaults.
-    style = _choose(
-        "Setup style",
-        ["Quick — one provider, recommended defaults (free/no-setup where possible)",
-         "Full — configure the pool, sandbox, security, and messaging"], 1)
-    quick = (style == 1)
+    # On a configured install with readiness gaps, offer the delta first:
+    # fix ONLY what doctor flags, instead of re-answering everything.
+    if rerun:
+        gaps = _doctor_gaps()
+        if gaps:
+            styles = [f"Fix what's missing ({len(gaps)} item(s) doctor flagged)",
+                      "Quick — one provider, recommended defaults",
+                      "Full — reconfigure the pool, sandbox, security, messaging"]
+            pick = _choose("Setup style", styles, 1)
+            if pick == 1:
+                return setup_missing()
+            quick = (pick == 2)
+        else:
+            quick = (_choose(
+                "Setup style",
+                ["Quick — one provider, recommended defaults (free/no-setup "
+                 "where possible)",
+                 "Full — configure the pool, sandbox, security, and messaging"],
+                1) == 1)
+    else:
+        # Quick / Full fork — most people want one provider and sane defaults.
+        quick = (_choose(
+            "Setup style",
+            ["Quick — one provider, recommended defaults (free/no-setup where "
+             "possible)",
+             "Full — configure the pool, sandbox, security, and messaging"],
+            1) == 1)
 
     members = _configure_providers()
     if not members:

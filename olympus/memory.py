@@ -247,6 +247,46 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
         pass
 
 
+def _conversation_preview(history: list[dict]) -> str:
+    """One line that identifies a session at a glance. Prefer the distilled
+    state block (what the conversation is durably ABOUT) over the literal
+    first message; fall back to the first user turn."""
+    for m in history:
+        content = str(m.get("content", ""))
+        if content.startswith("[Conversation state"):
+            body = content.partition("\n")[2].strip() or content
+            return " ".join(body.split())[:100]
+    for m in history:
+        if m.get("role") == "user":
+            return " ".join(str(m.get("content", "")).split())[:100]
+    return "(empty)"
+
+
+def list_conversations(prefix: str = "") -> list[dict]:
+    """Saved conversations, newest first: {id, mtime, turns, preview}.
+    `prefix` filters by id prefix (e.g. 'cli' for terminal sessions)."""
+    d = config.MEMORY_DIR / "conversations"
+    if not d.exists():
+        return []
+    out: list[dict] = []
+    for path in d.glob("*.json"):
+        cid = path.stem
+        if prefix and not cid.startswith(prefix):
+            continue
+        try:
+            history = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        out.append({
+            "id": cid,
+            "mtime": path.stat().st_mtime,
+            "turns": sum(1 for m in history if m.get("role") == "user"),
+            "preview": _conversation_preview(history),
+        })
+    out.sort(key=lambda s: s["mtime"], reverse=True)
+    return out
+
+
 # --- YouTube watch queue ------------------------------------------------
 
 def _watchlist_path() -> Path:
