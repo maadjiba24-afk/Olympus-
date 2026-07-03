@@ -42,6 +42,8 @@ HELP = (
     "/undo [N] — remove the last N exchanges from the conversation\n"
     "/goal <text> [:: done-means] — set a standing goal the heartbeat works\n"
     "/goal list · /goal drop <id> · /goal wait <id> <pid> — manage goals\n"
+    "/heartbeat add <every> <prompt> — a periodic check that only pings you "
+    "when something needs attention (list · drop <id>)\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
     "/moa <question> — one-shot mixture-of-agents across the model pool\n"
@@ -229,6 +231,26 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/heartbeat":
+        from . import agentbeat
+        sub, _, rest = arg.strip().partition(" ")
+        if not arg.strip() or sub == "list":
+            return chunk(agentbeat.summary(uid))
+        if sub == "drop":
+            return chunk("Dropped." if agentbeat.remove(uid, rest.strip())
+                         else "No heartbeat with that id.")
+        if sub == "add":
+            every, _, prompt = rest.partition(" ")
+            if not prompt.strip():
+                return chunk("Usage: /heartbeat add <every> <what to check>\n"
+                             "e.g. /heartbeat add 2h anything urgent in my goals?")
+            beat = agentbeat.add(uid, every, prompt)
+            return chunk(f"💓 Heartbeat #{beat.id} set — every "
+                         f"{beat.every // 60} minutes I'll check: "
+                         f"{beat.prompt}\nI'll only message you when "
+                         f"something needs attention.")
+        return chunk("Usage: /heartbeat [list] · add <every> <prompt> · "
+                     "drop <id>")
     if cmd == "/learn":
         from . import learn
         # Chat users must never read server paths — URLs/workflows only.

@@ -58,6 +58,10 @@ def next_due_in(state: dict | None = None, now: float | None = None) -> float:
     goal_wait = goals.next_due_in(now)
     if goal_wait is not None:
         waits.append(goal_wait)
+    from . import agentbeat
+    beat_wait = agentbeat.next_due_in(now)
+    if beat_wait is not None:
+        waits.append(beat_wait)
     return min(waits) if waits else float(config.DAILY_LEARNING_EVERY)
 
 

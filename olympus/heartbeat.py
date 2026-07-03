@@ -44,6 +44,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Operator failed:\n" + traceback.format_exc())
 
+    # Per-agent heartbeats: compact autonomous wake-ups. Each beat has its own
+    # cadence and stays quiet (HB_OK) unless something needs attention.
+    try:
+        from . import agentbeat
+        for line in agentbeat.run_due(now):
+            log.append("Heartbeats: " + line)
+    except Exception:
+        log.append("Heartbeats failed:\n" + traceback.format_exc())
+
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
     try:
