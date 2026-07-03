@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 61 tools in
+Olympus exposes a **finite, named** tool surface — the 62 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
