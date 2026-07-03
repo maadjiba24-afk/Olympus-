@@ -265,3 +265,46 @@ Questions (clarify)** · **Task Delegation (delegate_task)** · Cron Jobs
     wrapped as untrusted. Fills the one real tool gap vs Hermes.
 22. Surface Athena's DAG as a live ticking checklist (with progress modes).
 23. Lazy optional-key config; cron jobs can attach a skill.
+
+---
+
+## Screens 25–29 — Per-tool provider sub-pickers (Tool Configuration)
+
+### What Hermes did
+- Entered **Tool Configuration** for the 5 tools that need keys ("Configuring
+  5 tool(s)"). Browser Automation was **skipped** (no key chosen earlier).
+- **Image Generation → FAL.ai**: pitched "FLUX 2 Pro with auto-upscaling",
+  showed **`Get yours at: https://fal.ai/dashboard/keys`**, then a bare
+  `FAL API key:` prompt. The FAL dashboard flow: pick **Scope = API** ("For
+  running models… Recommended for most use cases"), Description "Hermes agent",
+  and a **safety note — "Keep it safe — your FAL_KEY will be shown here once
+  created… it cannot be recovered."**
+- **TTS provider sub-picker**: Microsoft **Edge TTS (Free, no key)** as the
+  active/default, then OpenAI TTS (Premium), ElevenLabs (Premium — most
+  natural), Mistral Voxtral (multilingual, native, needs `MISTRAL_API_KEY`),
+  and **Skip**.
+- **Web Search provider sub-picker**: Firecrawl Cloud, Exa, Parallel, Tavily,
+  **Firecrawl Self-Hosted (Free — run your own)**, and **Skip**.
+
+### Read
+This is the same three patterns we already captured, now confirmed as Hermes's
+*consistent* shape for every key-needing tool: (1) a **provider sub-picker**
+with **free/no-key option pre-selected**, (2) a **"Get yours at <url>"** line
+before the bare key prompt, (3) **Skip** always available. New detail worth
+stealing: the **"shown once — cannot be recovered, save it now"** safety note
+at the moment of key creation.
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| Per-tool **provider sub-picker**, free option default | **ADOPT (already backlog #7/#15/#23)** | Confirms the pattern — no new item. When we add optional tools, each gets a sub-picker whose free/no-key choice is pre-selected and marked `← recommended (free)`. |
+| **"Get yours at <url>"** before key prompt | **ADOPT (backlog #7)** | Already planned; reconfirmed as universal in Hermes. |
+| **"Key shown once — save it now"** safety note | **ADOPT — new nuance** | When we prompt for/echo any key path, add a one-line "your provider shows this once; store it in `~/.olympus/config.env` (owner-only) now" note. Small trust win, costs nothing. |
+| Bundled premium media providers (FAL/ElevenLabs/Mistral Voxtral) | **DIFFERENTIATE** | Don't bundle a provider zoo. Keep our generate_image/text_to_speech behind the ModelPool + openai_compat, so any OpenAI-compatible media endpoint drops in via config — no per-vendor code. Free/no-key default (like Edge TTS) is the right stance; we already lean headless/free. |
+| Firecrawl **self-hosted** free web-search option | **NOTE** | Nice that they surface a self-host escape hatch. Our web_search already defaults to server-side (Anthropic) with a DDG fallback — free, no key. Parity without the picker. |
+
+### Build backlog additions (batched)
+24. **"Key shown once — save it" safety note** on any key/credential prompt
+    (point at owner-only `~/.olympus/config.env`). Reinforces #7; no new
+    tool code — just wizard copy. (Screens 25–29 otherwise reinforce #7, #15,
+    #23 with no brand-new items.)
