@@ -403,6 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_wiki = sub.add_parser(
+        "wiki", help="the memory wiki: concept pages maintained by nightly "
+                     "dreaming (list | show <page> | lint | dream | rm <page>)")
+    p_wiki.add_argument("action", nargs="?", default="list",
+                        choices=["list", "show", "lint", "dream", "rm"])
+    p_wiki.add_argument("page", nargs="?", default="")
+    p_wiki.add_argument("--user", default="shared",
+                        help="memory namespace (default: shared)")
     p_restrict = sub.add_parser(
         "restrict", help="scope a conversation/user to a capability profile "
                          "(full | reader | guest | custom)")
@@ -1250,6 +1258,27 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "wiki":
+        from . import wiki
+        if args.action == "list":
+            print(wiki.summary(args.user))
+        elif args.action == "show":
+            if not args.page:
+                print("Usage: olympus wiki show <page>")
+                return 1
+            print(wiki.read(args.user, args.page))
+        elif args.action == "lint":
+            issues = wiki.lint(args.user)
+            print("\n".join(issues) if issues
+                  else "Wiki is fresh — no issues.")
+        elif args.action == "dream":
+            print(wiki.dream(args.user))
+        elif args.action == "rm":
+            if not args.page:
+                print("Usage: olympus wiki rm <page>")
+                return 1
+            print("Removed." if wiki.remove(args.user, args.page)
+                  else "No such page.")
     elif args.command == "restrict":
         from . import capprofile
         if args.list_profiles:

@@ -100,6 +100,17 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now
 
+    if _due(state, "dreaming", config.DREAM_EVERY, now):
+        log.append("Wiki: dreaming — consolidating memory into concept pages...")
+        try:
+            from . import wiki
+            results = wiki.dream_all(now)
+            log += ["Wiki: " + line for line in results] or \
+                   ["Wiki: nothing new to consolidate."]
+        except Exception:
+            log.append("Dreaming failed:\n" + traceback.format_exc())
+        state["dreaming"] = now
+
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
         try:

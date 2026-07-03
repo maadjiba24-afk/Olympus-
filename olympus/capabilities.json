@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 81,
+    "count": 82,
     "names": [
       "actions",
       "add-mcp",
@@ -119,6 +119,7 @@
       "web",
       "webhook",
       "whatsapp",
+      "wiki",
       "witness-pubkey"
     ]
   },

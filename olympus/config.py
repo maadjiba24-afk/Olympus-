@@ -588,6 +588,9 @@ WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
+# Nightly dreaming: consolidate session memory into wiki concept pages
+# (0 disables).
+DREAM_EVERY = int(os.environ.get("OLYMPUS_DREAM_EVERY", str(86400)))
 TRAIN_EVERY = int(os.environ.get("OLYMPUS_TRAIN_EVERY", str(3 * 86400)))
 # Prometheus trains the weakest specialists on a cadence (0 disables)
 

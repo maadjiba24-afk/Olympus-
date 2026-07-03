@@ -47,6 +47,8 @@ HELP = (
     "/onexit <pid> <prompt> — run a task once when that process exits\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
+    "/wiki [show <page>] — the concept pages Olympus maintains about "
+    "your world\n"
     "/moa <question> — one-shot mixture-of-agents across the model pool\n"
     "/reasoning — how the last answer was produced (pipeline trace)\n"
     "/lang <language> — reply in your language\n"
@@ -279,6 +281,12 @@ def reply_for(bots: dict, user_key: str, text: str,
         from . import learn
         # Chat users must never read server paths — URLs/workflows only.
         return chunk(learn.distill(arg, allow_paths=False))
+    if cmd == "/wiki":
+        from . import wiki
+        sub, _, ref = arg.strip().partition(" ")
+        if sub == "show" and ref.strip():
+            return chunk(wiki.read(uid, ref.strip()))
+        return chunk(wiki.summary(uid))
     if cmd == "/journey":
         from . import journey
         sub, _, ref = arg.strip().partition(" ")

@@ -83,6 +83,16 @@ def _format_clarify(questions: list[str]) -> str:
 Reporter = Callable[[str], None]
 
 
+def _wiki_block(user: str, user_message: str) -> str:
+    """Consolidated concept pages relevant to this message (never fatal —
+    the wiki is an enrichment, not a dependency)."""
+    try:
+        from . import wiki
+        return wiki.context_block(user, user_message)
+    except Exception:
+        return ""
+
+
 def _silent(_: str) -> None:
     pass
 
@@ -164,6 +174,7 @@ class Olympus:
         mem_ctx = replaystore.frozen_context("route", lambda: (
             profile.card(self.user)
             + recall.context_block(self.user, user_message)
+            + _wiki_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)

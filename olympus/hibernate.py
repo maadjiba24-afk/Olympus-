@@ -32,6 +32,7 @@ def _cadences() -> dict[str, int]:
         "watchlist": config.WATCHLIST_EVERY,
         "maintenance": config.MAINTENANCE_EVERY,
         "daily_learning": config.DAILY_LEARNING_EVERY,
+        "dreaming": config.DREAM_EVERY,
         "train": config.TRAIN_EVERY,
         "evolution_audit": config.EVOLUTION_AUDIT_EVERY,
         "skill_curation": curator.curation_every(),
