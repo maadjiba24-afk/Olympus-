@@ -49,6 +49,10 @@ HELP = (
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
+    "/approvals — commands held for your approval\n"
+    "/approve <id> · /deny <id> — decide a held command from chat\n"
+    "/usage — tokens and cost for this session and today\n"
+    "/model [name|auto] — pin this conversation to a model (opus/sonnet/gpt…)\n"
     "/reset — start fresh (keeps a distilled summary of what we covered)\n"
 )
 
@@ -170,10 +174,13 @@ def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
 
 
 def reply_for(bots: dict, user_key: str, text: str,
-              prefix: str = "ol") -> list[str]:
+              prefix: str = "ol", uid: str | None = None) -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
     otherwise running the full Zeus → Athena → Aletheia pipeline. `user_key`
-    namespaces that user's private memory and persisted conversation."""
+    namespaces that user's private memory and persisted conversation. A
+    transport may pass an explicit `uid` when its historical session keys
+    predate this router (Telegram's raw `tg-<chat id>`, where safe_id would
+    mangle negative group ids)."""
     text = (text or "").strip()
     if not text:
         return chunk("(say something and I'll help)")
@@ -199,7 +206,12 @@ def reply_for(bots: dict, user_key: str, text: str,
         memory.watchlist_add(arg)
         return chunk("Queued — the heartbeat will watch it on its next pass.")
 
-    uid = f"{prefix}-{memory.safe_id(user_key)}"
+    uid = uid or f"{prefix}-{memory.safe_id(user_key)}"
+    if cmd in ("/approvals", "/pending", "/approve", "/deny", "/reject"):
+        from . import approvals
+        handled = approvals.handle_command(uid, cmd, arg)
+        if handled is not None:
+            return chunk(handled)
     if cmd == "/goal":
         from . import goals
         sub, _, rest = arg.strip().partition(" ")
@@ -268,7 +280,11 @@ def reply_for(bots: dict, user_key: str, text: str,
     if cmd == "/reset":
         return chunk(bot.reset())
 
-    return chunk(bot.ask(text))
+    reply = bot.ask(text)
+    # A turn can leave irreversible actions held by the approval spine; tell
+    # the person in-channel so the decision happens where the ask happened.
+    from . import approvals
+    return chunk(reply + approvals.footer(uid))
 
 
 def reset_idle_sessions(bots: dict, max_age_secs: int | None = None) -> int:

@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->62<!--/cap--> agent tools, and <!--cap:commands-->79<!--/cap-->
+<!--cap:tools-->62<!--/cap--> agent tools, and <!--cap:commands-->80<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -767,14 +767,24 @@ Olympus instance feasible without burning your own key.
 1. Message **@BotFather** on Telegram → `/newbot` → copy the token.
 2. `export TELEGRAM_BOT_TOKEN=123456:ABC...`
 3. `python -m olympus telegram`
+4. Pair your chat: run `olympus pair telegram` on the machine, then send the
+   bot `/pair <code>`. DMs are **untrusted by default** — strangers get a
+   polite refusal, not your council.
+
+While Olympus works on a request it shows a live progress message (edited in
+place, `/steer <note>` to nudge mid-run), quotes the message it is answering,
+and if a turn leaves a command held by the approval gate, the bot tells you
+in-chat — reply `/approve <id>` or `/deny <id>` right there.
 
 Optional environment variables:
 
-- `TELEGRAM_ALLOWED_CHAT_IDS=12345,67890` — restrict who can use the bot
-  (open to everyone by default).
+- `TELEGRAM_DM_POLICY=pairing|allowlist|open` — who may talk (default
+  `pairing`; `open` restores the legacy anyone-can-talk behavior).
+- `TELEGRAM_ALLOWED_CHAT_IDS=12345,67890` — always-allowed chat ids.
 - `TELEGRAM_NOTIFY_CHAT_ID=12345` — the heartbeat proactively pushes
   opportunity scans and self-audit reports to this chat, so Olympus reaches
-  *you* instead of waiting to be asked.
+  *you* instead of waiting to be asked (this chat is always allowed).
+- `TELEGRAM_PROGRESS=0` — disable the live progress edits.
 
 ### WhatsApp (official Cloud API)
 

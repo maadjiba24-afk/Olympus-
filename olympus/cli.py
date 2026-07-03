@@ -399,6 +399,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_pair = sub.add_parser(
+        "pair", help="mint a one-time pairing code so a chat can talk to "
+                     "Olympus (channels are untrusted by default)")
+    p_pair.add_argument("channel", nargs="?", default="telegram",
+                        help="channel to pair (default: telegram)")
+    p_pair.add_argument("--revoke", metavar="SENDER_ID",
+                        help="unpair a previously paired chat/sender id")
+    p_pair.add_argument("--list", action="store_true", dest="list_paired",
+                        help="list paired sender ids for the channel")
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
                                            "(needs WHATSAPP_* env vars)")
     p_wa.add_argument("--host", default="0.0.0.0")
@@ -1215,6 +1224,20 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "pair":
+        from . import pairing
+        if args.list_paired:
+            ids = pairing.paired(args.channel)
+            print("\n".join(ids) if ids else
+                  f"No {args.channel} chats are paired.")
+        elif args.revoke:
+            gone = pairing.unpair(args.channel, args.revoke)
+            print("Unpaired." if gone else "That id wasn't paired.")
+        else:
+            code = pairing.issue_code(args.channel)
+            print(f"Pairing code for {args.channel}: {code}\n"
+                  f"Send `/pair {code}` to the bot within "
+                  f"{pairing.PAIR_TTL // 60} minutes. Single use.")
     elif args.command == "whatsapp":
         from . import whatsapp
         try:
