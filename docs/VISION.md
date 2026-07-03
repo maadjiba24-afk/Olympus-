@@ -211,3 +211,57 @@ We borrow Hermes's best UX, but keep our soul.
     (inactivity + daily hour) — reset feeds memory/companion first.
 18. Context budget as fraction-of-model-context (absolute override kept).
 19. (Later) Email gateway via existing gmail adapter; inbound webhooks gateway.
+
+---
+
+## Screens 20–24 — tool configuration (the full tool taxonomy)
+
+### What Hermes did — its 18 tool categories (multi-select, per-platform)
+`web_search/web_extract [no API key]` · Browser Automation
+(navigate/click/type/scroll) · Terminal & Processes · File Ops
+(read/write/patch/search) · Code Execution · **Vision/Image Analysis** ·
+Image Generation · **Mixture of Agents** (off by default) · Text-to-Speech ·
+Skills · **Task Planning (todo)** · Memory · Session Search · **Clarifying
+Questions (clarify)** · **Task Delegation (delegate_task)** · Cron Jobs
+(create/list/update/pause/resume/run + attached skills) · RL Training
+(Tinker/Atropos) · Home Assistant.
+- Tools that need keys are **enabled here but configured lazily** ("configured
+  when enabled") — it collected 5 that needed setup and let you skip any.
+- **Browser provider sub-picker**: Local (free headless Chromium) default, or
+  cloud (Browserbase/BrowserUse/Firecrawl w/ stealth+proxies), or Camofox
+  (anti-detection), or Skip.
+
+### Where Olympus already matches / exceeds
+| Hermes tool | Olympus |
+|---|---|
+| web_search/extract | ✓ web_search/web_fetch (server-side on Anthropic, DDG fallback) |
+| Terminal / File Ops / Code Exec | ✓ sandbox (run_command/write_file/read_file/list_dir) |
+| Vision/Image Analysis | ✗ **gap** — we generate images but don't *analyze* them |
+| Image Generation / TTS / Browser | ✓ media.py (generate_image/text_to_speech/browse_page) |
+| Mixture of Agents | ✓✓ our whole council IS this (and verified + benchmark-gated) |
+| Task Planning (todo) | ~ partial (playbooks) — no live per-task todo |
+| Memory / Session Search | ✓ memory + FTS5 search |
+| **Clarifying Questions (clarify)** | ✗ **gap** — Zeus never asks the user to disambiguate |
+| Task Delegation | ✓✓ DAG planner + spawn_subagent |
+| Cron (+attached skills) | ✓ scheduler (NL) — but no "attach a skill to a job" |
+| RL Training export | ~ we export trajectories (trajectories.py) |
+| Home Assistant | ✗ skip (breadth) |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| **Clarifying-questions tool** | **ADOPT — real gap** | Give Zeus a `clarify` path: when a request is ambiguous/underspecified, ask 1–2 crisp questions BEFORE delegating, instead of guessing. Cheap, huge quality lift. Olympus twist: only trigger when the route confidence is low, so it doesn't nag. |
+| **Vision / image analysis** | **ADOPT — real gap** | `analyze_image` tool (describe/answer-about an image) via a vision-capable pool model; wrap output as untrusted (it's external content). Rounds out media.py. |
+| Live task-planning (todo) surfaced to user | **ADAPT** | Surface Athena's DAG as a visible checklist that ticks off as steps complete (ties to progress modes, backlog #14). We already plan the graph — just show it. |
+| Lazy key config ("enabled now, configured when used") | **ADOPT** | Don't block setup on optional keys; enable the tool, prompt for the key on first use (or via `setup tools`). |
+| Cron jobs with **attached skills** | **ADAPT** | Let a scheduled task name a skill to load first ("every Monday, using the `weekly-report` skill, …"). |
+| Browser provider sub-picker; heavy cloud browsers | **SKIP/DIFFERENTIATE** | Keep browse_page (urllib, no Chromium). Note the free/no-key default is right; we already are that. |
+| Per-platform tool enable/disable | **NOTE** | We have capability-separation already (action tools stripped when ingesting untrusted). Could expose per-gateway tool allowlists later. |
+
+### Build backlog additions (batched)
+20. **`clarify` capability** — Zeus asks 1–2 questions on low-confidence/ambiguous
+    requests before delegating (gated on route confidence so it won't nag).
+21. **`analyze_image` (vision) tool** via a vision-capable pool model; output
+    wrapped as untrusted. Fills the one real tool gap vs Hermes.
+22. Surface Athena's DAG as a live ticking checklist (with progress modes).
+23. Lazy optional-key config; cron jobs can attach a skill.
