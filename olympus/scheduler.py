@@ -26,6 +26,7 @@ falls back to a daily cadence rather than failing.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -100,6 +101,8 @@ class Job:
     kind: str = "interval"       # "interval" | "on_exit" (event-driven)
     watch_pid: int = 0           # on_exit: fire when this process exits
     label: str = ""              # on_exit: human name for the watched work
+    started_at: float = 0.0      # run in progress (crash/upgrade detection)
+    resume_attempts: int = 0     # interrupted-run retries (bounded at 1)
 
     def due(self, now: float) -> bool:
         if not self.enabled:
@@ -204,12 +207,40 @@ def next_due_in(now: float | None = None) -> float | None:
     return min(waits) if waits else None
 
 
+# A run that started this long ago and never finished is presumed dead
+# (the process was killed/upgraded mid-run) and eligible for one resume.
+RESUME_AFTER = int(os.environ.get("OLYMPUS_JOB_RESUME_AFTER", "3600"))
+
+
+def _mark_started(name: str, now: float) -> None:
+    jobs_ = _load()
+    for j in jobs_:
+        if j.name == name:
+            j.started_at = now
+    _save(jobs_)
+
+
 def _mark_ran(name: str, now: float) -> None:
     jobs_ = _load()
     for j in jobs_:
         if j.name == name:
             j.last_run = now
+            j.resume_attempts = 0       # a finished run clears resume state
     _save(jobs_)
+
+
+def interrupted(now: float | None = None) -> list[Job]:
+    """Jobs whose last run STARTED but never finished (a restart or upgrade
+    killed the process mid-run) — eligible for one resume with a continuation
+    note, instead of silently waiting a whole cadence."""
+    now = now if now is not None else time.time()
+    out = []
+    for j in _load():
+        if (j.enabled and j.started_at > j.last_run
+                and now - j.started_at >= RESUME_AFTER
+                and j.resume_attempts < 1):
+            out.append(j)
+    return out
 
 
 def _deliver(job: Job, answer: str) -> None:
@@ -261,6 +292,13 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     now = now if now is not None else time.time()
     log: list[str] = []
     ready = due(now)
+    # Interrupted runs (process died mid-job) get one resume with a
+    # continuation note instead of silently waiting a whole cadence.
+    resumed_names = set()
+    for job in interrupted(now):
+        if all(j.name != job.name for j in ready):
+            resumed_names.add(job.name)
+            ready.append(job)
     if not ready:
         return log
     if runner is None:
@@ -268,12 +306,20 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
             from . import orchestrator
             return orchestrator.Olympus(user=user).ask(prompt)
     for job in ready:
+        prompt = _effective_prompt(job)
+        if job.name in resumed_names:
+            _bump_resume(job.name)
+            prompt = ("A previous attempt at this task was interrupted by a "
+                      "restart or upgrade before it finished. Redo it in "
+                      "full now.\n\n" + prompt)
+        _mark_started(job.name, now)
         try:
-            answer = runner(_effective_prompt(job), job.user)
+            answer = runner(prompt, job.user)
             _deliver(job, answer)
             memory.set_user("shared")
             memory.save("reports", f"Scheduled: {job.name}", answer)
-            log.append(f"ran scheduled job '{job.name}'")
+            log.append(("resumed interrupted job" if job.name in resumed_names
+                        else "ran scheduled job") + f" '{job.name}'")
         except Exception as err:
             log.append(f"scheduled job '{job.name}' failed: {str(err)[:120]}")
         finally:
@@ -281,6 +327,14 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
             if job.kind == "on_exit":
                 set_enabled(job.name, False)     # one-shot: fired, now dormant
     return log
+
+
+def _bump_resume(name: str) -> None:
+    jobs_ = _load()
+    for j in jobs_:
+        if j.name == name:
+            j.resume_attempts += 1
+    _save(jobs_)
 
 
 def _human_interval(secs: int) -> str:

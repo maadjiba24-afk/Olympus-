@@ -27,6 +27,27 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     now = now or time.time()
     log: list[str] = []
 
+    # Upgrade/restart handoff: the previous process journaled what it was in
+    # the middle of. Report it once — each subsystem (gateway inflight,
+    # scheduler interrupted-run resume) re-runs its own work.
+    try:
+        from . import selfupdate
+        handoff = selfupdate.take_handoff()
+        if handoff:
+            pending = handoff.get("pending", {})
+            carried = (len(pending.get("inflight", []))
+                       + len(pending.get("jobs_running", [])))
+            note = (f"⚡ Olympus restarted (was "
+                    f"v{handoff.get('from_version', '?')}).")
+            if carried:
+                note += (f" {carried} in-flight task(s) carried across the "
+                         "restart and will resume.")
+            log.append(note)
+            if carried:
+                gateway.notify_all(note)
+    except Exception:
+        log.append("Handoff check failed:\n" + traceback.format_exc())
+
     # User-defined scheduled tasks (natural-language cron). Checked every tick;
     # each job has its own interval, so this is cheap when nothing is due.
     try:
