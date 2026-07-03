@@ -37,6 +37,11 @@ carries a migration note here.
   memory, sessions, workspace) labeled editable vs managed.
 - THREAT_MODEL: documented the no-/yolo stance — DENY-tier commands stay
   blocked even when approvals are granted.
+- **Model picker type-to-filter** — aggregator-scale discovered lists (>20
+  models) get a substring filter before the numbered pick.
+- **Gateway checklist** — the wizard's messaging step now shows every channel
+  (telegram/discord/slack/signal/email/webhook) with its configured status and
+  lets you set up several in one pass.
 
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`

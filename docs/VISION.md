@@ -484,7 +484,7 @@ we've built — pattern by pattern:
 | Terminal backends (local/docker/modal/ssh/daytona/singularity) + Keep current | ✓ local/docker + keep-current done; the rest are thin transports over the same run() contract — **deliberate skip** until someone needs one |
 | Platform **multi-select checklist with "(not configured)" status** | ✓ single-pick configure done (telegram/discord/slack/signal/email/webhook); **△ small gap: multi-select + configured-status labels** in one screen; 26-platform breadth = deliberate skip |
 
-### Remaining micro-items (batched, NOT building yet)
-34. Model picker type-to-filter when the discovered list is large (>20).
-35. Gateway step: one checklist showing all six channels with
-    configured/not-configured status; toggle several in one pass.
+### Remaining micro-items — BUILT
+34. ✅ Model picker type-to-filter when the discovered list is large (>20).
+35. ✅ Gateway step: one checklist showing all six channels with
+    configured/not-configured status; several in one pass.

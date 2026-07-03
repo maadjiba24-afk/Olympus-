@@ -311,13 +311,34 @@ def _picker_entries():
     return entries
 
 
+def _filter_models(models: list[str], query: str) -> list[str]:
+    """Case-insensitive substring filter for large discovered model lists."""
+    q = (query or "").strip().lower()
+    if not q:
+        return models
+    return [m for m in models if q in m.lower()]
+
+
 def _pick_model(prov, api_key: str, base_url: str) -> str:
     """Let the user pick a model — listing the provider's real model IDs when we
-    can fetch them, so they never have to guess the exact name."""
+    can fetch them, so they never have to guess the exact name. Big lists
+    (OpenRouter-scale) get a type-to-filter step before the numbered pick."""
     from . import providers
     models = providers.fetch_models(prov, api_key, base_url)
     if models:
-        models = sorted(models)[:30]
+        models = sorted(models)
+        # Aggregators expose hundreds of models — filter before listing.
+        while len(models) > 20:
+            print(f"  Found {len(models)} models for your key.")
+            query = _ask("  Filter (part of a name, blank to list the first 30)")
+            if not query:
+                models = models[:30]
+                break
+            hits = _filter_models(models, query)
+            if hits:
+                models = hits[:30]
+                break
+            print(f"  Nothing matches '{query}' — try again.")
         print(f"  Found {len(models)} models for your key:")
         labels = models + ["(type a different model name)"]
         idx = _choose("Pick a model", labels, default=1)
@@ -383,20 +404,46 @@ _GATEWAYS = {
               ("SLACK_SIGNING_SECRET", "App signing secret", True)],
     "signal": [("SIGNAL_CLI_REST_URL", "signal-cli REST URL", False),
                ("SIGNAL_NUMBER", "Your registered number (+1…)", False)],
+    "email": [("GMAIL_REFRESH_TOKEN", "Gmail OAuth refresh token "
+               "(connect Gmail via the web UI OAuth flow)", True),
+              ("OLYMPUS_EMAIL_ALLOW", "Only reply to these senders "
+               "(comma-separated; blank = anyone)", False)],
+    "webhook": [("OLYMPUS_WEBHOOK_SECRET", "Shared secret callers must send "
+                 "(blank = open — LAN only!)", True)],
 }
 
 
+def _gateway_configured(name: str, values: dict | None = None) -> bool:
+    """Whether a platform has at least one of its env vars set (saved or env)."""
+    values = values or {}
+    return any(os.environ.get(env) or values.get(env)
+               for env, _desc, _secret in _GATEWAYS[name])
+
+
 def _configure_gateway(values: dict) -> None:
+    """One checklist of every channel with its configured status; pick several
+    numbers to set up in one pass (Hermes-style multi-select, numbered for
+    SSH/WSL robustness)."""
     names = list(_GATEWAYS)
-    idx = _choose("Which platform?", [n.title() for n in names] + ["(none)"], 1)
-    if idx > len(names):
-        return
-    name = names[idx - 1]
-    for env, desc, secret in _GATEWAYS[name]:
-        val = _ask_secret(f"  {env} — {desc}") if secret else _ask(f"  {env} — {desc}")
-        if val:
-            values[env] = val
-    print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
+    print("  Messaging channels:")
+    for i, name in enumerate(names, 1):
+        state = "configured" if _gateway_configured(name, values) \
+            else "not configured"
+        print(f"    {i:2}) [{'x' if state == 'configured' else ' '}] "
+              f"{name.title():9s} ({state})")
+    raw = _ask("  Configure which? (numbers, e.g. 1 3 — blank for none)")
+    picked: list[str] = []
+    for tok in raw.replace(",", " ").split():
+        if tok.isdigit() and 1 <= int(tok) <= len(names):
+            picked.append(names[int(tok) - 1])
+    for name in picked:
+        print(f"  — {name.title()}:")
+        for env, desc, secret in _GATEWAYS[name]:
+            val = (_ask_secret(f"  {env} — {desc}") if secret
+                   else _ask(f"  {env} — {desc}"))
+            if val:
+                values[env] = val
+        print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
 
 
 def _doctor_gaps() -> list:
