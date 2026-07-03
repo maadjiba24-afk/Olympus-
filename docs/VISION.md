@@ -376,10 +376,12 @@ command security scanner**.
 
 ---
 
-## Build log — shipped in 0.22.0
+## Build log — shipped in 0.24.0
 
-The full 27-item backlog above was built, tested, and released as **0.22.0**
-(747 tests passing; wheel builds clean). Sequenced into six tiers:
+The full 27-item backlog above was built, tested, and released as **0.24.0**
+(originally cut as 0.22.0, re-versioned after merging main's parallel
+operator/admin-panel workstream, which had already claimed the 0.22/0.23
+headers; 1115 tests passing on the merged tree; wheel builds clean). Sequenced into six tiers:
 
 - **Tier A — trust core** (`2676111`): command security gate (#25), clarify
   (#20), analyze_image (#21), per-provider credential rotation (#12).
