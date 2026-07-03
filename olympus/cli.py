@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="for set: <KEY> <VALUE>")
     sub.add_parser("doctor", help="check readiness: provider, sandbox, security, "
                                   "memory, optional capabilities")
+    p_soul = sub.add_parser(
+        "soul", help="view or edit Olympus's personality (~/.olympus/soul.md), "
+                     "injected into every reply")
+    p_soul.add_argument("action", nargs="?", default="show",
+                        choices=["show", "edit"])
     sub.add_parser("version", help="show the installed Olympus version")
     sub.add_parser("growth", help="show how Olympus has adapted to you over time")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
@@ -196,6 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
+    sub.add_parser("skills-starter",
+                   help="install a small curated starter-skill pack "
+                        "(provisional — benchmark-gated like any other skill)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
@@ -319,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         from . import doctor
         print(doctor.render())
         return 0 if doctor.is_ready() else 1
+    elif args.command == "soul":
+        from . import soul
+        print(soul.edit() if args.action == "edit" else soul.show())
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")
@@ -726,6 +737,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skills":
         from . import skills
         print(skills.index())
+    elif args.command == "skills-starter":
+        from . import skillpack
+        msgs = skillpack.install_starter_pack()
+        print("Installed the starter pack (provisional — run `olympus gate` to "
+              "benchmark them):")
+        for m in msgs:
+            print(f"  · {m}")
     elif args.command == "gate":
         print(orchestrator.gate_skills())
     elif args.command == "train":

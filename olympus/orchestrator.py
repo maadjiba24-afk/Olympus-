@@ -155,7 +155,9 @@ class Olympus:
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)
             + codegraph.context_block("self", user_message)))
-        system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
+        from . import soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
@@ -317,7 +319,9 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+        from . import soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
@@ -686,7 +690,9 @@ class Olympus:
                 self._finish(user_message, result)
                 return
             self.report("⚡ Zeus composes the final answer...")
-            system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+            from . import soul
+            system = (agent.load_prompt("zeus") + soul.block()
+                      + i18n.directive(self.user)
                       + profile.card(self.user)
                       + recall.context_block(self.user, user_message)
                       + playbooks.context_block(self.user, user_message)

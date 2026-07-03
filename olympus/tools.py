@@ -733,8 +733,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_dir": lambda path=".": _sandbox().list_dir(path),
     "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
         specialist, task),
-    "schedule_task": lambda name, interval, prompt, deliver_to="": _schedule_task(
-        name, interval, prompt, deliver_to),
+    "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
+        _schedule_task(name, interval, prompt, deliver_to, skill),
     "search_sessions": lambda query: _search_sessions(query),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
@@ -1006,6 +1006,9 @@ SCHEDULE_TASK = {
                        "description": "The task to run each time, in full"},
             "deliver_to": {"type": "string",
                            "description": "Optional: telegram | discord | slack | signal"},
+            "skill": {"type": "string",
+                      "description": "Optional: name of a skill to load before "
+                      "running the task each time (e.g. 'weekly-report')"},
         },
         "required": ["name", "interval", "prompt"],
     },
@@ -1112,14 +1115,16 @@ def _search_sessions(query: str) -> str:
 
 
 def _schedule_task(name: str, interval: str, prompt: str,
-                   deliver_to: str = "") -> str:
+                   deliver_to: str = "", skill: str = "") -> str:
     from . import scheduler
     user = memory.current_user()
-    job = scheduler.add(name, interval, prompt, deliver_to=deliver_to, user=user)
+    job = scheduler.add(name, interval, prompt, deliver_to=deliver_to,
+                        user=user, skill=skill)
     every = (f"{job.interval // 3600}h" if job.interval % 3600 == 0
              else f"{job.interval // 60}m")
     to = f", delivering to {job.deliver_to}" if job.deliver_to else ""
-    return (f"Scheduled '{job.name}' to run every {every}{to}. It runs "
+    using = f", using the '{job.skill}' skill" if job.skill else ""
+    return (f"Scheduled '{job.name}' to run every {every}{to}{using}. It runs "
             "unattended via the heartbeat.")
 
 

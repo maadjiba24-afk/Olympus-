@@ -112,3 +112,52 @@ def import_dir(root: str, *, provisional: bool = False) -> list[str]:
     for skill_md in sorted(base.rglob("SKILL.md")):
         out.append(import_file(str(skill_md), provisional=provisional))
     return out
+
+
+# --- curated starter pack ------------------------------------------------
+# A tiny, opt-in set of general-purpose skills, installed PROVISIONAL so they
+# go through the same benchmark gate as anything the system writes itself —
+# nothing curated gets a free pass. They pair with scheduled jobs (a cron job
+# can name one via `schedule_task(..., skill=...)`).
+
+STARTER_PACK: tuple[dict, ...] = (
+    {"name": "daily-brief",
+     "description": "A concise morning brief: what changed, what needs a "
+                    "decision today, and the single most important next action.",
+     "instructions": (
+         "Produce a short daily brief. Structure:\n"
+         "1. **Headlines** — 2-4 bullets of what actually changed since "
+         "yesterday (skip noise).\n"
+         "2. **Needs a decision** — anything waiting on the user, with the "
+         "options stated plainly.\n"
+         "3. **One next action** — the single highest-leverage thing to do "
+         "today, and why.\n"
+         "Be ruthless about brevity; lead with the decision, cut the filler.")},
+    {"name": "weekly-report",
+     "description": "A structured weekly report: progress, blockers, metrics, "
+                    "and next week's focus.",
+     "instructions": (
+         "Write a weekly report with these sections: **Shipped** (concrete "
+         "outcomes), **In progress** (with % done), **Blockers** (and what "
+         "would unblock each), **Metrics** (numbers that moved), **Next week** "
+         "(top 3 priorities). Keep each bullet to one line; prefer numbers to "
+         "adjectives.")},
+    {"name": "inbox-triage",
+     "description": "Turn a pile of messages into a prioritized, actionable "
+                    "list with suggested replies.",
+     "instructions": (
+         "Given a set of messages, triage them: group into **Urgent / "
+         "reply today**, **Can wait**, and **FYI / no action**. For each item "
+         "in the first two groups, give a one-line suggested reply or next "
+         "step. Never send anything — only propose. Flag anything that looks "
+         "like a deadline or a commitment.")},
+)
+
+
+def install_starter_pack() -> list[str]:
+    """Install the curated starter skills (PROVISIONAL). Returns messages."""
+    out = []
+    for s in STARTER_PACK:
+        out.append(skills.create(s["name"], s["description"], s["instructions"],
+                                 provisional=True))
+    return out

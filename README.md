@@ -11,10 +11,21 @@ hallucination controller, and the system continuously scans the world, learns
 from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->12<!--/cap--> specialist agents,
-<!--cap:tools-->40<!--/cap--> agent tools, and <!--cap:commands-->66<!--/cap-->
+<!--cap:tools-->40<!--/cap--> agent tools, and <!--cap:commands-->68<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
+
+**Headless-first and lightweight.** Olympus installs with three pure-Python
+dependencies and runs anywhere Python does — a server, a droplet, WSL, a CI job,
+an SSH session — with no desktop browser, no bundled media stack, and no OAuth
+dance to get started. Web access is server-side (with a client-side fallback),
+the sandbox is confined and approval-gated, and every command is screened by a
+[security gate](docs/THREAT_MODEL.md) before it can run. What you get for that
+small footprint is a *verified* council (every answer fact-checked before you
+see it), a pool that composes several models by strength and price, and a system
+that measurably improves at working with you over time — trust and adaptation
+over breadth.
 
 > **Status:** the full architecture is implemented and covered by a
 > comprehensive passing test suite. Install with the one-liner below, type
