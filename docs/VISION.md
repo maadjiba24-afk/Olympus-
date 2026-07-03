@@ -99,3 +99,39 @@ We borrow Hermes's best UX, but keep our soul.
 8. Config-location block at wizard start; show current pool on re-run.
 9. Env-scan auto-detection fallback ("Found X_API_KEY — use it?").
 10. Merge Anthropic entries into one auth-mode-first row.
+
+---
+
+## Screens 5–9 — model picker with pricing, credential rotation
+
+### What Hermes did
+- **Model picker shows live pricing columns**: `In / Out / Cache $/Mtok` per
+  model, and a green `← currently in use` marker on the active one. The user
+  picked `xiaomi/mimo-v2-pro` *because they could see it costs $1/$3 vs Opus's
+  $5/$25* — pricing at the decision point changes the decision.
+- Immediately confirms state: `Default model set to: xiaomi/mimo-v2-pro (via
+  OpenRouter)`.
+- **Same-Provider Fallback & Rotation**: keep *multiple credentials for one
+  provider* and rotate when one is exhausted or rate-limited. Explains WHY in
+  two lines ("preserves your primary provider while reducing interruptions
+  from quota issues").
+- Counts and attributes pooled credentials: `1 (0 manual, 1 auto-detected from
+  env/shared auth)` — transparent about where creds came from.
+- Extra credentials get **labels** (`api-key-2` default) for later management.
+
+### Verdicts + Olympus-native ideas
+| Hermes feature | Verdict | Olympus move |
+|---|---|---|
+| **Pricing columns in the model picker** | **ADOPT, then go beyond** | Wizard: where the provider exposes pricing (OpenRouter's /models does), show In/Out $/Mtok next to each model. **The Olympus step beyond: feed live pricing into the ModelPool** — role assignment (and fast-mode light-stage routing) becomes *cost-aware*, not just name-heuristic; and `usage.py` cost estimates become accurate per real provider prices instead of a static table. Hermes shows the human the price; Olympus *acts* on it. |
+| `← currently in use` marker | **ADOPT** | Mark current pool members in the wizard's model list on re-run. |
+| Immediate state confirmation ("Default model set to: X (via Y)") | **ADOPT** | Print the same one-liner after every wizard choice. |
+| **Same-provider credential rotation** (N keys per provider, rotate on 429/exhaustion) | **ADAPT — complements our pool** | Olympus has a multi-*provider* pool (best-model-per-role) but no multi-*credential* pool per provider. Add optional extra keys per member; on 429/quota errors `openai_compat._post` rotates to the next credential before backoff. Together: Hermes-style resilience *and* our role-based quality routing — neither alone. |
+| Credential provenance count ("0 manual, 1 auto-detected") | **ADOPT** | When env-scan (backlog #9) contributes a key, say so explicitly in `models`/`doctor` output. |
+| Credential labels | **ADAPT** | Label = provider+suffix automatically (`kimi-2`); only prompt if the user wants custom. |
+
+### Build backlog additions (batched)
+11. **Pricing-aware wizard + pool** (show $/Mtok in picker; use live pricing in
+    ModelPool role assignment + usage cost estimates). ← flagship candidate.
+12. **Per-provider credential rotation** on 429/exhaustion in openai_compat,
+    with labeled extra keys and provenance shown in `olympus models`.
+13. State-confirmation one-liners after each wizard step; `← in use` markers.
