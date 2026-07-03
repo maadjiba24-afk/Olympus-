@@ -403,6 +403,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_secret = sub.add_parser(
+        "secret", help="named secrets for SecretRef config indirection — "
+                       "reference them as vault:NAME instead of pasting "
+                       "credentials into config/env")
+    p_secret.add_argument("action", nargs="?", default="ls",
+                          choices=["set", "ls", "rm"])
+    p_secret.add_argument("name", nargs="?", default="")
     p_wiki = sub.add_parser(
         "wiki", help="the memory wiki: concept pages maintained by nightly "
                      "dreaming (list | show <page> | lint | dream | rm <page>)")
@@ -1258,6 +1265,35 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "secret":
+        from . import secretref, vault
+        if args.action == "set":
+            if not args.name:
+                print("Usage: olympus secret set <name>")
+                return 1
+            import getpass
+            value = getpass.getpass(f"value for '{args.name}' (hidden): ")
+            if not value:
+                print("Nothing entered — nothing stored.")
+                return 1
+            try:
+                ref = secretref.store(args.name, value)
+            except Exception as err:
+                print(f"Could not store secret: {err}")
+                return 1
+            print(f"Stored. Reference it in config as: {ref}")
+        elif args.action == "ls":
+            names = [n.removeprefix("secretref:")
+                     for n in vault.names("operator")
+                     if n.startswith("secretref:")]
+            print("\n".join(names) if names
+                  else "No named secrets. Add one: olympus secret set <name>")
+        elif args.action == "rm":
+            if not args.name:
+                print("Usage: olympus secret rm <name>")
+                return 1
+            vault.delete("operator", f"secretref:{args.name}")
+            print("Removed (if it existed).")
     elif args.command == "wiki":
         from . import wiki
         if args.action == "list":

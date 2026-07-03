@@ -42,7 +42,8 @@ PAIR_HINT = (
 
 
 def _token() -> str:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    from . import secretref
+    token = secretref.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN (get one from @BotFather).")
     return token
@@ -79,7 +80,8 @@ def notify(text: str) -> bool:
 
     Best-effort: returns False instead of raising when unconfigured/offline.
     """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    from . import secretref
+    token = secretref.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
     if not token or not chat_id:
         return False

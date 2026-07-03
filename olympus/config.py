@@ -94,15 +94,20 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Credential envs may hold the secret itself OR a SecretRef
+        # (env:/file:/vault:/keychain:) resolved here, at the choke point.
+        from . import secretref
         provider = os.environ.get("OLYMPUS_PROVIDER", "anthropic").lower()
         if provider == "anthropic":
             model = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
-            key = os.environ.get("ANTHROPIC_API_KEY")
+            key = secretref.getenv("ANTHROPIC_API_KEY") or None
         else:
             model = os.environ.get("OLYMPUS_MODEL", "")
-            key = (os.environ.get("OLYMPUS_API_KEY")
-                   or os.environ.get("OPENAI_API_KEY"))
-        extra = _split_keys(os.environ.get("OLYMPUS_API_KEYS", ""))
+            key = (secretref.getenv("OLYMPUS_API_KEY")
+                   or secretref.getenv("OPENAI_API_KEY") or None)
+        extra = tuple(secretref.resolve(k) for k in
+                      _split_keys(os.environ.get("OLYMPUS_API_KEYS", "")))
+        extra = tuple(k for k in extra if k)
         keys = tuple(k for k in ([key] if key else []) if k) + extra
         return cls(
             provider=provider,
@@ -308,11 +313,16 @@ class ModelPool:
         if raw:
             import json
             try:
+                from . import secretref
                 for d in json.loads(raw):
                     # A member may bring its own rotation pool via "api_keys"
-                    # (list) in addition to the primary "api_key".
-                    pool_keys = tuple(k for k in (d.get("api_keys") or []) if k)
-                    member_key = d.get("api_key")
+                    # (list) in addition to the primary "api_key". Each entry
+                    # may be a SecretRef instead of the key itself.
+                    pool_keys = tuple(
+                        secretref.resolve(k) for k in (d.get("api_keys") or [])
+                        if k)
+                    pool_keys = tuple(k for k in pool_keys if k)
+                    member_key = secretref.resolve(d.get("api_key")) or None
                     keys = tuple(k for k in ([member_key] if member_key else []) if k)
                     keys += tuple(k for k in pool_keys if k not in keys)
                     extra.append(Settings(

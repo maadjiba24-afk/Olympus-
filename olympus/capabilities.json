@@ -37,7 +37,7 @@
     ]
   },
   "commands": {
-    "count": 82,
+    "count": 83,
     "names": [
       "actions",
       "add-mcp",
@@ -96,6 +96,7 @@
       "schedule",
       "scores",
       "search",
+      "secret",
       "serve",
       "setup",
       "sign",
