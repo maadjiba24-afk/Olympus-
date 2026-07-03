@@ -727,6 +727,14 @@ class Olympus:
         old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
+        # Pre-compaction memory flush: whatever durable facts live only in the
+        # turns being folded away are extracted into typed memory FIRST, so
+        # compaction can never silently lose them (the prose summary below is
+        # for conversational continuity, not durability).
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         try:
             summary = backend.complete_text(
                 self.settings,
@@ -911,6 +919,12 @@ class Olympus:
             return "Nothing to reset — the conversation is already empty."
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in self.history)
+        # Same pre-clear flush as compaction: durable facts leave the
+        # transcript as typed memory before the turns are dropped.
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         summary = ""
         try:
             summary = backend.complete_text(
