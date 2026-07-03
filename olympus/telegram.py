@@ -180,10 +180,17 @@ def run_bot() -> None:
     me = _call(token, "getMe")["result"]
     print(f"⚡ Olympus is live on Telegram as @{me['username']}  (Ctrl-C to stop)")
 
+    from . import gateway
     bots: dict[int, orchestrator.Olympus] = {}
     workers: dict[int, _ChatWorker] = {}
     offset = 0
+    last_sweep = time.time()
     while True:
+        # Periodically distill-and-clear idle sessions so a long-lived gateway
+        # doesn't carry unbounded per-user history.
+        if time.time() - last_sweep >= 900:
+            gateway.reset_idle_sessions(bots)
+            last_sweep = time.time()
         try:
             updates = _call(token, "getUpdates", offset=offset, timeout=50)
         except (urllib.error.URLError, TimeoutError, OSError):

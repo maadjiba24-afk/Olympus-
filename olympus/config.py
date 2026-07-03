@@ -219,10 +219,11 @@ class ModelPool:
         return self.members[0]
 
     def _role_map(self) -> dict[str, Settings]:
-        """Assign each role to a member: highest capability wins, and TIES are
-        broken toward the least-used member so comparable frontier models split
-        the work (both keys get used) rather than one hogging everything. A
-        strictly stronger model still wins outright — quality first."""
+        """Assign each role to a member: highest capability wins (quality
+        first — a strictly stronger model always wins outright). Genuine TIES
+        are broken toward the CHEAPER model (live pricing when available), then
+        toward the least-used member so equal-cost frontier models split the
+        work rather than one hogging everything."""
         roles = ("reasoning", "coding", "verify")
         if len(self.members) == 1:
             return {r: self.members[0] for r in roles}
@@ -232,7 +233,8 @@ class ModelPool:
             best = max(capability_score(m.model, role) for m in self.members)
             tied = [m for m in self.members
                     if capability_score(m.model, role) == best]
-            pick = min(tied, key=lambda m: used[id(m)])  # least-used among tied
+            pick = min(tied, key=lambda m: (round(price_per_mtok(m.model), 2),
+                                            used[id(m)]))
             out[role] = pick
             used[id(pick)] += 1
         return out
@@ -262,15 +264,19 @@ class ModelPool:
         return len(self.members) > 1
 
     def assignment(self) -> str:
-        """Human-readable view of which model handles what."""
+        """Human-readable view of which model handles what, with rough pricing."""
+        def price_tag(model: str) -> str:
+            return f"~${price_per_mtok(model):g}/Mtok"
+
         if not self.is_multi():
             s = self.members[0]
-            return f"Single model: {s.provider}/{s.model or '(env default)'}"
+            return (f"Single model: {s.provider}/{s.model or '(env default)'}"
+                    + (f"  ({price_tag(s.model)})" if s.model else ""))
         rmap = self._role_map()
         lines = ["Model pool (best of each, used together):"]
         for role in ("reasoning", "coding", "verify"):
             s = rmap[role]
-            lines.append(f"  {role:9s} → {s.provider}/{s.model}")
+            lines.append(f"  {role:9s} → {s.provider}/{s.model}  ({price_tag(s.model)})")
         lines.append("  members: "
                      + ", ".join(f"{m.provider}/{m.model}" for m in self.members))
         return "\n".join(lines)
@@ -299,8 +305,79 @@ MAX_TOKENS = int(os.environ.get("OLYMPUS_MAX_TOKENS", "16000"))
 # estimated tokens, older turns are folded into a compact running "state" block
 # and only the most recent turns are replayed verbatim. Token-based (not turn-
 # count) because cost tracks context size, not the number of messages.
+#
+# The budget is a FRACTION of the model's context window by default, so it
+# adapts to each model (a 1M-token Gemini keeps far more verbatim history than a
+# 128k model) instead of a one-size-fits-all number. An explicit
+# OLYMPUS_HISTORY_TOKEN_BUDGET still wins as an absolute override.
 HISTORY_TOKEN_BUDGET = int(os.environ.get("OLYMPUS_HISTORY_TOKEN_BUDGET", "3000"))
+HISTORY_BUDGET_IS_EXPLICIT = "OLYMPUS_HISTORY_TOKEN_BUDGET" in os.environ
+HISTORY_CONTEXT_FRACTION = float(
+    os.environ.get("OLYMPUS_HISTORY_CONTEXT_FRACTION", "0.35"))
 HISTORY_KEEP_TURNS = int(os.environ.get("OLYMPUS_HISTORY_KEEP_TURNS", "8"))
+
+# Approximate context-window size (tokens) by model-name substring — enough to
+# scale the history budget per model. Not authoritative; a rough, defensible map.
+_CONTEXT_WINDOW: dict[str, int] = {
+    "fable": 200_000, "mythos": 200_000, "opus": 200_000, "sonnet": 200_000,
+    "haiku": 200_000, "gpt-5": 400_000, "o3": 200_000, "o1": 200_000,
+    "gpt-4o": 128_000, "gpt-4": 128_000, "gemini": 1_000_000,
+    "deepseek": 128_000, "glm": 128_000, "kimi": 128_000, "moonshot": 128_000,
+    "qwen": 128_000, "mistral": 128_000, "llama": 128_000,
+}
+_DEFAULT_CONTEXT = 128_000
+
+
+def context_window(model: str | None) -> int:
+    m = (model or "").lower()
+    for key, win in _CONTEXT_WINDOW.items():
+        if key in m:
+            return win
+    return _DEFAULT_CONTEXT
+
+
+def history_token_budget(model: str | None = None) -> int:
+    """Estimated-token ceiling for verbatim history before compaction. Explicit
+    override wins; otherwise a fraction of the model's context window."""
+    if HISTORY_BUDGET_IS_EXPLICIT:
+        return HISTORY_TOKEN_BUDGET
+    return max(1000, int(context_window(model) * HISTORY_CONTEXT_FRACTION))
+
+
+# --- rough list pricing (for cost-aware pool routing + estimates) ------------
+# Blended $/Mtok by model-name substring — a defensible ballpark, NOT a billing
+# source. Used to break capability ties toward the cheaper model and to show
+# cost estimates. Live pricing (providers.fetch_pricing) overrides at runtime.
+_PRICE_PER_MTOK: dict[str, float] = {
+    "opus": 30.0, "fable": 30.0, "mythos": 30.0, "o1": 30.0, "o3": 12.0,
+    "gpt-5": 10.0, "gpt-4": 12.0, "gpt-4o": 7.0, "sonnet": 6.0, "gemini": 3.0,
+    "mistral": 2.0, "haiku": 1.5, "kimi": 1.0, "moonshot": 1.0, "deepseek": 0.5,
+    "qwen": 0.5, "glm": 0.4, "llama": 0.4,
+}
+_DEFAULT_PRICE = 5.0
+_LIVE_PRICING: dict[str, float] = {}     # model_id -> $/Mtok, set at runtime
+
+
+def set_live_pricing(mapping: dict[str, float]) -> None:
+    """Install live per-model pricing (e.g. from OpenRouter) as an override."""
+    _LIVE_PRICING.clear()
+    _LIVE_PRICING.update({str(k).lower(): float(v)
+                          for k, v in (mapping or {}).items()})
+
+
+def price_per_mtok(model: str | None) -> float:
+    """Rough blended list price per million tokens for a model. Live pricing
+    first (exact then substring), then the static table, then a default."""
+    m = (model or "").lower()
+    if m in _LIVE_PRICING:
+        return _LIVE_PRICING[m]
+    for k, v in _LIVE_PRICING.items():
+        if k and (k in m or m in k):
+            return v
+    for key, price in _PRICE_PER_MTOK.items():
+        if key in m:
+            return price
+    return _DEFAULT_PRICE
 
 # Durable per-user memory: extract durable facts from turns (cheap model, in the
 # background), gate them, and retrieve the relevant ones into context.

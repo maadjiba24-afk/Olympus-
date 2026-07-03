@@ -31,6 +31,7 @@ COMMANDS: dict[str, str] = {
     "/lang": "set reply language: /lang <language|auto>",
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
+    "/reset": "start fresh — distill this chat into durable state, then clear it",
     "/exit": "leave Olympus",
 }
 
@@ -132,6 +133,8 @@ def dispatch_command(bot, raw: str):
     if name == "/growth":
         from . import companion
         return (True, companion.summary("cli"), False)
+    if name == "/reset":
+        return (True, bot.reset(), False)
     return (False, None, False)
 
 

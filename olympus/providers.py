@@ -121,6 +121,39 @@ def fetch_models(provider: Provider, api_key: str = "",
     return []
 
 
+def fetch_pricing(provider: Provider, api_key: str = "",
+                  base_url: str = "") -> dict[str, float]:
+    """Return live blended $/Mtok per model where the provider publishes it.
+
+    OpenRouter exposes per-token pricing in its /models payload; we blend prompt
+    and completion into one rough $/Mtok figure for cost-aware routing. Best-
+    effort: returns {} on any error or for providers without published pricing.
+    """
+    base = (base_url or provider.base_url).rstrip("/")
+    if "openrouter" not in base and provider.key != "openrouter":
+        return {}
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        data = _http_json(base + "/models", headers)
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for m in data.get("data", []) if isinstance(data, dict) else []:
+        mid = m.get("id")
+        pricing = m.get("pricing") or {}
+        try:
+            # OpenRouter prices are per-token strings; blend prompt+completion.
+            prompt = float(pricing.get("prompt", 0) or 0)
+            completion = float(pricing.get("completion", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if mid and (prompt or completion):
+            # Weight completion a bit heavier (output is usually the larger cost).
+            blended = (prompt * 0.4 + completion * 0.6) * 1_000_000
+            out[str(mid).lower()] = round(blended, 4)
+    return out
+
+
 @dataclass
 class Member:
     """One chosen provider entry, ready to become pool config."""

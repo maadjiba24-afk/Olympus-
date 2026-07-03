@@ -574,7 +574,8 @@ class Olympus:
         verbatim history actually exceeds the token budget — so short chats
         never pay for summarization, and a single huge paste triggers it even
         at turn one."""
-        if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
+        budget = config.history_token_budget(self.settings.model)
+        if self._estimate_tokens(self.history) <= budget:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:
             return  # everything is in the verbatim tail; nothing to fold away
@@ -713,6 +714,48 @@ class Olympus:
             self._finish(user_message, "".join(chunks))
         finally:
             tr.flush()
+
+    def reset(self) -> str:
+        """Distill the conversation into durable state, then clear it.
+
+        Unlike a plain wipe, this *keeps what matters*: before dropping the
+        turns it folds the whole conversation into a compact state block (facts,
+        decisions, preferences, open threads) and seeds the fresh history with
+        it, so the next turn starts clean but not amnesiac. Durable per-user
+        memory (lessons/facts) is untouched — only the working transcript is
+        distilled. Used by /reset and by scheduled gateway session resets."""
+        memory.set_user(self.user)
+        turns = len([m for m in self.history if m.get("role") == "user"])
+        if not self.history:
+            return "Nothing to reset — the conversation is already empty."
+        as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
+                            for m in self.history)
+        summary = ""
+        try:
+            summary = backend.complete_text(
+                self.settings,
+                "Distill this conversation into a compact durable state — facts, "
+                "decisions, user preferences, and open threads only. This will be "
+                "the sole memory of the chat, so keep everything that matters and "
+                "nothing that doesn't.",
+                [{"role": "user", "content": as_text}], effort="low").strip()
+        except Exception:
+            summary = ""
+        if summary:
+            self.history = [
+                {"role": "user",
+                 "content": "[Conversation state — distilled from a prior "
+                            "session]\n" + summary},
+                {"role": "assistant",
+                 "content": "Understood — continuing with that context."},
+            ]
+            tail = "kept a distilled summary of what we covered"
+        else:
+            self.history = []
+            tail = "cleared the transcript"
+        if self.conversation_id:
+            memory.save_conversation(self.conversation_id, self.history)
+        return f"Fresh start — {tail} ({turns} turn(s) folded away)."
 
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""
