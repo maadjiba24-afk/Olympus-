@@ -292,6 +292,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
                          help="deliver result to: telegram|discord|slack|signal")
+    p_sched.add_argument("--on-exit", type=int, default=0, dest="on_exit_pid",
+                         metavar="PID",
+                         help="event-driven: run once when this process exits "
+                              "(the interval argument is ignored)")
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
@@ -1151,10 +1155,21 @@ def main(argv: list[str] | None = None) -> int:
                 print('Usage: olympus schedule add <name> <interval> "<prompt>" '
                       '[--to telegram]')
                 return 1
-            job = scheduler.add(args.name, args.interval, prompt,
-                                deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every "
-                  f"{scheduler._human_interval(job.interval)}.")
+            if args.on_exit_pid:
+                try:
+                    job = scheduler.add_on_exit(
+                        args.name, args.on_exit_pid, prompt,
+                        deliver_to=args.deliver_to, user="cli")
+                except ValueError as err:
+                    print(err)
+                    return 1
+                print(f"Scheduled '{job.name}' to run once when pid "
+                      f"{job.watch_pid} exits.")
+            else:
+                job = scheduler.add(args.name, args.interval, prompt,
+                                    deliver_to=args.deliver_to, user="cli")
+                print(f"Scheduled '{job.name}' every "
+                      f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):

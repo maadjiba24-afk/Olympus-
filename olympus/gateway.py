@@ -44,6 +44,7 @@ HELP = (
     "/goal list · /goal drop <id> · /goal wait <id> <pid> — manage goals\n"
     "/heartbeat add <every> <prompt> — a periodic check that only pings you "
     "when something needs attention (list · drop <id>)\n"
+    "/onexit <pid> <prompt> — run a task once when that process exits\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
     "/moa <question> — one-shot mixture-of-agents across the model pool\n"
@@ -231,6 +232,24 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/onexit":
+        from . import scheduler
+        pid_str, _, prompt = arg.strip().partition(" ")
+        if not pid_str.isdigit() or not prompt.strip():
+            return chunk("Usage: /onexit <pid> <what to do when it exits>\n"
+                         "e.g. /onexit 4242 summarize the training log")
+        # Deliver the wake-up result back to the requesting channel's owner
+        # chat (the closest thing a scheduled run has to "this conversation").
+        channel = {"tg": "telegram", "dc": "discord",
+                   "sl": "slack", "sg": "signal"}.get(uid.split("-", 1)[0], "")
+        try:
+            job = scheduler.add_on_exit(
+                f"onexit-{pid_str}", int(pid_str), prompt.strip(), user=uid,
+                deliver_to=channel)
+        except ValueError as err:
+            return chunk(str(err))
+        return chunk(f"⏳ Watching pid {job.watch_pid} — when it exits I'll "
+                     f"run: {prompt.strip()}")
     if cmd == "/heartbeat":
         from . import agentbeat
         sub, _, rest = arg.strip().partition(" ")
