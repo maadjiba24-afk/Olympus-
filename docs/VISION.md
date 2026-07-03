@@ -308,3 +308,68 @@ at the moment of key creation.
     (point at owner-only `~/.olympus/config.env`). Reinforces #7; no new
     tool code — just wizard copy. (Screens 25–29 otherwise reinforce #7, #15,
     #23 with no brand-new items.)
+
+---
+
+## Screens 30–34 — Setup exit + first launch (tools/skills dashboard, status line, security scanner)
+
+### What Hermes did
+- **"To edit your configuration"** help block on setup exit: `hermes setup`
+  (re-run wizard), `hermes setup model|terminal|gateway|tools` (edit one
+  section), `hermes config` (view), `hermes config edit` (open in $EDITOR),
+  `hermes config set <key> <value>`, plus the raw file paths
+  (`~/.hermes/config.yaml`, `~/.hermes/.env`). Then **"Ready to go!"** →
+  `hermes` / `hermes gateway` / `hermes doctor`, and `Launch hermes chat now?
+  [Y/n]`.
+- **First launch**: big `HERMES-AGENT` banner + `v0.9.0 (2026.4.13) · upstream
+  5621fc44`. A boxed **"Available Tools"** grouped by category with real tool
+  names: `browser: browser_back, browser_click…`, `clarify: clarify`,
+  `code_execution: execute_code`, `cronjob: cronjob`, `delegation:
+  delegate_task`, `file: patch, read_file, search_files, write_file`,
+  `homeassistant: …`, `image_gen: image_generate`, "(and 10 more toolsets…)".
+- **"Available Skills"** — the full 72-skill taxonomy by category
+  (autonomous-ai-agents, creative, data-science, devops, email, gaming,
+  general, github, leisure, mcp, media, mlops, note-taking, productivity,
+  red-teaming, research, smart-home, social-media, software-development).
+- Model line: **`mimo-v2-pro · Nous Research`**, session path + session id.
+- **Welcome** message + **"/help for commands"**; tip that each MCP server gets
+  its own toggleable toolset (`mcp-servername`).
+- A **status line**: `mimo-v2-pro | ctx -- | [redacted] -- | 19s`
+  (model | context usage | cost/tokens | elapsed).
+- A safety warning: **"tirith security scanner enabled but not available —
+  command scanning will use pattern matching only."** → Hermes has a
+  pre-execution **command security scanner** that inspects shell commands
+  before running them, with a pattern-matching fallback.
+
+### Read
+Two confirmations and three genuinely new ideas. Confirmed: **`clarify` is a
+real shipped tool** (validates backlog #20), and the tool list shows
+`image_generate` but **no image *analysis*** (vision gap #21 still stands).
+Config sub-commands reinforce backlog #1 (doctor) / #2 (setup sections) and add
+`config set`/`config edit`. New: the **launch capability dashboard**, the
+**status line**, and — most aligned with our trust thesis — a **pre-exec
+command security scanner**.
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| **Pre-exec command security scanner** (tirith) | **ADOPT — dead-on our thesis** | Add a **verification gate on shell/sandbox commands**: before `run_command` executes, Aletheia-style check classifies it (safe / needs-confirm / deny) against a policy, with a pattern-match fallback when no model budget. This is the shell analogue of our hallucination gate — trust is our whole pitch. Fail *closed* (deny on scanner-unavailable is stricter than Hermes's "fall back to patterns"). |
+| **Launch capability dashboard** (Tools + Skills by category) | **ADAPT** | On `olympus` launch, print a compact **"what I can do now"**: active council roles + pool models, enabled tools, loaded skills — grouped, collapsed to counts with `--verbose` to expand. Ties to `doctor`/readiness (#1). Answers "is it actually set up?" at a glance. |
+| **Status line** (model \| ctx \| cost \| elapsed) | **ADOPT** | Persistent one-line footer: **active pool model(s) \| context budget used (fraction, #18) \| est. cost so far (pricing-aware, #11) \| elapsed**. Cheap, always-on situational awareness; composes with progress modes (#14). |
+| `config set <key> <value>` / `config edit` ($EDITOR) | **ADOPT (reinforces #2)** | Give `olympus config set/edit/show` so users don't hand-edit `config.env` blind — but keep secrets going only to owner-only file, never echoed. |
+| Per-MCP-server toggleable toolset | **NOTE / later** | When we add MCP, mirror "each server = one named, independently-toggleable toolset" with capability-separation applied per server. |
+| Version + **upstream commit** in banner | **ADOPT — tiny** | Show `olympus X.Y.Z · <git short-sha>` on launch/`doctor` for reproducible bug reports (we sign releases already; surface the provenance). |
+
+### Build backlog additions (batched)
+25. **Command security gate** — pre-execution classifier on `run_command`
+    (safe/confirm/deny via policy + Aletheia check, pattern-match fallback,
+    **fail-closed**). The shell analogue of our hallucination controller;
+    strongest trust-thesis win in this batch.
+26. **Launch capability dashboard** — compact "what I can do now" (roles +
+    pool + tools + skills, grouped/counted, `--verbose` expands); ties to
+    `doctor` (#1).
+27. **Persistent status line** — model/pool | context-fraction (#18) | est.
+    cost (#11) | elapsed; composes with progress modes (#14).
+    (Also: `olympus config set/edit/show` reinforces #2; version+short-sha in
+    banner for provenance. `clarify` confirmed real → keep #20; vision still a
+    gap → keep #21.)
