@@ -135,3 +135,40 @@ We borrow Hermes's best UX, but keep our soul.
 12. **Per-provider credential rotation** on 429/exhaustion in openai_compat,
     with labeled extra keys and provenance shown in `olympus models`.
 13. State-confirmation one-liners after each wizard step; `← in use` markers.
+
+---
+
+## Screens 10–14 — TTS/backend pickers, agent knobs, tool-progress modes
+
+### What Hermes did
+- **Every option labeled with its trade-off in a few words**: "Edge TTS (free,
+  cloud-based, no setup needed)", "ElevenLabs (premium quality, needs API
+  key)", "NeuTTS (local on-device, free, ~300MB model download)". Cost +
+  setup burden visible before choosing; the free zero-setup one is default.
+- **`Keep current (X)` pre-selected in every picker** — the wizard is safely
+  re-runnable; mashing Enter changes nothing (idempotent).
+- Rotation strategy is *named and saved*: `✓ Saved openrouter rotation
+  strategy: fill_first` (implies alternatives, e.g. round-robin).
+- **Agent knobs explained inline with trade-off + recommended default**:
+  "Maximum tool-calling iterations… Higher = more complex tasks, but costs
+  more tokens. Default is 90, works for most tasks. Use 150+ for open
+  exploration." One line: what it is, what it costs, when to change it.
+- **Tool Progress Display modes**: `off` (final answer only) / `new` (tool
+  name only on change) / `all` (every call + short preview) / `verbose`
+  (full args, results, debug) — applies to CLI *and* messaging.
+
+### Verdicts + Olympus-native ideas
+| Hermes feature | Verdict | Olympus move |
+|---|---|---|
+| Trade-off-labeled options | **ADOPT** | Catalog + pickers gain "(free)", "(needs API key)", "(no setup)", "(~size download)" labels. |
+| `Keep current (X)` defaults | **ADOPT** | Wizard re-runs pre-select current values (pairs with backlog #8). |
+| Inline knob explanations | **ADOPT** | Full setup exposes MAX_AGENT_ITERATIONS, HISTORY_TOKEN_BUDGET, OLYMPUS_FAST, DAILY_BUDGET — each with one-line what/trade-off/default. |
+| **Tool-progress verbosity modes** | **ADAPT — big UX win** | `OLYMPUS_PROGRESS=off|stages|all|verbose` + `/progress` command, CLI+web+gateways. Today's stage lines = `stages`. **Olympus twist:** at `all`+, surface *verification* activity distinctly (claims checked, fact-cache hits) — make the trust machinery visible; that's our moat. |
+| Named rotation strategies | **NOTE** | When #12 lands: `fill_first` default, `round_robin` later. |
+| Free-tier defaults | **ADAPT** | No-key options (DuckDuckGo fallback, local backend) labeled "(free, no setup)" and made defaults. |
+
+### Build backlog additions (batched)
+14. **Tool-progress verbosity modes** (off/stages/all/verbose) everywhere +
+    `/progress`; verification activity highlighted at all+.
+15. Trade-off labels on all pickers; free/no-setup options as defaults.
+16. `Keep current` pre-selection + inline knob explanations in full setup.
