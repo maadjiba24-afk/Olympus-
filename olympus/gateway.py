@@ -234,6 +234,28 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/usage":
+        from . import prefs, usage
+        sub = arg.strip().lower()
+        if sub in ("on", "off"):
+            prefs.set(uid, "usage_footer", True if sub == "on" else None)
+            return chunk("Usage footer on — every reply ends with its "
+                         "token/cost line." if sub == "on"
+                         else "Usage footer off.")
+        session = usage.session_totals(uid)
+        lines = [
+            f"This session: {session['calls']} model call(s), "
+            f"{usage._fmt_tokens(session['in'])} in / "
+            f"{usage._fmt_tokens(session['out'])} out, "
+            f"~${session['cost']:.4f}",
+            f"Today (all users): ${usage.today_spend():.2f}",
+        ]
+        budget = usage.budget_status()
+        if budget.get("budget"):
+            lines.append(f"Daily budget: ${budget['budget']:.2f} "
+                         f"({budget.get('status', '')})")
+        lines.append("Per-reply footers: /usage on · /usage off")
+        return chunk("\n".join(lines))
     if cmd == "/model":
         from . import modelpin
         if not arg.strip():
@@ -343,11 +365,18 @@ def reply_for(bots: dict, user_key: str, text: str,
     if cmd == "/reset":
         return chunk(bot.reset())
 
+    from . import prefs, usage
+    before = usage.session_totals(uid)
     reply = bot.ask(text)
     # A turn can leave irreversible actions held by the approval spine; tell
     # the person in-channel so the decision happens where the ask happened.
     from . import approvals
-    return chunk(reply + approvals.footer(uid))
+    reply += approvals.footer(uid)
+    # Opt-in per-reply cost accounting (/usage on).
+    if prefs.get(uid, "usage_footer"):
+        spent = usage.delta(before, usage.session_totals(uid))
+        reply += "\n\n" + usage.footer(spent, uid)
+    return chunk(reply)
 
 
 def reset_idle_sessions(bots: dict, max_age_secs: int | None = None) -> int:
