@@ -71,7 +71,7 @@ class Specialist:
             return True
         return False
 
-    def tool_defs(self, provider: str = "anthropic"):
+    def tool_defs(self, provider: str = "anthropic", task: str | None = None):
         ingests = self._ingests(provider)
         # System specialists keep action capabilities; others lose them in any
         # run that also ingests external content (capability separation).
@@ -97,6 +97,12 @@ class Specialist:
             _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
                    "codegraph_path", "verify_code_claim"}
             defs = [d for d in defs if d.get("name") not in _cg]
+        if task is not None:
+            # Per-turn dynamic selection LAST, strictly after every security
+            # filter above: it only drops from the already-filtered loadout,
+            # so relevance can never re-admit a stripped capability.
+            from . import toolselect
+            defs = toolselect.select(task, defs)
         return defs
 
     def mcp_defs(self, provider: str = "anthropic"):
@@ -135,7 +141,8 @@ class Specialist:
         settings = settings or config.Settings.from_env()
         effort = effort or self.effort
         return backend.run_agent_counted(settings, self.system_prompt(), task,
-                                         self.tool_defs(settings.provider),
+                                         self.tool_defs(settings.provider,
+                                                        task=task),
                                          mcp_servers=self.mcp_defs(settings.provider),
                                          effort=effort)
 
