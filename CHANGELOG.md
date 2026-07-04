@@ -15,6 +15,66 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — capabilities studied from Odysseus
+
+A batch distilled from analyzing the Odysseus self-hosted AI workspace
+(`pewdiepie-archdaemon/odysseus`) and adopting its best agent ideas the
+Olympus-native way — verified, gated, headless-first. See the release-tracking
+analysis for the full feature comparison.
+
+- **Deep Research pipeline** (`olympus/research.py`, `olympus research`) — an
+  IterResearch-style engine: plan sub-questions → iterative search/read/extract
+  loop the model drives → cited markdown report. Pool-aware staging (reasoning
+  plans/synthesizes, general extracts, verify checks the draft against the
+  evidence), a never-laundered verification-notes section, date-grounded
+  queries, low-quality-domain and duplicate-query filtering, and every fetched
+  page wrapped untrusted through the SSRF/rebinding-pinned path.
+- **Code-navigation tools for Hephaestus** — `grep_files` (bounded regex
+  search), `glob_files` (pathlib-style `**/`, newest-first), and `read_file`
+  line-range slicing, plus `edit_file`: exact-string editing routed through the
+  approval spine as a NOTABLE reversible action whose preview *is* the unified
+  diff. A case-insensitive sensitive-file deny-list (`.env`, keys, `.ssh`/`.aws`,
+  …) guards read/grep/glob/edit.
+- **Per-turn dynamic tool selection** (`olympus/toolselect.py`) — ranks a
+  specialist's loadout against the current task and drops the least-relevant
+  tail of oversized loadouts, saving prompt tokens each round. Runs strictly
+  after every security filter (it can only drop, never re-admit a stripped
+  tool); BASE/server-side/`prepare_action`/`ask_user` are never dropped.
+  `OLYMPUS_TOOL_SELECT_MAX` tunes the cap (set low for small-context models).
+- **Teacher escalation** (`olympus/teacher.py`) — an Athena-ordered rework
+  reruns on the strongest pool member for that role, and the fix is distilled
+  into a provisional, benchmark-gated, specialist-scoped skill so the weaker
+  model learns. No-op with a single-member pool or an already-strongest
+  specialist. `OLYMPUS_TEACHER_ESCALATION=0` disables.
+- **Pluggable web-search providers** (`olympus/websearch.py`) — SearXNG, Brave,
+  Tavily, Serper, and Google PSE behind one seam with DDG as the keyless
+  fallback; ordered try-through, 429 cooldown, and a shared result cache.
+  Endpoints ride the sovereign egress choke. The `web_search` tool and Deep
+  Research both use it.
+- **Skill import from public GitHub URLs** (`skillpack.import_url`) — direct
+  SKILL.md links, GitHub blob links, and whole repo/tree bundles (read in
+  memory, never extracted to disk). Remote imports are always provisional and
+  pass the injection/credential scan before the benchmark gate.
+- **`ask_user` tool** (`olympus/interaction.py`) — specialists can ask a
+  focused multiple-choice question mid-run through a thread-local provider;
+  interactive surfaces prompt the terminal, headless runs proceed with a stated
+  assumption instead of blocking. Available to every specialist and safe under
+  capability separation.
+- **Style-matched email drafting** (`olympus/emailstyle.py`) — Angelos distills
+  the user's writing voice from sent mail (quotes/signatures stripped, bodies
+  wrapped untrusted, guide scrubbed for injection) and drafts replies in it; a
+  `refresh_email_style` tool rebuilds on demand.
+
+### Security
+
+- **DNS-rebinding defense for outbound fetches** — `security.resolve_pinned_ip`
+  validates every resolved address and returns the exact IP to dial;
+  `tools._PinnedHTTP(S)Connection` connect to that pinned IP (HTTPS keeps
+  SNI/cert checks on the hostname), closing the validate-then-reconnect window
+  the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
+  delivery use the pinned opener. (Adapted from Odysseus fix #704; the
+  case-insensitive sensitive-file deny-list mirrors their #5097.)
+
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
 > through `0.24.0` sections below were prepared and dated but **never tagged or
