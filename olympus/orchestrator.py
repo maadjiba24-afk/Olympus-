@@ -150,6 +150,12 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        # Interaction provider for the ask_user tool: interactive surfaces
+        # install one; captured here so worker threads (which don't inherit
+        # thread-locals) can re-install it. None = headless (ask_user returns
+        # a proceed-with-assumption instruction instead of blocking).
+        from . import interaction
+        self._ask_provider = interaction.current()
         connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
@@ -389,8 +395,11 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
-    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace") -> str:
-        """Run a single specialist with failure isolation, on its best model.
+    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace",
+                 settings_override: config.Settings | None = None) -> str:
+        """Run a single specialist with failure isolation, on its best model
+        (or on `settings_override` when the caller escalates — the teacher
+        path routes a failed rework to the strongest pool member).
 
         This is the single funnel for the main pipeline: both dispatch paths
         (`_dispatch_dag` and the rework `_dispatch`) call it, so the hard output
@@ -411,10 +420,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        from . import interaction
+        ask_prev = interaction.set_provider(self._ask_provider)
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
-                    task, settings=self.pool.for_specialist(key),
+                    task,
+                    settings=settings_override or self.pool.for_specialist(key),
                     effort=SPECIALISTS[key].effort)
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
@@ -448,11 +460,15 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 
     def _dispatch(self, assignments: list[dict[str, str]],
-                  tr: "trace_mod.Trace") -> list[tuple[str, str]]:
-        """Run flat (independent) assignments in parallel. Used by rework."""
+                  tr: "trace_mod.Trace",
+                  overrides: dict[str, config.Settings] | None = None,
+                  ) -> list[tuple[str, str]]:
+        """Run flat (independent) assignments in parallel. Used by rework.
+        `overrides` maps specialist key → escalated Settings (teacher path)."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
@@ -460,7 +476,9 @@ class Olympus:
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
             results = list(pool.map(
                 lambda item: (item["specialist"],
-                              self._run_one(item["specialist"], item["task"], tr)),
+                              self._run_one(item["specialist"], item["task"], tr,
+                                            (overrides or {}).get(
+                                                item["specialist"]))),
                 assignments))
         # Workers appended their contract/egress decisions in completion order;
         # canonicalize this parallel slice so replay is order-stable.
@@ -643,8 +661,28 @@ class Olympus:
                           "the feedback.")}
                 for k in retry_keys
             ]
+            # Teacher escalation: a rework is the pipeline's own signal that
+            # the specialist's usual model wasn't good enough — rerun it on
+            # the strongest pool member for that role, when one exists.
+            from . import teacher as teacher_mod
+            escalated: dict[str, config.Settings] = {}
+            for k in retry_keys:
+                t = teacher_mod.teacher_for(self.pool, k)
+                if t is not None:
+                    escalated[k] = t
+                    self.report(f"🎓 {SPECIALISTS[k].name}'s rework escalates "
+                                f"to the teacher model ({t.model}).")
+                    tr.event("teacher.escalated", specialist=k, model=t.model)
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo, tr))
+                redone = dict(self._dispatch(redo, tr, overrides=escalated))
+            # The teacher's fix becomes homework: distill a provisional,
+            # benchmark-gated skill for the student model, in the background.
+            for k, t in escalated.items():
+                fix = redone.get(k, "")
+                if fix and not fix.startswith("["):     # skip failure markers
+                    teacher_mod.distill_async(
+                        k, by_key.get(k, brief),
+                        review.get("feedback", ""), fix, t)
             outputs = [(k, redone.get(k, v)) for k, v in outputs]
             self.report("🔍 Aletheia re-verifies the rework...")
             try:

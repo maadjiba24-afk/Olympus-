@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 62 tools in
+Olympus exposes a **finite, named** tool surface — the 67 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -105,13 +105,19 @@ surface. So the surface and its threat model can't drift apart.
 | `run_code_benchmark` | Execute code benchmarks | self-modifying (exec) | Runs model-written code as a local subprocess (temp dir + wall-clock timeout) — NOT an OS sandbox on the default backend | Arbitrary code execution — bound the benchmark inputs; use `OLYMPUS_EXEC_BACKEND=docker` for OS isolation |
 | `send_email` | Send an email | external actuator | **Irreversible**: requires `gmail.send`/`email` scope; never auto; rate-limited | Spam / data exfil — scope-gated, human-approved, capped |
 | `call_webhook` | POST to an external URL | external actuator | Requires scope; never auto; rate-limited | SSRF / exfil — scope-gated, human-approved, capped |
+| `grep_files` | Regex-search file contents in the workspace | first-party read | Read-only; path-confined via `_confine`; sensitive-file deny-list; binary/size bounded | Credential harvest / recon — deny-list skips `.env`/keys/`.ssh`, confined to the root |
+| `glob_files` | List workspace files matching a glob | first-party read | Read-only; path-confined; sensitive-file deny-list; result-capped | Recon outside the workspace / secret discovery — confined and deny-listed |
+| `edit_file` | Exact-string edit of a workspace file | external actuator | Routed through the approval spine as a NOTABLE reversible action; preview is the unified diff; sensitive-file deny-list; path-confined; `undo` restores prior contents | Unapproved code change / secret edit — never writes directly (prepares an action), deny-listed, reversible |
+| `ask_user` | Ask the user a focused multiple-choice question | first-party (interaction) | Neither ingests nor acts; headless runs never block (proceed-with-assumption); the answer is wrapped untrusted | None significant — no external content, no world effect; the returned answer is treated as data |
+| `refresh_email_style` | Rebuild the user's email writing-style profile from sent mail | first-party (learning) | Distills style (not content) from the user's own sent mail; bodies wrapped untrusted while profiling; the stored guide is scrubbed for injection markers | Injection via a hostile sent message steering the profiler — content is wrapped and the guide is sanitized before caching |
 
 ## The action spine (execution layer)
 
 Tools that *act* (`send_email`, `call_webhook`) and the higher-level action
 types (`gmail_send`, `gmail_draft`, `gmail_archive`, `calendar_create`,
-`save_note`, and the workspace-execution types `run_command` (irreversible) and
-`write_file` (reversible — `undo` restores prior contents), …) all run through
+`save_note`, and the workspace-execution types `run_command` (irreversible),
+`write_file` and `edit_file` (reversible — `undo` restores prior contents), …)
+all run through
 the Action spine, which enforces deny-first:
 
 - irreversible actions **never** auto-execute (`can_auto_execute` is always

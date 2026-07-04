@@ -1,12 +1,13 @@
 {
   "actions": {
-    "count": 14,
+    "count": 15,
     "names": [
       "browser_operate",
       "browser_operate_financial",
       "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",
+      "edit_file",
       "email_egress_held",
       "gmail_archive",
       "gmail_draft",
@@ -37,7 +38,7 @@
     ]
   },
   "commands": {
-    "count": 83,
+    "count": 84,
     "names": [
       "actions",
       "add-mcp",
@@ -89,6 +90,7 @@
       "reject",
       "replay",
       "reports",
+      "research",
       "restore",
       "restrict",
       "revoke",
@@ -126,9 +128,10 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 62,
+    "count": 67,
     "names": [
       "analyze_image",
+      "ask_user",
       "browse_page",
       "browser_act",
       "browser_exists",
@@ -145,10 +148,13 @@
       "codegraph_path",
       "create_skill",
       "current_time",
+      "edit_file",
       "gate_prompt",
       "gate_skills",
       "generate_benchmark",
       "generate_image",
+      "glob_files",
+      "grep_files",
       "list_dir",
       "list_source_files",
       "operator_authorize_site",
@@ -171,6 +177,7 @@
       "recall_fact",
       "recall_memory",
       "recent_learning",
+      "refresh_email_style",
       "restore_prompt",
       "run_benchmark",
       "run_code_benchmark",

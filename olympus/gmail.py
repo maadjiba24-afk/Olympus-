@@ -205,6 +205,29 @@ def list_unread(max_results: int = 10) -> list[dict]:
     return out
 
 
+def list_sent_bodies(max_results: int = 12) -> list[str]:
+    """Plain-text bodies of the user's recent SENT mail — the raw material a
+    writing-style profile is distilled from. Best-effort; empty on any error."""
+    q = urllib.parse.urlencode({"q": "in:sent", "maxResults": max_results})
+    try:
+        listing = _request("GET", f"/messages?{q}")
+    except Exception:
+        return []
+    out: list[str] = []
+    for ref in listing.get("messages", []):
+        mid = ref.get("id")
+        if not mid:
+            continue
+        try:
+            m = _request("GET", f"/messages/{mid}?format=full")
+            body = _plain_body(m).strip()
+        except Exception:
+            continue
+        if body:
+            out.append(body[:2000])
+    return out
+
+
 def mark_read(message_id: str) -> dict:
     """Remove the UNREAD label so the gateway doesn't re-answer a message."""
     return _request("POST", f"/messages/{message_id}/modify",

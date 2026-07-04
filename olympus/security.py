@@ -342,6 +342,45 @@ def _ip_is_public(ip: "ipaddress._BaseAddress") -> bool:
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 
+def resolve_pinned_ip(host: str, port: int) -> str:
+    """Resolve `host`, validate EVERY address it resolves to, and return one
+    validated IP for the caller to connect to. Raises ValueError with a human
+    reason when the host must not be fetched.
+
+    Connecting to the returned IP (rather than re-resolving the hostname) is
+    the DNS-rebinding defense: an attacker who flips the record between
+    validation and connect gets no second resolution to poison. The pinned
+    fetch path in tools.py calls this from the socket-connect hook, so the
+    address that was validated is byte-for-byte the address dialed.
+    """
+    if not host:
+        raise ValueError("URL has no host")
+    if host.lower() in _BLOCKED_HOSTNAMES:
+        raise ValueError(f"refusing to fetch an internal host ({host})")
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise ValueError(f"could not resolve host: {host}")
+    except (UnicodeError, ValueError):
+        raise ValueError(f"invalid host: {host}")
+    if not infos:
+        raise ValueError(f"could not resolve host: {host}")
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise ValueError(f"unparseable address for host: {host}")
+        if not _ip_is_public(ip):
+            raise ValueError(f"refusing to fetch a non-public address ({ip})")
+    # Under sovereign mode the same guard also enforces the egress allowlist:
+    # a public host that is not explicitly allowlisted may not receive our data.
+    if not egress_allowed(host):
+        raise ValueError(
+            f"sovereign mode: egress to '{host}' is not on the allowlist "
+            "(OLYMPUS_EGRESS_ALLOWLIST)")
+    return str(infos[0][4][0])
+
+
 def url_block_reason(url: str) -> str | None:
     """Return a human reason if `url` must NOT be fetched, else None.
 
@@ -350,10 +389,11 @@ def url_block_reason(url: str) -> str | None:
     address — so neither a literal internal IP nor a public hostname pointed at
     one (e.g. the cloud metadata service) can be reached.
 
-    Note: this validates at resolve time; it does not pin the socket to the
-    validated IP, so a DNS-rebinding attacker who flips the record between this
-    check and the actual connection is not fully defeated. It does stop the
-    common cases (direct IP, static internal name, metadata endpoints).
+    This check alone validates at resolve time. The pinned opener in tools.py
+    additionally connects to the exact IP validated by `resolve_pinned_ip` at
+    socket-connect time, closing the DNS-rebinding window for HTTP fetches.
+    Callers that hand the URL to an agent they don't control the sockets of
+    (the CDP browser) still rely on this name-level check only.
     """
     try:
         parsed = urlparse(url)
@@ -364,27 +404,9 @@ def url_block_reason(url: str) -> str | None:
     host = parsed.hostname
     if not host:
         return "URL has no host"
-    if host.lower() in _BLOCKED_HOSTNAMES:
-        return f"refusing to fetch an internal host ({host})"
     port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return f"could not resolve host: {host}"
-    except (UnicodeError, ValueError):
-        return f"invalid host: {host}"
-    if not infos:
-        return f"could not resolve host: {host}"
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return f"unparseable address for host: {host}"
-        if not _ip_is_public(ip):
-            return f"refusing to fetch a non-public address ({ip})"
-    # Under sovereign mode the same guard also enforces the egress allowlist:
-    # a public host that is not explicitly allowlisted may not receive our data.
-    if not egress_allowed(host):
-        return (f"sovereign mode: egress to '{host}' is not on the allowlist "
-                "(OLYMPUS_EGRESS_ALLOWLIST)")
+        resolve_pinned_ip(host, port)
+    except ValueError as err:
+        return str(err)
     return None

@@ -71,7 +71,7 @@ class Specialist:
             return True
         return False
 
-    def tool_defs(self, provider: str = "anthropic"):
+    def tool_defs(self, provider: str = "anthropic", task: str | None = None):
         ingests = self._ingests(provider)
         # System specialists keep action capabilities; others lose them in any
         # run that also ingests external content (capability separation).
@@ -97,6 +97,12 @@ class Specialist:
             _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
                    "codegraph_path", "verify_code_claim"}
             defs = [d for d in defs if d.get("name") not in _cg]
+        if task is not None:
+            # Per-turn dynamic selection LAST, strictly after every security
+            # filter above: it only drops from the already-filtered loadout,
+            # so relevance can never re-admit a stripped capability.
+            from . import toolselect
+            defs = toolselect.select(task, defs)
         return defs
 
     def mcp_defs(self, provider: str = "anthropic"):
@@ -116,7 +122,16 @@ class Specialist:
         return (agent.load_prompt(self.key)
                 + "\n\n## Skill library (load with read_skill before "
                   "relevant tasks)\n" + skills.index(self.key)
+                + self._extra_context()
                 + _UNTRUSTED_NOTE)
+
+    def _extra_context(self) -> str:
+        """Per-specialist prompt context. Angelos gets the user's email
+        writing-style guide so its drafts match the user's voice."""
+        if self.key == "angelos":
+            from . import emailstyle, memory
+            return emailstyle.context_block(memory.current_user())
+        return ""
 
     def run(self, task: str, settings: config.Settings | None = None,
             effort: str | None = None) -> str:
@@ -135,7 +150,8 @@ class Specialist:
         settings = settings or config.Settings.from_env()
         effort = effort or self.effort
         return backend.run_agent_counted(settings, self.system_prompt(), task,
-                                         self.tool_defs(settings.provider),
+                                         self.tool_defs(settings.provider,
+                                                        task=task),
                                          mcp_servers=self.mcp_defs(settings.provider),
                                          effort=effort)
 
@@ -165,7 +181,8 @@ SPECIALISTS: dict[str, Specialist] = {
             web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
-                         "read_file", "list_dir", "prepare_action",
+                         "read_file", "list_dir", "grep_files", "glob_files",
+                         "edit_file", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(
@@ -204,7 +221,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "send/draft/archive/invite actions for the user to "
                         "approve. Reads untrusted mail; never sends on its own.",
             extra_tools=("read_inbox", "read_email", "read_calendar",
-                         "prepare_action"),
+                         "prepare_action", "refresh_email_style"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",

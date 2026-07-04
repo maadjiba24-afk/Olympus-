@@ -257,6 +257,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="data-sensitivity class for routing; 'restricted' "
                             "stays local even with sovereign mode off")
 
+    p_res = sub.add_parser(
+        "research",
+        help="deep research: plan → iterative web search/read → cited report")
+    p_res.add_argument("question", nargs="+")
+    p_res.add_argument("--rounds", type=int, default=None,
+                       help="search/read rounds (default "
+                            "OLYMPUS_RESEARCH_ROUNDS or 4)")
+    p_res.add_argument("--out", default=None,
+                       help="also write the report to this markdown file")
+
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
 
@@ -333,7 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
-    p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
+    p_skim.add_argument("path", help="a SKILL.md, its directory, a tree to "
+                                     "scan, or a public GitHub URL (repo, "
+                                     "tree, blob, or raw SKILL.md — remote "
+                                     "imports are always provisional)")
     p_skim.add_argument("--provisional", action="store_true",
                         help="route imports through the benchmark gate")
     p_skex = sub.add_parser("skill-export", help="export a skill as an "
@@ -986,6 +999,19 @@ def main(argv: list[str] | None = None) -> int:
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
             pool=pool)
         print(bot.ask(" ".join(args.question)))
+    elif args.command == "research":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import research
+        report = research.run(" ".join(args.question),
+                              report=lambda msg: print(f"  {msg}",
+                                                       file=sys.stderr),
+                              rounds=args.rounds)
+        print(report)
+        if args.out:
+            from pathlib import Path
+            Path(args.out).write_text(report, encoding="utf-8")
+            print(f"\n[written to {args.out}]", file=sys.stderr)
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
     elif args.command == "audit":
@@ -1133,7 +1159,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skill-import":
         from . import skillpack
         import os.path
-        if os.path.isdir(args.path) and not os.path.isfile(
+        if "://" in args.path:
+            print("\n".join(skillpack.import_url(args.path)))
+        elif os.path.isdir(args.path) and not os.path.isfile(
                 os.path.join(args.path, "SKILL.md")):
             msgs = skillpack.import_dir(args.path, provisional=args.provisional)
             print("\n".join(msgs) if msgs else "No SKILL.md files found.")

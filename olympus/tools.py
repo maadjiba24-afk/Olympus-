@@ -488,6 +488,9 @@ _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+import http.client as _httpclient
+import socket as _socket
+import ssl as _ssl
 import urllib.error as _urlerr
 import urllib.request as _urlreq
 
@@ -504,20 +507,69 @@ class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _PinnedHTTPConnection(_httpclient.HTTPConnection):
+    """Validate at connect time and dial the validated IP itself, never the
+    hostname — DNS-rebinding defense: there is no second resolution for an
+    attacker to flip between the SSRF check and the socket connect."""
+
+    def connect(self):
+        try:
+            ip = security.resolve_pinned_ip(self.host, self.port)
+        except ValueError as err:
+            raise _urlerr.URLError(f"blocked ({err})")
+        self.sock = _socket.create_connection(
+            (ip, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(_httpclient.HTTPSConnection):
+    """HTTPS twin of _PinnedHTTPConnection: connects to the validated IP while
+    keeping SNI + certificate hostname checks bound to the original hostname,
+    so pinning does not weaken TLS verification."""
+
+    def connect(self):
+        try:
+            ip = security.resolve_pinned_ip(self.host, self.port)
+        except ValueError as err:
+            raise _urlerr.URLError(f"blocked ({err})")
+        sock = _socket.create_connection(
+            (ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(_urlreq.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(_urlreq.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req,
+                            context=self._context)
+
+
+def _pinned_opener() -> "_urlreq.OpenerDirector":
+    """Opener for model/user-supplied URLs: SSRF-validated redirects plus
+    IP-pinned connections on both schemes."""
+    return _urlreq.build_opener(_PinnedHTTPHandler(),
+                                _PinnedHTTPSHandler(
+                                    context=_ssl.create_default_context()),
+                                _SafeRedirectHandler())
+
+
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
-    initial request AND on every redirect, and refusing a URL that carries a
-    stored secret (raw or encoded) — the classic injection exfil channel.
-    Raises ValueError if blocked."""
+    initial request, on every redirect, AND at socket-connect time (the
+    connection is pinned to the validated IP, defeating DNS rebinding); also
+    refuses a URL that carries a stored secret (raw or encoded) — the classic
+    injection exfil channel. Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
     reason = security.url_block_reason(url)
     if reason:
         raise ValueError(reason)
-    opener = _urlreq.build_opener(_SafeRedirectHandler)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
-    with opener.open(req, timeout=30) as resp:
+    with _pinned_opener().open(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -530,8 +582,10 @@ def _strip_html(html: str) -> str:
     return _re.sub(r"\s+", " ", text).strip()
 
 
-def _ddg_search(query: str) -> str:
-    """Client-side web search via DuckDuckGo's HTML endpoint (no API key)."""
+def ddg_results(query: str, limit: int = 8) -> list[dict]:
+    """Client-side web search via DuckDuckGo's HTML endpoint (no API key).
+    Returns [{title, url, snippet}] — the structured seam Deep Research and
+    the web_search tool share."""
     import re as _re
     import urllib.parse
     html = _http_get(
@@ -544,12 +598,20 @@ def _ddg_search(query: str) -> str:
         r'class="result__snippet"[^>]*>(.*?)</a>', html, _re.DOTALL
     )
     results = []
-    for i, (href, title) in enumerate(titles[:8]):
+    for i, (href, title) in enumerate(titles[:limit]):
         if "uddg=" in href:
             href = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
         snippet = _strip_html(snippets[i]) if i < len(snippets) else ""
-        results.append(f"{_strip_html(title)}\n{href}\n{snippet}")
-    return "\n\n".join(results) or "No results found."
+        results.append({"title": _strip_html(title), "url": href,
+                        "snippet": snippet})
+    return results
+
+
+def _ddg_search(query: str) -> str:
+    """The web_search tool's client-side fallback — now provider-pluggable
+    (websearch tries SearXNG/Brave/Tavily/Serper/PSE before DDG)."""
+    from . import websearch
+    return websearch.search_text(query)
 
 
 def _web_fetch(url: str) -> str:
@@ -752,9 +814,8 @@ def _call_webhook(name: str, payload: dict | None = None, *,
         data=_json.dumps(payload or {}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "olympus-agent"},
     )
-    opener = _urlreq.build_opener(_SafeRedirectHandler)
     try:
-        with opener.open(req, timeout=30) as resp:
+        with _pinned_opener().open(req, timeout=30) as resp:
             return (f"Webhook '{name}' responded {resp.status}: "
                     f"{resp.read(500).decode(errors='replace')}")
     except _urlerr.HTTPError as err:
@@ -781,6 +842,28 @@ def _send_email_tool(to: str, subject: str, body: str) -> str:
     return _spine_action("send_email", {"to": to, "subject": subject,
                                         "body": body},
                          f"Email to {to}", f"Email to {to}")
+
+
+def _ask_user(question: str, options=None) -> str:
+    from . import interaction
+    opts = options if isinstance(options, list) else None
+    return interaction.ask(question, opts)
+
+
+def _refresh_email_style() -> str:
+    from . import emailstyle, memory
+    return emailstyle.refresh(memory.current_user())
+
+
+def _edit_file_tool(path: str, old_string: str, new_string: str,
+                    replace_all: bool = False) -> str:
+    """File edits are writes: route through the approval spine like write_file.
+    The prepared action's preview is the unified diff of exactly this edit."""
+    return _spine_action("edit_file",
+                         {"path": path, "old_string": old_string,
+                          "new_string": new_string,
+                          "replace_all": bool(replace_all)},
+                         f"Edit {path}", f"Edit of {path}")
 
 
 def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
@@ -1182,13 +1265,21 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_inbox": lambda query="in:inbox", max_results=10: _read_inbox(query, max_results),
     "read_email": lambda message_id: _read_email(message_id),
     "read_calendar": lambda time_min, time_max: _read_calendar(time_min, time_max),
-    "read_file": lambda path: _sandbox().read_file(path),
+    "read_file": lambda path, start_line=None, end_line=None:
+        _sandbox().read_file(path, start_line, end_line),
     "list_dir": lambda path=".": _sandbox().list_dir(path),
+    "grep_files": lambda pattern, path=".", glob="":
+        _sandbox().grep_files(pattern, path, glob),
+    "glob_files": lambda pattern, path=".": _sandbox().glob_files(pattern, path),
+    "edit_file": lambda path, old_string, new_string, replace_all=False:
+        _edit_file_tool(path, old_string, new_string, replace_all),
     "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
         specialist, task),
     "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
         _schedule_task(name, interval, prompt, deliver_to, skill),
     "search_sessions": lambda query: _search_sessions(query),
+    "ask_user": lambda question, options=None: _ask_user(question, options),
+    "refresh_email_style": lambda: _refresh_email_style(),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1381,14 +1472,119 @@ READ_FILE = {
     "name": "read_file",
     "description": (
         "Read a UTF-8 file from Olympus's confined workspace (host-side). "
-        "Side-effect-free. To create/modify files or run commands, prepare a "
-        "'write_file' or 'run_command' action instead (they need approval)."
+        "Side-effect-free. Pass start_line/end_line to read just a slice of a "
+        "large file. To create/modify files or run commands, use 'edit_file' / "
+        "prepare a 'write_file' or 'run_command' action instead (they need "
+        "approval)."
     ),
     "input_schema": {
         "type": "object",
-        "properties": {"path": {"type": "string",
-                                "description": "Path relative to the workspace root"}},
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Path relative to the workspace root"},
+            "start_line": {"type": "integer",
+                           "description": "First line to read (1-indexed)"},
+            "end_line": {"type": "integer",
+                         "description": "Last line to read (inclusive)"},
+        },
         "required": ["path"],
+    },
+}
+
+GREP_FILES = {
+    "name": "grep_files",
+    "description": (
+        "Regex-search file contents under a workspace directory. Returns "
+        "'path:line-number: line' matches. Side-effect-free. Use this to find "
+        "where something is defined or used before reading whole files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Python regex"},
+            "path": {"type": "string",
+                     "description": "Directory relative to the workspace root "
+                                    "(default '.')"},
+            "glob": {"type": "string",
+                     "description": "Optional filename filter, e.g. '*.py'"},
+        },
+        "required": ["pattern"],
+    },
+}
+
+GLOB_FILES = {
+    "name": "glob_files",
+    "description": (
+        "List workspace files matching a glob pattern (e.g. '**/*.py', "
+        "'src/*.ts'), newest-modified first. Side-effect-free."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string"},
+            "path": {"type": "string",
+                     "description": "Directory relative to the workspace root "
+                                    "(default '.')"},
+        },
+        "required": ["pattern"],
+    },
+}
+
+EDIT_FILE = {
+    "name": "edit_file",
+    "description": (
+        "Edit a workspace file by exact-string replacement. old_string must "
+        "match the file exactly and (unless replace_all) uniquely — include "
+        "surrounding lines to disambiguate. The edit is prepared as an "
+        "approval-gated action whose preview is the unified diff; it applies "
+        "when policy allows or the user approves. For a brand-new file, "
+        "prepare a 'write_file' action instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Path relative to the workspace root"},
+            "old_string": {"type": "string",
+                           "description": "Exact text to replace"},
+            "new_string": {"type": "string",
+                           "description": "Replacement text"},
+            "replace_all": {"type": "boolean",
+                            "description": "Replace every occurrence "
+                                           "(default false)"},
+        },
+        "required": ["path", "old_string", "new_string"],
+    },
+}
+
+REFRESH_EMAIL_STYLE = {
+    "name": "refresh_email_style",
+    "description": (
+        "Rebuild the user's email writing-style profile from their recent "
+        "sent mail, so your drafted replies match their voice. Run this once "
+        "when you start managing their inbox, or if your drafts don't sound "
+        "like them yet."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+ASK_USER = {
+    "name": "ask_user",
+    "description": (
+        "Ask the user a single, focused question when you are genuinely "
+        "blocked on a choice only they can make — offer 2-4 concrete options. "
+        "Use sparingly: prefer a reasonable assumption over interrupting. If "
+        "no interactive user is available, you'll be told to proceed with an "
+        "assumption — do that and state it, never stall."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "options": {"type": "array", "items": {"type": "string"},
+                        "description": "2-4 concrete choices to offer"},
+        },
+        "required": ["question"],
     },
 }
 
@@ -1903,7 +2099,7 @@ LIST_DIR = {
 
 # Tools every specialist gets by default.
 BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME,
-              SEARCH_SESSIONS]
+              SEARCH_SESSIONS, ASK_USER]
 
 # Extra client-side tools, referenced by name in the specialist registry.
 EXTRA_TOOLS: dict[str, dict[str, Any]] = {
@@ -1919,8 +2115,12 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_inbox": READ_INBOX,
     "read_email": READ_EMAIL,
     "read_calendar": READ_CALENDAR,
+    "refresh_email_style": REFRESH_EMAIL_STYLE,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,
+    "grep_files": GREP_FILES,
+    "glob_files": GLOB_FILES,
+    "edit_file": EDIT_FILE,
     "spawn_subagent": SPAWN_SUBAGENT,
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,
