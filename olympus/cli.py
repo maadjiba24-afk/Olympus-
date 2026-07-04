@@ -343,7 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
-    p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
+    p_skim.add_argument("path", help="a SKILL.md, its directory, a tree to "
+                                     "scan, or a public GitHub URL (repo, "
+                                     "tree, blob, or raw SKILL.md — remote "
+                                     "imports are always provisional)")
     p_skim.add_argument("--provisional", action="store_true",
                         help="route imports through the benchmark gate")
     p_skex = sub.add_parser("skill-export", help="export a skill as an "
@@ -1156,7 +1159,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skill-import":
         from . import skillpack
         import os.path
-        if os.path.isdir(args.path) and not os.path.isfile(
+        if "://" in args.path:
+            print("\n".join(skillpack.import_url(args.path)))
+        elif os.path.isdir(args.path) and not os.path.isfile(
                 os.path.join(args.path, "SKILL.md")):
             msgs = skillpack.import_dir(args.path, provisional=args.provisional)
             print("\n".join(msgs) if msgs else "No SKILL.md files found.")
