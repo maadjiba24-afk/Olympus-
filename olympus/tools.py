@@ -608,9 +608,10 @@ def ddg_results(query: str, limit: int = 8) -> list[dict]:
 
 
 def _ddg_search(query: str) -> str:
-    """The web_search tool's text rendering of ddg_results."""
-    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['snippet']}"
-                       for r in ddg_results(query)) or "No results found."
+    """The web_search tool's client-side fallback — now provider-pluggable
+    (websearch tries SearXNG/Brave/Tavily/Serper/PSE before DDG)."""
+    from . import websearch
+    return websearch.search_text(query)
 
 
 def _web_fetch(url: str) -> str:

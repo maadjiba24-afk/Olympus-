@@ -138,9 +138,10 @@ def _today() -> str:
 
 
 def _search(query: str) -> list[dict]:
-    """The search seam: structured [{title,url,snippet}] results."""
-    from . import tools
-    return tools.ddg_results(query)
+    """The search seam: structured [{title,url,snippet}] results from the
+    provider layer (SearXNG/Brave/Tavily/Serper/PSE, DDG fallback)."""
+    from . import websearch
+    return websearch.results(query)
 
 
 def _fetch(url: str) -> str:
