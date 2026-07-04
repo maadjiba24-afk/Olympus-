@@ -122,7 +122,16 @@ class Specialist:
         return (agent.load_prompt(self.key)
                 + "\n\n## Skill library (load with read_skill before "
                   "relevant tasks)\n" + skills.index(self.key)
+                + self._extra_context()
                 + _UNTRUSTED_NOTE)
+
+    def _extra_context(self) -> str:
+        """Per-specialist prompt context. Angelos gets the user's email
+        writing-style guide so its drafts match the user's voice."""
+        if self.key == "angelos":
+            from . import emailstyle, memory
+            return emailstyle.context_block(memory.current_user())
+        return ""
 
     def run(self, task: str, settings: config.Settings | None = None,
             effort: str | None = None) -> str:
@@ -212,7 +221,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "send/draft/archive/invite actions for the user to "
                         "approve. Reads untrusted mail; never sends on its own.",
             extra_tools=("read_inbox", "read_email", "read_calendar",
-                         "prepare_action"),
+                         "prepare_action", "refresh_email_style"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",

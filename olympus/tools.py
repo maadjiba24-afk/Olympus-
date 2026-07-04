@@ -850,6 +850,11 @@ def _ask_user(question: str, options=None) -> str:
     return interaction.ask(question, opts)
 
 
+def _refresh_email_style() -> str:
+    from . import emailstyle, memory
+    return emailstyle.refresh(memory.current_user())
+
+
 def _edit_file_tool(path: str, old_string: str, new_string: str,
                     replace_all: bool = False) -> str:
     """File edits are writes: route through the approval spine like write_file.
@@ -1274,6 +1279,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         _schedule_task(name, interval, prompt, deliver_to, skill),
     "search_sessions": lambda query: _search_sessions(query),
     "ask_user": lambda question, options=None: _ask_user(question, options),
+    "refresh_email_style": lambda: _refresh_email_style(),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1549,6 +1555,17 @@ EDIT_FILE = {
         },
         "required": ["path", "old_string", "new_string"],
     },
+}
+
+REFRESH_EMAIL_STYLE = {
+    "name": "refresh_email_style",
+    "description": (
+        "Rebuild the user's email writing-style profile from their recent "
+        "sent mail, so your drafted replies match their voice. Run this once "
+        "when you start managing their inbox, or if your drafts don't sound "
+        "like them yet."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
 ASK_USER = {
@@ -2098,6 +2115,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_inbox": READ_INBOX,
     "read_email": READ_EMAIL,
     "read_calendar": READ_CALENDAR,
+    "refresh_email_style": REFRESH_EMAIL_STYLE,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,
     "grep_files": GREP_FILES,

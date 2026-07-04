@@ -128,7 +128,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 66,
+    "count": 67,
     "names": [
       "analyze_image",
       "ask_user",
@@ -177,6 +177,7 @@
       "recall_fact",
       "recall_memory",
       "recent_learning",
+      "refresh_email_style",
       "restore_prompt",
       "run_benchmark",
       "run_code_benchmark",
