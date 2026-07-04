@@ -488,6 +488,9 @@ _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
 
+import http.client as _httpclient
+import socket as _socket
+import ssl as _ssl
 import urllib.error as _urlerr
 import urllib.request as _urlreq
 
@@ -504,20 +507,69 @@ class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _PinnedHTTPConnection(_httpclient.HTTPConnection):
+    """Validate at connect time and dial the validated IP itself, never the
+    hostname — DNS-rebinding defense: there is no second resolution for an
+    attacker to flip between the SSRF check and the socket connect."""
+
+    def connect(self):
+        try:
+            ip = security.resolve_pinned_ip(self.host, self.port)
+        except ValueError as err:
+            raise _urlerr.URLError(f"blocked ({err})")
+        self.sock = _socket.create_connection(
+            (ip, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(_httpclient.HTTPSConnection):
+    """HTTPS twin of _PinnedHTTPConnection: connects to the validated IP while
+    keeping SNI + certificate hostname checks bound to the original hostname,
+    so pinning does not weaken TLS verification."""
+
+    def connect(self):
+        try:
+            ip = security.resolve_pinned_ip(self.host, self.port)
+        except ValueError as err:
+            raise _urlerr.URLError(f"blocked ({err})")
+        sock = _socket.create_connection(
+            (ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(_urlreq.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(_urlreq.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req,
+                            context=self._context)
+
+
+def _pinned_opener() -> "_urlreq.OpenerDirector":
+    """Opener for model/user-supplied URLs: SSRF-validated redirects plus
+    IP-pinned connections on both schemes."""
+    return _urlreq.build_opener(_PinnedHTTPHandler(),
+                                _PinnedHTTPSHandler(
+                                    context=_ssl.create_default_context()),
+                                _SafeRedirectHandler())
+
+
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
-    initial request AND on every redirect, and refusing a URL that carries a
-    stored secret (raw or encoded) — the classic injection exfil channel.
-    Raises ValueError if blocked."""
+    initial request, on every redirect, AND at socket-connect time (the
+    connection is pinned to the validated IP, defeating DNS rebinding); also
+    refuses a URL that carries a stored secret (raw or encoded) — the classic
+    injection exfil channel. Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
     reason = security.url_block_reason(url)
     if reason:
         raise ValueError(reason)
-    opener = _urlreq.build_opener(_SafeRedirectHandler)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
-    with opener.open(req, timeout=30) as resp:
+    with _pinned_opener().open(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -752,9 +804,8 @@ def _call_webhook(name: str, payload: dict | None = None, *,
         data=_json.dumps(payload or {}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "olympus-agent"},
     )
-    opener = _urlreq.build_opener(_SafeRedirectHandler)
     try:
-        with opener.open(req, timeout=30) as resp:
+        with _pinned_opener().open(req, timeout=30) as resp:
             return (f"Webhook '{name}' responded {resp.status}: "
                     f"{resp.read(500).decode(errors='replace')}")
     except _urlerr.HTTPError as err:
