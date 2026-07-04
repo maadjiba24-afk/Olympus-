@@ -38,7 +38,7 @@
     ]
   },
   "commands": {
-    "count": 83,
+    "count": 84,
     "names": [
       "actions",
       "add-mcp",
@@ -90,6 +90,7 @@
       "reject",
       "replay",
       "reports",
+      "research",
       "restore",
       "restrict",
       "revoke",

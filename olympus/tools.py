@@ -582,8 +582,10 @@ def _strip_html(html: str) -> str:
     return _re.sub(r"\s+", " ", text).strip()
 
 
-def _ddg_search(query: str) -> str:
-    """Client-side web search via DuckDuckGo's HTML endpoint (no API key)."""
+def ddg_results(query: str, limit: int = 8) -> list[dict]:
+    """Client-side web search via DuckDuckGo's HTML endpoint (no API key).
+    Returns [{title, url, snippet}] — the structured seam Deep Research and
+    the web_search tool share."""
     import re as _re
     import urllib.parse
     html = _http_get(
@@ -596,12 +598,19 @@ def _ddg_search(query: str) -> str:
         r'class="result__snippet"[^>]*>(.*?)</a>', html, _re.DOTALL
     )
     results = []
-    for i, (href, title) in enumerate(titles[:8]):
+    for i, (href, title) in enumerate(titles[:limit]):
         if "uddg=" in href:
             href = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
         snippet = _strip_html(snippets[i]) if i < len(snippets) else ""
-        results.append(f"{_strip_html(title)}\n{href}\n{snippet}")
-    return "\n\n".join(results) or "No results found."
+        results.append({"title": _strip_html(title), "url": href,
+                        "snippet": snippet})
+    return results
+
+
+def _ddg_search(query: str) -> str:
+    """The web_search tool's text rendering of ddg_results."""
+    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['snippet']}"
+                       for r in ddg_results(query)) or "No results found."
 
 
 def _web_fetch(url: str) -> str:
