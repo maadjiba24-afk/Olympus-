@@ -1,12 +1,13 @@
 {
   "actions": {
-    "count": 14,
+    "count": 15,
     "names": [
       "browser_operate",
       "browser_operate_financial",
       "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",
+      "edit_file",
       "email_egress_held",
       "gmail_archive",
       "gmail_draft",
@@ -126,7 +127,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 62,
+    "count": 65,
     "names": [
       "analyze_image",
       "browse_page",
@@ -145,10 +146,13 @@
       "codegraph_path",
       "create_skill",
       "current_time",
+      "edit_file",
       "gate_prompt",
       "gate_skills",
       "generate_benchmark",
       "generate_image",
+      "glob_files",
+      "grep_files",
       "list_dir",
       "list_source_files",
       "operator_authorize_site",

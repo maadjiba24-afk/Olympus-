@@ -834,6 +834,17 @@ def _send_email_tool(to: str, subject: str, body: str) -> str:
                          f"Email to {to}", f"Email to {to}")
 
 
+def _edit_file_tool(path: str, old_string: str, new_string: str,
+                    replace_all: bool = False) -> str:
+    """File edits are writes: route through the approval spine like write_file.
+    The prepared action's preview is the unified diff of exactly this edit."""
+    return _spine_action("edit_file",
+                         {"path": path, "old_string": old_string,
+                          "new_string": new_string,
+                          "replace_all": bool(replace_all)},
+                         f"Edit {path}", f"Edit of {path}")
+
+
 def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
     return _spine_action("call_webhook", {"name": name, "payload": payload or {}},
                          f"Webhook {name}", f"Webhook '{name}'")
@@ -1233,8 +1244,14 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_inbox": lambda query="in:inbox", max_results=10: _read_inbox(query, max_results),
     "read_email": lambda message_id: _read_email(message_id),
     "read_calendar": lambda time_min, time_max: _read_calendar(time_min, time_max),
-    "read_file": lambda path: _sandbox().read_file(path),
+    "read_file": lambda path, start_line=None, end_line=None:
+        _sandbox().read_file(path, start_line, end_line),
     "list_dir": lambda path=".": _sandbox().list_dir(path),
+    "grep_files": lambda pattern, path=".", glob="":
+        _sandbox().grep_files(pattern, path, glob),
+    "glob_files": lambda pattern, path=".": _sandbox().glob_files(pattern, path),
+    "edit_file": lambda path, old_string, new_string, replace_all=False:
+        _edit_file_tool(path, old_string, new_string, replace_all),
     "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
         specialist, task),
     "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
@@ -1432,14 +1449,88 @@ READ_FILE = {
     "name": "read_file",
     "description": (
         "Read a UTF-8 file from Olympus's confined workspace (host-side). "
-        "Side-effect-free. To create/modify files or run commands, prepare a "
-        "'write_file' or 'run_command' action instead (they need approval)."
+        "Side-effect-free. Pass start_line/end_line to read just a slice of a "
+        "large file. To create/modify files or run commands, use 'edit_file' / "
+        "prepare a 'write_file' or 'run_command' action instead (they need "
+        "approval)."
     ),
     "input_schema": {
         "type": "object",
-        "properties": {"path": {"type": "string",
-                                "description": "Path relative to the workspace root"}},
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Path relative to the workspace root"},
+            "start_line": {"type": "integer",
+                           "description": "First line to read (1-indexed)"},
+            "end_line": {"type": "integer",
+                         "description": "Last line to read (inclusive)"},
+        },
         "required": ["path"],
+    },
+}
+
+GREP_FILES = {
+    "name": "grep_files",
+    "description": (
+        "Regex-search file contents under a workspace directory. Returns "
+        "'path:line-number: line' matches. Side-effect-free. Use this to find "
+        "where something is defined or used before reading whole files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Python regex"},
+            "path": {"type": "string",
+                     "description": "Directory relative to the workspace root "
+                                    "(default '.')"},
+            "glob": {"type": "string",
+                     "description": "Optional filename filter, e.g. '*.py'"},
+        },
+        "required": ["pattern"],
+    },
+}
+
+GLOB_FILES = {
+    "name": "glob_files",
+    "description": (
+        "List workspace files matching a glob pattern (e.g. '**/*.py', "
+        "'src/*.ts'), newest-modified first. Side-effect-free."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string"},
+            "path": {"type": "string",
+                     "description": "Directory relative to the workspace root "
+                                    "(default '.')"},
+        },
+        "required": ["pattern"],
+    },
+}
+
+EDIT_FILE = {
+    "name": "edit_file",
+    "description": (
+        "Edit a workspace file by exact-string replacement. old_string must "
+        "match the file exactly and (unless replace_all) uniquely — include "
+        "surrounding lines to disambiguate. The edit is prepared as an "
+        "approval-gated action whose preview is the unified diff; it applies "
+        "when policy allows or the user approves. For a brand-new file, "
+        "prepare a 'write_file' action instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string",
+                     "description": "Path relative to the workspace root"},
+            "old_string": {"type": "string",
+                           "description": "Exact text to replace"},
+            "new_string": {"type": "string",
+                           "description": "Replacement text"},
+            "replace_all": {"type": "boolean",
+                            "description": "Replace every occurrence "
+                                           "(default false)"},
+        },
+        "required": ["path", "old_string", "new_string"],
     },
 }
 
@@ -1972,6 +2063,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_calendar": READ_CALENDAR,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,
+    "grep_files": GREP_FILES,
+    "glob_files": GLOB_FILES,
+    "edit_file": EDIT_FILE,
     "spawn_subagent": SPAWN_SUBAGENT,
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,

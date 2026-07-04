@@ -181,6 +181,21 @@ def _write_file_execute(p: dict) -> dict:
     return sandbox.write_file(p.get("path", ""), p.get("content", ""))
 
 
+def _edit_file_preview(p: dict) -> str:
+    """The approval preview IS the diff — the human sees exactly the hunk that
+    will land, not a description of it."""
+    diff = sandbox.edit_file_diff(
+        p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
+        bool(p.get("replace_all")))
+    return f"Edit file '{p.get('path', '?')}' in the workspace:\n{diff}"
+
+
+def _edit_file_execute(p: dict) -> dict:
+    return sandbox.edit_file(
+        p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
+        bool(p.get("replace_all")))
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -240,6 +255,12 @@ def register_builtins() -> None:
         preview=_write_file_preview, execute=_write_file_execute,
         undo=sandbox.undo_write,
         description="Create/overwrite a file in the workspace (reversible)."))
+    actions.register(actions.ActionType(
+        name="edit_file", risk_class=actions.NOTABLE, scope="exec",
+        preview=_edit_file_preview, execute=_edit_file_execute,
+        undo=sandbox.undo_write,
+        description="Exact-string edit of a workspace file, previewed as a "
+                    "unified diff (reversible)."))
     # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
     from . import operator
     operator.register_operator_actions()

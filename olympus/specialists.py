@@ -165,7 +165,8 @@ SPECIALISTS: dict[str, Specialist] = {
             web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
-                         "read_file", "list_dir", "prepare_action",
+                         "read_file", "list_dir", "grep_files", "glob_files",
+                         "edit_file", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(
