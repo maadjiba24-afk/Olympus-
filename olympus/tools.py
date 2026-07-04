@@ -844,6 +844,12 @@ def _send_email_tool(to: str, subject: str, body: str) -> str:
                          f"Email to {to}", f"Email to {to}")
 
 
+def _ask_user(question: str, options=None) -> str:
+    from . import interaction
+    opts = options if isinstance(options, list) else None
+    return interaction.ask(question, opts)
+
+
 def _edit_file_tool(path: str, old_string: str, new_string: str,
                     replace_all: bool = False) -> str:
     """File edits are writes: route through the approval spine like write_file.
@@ -1267,6 +1273,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
         _schedule_task(name, interval, prompt, deliver_to, skill),
     "search_sessions": lambda query: _search_sessions(query),
+    "ask_user": lambda question, options=None: _ask_user(question, options),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1541,6 +1548,26 @@ EDIT_FILE = {
                                            "(default false)"},
         },
         "required": ["path", "old_string", "new_string"],
+    },
+}
+
+ASK_USER = {
+    "name": "ask_user",
+    "description": (
+        "Ask the user a single, focused question when you are genuinely "
+        "blocked on a choice only they can make — offer 2-4 concrete options. "
+        "Use sparingly: prefer a reasonable assumption over interrupting. If "
+        "no interactive user is available, you'll be told to proceed with an "
+        "assumption — do that and state it, never stall."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "options": {"type": "array", "items": {"type": "string"},
+                        "description": "2-4 concrete choices to offer"},
+        },
+        "required": ["question"],
     },
 }
 
@@ -2055,7 +2082,7 @@ LIST_DIR = {
 
 # Tools every specialist gets by default.
 BASE_TOOLS = [RECALL_MEMORY, RECALL_FACT, SAVE_LESSON, READ_SKILL, CURRENT_TIME,
-              SEARCH_SESSIONS]
+              SEARCH_SESSIONS, ASK_USER]
 
 # Extra client-side tools, referenced by name in the specialist registry.
 EXTRA_TOOLS: dict[str, dict[str, Any]] = {

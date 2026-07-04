@@ -150,6 +150,12 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        # Interaction provider for the ask_user tool: interactive surfaces
+        # install one; captured here so worker threads (which don't inherit
+        # thread-locals) can re-install it. None = headless (ask_user returns
+        # a proceed-with-assumption instruction instead of blocking).
+        from . import interaction
+        self._ask_provider = interaction.current()
         connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
@@ -414,6 +420,8 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        from . import interaction
+        ask_prev = interaction.set_provider(self._ask_provider)
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
@@ -452,6 +460,7 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 
     def _dispatch(self, assignments: list[dict[str, str]],
