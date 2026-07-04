@@ -15,7 +15,10 @@ def action_type():
         preview=lambda p: f"would run: {p.get('cmd', '?')}",
         execute=lambda p: executed.append(p) or {"ran": p.get("cmd")},
         description="test action"))
-    return executed
+    yield executed
+    # the registry is process-global: leave it as we found it, or the
+    # capabilities drift gate counts a phantom action later in the suite
+    actions._REGISTRY.pop("test_op", None)
 
 
 def _prepare(user, cmd="rm -rf ./build"):

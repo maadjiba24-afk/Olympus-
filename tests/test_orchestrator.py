@@ -142,8 +142,9 @@ def test_reverify_divergence_is_not_masked(monkeypatch):
 def test_heartbeat_nothing_due():
     from olympus import heartbeat
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
-                               "daily_learning", "train", "evolution_audit",
-                               "skill_curation", "replay_gate", "backup")}
+                               "daily_learning", "dreaming", "train",
+                               "evolution_audit", "skill_curation",
+                               "replay_gate", "backup")}
     assert heartbeat.tick(state) == []
 
 

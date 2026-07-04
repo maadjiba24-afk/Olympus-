@@ -122,12 +122,11 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         state["maintenance"] = now
 
     if _due(state, "dreaming", config.DREAM_EVERY, now):
-        log.append("Wiki: dreaming — consolidating memory into concept pages...")
         try:
             from . import wiki
-            results = wiki.dream_all(now)
-            log += ["Wiki: " + line for line in results] or \
-                   ["Wiki: nothing new to consolidate."]
+            # Quiet when there was nothing to consolidate — a nightly job
+            # must not turn the heartbeat log into a metronome.
+            log += ["Wiki: " + line for line in wiki.dream_all(now)]
         except Exception:
             log.append("Dreaming failed:\n" + traceback.format_exc())
         state["dreaming"] = now

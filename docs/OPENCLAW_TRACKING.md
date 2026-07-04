@@ -293,10 +293,28 @@ gaps or could amplify existing Olympus systems:
 
 ---
 
-## 6. Adoption plan (decided 2026-07-03)
+## 6. Adoption plan (decided 2026-07-03 — **implemented 2026-07-03**)
 
-Features we are implementing in Olympus, in priority order. Concept adoption
-only — no OpenClaw code is copied.
+All 12 features below are now built, tested, and merged into the Olympus
+codebase (concept adoption only — no OpenClaw code was copied). Where each
+landed:
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 1 | Telegram channel | `telegram.py` (pairing, reply quoting, live progress), `pairing.py`, `olympus pair` |
+| 2 | Exec approvals via chat | `approvals.py` + `gateway.py` (/approvals, /approve, /deny, held-for-approval footer) |
+| 3 | Model failover chains | `config.ModelPool.fallbacks_for`, `OLYMPUS_ROLE_FALLBACKS`, key rotation in `llm.py` |
+| 4 | Heartbeats | `agentbeat.py` (/heartbeat, HB_OK quietness contract, compact context) |
+| 5 | Event-driven scheduling | `scheduler.py` on_exit kind (`--on-exit`, /onexit) |
+| 6 | Capability profiles | `capprofile.py` (full/reader/guest, autonomy caps, `olympus restrict`, OLYMPUS_CHANNEL_PROFILE) |
+| 7 | Memory Wiki + dreaming | `wiki.py` (concept pages, freshness lint, nightly dream via heartbeat, /wiki, `olympus wiki`) |
+| 8 | Pre-compaction flush | `recall.flush_slice` wired into compaction and reset |
+| 9 | Model overrides | `modelpin.py` (/model shorthands), `OLYMPUS_SPECIALIST_MODELS` |
+| 10 | SecretRef | `secretref.py` (env:/file:/vault:/keychain:), `olympus secret` |
+| 11 | Usage footers | `usage.py` session totals + footer, /usage on·off |
+| 12 | Update handoff | `scheduler` interrupted-run resume, `selfupdate` handoff record, heartbeat report |
+
+Original plan for reference:
 
 ### Phase 1 — highest value, lowest friction
 1. **Telegram channel** — single channel plugin over the pure-HTTP Bot API
