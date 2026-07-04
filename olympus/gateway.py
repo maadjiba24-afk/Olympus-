@@ -42,13 +42,22 @@ HELP = (
     "/undo [N] — remove the last N exchanges from the conversation\n"
     "/goal <text> [:: done-means] — set a standing goal the heartbeat works\n"
     "/goal list · /goal drop <id> · /goal wait <id> <pid> — manage goals\n"
+    "/heartbeat add <every> <prompt> — a periodic check that only pings you "
+    "when something needs attention (list · drop <id>)\n"
+    "/onexit <pid> <prompt> — run a task once when that process exits\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
+    "/wiki [show <page>] — the concept pages Olympus maintains about "
+    "your world\n"
     "/moa <question> — one-shot mixture-of-agents across the model pool\n"
     "/reasoning — how the last answer was produced (pipeline trace)\n"
     "/lang <language> — reply in your language\n"
     "/contribute on|off — share anonymized insights to improve Olympus\n"
     "/growth — see how Olympus has adapted to you over time\n"
+    "/approvals — commands held for your approval\n"
+    "/approve <id> · /deny <id> — decide a held command from chat\n"
+    "/usage — tokens and cost for this session and today\n"
+    "/model [name|auto] — pin this conversation to a model (opus/sonnet/gpt…)\n"
     "/reset — start fresh (keeps a distilled summary of what we covered)\n"
 )
 
@@ -170,10 +179,13 @@ def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
 
 
 def reply_for(bots: dict, user_key: str, text: str,
-              prefix: str = "ol") -> list[str]:
+              prefix: str = "ol", uid: str | None = None) -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
     otherwise running the full Zeus → Athena → Aletheia pipeline. `user_key`
-    namespaces that user's private memory and persisted conversation."""
+    namespaces that user's private memory and persisted conversation. A
+    transport may pass an explicit `uid` when its historical session keys
+    predate this router (Telegram's raw `tg-<chat id>`, where safe_id would
+    mangle negative group ids)."""
     text = (text or "").strip()
     if not text:
         return chunk("(say something and I'll help)")
@@ -199,7 +211,12 @@ def reply_for(bots: dict, user_key: str, text: str,
         memory.watchlist_add(arg)
         return chunk("Queued — the heartbeat will watch it on its next pass.")
 
-    uid = f"{prefix}-{memory.safe_id(user_key)}"
+    uid = uid or f"{prefix}-{memory.safe_id(user_key)}"
+    if cmd in ("/approvals", "/pending", "/approve", "/deny", "/reject"):
+        from . import approvals
+        handled = approvals.handle_command(uid, cmd, arg)
+        if handled is not None:
+            return chunk(handled)
     if cmd == "/goal":
         from . import goals
         sub, _, rest = arg.strip().partition(" ")
@@ -217,10 +234,90 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(goals.wait_on(parts[0], int(parts[1])))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
+    if cmd == "/usage":
+        from . import prefs, usage
+        sub = arg.strip().lower()
+        if sub in ("on", "off"):
+            prefs.set(uid, "usage_footer", True if sub == "on" else None)
+            return chunk("Usage footer on — every reply ends with its "
+                         "token/cost line." if sub == "on"
+                         else "Usage footer off.")
+        session = usage.session_totals(uid)
+        lines = [
+            f"This session: {session['calls']} model call(s), "
+            f"{usage._fmt_tokens(session['in'])} in / "
+            f"{usage._fmt_tokens(session['out'])} out, "
+            f"~${session['cost']:.4f}",
+            f"Today (all users): ${usage.today_spend():.2f}",
+        ]
+        budget = usage.budget_status()
+        if budget.get("budget"):
+            lines.append(f"Daily budget: ${budget['budget']:.2f} "
+                         f"({budget.get('status', '')})")
+        lines.append("Per-reply footers: /usage on · /usage off")
+        return chunk("\n".join(lines))
+    if cmd == "/model":
+        from . import modelpin
+        if not arg.strip():
+            return chunk(modelpin.status(uid))
+        reply = modelpin.set_pin(uid, arg)
+        # The session's pool is chosen at construction; rebuild it so the
+        # pin (or unpin) takes effect on the next message, not next restart.
+        bots.pop(uid, None)
+        return chunk(reply)
+    if cmd == "/profile":
+        # View-only: a conversation can see its boundary, never widen it
+        # (assignment is operator-side via `olympus restrict`).
+        from . import capprofile
+        return chunk(capprofile.summary(uid))
+    if cmd == "/onexit":
+        from . import scheduler
+        pid_str, _, prompt = arg.strip().partition(" ")
+        if not pid_str.isdigit() or not prompt.strip():
+            return chunk("Usage: /onexit <pid> <what to do when it exits>\n"
+                         "e.g. /onexit 4242 summarize the training log")
+        # Deliver the wake-up result back to the requesting channel's owner
+        # chat (the closest thing a scheduled run has to "this conversation").
+        channel = {"tg": "telegram", "dc": "discord",
+                   "sl": "slack", "sg": "signal"}.get(uid.split("-", 1)[0], "")
+        try:
+            job = scheduler.add_on_exit(
+                f"onexit-{pid_str}", int(pid_str), prompt.strip(), user=uid,
+                deliver_to=channel)
+        except ValueError as err:
+            return chunk(str(err))
+        return chunk(f"⏳ Watching pid {job.watch_pid} — when it exits I'll "
+                     f"run: {prompt.strip()}")
+    if cmd == "/heartbeat":
+        from . import agentbeat
+        sub, _, rest = arg.strip().partition(" ")
+        if not arg.strip() or sub == "list":
+            return chunk(agentbeat.summary(uid))
+        if sub == "drop":
+            return chunk("Dropped." if agentbeat.remove(uid, rest.strip())
+                         else "No heartbeat with that id.")
+        if sub == "add":
+            every, _, prompt = rest.partition(" ")
+            if not prompt.strip():
+                return chunk("Usage: /heartbeat add <every> <what to check>\n"
+                             "e.g. /heartbeat add 2h anything urgent in my goals?")
+            beat = agentbeat.add(uid, every, prompt)
+            return chunk(f"💓 Heartbeat #{beat.id} set — every "
+                         f"{beat.every // 60} minutes I'll check: "
+                         f"{beat.prompt}\nI'll only message you when "
+                         f"something needs attention.")
+        return chunk("Usage: /heartbeat [list] · add <every> <prompt> · "
+                     "drop <id>")
     if cmd == "/learn":
         from . import learn
         # Chat users must never read server paths — URLs/workflows only.
         return chunk(learn.distill(arg, allow_paths=False))
+    if cmd == "/wiki":
+        from . import wiki
+        sub, _, ref = arg.strip().partition(" ")
+        if sub == "show" and ref.strip():
+            return chunk(wiki.read(uid, ref.strip()))
+        return chunk(wiki.summary(uid))
     if cmd == "/journey":
         from . import journey
         sub, _, ref = arg.strip().partition(" ")
@@ -268,7 +365,18 @@ def reply_for(bots: dict, user_key: str, text: str,
     if cmd == "/reset":
         return chunk(bot.reset())
 
-    return chunk(bot.ask(text))
+    from . import prefs, usage
+    before = usage.session_totals(uid)
+    reply = bot.ask(text)
+    # A turn can leave irreversible actions held by the approval spine; tell
+    # the person in-channel so the decision happens where the ask happened.
+    from . import approvals
+    reply += approvals.footer(uid)
+    # Opt-in per-reply cost accounting (/usage on).
+    if prefs.get(uid, "usage_footer"):
+        spent = usage.delta(before, usage.session_totals(uid))
+        reply += "\n\n" + usage.footer(spent, uid)
+    return chunk(reply)
 
 
 def reset_idle_sessions(bots: dict, max_age_secs: int | None = None) -> int:

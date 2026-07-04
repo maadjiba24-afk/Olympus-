@@ -57,9 +57,76 @@ def plan(force_git: bool = False) -> list[str]:
     return [sys.executable, "-m", "pip", "install", "--upgrade", PACKAGE]
 
 
+def pending_work() -> dict:
+    """A snapshot of in-flight work that a restart/upgrade would interrupt:
+    chat requests in the gateway journal and scheduled jobs mid-run. Purely
+    informational — each subsystem already knows how to resume its own."""
+    snapshot: dict = {"inflight": [], "jobs_running": []}
+    try:
+        import json as _json
+        from . import config
+        d = config.MEMORY_DIR / "inflight"
+        if d.exists():
+            for path in d.glob("*.json"):
+                try:
+                    entry = _json.loads(path.read_text(encoding="utf-8"))
+                    snapshot["inflight"].append(str(entry.get("uid", path.stem)))
+                except Exception:
+                    snapshot["inflight"].append(path.stem)
+    except Exception:
+        pass
+    try:
+        from . import scheduler
+        snapshot["jobs_running"] = [
+            j.name for j in scheduler.jobs()
+            if j.enabled and j.started_at > j.last_run]
+    except Exception:
+        pass
+    return snapshot
+
+
+def write_handoff() -> dict:
+    """Record the durable handoff before an upgrade replaces the code, so the
+    next process can tell the user what carried across and resume it."""
+    import json as _json
+    import time as _time
+    from . import __version__, config
+    handoff = {"ts": _time.time(), "from_version": __version__,
+               "pending": pending_work()}
+    try:
+        path = config.MEMORY_DIR / "handoff.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(handoff, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    return handoff
+
+
+def take_handoff() -> dict | None:
+    """Consume the handoff record left by the pre-upgrade process (None when
+    there wasn't one). Called once by the heartbeat on its first tick."""
+    import json as _json
+    from . import config
+    path = config.MEMORY_DIR / "handoff.json"
+    if not path.exists():
+        return None
+    try:
+        handoff = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        handoff = None
+    path.unlink(missing_ok=True)
+    return handoff
+
+
 def run(force_git: bool = False) -> int:
     """Run the upgrade. Returns the subprocess exit code (0 = success)."""
     argv = plan(force_git)
+    handoff = write_handoff()
+    pending = handoff["pending"]
+    carried = len(pending["inflight"]) + len(pending["jobs_running"])
+    if carried:
+        print(f"⚡ {carried} in-flight task(s) journaled — they resume after "
+              "the upgrade.")
     print("⚡ Upgrading Olympus:  " + " ".join(argv))
     try:
         return subprocess.call(argv)

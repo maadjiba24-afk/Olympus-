@@ -27,6 +27,27 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     now = now or time.time()
     log: list[str] = []
 
+    # Upgrade/restart handoff: the previous process journaled what it was in
+    # the middle of. Report it once — each subsystem (gateway inflight,
+    # scheduler interrupted-run resume) re-runs its own work.
+    try:
+        from . import selfupdate
+        handoff = selfupdate.take_handoff()
+        if handoff:
+            pending = handoff.get("pending", {})
+            carried = (len(pending.get("inflight", []))
+                       + len(pending.get("jobs_running", [])))
+            note = (f"⚡ Olympus restarted (was "
+                    f"v{handoff.get('from_version', '?')}).")
+            if carried:
+                note += (f" {carried} in-flight task(s) carried across the "
+                         "restart and will resume.")
+            log.append(note)
+            if carried:
+                gateway.notify_all(note)
+    except Exception:
+        log.append("Handoff check failed:\n" + traceback.format_exc())
+
     # User-defined scheduled tasks (natural-language cron). Checked every tick;
     # each job has its own interval, so this is cheap when nothing is due.
     try:
@@ -43,6 +64,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Operator: " + line)
     except Exception:
         log.append("Operator failed:\n" + traceback.format_exc())
+
+    # Per-agent heartbeats: compact autonomous wake-ups. Each beat has its own
+    # cadence and stays quiet (HB_OK) unless something needs attention.
+    try:
+        from . import agentbeat
+        for line in agentbeat.run_due(now):
+            log.append("Heartbeats: " + line)
+    except Exception:
+        log.append("Heartbeats failed:\n" + traceback.format_exc())
 
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
@@ -90,6 +120,16 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         except Exception:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now
+
+    if _due(state, "dreaming", config.DREAM_EVERY, now):
+        try:
+            from . import wiki
+            # Quiet when there was nothing to consolidate — a nightly job
+            # must not turn the heartbeat log into a metronome.
+            log += ["Wiki: " + line for line in wiki.dream_all(now)]
+        except Exception:
+            log.append("Dreaming failed:\n" + traceback.format_exc())
+        state["dreaming"] = now
 
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")

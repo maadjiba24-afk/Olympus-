@@ -83,6 +83,16 @@ def _format_clarify(questions: list[str]) -> str:
 Reporter = Callable[[str], None]
 
 
+def _wiki_block(user: str, user_message: str) -> str:
+    """Consolidated concept pages relevant to this message (never fatal —
+    the wiki is an enrichment, not a dependency)."""
+    try:
+        from . import wiki
+        return wiki.context_block(user, user_message)
+    except Exception:
+        return ""
+
+
 def _silent(_: str) -> None:
     pass
 
@@ -125,6 +135,14 @@ class Olympus:
         # on its strongest model). A single Settings becomes a pool of one.
         self.pool = pool or config.ModelPool.of(
             settings or config.Settings.from_env())
+        # A conversation-level model pin (/model opus) narrows the pool to the
+        # pinned member — but only for default env-pool sessions: a caller who
+        # brought explicit settings/pool (BYOK) is never silently switched.
+        if settings is None and pool is None:
+            from . import modelpin
+            pinned = modelpin.resolve(user)
+            if pinned is not None:
+                self.pool = config.ModelPool.of(pinned)
         self.settings = self.pool.primary()
         self.user = memory.safe_id(user)
         self.conversation_id = conversation_id
@@ -164,6 +182,7 @@ class Olympus:
         mem_ctx = replaystore.frozen_context("route", lambda: (
             profile.card(self.user)
             + recall.context_block(self.user, user_message)
+            + _wiki_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)
@@ -716,6 +735,14 @@ class Olympus:
         old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
+        # Pre-compaction memory flush: whatever durable facts live only in the
+        # turns being folded away are extracted into typed memory FIRST, so
+        # compaction can never silently lose them (the prose summary below is
+        # for conversational continuity, not durability).
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         try:
             summary = backend.complete_text(
                 self.settings,
@@ -900,6 +927,12 @@ class Olympus:
             return "Nothing to reset — the conversation is already empty."
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in self.history)
+        # Same pre-clear flush as compaction: durable facts leave the
+        # transcript as typed memory before the turns are dropped.
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         summary = ""
         try:
             summary = backend.complete_text(

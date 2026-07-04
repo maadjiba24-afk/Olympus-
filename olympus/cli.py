@@ -292,6 +292,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
                          help="deliver result to: telegram|discord|slack|signal")
+    p_sched.add_argument("--on-exit", type=int, default=0, dest="on_exit_pid",
+                         metavar="PID",
+                         help="event-driven: run once when this process exits "
+                              "(the interval argument is ignored)")
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
@@ -399,6 +403,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_secret = sub.add_parser(
+        "secret", help="named secrets for SecretRef config indirection — "
+                       "reference them as vault:NAME instead of pasting "
+                       "credentials into config/env")
+    p_secret.add_argument("action", nargs="?", default="ls",
+                          choices=["set", "ls", "rm"])
+    p_secret.add_argument("name", nargs="?", default="")
+    p_wiki = sub.add_parser(
+        "wiki", help="the memory wiki: concept pages maintained by nightly "
+                     "dreaming (list | show <page> | lint | dream | rm <page>)")
+    p_wiki.add_argument("action", nargs="?", default="list",
+                        choices=["list", "show", "lint", "dream", "rm"])
+    p_wiki.add_argument("page", nargs="?", default="")
+    p_wiki.add_argument("--user", default="shared",
+                        help="memory namespace (default: shared)")
+    p_restrict = sub.add_parser(
+        "restrict", help="scope a conversation/user to a capability profile "
+                         "(full | reader | guest | custom)")
+    p_restrict.add_argument("user", nargs="?", default="",
+                            help="conversation/user id (e.g. tg-12345)")
+    p_restrict.add_argument("profile", nargs="?", default="",
+                            help="profile name; omit to show current")
+    p_restrict.add_argument("--clear", action="store_true",
+                            help="remove the explicit restriction")
+    p_restrict.add_argument("--profiles", action="store_true",
+                            dest="list_profiles", help="list known profiles")
+    p_pair = sub.add_parser(
+        "pair", help="mint a one-time pairing code so a chat can talk to "
+                     "Olympus (channels are untrusted by default)")
+    p_pair.add_argument("channel", nargs="?", default="telegram",
+                        help="channel to pair (default: telegram)")
+    p_pair.add_argument("--revoke", metavar="SENDER_ID",
+                        help="unpair a previously paired chat/sender id")
+    p_pair.add_argument("--list", action="store_true", dest="list_paired",
+                        help="list paired sender ids for the channel")
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
                                            "(needs WHATSAPP_* env vars)")
     p_wa.add_argument("--host", default="0.0.0.0")
@@ -1142,10 +1181,21 @@ def main(argv: list[str] | None = None) -> int:
                 print('Usage: olympus schedule add <name> <interval> "<prompt>" '
                       '[--to telegram]')
                 return 1
-            job = scheduler.add(args.name, args.interval, prompt,
-                                deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every "
-                  f"{scheduler._human_interval(job.interval)}.")
+            if args.on_exit_pid:
+                try:
+                    job = scheduler.add_on_exit(
+                        args.name, args.on_exit_pid, prompt,
+                        deliver_to=args.deliver_to, user="cli")
+                except ValueError as err:
+                    print(err)
+                    return 1
+                print(f"Scheduled '{job.name}' to run once when pid "
+                      f"{job.watch_pid} exits.")
+            else:
+                job = scheduler.add(args.name, args.interval, prompt,
+                                    deliver_to=args.deliver_to, user="cli")
+                print(f"Scheduled '{job.name}' every "
+                      f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):
@@ -1215,6 +1265,88 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "secret":
+        from . import secretref, vault
+        if args.action == "set":
+            if not args.name:
+                print("Usage: olympus secret set <name>")
+                return 1
+            import getpass
+            value = getpass.getpass(f"value for '{args.name}' (hidden): ")
+            if not value:
+                print("Nothing entered — nothing stored.")
+                return 1
+            try:
+                ref = secretref.store(args.name, value)
+            except Exception as err:
+                print(f"Could not store secret: {err}")
+                return 1
+            print(f"Stored. Reference it in config as: {ref}")
+        elif args.action == "ls":
+            names = [n.removeprefix("secretref:")
+                     for n in vault.names("operator")
+                     if n.startswith("secretref:")]
+            print("\n".join(names) if names
+                  else "No named secrets. Add one: olympus secret set <name>")
+        elif args.action == "rm":
+            if not args.name:
+                print("Usage: olympus secret rm <name>")
+                return 1
+            vault.delete("operator", f"secretref:{args.name}")
+            print("Removed (if it existed).")
+    elif args.command == "wiki":
+        from . import wiki
+        if args.action == "list":
+            print(wiki.summary(args.user))
+        elif args.action == "show":
+            if not args.page:
+                print("Usage: olympus wiki show <page>")
+                return 1
+            print(wiki.read(args.user, args.page))
+        elif args.action == "lint":
+            issues = wiki.lint(args.user)
+            print("\n".join(issues) if issues
+                  else "Wiki is fresh — no issues.")
+        elif args.action == "dream":
+            print(wiki.dream(args.user))
+        elif args.action == "rm":
+            if not args.page:
+                print("Usage: olympus wiki rm <page>")
+                return 1
+            print("Removed." if wiki.remove(args.user, args.page)
+                  else "No such page.")
+    elif args.command == "restrict":
+        from . import capprofile
+        if args.list_profiles:
+            for name, spec in sorted(capprofile.profiles().items()):
+                denied = (f"{len(spec['deny'])} tools denied" if spec["deny"]
+                          else "no restriction")
+                print(f"{name:8s} {denied}, autonomy cap "
+                      f"L{spec.get('max_autonomy', 4)}")
+        elif not args.user:
+            print("Usage: olympus restrict <user> <profile> "
+                  "| --clear | --profiles")
+            return 1
+        elif args.clear:
+            print(capprofile.clear(args.user))
+        elif args.profile:
+            print(capprofile.assign(args.user, args.profile))
+        else:
+            print(capprofile.summary(args.user))
+    elif args.command == "pair":
+        from . import pairing
+        if args.list_paired:
+            ids = pairing.paired(args.channel)
+            print("\n".join(ids) if ids else
+                  f"No {args.channel} chats are paired.")
+        elif args.revoke:
+            gone = pairing.unpair(args.channel, args.revoke)
+            print("Unpaired." if gone else "That id wasn't paired.")
+        else:
+            code = pairing.issue_code(args.channel)
+            print(f"Pairing code for {args.channel}: {code}\n"
+                  f"Send `/pair {code}` to the bot within "
+                  f"{pairing.PAIR_TTL // 60} minutes. Single use.")
     elif args.command == "whatsapp":
         from . import whatsapp
         try:

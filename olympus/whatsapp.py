@@ -34,7 +34,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import memory, orchestrator, telegram
+from . import gateway, memory, orchestrator
 
 GRAPH = "https://graph.facebook.com/v21.0"
 CHUNK = 4000  # WhatsApp text body limit is 4096 chars
@@ -174,7 +174,7 @@ def _process(bots: dict, sender: str, text: str) -> None:
     cmd = cmd.lower()
 
     if cmd in ("/start", "/help"):
-        _send(sender, telegram.HELP)
+        _send(sender, gateway.HELP)
         return
     if cmd == "/scan":
         _send(sender, "🌐 Argus is scanning the world — give me a few minutes...")

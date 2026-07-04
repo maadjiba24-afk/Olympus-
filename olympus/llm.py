@@ -139,11 +139,29 @@ def complete(
     from . import connectors
     connectors.emit("pre_llm_call", params)
 
+    # Key-rotation ring: on a rate-limited or credit-exhausted key, move to the
+    # member's next configured key immediately instead of burning the remaining
+    # retries on a key that will keep saying no (mirrors openai_compat._post).
+    keys = settings.all_keys()
+    key_idx = 0
+
+    def _active() -> config.Settings:
+        if key_idx == 0 or not keys:
+            return settings
+        import dataclasses
+        return dataclasses.replace(settings, api_key=keys[key_idx % len(keys)])
+
+    def _quotaish(err: Exception) -> bool:
+        low = str(err).lower()
+        return any(m in low for m in ("credit", "quota", "billing",
+                                      "insufficient", "balance"))
+
     last_err: Exception | None = None
     for attempt in range(4):
+        s = _active()
         try:
-            endpoint = client(settings).beta.messages if use_beta \
-                else client(settings).messages
+            endpoint = client(s).beta.messages if use_beta \
+                else client(s).messages
             with usage.slot():
                 with endpoint.stream(**params) as stream:
                     message = stream.get_final_message()
@@ -163,8 +181,22 @@ def complete(
         except (anthropic.RateLimitError, anthropic.InternalServerError,
                 anthropic.APIConnectionError) as err:
             last_err = err
+            if isinstance(err, anthropic.RateLimitError) \
+                    and key_idx + 1 < len(keys):
+                key_idx += 1                # next key now — no backoff needed
+                continue
             if attempt < 3:                 # no point sleeping after the last try
                 time.sleep(2 ** attempt)
+        except anthropic.APIStatusError as err:
+            # Anthropic reports an exhausted balance as a 400-class error
+            # ("credit balance is too low"): rotate if another key exists;
+            # anything else 4xx is a real request problem — surface it (the
+            # pool-level failover in backend.py may still switch members).
+            if _quotaish(err) and key_idx + 1 < len(keys):
+                last_err = err
+                key_idx += 1
+                continue
+            raise
     raise last_err  # type: ignore[misc]
 
 

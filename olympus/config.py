@@ -94,15 +94,20 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Credential envs may hold the secret itself OR a SecretRef
+        # (env:/file:/vault:/keychain:) resolved here, at the choke point.
+        from . import secretref
         provider = os.environ.get("OLYMPUS_PROVIDER", "anthropic").lower()
         if provider == "anthropic":
             model = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
-            key = os.environ.get("ANTHROPIC_API_KEY")
+            key = secretref.getenv("ANTHROPIC_API_KEY") or None
         else:
             model = os.environ.get("OLYMPUS_MODEL", "")
-            key = (os.environ.get("OLYMPUS_API_KEY")
-                   or os.environ.get("OPENAI_API_KEY"))
-        extra = _split_keys(os.environ.get("OLYMPUS_API_KEYS", ""))
+            key = (secretref.getenv("OLYMPUS_API_KEY")
+                   or secretref.getenv("OPENAI_API_KEY") or None)
+        extra = tuple(secretref.resolve(k) for k in
+                      _split_keys(os.environ.get("OLYMPUS_API_KEYS", "")))
+        extra = tuple(k for k in extra if k)
         keys = tuple(k for k in ([key] if key else []) if k) + extra
         return cls(
             provider=provider,
@@ -209,6 +214,49 @@ def specialist_role(key: str) -> str:
     return SPECIALIST_ROLE.get(key, "reasoning")
 
 
+def specialist_model_overrides() -> dict[str, str]:
+    """Per-council-member model pins from OLYMPUS_SPECIALIST_MODELS, e.g.
+    '{"hephaestus": "deepseek", "aletheia": "opus"}'. Values are matched as
+    case-insensitive substrings of a configured member's provider/model.
+    Malformed input is ignored."""
+    raw = os.environ.get("OLYMPUS_SPECIALIST_MODELS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).strip().lower(): str(v).strip().lower()
+            for k, v in data.items() if str(v).strip()}
+
+
+def role_fallback_overrides() -> dict[str, list[str]]:
+    """Explicit per-role fallback order from OLYMPUS_ROLE_FALLBACKS, e.g.
+    '{"coding": ["openai/gpt-5", "haiku"]}'. Tokens are case-insensitive
+    substrings matched against "provider/model". Malformed input is ignored
+    (capability ordering still applies) rather than breaking calls."""
+    raw = os.environ.get("OLYMPUS_ROLE_FALLBACKS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for role, tokens in data.items():
+        if isinstance(tokens, list):
+            cleaned = [str(t).strip().lower() for t in tokens if str(t).strip()]
+            if cleaned:
+                out[str(role).strip().lower()] = cleaned
+    return out
+
+
 def capability_score(model: str, role: str) -> float:
     m = (model or "").lower()
     for key, caps in _CAPABILITIES.items():
@@ -265,11 +313,16 @@ class ModelPool:
         if raw:
             import json
             try:
+                from . import secretref
                 for d in json.loads(raw):
                     # A member may bring its own rotation pool via "api_keys"
-                    # (list) in addition to the primary "api_key".
-                    pool_keys = tuple(k for k in (d.get("api_keys") or []) if k)
-                    member_key = d.get("api_key")
+                    # (list) in addition to the primary "api_key". Each entry
+                    # may be a SecretRef instead of the key itself.
+                    pool_keys = tuple(
+                        secretref.resolve(k) for k in (d.get("api_keys") or [])
+                        if k)
+                    pool_keys = tuple(k for k in pool_keys if k)
+                    member_key = secretref.resolve(d.get("api_key")) or None
                     keys = tuple(k for k in ([member_key] if member_key else []) if k)
                     keys += tuple(k for k in pool_keys if k not in keys)
                     extra.append(Settings(
@@ -328,7 +381,53 @@ class ModelPool:
         return self._role_map().get(role) or max(
             self.members, key=lambda s: capability_score(s.model, role))
 
+    def role_of(self, member: Settings) -> str:
+        """The pipeline role this member is assigned to (first match), so a
+        failure can be retried on the next-best model *for that kind of work*.
+        Members outside the role map default to reasoning."""
+        fp = (member.provider, member.model, member.api_key, member.base_url)
+        rmap = self._role_map()
+        for role in ("coding", "verify", "reasoning"):
+            s = rmap.get(role)
+            if s and (s.provider, s.model, s.api_key, s.base_url) == fp:
+                return role
+        return "reasoning"
+
+    def fallbacks_for(self, member: Settings,
+                      role: str | None = None) -> list[Settings]:
+        """Ordered alternates to try when `member` fails a call: an explicit
+        OLYMPUS_ROLE_FALLBACKS order wins; otherwise strongest-for-role first,
+        genuine ties toward the cheaper model. The failing member's own role
+        is inferred when not given, so a coding-call failure retries on the
+        next-best *coder*, not whatever happens to sit next in the pool."""
+        def fp(s: Settings) -> tuple:
+            return (s.provider, s.model, s.api_key, s.base_url)
+        others = [m for m in self.members if fp(m) != fp(member)]
+        if not others:
+            return []
+        role = (role or self.role_of(member)).lower()
+        explicit = role_fallback_overrides().get(role)
+        if explicit:
+            def rank(m: Settings) -> tuple:
+                tag = f"{m.provider}/{m.model}".lower()
+                for i, token in enumerate(explicit):
+                    if token in tag:
+                        return (0, i, 0.0)
+                return (1, 0, -capability_score(m.model, role))
+            return sorted(others, key=rank)
+        return sorted(others, key=lambda m: (
+            -capability_score(m.model, role),
+            round(price_per_mtok(m.model), 2)))
+
     def for_specialist(self, key: str) -> Settings:
+        # An explicit per-council-member pin wins over role scoring:
+        # OLYMPUS_SPECIALIST_MODELS='{"hephaestus": "deepseek"}' routes that
+        # specialist to the matching configured member (shorthands fine).
+        token = specialist_model_overrides().get(key)
+        if token:
+            for member in self.members:
+                if token in f"{member.provider}/{member.model}".lower():
+                    return member
         return self.for_role(specialist_role(key))
 
     def fastest(self) -> Settings:
@@ -526,6 +625,9 @@ WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
+# Nightly dreaming: consolidate session memory into wiki concept pages
+# (0 disables).
+DREAM_EVERY = int(os.environ.get("OLYMPUS_DREAM_EVERY", str(86400)))
 TRAIN_EVERY = int(os.environ.get("OLYMPUS_TRAIN_EVERY", str(3 * 86400)))
 # Prometheus trains the weakest specialists on a cadence (0 disables)
 

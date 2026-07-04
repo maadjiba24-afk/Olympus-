@@ -290,3 +290,67 @@ gaps or could amplify existing Olympus systems:
    `docs/OPENAI_ENDPOINT.md`; OpenClaw validates the pattern.
 10. **QA-Lab style scenario capture** (VNC screenshots/video, parity benchmarks)
     — would strengthen Olympus's CI-verified capabilities story.
+
+---
+
+## 6. Adoption plan (decided 2026-07-03 — **implemented 2026-07-03**)
+
+All 12 features below are now built, tested, and merged into the Olympus
+codebase (concept adoption only — no OpenClaw code was copied). Where each
+landed:
+
+| # | Feature | Where it lives |
+|---|---|---|
+| 1 | Telegram channel | `telegram.py` (pairing, reply quoting, live progress), `pairing.py`, `olympus pair` |
+| 2 | Exec approvals via chat | `approvals.py` + `gateway.py` (/approvals, /approve, /deny, held-for-approval footer) |
+| 3 | Model failover chains | `config.ModelPool.fallbacks_for`, `OLYMPUS_ROLE_FALLBACKS`, key rotation in `llm.py` |
+| 4 | Heartbeats | `agentbeat.py` (/heartbeat, HB_OK quietness contract, compact context) |
+| 5 | Event-driven scheduling | `scheduler.py` on_exit kind (`--on-exit`, /onexit) |
+| 6 | Capability profiles | `capprofile.py` (full/reader/guest, autonomy caps, `olympus restrict`, OLYMPUS_CHANNEL_PROFILE) |
+| 7 | Memory Wiki + dreaming | `wiki.py` (concept pages, freshness lint, nightly dream via heartbeat, /wiki, `olympus wiki`) |
+| 8 | Pre-compaction flush | `recall.flush_slice` wired into compaction and reset |
+| 9 | Model overrides | `modelpin.py` (/model shorthands), `OLYMPUS_SPECIALIST_MODELS` |
+| 10 | SecretRef | `secretref.py` (env:/file:/vault:/keychain:), `olympus secret` |
+| 11 | Usage footers | `usage.py` session totals + footer, /usage on·off |
+| 12 | Update handoff | `scheduler` interrupted-run resume, `selfupdate` handoff record, heartbeat report |
+
+Original plan for reference:
+
+### Phase 1 — highest value, lowest friction
+1. **Telegram channel** — single channel plugin over the pure-HTTP Bot API
+   (no browser, no OAuth), with DM pairing/allowlist (untrusted by default),
+   streaming progress messages, and reply quoting.
+2. **Exec approvals via chat** — surface pending sandbox commands in Telegram;
+   approve/deny by reply, routed through the existing security gate.
+3. **Model failover chains** — per-role fallback model lists in the pool;
+   retry the next model on rate-limit/credit exhaustion instead of failing.
+4. **Heartbeats** — per-agent periodic autonomous wake-ups with compact
+   dedicated context, wired into the self-recurring scan loop.
+
+### Phase 2 — deepens existing strengths
+5. **Event-driven scheduling** — `on-exit`-style triggers: wake an agent when a
+   watched command/process exits, alongside time-based cron.
+6. **Per-conversation capability profiles** — scoped tool/access boundaries per
+   conversation/sender, layered on the security gate.
+7. **Memory Wiki + nightly consolidation** — self-maintained wiki of durable
+   concepts with freshness linting; scheduled job consolidates session memory
+   into it (OpenClaw's "dreaming").
+8. **Pre-compaction memory flush** — flush salient facts to memory before any
+   context compaction in long council sessions.
+
+### Phase 3 — worth doing, not urgent
+9. **Per-agent/per-task model overrides** — pin models per council member or
+   conversation, with shorthands (opus/sonnet/gpt).
+10. **SecretRef-style secret indirection** — credentials referenced by name in
+    config, resolved from env/keychain at runtime, never inline.
+11. **Usage/cost footers** — per-reply and per-session token/cost accounting.
+12. **Graceful update handoff** — durable state for in-flight work so restarts
+    and upgrades resume with a continuation instead of dropping tasks.
+
+### Explicitly not adopting
+- 20+ channels, mobile/watch apps, Control UI (contradicts headless-first).
+- Voice stack: wake word, TTS, phone calls, meeting bots (no media stack).
+- Browser automation / Chrome relay (operator harness already covers this).
+- Plugin marketplace (premature for single-user; revisit if a plugin surface
+  opens — then reuse OpenClaw's trust-policy design as reference).
+- Image/video generation, Live Canvas (outside the verified-answers focus).
