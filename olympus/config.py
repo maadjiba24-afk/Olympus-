@@ -761,6 +761,15 @@ def sovereign_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def sovereign_allow_dev_seed() -> bool:
+    """Labs/CI escape hatch (OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED): let sovereign
+    mode run on the PUBLIC default signing seed. Every artifact signed that way
+    is forgeable, so each use is loudly warned. OFF by default — a sovereign
+    instance without a configured seed refuses to boot / sign instead."""
+    return os.environ.get("OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED",
+                          "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def egress_allowlist() -> list[str]:
     """Hosts/CIDRs permitted to receive data under sovereign mode
     (OLYMPUS_EGRESS_ALLOWLIST, comma-separated). Loopback and known local

@@ -38,7 +38,7 @@
     ]
   },
   "commands": {
-    "count": 85,
+    "count": 86,
     "names": [
       "actions",
       "add-mcp",
@@ -73,6 +73,7 @@
       "heartbeat",
       "import-agent",
       "journey",
+      "keygen",
       "learn",
       "learned",
       "limit",
