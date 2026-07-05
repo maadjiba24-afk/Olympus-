@@ -204,7 +204,30 @@ def test_pinned_pubkeys_env_then_file_deduped(monkeypatch):
     assert witness.pinned_pubkey() == pins[0]         # back-compat wrapper
 
 
-# --- 5. regression: unconfigured, non-sovereign = today's behavior --------------
+# --- 5. the seed never leaves the machine inside a backup archive ---------------
+
+def test_seed_file_is_never_backed_up(tmp_path, monkeypatch, capsys):
+    from olympus import backup
+    mem = tmp_path / "mem"
+    (mem / "usermem").mkdir(parents=True)
+    (mem / "usermem" / "alice.json").write_text('{"facts": []}')
+    monkeypatch.setattr(config, "MEMORY_DIR", mem)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
+    rc, _, _ = _run_cli(["keygen"], capsys)          # default MEMORY_DIR path
+    assert rc == 0 and (mem / "signing_seed").exists()
+
+    assert all(p.name != "signing_seed"              # belt: excluded at listing
+               for p in backup._included_files(mem, full=True))
+
+    res = backup.create()                            # and truly not in archive
+    assert res["files"] == 1                         # only alice.json
+    restored = tmp_path / "restored"
+    backup.restore(res["path"], into=restored)
+    assert (restored / "usermem" / "alice.json").exists()
+    assert not (restored / "signing_seed").exists()
+
+
+# --- 6. regression: unconfigured, non-sovereign = today's behavior --------------
 
 def test_unconfigured_nonsovereign_dev_behavior_intact(tmp_path, monkeypatch,
                                                        capsys):

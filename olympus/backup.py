@@ -46,6 +46,11 @@ _MANIFEST_NAME = "BACKUP_MANIFEST.json"
 # Reproducible operational caches — excluded by default to keep archives small;
 # losing them only forfeits replay of *old* runs, never user data.
 _REPLAY_CACHE = ("responses", "tool_results", "context")
+# Files that must NEVER leave the machine inside an archive, even a full one.
+# The signing seed is the release/audit root of trust; archives are encrypted,
+# but under OLYMPUS_SECRET_KEY — a different (often weaker) custody domain
+# than the seed itself (docs/SIGNING.md).
+_NEVER_BACKUP = ("signing_seed",)
 _LOCK = threading.Lock()
 
 
@@ -81,7 +86,8 @@ def _sha256_bytes(data: bytes) -> str:
 
 def _included_files(root: Path, *, full: bool) -> list[Path]:
     """Every file under MEMORY_DIR to back up, excluding the backups dir itself
-    (no recursive growth), temp files, and — unless `full` — the replay caches."""
+    (no recursive growth), temp files, the signing seed (never leaves the
+    machine), and — unless `full` — the replay caches."""
     backups = (root / "backups").resolve()
     out: list[Path] = []
     for p in sorted(root.rglob("*")):
@@ -93,6 +99,8 @@ def _included_files(root: Path, *, full: bool) -> list[Path]:
         rel = p.relative_to(root)
         top = rel.parts[0] if rel.parts else ""
         if not full and top in _REPLAY_CACHE:
+            continue
+        if p.name in _NEVER_BACKUP:
             continue
         if p.name.startswith(".") and p.suffix == ".tmp":
             continue

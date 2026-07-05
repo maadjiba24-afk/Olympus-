@@ -6,6 +6,8 @@ venv/
 .env
 memory/
 keys.sh
+# the signing seed must never be committed, wherever keygen wrote it
+signing_seed
 deploy/.env
 olympus/verification.json
 
