@@ -50,6 +50,15 @@ def embed(texts: list[str]) -> list[list[float]] | None:
     returns None on any problem so callers fall back to lexical retrieval."""
     if not available() or not texts:
         return None
+    # Sovereign egress choke: embeddings send user memory content to the
+    # configured endpoint, so this outbound path honors the same allowlist as
+    # model calls. Under sovereign mode a non-allowlisted host is refused and we
+    # return None (best-effort) so retrieval degrades to lexical search instead
+    # of leaking content off-box. No-op when sovereign mode is off.
+    from . import security
+    from urllib.parse import urlparse
+    if not security.egress_allowed(urlparse(_base_url()).hostname or ""):
+        return None
     payload = {"model": _model(), "input": texts}
     headers = {"Content-Type": "application/json"}
     key = _api_key()

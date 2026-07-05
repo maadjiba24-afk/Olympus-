@@ -54,12 +54,16 @@ A routing outcome can be labeled by more than one signal. Highest wins:
 2. **The verify/review verdict** from the pipeline (`approve` → `positive`,
    `retry` → `negative`) — the default signal emitted at verify/review
    completion.
-3. **An action outcome** from `outcomes.py` (`approved` → positive,
-   `approved_after_edit` → its own label, `rejected`/`undone` → negative) — the
-   lowest tier, used when nothing stronger exists.
 
 `resolve_signal()` implements this order; `record_run()` emits the review-tier
 signal, and `apply_feedback()` later upgrades it to the feedback tier.
+
+> An action-outcome tier (from `outcomes.py`) was originally envisioned as a
+> third, lowest source. It is **not** wired: prepared actions aren't linked to a
+> run id in this store, so there's no reliable join. The code and this doc
+> reflect only the two sources that are actually emitted. (`approved_after_edit`
+> remains a supported signal value the learned selector weights at 0.5, ready
+> if such a source is ever added.)
 
 ## Privacy posture (identical to `outcomes.py`)
 

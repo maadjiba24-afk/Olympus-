@@ -11,7 +11,9 @@ scoping (`memory.safe_id`), an append-only capped list, and best-effort writes
 that never raise into the caller (a telemetry failure must never break a run).
 
 `outcome_signal` precedence (highest wins), documented in docs/LEARNED_ROUTING.md:
-    explicit user feedback  >  the verify/review verdict  >  an action outcome.
+    explicit user feedback  >  the verify/review verdict.
+(An action-outcome tier was originally envisioned as a third source but is not
+wired — actions aren't linked to a run here — so it is not part of precedence.)
 
 Phase B is GATED: `gate_status()` reports whether enough LABELED outcomes from
 REAL adoption exist. Synthetic / self-generated rows are flagged and excluded, so
@@ -33,18 +35,22 @@ _LOCK = threading.Lock()
 _MAX = 2000
 
 # --- outcome_signal enum -----------------------------------------------------
-POSITIVE = "positive"                 # 👍 feedback / review approved / action approved
-NEGATIVE = "negative"                 # 👎 feedback / review retry / action rejected|undone
-APPROVED_AFTER_EDIT = "approved_after_edit"   # action approved after an edit
+POSITIVE = "positive"                 # 👍 feedback / review approved
+NEGATIVE = "negative"                 # 👎 feedback / review retry
+# A half-win value the learned selector weights at 0.5 (see learned_routing).
+# No emit path produces it today; retained as a supported, tested signal value.
+APPROVED_AFTER_EDIT = "approved_after_edit"
 PENDING = "pending"                   # no outcome signal yet
 SIGNALS = (POSITIVE, NEGATIVE, APPROVED_AFTER_EDIT, PENDING)
 
 # --- signal source tier (for precedence + provenance) ------------------------
+# Precedence: explicit feedback > verify/review verdict. An action-outcome tier
+# was originally envisioned as a third, lowest source, but nothing feeds it
+# (actions aren't linked to a run_id in this store), so it is intentionally NOT
+# part of the wired precedence — the code and docs reflect only what is emitted.
 SRC_FEEDBACK = "feedback"
 SRC_REVIEW = "review"
-SRC_ACTION = "action"
 SRC_NONE = "none"
-_TIER = {SRC_FEEDBACK: 3, SRC_REVIEW: 2, SRC_ACTION: 1, SRC_NONE: 0}
 
 # --- Phase B data gate (see docs/LEARNED_ROUTING.md for the justification) ----
 GATE_MIN_LABELED = 300                # labeled (non-pending) real outcomes
@@ -95,27 +101,15 @@ def signal_from_feedback(verdict: str) -> str:
         "up", "good", "positive", "+1", "👍") else NEGATIVE
 
 
-def signal_from_action(outcome: str) -> str:
-    """Map an outcomes.py action outcome to a routing signal."""
-    o = str(outcome).lower()
-    if o == "approved":
-        return POSITIVE
-    if o == "approved_after_edit":
-        return APPROVED_AFTER_EDIT
-    return NEGATIVE                    # rejected / undone
-
-
-def resolve_signal(*, feedback: str | None = None, review: str | None = None,
-                   action: str | None = None) -> tuple[str, str]:
-    """Pick the outcome signal by documented precedence:
-    explicit feedback > verify/review verdict > action outcome. Returns
-    (signal, source); (PENDING, SRC_NONE) when no signal is available."""
+def resolve_signal(*, feedback: str | None = None,
+                   review: str | None = None) -> tuple[str, str]:
+    """Pick the outcome signal by precedence: explicit feedback > verify/review
+    verdict. Returns (signal, source); (PENDING, SRC_NONE) when neither source
+    has a signal yet."""
     if feedback:
         return feedback, SRC_FEEDBACK
     if review:
         return review, SRC_REVIEW
-    if action:
-        return action, SRC_ACTION
     return PENDING, SRC_NONE
 
 

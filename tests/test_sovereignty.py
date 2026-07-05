@@ -264,3 +264,29 @@ def test_sovereign_ssrf_blocks_non_allowlisted_public(monkeypatch):
     assert reason and "allowlist" in reason
     # An allowlisted public host passes the same guard.
     assert security.url_block_reason("https://allowed.example.com/x") is None
+
+
+def test_sovereign_embeddings_do_not_egress_to_non_allowlisted_host(monkeypatch):
+    """The embeddings path (user memory content) must honor the same egress
+    allowlist as model calls under sovereign mode — no silent leak off-box."""
+    from olympus import embed
+    monkeypatch.setenv("OLYMPUS_SOVEREIGN", "1")
+    monkeypatch.delenv("OLYMPUS_EGRESS_ALLOWLIST", raising=False)
+    monkeypatch.setenv("OLYMPUS_EMBED_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OLYMPUS_EMBED_API_KEY", "sk-secret")
+    monkeypatch.setenv("OLYMPUS_EMBED_MODEL", "text-embedding-3-small")
+    attempted = {"n": 0}
+
+    def boom(*a, **k):
+        attempted["n"] += 1
+        raise AssertionError("embeddings egressed under sovereign mode")
+
+    monkeypatch.setattr(embed.urllib.request, "urlopen", boom)
+    # Refused before any send → None (retrieval degrades to lexical).
+    assert embed.embed_one("private memory content") is None
+    assert attempted["n"] == 0
+    # With the host allowlisted, the guard permits the call (it then reaches the
+    # spy, proving the guard — not availability — was the gate).
+    monkeypatch.setenv("OLYMPUS_EGRESS_ALLOWLIST", "api.openai.com")
+    with pytest.raises(AssertionError):
+        embed.embed_one("private memory content")

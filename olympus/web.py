@@ -1565,21 +1565,26 @@ class Handler(BaseHTTPRequestHandler):
             return (False, 401,
                     "missing or invalid API key — pass a configured "
                     "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
-        # No keys configured: loopback-only, and never an open relay.
-        if not self._peer_is_loopback():
-            return (False, 403,
-                    "the OpenAI-compatible API is loopback-only until "
-                    "OLYMPUS_API_KEYS is configured (no open relay).")
+        # No keys configured: loopback-only, and never an open relay. The
+        # peer/header decision funnels through the module-level `_v1_allowed`
+        # predicate — the SAME function the boundary tests assert — so the
+        # production gate and the test can't drift. Granular status/messages and
+        # the bind check are layered on top of that single source of truth.
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        if not _v1_allowed(peer, self.headers):
+            if not _is_loopback(peer):
+                return (False, 403,
+                        "the OpenAI-compatible API is loopback-only until "
+                        "OLYMPUS_API_KEYS is configured (no open relay).")
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
+                    "present, so this request is being relayed from off-box and "
+                    "needs an API key (no open relay behind a proxy).")
         if not self._bound_to_loopback():
             return (False, 401,
                     "set OLYMPUS_API_KEYS: the server is bound to a non-loopback "
                     "address, so the OpenAI-compatible API needs an API key "
                     "(safety is not inferred from the connection).")
-        if _forwarding_headers_present(self.headers):
-            return (False, 401,
-                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
-                    "present, so this request is being relayed from off-box and "
-                    "needs an API key (no open relay behind a proxy).")
         return True, 200, ""
 
     def _v1_error(self, code: int, message: str) -> None:
