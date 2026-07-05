@@ -105,8 +105,13 @@ class Settings:
             model = os.environ.get("OLYMPUS_MODEL", "")
             key = (secretref.getenv("OLYMPUS_API_KEY")
                    or secretref.getenv("OPENAI_API_KEY") or None)
+        # Outbound provider-key rotation pool. NOTE: this is deliberately a
+        # DIFFERENT variable from OLYMPUS_API_KEYS — the latter is the inbound
+        # /v1 bearer allowlist (config.api_keys()), and reusing it here would
+        # inject an inbound gate token into the outbound rotation set (i.e. leak
+        # it to the model provider on a rate-limit failover).
         extra = tuple(secretref.resolve(k) for k in
-                      _split_keys(os.environ.get("OLYMPUS_API_KEYS", "")))
+                      _split_keys(os.environ.get("OLYMPUS_PROVIDER_KEYS", "")))
         extra = tuple(k for k in extra if k)
         keys = tuple(k for k in ([key] if key else []) if k) + extra
         return cls(

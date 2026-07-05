@@ -100,14 +100,13 @@ def test_retry_verdict_is_negative(monkeypatch):
 
 # --- 2. precedence -----------------------------------------------------------
 def test_signal_precedence_order():
-    # feedback > review > action
-    assert ro.resolve_signal(feedback=ro.POSITIVE, review=ro.NEGATIVE,
-                             action=ro.NEGATIVE) == (ro.POSITIVE, ro.SRC_FEEDBACK)
-    assert ro.resolve_signal(review=ro.POSITIVE,
-                             action=ro.NEGATIVE) == (ro.POSITIVE, ro.SRC_REVIEW)
-    assert ro.resolve_signal(action=ro.APPROVED_AFTER_EDIT) == (
-        ro.APPROVED_AFTER_EDIT, ro.SRC_ACTION)
+    # feedback > review (the two wired sources); no action tier.
+    assert ro.resolve_signal(feedback=ro.POSITIVE,
+                             review=ro.NEGATIVE) == (ro.POSITIVE, ro.SRC_FEEDBACK)
+    assert ro.resolve_signal(review=ro.POSITIVE) == (ro.POSITIVE, ro.SRC_REVIEW)
     assert ro.resolve_signal() == (ro.PENDING, ro.SRC_NONE)
+    assert not hasattr(ro, "signal_from_action")   # dead mapper removed
+    assert not hasattr(ro, "SRC_ACTION")
 
 
 def test_feedback_upgrades_review_signal(monkeypatch):
