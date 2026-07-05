@@ -68,12 +68,12 @@ def _verify_run_combined(run_id: str, require_production: bool) -> int:
     # (signed by the public default key) is integrity-only by definition and is
     # handled by the dev label / --require-production gate below, not by the pin
     # (which is the production trust anchor).
-    pin = witness.pinned_pubkey()
+    pins = witness.pinned_pubkeys()
     signer = ((run.get("log_signature") or {}).get("publicKey") or "").lower()
-    if sig_ok and posture == "production" and pin and signer != pin.lower():
+    if sig_ok and posture == "production" and pins and signer not in pins:
         sig_ok = False
-        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that does not "
-                   f"match the pinned public key {pin.lower()[:16]}…")
+        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that matches "
+                   f"none of the {len(pins)} pinned public key(s)")
 
     print(f"Run {run_id} — verification ({posture} signing posture)")
     print(f"  replay    : {'PASS' if replay_ok else 'FAIL'} — {replay_msg}")
@@ -872,11 +872,12 @@ def main(argv: list[str] | None = None) -> int:
                   "See docs/SIGNING.md (HSM/KMS recommended for the seed).",
                   file=sys.stderr)
         else:
-            pin = witness.pinned_pubkey()
-            state = ("matches the pinned key" if pin and pin.lower() == pub.lower()
+            pins = witness.pinned_pubkeys()
+            state = ("matches a pinned key" if pub.lower() in pins
                      else "NOT yet pinned — add it to witness_pubkey.txt / "
-                          "OLYMPUS_PINNED_PUBKEY" if not pin
-                     else "DIFFERS from the pinned key (rotation in progress?)")
+                          "OLYMPUS_PINNED_PUBKEY" if not pins
+                     else "matches NONE of the pinned keys (rotation in "
+                          "progress? append it to witness_pubkey.txt)")
             print(f"\nposture: PRODUCTION — derived from OLYMPUS_SIGNING_SEED; "
                   f"{state}.", file=sys.stderr)
     elif args.command == "keygen":

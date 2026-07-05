@@ -141,21 +141,34 @@ def is_default_seed() -> bool:
     return _configured_seed() is None
 
 
-def pinned_pubkey() -> str | None:
-    """The canonical public key a verifier trusts, if pinned out-of-band:
-    OLYMPUS_PINNED_PUBKEY (hex), else a committed `witness_pubkey.txt`. When set,
-    a manifest must be signed by exactly this key — internal consistency with the
-    local seed is not enough."""
+def pinned_pubkeys() -> list[str]:
+    """Every public key a verifier trusts, pinned out-of-band: the entries of
+    OLYMPUS_PINNED_PUBKEY (comma-separated) first, then ALL non-comment lines
+    of a committed `witness_pubkey.txt` — lowercased, deduped, order kept.
+    More than one pin exists for ROTATION: during the overlap window both the
+    old and the new key verify, so switching seeds is not a flag day. A
+    manifest must be signed by one of these keys — internal consistency with
+    the local seed is never enough."""
+    pins: list[str] = []
     env = (os.environ.get("OLYMPUS_PINNED_PUBKEY") or "").strip()
-    if env:
-        return env.lower()
+    for part in env.split(","):
+        part = part.strip().lower()
+        if part and part not in pins:
+            pins.append(part)
     f = _package_dir() / "witness_pubkey.txt"
     if f.exists():
         for line in f.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                return line.lower()
-    return None
+            line = line.strip().lower()
+            if line and not line.startswith("#") and line not in pins:
+                pins.append(line)
+    return pins
+
+
+def pinned_pubkey() -> str | None:
+    """Back-compat thin wrapper: the FIRST pinned key, or None. New code should
+    use `pinned_pubkeys()` and accept any pinned key (rotation overlap)."""
+    pins = pinned_pubkeys()
+    return pins[0] if pins else None
 
 
 def _require_crypto() -> None:
@@ -375,9 +388,10 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     signed manifest (injected-file detection).
 
     Trust model (authenticity, not just internal consistency):
-    - A **pinned** key (arg, or `pinned_pubkey()`): the manifest MUST be signed
-      by exactly that key — a manifest re-signed with any other key fails even
-      if its own signature checks out.
+    - **Pinned** key(s) (the `pin` arg, or every key from `pinned_pubkeys()`):
+      the manifest MUST be signed by one of them — a manifest re-signed with
+      any other key fails even if its own signature checks out. Multiple pins
+      exist so key rotation has an overlap window, not a flag day.
     - No pin, **dev** manifest (signed by the public default seed): accepted only
       with `allow_dev=True`, and only as local integrity (never authenticity).
     - No pin, non-dev manifest: rejected — there's no trusted key to check against.
@@ -412,8 +426,13 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     signature_ok = bool(pub) and verify_signature(pub, payload,
                                                   integrity.get("signature", ""))
     is_dev = bool(manifest.get("dev"))
-    pin = (pin if pin is not None else pinned_pubkey())
-    pin = pin.lower() if pin else None
+    # An explicit `pin` argument stays single-key (caller knows exactly which
+    # key it expects); otherwise trust ANY configured pin, so key rotation has
+    # an overlap window instead of a flag day.
+    if pin is not None:
+        pins = [pin.lower()] if pin else []
+    else:
+        pins = pinned_pubkeys()
 
     problems = []
     for p in drifted:
@@ -426,12 +445,12 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     pubkey_trusted = False
     if not signature_ok:
         problems.append("manifest signature is INVALID (content was altered).")
-    elif pin:
-        if pub == pin:
+    elif pins:
+        if pub in pins:
             pubkey_trusted = True
         else:
             problems.append("manifest is signed by an UNTRUSTED key "
-                            "(does not match the pinned public key).")
+                            "(does not match any pinned public key).")
     elif is_dev:
         if allow_dev:
             pubkey_trusted = True
