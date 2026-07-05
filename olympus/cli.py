@@ -175,6 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    sub.add_parser("routing-stats",
+                   help="routing-outcome telemetry (SPEC-04 Phase A) + the "
+                        "Phase B data-gate readiness check")
     sub.add_parser("learned", help="what Olympus learned/did on its own "
                                    "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
@@ -1124,6 +1127,39 @@ def main(argv: list[str] | None = None) -> int:
                       f"spent today" + ("  ⚠ reached" if b["exceeded"] else ""))
         else:
             print(usage.set_budget(args.amount))
+    elif args.command == "routing-stats":
+        from . import routing_outcomes as ro
+        g = ro.gate_status()
+        s = g["stats"]
+        print("Routing-outcome telemetry (SPEC-04 Phase A — passive; changes no "
+              "routing)")
+        print(f"  rows total       : {s['total_rows']} "
+              f"(synthetic {s['synthetic_rows']}, pending {s['pending_rows']})")
+        print(f"  labeled (real)   : {s['labeled']}")
+        print(f"  distinct sources : {s['distinct_users']}")
+        if s["task_types"]:
+            print("  by task-type     :")
+            for t, n in sorted(s["task_types"].items(), key=lambda kv: -kv[1]):
+                print(f"      {t:12s} {n}")
+        if s["by_specialist_model"]:
+            print("  by specialist/model :")
+            for mk, n in sorted(s["by_specialist_model"].items(),
+                                key=lambda kv: -kv[1])[:20]:
+                print(f"      {mk:28s} {n}")
+        if any(s["signals"].values()):
+            print("  signals          : "
+                  + ", ".join(f"{k}={v}" for k, v in s["signals"].items() if v))
+        th = g["thresholds"]
+        print()
+        if g["met"]:
+            print("  GATE READINESS   : ✅ MET — Phase B data threshold reached "
+                  f"(≥{th['labeled']} labeled, ≥{th['task_types']} task-types, "
+                  f"≥{th['distinct_users']} sources).")
+        else:
+            print("  GATE READINESS   : ⛔ NOT MET — Phase B stays gated. "
+                  + "; ".join(g["reasons"]) + ".")
+        print("  (Phase B — the learned selector — must not be built until this "
+              "gate is MET from REAL adoption; synthetic rows never count.)")
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()

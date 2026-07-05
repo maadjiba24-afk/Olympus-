@@ -695,7 +695,37 @@ class Olympus:
                 verified = "\n\n".join(
                     f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
 
+        # SPEC-04 Phase A: passive routing-outcome telemetry. Records which
+        # specialist ran on which model and the verify/review verdict as the
+        # outcome signal — it decides nothing. Best-effort and never emitted
+        # during replay (keeps replay a pure, side-effect-free verification).
+        self._record_routing_outcome(tr, user_message, assignments, review)
+
         return "delegate", brief, verified
+
+    def _record_routing_outcome(self, tr, user_message, assignments, review) -> None:
+        """Emit one routing-outcome row per dispatched specialist (Phase A).
+        Fully isolated: any failure is swallowed so telemetry can never break a
+        run, and the model/role are READ from the deterministic selection —
+        nothing about routing is changed."""
+        try:
+            if replaystore.replaying():
+                return
+            from . import routing_outcomes
+            keys = [a["specialist"] for a in assignments
+                    if a.get("specialist") in SPECIALISTS]
+            if not keys:
+                return
+            models = {k: (self.pool.for_specialist(k).model
+                          or config.default_model()) for k in keys}
+            roles = {k: config.specialist_role(k) for k in keys}
+            routing_outcomes.record_run(
+                self.user, tr.id, user_message, keys,
+                models=models, roles=roles,
+                review_verdict=review.get("verdict"),
+                synthetic=config.routing_synthetic())
+        except Exception:
+            pass
 
     def _finish(self, user_message: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_message})
@@ -1015,6 +1045,13 @@ class Olympus:
             return "Nothing to rate yet."
         user_msg = self.history[-2].get("content", "")
         reply = self.history[-1].get("content", "")
+        # SPEC-04 Phase A: an explicit 👍/👎 is the top-precedence outcome
+        # signal — upgrade this run's routing-outcome rows. Best-effort.
+        try:
+            from . import routing_outcomes
+            routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
+        except Exception:
+            pass
         verdict = "positive" if verdict.lower() in ("up", "good", "positive",
                                                     "+1", "👍") else "negative"
         memory.save(
