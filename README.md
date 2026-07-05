@@ -505,9 +505,12 @@ once the run completes; use `/api/status` or a non-streaming request to get it),
 and `/api/status` reports the signing posture. **Honesty about trust:** with no secret
 signing seed configured, runs are signed by a *public default key* — verification
 still passes but is loudly labeled `DEV / UNVERIFIED` (integrity, not
-authenticity), and `olympus verify --run … --require-production` rejects it. Set a
-real `OLYMPUS_SIGNING_SEED` (HSM/KMS recommended) and pin the derived key to make
-it a genuine guarantee. Step-by-step for a skeptical evaluator:
+authenticity), and `olympus verify --run … --require-production` rejects it.
+Generate a real seed with `olympus keygen` (a 0600 seed file for
+`OLYMPUS_SIGNING_SEED_FILE` — systemd/Docker-secrets friendly) and pin the
+derived key to make it a genuine guarantee; in sovereign mode a configured seed
+is *required* — a sovereign instance refuses to boot or sign on the forgeable
+default. Step-by-step for a skeptical evaluator:
 [docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
 [docs/SIGNING.md](docs/SIGNING.md).
 
