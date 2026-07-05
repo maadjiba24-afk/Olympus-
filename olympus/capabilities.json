@@ -38,7 +38,7 @@
     ]
   },
   "commands": {
-    "count": 84,
+    "count": 85,
     "names": [
       "actions",
       "add-mcp",
@@ -94,6 +94,7 @@
       "restore",
       "restrict",
       "revoke",
+      "routing-stats",
       "scan",
       "schedule",
       "scores",

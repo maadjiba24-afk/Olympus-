@@ -721,6 +721,16 @@ def fast_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def routing_synthetic() -> bool:
+    """Mark routing-outcome telemetry from THIS process as synthetic/self-
+    generated (OLYMPUS_ROUTING_SYNTHETIC=1) so it never counts toward the
+    SPEC-04 Phase B data gate. Set it for eval, load-tests, demos, and any
+    self-generated traffic; real adoption leaves it unset. Phase A telemetry
+    only — it changes no routing behavior."""
+    return os.environ.get("OLYMPUS_ROUTING_SYNTHETIC", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 # --- sovereignty: provable zero-egress mode (SPEC-02) --------------------
 # Sovereign mode turns Olympus's *capability* to run fully local into an
 # enforced, fail-closed *guarantee*: remote models are excluded from selection,

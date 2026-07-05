@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->67<!--/cap--> agent tools, and <!--cap:commands-->84<!--/cap-->
+<!--cap:tools-->67<!--/cap--> agent tools, and <!--cap:commands-->85<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -510,6 +510,23 @@ real `OLYMPUS_SIGNING_SEED` (HSM/KMS recommended) and pin the derived key to mak
 it a genuine guarantee. Step-by-step for a skeptical evaluator:
 [docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
 [docs/SIGNING.md](docs/SIGNING.md).
+
+### Routing telemetry (learns from real outcomes, when there are enough)
+
+Model selection today is a static keyword heuristic. Olympus now **passively
+records** which specialist/model handled which kind of task and whether it
+succeeded (from the verify/review verdict and your 👍/👎) — the data a learned
+router would need. It changes **nothing** about how routing works; it only logs.
+Check readiness with:
+
+```bash
+olympus routing-stats     # counts, breakdowns, and the Phase-B data-gate verdict
+```
+
+A learned selector (Phase B) stays deliberately **unbuilt** until this gate is met
+from real adoption — a selector trained on little data is worse than the heuristic.
+What's logged, the outcome-signal precedence, the privacy posture, and the exact
+threshold are in [docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
 
 ### Connectors: MCP servers & custom plugins
 
