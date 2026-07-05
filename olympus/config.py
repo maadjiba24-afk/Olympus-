@@ -867,6 +867,16 @@ def contracts_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
+def browser_financial_enabled() -> bool:
+    """Allow the operator's financial/legal and irreversible browser templates
+    (OLYMPUS_ENABLE_BROWSER_FINANCIAL=1). OFF BY DEFAULT — fail closed: without
+    the flag those templates refuse at EXECUTION time, even if already prepared
+    or approved, so the highest-risk browser actuators can never run on an
+    instance whose operator hasn't explicitly opted in."""
+    return os.environ.get("OLYMPUS_ENABLE_BROWSER_FINANCIAL",
+                          "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def egress_guard_enabled() -> bool:
     """Route outbound data through the egress gateway (OLYMPUS_EGRESS_GUARD=1).
     OFF BY DEFAULT — inert until an operator opts in, so it can't surprise a

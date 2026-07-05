@@ -81,6 +81,10 @@ def test_notable_template_auto_runs_within_scope(monkeypatch):
 
 def test_irreversible_template_always_waits_for_approval(monkeypatch):
     _authorize(monkeypatch)                                # scope + L4 autonomy
+    # This test is about the approval hold, so opt into the (default-off)
+    # high-risk template gate; the default-off behavior itself is covered in
+    # test_operator_hardening.py.
+    monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     _buy_template(risk="irreversible")
     browser.set_transport_factory(

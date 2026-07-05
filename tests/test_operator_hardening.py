@@ -58,3 +58,53 @@ def test_browser_act_allowed_on_authorized_domain(monkeypatch):
     browser.set_transport_factory(lambda: fake)
     out = tools._browser_act("click", selector="#buy")
     assert "Clicked" in out
+
+
+# --- financial/irreversible templates are DISABLED BY DEFAULT --------------
+#
+# OLYMPUS_ENABLE_BROWSER_FINANCIAL gates the two highest-risk action types,
+# fail-closed at the execution door: even an explicitly APPROVED action
+# refuses without the opt-in (mirroring how the sovereign gates are written).
+
+def _authorized_template(monkeypatch, risk):
+    from olympus import security
+    monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+    monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    user = memory.current_user()
+    actions.set_autonomy(user, actions.L4_STANDING)
+    actions.grant_scope(user, operator.OPERATE_SCOPE)
+    browser.set_template("shop.com", "buy", risk,
+                         [{"op": "click", "selector": "#buy"}],
+                         success_selector="#done")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    return user
+
+
+@pytest.mark.parametrize("risk", ["financial_legal", "irreversible"])
+def test_gated_templates_fail_closed_by_default(monkeypatch, risk):
+    monkeypatch.delenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", raising=False)
+    user = _authorized_template(monkeypatch, risk)
+    action = operator.run(user, "shop.com", "buy", {})
+    assert action.status == actions.PREPARED           # held, as ever
+    done = actions.approve(user, action.id)            # even explicit approval
+    assert done.status == actions.FAILED               # refuses at the door
+    assert "OLYMPUS_ENABLE_BROWSER_FINANCIAL" in done.error
+
+
+@pytest.mark.parametrize("risk", ["financial_legal", "irreversible"])
+def test_gated_templates_execute_with_explicit_optin(monkeypatch, risk):
+    monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
+    user = _authorized_template(monkeypatch, risk)
+    action = operator.run(user, "shop.com", "buy", {})
+    assert action.status == actions.PREPARED           # still approval-held
+    done = actions.approve(user, action.id)
+    assert done.status == actions.EXECUTED
+
+
+def test_notable_templates_unaffected_by_the_flag(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", raising=False)
+    user = _authorized_template(monkeypatch, "notable")
+    action = operator.run(user, "shop.com", "buy", {})
+    assert action.status == actions.EXECUTED           # auto-ran within policy
