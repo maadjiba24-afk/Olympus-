@@ -513,6 +513,21 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass                        # a broken vault must never block the CLI
 
+    # Sovereign boot invariant: a sovereign instance must not run on the PUBLIC
+    # default signing seed (its decision logs and backups would be forgeable).
+    # Checked here — after the saved env is loaded, before any command runs —
+    # so the failure is one actionable line at boot, not a surprise later.
+    # `keygen` is exempt: it is the fix the error prescribes. Non-sovereign
+    # instances are untouched. witness.sign() re-checks (defense in depth).
+    if args.command != "keygen":
+        from . import config as _config, witness as _witness
+        if _config.sovereign_mode():
+            try:
+                _witness.check_sovereign_seed()
+            except _witness.WitnessError as err:
+                print(f"[sovereign] {err}", file=sys.stderr)
+                return 1
+
     if args.command == "setup":
         if getattr(args, "section", None):
             firstrun.setup_section(args.section)

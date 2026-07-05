@@ -244,7 +244,34 @@ def available() -> bool:
     return _HAVE_CRYPTO
 
 
+def check_sovereign_seed() -> None:
+    """Sovereign fail-closed for the signing key (shared by the CLI boot check
+    and the sign-time defense below): sovereign posture is the production
+    switch, and a sovereign instance on the PUBLIC default seed would sign
+    every decision log and backup with a key anyone can forge. Raises
+    WitnessError unless the operator explicitly opted in
+    (OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED — labs/CI only, loudly warned).
+    A no-op outside sovereign mode: dev-seed behavior there is unchanged."""
+    if not config.sovereign_mode() or not is_default_seed():
+        return
+    if config.sovereign_allow_dev_seed():
+        import logging
+        logging.getLogger("olympus.witness").warning(
+            "SOVEREIGN MODE IS USING THE PUBLIC DEV SIGNING SEED "
+            "(OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED=1): every signature produced is "
+            "FORGEABLE — acceptable for labs/CI, never for production.")
+        return
+    raise WitnessError(
+        "sovereign mode requires a configured signing seed; the default seed "
+        "is public and forgeable. Fix: run `olympus keygen`, then set "
+        "OLYMPUS_SIGNING_SEED_FILE to the generated file (see docs/SIGNING.md)."
+        " Labs/CI escape hatch: OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED=1.")
+
+
 def sign(data: bytes) -> str:
+    # Defense in depth behind the CLI boot check: catches sovereign mode being
+    # enabled after boot, and entry points that don't pass through cli.main().
+    check_sovereign_seed()
     return signing_key().sign(data).hex()
 
 
