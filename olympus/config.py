@@ -428,7 +428,15 @@ class ModelPool:
             for member in self.members:
                 if token in f"{member.provider}/{member.model}".lower():
                     return member
-        return self.for_role(specialist_role(key))
+        heuristic = self.for_role(specialist_role(key))
+        # SPEC-04 Phase B: the learned selector may override the keyword
+        # heuristic, but only under full evidence gates (opt-in flag + data gate
+        # + per-cell samples on BOTH candidates; disabled during replay). It
+        # chooses among self.members, which sovereign mode already filtered, and
+        # falls back to the heuristic on anything short of that — so with no
+        # data (or the flag off) this line is a no-op.
+        from . import learned_routing
+        return learned_routing.choose(self.members, key, heuristic) or heuristic
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints

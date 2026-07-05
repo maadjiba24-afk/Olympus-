@@ -1156,10 +1156,37 @@ def main(argv: list[str] | None = None) -> int:
                   f"(≥{th['labeled']} labeled, ≥{th['task_types']} task-types, "
                   f"≥{th['distinct_users']} sources).")
         else:
-            print("  GATE READINESS   : ⛔ NOT MET — Phase B stays gated. "
+            print("  GATE READINESS   : ⛔ NOT MET — "
                   + "; ".join(g["reasons"]) + ".")
-        print("  (Phase B — the learned selector — must not be built until this "
-              "gate is MET from REAL adoption; synthetic rows never count.)")
+        from . import learned_routing
+        ls = learned_routing.status()
+        print()
+        print("Learned routing (SPEC-04 Phase B — evidence-gated selector)")
+        print(f"  opt-in flag      : "
+              + ("ON (OLYMPUS_LEARNED_ROUTING)" if ls["flag_enabled"]
+                 else "off — set OLYMPUS_LEARNED_ROUTING=1 to enable"))
+        print(f"  status           : "
+              + ("🟢 ACTIVE — may override the keyword heuristic where a "
+                 "(specialist, model) cell has evidence" if ls["active"]
+                 else "⚪ dormant — routing is the keyword heuristic, unchanged"
+                 + ("" if ls["flag_enabled"] else " (flag off)")
+                 + ("" if ls["gate_met"] else " (data gate not met)")))
+        known = [c for c in ls["cells"] if c["known"]]
+        if ls["cells"]:
+            print(f"  evidence cells   : {len(ls['cells'])} "
+                  f"({len(known)} with ≥{ls['min_cell_samples']} samples — "
+                  "only these can influence a choice):")
+            for c in ls["cells"][:15]:
+                mark = "●" if c["known"] else "○"
+                print(f"      {mark} {c['specialist']}/{c['model']:24s} "
+                      f"n={c['n']:<5d} rate={c['rate']:.2f} "
+                      f"wilsonLB={c['wilson_lb']:.2f}")
+        else:
+            print("  evidence cells   : none yet")
+        print("  (The selector overrides the heuristic only when BOTH the "
+              "challenger and the incumbent cells are known and the challenger's "
+              "Wilson lower bound is strictly higher; otherwise the heuristic "
+              "stands. Replay always uses the recorded decisions.)")
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()

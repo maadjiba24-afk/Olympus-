@@ -511,22 +511,25 @@ it a genuine guarantee. Step-by-step for a skeptical evaluator:
 [docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
 [docs/SIGNING.md](docs/SIGNING.md).
 
-### Routing telemetry (learns from real outcomes, when there are enough)
+### Learned routing (from real outcomes, evidence-gated)
 
-Model selection today is a static keyword heuristic. Olympus now **passively
+Model selection defaults to a static keyword heuristic. Olympus **passively
 records** which specialist/model handled which kind of task and whether it
-succeeded (from the verify/review verdict and your 👍/👎) — the data a learned
-router would need. It changes **nothing** about how routing works; it only logs.
-Check readiness with:
+succeeded (from the verify/review verdict and your 👍/👎), and ships an
+**evidence-gated learned selector** that can prefer the model with the best
+*recorded* success rate. It is **off by default** and triple-gated: it engages
+only with `OLYMPUS_LEARNED_ROUTING=1`, only once the data gate is met from real
+(non-synthetic) usage, and only where a specific (specialist, model) pairing has
+enough samples on **both** candidates — anything less falls back to the
+heuristic, byte-for-byte. Check the live status with:
 
 ```bash
-olympus routing-stats     # counts, breakdowns, and the Phase-B data-gate verdict
+olympus routing-stats     # counts, the data-gate verdict, and the selector's evidence table
 ```
 
-A learned selector (Phase B) stays deliberately **unbuilt** until this gate is met
-from real adoption — a selector trained on little data is worse than the heuristic.
-What's logged, the outcome-signal precedence, the privacy posture, and the exact
-threshold are in [docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
+What's logged, the outcome-signal precedence, the privacy posture, the Wilson
+lower-bound ranking, and every activation gate are in
+[docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
 
 ### Connectors: MCP servers & custom plugins
 
