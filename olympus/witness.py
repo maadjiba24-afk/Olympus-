@@ -180,11 +180,42 @@ def default_public_key_hex() -> str:
     """The public key derived from the PUBLIC default seed. Lets a verifier
     recognize a run/manifest signed by the forgeable default key regardless of
     the seed currently configured."""
+    return pubkey_for_seed(_DEFAULT_SEED)
+
+
+def pubkey_for_seed(seed: str) -> str:
+    """The Ed25519 public key (hex) a given seed derives to — computed from the
+    argument alone, never the configured environment. `olympus keygen` uses it
+    to print the pin for a seed that was just written to disk."""
     _require_crypto()
     sk = ed25519.Ed25519PrivateKey.from_private_bytes(
-        hashlib.sha256(_DEFAULT_SEED.encode("utf-8")).digest())
+        hashlib.sha256(seed.encode("utf-8")).digest())
     return sk.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def write_seed_file(path: Path, *, force: bool = False) -> str:
+    """Generate a fresh 256-bit signing seed and write it to `path`, created
+    0600 via os.open flags (no write-then-chmod race). Refuses to overwrite an
+    existing file unless `force`. Returns the seed so the caller can derive
+    its public key in-process — callers must NEVER print or log it."""
+    import secrets
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not force:
+            raise WitnessError(
+                f"{path} already exists — refusing to overwrite a signing "
+                "seed (pass --force to replace it; the old key becomes "
+                "unrecoverable).")
+        path.unlink()
+    seed = secrets.token_hex(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, (seed + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    return seed
 
 
 def posture() -> str:

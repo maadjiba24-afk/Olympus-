@@ -252,6 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("witness-pubkey", aliases=["pubkey"],
                    help="print the Ed25519 public key for the "
                                           "current signing seed (to pin it)")
+    p_keygen = sub.add_parser(
+        "keygen", help="generate a 256-bit signing seed file (mode 0600) and "
+                       "print the public key to pin — see docs/SIGNING.md")
+    p_keygen.add_argument("--out", metavar="PATH", default=None,
+                          help="where to write the seed file "
+                               "(default: <memory dir>/signing_seed)")
+    p_keygen.add_argument("--force", action="store_true",
+                          help="overwrite an existing seed file (the old key "
+                               "becomes unrecoverable)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -855,6 +864,31 @@ def main(argv: list[str] | None = None) -> int:
                      else "DIFFERS from the pinned key (rotation in progress?)")
             print(f"\nposture: PRODUCTION — derived from OLYMPUS_SIGNING_SEED; "
                   f"{state}.", file=sys.stderr)
+    elif args.command == "keygen":
+        from pathlib import Path
+        from . import config, witness
+        out = Path(args.out) if args.out else config.MEMORY_DIR / "signing_seed"
+        try:
+            seed = witness.write_seed_file(out, force=args.force)
+        except witness.WitnessError as err:
+            print(f"[keygen] {err}")
+            return 1
+        # The seed itself is NEVER printed — only where it lives and the
+        # derived PUBLIC key an operator pins for verifiers.
+        print(f"Wrote a new 256-bit signing seed: {out}  (mode 0600)")
+        if witness.available():
+            print(f"  public key: {witness.pubkey_for_seed(seed)}")
+        else:
+            print("  public key: (cannot derive here — the cryptography "
+                  "backend is unavailable; run `olympus pubkey` with the seed "
+                  "configured on a host where it is)")
+        print("\nNext steps:")
+        print(f"  export OLYMPUS_SIGNING_SEED_FILE={out}")
+        print("  # pin the public key for verifiers: set OLYMPUS_PINNED_PUBKEY "
+              "to it,\n"
+              "  # or add it to olympus/witness_pubkey.txt (one key per line).\n"
+              "  # systemd LoadCredential / Docker-secrets recipes: "
+              "docs/SIGNING.md")
     elif args.command == "verify":
         from pathlib import Path
         from . import witness
