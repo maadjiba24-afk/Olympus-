@@ -71,16 +71,74 @@ def canonical_json(obj) -> bytes:
 
 # --- the key -------------------------------------------------------------
 
+def _configured_seed() -> str | None:
+    """The operator-configured signing seed, or None when custody is not
+    configured (callers fall back to the PUBLIC default seed, posture 'dev').
+
+    The single acquisition point used by BOTH `_seed_bytes()` and
+    `is_default_seed()`, so posture can never diverge from key derivation.
+    Read fresh on every call — never cached — so posture always reflects the
+    live environment (tests monkeypatch it; injected credentials can rotate).
+
+    Custody sources, strictest first:
+    - `OLYMPUS_SIGNING_SEED_FILE`: read the file (systemd `LoadCredential`,
+      Docker/K8s secrets). A configured-but-broken file is a hard error —
+      never a silent downgrade to the forgeable default seed.
+    - `OLYMPUS_SIGNING_SEED`: the seed itself in the environment.
+    - Both set → error (ambiguous custody; refusing to guess).
+    """
+    env_seed = (os.environ.get("OLYMPUS_SIGNING_SEED") or "").strip()
+    path = (os.environ.get("OLYMPUS_SIGNING_SEED_FILE") or "").strip()
+    if env_seed and path:
+        raise WitnessError(
+            "both OLYMPUS_SIGNING_SEED and OLYMPUS_SIGNING_SEED_FILE are set — "
+            "ambiguous key custody; refusing to guess which key is "
+            "authoritative. Unset one of them.")
+    if path:
+        p = Path(path)
+        # POSIX only: a seed readable by group/other is not custody. Windows
+        # ACLs don't surface through st_mode's group/other bits, so the check
+        # would be meaningless noise there — skipped by design.
+        if os.name == "posix":
+            try:
+                mode = os.stat(p).st_mode & 0o777
+            except OSError as err:
+                raise WitnessError(
+                    f"OLYMPUS_SIGNING_SEED_FILE points at {path!r} but it "
+                    f"cannot be read ({err.__class__.__name__}: {err}) — "
+                    "refusing to fall back to the public default seed."
+                ) from err
+            if mode & 0o077:
+                raise WitnessError(
+                    f"seed file {path!r} has mode {mode:03o} — readable by "
+                    f"group/other. Fix: chmod 600 {path}")
+        try:
+            seed = p.read_text(encoding="utf-8").strip()
+        except OSError as err:
+            raise WitnessError(
+                f"OLYMPUS_SIGNING_SEED_FILE points at {path!r} but it cannot "
+                f"be read ({err.__class__.__name__}: {err}) — refusing to "
+                "fall back to the public default seed.") from err
+        if not seed:
+            raise WitnessError(
+                f"seed file {path!r} is empty (after stripping whitespace) — "
+                "refusing to fall back to the public default seed.")
+        return seed
+    return env_seed or None
+
+
 def _seed_bytes() -> bytes:
-    seed = os.environ.get("OLYMPUS_SIGNING_SEED") or _DEFAULT_SEED
+    seed = _configured_seed() or _DEFAULT_SEED
     return hashlib.sha256(seed.encode("utf-8")).digest()
 
 
 def is_default_seed() -> bool:
     """True when no secret signing seed is configured — i.e. the key is the
     PUBLIC default and anyone could forge a signature. Such manifests are 'dev'
-    only: integrity for local use, never authenticity for a release."""
-    return not (os.environ.get("OLYMPUS_SIGNING_SEED") or "").strip()
+    only: integrity for local use, never authenticity for a release.
+    Raises WitnessError when custody is configured but broken (missing/empty/
+    world-readable seed file, or both env and file set)."""
+    return _configured_seed() is None
 
 
 def pinned_pubkey() -> str | None:
