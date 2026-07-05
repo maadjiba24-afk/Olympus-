@@ -1,20 +1,26 @@
-# Learned routing — Phase A (instrumentation only)
+# Learned routing — outcomes instrumentation (Phase A) + the evidence-gated selector (Phase B)
 
 Olympus picks a model for each specialist with a **static keyword heuristic**
-(`config.py:capability_score`, scoring models by name substring). The eventual
-moat is a router that learns which model/specialist actually **succeeds** on
-which kind of task, from Olympus's own recorded outcomes — data a hosted
-competitor cannot access.
+(`config.py:capability_score`, scoring models by name substring). The moat is a
+router that learns which model actually **succeeds** on which kind of task, from
+Olympus's own recorded outcomes — data a hosted competitor cannot access.
 
-That data does not exist yet: nothing links a routing decision to its eventual
-outcome. **Phase A builds exactly that link and a readiness counter, and changes
-nothing about how routing works.** It is a passive sensor: it records, it does
-not decide.
+- **Phase A** (the sensor) records the link between each routing decision and
+  its eventual outcome, and counts readiness. It decides nothing.
+- **Phase B** (the selector, `olympus/learned_routing.py`) is implemented but
+  ships **dormant and evidence-gated**: it can only override the heuristic when
+  the operator opts in (`OLYMPUS_LEARNED_ROUTING=1`) **and** the data gate below
+  is met on that deployment **and** the specific decision has statistical
+  evidence on *both* candidates. Anything short of that falls back to the
+  keyword heuristic, byte-for-byte.
 
-> ⛔ **Phase B (the learned selector) is not built and must not be built** until
-> the data gate below is MET **from real adoption**. A selector trained on
-> little/no data is strictly worse than the current heuristic. `olympus
-> routing-stats` is the gate check.
+> The original SPEC-04 gate ("do not build Phase B until real adoption produces
+> the data") was overridden by an explicit owner instruction to implement Phase
+> B in full. The gate's *reason* — a selector trained on little/no data is
+> strictly worse than the heuristic — is preserved by moving the gate into the
+> runtime: with no data the selector never engages, so shipping it is
+> behavior-neutral. `olympus routing-stats` shows both the data gate and the
+> selector's live status.
 
 ## What is logged (the row schema)
 
@@ -88,11 +94,59 @@ heuristic instead of regressing it.*
 
 ## What Phase A explicitly does NOT do
 
-- It does **not** change which model is selected — `capability_score`,
-  `ModelPool.for_role`/`for_specialist`, and the SPEC-02 sovereign eligibility
-  filter behave byte-for-byte as before (proven by a regression test).
+- It does **not** change which model is selected — the telemetry hooks read the
+  deterministic selection, never influence it.
 - It does **not** train, fit, or consult any model to route.
 - A telemetry failure is swallowed and **never breaks a run**.
 
-Phase B remains unbuilt until `olympus routing-stats` shows the gate MET from
-real usage.
+## Phase B — the evidence-gated selector
+
+`olympus/learned_routing.py` turns the ledger into a routing preference. It is
+**off by default** and layered so that every missing piece of evidence means
+"use the heuristic":
+
+### Selection precedence (in `ModelPool.for_specialist`)
+
+```
+explicit pin (OLYMPUS_SPECIALIST_MODELS)   — always wins
+   > learned selector (this module)        — only under ALL gates below
+      > keyword heuristic (capability_score) — the default, and every fallback
+```
+
+The SPEC-02 **sovereign filter runs before any of this** (it constrains the
+pool's members), so the selector can only ever choose among already-eligible
+(e.g. local-only) members — evidence favoring a remote model cannot pull data
+off-box.
+
+### Activation gates (ALL required, checked per decision)
+
+1. **Operator opt-in**: `OLYMPUS_LEARNED_ROUTING=1` (default off — routing is
+   byte-for-byte the keyword heuristic, proven by regression test).
+2. **Not replaying**: under `OLYMPUS_REPLAY` the selector is forced off, so a
+   recorded run always replays its recorded decisions even after the ledger
+   grows.
+3. **The data gate above is met** on this deployment (labeled, non-synthetic,
+   multi-task-type, multi-source) — the SPEC-04 gate, enforced at runtime.
+4. **Per-cell evidence**: a `(specialist, model)` cell participates only with
+   **≥ 25 labeled real outcomes** (`MIN_CELL_SAMPLES`), and the selector
+   overrides the heuristic **only when the incumbent's cell is also known and
+   strictly worse**. One-sided evidence never displaces the heuristic.
+
+### The statistics (deliberately boring, stdlib-only)
+
+Outcomes are weighted — `positive` = 1.0, `approved_after_edit` = 0.5,
+`negative` = 0.0 — and candidates are ranked by the **Wilson score lower bound
+(95%)** of their success rate. Wilson's lower bound is pessimistic on small
+samples, so a lucky 3-for-3 cell can never outrank a solid 65-for-80 cell. There
+is no model fitting, no gradient descent, no new dependency: the "learning" is
+honest per-cell success accounting, which at a few hundred to a few thousand
+outcomes is *more* defensible than an ML fit.
+
+### Observability & kill switch
+
+`olympus routing-stats` shows the flag, the live active/dormant status, and the
+full evidence table (every cell with `n`, rate, Wilson lower bound, and whether
+it is large enough to matter). Unset `OLYMPUS_LEARNED_ROUTING` to revert to the
+pure heuristic instantly; the ledger keeps accumulating either way. Any internal
+selector failure (unreadable ledger, bad rows) silently falls back to the
+heuristic — routing can never break on telemetry.
