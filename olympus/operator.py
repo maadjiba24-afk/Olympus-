@@ -190,6 +190,15 @@ def execute(payload: dict) -> dict:
     _, tmpl = _template(domain, name)
     if not tmpl:
         raise RuntimeError(f"no template '{name}' for {domain}")
+    # The two highest-risk action types are DISABLED BY DEFAULT and fail
+    # closed at the execution door (mirroring the sovereign gates): even a
+    # previously prepared/approved action refuses without the explicit opt-in.
+    if type_for_risk(tmpl.get("risk", "notable")) in (
+            "browser_operate_financial", "browser_operate_irreversible") \
+            and not config.browser_financial_enabled():
+        raise RuntimeError(
+            "financial/irreversible browser templates are disabled by "
+            "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
     result = sess.run_template(tmpl.get("steps", []), params)
     ok = True
