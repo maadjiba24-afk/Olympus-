@@ -101,3 +101,29 @@ def test_telegram_token_accepts_ref(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", f"file:{token_file}")
     from olympus import telegram
     assert telegram._token() == "123:ABC"
+
+
+def test_secret_cli_ls_without_key_fails_gracefully(monkeypatch, capsys):
+    # A vault that exists but can't be opened (no OLYMPUS_SECRET_KEY) must
+    # explain itself, not traceback.
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
+    from olympus import cli, secretref
+    secretref.store("cli-audit", "sk-x")
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    rc = cli.main(["secret", "ls"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "OLYMPUS_SECRET_KEY" in out
+    rc = cli.main(["secret", "rm", "cli-audit"])
+    out = capsys.readouterr().out
+    assert rc == 1 and "OLYMPUS_SECRET_KEY" in out
+
+
+def test_secret_cli_roundtrip_with_key(monkeypatch, capsys):
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
+    from olympus import cli, secretref
+    secretref.store("cli-audit2", "sk-y")
+    rc = cli.main(["secret", "ls"])
+    out = capsys.readouterr().out
+    assert rc in (0, None) and "cli-audit2" in out
+    rc = cli.main(["secret", "rm", "cli-audit2"])
+    assert rc in (0, None)

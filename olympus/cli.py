@@ -1424,16 +1424,24 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Stored. Reference it in config as: {ref}")
         elif args.action == "ls":
-            names = [n.removeprefix("secretref:")
-                     for n in vault.names("operator")
-                     if n.startswith("secretref:")]
+            try:
+                names = [n.removeprefix("secretref:")
+                         for n in vault.names("operator")
+                         if n.startswith("secretref:")]
+            except vault.VaultError as err:
+                print(f"Cannot open the vault: {err}")
+                return 1
             print("\n".join(names) if names
                   else "No named secrets. Add one: olympus secret set <name>")
         elif args.action == "rm":
             if not args.name:
                 print("Usage: olympus secret rm <name>")
                 return 1
-            vault.delete("operator", f"secretref:{args.name}")
+            try:
+                vault.delete("operator", f"secretref:{args.name}")
+            except vault.VaultError as err:
+                print(f"Cannot open the vault: {err}")
+                return 1
             print("Removed (if it existed).")
     elif args.command == "wiki":
         from . import wiki
