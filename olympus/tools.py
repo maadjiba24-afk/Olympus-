@@ -495,12 +495,30 @@ import urllib.error as _urlerr
 import urllib.request as _urlreq
 
 
+def _proxied(url: str) -> bool:
+    """Whether an HTTP(S) proxy is configured for this URL (HTTPS_PROXY /
+    HTTP_PROXY env, honoring NO_PROXY). When true, egress goes THROUGH the proxy
+    — we must not pin+dial the target IP ourselves (that bypasses the proxy and,
+    in proxy setups, the target resolves to the proxy's loopback locally)."""
+    try:
+        parsed = _urlreq.urlparse(url)
+    except Exception:
+        return False
+    proxies = _urlreq.getproxies()
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in proxies:
+        return False
+    host = parsed.hostname or ""
+    return not _urlreq.proxy_bypass(host)
+
+
 class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
     """Re-validate every 3xx hop against the SSRF/egress gate — a public URL
-    that 302-redirects to an internal host must not be followed."""
+    that 302-redirects to an internal host must not be followed. The resolve
+    check is skipped for proxied hops (the proxy is the egress control point)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        reason = security.url_block_reason(newurl)
+        reason = security.url_block_reason(newurl, resolve=not _proxied(newurl))
         if reason:
             raise _urlerr.HTTPError(newurl, code,
                                     f"blocked redirect ({reason})", headers, fp)
@@ -548,28 +566,41 @@ class _PinnedHTTPSHandler(_urlreq.HTTPSHandler):
 
 
 def _pinned_opener() -> "_urlreq.OpenerDirector":
-    """Opener for model/user-supplied URLs: SSRF-validated redirects plus
-    IP-pinned connections on both schemes."""
+    """Opener for a DIRECT connection: SSRF-validated redirects plus IP-pinned
+    connections on both schemes (DNS-rebinding defense)."""
     return _urlreq.build_opener(_PinnedHTTPHandler(),
                                 _PinnedHTTPSHandler(
                                     context=_ssl.create_default_context()),
                                 _SafeRedirectHandler())
 
 
+def _proxy_opener() -> "_urlreq.OpenerDirector":
+    """Opener for a PROXIED connection: the default ProxyHandler (from
+    getproxies()) carries egress to the proxy, which resolves/connects to the
+    target and enforces its own policy. We must NOT pin here — pinning dials the
+    target IP directly and bypasses the proxy. SSRF redirects are still
+    re-checked (by name, in proxy mode)."""
+    return _urlreq.build_opener(_SafeRedirectHandler())
+
+
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
-    initial request, on every redirect, AND at socket-connect time (the
-    connection is pinned to the validated IP, defeating DNS rebinding); also
-    refuses a URL that carries a stored secret (raw or encoded) — the classic
-    injection exfil channel. Raises ValueError if blocked."""
+    initial request and every redirect; on a DIRECT connection also pins the
+    socket to the validated IP (defeating DNS rebinding), while a PROXIED
+    connection routes through the configured HTTP(S) proxy (which is the egress
+    control point). Also refuses a URL that carries a stored secret (raw or
+    encoded) — the classic injection exfil channel. Raises ValueError if
+    blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
-    reason = security.url_block_reason(url)
+    proxied = _proxied(url)
+    reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
-    with _pinned_opener().open(req, timeout=30) as resp:
+    opener = _proxy_opener() if proxied else _pinned_opener()
+    with opener.open(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -806,7 +837,8 @@ def _call_webhook(name: str, payload: dict | None = None, *,
     # Gate the outbound URL through the same SSRF/egress choke as web fetches: an
     # operator can misconfigure a webhook to an internal/metadata host, and the
     # endpoint can 302-redirect to one. Re-validate the initial URL and every hop.
-    reason = security.url_block_reason(hooks[name])
+    _proxy = _proxied(hooks[name])
+    reason = security.url_block_reason(hooks[name], resolve=not _proxy)
     if reason:
         return f"Error: webhook '{name}' URL is blocked ({reason})."
     req = urllib.request.Request(
@@ -815,7 +847,8 @@ def _call_webhook(name: str, payload: dict | None = None, *,
         headers={"Content-Type": "application/json", "User-Agent": "olympus-agent"},
     )
     try:
-        with _pinned_opener().open(req, timeout=30) as resp:
+        opener = _proxy_opener() if _proxy else _pinned_opener()
+        with opener.open(req, timeout=30) as resp:
             return (f"Webhook '{name}' responded {resp.status}: "
                     f"{resp.read(500).decode(errors='replace')}")
     except _urlerr.HTTPError as err:
@@ -855,15 +888,71 @@ def _refresh_email_style() -> str:
     return emailstyle.refresh(memory.current_user())
 
 
+def _list_documents() -> str:
+    from . import documents
+    return documents.render_list(memory.current_user())
+
+
+def _read_document(name: str) -> str:
+    from . import documents
+    body = documents.read(memory.current_user(), name)
+    if body is None:
+        return f"No document named '{name}'. Use list_documents to see them."
+    return body
+
+
+def _search_documents(query: str) -> str:
+    from . import docrag
+    return docrag.render_search(memory.current_user(), query)
+
+
+def _write_document(name: str, content: str) -> str:
+    # Route through the always-hold approval spine: a document save is the
+    # user's content and is reversible, but never happens without their nod.
+    return _prepare_action("write_document",
+                           {"name": name, "content": content},
+                           title=f"Save document '{name}'")
+
+
+def _trigger_research(question: str, rounds: int | None = None) -> str:
+    """Run the Deep Research pipeline inline and return the cited report. Uses
+    the run's active pool (so a specialist's research inherits the same
+    credentials), and clamps rounds so an agent can't spin an unbounded loop."""
+    from . import config, research
+    try:
+        r = int(rounds) if rounds is not None else None
+    except (TypeError, ValueError):
+        r = None
+    if r is not None:
+        r = max(1, min(r, 6))
+    try:
+        pool = config.ModelPool.of(config.active_settings()) \
+            if config.active_settings() else config.ModelPool.from_env()
+    except Exception:
+        pool = config.ModelPool.from_env()
+    return research.run(question, pool=pool, rounds=r)
+
+
 def _edit_file_tool(path: str, old_string: str, new_string: str,
                     replace_all: bool = False) -> str:
-    """File edits are writes: route through the approval spine like write_file.
-    The prepared action's preview is the unified diff of exactly this edit."""
-    return _spine_action("edit_file",
-                         {"path": path, "old_string": old_string,
-                          "new_string": new_string,
-                          "replace_all": bool(replace_all)},
-                         f"Edit {path}", f"Edit of {path}")
+    """File edits are writes: stage them for EXPLICIT approval, exactly like a
+    `write_file` staged via prepare_action — never `_spine_action`/auto_or_hold.
+
+    This matters for security, not just consistency: `edit_file` lives on
+    Hephaestus, which is `web=True` and therefore always ingests untrusted
+    content, so a real actuator here would let an injected page's "apply this
+    edit" instruction modify workspace files. `edit_file` is deliberately NOT
+    in `security.ACTION_TOOLS` (that would strip it from every always-ingesting
+    Hephaestus run and kill the feature); instead its safety comes from being
+    always-hold — the same posture that makes `prepare_action` safe to survive
+    an ingesting run. A NOTABLE action run through auto_or_hold would otherwise
+    auto-execute at autonomy L4, which is exactly the injection→write path we
+    must not allow."""
+    return _prepare_action(
+        "edit_file",
+        {"path": path, "old_string": old_string, "new_string": new_string,
+         "replace_all": bool(replace_all)},
+        title=f"Edit {path}")
 
 
 def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
@@ -1209,17 +1298,19 @@ def _operator_forget_site(domain: str) -> str:
 
 
 def _operator_status() -> str:
-    user = memory.current_user()
-    if not operator.enabled(user):
-        return ("The operator is off. Just ask me to do something on a site "
-                "(e.g. 'reorder my dog food on Amazon') and I'll set it up.")
-    s = operator.sites(user)
-    if not s:
-        return "The operator is on, but no sites are set up yet."
-    lines = ["I'm set up to act on these sites:"]
-    for d, meta in sorted(s.items()):
-        lines.append(f"- {d} ({meta.get('login', 'manual')} sign-in)")
-    return "\n".join(lines)
+    # The full plain-English status: on/off, authorized sites, pending
+    # approvals, and recent actions (same surface as `olympus operator status`).
+    return operator.status_summary(memory.current_user())
+
+
+def _operator_history(limit: int = 20) -> str:
+    """What Olympus has done on the user's accounts — the chat-facing review
+    surface, so a user on Telegram/web can audit the operator, not just CLI."""
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        n = 20
+    return operator.render_history(memory.current_user(), max(1, min(n, 100)))
 
 
 def _operator_remember_login(domain: str) -> str:
@@ -1280,6 +1371,12 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "search_sessions": lambda query: _search_sessions(query),
     "ask_user": lambda question, options=None: _ask_user(question, options),
     "refresh_email_style": lambda: _refresh_email_style(),
+    "list_documents": lambda: _list_documents(),
+    "read_document": lambda name: _read_document(name),
+    "search_documents": lambda query: _search_documents(query),
+    "write_document": lambda name, content: _write_document(name, content),
+    "trigger_research": lambda question, rounds=None: _trigger_research(
+        question, rounds),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1305,6 +1402,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "operator_authorize_site": _operator_authorize_site,
     "operator_forget_site": _operator_forget_site,
     "operator_status": _operator_status,
+    "operator_history": lambda limit=20: _operator_history(limit),
     "operator_remember_login": _operator_remember_login,
     "set_advanced_mode": _set_advanced_mode,
     "recent_learning": _recent_learning,
@@ -1554,6 +1652,77 @@ EDIT_FILE = {
                                            "(default false)"},
         },
         "required": ["path", "old_string", "new_string"],
+    },
+}
+
+TRIGGER_RESEARCH = {
+    "name": "trigger_research",
+    "description": (
+        "Run a full multi-step Deep Research pass on a question — plan "
+        "sub-questions, search and read the web across several rounds, and "
+        "return a cited report with verification notes. Use for open, "
+        "research-grade questions that a single search can't answer; it is "
+        "slower and costlier than web_search, so prefer web_search for simple "
+        "lookups. Returns the finished report text."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "rounds": {"type": "integer",
+                       "description": "Search/read rounds (default 4). Keep "
+                                      "small (2-3) for a quick pass."},
+        },
+        "required": ["question"],
+    },
+}
+
+LIST_DOCUMENTS = {
+    "name": "list_documents",
+    "description": "List the documents in the user's workspace (name, size, "
+                   "last updated). Side-effect-free.",
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+READ_DOCUMENT = {
+    "name": "read_document",
+    "description": "Read a document from the user's workspace by name. "
+                   "Side-effect-free.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    },
+}
+
+WRITE_DOCUMENT = {
+    "name": "write_document",
+    "description": (
+        "Create or overwrite a document in the user's workspace (Markdown). "
+        "The write is staged for the user's approval and is reversible — it "
+        "never saves silently. Use for drafts, notes, reports the user wants "
+        "to keep."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Document name/title"},
+            "content": {"type": "string", "description": "Full Markdown body"},
+        },
+        "required": ["name", "content"],
+    },
+}
+
+SEARCH_DOCUMENTS = {
+    "name": "search_documents",
+    "description": "Search the user's saved documents for passages relevant to "
+                   "a query (semantic when embeddings are configured, keyword "
+                   "otherwise). Side-effect-free. Use to ground an answer in "
+                   "what the user has written.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+        "required": ["query"],
     },
 }
 
@@ -1954,10 +2123,27 @@ OPERATOR_FORGET_SITE = {
 OPERATOR_STATUS = {
     "name": "operator_status",
     "description": (
-        "Show, in plain language, whether the operator is on for the user and "
-        "which sites it's set up to act on (and how each signs in)."
+        "Show, in plain language, whether the operator is on for the user, "
+        "which sites it's set up to act on (and how each signs in), any "
+        "actions awaiting approval, and the most recent actions."
     ),
     "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+OPERATOR_HISTORY = {
+    "name": "operator_history",
+    "description": (
+        "Report what Olympus has actually done on the user's accounts — recent "
+        "operator actions with their site, task, and outcome. Use when the user "
+        "asks 'what have you done on my accounts' or wants to audit the operator."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"limit": {"type": "integer",
+                                 "description": "how many recent actions "
+                                                "(default 20)"}},
+        "required": [],
+    },
 }
 
 OPERATOR_REMEMBER_LOGIN = {
@@ -2116,6 +2302,11 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_email": READ_EMAIL,
     "read_calendar": READ_CALENDAR,
     "refresh_email_style": REFRESH_EMAIL_STYLE,
+    "list_documents": LIST_DOCUMENTS,
+    "read_document": READ_DOCUMENT,
+    "search_documents": SEARCH_DOCUMENTS,
+    "write_document": WRITE_DOCUMENT,
+    "trigger_research": TRIGGER_RESEARCH,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,
     "grep_files": GREP_FILES,
@@ -2146,6 +2337,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "operator_authorize_site": OPERATOR_AUTHORIZE_SITE,
     "operator_forget_site": OPERATOR_FORGET_SITE,
     "operator_status": OPERATOR_STATUS,
+    "operator_history": OPERATOR_HISTORY,
     "operator_remember_login": OPERATOR_REMEMBER_LOGIN,
     "set_advanced_mode": SET_ADVANCED_MODE,
     "recent_learning": RECENT_LEARNING,

@@ -53,7 +53,12 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "browser_open", "browser_read",
                              # A transcript of arbitrary audio is external
                              # content too — spoken injection is still injection.
-                             "transcribe_audio"})
+                             "transcribe_audio",
+                             # Deep Research reads attacker-controlled pages and
+                             # folds them into its report; treat the report as
+                             # untrusted (and keep action tools out of any run
+                             # that can invoke it).
+                             "trigger_research"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"
@@ -381,19 +386,26 @@ def resolve_pinned_ip(host: str, port: int) -> str:
     return str(infos[0][4][0])
 
 
-def url_block_reason(url: str) -> str | None:
+def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
     """Return a human reason if `url` must NOT be fetched, else None.
 
     SSRF defense for any tool that fetches a model- or user-supplied URL. We
-    refuse non-http(s) schemes and any host that resolves to a non-public
-    address — so neither a literal internal IP nor a public hostname pointed at
-    one (e.g. the cloud metadata service) can be reached.
+    refuse non-http(s) schemes, internal hostnames by name, and — when
+    `resolve` is True — any host that resolves to a non-public address, so
+    neither a literal internal IP nor a public hostname pointed at one (e.g. the
+    cloud metadata service) can be reached.
 
-    This check alone validates at resolve time. The pinned opener in tools.py
-    additionally connects to the exact IP validated by `resolve_pinned_ip` at
-    socket-connect time, closing the DNS-rebinding window for HTTP fetches.
-    Callers that hand the URL to an agent they don't control the sockets of
-    (the CDP browser) still rely on this name-level check only.
+    Pass `resolve=False` when the request egresses through a trusted HTTP(S)
+    proxy: the client never resolves or connects to the target itself (the proxy
+    does, and enforces its own egress policy), and the target legitimately
+    resolves to the proxy's loopback address locally — so a resolve-time IP
+    check would wrongly refuse every fetch. The name-level checks (scheme,
+    internal-hostname blocklist, sovereign allowlist) still apply.
+
+    With `resolve=True`, the pinned opener in tools.py additionally connects to
+    the exact IP validated by `resolve_pinned_ip` at socket-connect time,
+    closing the DNS-rebinding window. Callers that hand the URL to an agent they
+    don't control the sockets of (the CDP browser) rely on this name check only.
     """
     try:
         parsed = urlparse(url)
@@ -404,9 +416,16 @@ def url_block_reason(url: str) -> str | None:
     host = parsed.hostname
     if not host:
         return "URL has no host"
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    try:
-        resolve_pinned_ip(host, port)
-    except ValueError as err:
-        return str(err)
+    if host.lower() in _BLOCKED_HOSTNAMES:
+        return f"refusing to fetch an internal host ({host})"
+    if resolve:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        try:
+            resolve_pinned_ip(host, port)
+        except ValueError as err:
+            return str(err)
+    elif not egress_allowed(host):
+        # Proxy path: no resolve, but sovereign mode still gates by name.
+        return (f"sovereign mode: egress to '{host}' is not on the allowlist "
+                "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None

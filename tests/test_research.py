@@ -143,3 +143,32 @@ def test_cli_has_research_command():
     args = parser.parse_args(["research", "what", "is", "x", "--rounds", "2"])
     assert args.command == "research"
     assert args.question == ["what", "is", "x"] and args.rounds == 2
+
+
+# --- trigger_research agent tool -------------------------------------------
+
+def test_trigger_research_tool_is_registered_and_wrapped():
+    from olympus import security, specialists, tools
+    assert "trigger_research" in tools.EXTRA_TOOLS
+    assert "trigger_research" in tools.HANDLERS
+    # It's an ingestion tool: report treated as untrusted, in scope for
+    # capability separation.
+    assert "trigger_research" in security.INGESTION_TOOLS
+    assert "trigger_research" in specialists.SPECIALISTS["argus"].extra_tools
+
+
+def test_trigger_research_tool_clamps_rounds_and_runs(monkeypatch):
+    from olympus import tools
+    seen = {}
+
+    def fake_run(question, pool=None, report=None, rounds=None,
+                 fetches_per_search=2):
+        seen["question"] = question
+        seen["rounds"] = rounds
+        return "REPORT"
+
+    monkeypatch.setattr("olympus.research.run", fake_run)
+    out = tools.HANDLERS["trigger_research"]("what is x", 99)   # over the cap
+    assert out == "REPORT"
+    assert seen["question"] == "what is x"
+    assert seen["rounds"] == 6            # clamped to the ceiling

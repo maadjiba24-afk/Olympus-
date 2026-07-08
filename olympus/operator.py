@@ -132,6 +132,70 @@ def remember_credentials(user: str, domain: str, username: str,
     return domain
 
 
+# --- review surface: what the operator did on your accounts ---------------
+#
+# The data already exists (every operate is an Action with an immutable audit
+# trail); this surfaces it in plain English so a non-technical user can see and
+# trust what ran on their accounts.
+
+# The three operate ActionTypes plus the credentialed login actuator.
+OPERATOR_ACTION_TYPES = frozenset({
+    "browser_operate", "browser_operate_irreversible",
+    "browser_operate_financial",
+})
+
+
+def history(user: str, limit: int = 20) -> list["actions.Action"]:
+    """Recent operator actions for `user`, newest first — filtered from the
+    action history to just the credentialed-operate types."""
+    return [a for a in actions.history(user, limit=max(limit * 4, 80))
+            if a.type in OPERATOR_ACTION_TYPES][:limit]
+
+
+def render_history(user: str, limit: int = 20) -> str:
+    """Plain-English 'what Olympus did on my accounts' report."""
+    items = history(user, limit)
+    if not items:
+        return "No operator actions yet."
+    lines = []
+    for a in items:
+        domain = (a.payload or {}).get("domain", "?")
+        tmpl = (a.payload or {}).get("template", a.type)
+        when = time.strftime("%Y-%m-%d %H:%M",
+                             time.localtime(getattr(a, "created_at", 0) or 0))
+        mark = {"executed": "✓", "failed": "✗", "rejected": "⊘",
+                "prepared": "…", "approved": "→", "undone": "↺"}.get(
+                    a.status, "•")
+        lines.append(f"{mark} {when}  {domain}  {tmpl}  [{a.status}]")
+    return "\n".join(lines)
+
+
+def status_summary(user: str) -> str:
+    """Plain-English operator status: on/off, authorized sites (+ login mode),
+    pending approvals, and the last few actions."""
+    on = enabled(user)
+    lines = [f"Operator: {'ON' if on else 'off'}"]
+    if not on:
+        lines.append("  Ask me to do something on a site, or run "
+                     "`olympus operator enable`, to turn it on.")
+    site_map = sites(user)
+    if site_map:
+        lines.append("Authorized sites:")
+        for d in sorted(site_map):
+            lines.append(f"  • {d} (login: {login_mode(user, d)})")
+    else:
+        lines.append("Authorized sites: none yet.")
+    pend = [a for a in actions.pending(user) if a.type in OPERATOR_ACTION_TYPES]
+    if pend:
+        lines.append(f"Awaiting your approval: {len(pend)} operator "
+                     "action(s) — run `olympus actions` to review.")
+    recent = render_history(user, 5)
+    if recent != "No operator actions yet.":
+        lines.append("Recent actions:")
+        lines += [f"  {ln}" for ln in recent.splitlines()]
+    return "\n".join(lines)
+
+
 # --- risk → spine ActionType ---------------------------------------------
 
 def type_for_risk(risk: str) -> str:

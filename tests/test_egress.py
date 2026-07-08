@@ -143,7 +143,7 @@ def _webhook_recorder(monkeypatch):
 
     monkeypatch.setattr(tools._urlreq, "build_opener", lambda *a, **k: _FakeOpener())
     # Don't do a real DNS lookup for the SSRF gate in tests.
-    monkeypatch.setattr(security, "url_block_reason", lambda url: None)
+    monkeypatch.setattr(security, "url_block_reason", lambda url, **kw: None)
     monkeypatch.setenv("OLYMPUS_WEBHOOKS", "hook=https://example.com/h")
     return calls
 
@@ -168,7 +168,7 @@ def test_webhook_url_ssrf_gated(monkeypatch):
     # A webhook pointed at an internal/metadata host is refused before the POST.
     calls = _webhook_recorder(monkeypatch)
     monkeypatch.setattr(security, "url_block_reason",
-                        lambda url: "refusing to fetch an internal host")
+                        lambda url, **kw: "refusing to fetch an internal host")
     out = tools._call_webhook("hook", {"x": 1})
     assert "blocked" in out.lower() and calls == []       # never sent
 

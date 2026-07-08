@@ -37,6 +37,29 @@ def test_dismissal_is_handled():
     assert "dismissed" in interaction.ask("Q?", ["a"])
 
 
+def test_reporting_provider_surfaces_then_proceeds():
+    """Async surfaces (web/gateway): the question is surfaced through the report
+    channel and the run proceeds with an assumption — not silently absorbed."""
+    surfaced = []
+    interaction.set_provider(
+        interaction.reporting_provider(surfaced.append))
+    out = interaction.ask("Which region?", ["us", "eu"])
+    # the user saw the question + options
+    assert surfaced and "Which region?" in surfaced[0]
+    assert "us; eu" in surfaced[0]
+    # and the run got proceed-with-assumption guidance (not a fake answer)
+    assert "proceed" in out.lower() and "options were: us; eu" in out
+
+
+def test_reporting_provider_survives_a_broken_report_channel():
+    def boom(_msg):
+        raise RuntimeError("channel down")
+
+    interaction.set_provider(interaction.reporting_provider(boom))
+    out = interaction.ask("Q?", ["a", "b"])
+    assert "proceed" in out.lower()          # still proceeds, never raises
+
+
 def test_cli_provider_numeric_choice():
     class FakeIO:
         def __init__(self):

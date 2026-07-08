@@ -181,6 +181,24 @@ def _write_file_execute(p: dict) -> dict:
     return sandbox.write_file(p.get("path", ""), p.get("content", ""))
 
 
+def _write_document_preview(p: dict) -> str:
+    body = p.get("content", "")
+    return (f"Save document '{p.get('name', '?')}' "
+            f"({len(body.encode('utf-8'))} bytes) to your workspace:\n"
+            f"{body[:500]}")
+
+
+def _write_document_execute(p: dict) -> dict:
+    from . import documents, memory
+    user = p.get("_user") or memory.current_user()
+    return documents.save(user, p.get("name", ""), p.get("content", ""))
+
+
+def _write_document_undo(result: dict) -> str:
+    from . import documents
+    return documents.undo_save(result)
+
+
 def _edit_file_preview(p: dict) -> str:
     """The approval preview IS the diff — the human sees exactly the hunk that
     will land, not a description of it."""
@@ -261,6 +279,15 @@ def register_builtins() -> None:
         undo=sandbox.undo_write,
         description="Exact-string edit of a workspace file, previewed as a "
                     "unified diff (reversible)."))
+    # User documents — the workspace. No scope gate (it's the user's own
+    # content, confined to their document dir), but always human-approved
+    # (staged via prepare_action, never auto-executed) and reversible.
+    actions.register(actions.ActionType(
+        name="write_document", risk_class=actions.NOTABLE, scope="",
+        preview=_write_document_preview, execute=_write_document_execute,
+        undo=_write_document_undo,
+        description="Create or overwrite a document in the user's workspace "
+                    "(reversible)."))
     # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
     from . import operator
     operator.register_operator_actions()

@@ -104,3 +104,58 @@ def test_pinned_opener_uses_pinned_handlers():
     assert "_PinnedHTTPHandler" in kinds
     assert "_PinnedHTTPSHandler" in kinds
     assert "_SafeRedirectHandler" in kinds
+
+
+# --- proxy-aware fetch (regression: pinning must not bypass an HTTP proxy) ---
+
+def test_proxied_detects_configured_proxy(monkeypatch):
+    monkeypatch.setattr(tools._urlreq, "getproxies", lambda: {"https": "http://127.0.0.1:8080"})
+    monkeypatch.setattr(tools._urlreq, "proxy_bypass", lambda h: False)
+    assert tools._proxied("https://example.com") is True
+    monkeypatch.setattr(tools._urlreq, "getproxies", lambda: {})
+    assert tools._proxied("https://example.com") is False
+
+
+def test_proxy_bypass_is_honored(monkeypatch):
+    monkeypatch.setattr(tools._urlreq, "getproxies", lambda: {"https": "http://127.0.0.1:8080"})
+    monkeypatch.setattr(tools._urlreq, "proxy_bypass", lambda h: True)   # NO_PROXY match
+    assert tools._proxied("https://internal.example") is False
+
+
+def test_http_get_uses_proxy_opener_when_proxied(monkeypatch):
+    """Proxied fetch must go through the proxy opener (which respects the
+    proxy), NOT the pinning opener that dials the target IP directly."""
+    monkeypatch.setattr(tools, "_proxied", lambda url: True)
+    used = {}
+    monkeypatch.setattr(tools, "_proxy_opener",
+                        lambda: _fake_opener(used, "proxy"))
+    monkeypatch.setattr(tools, "_pinned_opener",
+                        lambda: _fake_opener(used, "pinned"))
+    # In proxy mode the SSRF check must not resolve (target resolves to the
+    # proxy's loopback locally); a benign public URL should pass.
+    tools._http_get("https://example.com")
+    assert used["opener"] == "proxy"
+
+
+def test_http_get_uses_pinned_opener_when_direct(monkeypatch):
+    monkeypatch.setattr(tools, "_proxied", lambda url: False)
+    monkeypatch.setattr(security, "url_block_reason", lambda url, **kw: None)
+    used = {}
+    monkeypatch.setattr(tools, "_proxy_opener", lambda: _fake_opener(used, "proxy"))
+    monkeypatch.setattr(tools, "_pinned_opener", lambda: _fake_opener(used, "pinned"))
+    tools._http_get("https://example.com")
+    assert used["opener"] == "pinned"
+
+
+class _FakeResp:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self): return b"ok"
+
+
+def _fake_opener(used, tag):
+    class _O:
+        def open(self, req, timeout=0):
+            used["opener"] = tag
+            return _FakeResp()
+    return _O()

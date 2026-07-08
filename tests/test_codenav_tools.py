@@ -165,18 +165,48 @@ def test_hephaestus_loadout_gains_code_nav():
         assert name in extra
 
 
-def test_edit_file_tool_routes_through_spine(ws, monkeypatch):
+def test_edit_file_tool_prepares_and_never_writes(ws, monkeypatch):
     """The free tool must PREPARE an action, never write directly."""
     captured = {}
 
-    def fake_spine(type_name, payload, title, noun):
+    def fake_prepare(type_name, payload, title=None, why=""):
         captured["type"] = type_name
         captured["payload"] = payload
         return "prepared"
 
-    monkeypatch.setattr(tools, "_spine_action", fake_spine)
+    monkeypatch.setattr(tools, "_prepare_action", fake_prepare)
     out = tools.HANDLERS["edit_file"]("app.py", "return 1", "return 2")
     assert out == "prepared"
     assert captured["type"] == "edit_file"
     assert captured["payload"]["old_string"] == "return 1"
     assert "return 1" in (ws / "app.py").read_text()   # untouched
+
+
+def test_edit_file_never_auto_executes_even_at_l4(ws, monkeypatch):
+    """Security regression: edit_file lives on always-ingesting Hephaestus, so
+    it must ALWAYS hold for explicit approval — never auto-execute, even at
+    autonomy L4 with the exec scope granted (which would auto-run a NOTABLE
+    action routed through auto_or_hold). A prompt-injected edit must not land
+    without a human."""
+    from olympus import actions, memory
+    user = memory.current_user()
+    monkeypatch.setattr(actions, "autonomy_level", lambda u: actions.L4_STANDING)
+    monkeypatch.setattr(actions, "granted_scopes", lambda u: {"exec"})
+
+    out = tools.HANDLERS["edit_file"]("app.py", "return 1", "return 2")
+    # file untouched: the edit only PREPARED, it did not execute
+    assert "return 1" in (ws / "app.py").read_text()
+    assert "return 2" not in (ws / "app.py").read_text()
+    assert "await" in out.lower() or "approv" in out.lower()
+    # and the staged action is PREPARED, not EXECUTED/APPROVED
+    pending = [a for a in actions.pending(user) if a.type == "edit_file"]
+    assert pending and all(a.status == actions.PREPARED for a in pending)
+
+
+def test_edit_file_diff_preview_flags_truncation(ws):
+    """A giant edit's preview must announce truncation, so an approver is never
+    shown a partial diff of a full change."""
+    big = "x = 1\n" * 2000
+    (ws / "big.py").write_text(big)
+    diff = sandbox.edit_file_diff("big.py", big, "y = 2\n" * 2000)
+    assert "truncated" in diff and "FULL edit will apply" in diff

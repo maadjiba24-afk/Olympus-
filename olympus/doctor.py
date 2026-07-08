@@ -108,6 +108,16 @@ def _optional_checks() -> list[Check]:
     live = [n for n, v in gateways.items() if v]
     out.append(Check("gateways", OK if live else WARN,
                      ", ".join(live) if live else "none connected (optional)"))
+    # Web-search providers: DuckDuckGo always works keyless; report any keyed
+    # or self-hosted providers the operator has configured so they're
+    # discoverable (see docs/ODYSSEUS_TRACKING.md §7).
+    from . import websearch
+    providers = websearch.configured()
+    extra = [p for p in providers if p != "ddg"]
+    out.append(Check("web search", OK,
+                     (f"{', '.join(providers)} (order)" if extra
+                      else "DuckDuckGo (keyless; add SearXNG/Brave/Tavily/"
+                           "Serper/PSE for better results)")))
     return out
 
 

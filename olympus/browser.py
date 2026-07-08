@@ -846,16 +846,56 @@ def record_profile(domain: str, *, login_url: str = "",
     return prof
 
 
+def _builtin_profiles_dir() -> "config.Path":  # type: ignore[name-defined]
+    return config.Path(__file__).resolve().parent / "profiles"
+
+
+def builtin_profiles() -> list[SiteProfile]:
+    """Curated site profiles shipped with Olympus (olympus/profiles/*.json),
+    so the operator can act on common sites without the user authoring CSS
+    selectors. Read-only seeds: marked source='builtin'; a user's own recorded
+    profile for the same domain always wins (see _merged_profiles). Malformed
+    or unreadable seed files are skipped, never fatal."""
+    out: list[SiteProfile] = []
+    d = _builtin_profiles_dir()
+    if not d.is_dir():
+        return out
+    for path in sorted(d.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for entry in (raw if isinstance(raw, list) else [raw]):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                prof = SiteProfile.from_dict(entry)
+            except (KeyError, TypeError, ValueError):
+                continue
+            prof.source = "builtin"
+            out.append(prof)
+    return out
+
+
+def _merged_profiles() -> list[SiteProfile]:
+    """User-recorded profiles overlaid on the built-in catalog, keyed by
+    domain — the user's own recipe for a domain always shadows the seed."""
+    by_domain: dict[str, SiteProfile] = {p.domain: p for p in builtin_profiles()}
+    for p in _load_profiles():                 # user recordings win
+        by_domain[p.domain] = p
+    return list(by_domain.values())
+
+
 def get_profile(domain: str) -> SiteProfile | None:
     d = (domain or "").strip().lower()
-    for p in _load_profiles():
+    for p in _merged_profiles():
         if p.domain == d:
             return p
     return None
 
 
 def list_profiles() -> list[SiteProfile]:
-    return sorted(_load_profiles(), key=lambda p: (p.reliability, p.runs),
+    return sorted(_merged_profiles(), key=lambda p: (p.reliability, p.runs),
                   reverse=True)
 
 
