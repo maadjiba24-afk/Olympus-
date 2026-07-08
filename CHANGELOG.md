@@ -19,6 +19,11 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **Email spam triage** (`olympus/spamtriage.py`, `triage_inbox` on Angelos,
+  `olympus triage`) — a read-only heuristic classifier that sorts the inbox into
+  important / promotions / spam / other with a reason for each. No model call
+  (works even where egress is locked down), never deletes or moves anything, and
+  message content stays untrusted (the tool is wrapped like other inbox reads).
 - **Notes / todos / reminders** (`olympus/todos.py`, `olympus todo`, web UI
   "Your list" in the `📅 agenda` panel) — a small per-user checklist store:
   notes (kept scraps), todos (tickable), and reminders (todos with a due time).

@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 97,
+    "count": 98,
     "names": [
       "actions",
       "add-mcp",
@@ -127,6 +127,7 @@
       "todo",
       "todos",
       "train",
+      "triage",
       "undo",
       "upgrade",
       "usage",
@@ -142,7 +143,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 76,
+    "count": 77,
     "names": [
       "add_todo",
       "analyze_image",
@@ -213,6 +214,7 @@
       "spawn_subagent",
       "text_to_speech",
       "transcribe_audio",
+      "triage_inbox",
       "trigger_research",
       "update_prompt",
       "verify_code_claim",

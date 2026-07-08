@@ -906,6 +906,15 @@ def _search_documents(query: str) -> str:
     return docrag.render_search(memory.current_user(), query)
 
 
+def _triage_inbox(query: str = "in:inbox", max_results: int = 20) -> str:
+    from . import spamtriage
+    try:
+        n = max(1, min(int(max_results), 50))
+    except (TypeError, ValueError):
+        n = 20
+    return spamtriage.render(query or "in:inbox", n)
+
+
 def _list_todos() -> str:
     from . import todos
     return todos.render_list(memory.current_user())
@@ -1397,6 +1406,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_document": lambda name: _read_document(name),
     "search_documents": lambda query: _search_documents(query),
     "write_document": lambda name, content: _write_document(name, content),
+    "triage_inbox": lambda query="in:inbox", max_results=20: _triage_inbox(
+        query, max_results),
     "list_todos": lambda: _list_todos(),
     "add_todo": lambda text, kind="todo", due="": _add_todo(text, kind, due),
     "complete_todo": lambda item_id: _complete_todo(item_id),
@@ -1748,6 +1759,26 @@ SEARCH_DOCUMENTS = {
         "type": "object",
         "properties": {"query": {"type": "string"}},
         "required": ["query"],
+    },
+}
+
+TRIAGE_INBOX = {
+    "name": "triage_inbox",
+    "description": (
+        "Triage the inbox: fetch recent messages and sort them into important / "
+        "promotions / spam / other with a short reason for each. Read-only — it "
+        "classifies, it never deletes or moves anything. Message content is "
+        "untrusted."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string",
+                      "description": "Gmail search, default 'in:inbox'"},
+            "max_results": {"type": "integer",
+                            "description": "how many to triage (default 20)"},
+        },
+        "required": [],
     },
 }
 
@@ -2370,6 +2401,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_document": READ_DOCUMENT,
     "search_documents": SEARCH_DOCUMENTS,
     "write_document": WRITE_DOCUMENT,
+    "triage_inbox": TRIAGE_INBOX,
     "list_todos": LIST_TODOS,
     "add_todo": ADD_TODO,
     "complete_todo": COMPLETE_TODO,

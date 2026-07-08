@@ -225,7 +225,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "send/draft/archive/invite actions for the user to "
                         "approve. Reads untrusted mail; never sends on its own.",
             extra_tools=("read_inbox", "read_email", "read_calendar",
-                         "prepare_action", "refresh_email_style"),
+                         "triage_inbox", "prepare_action",
+                         "refresh_email_style"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",

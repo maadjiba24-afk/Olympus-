@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 76 tools in
+Olympus exposes a **finite, named** tool surface — the 77 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -60,6 +60,7 @@ surface. So the surface and its threat model can't drift apart.
 | `web_fetch` | Fetch a URL's contents | ingests untrusted | Output treated as untrusted | SSRF / injected page content — wrapped, not trusted |
 | `watch_youtube` | Fetch a video transcript | ingests untrusted | Output treated as untrusted | Malicious transcript injection — wrapped |
 | `read_inbox` | List inbox messages | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — `should_wrap` wraps it |
+| `triage_inbox` | Classify inbox messages into important/promotions/spam/other | ingests untrusted | Read-only — classifies, never deletes/moves; heuristic (no model call required); wrapped | Email-borne prompt injection — `should_wrap` wraps it; classification is derived data, not instructions |
 | `read_email` | Read one email | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — wrapped |
 | `read_calendar` | Read calendar events | ingests untrusted | Read-only; wrapped | Event-text injection — wrapped |
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |

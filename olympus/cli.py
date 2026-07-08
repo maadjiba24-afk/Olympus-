@@ -505,6 +505,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_todo.add_argument("--note", action="store_true",
                         help="add as a kept note instead of a tickable todo")
 
+    p_triage = sub.add_parser(
+        "triage",
+        help="triage the inbox into important/promotions/spam/other "
+             "(read-only; needs a connected Google account)")
+    p_triage.add_argument("--query", default="in:inbox",
+                          help="Gmail search (default 'in:inbox')")
+    p_triage.add_argument("--max", type=int, default=20, dest="max_results",
+                          help="how many messages to triage (default 20)")
+
     p_cmp = sub.add_parser(
         "compare",
         help="blind multi-model compare: same prompt, every configured model, "
@@ -1305,6 +1314,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "clear":
             n = todos.clear_done(user)
             print(f"Cleared {n} done item(s).")
+    elif args.command == "triage":
+        from . import spamtriage, gmail
+        if not gmail.configured():
+            print("No Google account connected. Connect one (GMAIL_* env or the "
+                  "web OAuth flow) to triage your inbox.")
+            return 1
+        print(spamtriage.render(args.query, max(1, min(args.max_results, 50))))
     elif args.command == "compare":
         from . import compare
         user = "cli"
