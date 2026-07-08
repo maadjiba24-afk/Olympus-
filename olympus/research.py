@@ -137,14 +137,38 @@ def _today() -> str:
     return _dt.date.today().isoformat()
 
 
+# Set by run() to the pool's Anthropic member (if any) so the search/fetch
+# seams use Anthropic's SERVER-SIDE web tools — which run on Anthropic's
+# servers and therefore work even where this host's outbound egress is locked
+# down to a proxy allowlist (Deep Research otherwise can't reach the open web).
+# None → use the client-side provider layer. Module-level to preserve the
+# monkeypatch seams the tests rely on; research runs are sequential.
+_active_web_settings = None
+
+
 def _search(query: str) -> list[dict]:
-    """The search seam: structured [{title,url,snippet}] results from the
+    """The search seam: structured [{title,url,snippet}] results. Server-side
+    web search on Anthropic (egress-policy independent), else the client-side
     provider layer (SearXNG/Brave/Tavily/Serper/PSE, DDG fallback)."""
+    s = _active_web_settings
+    if s is not None:
+        from . import llm
+        hits = llm.server_web_search(s, query)
+        if hits:
+            return hits
     from . import websearch
     return websearch.results(query)
 
 
 def _fetch(url: str) -> str:
+    """Fetch seam: server-side web_fetch on Anthropic (egress-independent),
+    else the client-side SSRF/rebinding-pinned fetch."""
+    s = _active_web_settings
+    if s is not None:
+        from . import llm
+        txt = llm.server_web_fetch(s, url)
+        if txt:
+            return txt
     from . import tools
     return tools._web_fetch(url)
 
@@ -162,6 +186,23 @@ def run(question: str, pool: config.ModelPool | None = None,
     pool = pool or config.ModelPool.from_env()
     rounds = rounds or _rounds()
     reason, cheap = pool.for_role("reasoning"), pool.for_role("general")
+
+    # If any pool member is Anthropic, route search/fetch through its
+    # SERVER-SIDE web tools (egress-policy independent, higher quality). Set for
+    # the duration of this run; restored in the finally below.
+    global _active_web_settings
+    _prev_web = _active_web_settings
+    _active_web_settings = next(
+        (m for m in pool.members if m.provider == "anthropic"), None)
+    try:
+        return _run(question, pool, report, rounds, fetches_per_search,
+                    reason, cheap, backend)
+    finally:
+        _active_web_settings = _prev_web
+
+
+def _run(question, pool, report, rounds, fetches_per_search, reason, cheap,
+         backend):
 
     # -- stage 1: plan -------------------------------------------------------
     report("🔭 Planning the research...")

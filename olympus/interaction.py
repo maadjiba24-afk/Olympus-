@@ -58,18 +58,32 @@ def ask(question: str, options: list[str] | None = None) -> str:
     opts = [str(o).strip() for o in (options or []) if str(o).strip()]
     provider = current()
     if provider is None:
-        listed = ("; ".join(opts)) if opts else "your best judgment"
-        return ("[No interactive user is available to answer right now. "
-                "Do not wait — proceed with the most reasonable assumption "
-                f"(options were: {listed}) and state the assumption you made "
-                "in your answer.]")
+        return _proceed_instruction(opts)
     try:
         answer = provider(question, opts)
+    except NoAnswer:
+        # A surface-and-proceed provider (web/gateway) reported the question
+        # but can't block for a live answer — fall through to the same
+        # proceed-with-assumption guidance as headless.
+        return _proceed_instruction(opts)
     except (EOFError, KeyboardInterrupt):
         return ("[The user dismissed the question. Proceed with your best "
                 "assumption and state it.]")
     from . import security
     return security.wrap_untrusted(str(answer), source="user-answer")
+
+
+class NoAnswer(Exception):
+    """Raised by a provider that surfaced the question but cannot supply a
+    live answer (an async surface), so ask() returns proceed guidance."""
+
+
+def _proceed_instruction(opts: list[str]) -> str:
+    listed = ("; ".join(opts)) if opts else "your best judgment"
+    return ("[No interactive user is available to answer right now. "
+            "Do not wait — proceed with the most reasonable assumption "
+            f"(options were: {listed}) and state the assumption you made "
+            "in your answer.]")
 
 
 def cli_provider(io=None) -> Provider:
@@ -87,4 +101,27 @@ def cli_provider(io=None) -> Provider:
             return options[int(raw) - 1]
         return raw
 
+    return provider
+
+
+def reporting_provider(report) -> Provider:
+    """A provider for async surfaces (web UI, chat gateways) that cannot block
+    for a live answer within one run: it SURFACES the question through `report`
+    so the user sees exactly what the agent asked, then raises NoAnswer so the
+    run proceeds with a stated assumption. The user can course-correct in their
+    next message — strictly better than the silent headless fallback.
+
+    (A truly blocking prompt on these surfaces would require suspending and
+    resuming the agent run across separate inbound messages/requests, which the
+    request/response architecture doesn't support — so surface-and-proceed is
+    the correct behavior here, not a blocking prompt.)"""
+    def provider(question: str, options: list[str]) -> str:
+        listed = f" (options: {'; '.join(options)})" if options else ""
+        try:
+            report(f"❓ {question}{listed} — no live answer channel here, so "
+                   "I'll proceed with my best assumption; tell me if you'd "
+                   "prefer otherwise.")
+        except Exception:
+            pass
+        raise NoAnswer
     return provider

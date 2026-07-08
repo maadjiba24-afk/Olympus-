@@ -15,6 +15,48 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — workspace, operator, and gateway (Odysseus/Hermes/OpenClaw study)
+
+A three-phase build extending Olympus toward the archetypes it was closest to.
+
+- **Documents workspace** (`olympus/documents.py`, `olympus documents`, web UI
+  `📄 docs` panel) — a per-user Markdown store the assistant can read and, with
+  approval, write. The agent's `write_document` tool stages every save through
+  the approval spine (reversible, never silent); the user editing in the web UI
+  saves directly. `list_documents`/`read_document`/`write_document` on Peitho.
+- **Personal-document RAG** (`olympus/docrag.py`, `search_documents` on Peitho)
+  — retrieval over the user's own documents, grounded into the synthesis
+  prompt. Semantic (cosine over embeddings) when an embeddings endpoint is
+  configured, lexical overlap otherwise; a per-user index re-embeds only the
+  documents whose mtime changed. First-party content (grounded like memory, not
+  wrapped as untrusted).
+- **Gallery** (`olympus/gallery.py`, `olympus gallery`, web UI `🖼 gallery`
+  panel) — surfaces images generated into the confined workspace. Serving is
+  path-confined (traversal refused via `_confine`), image-types only, and
+  size-capped; the panel lazy-loads thumbnails and opens full images in a tab.
+- **Agenda** (`_agenda_view` + `/api/agenda`, `olympus agenda`, web UI
+  `📅 agenda` panel) — one view of the user's scheduled tasks (from the
+  natural-language scheduler, filtered to the principal plus shared jobs) and
+  their upcoming calendar events. Calendar reads are read-only, scoped to the
+  connected Google account, and degrade to "not connected" instead of erroring
+  when no account is linked or egress is blocked.
+- **Blind multi-model compare** (`olympus/compare.py`, `olympus compare`, web UI
+  `⚖ compare` panel) — the same prompt against every configured model with
+  labels shuffled, revealed only after you pick, and picks accumulated into a
+  per-user tally so preference reflects output rather than brand. Each model is
+  called with no cross-member failover (`backend.complete_text_once`), so a
+  failing model shows its own error under its own label instead of being
+  silently answered by another. Needs ≥2 models (via `OLYMPUS_MODELS`).
+- **Hermes operator, made usable** — `olympus operator`
+  (status/enable/authorize/forget/list/history), a built-in site-profile
+  catalog (`olympus/profiles/`), a plain-English review surface in CLI and chat
+  (`operator_status`/`operator_history`), and `docs/OPERATOR_GUIDE.md`. Built on
+  the existing governed operator; no bypass of its gates.
+- **Unified gateway daemon** (`olympus gateway`) — runs every configured chat
+  channel (Telegram/Discord/Slack/Signal/WhatsApp/email/webhook) in one
+  supervised process with auto-restart + backoff and a cross-process health
+  file (`gateway --status`). `docs/GATEWAY.md`.
+
 ### Added — capabilities studied from Odysseus
 
 A batch distilled from analyzing the Odysseus self-hosted AI workspace
@@ -28,13 +70,18 @@ analysis for the full feature comparison.
   plans/synthesizes, general extracts, verify checks the draft against the
   evidence), a never-laundered verification-notes section, date-grounded
   queries, low-quality-domain and duplicate-query filtering, and every fetched
-  page wrapped untrusted through the SSRF/rebinding-pinned path.
+  page wrapped untrusted through the SSRF/rebinding-pinned path. On the
+  Anthropic backend, search/fetch run through Anthropic's **server-side** web
+  tools — so Deep Research reaches the open web even where the host's outbound
+  egress is locked down to a proxy allowlist — falling back to the client-side
+  provider layer for local/non-Anthropic models.
 - **Code-navigation tools for Hephaestus** — `grep_files` (bounded regex
   search), `glob_files` (pathlib-style `**/`, newest-first), and `read_file`
-  line-range slicing, plus `edit_file`: exact-string editing routed through the
-  approval spine as a NOTABLE reversible action whose preview *is* the unified
-  diff. A case-insensitive sensitive-file deny-list (`.env`, keys, `.ssh`/`.aws`,
-  …) guards read/grep/glob/edit.
+  line-range slicing, plus `edit_file`: exact-string editing staged for
+  explicit approval (always-hold — never auto-executes, since it rides on the
+  always-ingesting Hephaestus) whose preview *is* the unified diff. A
+  case-insensitive sensitive-file deny-list (`.env`, keys, `.ssh`/`.aws`, …)
+  guards read/grep/glob/edit.
 - **Per-turn dynamic tool selection** (`olympus/toolselect.py`) — ranks a
   specialist's loadout against the current task and drops the least-relevant
   tail of oversized loadouts, saving prompt tokens each round. Runs strictly

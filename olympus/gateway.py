@@ -12,6 +12,7 @@ instances (private memory + persisted history per user).
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import threading
@@ -461,3 +462,267 @@ class Dispatcher:
                 worker = self._workers[key] = _Worker()
                 worker.start()
         worker.q.put(fn)
+
+
+# --- unified gateway daemon (OpenClaw-style: one process, all channels) ----
+#
+# Historically each channel was its own `olympus <channel>` process. This runs
+# every CONFIGURED channel together in one long-lived daemon, each in its own
+# thread with error isolation, so a single deployment is reachable everywhere
+# the user already chats. Channel detection is env-based (same signals the
+# individual commands and `olympus doctor` use).
+
+# HTTP-serving channels need distinct ports; polling channels take none.
+_CHANNEL_PORTS = {"whatsapp": 8485, "discord": 8486, "slack": 8487,
+                  "webhook": 8488}
+
+
+def _channel_registry() -> "dict[str, tuple]":
+    """name -> (is_configured: ()->bool, start: ()->None). Imported lazily so
+    importing gateway never drags in every channel module."""
+    from . import (discord, email_gateway, gmail, signal as signal_gw, slack,
+                   telegram, webhook_gateway, whatsapp)
+
+    def env(k: str) -> bool:
+        return bool(os.environ.get(k))
+
+    return {
+        "telegram": (lambda: env("TELEGRAM_BOT_TOKEN"), telegram.run_bot),
+        "signal": (lambda: env("SIGNAL_CLI_REST_URL"), signal_gw.run_bot),
+        "email": (gmail.configured, email_gateway.run),
+        "discord": (lambda: env("DISCORD_PUBLIC_KEY"),
+                    lambda: discord.run_server(port=_CHANNEL_PORTS["discord"])),
+        "slack": (lambda: env("SLACK_SIGNING_SECRET"),
+                  lambda: slack.run_server(port=_CHANNEL_PORTS["slack"])),
+        "whatsapp": (lambda: env("WHATSAPP_VERIFY_TOKEN"),
+                     lambda: whatsapp.run_server(
+                         port=_CHANNEL_PORTS["whatsapp"])),
+        "webhook": (lambda: env("OLYMPUS_WEBHOOK_SECRET"),
+                    lambda: webhook_gateway.run_server(
+                        port=_CHANNEL_PORTS["webhook"])),
+    }
+
+
+def _is_configured(pred) -> bool:
+    try:
+        return bool(pred())
+    except Exception:
+        return False
+
+
+def configured_channels(registry: "dict | None" = None) -> "list[str]":
+    """The channels whose credentials/config are present, in a stable order."""
+    reg = registry or _channel_registry()
+    return [name for name, (is_cfg, _start) in reg.items()
+            if _is_configured(is_cfg)]
+
+
+def _max_restarts() -> int:
+    """How many times a channel may be auto-restarted before the supervisor
+    gives up on it (0 = never restart; -1 = unbounded). Default 20."""
+    try:
+        return int(os.environ.get("OLYMPUS_GATEWAY_MAX_RESTARTS", "20"))
+    except ValueError:
+        return 20
+
+
+class _Supervisor:
+    """Keeps configured channels alive: each runs in its own thread, and when
+    one exits or crashes it is restarted with exponential backoff — so a
+    transient upstream blip or a dropped long-poll doesn't silently take a
+    channel offline for the life of the daemon. Per-channel liveness is tracked
+    for `channel_health()`."""
+
+    def __init__(self, report=print, *, max_restarts: int | None = None,
+                 base_delay: float = 1.0, max_delay: float = 60.0,
+                 persist: bool = False):
+        self.report = report
+        self.max_restarts = _max_restarts() if max_restarts is None \
+            else max_restarts
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+        self.state: dict[str, dict] = {}
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._persist = persist            # write status to disk (the CLI daemon)
+        self._lock = threading.Lock()
+        self._started_at = 0.0
+
+    def _write_status(self) -> None:
+        """Publish liveness to a status file so `olympus gateway status` (a
+        SEPARATE process) can read a running daemon's health. Best-effort.
+        Several supervisor threads call this concurrently, so the state is
+        snapshotted under the lock and each write uses a UNIQUE temp file —
+        the final rename is atomic, so a reader never sees a partial file and
+        writers never clobber each other's temp."""
+        if not self._persist:
+            return
+        import threading as _t
+        import time
+        with self._lock:
+            snapshot = {k: dict(v) for k, v in self.state.items()}
+            started = self._started_at
+        try:
+            path = _status_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps({
+                "pid": os.getpid(),
+                "started_at": started,
+                "heartbeat": time.time(),
+                "channels": snapshot,
+            }, indent=2)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{_t.get_ident()}.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
+    def _set_state(self, name: str, **fields) -> None:
+        with self._lock:
+            self.state[name] = fields
+        self._write_status()
+
+    def _supervise(self, name: str, start) -> None:
+        restarts = 0
+        while not self._stop.is_set():
+            self._set_state(name, status="running", restarts=restarts,
+                            last_error="")
+            self.report(f"▶ {name} channel started"
+                        + (f" (:{_CHANNEL_PORTS[name]})"
+                           if name in _CHANNEL_PORTS else ""))
+            try:
+                start()                    # blocks until the channel loop ends
+                reason = "exited"
+            except Exception as err:
+                reason = str(err)[:160] or type(err).__name__
+            if self._stop.is_set():
+                break
+            restarts += 1
+            if self.max_restarts >= 0 and restarts > self.max_restarts:
+                self._set_state(name, status="failed", restarts=restarts - 1,
+                                last_error=reason)
+                self.report(f"✗ {name} channel gave up after "
+                            f"{restarts - 1} restart(s): {reason}")
+                return
+            delay = min(self.max_delay,
+                        self.base_delay * (2 ** (restarts - 1)))
+            self._set_state(name, status="restarting", restarts=restarts,
+                            last_error=reason)
+            self.report(f"↻ {name} channel {reason}; restart #{restarts} "
+                        f"in {delay:.0f}s")
+            self._stop.wait(delay)         # interruptible backoff
+        self._set_state(name, status="stopped", restarts=restarts,
+                        last_error="")
+
+    def start(self, names: "list[str]", reg: dict) -> None:
+        import time
+        self._started_at = time.time()
+        for name in names:
+            _is_cfg, start = reg[name]
+            t = threading.Thread(target=self._supervise, args=(name, start),
+                                 name=f"gw-{name}", daemon=True)
+            t.start()
+            self._threads.append(t)
+        self._write_status()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def wait(self) -> None:
+        """Block until interrupted, refreshing the status heartbeat so a stale
+        file is distinguishable from a live one, then signal channels to stop."""
+        try:
+            while not self._stop.is_set():
+                self._write_status()          # heartbeat
+                self._stop.wait(30)
+        except KeyboardInterrupt:
+            pass
+        self.stop()
+        self._write_status()
+
+
+def _status_path() -> "config.Path":  # type: ignore[name-defined]
+    return config.MEMORY_DIR / "gateway_status.json"
+
+
+def read_status(stale_after: float = 90.0) -> dict:
+    """Read the running daemon's status file (written by the CLI daemon), from
+    ANY process. Adds `running` (heartbeat fresh AND pid alive) and `stale`.
+    Returns {"running": False, "reason": ...} when no live daemon is found."""
+    import time
+    path = _status_path()
+    if not path.exists():
+        return {"running": False, "reason": "no gateway daemon status file"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"running": False, "reason": "unreadable status file"}
+    age = time.time() - float(data.get("heartbeat", 0))
+    pid = int(data.get("pid", 0))
+    alive = _pid_alive(pid)
+    data["age_secs"] = round(age, 1)
+    data["stale"] = age > stale_after
+    data["running"] = alive and not data["stale"]
+    if not alive:
+        data["reason"] = f"pid {pid} not running"
+    elif data["stale"]:
+        data["reason"] = f"heartbeat {age:.0f}s old (> {stale_after:.0f}s)"
+    return data
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def channel_health(supervisor: "_Supervisor | None" = None) -> dict:
+    """Per-channel liveness of the currently-running daemon (status, restart
+    count, last error). Empty when no daemon is running in this process."""
+    sup = supervisor if supervisor is not None else _RUNNING
+    return dict(sup.state) if sup is not None else {}
+
+
+_RUNNING: "_Supervisor | None" = None       # the daemon running in this process
+
+
+def run_all(only: "list[str] | None" = None, registry: "dict | None" = None,
+            block: bool = True, report=print,
+            supervisor: "_Supervisor | None" = None) -> "list[str]":
+    """Run every configured channel together under a supervisor that
+    auto-restarts a channel that exits or crashes (exponential backoff, capped
+    by OLYMPUS_GATEWAY_MAX_RESTARTS). Returns the channels started. With
+    block=True (the CLI path) runs until interrupted; block=False returns after
+    launching (tests / embedding)."""
+    global _RUNNING
+    reg = registry or _channel_registry()
+    names = configured_channels(reg)
+    if only:
+        want = {c.strip().lower() for c in only}
+        for u in want - set(reg):
+            report(f"⚠ unknown channel '{u}' — known: {', '.join(reg)}")
+        names = [n for n in names if n in want]
+    if not names:
+        report("No channels configured. Set a channel's env vars (e.g. "
+               "TELEGRAM_BOT_TOKEN) — see docs/GATEWAY.md — then rerun "
+               "`olympus gateway`.")
+        return []
+
+    sup = supervisor or _Supervisor(report=report, persist=True)
+    sup.start(names, reg)
+    _RUNNING = sup
+    report(f"Gateway daemon live — {len(names)} channel(s): "
+           f"{', '.join(names)}. Auto-restart on crash; Ctrl-C to stop.")
+    if block:
+        sup.wait()
+        report("Shutting down gateway daemon.")
+        _RUNNING = None
+    return names

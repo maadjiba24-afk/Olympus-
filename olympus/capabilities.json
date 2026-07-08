@@ -1,6 +1,6 @@
 {
   "actions": {
-    "count": 15,
+    "count": 16,
     "names": [
       "browser_operate",
       "browser_operate_financial",
@@ -16,6 +16,7 @@
       "save_note",
       "send_email",
       "webhook_egress_held",
+      "write_document",
       "write_file"
     ]
   },
@@ -38,10 +39,11 @@
     ]
   },
   "commands": {
-    "count": 86,
+    "count": 94,
     "names": [
       "actions",
       "add-mcp",
+      "agenda",
       "approve",
       "ask",
       "audit",
@@ -51,6 +53,7 @@
       "capabilities",
       "chat",
       "code-eval",
+      "compare",
       "config",
       "connectors",
       "contrib",
@@ -58,19 +61,24 @@
       "dashboard",
       "discord",
       "distill",
+      "docs",
       "doctor",
+      "documents",
       "edit",
       "email",
       "errors",
       "eval",
       "explain",
       "export-trajectories",
+      "gallery",
       "gate",
+      "gateway",
       "goal",
       "grant",
       "graph",
       "growth",
       "heartbeat",
+      "images",
       "import-agent",
       "journey",
       "keygen",
@@ -82,6 +90,7 @@
       "moa",
       "models",
       "next-wake",
+      "operator",
       "outcomes",
       "pair",
       "playbook",
@@ -130,7 +139,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 67,
+    "count": 73,
     "names": [
       "analyze_image",
       "ask_user",
@@ -158,9 +167,11 @@
       "glob_files",
       "grep_files",
       "list_dir",
+      "list_documents",
       "list_source_files",
       "operator_authorize_site",
       "operator_forget_site",
+      "operator_history",
       "operator_remember_login",
       "operator_review",
       "operator_schedule",
@@ -171,6 +182,7 @@
       "propose_upgrade",
       "query_codegraph",
       "read_calendar",
+      "read_document",
       "read_email",
       "read_file",
       "read_inbox",
@@ -185,6 +197,7 @@
       "run_code_benchmark",
       "save_lesson",
       "schedule_task",
+      "search_documents",
       "search_sessions",
       "send_email",
       "set_advanced_mode",
@@ -194,11 +207,13 @@
       "spawn_subagent",
       "text_to_speech",
       "transcribe_audio",
+      "trigger_research",
       "update_prompt",
       "verify_code_claim",
       "watch_youtube",
       "web_fetch",
-      "web_search"
+      "web_search",
+      "write_document"
     ]
   }
 }

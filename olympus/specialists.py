@@ -168,10 +168,13 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="peitho", name="Peitho", title="Marketing Specialist",
             description="Marketing strategy, branding, copywriting, growth, "
-                        "audience research, campaigns, SEO.",
+                        "audience research, campaigns, SEO. Drafts and saves "
+                        "documents to the user's workspace.",
             web=True,
             extra_tools=("generate_image", "text_to_speech",
-                         "transcribe_audio", "browse_page", "analyze_image"),
+                         "transcribe_audio", "browse_page", "analyze_image",
+                         "list_documents", "read_document", "search_documents",
+                         "write_document"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
@@ -237,7 +240,7 @@ SPECIALISTS: dict[str, Specialist] = {
             # run. The read/learn tools (open/read/skills) remain.
             extra_tools=("browse_page", "analyze_image", "browser_open",
                          "browser_read", "browser_act", "browser_skills",
-                         "browser_skill_record"),
+                         "browser_skill_record", "trigger_research"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),
@@ -297,7 +300,8 @@ SPECIALISTS: dict[str, Specialist] = {
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",
                          "operator_forget_site", "operator_status",
-                         "operator_remember_login", "set_advanced_mode"),
+                         "operator_history", "operator_remember_login",
+                         "set_advanced_mode"),
         ),
     ]
 }

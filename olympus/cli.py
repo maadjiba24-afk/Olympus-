@@ -428,6 +428,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_gw = sub.add_parser(
+        "gateway", help="run ALL configured chat channels together in one "
+                        "always-on daemon (Telegram/Discord/Slack/Signal/"
+                        "WhatsApp/email/webhook)")
+    p_gw.add_argument("--only", default="",
+                      help="comma-separated subset of channels to run "
+                           "(default: every configured channel)")
+    p_gw.add_argument("--list", action="store_true", dest="list_channels",
+                      help="list which channels are configured, then exit")
+    p_gw.add_argument("--status", action="store_true", dest="gw_status",
+                      help="report a running daemon's per-channel health "
+                           "(reads its status file), then exit")
     p_secret = sub.add_parser(
         "secret", help="named secrets for SecretRef config indirection — "
                        "reference them as vault:NAME instead of pasting "
@@ -463,6 +475,53 @@ def build_parser() -> argparse.ArgumentParser:
                         help="unpair a previously paired chat/sender id")
     p_pair.add_argument("--list", action="store_true", dest="list_paired",
                         help="list paired sender ids for the channel")
+    p_doc = sub.add_parser(
+        "documents", aliases=["docs"],
+        help="your document workspace: list | read <name> | delete <name>")
+    p_doc.add_argument("action", nargs="?", default="list",
+                       choices=["list", "read", "delete"])
+    p_doc.add_argument("name", nargs="?", help="document name (read/delete)")
+
+    p_gal = sub.add_parser(
+        "gallery", aliases=["images"],
+        help="images generated into the workspace: list | delete <name>")
+    p_gal.add_argument("action", nargs="?", default="list",
+                       choices=["list", "delete"])
+    p_gal.add_argument("name", nargs="?", help="image file name (delete)")
+
+    sub.add_parser(
+        "agenda",
+        help="your scheduled tasks and upcoming calendar events in one view")
+
+    p_cmp = sub.add_parser(
+        "compare",
+        help="blind multi-model compare: same prompt, every configured model, "
+             "revealed only after you pick")
+    p_cmp.add_argument("prompt", nargs="?", help="the prompt to compare")
+    p_cmp.add_argument("--pick", metavar="LABEL",
+                       help="record a pick (A/B/…) for --reveal")
+    p_cmp.add_argument("--reveal", metavar="ID",
+                       help="reveal a prior comparison by id")
+    p_cmp.add_argument("--tally", action="store_true",
+                       help="show your running blind-pick tally")
+
+    p_op = sub.add_parser(
+        "operator",
+        help="manage the Hermes operator (acts on YOUR authorized accounts)")
+    p_op.add_argument(
+        "action", nargs="?", default="status",
+        choices=["status", "enable", "disable", "authorize", "forget",
+                 "list", "history"],
+        help="status (default) | enable | disable | authorize <domain> | "
+             "forget <domain> | list (site profiles) | history")
+    p_op.add_argument("target", nargs="?",
+                      help="domain, for authorize/forget")
+    p_op.add_argument("--remember", action="store_true",
+                      help="authorize with saved-password (remember) login "
+                           "instead of manual sign-in")
+    p_op.add_argument("--limit", type=int, default=20,
+                      help="rows to show for history (default 20)")
+
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
                                            "(needs WHATSAPP_* env vars)")
     p_wa.add_argument("--host", default="0.0.0.0")
@@ -1165,6 +1224,146 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{args.type}: {actions.daily_limit(user, args.type) or 'unlimited'} per day")
             else:
                 print(actions.set_limit(user, args.type, args.n))
+    elif args.command in ("documents", "docs"):
+        from . import documents
+        user = "cli"
+        if args.action == "list":
+            print(documents.render_list(user))
+        elif args.action == "read":
+            if not args.name:
+                print("Usage: olympus documents read <name>")
+                return 1
+            body = documents.read(user, args.name)
+            print(body if body is not None else f"No document named '{args.name}'.")
+        elif args.action == "delete":
+            if not args.name:
+                print("Usage: olympus documents delete <name>")
+                return 1
+            print(f"Deleted '{args.name}'." if documents.delete(user, args.name)
+                  else f"No document named '{args.name}'.")
+    elif args.command in ("gallery", "images"):
+        from . import gallery
+        if args.action == "list":
+            print(gallery.render_list())
+        elif args.action == "delete":
+            if not args.name:
+                print("Usage: olympus gallery delete <name>")
+                return 1
+            print(f"Deleted '{args.name}'." if gallery.delete_image(args.name)
+                  else f"No image named '{args.name}'.")
+    elif args.command == "agenda":
+        from . import scheduler
+        print(scheduler.summary())
+        from . import calendar as gcal
+        if gcal.configured():
+            try:
+                events = gcal.upcoming()
+            except Exception as err:
+                events = None
+                print(f"\nCalendar unavailable: {str(err)[:120]}")
+            if events:
+                print("\nUpcoming calendar:")
+                for e in events:
+                    print(f"  {e['start']}  {e['summary']}")
+            elif events is not None:
+                print("\nNo calendar events in the next two weeks.")
+        else:
+            print("\n(Connect a Google account to see upcoming calendar events.)")
+    elif args.command == "compare":
+        from . import compare
+        user = "cli"
+        if args.tally:
+            print(compare.render_tally(user))
+            return 0
+        if args.reveal:
+            out = compare.reveal(user, args.reveal, args.pick or "")
+            if out is None:
+                print(f"No comparison with id '{args.reveal}'.")
+                return 1
+            print("Which model wrote each answer:")
+            for label, model in sorted(out["mapping"].items()):
+                mark = "  ← your pick" if out.get("choice") == label else ""
+                print(f"  {label}: {model}{mark}")
+            return 0
+        if not args.prompt:
+            print('Usage: olympus compare "<prompt>"   '
+                  '(or --reveal <id> [--pick A] | --tally)')
+            return 1
+        result = compare.run(user, args.prompt)
+        if "error" in result:
+            print(result.get("hint") or result["error"])
+            if result.get("models"):
+                print("Configured: " + ", ".join(result["models"]))
+            return 1
+        print(f"Blind comparison {result['id']} — pick the best answer:\n")
+        for a in result["answers"]:
+            print(f"── Answer {a['label']} " + "─" * 40)
+            print(a["text"].strip() + "\n")
+        # Interactive reveal when attached to a terminal; otherwise print how.
+        import sys as _sys
+        if _sys.stdin.isatty():
+            choice = input("Which is best? [label / Enter to skip] ").strip()
+            out = compare.reveal(user, result["id"], choice)
+            print("\nWhich model wrote each answer:")
+            for label, model in sorted(out["mapping"].items()):
+                mark = "  ← your pick" if out.get("choice") == label else ""
+                print(f"  {label}: {model}{mark}")
+        else:
+            print(f"Reveal with: olympus compare --reveal {result['id']} "
+                  f"[--pick <label>]")
+    elif args.command == "operator":
+        from . import browser, operator
+        user = "cli"
+        act = args.action
+        if act == "status":
+            print(operator.status_summary(user))
+        elif act == "enable":
+            s = operator._settings(user)
+            s["enabled"] = True
+            operator._save_settings(user, s)
+            print("Operator enabled. Next: authorize a site with "
+                  "`olympus operator authorize <domain>`, and grant the scope "
+                  "with `olympus grant browser.operate`.")
+        elif act == "disable":
+            s = operator._settings(user)
+            s["enabled"] = False
+            operator._save_settings(user, s)
+            print("Operator disabled. Authorized sites are kept; re-enable "
+                  "anytime with `olympus operator enable`.")
+        elif act == "authorize":
+            if not args.target:
+                print("Usage: olympus operator authorize <domain> [--remember]")
+                return 1
+            mode = "remember" if args.remember else "manual"
+            d = operator.authorize_site(user, args.target, mode)
+            print(f"Authorized {d} (login: {mode}).")
+            if mode == "remember":
+                print("Run the interactive app (`olympus`) and you'll be "
+                      "prompted to enter the password privately — it never "
+                      "passes through the model.")
+            else:
+                print("Manual login: you sign in yourself in the browser "
+                      "(handles 2FA); Olympus reuses that session.")
+        elif act == "forget":
+            if not args.target:
+                print("Usage: olympus operator forget <domain>")
+                return 1
+            ok = operator.forget_site(user, args.target)
+            print(f"Forgot {args.target.strip().lower()} (authorization + any "
+                  "saved credentials removed)." if ok
+                  else f"{args.target} was not authorized.")
+        elif act == "list":
+            profs = browser.list_profiles()
+            if not profs:
+                print("No site profiles yet. Built-in profiles ship in "
+                      "olympus/profiles/; Hermes records new ones as it learns "
+                      "a site.")
+            for p in profs:
+                tmpls = ", ".join(p.templates) or "—"
+                print(f"  {p.domain}  [{p.source}]  reliability "
+                      f"{p.reliability}  templates: {tmpls}")
+        elif act == "history":
+            print(operator.render_history(user, args.limit))
     elif args.command == "budget":
         from . import usage
         if args.amount is None:
@@ -1406,6 +1605,29 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "gateway":
+        from . import gateway
+        if args.gw_status:
+            st = gateway.read_status()
+            if not st.get("running"):
+                print(f"Gateway daemon: not running ({st.get('reason', 'unknown')}).")
+                return 1
+            print(f"Gateway daemon: RUNNING (pid {st['pid']}, "
+                  f"heartbeat {st['age_secs']}s ago)")
+            for name, s in sorted((st.get("channels") or {}).items()):
+                mark = {"running": "✓", "restarting": "↻", "failed": "✗",
+                        "stopped": "•"}.get(s.get("status"), "•")
+                extra = (f" — {s['last_error']}" if s.get("last_error") else "")
+                rc = s.get("restarts", 0)
+                print(f"  {mark} {name}: {s.get('status')}"
+                      f"{f' ({rc} restart(s))' if rc else ''}{extra}")
+        elif args.list_channels:
+            live = gateway.configured_channels()
+            print("Configured channels: " + (", ".join(live) if live
+                  else "none (set a channel's env vars — see docs/GATEWAY.md)"))
+        else:
+            only = [c for c in args.only.split(",") if c.strip()] or None
+            gateway.run_all(only=only)
     elif args.command == "secret":
         from . import secretref, vault
         if args.action == "set":

@@ -502,7 +502,17 @@ def edit_file_diff(path: str, old_string: str, new_string: str,
     diff = difflib.unified_diff(prior.splitlines(keepends=True),
                                 after.splitlines(keepends=True),
                                 fromfile=f"a/{path}", tofile=f"b/{path}")
-    return "".join(diff)[:4_000] or "(no textual change)"
+    text = "".join(diff)
+    if not text:
+        return "(no textual change)"
+    # The preview goes on a human approval card. If it's too big to show whole,
+    # say so explicitly — never present a silently-truncated diff as the full
+    # change an approver is signing off on.
+    if len(text) > 4_000:
+        return (text[:4_000] + f"\n… [diff truncated — showing 4000 of "
+                f"{len(text)} characters; the FULL edit will apply if "
+                "approved. Review the complete change before approving.]")
+    return text
 
 
 def list_dir(path: str = ".") -> str:

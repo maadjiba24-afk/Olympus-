@@ -30,6 +30,25 @@ def test_list_events_summarizes(fake_cal):
     assert "Standup" in out and "09:00" in out and "team@co.com" in out
 
 
+def test_upcoming_returns_structured_events(fake_cal):
+    events = calendar.upcoming()
+    assert len(events) == 1
+    e = events[0]
+    assert e["summary"] == "Standup"
+    assert e["start"] == "2026-06-15T09:00:00Z"
+    assert e["attendees"] == ["team@co.com"]
+    assert e["all_day"] is False
+    method, path, _ = [c for c in fake_cal if c[0] == "GET"][0]
+    assert "singleEvents=true" in path and "orderBy=startTime" in path
+
+
+def test_upcoming_degrades_to_empty_on_error(monkeypatch):
+    def boom(method, path, body=None):
+        raise calendar.CalendarError("Calendar API 401")
+    monkeypatch.setattr(calendar, "_request", boom)
+    assert calendar.upcoming() == []
+
+
 def test_create_event_emails_attendees(fake_cal):
     r = calendar.create_event("Intro call", "2026-06-16T10:00:00Z",
                               "2026-06-16T10:30:00Z", ["jordan@client.com"])

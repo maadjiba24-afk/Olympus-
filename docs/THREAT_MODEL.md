@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 67 tools in
+Olympus exposes a **finite, named** tool surface — the 73 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -83,6 +83,7 @@ surface. So the surface and its threat model can't drift apart.
 | `operator_authorize_site` | Authorize the operator for a site (per user) | first-party (gated) | Records the user's explicit opt-in in their prefs; still bounded by the egress allowlist; defaults to manual sign-in (no password handling); credentialed actions still spine-gated | Self-granting authority — only on explicit user request; irreversible actions still need approval; reversible via `operator_forget_site` |
 | `operator_forget_site` | De-authorize a site and delete its saved sign-in | first-party write | Removes the prefs entry and any vault credentials for the domain | None significant — strictly reduces capability |
 | `operator_status` | Show which sites the operator is set up for | first-party read | Read-only; own settings; no secrets shown | None significant — own settings |
+| `operator_history` | Report what the operator did on the user's accounts | first-party read | Read-only over the user's own action audit trail; no secrets shown | None significant — own audit data, per-user namespaced |
 | `operator_remember_login` | Start saving a site sign-in for auto-login | first-party (gated) | Records a pending request only; the password is captured out-of-band by a private prompt and stored in the vault — it never passes through the model or this tool | Password exposure to the model — the secret never enters the model loop by construction |
 | `set_advanced_mode` | Toggle plain-English vs. engineer surface | first-party write | Per-user UI preference; no capability change | None — purely a presentation setting |
 | `recent_learning` | Summarize the autonomous loop's recent activity | first-party read | Read-only over heartbeat state + own memory; no model calls | None significant — own content, no secrets |
@@ -107,9 +108,14 @@ surface. So the surface and its threat model can't drift apart.
 | `call_webhook` | POST to an external URL | external actuator | Requires scope; never auto; rate-limited | SSRF / exfil — scope-gated, human-approved, capped |
 | `grep_files` | Regex-search file contents in the workspace | first-party read | Read-only; path-confined via `_confine`; sensitive-file deny-list; binary/size bounded | Credential harvest / recon — deny-list skips `.env`/keys/`.ssh`, confined to the root |
 | `glob_files` | List workspace files matching a glob | first-party read | Read-only; path-confined; sensitive-file deny-list; result-capped | Recon outside the workspace / secret discovery — confined and deny-listed |
-| `edit_file` | Exact-string edit of a workspace file | external actuator | Routed through the approval spine as a NOTABLE reversible action; preview is the unified diff; sensitive-file deny-list; path-confined; `undo` restores prior contents | Unapproved code change / secret edit — never writes directly (prepares an action), deny-listed, reversible |
+| `edit_file` | Exact-string edit of a workspace file | first-party (gated) | **Always prepares for explicit approval — never auto-executes**, even at autonomy L4 (it stages via the always-hold `prepare_action` path, not `auto_or_hold`), because it lives on the always-ingesting Hephaestus; preview is the unified diff (truncation is announced); sensitive-file deny-list; path-confined; `undo` restores prior contents | Injection-driven code change in a web-reading run — the edit only stages and a human approves the full diff before it lands; deny-listed; reversible |
 | `ask_user` | Ask the user a focused multiple-choice question | first-party (interaction) | Neither ingests nor acts; headless runs never block (proceed-with-assumption); the answer is wrapped untrusted | None significant — no external content, no world effect; the returned answer is treated as data |
 | `refresh_email_style` | Rebuild the user's email writing-style profile from sent mail | first-party (learning) | Distills style (not content) from the user's own sent mail; bodies wrapped untrusted while profiling; the stored guide is scrubbed for injection markers | Injection via a hostile sent message steering the profiler — content is wrapped and the guide is sanitized before caching |
+| `list_documents` | List the user's workspace documents | first-party read | Read-only; per-user namespaced | None significant — the user's own content |
+| `read_document` | Read one workspace document | first-party read | Read-only; per-user namespaced | None significant — the user's own content |
+| `search_documents` | Retrieve relevant passages from the user's own documents | first-party read | Read-only; per-user namespaced; first-party content (like memory, not wrapped) | None significant — the user's own documents; retrieval only |
+| `write_document` | Create/overwrite a workspace document | first-party (gated) | **Always staged for approval** (via prepare_action, never auto-executes) and reversible (`undo`); confined to the user's own document dir; size-capped | Silent/unwanted document writes — human approves every save; reversible; per-user isolated |
+| `trigger_research` | Run a multi-round Deep Research pass and return a cited report | ingests untrusted | Every fetched page is wrapped untrusted during extraction and fetched through the SSRF/rebinding-pinned path; the tool is an INGESTION tool, so it's in-scope for capability separation (any run that can invoke it loses action tools) and its report is re-wrapped; rounds are clamped (≤6) so an agent can't spin an unbounded loop | Injection via researched pages / SSRF / cost runaway — content wrapped, actuators stripped, fetch gated, rounds bounded |
 
 ## The action spine (execution layer)
 
