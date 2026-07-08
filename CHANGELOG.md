@@ -19,6 +19,44 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **Image editing** (`media.edit_image`, `edit_image` on Peitho/Iris,
+  `olympus gallery edit`, an Edit button in the `🖼 gallery` panel) — AI-edit an
+  existing workspace image by prompt, saving the result as a **new** file (the
+  original is never overwritten). Reads the source path-confined (image types
+  only, size-capped) and writes only to the confined workspace; degrades
+  gracefully without a media key. Uses a dependency-free multipart POST to the
+  images-edit endpoint — no new heavy image library.
+- **Runtime health reporting** (`olympus/health.py`, `olympus health`,
+  `/api/health`) — a live "what's degraded right now" view of the moving parts
+  (models, memory, gateway channels, search, push, connections), each reported
+  **ok / degraded / down**. Distinct from `doctor` (setup readiness): `health`
+  is pollable, `olympus health` exits non-zero when anything is down, and an
+  absent optional piece is *degraded*, not a failure, so a minimal install still
+  reads healthy.
+- **ntfy push channel** (`olympus/ntfy.py`) — a lightweight publish-to-a-topic
+  delivery target for scheduled jobs and proactive alerts, alongside
+  Telegram/Discord/Slack/Signal. Configure with `NTFY_TOPIC` (+ optional
+  `NTFY_SERVER` for self-hosted and `NTFY_TOKEN` for a protected topic); wired
+  into the scheduler (`--to ntfy`), the gateway fan-out, and the heartbeat, and
+  reported by `olympus doctor`. Best-effort — a push failure never breaks the
+  job that produced the result.
+- **MCP server — workspace reads** (`olympus/mcp_server.py`, `olympus mcp-serve`)
+  — the existing MCP server now also exposes three **read-only** workspace tools
+  to any MCP client (Claude Desktop, IDEs, other agents): `olympus_search_documents`,
+  `olympus_list_todos`, and `olympus_recall_memory`, scoped to `OLYMPUS_MCP_USER`
+  (default the shared namespace). No write or actuator ever crosses the boundary.
+- **Email spam triage** (`olympus/spamtriage.py`, `triage_inbox` on Angelos,
+  `olympus triage`) — a read-only heuristic classifier that sorts the inbox into
+  important / promotions / spam / other with a reason for each. No model call
+  (works even where egress is locked down), never deletes or moves anything, and
+  message content stays untrusted (the tool is wrapped like other inbox reads).
+- **Notes / todos / reminders** (`olympus/todos.py`, `olympus todo`, web UI
+  "Your list" in the `📅 agenda` panel) — a small per-user checklist store:
+  notes (kept scraps), todos (tickable), and reminders (todos with a due time).
+  Open items and overdue reminders surface in the agenda; `list_todos` /
+  `add_todo` / `complete_todo` on Chronos are first-party and ungated (the
+  user's own data, no external side effect).
+
 - **Documents workspace** (`olympus/documents.py`, `olympus documents`, web UI
   `📄 docs` panel) — a per-user Markdown store the assistant can read and, with
   approval, write. The agent's `write_document` tool stages every save through

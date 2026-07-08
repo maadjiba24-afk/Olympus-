@@ -7,7 +7,8 @@ watchlist of what is coming next, and — for each idea — whether it is alread
 implemented in Olympus. **No Odysseus code is used here** — this is
 competitive/inspiration analysis only (Odysseus is AGPL-3.0; Olympus is MIT).
 
-- **Last checked:** 2026-07-04
+- **Last checked:** 2026-07-04 (adoption table refreshed 2026-07-08 after the
+  phases-1–3 build and the six-gap closing pass)
 - **Baseline (diff against this on the next check):**
   - `APP_VERSION` = **1.0.1** (`src/constants.py`)
   - `origin/main` @ **dc3530b** (curated release branch — fast-forwarded at releases)
@@ -90,7 +91,12 @@ acknowledged #1 gap); backup/restore helper.
 ## 6. Adoption status in Olympus
 
 Which Odysseus ideas we evaluated, and where they landed. ✅ implemented,
-➖ intentionally skipped, ⏳ candidate.
+➖ intentionally skipped, ⏳ candidate. As of this revision every agent-quality
+and workspace idea worth mining is implemented (three phases —
+operator/gateway/workspace — plus a six-item gap-closing pass:
+notes/todos/reminders, spam triage, MCP-server workspace reads, ntfy, health
+reporting, image editing). What remains ➖ is genuinely off-mission
+(local-model serving, self-hosted-infra glue, cosmetic UI).
 
 | Odysseus idea | Status in Olympus | Notes |
 |---|---|---|
@@ -104,11 +110,22 @@ Which Odysseus ideas we evaluated, and where they landed. ✅ implemented,
 | Skill import from GitHub URLs | ✅ `skillpack.import_url` | in-memory tarball, always provisional + scanned |
 | `ask_user` (mid-run question) | ✅ `interaction.py` | TUI blocks; web/gateways surface-and-proceed; headless proceeds with a stated assumption |
 | Style-matched email drafting | ✅ `emailstyle.py` | Angelos learns voice from sent mail (Gmail) |
+| Documents app (editor + storage) | ✅ `documents.py`, `📄 docs` panel, `olympus documents` | per-user Markdown; agent writes go through the always-hold approval spine, UI saves are direct |
+| Personal-document RAG | ✅ `docrag.py` + `search_documents` | grounded into synthesis; semantic (embeddings) or lexical |
+| Gallery + image editing | ✅ `gallery.py` + `media.edit_image`, `🖼 gallery` panel, `olympus gallery` | path-confined serving; AI edit saves a NEW file (non-destructive), dependency-free multipart |
+| Calendar / agenda UI | ✅ `_agenda_view` + `📅 agenda` panel, `olympus agenda` | scheduled tasks + Google Calendar (read-only, degrades to "not connected") |
+| Notes / todos / reminders | ✅ `todos.py`, "Your list" in agenda, `olympus todo` | notes/todos/reminders; due items surface in the agenda |
+| Compare (blind A/B) | ✅ `compare.py`, `⚖ compare` panel, `olympus compare` | labels shuffled, revealed after you pick, per-user tally; no cross-member failover |
+| Email spam triage | ✅ `spamtriage.py` + `triage_inbox` on Angelos, `olympus triage` | read-only heuristic (no model call); wrapped as untrusted |
+| MCP **server** (expose Olympus) | ✅ `mcp_server.py`, `olympus mcp-serve` | `ask_olympus` + read-only workspace tools (documents/todos/memory), scoped to `OLYMPUS_MCP_USER` |
+| ntfy push | ✅ `ntfy.py` | one more delivery target for the scheduler/gateway/heartbeat |
+| Degraded-state / health reporting | ✅ `health.py`, `olympus health`, `/api/health` | live ok/degraded/down per component; distinct from `doctor`'s readiness |
 | Cookbook (local model serving) | ➖ off-mission | Olympus consumes Ollama/vLLM/LM Studio as endpoints, doesn't manage GPU serving |
-| Web-UI apps (docs editor, gallery, calendar UI, themes) | ➖ off-mission | Olympus is CLI/gateway-first |
+| CalDAV/contacts, generic IMAP/SMTP, Vaultwarden | ➖ off-mission | Olympus uses Google OAuth (mail/calendar) and its own secret vault |
+| Web-UI themes / offline-vendored CDN assets | ➖ cosmetic | not aligned with the headless-first footprint |
 | Plan mode via tool-stripping | ➖ already stronger | prepare→approve spine + autonomy L0/L1 |
-| Prompt caching / window-scaled context / untrusted wrapping / MCP / scheduled tasks / vector memory / STT-TTS / 2FA | ➖ already present | some stronger (capability separation strips actuators, unlike their wrapping alone) |
-| ntfy push | ⏳ optional | Telegram/Discord/Slack/Signal already cover push |
+| Prompt caching / window-scaled context / untrusted wrapping / MCP client / scheduled tasks / vector memory / STT-TTS / 2FA | ➖ already present | some stronger (capability separation strips actuators, unlike their wrapping alone) |
+| OS-level agent shell/FS sandbox (their #1 gap) | ✅ already exceeded | workspace confinement + approval spine + optional Docker isolation |
 
 ## 7. New Olympus configuration from this work
 
@@ -126,5 +143,11 @@ Env vars introduced while adopting the above (all optional, safe defaults):
 | `OLYMPUS_SEARXNG_URL` | — | self-hosted SearXNG endpoint (sovereignty-friendly) |
 | `BRAVE_SEARCH_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` | — | keyed search providers |
 | `GOOGLE_PSE_KEY` + `GOOGLE_PSE_CX` | — | Google Programmable Search |
+| `NTFY_TOPIC` | — | ntfy topic to publish to (required for the ntfy channel) |
+| `NTFY_SERVER` | `https://ntfy.sh` | ntfy base URL (set for a self-hosted server) |
+| `NTFY_TOKEN` | — | bearer token for a protected ntfy topic |
+| `OLYMPUS_MCP_USER` | `shared` | which user's documents/todos/memory the MCP server exposes (read-only) |
 
-`olympus doctor` reports which search providers are configured.
+`olympus doctor` reports which search providers and push channels are
+configured; `olympus health` reports the live ok/degraded/down state of each
+component.

@@ -31,6 +31,62 @@ def test_generate_image_saves_file(monkeypatch, tmp_path):
     assert (tmp_path / "ws" / "cat.png").read_bytes().startswith(b"\x89PNG")
 
 
+def test_edit_image_without_key_is_graceful(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
+    out = media.edit_image("make it blue", "cat.png")
+    assert out.startswith("Error") and "API key" in out
+
+
+def test_edit_image_missing_source_is_graceful(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    out = media.edit_image("make it blue", "nope.png")
+    assert out.startswith("Error") and "no workspace image" in out
+
+
+def test_edit_image_rejects_traversal(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    out = media.edit_image("x", "../secret.png")
+    assert out.startswith("Error") and "outside the workspace" in out
+
+
+def test_edit_image_saves_new_file_leaving_source(monkeypatch, tmp_path):
+    import base64
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = ws / "cat.png"
+    src.write_bytes(b"\x89PNG original")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
+    png = base64.b64encode(b"\x89PNG edited").decode()
+    captured = {}
+
+    def fake_mp(path, fields, files, timeout=180):
+        captured["path"] = path
+        captured["fields"] = fields
+        captured["file_field"] = files[0][0]
+        return b'{"data":[{"b64_json":"%s"}]}' % png.encode()
+
+    monkeypatch.setattr(media, "_post_multipart", fake_mp)
+    out = media.edit_image("make it blue", "cat.png", filename="blue.png")
+    assert "blue.png" in out
+    assert captured["path"] == "/images/edits"
+    assert captured["fields"]["prompt"] == "make it blue"
+    assert captured["file_field"] == "image"
+    # source untouched, new file written
+    assert src.read_bytes() == b"\x89PNG original"
+    assert (ws / "blue.png").read_bytes() == b"\x89PNG edited"
+
+
+def test_edit_image_tool_registered_and_on_specialists():
+    from olympus import tools, specialists
+    assert "edit_image" in tools.EXTRA_TOOLS and "edit_image" in tools.HANDLERS
+    assert "edit_image" in specialists.SPECIALISTS["peitho"].extra_tools
+    assert "edit_image" in specialists.SPECIALISTS["iris"].extra_tools
+
+
 def test_extract_links():
     html = ('<a href="https://a.com/x">A</a> <a href="/rel">rel</a> '
             '<a href="https://a.com/x">dup</a> <a href="https://b.com">B</a>')

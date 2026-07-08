@@ -171,7 +171,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "audience research, campaigns, SEO. Drafts and saves "
                         "documents to the user's workspace.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech",
+            extra_tools=("generate_image", "edit_image", "text_to_speech",
                          "transcribe_audio", "browse_page", "analyze_image",
                          "list_documents", "read_document", "search_documents",
                          "write_document"),
@@ -199,7 +199,8 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
-            extra_tools=("generate_image", "browse_page", "analyze_image"),
+            extra_tools=("generate_image", "edit_image", "browse_page",
+                         "analyze_image"),
             # Social copy should stay tight — guard against a wall-of-text reply.
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_chars=8000),
@@ -215,7 +216,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "deadlines, prioritization. Prepares real-world actions "
                         "(emails, webhooks) for the user to approve.",
             extra_tools=("send_email", "call_webhook", "prepare_action",
-                         "propose_playbook", "schedule_task"),
+                         "propose_playbook", "schedule_task",
+                         "list_todos", "add_todo", "complete_todo"),
         ),
         Specialist(
             key="angelos", name="Angelos", title="Inbox & Calendar Manager",
@@ -224,7 +226,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "send/draft/archive/invite actions for the user to "
                         "approve. Reads untrusted mail; never sends on its own.",
             extra_tools=("read_inbox", "read_email", "read_calendar",
-                         "prepare_action", "refresh_email_style"),
+                         "triage_inbox", "prepare_action",
+                         "refresh_email_style"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",

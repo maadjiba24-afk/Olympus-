@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 73 tools in
+Olympus exposes a **finite, named** tool surface — the 78 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -60,6 +60,7 @@ surface. So the surface and its threat model can't drift apart.
 | `web_fetch` | Fetch a URL's contents | ingests untrusted | Output treated as untrusted | SSRF / injected page content — wrapped, not trusted |
 | `watch_youtube` | Fetch a video transcript | ingests untrusted | Output treated as untrusted | Malicious transcript injection — wrapped |
 | `read_inbox` | List inbox messages | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — `should_wrap` wraps it |
+| `triage_inbox` | Classify inbox messages into important/promotions/spam/other | ingests untrusted | Read-only — classifies, never deletes/moves; heuristic (no model call required); wrapped | Email-borne prompt injection — `should_wrap` wraps it; classification is derived data, not instructions |
 | `read_email` | Read one email | ingests untrusted | Read-only; wrapped | Email-borne prompt injection — wrapped |
 | `read_calendar` | Read calendar events | ingests untrusted | Read-only; wrapped | Event-text injection — wrapped |
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
@@ -91,6 +92,7 @@ surface. So the surface and its threat model can't drift apart.
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |
 | `generate_image` | Generate an image into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn / disallowed content — key-gated, confined output |
+| `edit_image` | AI-edit an existing workspace image, saving the result as a NEW file | external actuator | Reads the source path-confined via `_confine` (image types only, size-capped) and writes only to the confined workspace; the source is never overwritten; needs a media API key | Cost burn / disallowed content — key-gated, confined I/O, non-destructive (original preserved) |
 | `text_to_speech` | Synthesize audio into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn — key-gated, confined output |
 | `transcribe_audio` | Transcribe a workspace audio file to text | ingestion | Reads only from the confined workspace; key-gated; transcript is wrapped as untrusted content | Injection via spoken/recorded content — transcript is data, capability separation applies |
 | `prepare_action` | Stage an action for approval | first-party (gated) | **Never executes** — human approval required | Self-authorizing actions — execution is human-gated |
@@ -115,6 +117,9 @@ surface. So the surface and its threat model can't drift apart.
 | `read_document` | Read one workspace document | first-party read | Read-only; per-user namespaced | None significant — the user's own content |
 | `search_documents` | Retrieve relevant passages from the user's own documents | first-party read | Read-only; per-user namespaced; first-party content (like memory, not wrapped) | None significant — the user's own documents; retrieval only |
 | `write_document` | Create/overwrite a workspace document | first-party (gated) | **Always staged for approval** (via prepare_action, never auto-executes) and reversible (`undo`); confined to the user's own document dir; size-capped | Silent/unwanted document writes — human approves every save; reversible; per-user isolated |
+| `list_todos` | List the user's notes/todos/reminders | first-party read | Read-only; per-user namespaced | None significant — the user's own list |
+| `add_todo` | Add a note/todo/reminder to the user's list | first-party (ungated) | Writes only to the user's own todos file; per-user namespaced; item/text-count capped; no external side effect | Unwanted list entries — the user's own data, trivially deletable; no actuator, nothing leaves the machine |
+| `complete_todo` | Mark one of the user's todos done | first-party (ungated) | Per-user namespaced; toggles a boolean on the user's own item | None significant — the user's own list |
 | `trigger_research` | Run a multi-round Deep Research pass and return a cited report | ingests untrusted | Every fetched page is wrapped untrusted during extraction and fetched through the SSRF/rebinding-pinned path; the tool is an INGESTION tool, so it's in-scope for capability separation (any run that can invoke it loses action tools) and its report is re-wrapped; rounds are clamped (≤6) so an agent can't spin an unbounded loop | Injection via researched pages / SSRF / cost runaway — content wrapped, actuators stripped, fetch gated, rounds bounded |
 
 ## The action spine (execution layer)

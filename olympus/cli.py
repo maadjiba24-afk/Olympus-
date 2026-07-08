@@ -313,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="e.g. daily, hourly, 'every 6h'")
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
-                         help="deliver result to: telegram|discord|slack|signal")
+                         help="deliver result to: telegram|discord|slack|signal|ntfy")
     p_sched.add_argument("--on-exit", type=int, default=0, dest="on_exit_pid",
                          metavar="PID",
                          help="event-driven: run once when this process exits "
@@ -486,12 +486,41 @@ def build_parser() -> argparse.ArgumentParser:
         "gallery", aliases=["images"],
         help="images generated into the workspace: list | delete <name>")
     p_gal.add_argument("action", nargs="?", default="list",
-                       choices=["list", "delete"])
-    p_gal.add_argument("name", nargs="?", help="image file name (delete)")
+                       choices=["list", "delete", "edit"])
+    p_gal.add_argument("name", nargs="?", help="image file name (delete/edit)")
+    p_gal.add_argument("prompt", nargs="*", help="edit prompt (edit)")
 
     sub.add_parser(
         "agenda",
         help="your scheduled tasks and upcoming calendar events in one view")
+
+    p_todo = sub.add_parser(
+        "todo", aliases=["todos", "notes"],
+        help="your notes, todos, and reminders: list | add <text> | done <id> "
+             "| rm <id> | clear")
+    p_todo.add_argument("action", nargs="?", default="list",
+                        choices=["list", "add", "done", "rm", "clear"])
+    p_todo.add_argument("text", nargs="*", help="item text (add) or id (done/rm)")
+    p_todo.add_argument("--due", default="",
+                        help="due time for a reminder, e.g. '2026-07-10 09:00'")
+    p_todo.add_argument("--note", action="store_true",
+                        help="add as a kept note instead of a tickable todo")
+
+    p_health = sub.add_parser(
+        "health",
+        help="runtime health of the moving parts (models, memory, gateway, "
+             "search, push, connections); exits non-zero if anything is down")
+    p_health.add_argument("--json", action="store_true", dest="as_json",
+                          help="emit the structured report as JSON")
+
+    p_triage = sub.add_parser(
+        "triage",
+        help="triage the inbox into important/promotions/spam/other "
+             "(read-only; needs a connected Google account)")
+    p_triage.add_argument("--query", default="in:inbox",
+                          help="Gmail search (default 'in:inbox')")
+    p_triage.add_argument("--max", type=int, default=20, dest="max_results",
+                          help="how many messages to triage (default 20)")
 
     p_cmp = sub.add_parser(
         "compare",
@@ -1251,6 +1280,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Deleted '{args.name}'." if gallery.delete_image(args.name)
                   else f"No image named '{args.name}'.")
+        elif args.action == "edit":
+            prompt = " ".join(args.prompt).strip()
+            if not args.name or not prompt:
+                print('Usage: olympus gallery edit <name> "<edit prompt>"')
+                return 1
+            from . import media
+            print(media.edit_image(prompt, args.name))
     elif args.command == "agenda":
         from . import scheduler
         print(scheduler.summary())
@@ -1269,6 +1305,46 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nNo calendar events in the next two weeks.")
         else:
             print("\n(Connect a Google account to see upcoming calendar events.)")
+    elif args.command in ("todo", "todos", "notes"):
+        from . import todos
+        user = "cli"
+        if args.action == "list":
+            print(todos.render_list(user))
+        elif args.action == "add":
+            text = " ".join(args.text).strip()
+            if not text:
+                print('Usage: olympus todo add "buy milk" [--due "2026-07-10 09:00"] [--note]')
+                return 1
+            it = todos.add(user, text, kind="note" if args.note else "todo",
+                           due=args.due or None)
+            print(f"Added [{it['id']}]: {it['text']}")
+        elif args.action == "done":
+            tid = (args.text[0] if args.text else "")
+            print("Marked done." if todos.complete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "rm":
+            tid = (args.text[0] if args.text else "")
+            print("Removed." if todos.delete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "clear":
+            n = todos.clear_done(user)
+            print(f"Cleared {n} done item(s).")
+    elif args.command == "health":
+        from . import health
+        rep = health.report()
+        if args.as_json:
+            import json as _json
+            print(_json.dumps(rep, indent=2))
+        else:
+            print(health.render(rep))
+        return 0 if rep["ok"] else 1
+    elif args.command == "triage":
+        from . import spamtriage, gmail
+        if not gmail.configured():
+            print("No Google account connected. Connect one (GMAIL_* env or the "
+                  "web OAuth flow) to triage your inbox.")
+            return 1
+        print(spamtriage.render(args.query, max(1, min(args.max_results, 50))))
     elif args.command == "compare":
         from . import compare
         user = "cli"

@@ -45,6 +45,7 @@ ACTION_TOOLS = frozenset({
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
+                             "triage_inbox",
                              "browse_page",
                              # A vision model's read of an image is external
                              # content — text-in-image injection is injection.

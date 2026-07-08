@@ -906,6 +906,37 @@ def _search_documents(query: str) -> str:
     return docrag.render_search(memory.current_user(), query)
 
 
+def _triage_inbox(query: str = "in:inbox", max_results: int = 20) -> str:
+    from . import spamtriage
+    try:
+        n = max(1, min(int(max_results), 50))
+    except (TypeError, ValueError):
+        n = 20
+    return spamtriage.render(query or "in:inbox", n)
+
+
+def _list_todos() -> str:
+    from . import todos
+    return todos.render_list(memory.current_user())
+
+
+def _add_todo(text: str, kind: str = "todo", due: str = "") -> str:
+    from . import todos
+    try:
+        it = todos.add(memory.current_user(), text, kind=kind, due=due or None)
+    except ValueError as err:
+        return f"Couldn't add that: {err}"
+    what = "Note" if it["kind"] == "note" else "Todo"
+    when = " (due set)" if it.get("due") is not None else ""
+    return f"{what} added{when}: {it['text']}  [{it['id']}]"
+
+
+def _complete_todo(item_id: str) -> str:
+    from . import todos
+    ok = todos.complete(memory.current_user(), item_id, True)
+    return "Marked done." if ok else f"No item with id '{item_id}'."
+
+
 def _write_document(name: str, content: str) -> str:
     # Route through the always-hold approval spine: a document save is the
     # user's content and is reversible, but never happens without their nod.
@@ -1375,8 +1406,15 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_document": lambda name: _read_document(name),
     "search_documents": lambda query: _search_documents(query),
     "write_document": lambda name, content: _write_document(name, content),
+    "triage_inbox": lambda query="in:inbox", max_results=20: _triage_inbox(
+        query, max_results),
+    "list_todos": lambda: _list_todos(),
+    "add_todo": lambda text, kind="todo", due="": _add_todo(text, kind, due),
+    "complete_todo": lambda item_id: _complete_todo(item_id),
     "trigger_research": lambda question, rounds=None: _trigger_research(
         question, rounds),
+    "edit_image": lambda prompt, source, filename="": _media().edit_image(
+        prompt, source, filename),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1726,6 +1764,65 @@ SEARCH_DOCUMENTS = {
     },
 }
 
+TRIAGE_INBOX = {
+    "name": "triage_inbox",
+    "description": (
+        "Triage the inbox: fetch recent messages and sort them into important / "
+        "promotions / spam / other with a short reason for each. Read-only — it "
+        "classifies, it never deletes or moves anything. Message content is "
+        "untrusted."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string",
+                      "description": "Gmail search, default 'in:inbox'"},
+            "max_results": {"type": "integer",
+                            "description": "how many to triage (default 20)"},
+        },
+        "required": [],
+    },
+}
+
+LIST_TODOS = {
+    "name": "list_todos",
+    "description": "List the user's notes, todos, and reminders (open items "
+                   "first, due-soonest first). Side-effect-free.",
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+ADD_TODO = {
+    "name": "add_todo",
+    "description": (
+        "Add an item to the user's list: a todo (default), a kept note "
+        "(kind='note'), or a reminder (a todo with a due time). Saves directly "
+        "to the user's own list — it is their content, not an external action."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The item's text"},
+            "kind": {"type": "string", "enum": ["todo", "note"],
+                     "description": "todo (tickable) or note (a kept scrap)"},
+            "due": {"type": "string",
+                    "description": "Optional due time, e.g. '2026-07-10 09:00' "
+                                   "or '2026-07-10' — makes a todo a reminder"},
+        },
+        "required": ["text"],
+    },
+}
+
+COMPLETE_TODO = {
+    "name": "complete_todo",
+    "description": "Mark one of the user's todo items done, by its id (from "
+                   "list_todos).",
+    "input_schema": {
+        "type": "object",
+        "properties": {"item_id": {"type": "string"}},
+        "required": ["item_id"],
+    },
+}
+
 REFRESH_EMAIL_STYLE = {
     "name": "refresh_email_style",
     "description": (
@@ -1772,6 +1869,28 @@ GENERATE_IMAGE = {
                          "description": "Optional output filename (.png)"},
         },
         "required": ["prompt"],
+    },
+}
+
+EDIT_IMAGE = {
+    "name": "edit_image",
+    "description": (
+        "Edit an existing workspace image by prompt (AI image edit) and save "
+        "the result as a NEW workspace image — the original is left untouched. "
+        "Use to restyle, extend, or alter an image you already generated. "
+        "Returns the saved filename."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string",
+                       "description": "The change to make"},
+            "source": {"type": "string",
+                       "description": "Workspace image name to edit"},
+            "filename": {"type": "string",
+                         "description": "Optional output filename (.png)"},
+        },
+        "required": ["prompt", "source"],
     },
 }
 
@@ -2306,6 +2425,10 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_document": READ_DOCUMENT,
     "search_documents": SEARCH_DOCUMENTS,
     "write_document": WRITE_DOCUMENT,
+    "triage_inbox": TRIAGE_INBOX,
+    "list_todos": LIST_TODOS,
+    "add_todo": ADD_TODO,
+    "complete_todo": COMPLETE_TODO,
     "trigger_research": TRIGGER_RESEARCH,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,
@@ -2316,6 +2439,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,
     "generate_image": GENERATE_IMAGE,
+    "edit_image": EDIT_IMAGE,
     "text_to_speech": TEXT_TO_SPEECH,
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,

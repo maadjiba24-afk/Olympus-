@@ -69,7 +69,7 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
 
 
 # Every chat platform that exposes an ambient notify() for proactive pushes.
-NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal")
+NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal", "ntfy")
 
 
 # --- in-flight work journal (session auto-resume) --------------------------
@@ -149,9 +149,10 @@ def notify_all(text: str) -> list[str]:
     channels that accepted it. Each gateway's notify() is a no-op returning
     False when that platform isn't configured, so this fans out only where
     credentials exist — the heartbeat/backup no longer reach Telegram alone."""
-    from . import discord, signal as signal_gw, slack, telegram
+    from . import discord, ntfy, signal as signal_gw, slack, telegram
     fns = {"telegram": telegram.notify, "discord": discord.notify,
-           "slack": slack.notify, "signal": signal_gw.notify}
+           "slack": slack.notify, "signal": signal_gw.notify,
+           "ntfy": ntfy.notify}
     delivered = []
     for name in NOTIFY_CHANNELS:
         try:
