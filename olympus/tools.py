@@ -906,6 +906,28 @@ def _search_documents(query: str) -> str:
     return docrag.render_search(memory.current_user(), query)
 
 
+def _list_todos() -> str:
+    from . import todos
+    return todos.render_list(memory.current_user())
+
+
+def _add_todo(text: str, kind: str = "todo", due: str = "") -> str:
+    from . import todos
+    try:
+        it = todos.add(memory.current_user(), text, kind=kind, due=due or None)
+    except ValueError as err:
+        return f"Couldn't add that: {err}"
+    what = "Note" if it["kind"] == "note" else "Todo"
+    when = " (due set)" if it.get("due") is not None else ""
+    return f"{what} added{when}: {it['text']}  [{it['id']}]"
+
+
+def _complete_todo(item_id: str) -> str:
+    from . import todos
+    ok = todos.complete(memory.current_user(), item_id, True)
+    return "Marked done." if ok else f"No item with id '{item_id}'."
+
+
 def _write_document(name: str, content: str) -> str:
     # Route through the always-hold approval spine: a document save is the
     # user's content and is reversible, but never happens without their nod.
@@ -1375,6 +1397,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "read_document": lambda name: _read_document(name),
     "search_documents": lambda query: _search_documents(query),
     "write_document": lambda name, content: _write_document(name, content),
+    "list_todos": lambda: _list_todos(),
+    "add_todo": lambda text, kind="todo", due="": _add_todo(text, kind, due),
+    "complete_todo": lambda item_id: _complete_todo(item_id),
     "trigger_research": lambda question, rounds=None: _trigger_research(
         question, rounds),
     "generate_image": lambda prompt, filename="": _media().generate_image(
@@ -1723,6 +1748,45 @@ SEARCH_DOCUMENTS = {
         "type": "object",
         "properties": {"query": {"type": "string"}},
         "required": ["query"],
+    },
+}
+
+LIST_TODOS = {
+    "name": "list_todos",
+    "description": "List the user's notes, todos, and reminders (open items "
+                   "first, due-soonest first). Side-effect-free.",
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+ADD_TODO = {
+    "name": "add_todo",
+    "description": (
+        "Add an item to the user's list: a todo (default), a kept note "
+        "(kind='note'), or a reminder (a todo with a due time). Saves directly "
+        "to the user's own list — it is their content, not an external action."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The item's text"},
+            "kind": {"type": "string", "enum": ["todo", "note"],
+                     "description": "todo (tickable) or note (a kept scrap)"},
+            "due": {"type": "string",
+                    "description": "Optional due time, e.g. '2026-07-10 09:00' "
+                                   "or '2026-07-10' — makes a todo a reminder"},
+        },
+        "required": ["text"],
+    },
+}
+
+COMPLETE_TODO = {
+    "name": "complete_todo",
+    "description": "Mark one of the user's todo items done, by its id (from "
+                   "list_todos).",
+    "input_schema": {
+        "type": "object",
+        "properties": {"item_id": {"type": "string"}},
+        "required": ["item_id"],
     },
 }
 
@@ -2306,6 +2370,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "read_document": READ_DOCUMENT,
     "search_documents": SEARCH_DOCUMENTS,
     "write_document": WRITE_DOCUMENT,
+    "list_todos": LIST_TODOS,
+    "add_todo": ADD_TODO,
+    "complete_todo": COMPLETE_TODO,
     "trigger_research": TRIGGER_RESEARCH,
     "read_file": READ_FILE,
     "list_dir": LIST_DIR,

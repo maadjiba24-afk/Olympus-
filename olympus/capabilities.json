@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 94,
+    "count": 97,
     "names": [
       "actions",
       "add-mcp",
@@ -90,6 +90,7 @@
       "moa",
       "models",
       "next-wake",
+      "notes",
       "operator",
       "outcomes",
       "pair",
@@ -123,6 +124,8 @@
       "status",
       "telegram",
       "tick",
+      "todo",
+      "todos",
       "train",
       "undo",
       "upgrade",
@@ -139,8 +142,9 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 73,
+    "count": 76,
     "names": [
+      "add_todo",
       "analyze_image",
       "ask_user",
       "browse_page",
@@ -157,6 +161,7 @@
       "codegraph_impact",
       "codegraph_neighbors",
       "codegraph_path",
+      "complete_todo",
       "create_skill",
       "current_time",
       "edit_file",
@@ -169,6 +174,7 @@
       "list_dir",
       "list_documents",
       "list_source_files",
+      "list_todos",
       "operator_authorize_site",
       "operator_forget_site",
       "operator_history",

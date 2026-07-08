@@ -95,7 +95,14 @@ def _agenda_view(user: str) -> dict:
             events = gcal.upcoming()
     except Exception:
         events = None
-    return {"tasks": jobs, "events": events, "calendar_connected": connected}
+    from . import todos as _todos
+    open_items = _todos.listing(user, include_done=False)
+    due_ids = {it["id"] for it in _todos.due_items(user, now)}
+    todo_view = [{"id": it["id"], "text": it["text"], "kind": it["kind"],
+                  "due": it.get("due"), "overdue": it["id"] in due_ids}
+                 for it in open_items]
+    return {"tasks": jobs, "events": events, "calendar_connected": connected,
+            "todos": todo_view}
 
 
 def _actions_view(user: str) -> list[dict]:
@@ -1207,11 +1214,50 @@ function agRow(title, when, sub, off) {
 async function renderAgenda() {
   agEl.innerHTML = '';
   const wrap = document.createElement('div'); wrap.className = 'agwrap';
-  let d = {tasks: [], events: null, calendar_connected: false};
+  let d = {tasks: [], events: null, calendar_connected: false, todos: []};
   try {
     d = await (await fetch('/api/agenda?session=' + encodeURIComponent(session),
       {headers: hdrs()})).json();
   } catch (e) {}
+  // --- your list (notes/todos/reminders) ---
+  const lh = document.createElement('h4'); lh.textContent = 'Your list';
+  wrap.appendChild(lh);
+  const addbar = document.createElement('div'); addbar.className = 'cmpbar';
+  const ti = document.createElement('input'); ti.id = 'todoinput';
+  ti.placeholder = 'Add a todo, note, or reminder…';
+  const di = document.createElement('input'); di.id = 'tododue'; di.type = 'text';
+  di.placeholder = 'due (optional)'; di.style.maxWidth = '150px';
+  const ab = document.createElement('button'); ab.className = 'ok'; ab.textContent = 'Add';
+  ab.onclick = () => addTodo(ti.value, di.value);
+  ti.onkeydown = (e) => { if (e.key === 'Enter') addTodo(ti.value, di.value); };
+  addbar.append(ti, di, ab); wrap.appendChild(addbar);
+  if (!d.todos || !d.todos.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'Nothing on your list yet.';
+    wrap.appendChild(p);
+  } else {
+    d.todos.forEach(it => {
+      const row = document.createElement('div'); row.className = 'agrow';
+      const t = document.createElement('div'); t.className = 'at';
+      if (it.kind === 'todo') {
+        const cb = document.createElement('input'); cb.type = 'checkbox';
+        cb.style.marginRight = '8px'; cb.onchange = () => completeTodo(it.id);
+        t.appendChild(cb);
+      }
+      const b = document.createElement('span'); b.textContent = it.text;
+      if (it.kind === 'note') b.style.fontStyle = 'italic';
+      t.appendChild(b);
+      const w = document.createElement('span'); w.className = 'aw';
+      if (it.due != null) {
+        w.textContent = '⏰ ' + new Date(it.due * 1000).toLocaleString();
+        if (it.overdue) w.style.color = '#e0884a';
+      }
+      const del = document.createElement('span'); del.className = 'aw';
+      del.textContent = '✕'; del.style.cursor = 'pointer'; del.style.marginLeft = '8px';
+      del.onclick = () => deleteTodo(it.id);
+      row.append(t, w, del); wrap.appendChild(row);
+    });
+  }
   const th = document.createElement('h4'); th.textContent = 'Scheduled tasks';
   wrap.appendChild(th);
   if (!d.tasks || !d.tasks.length) {
@@ -1244,6 +1290,19 @@ async function renderAgenda() {
   }
   agEl.appendChild(wrap);
 }
+async function todoPost(payload) {
+  await fetch('/api/todos', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))});
+  renderAgenda();
+}
+function addTodo(text, due) {
+  text = (text || '').trim(); if (!text) return;
+  const kind = /^note:/i.test(text) ? 'note' : 'todo';
+  if (kind === 'note') text = text.replace(/^note:\\s*/i, '');
+  todoPost({op: 'add', text: text, kind: kind, due: (due || '').trim()});
+}
+function completeTodo(id) { todoPost({op: 'complete', id: id, done: true}); }
+function deleteTodo(id) { todoPost({op: 'delete', id: id}); }
 
 // --- compare (blind multi-model) ---
 const cmpEl = document.getElementById('compare');
@@ -1725,8 +1784,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/documents", "/api/compare",
-                        "/api/register", "/api/login", "/api/logout",
-                        "/api/report", "/api/admin/act"):
+                        "/api/todos", "/api/register", "/api/login",
+                        "/api/logout", "/api/report", "/api/admin/act"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -1871,6 +1930,31 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(out)
             else:
                 self._json({"error": "unknown op"}, 400)
+            return
+
+        if path == "/api/todos":
+            from . import todos
+            op = str(payload.get("op", "add"))
+            try:
+                if op == "add":
+                    todos.add(user, str(payload.get("text", "")),
+                              kind=str(payload.get("kind", "todo")),
+                              due=payload.get("due") or None)
+                elif op == "complete":
+                    todos.complete(user, str(payload.get("id", "")),
+                                   bool(payload.get("done", True)))
+                elif op == "delete":
+                    todos.delete(user, str(payload.get("id", "")))
+                elif op == "clear_done":
+                    todos.clear_done(user)
+                else:
+                    self._json({"error": "unknown op"}, 400)
+                    return
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
+                return
+            self._json({"ok": True,
+                        "todos": todos.listing(user, include_done=True)})
             return
 
         if path == "/api/memory":

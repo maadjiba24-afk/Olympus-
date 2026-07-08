@@ -215,7 +215,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "deadlines, prioritization. Prepares real-world actions "
                         "(emails, webhooks) for the user to approve.",
             extra_tools=("send_email", "call_webhook", "prepare_action",
-                         "propose_playbook", "schedule_task"),
+                         "propose_playbook", "schedule_task",
+                         "list_todos", "add_todo", "complete_todo"),
         ),
         Specialist(
             key="angelos", name="Angelos", title="Inbox & Calendar Manager",

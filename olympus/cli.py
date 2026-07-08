@@ -493,6 +493,18 @@ def build_parser() -> argparse.ArgumentParser:
         "agenda",
         help="your scheduled tasks and upcoming calendar events in one view")
 
+    p_todo = sub.add_parser(
+        "todo", aliases=["todos", "notes"],
+        help="your notes, todos, and reminders: list | add <text> | done <id> "
+             "| rm <id> | clear")
+    p_todo.add_argument("action", nargs="?", default="list",
+                        choices=["list", "add", "done", "rm", "clear"])
+    p_todo.add_argument("text", nargs="*", help="item text (add) or id (done/rm)")
+    p_todo.add_argument("--due", default="",
+                        help="due time for a reminder, e.g. '2026-07-10 09:00'")
+    p_todo.add_argument("--note", action="store_true",
+                        help="add as a kept note instead of a tickable todo")
+
     p_cmp = sub.add_parser(
         "compare",
         help="blind multi-model compare: same prompt, every configured model, "
@@ -1269,6 +1281,30 @@ def main(argv: list[str] | None = None) -> int:
                 print("\nNo calendar events in the next two weeks.")
         else:
             print("\n(Connect a Google account to see upcoming calendar events.)")
+    elif args.command in ("todo", "todos", "notes"):
+        from . import todos
+        user = "cli"
+        if args.action == "list":
+            print(todos.render_list(user))
+        elif args.action == "add":
+            text = " ".join(args.text).strip()
+            if not text:
+                print('Usage: olympus todo add "buy milk" [--due "2026-07-10 09:00"] [--note]')
+                return 1
+            it = todos.add(user, text, kind="note" if args.note else "todo",
+                           due=args.due or None)
+            print(f"Added [{it['id']}]: {it['text']}")
+        elif args.action == "done":
+            tid = (args.text[0] if args.text else "")
+            print("Marked done." if todos.complete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "rm":
+            tid = (args.text[0] if args.text else "")
+            print("Removed." if todos.delete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "clear":
+            n = todos.clear_done(user)
+            print(f"Cleared {n} done item(s).")
     elif args.command == "compare":
         from . import compare
         user = "cli"

@@ -19,6 +19,13 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **Notes / todos / reminders** (`olympus/todos.py`, `olympus todo`, web UI
+  "Your list" in the `📅 agenda` panel) — a small per-user checklist store:
+  notes (kept scraps), todos (tickable), and reminders (todos with a due time).
+  Open items and overdue reminders surface in the agenda; `list_todos` /
+  `add_todo` / `complete_todo` on Chronos are first-party and ungated (the
+  user's own data, no external side effect).
+
 - **Documents workspace** (`olympus/documents.py`, `olympus documents`, web UI
   `📄 docs` panel) — a per-user Markdown store the assistant can read and, with
   approval, write. The agent's `write_document` tool stages every save through

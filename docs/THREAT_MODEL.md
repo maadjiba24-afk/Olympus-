@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 73 tools in
+Olympus exposes a **finite, named** tool surface — the 76 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -115,6 +115,9 @@ surface. So the surface and its threat model can't drift apart.
 | `read_document` | Read one workspace document | first-party read | Read-only; per-user namespaced | None significant — the user's own content |
 | `search_documents` | Retrieve relevant passages from the user's own documents | first-party read | Read-only; per-user namespaced; first-party content (like memory, not wrapped) | None significant — the user's own documents; retrieval only |
 | `write_document` | Create/overwrite a workspace document | first-party (gated) | **Always staged for approval** (via prepare_action, never auto-executes) and reversible (`undo`); confined to the user's own document dir; size-capped | Silent/unwanted document writes — human approves every save; reversible; per-user isolated |
+| `list_todos` | List the user's notes/todos/reminders | first-party read | Read-only; per-user namespaced | None significant — the user's own list |
+| `add_todo` | Add a note/todo/reminder to the user's list | first-party (ungated) | Writes only to the user's own todos file; per-user namespaced; item/text-count capped; no external side effect | Unwanted list entries — the user's own data, trivially deletable; no actuator, nothing leaves the machine |
+| `complete_todo` | Mark one of the user's todos done | first-party (ungated) | Per-user namespaced; toggles a boolean on the user's own item | None significant — the user's own list |
 | `trigger_research` | Run a multi-round Deep Research pass and return a cited report | ingests untrusted | Every fetched page is wrapped untrusted during extraction and fetched through the SSRF/rebinding-pinned path; the tool is an INGESTION tool, so it's in-scope for capability separation (any run that can invoke it loses action tools) and its report is re-wrapped; rounds are clamped (≤6) so an agent can't spin an unbounded loop | Injection via researched pages / SSRF / cost runaway — content wrapped, actuators stripped, fetch gated, rounds bounded |
 
 ## The action spine (execution layer)
