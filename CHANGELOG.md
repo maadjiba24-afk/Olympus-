@@ -19,6 +19,13 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **Runtime health reporting** (`olympus/health.py`, `olympus health`,
+  `/api/health`) — a live "what's degraded right now" view of the moving parts
+  (models, memory, gateway channels, search, push, connections), each reported
+  **ok / degraded / down**. Distinct from `doctor` (setup readiness): `health`
+  is pollable, `olympus health` exits non-zero when anything is down, and an
+  absent optional piece is *degraded*, not a failure, so a minimal install still
+  reads healthy.
 - **ntfy push channel** (`olympus/ntfy.py`) — a lightweight publish-to-a-topic
   delivery target for scheduled jobs and proactive alerts, alongside
   Telegram/Discord/Slack/Signal. Configure with `NTFY_TOPIC` (+ optional

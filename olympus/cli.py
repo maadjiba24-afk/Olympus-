@@ -505,6 +505,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_todo.add_argument("--note", action="store_true",
                         help="add as a kept note instead of a tickable todo")
 
+    p_health = sub.add_parser(
+        "health",
+        help="runtime health of the moving parts (models, memory, gateway, "
+             "search, push, connections); exits non-zero if anything is down")
+    p_health.add_argument("--json", action="store_true", dest="as_json",
+                          help="emit the structured report as JSON")
+
     p_triage = sub.add_parser(
         "triage",
         help="triage the inbox into important/promotions/spam/other "
@@ -1314,6 +1321,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "clear":
             n = todos.clear_done(user)
             print(f"Cleared {n} done item(s).")
+    elif args.command == "health":
+        from . import health
+        rep = health.report()
+        if args.as_json:
+            import json as _json
+            print(_json.dumps(rep, indent=2))
+        else:
+            print(health.render(rep))
+        return 0 if rep["ok"] else 1
     elif args.command == "triage":
         from . import spamtriage, gmail
         if not gmail.configured():

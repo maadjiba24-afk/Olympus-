@@ -1711,6 +1711,9 @@ class Handler(BaseHTTPRequestHandler):
                            extra_headers={"Cache-Control": "no-store"})
         elif url.path == "/api/agenda":
             self._json(_agenda_view(user))
+        elif url.path == "/api/health":
+            from . import health
+            self._json(health.report())
         elif url.path == "/api/compare":
             from . import compare
             models = [compare.model_label(m)
