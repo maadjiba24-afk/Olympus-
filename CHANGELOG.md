@@ -19,6 +19,11 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **MCP server — workspace reads** (`olympus/mcp_server.py`, `olympus mcp-serve`)
+  — the existing MCP server now also exposes three **read-only** workspace tools
+  to any MCP client (Claude Desktop, IDEs, other agents): `olympus_search_documents`,
+  `olympus_list_todos`, and `olympus_recall_memory`, scoped to `OLYMPUS_MCP_USER`
+  (default the shared namespace). No write or actuator ever crosses the boundary.
 - **Email spam triage** (`olympus/spamtriage.py`, `triage_inbox` on Angelos,
   `olympus triage`) — a read-only heuristic classifier that sorts the inbox into
   important / promotions / spam / other with a reason for each. No model call
