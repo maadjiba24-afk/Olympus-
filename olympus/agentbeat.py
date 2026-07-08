@@ -157,9 +157,10 @@ def _deliver(beat: Beat, text: str) -> str:
     if beat.deliver_to:
         fns = {}
         try:
-            from . import discord, signal as signal_gw, slack, telegram
+            from . import discord, ntfy, signal as signal_gw, slack, telegram
             fns = {"telegram": telegram.notify, "discord": discord.notify,
-                   "slack": slack.notify, "signal": signal_gw.notify}
+                   "slack": slack.notify, "signal": signal_gw.notify,
+                   "ntfy": ntfy.notify}
         except Exception:
             pass
         fn = fns.get(beat.deliver_to)

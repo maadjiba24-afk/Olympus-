@@ -313,7 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="e.g. daily, hourly, 'every 6h'")
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
-                         help="deliver result to: telegram|discord|slack|signal")
+                         help="deliver result to: telegram|discord|slack|signal|ntfy")
     p_sched.add_argument("--on-exit", type=int, default=0, dest="on_exit_pid",
                          metavar="PID",
                          help="event-driven: run once when this process exits "

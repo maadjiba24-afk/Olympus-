@@ -104,6 +104,7 @@ def _optional_checks() -> list[Check]:
         or os.environ.get("DISCORD_PUBLIC_KEY"),
         "slack": os.environ.get("SLACK_BOT_TOKEN"),
         "signal": os.environ.get("SIGNAL_CLI_REST_URL"),
+        "ntfy": os.environ.get("NTFY_TOPIC"),
     }
     live = [n for n, v in gateways.items() if v]
     out.append(Check("gateways", OK if live else WARN,

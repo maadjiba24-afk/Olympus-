@@ -260,6 +260,9 @@ def _deliver(job: Job, answer: str) -> None:
         elif target == "signal":
             from . import signal as signal_gw
             signal_gw.notify(msg)
+        elif target == "ntfy":
+            from . import ntfy
+            ntfy.notify(msg, title=f"Scheduled — {job.name}")
     except Exception:
         pass
 

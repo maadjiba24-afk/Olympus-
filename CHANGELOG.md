@@ -19,6 +19,13 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **ntfy push channel** (`olympus/ntfy.py`) — a lightweight publish-to-a-topic
+  delivery target for scheduled jobs and proactive alerts, alongside
+  Telegram/Discord/Slack/Signal. Configure with `NTFY_TOPIC` (+ optional
+  `NTFY_SERVER` for self-hosted and `NTFY_TOKEN` for a protected topic); wired
+  into the scheduler (`--to ntfy`), the gateway fan-out, and the heartbeat, and
+  reported by `olympus doctor`. Best-effort — a push failure never breaks the
+  job that produced the result.
 - **MCP server — workspace reads** (`olympus/mcp_server.py`, `olympus mcp-serve`)
   — the existing MCP server now also exposes three **read-only** workspace tools
   to any MCP client (Claude Desktop, IDEs, other agents): `olympus_search_documents`,
