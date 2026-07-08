@@ -486,8 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
         "gallery", aliases=["images"],
         help="images generated into the workspace: list | delete <name>")
     p_gal.add_argument("action", nargs="?", default="list",
-                       choices=["list", "delete"])
-    p_gal.add_argument("name", nargs="?", help="image file name (delete)")
+                       choices=["list", "delete", "edit"])
+    p_gal.add_argument("name", nargs="?", help="image file name (delete/edit)")
+    p_gal.add_argument("prompt", nargs="*", help="edit prompt (edit)")
 
     sub.add_parser(
         "agenda",
@@ -1279,6 +1280,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Deleted '{args.name}'." if gallery.delete_image(args.name)
                   else f"No image named '{args.name}'.")
+        elif args.action == "edit":
+            prompt = " ".join(args.prompt).strip()
+            if not args.name or not prompt:
+                print('Usage: olympus gallery edit <name> "<edit prompt>"')
+                return 1
+            from . import media
+            print(media.edit_image(prompt, args.name))
     elif args.command == "agenda":
         from . import scheduler
         print(scheduler.summary())

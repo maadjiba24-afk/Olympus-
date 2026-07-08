@@ -1413,6 +1413,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "complete_todo": lambda item_id: _complete_todo(item_id),
     "trigger_research": lambda question, rounds=None: _trigger_research(
         question, rounds),
+    "edit_image": lambda prompt, source, filename="": _media().edit_image(
+        prompt, source, filename),
     "generate_image": lambda prompt, filename="": _media().generate_image(
         prompt, filename),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
@@ -1867,6 +1869,28 @@ GENERATE_IMAGE = {
                          "description": "Optional output filename (.png)"},
         },
         "required": ["prompt"],
+    },
+}
+
+EDIT_IMAGE = {
+    "name": "edit_image",
+    "description": (
+        "Edit an existing workspace image by prompt (AI image edit) and save "
+        "the result as a NEW workspace image — the original is left untouched. "
+        "Use to restyle, extend, or alter an image you already generated. "
+        "Returns the saved filename."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string",
+                       "description": "The change to make"},
+            "source": {"type": "string",
+                       "description": "Workspace image name to edit"},
+            "filename": {"type": "string",
+                         "description": "Optional output filename (.png)"},
+        },
+        "required": ["prompt", "source"],
     },
 }
 
@@ -2415,6 +2439,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,
     "generate_image": GENERATE_IMAGE,
+    "edit_image": EDIT_IMAGE,
     "text_to_speech": TEXT_TO_SPEECH,
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,

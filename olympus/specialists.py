@@ -171,7 +171,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "audience research, campaigns, SEO. Drafts and saves "
                         "documents to the user's workspace.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech",
+            extra_tools=("generate_image", "edit_image", "text_to_speech",
                          "transcribe_audio", "browse_page", "analyze_image",
                          "list_documents", "read_document", "search_documents",
                          "write_document"),
@@ -199,7 +199,8 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
-            extra_tools=("generate_image", "browse_page", "analyze_image"),
+            extra_tools=("generate_image", "edit_image", "browse_page",
+                         "analyze_image"),
             # Social copy should stay tight — guard against a wall-of-text reply.
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_chars=8000),

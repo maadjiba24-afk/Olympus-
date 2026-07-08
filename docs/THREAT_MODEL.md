@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 77 tools in
+Olympus exposes a **finite, named** tool surface — the 78 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -92,6 +92,7 @@ surface. So the surface and its threat model can't drift apart.
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |
 | `generate_image` | Generate an image into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn / disallowed content — key-gated, confined output |
+| `edit_image` | AI-edit an existing workspace image, saving the result as a NEW file | external actuator | Reads the source path-confined via `_confine` (image types only, size-capped) and writes only to the confined workspace; the source is never overwritten; needs a media API key | Cost burn / disallowed content — key-gated, confined I/O, non-destructive (original preserved) |
 | `text_to_speech` | Synthesize audio into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn — key-gated, confined output |
 | `transcribe_audio` | Transcribe a workspace audio file to text | ingestion | Reads only from the confined workspace; key-gated; transcript is wrapped as untrusted content | Injection via spoken/recorded content — transcript is data, capability separation applies |
 | `prepare_action` | Stage an action for approval | first-party (gated) | **Never executes** — human approval required | Self-authorizing actions — execution is human-gated |

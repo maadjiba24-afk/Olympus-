@@ -1182,9 +1182,28 @@ async function renderGallery() {
     const sz = document.createElement('span');
     sz.textContent = Math.max(1, Math.round(im.bytes / 1024)) + 'KB';
     meta.append(nm, sz);
-    card.append(img, meta); grid.appendChild(card);
+    const actions = document.createElement('div'); actions.className = 'gm';
+    const edit = document.createElement('a'); edit.textContent = 'Edit';
+    edit.style.cursor = 'pointer'; edit.style.color = '#d9b44a';
+    edit.onclick = () => editImage(im.name);
+    const del = document.createElement('a'); del.textContent = 'Delete';
+    del.style.cursor = 'pointer'; del.style.color = '#8b93a0';
+    del.onclick = () => galPost({op: 'delete', name: im.name});
+    actions.append(edit, del);
+    card.append(img, meta, actions); grid.appendChild(card);
   });
   galEl.appendChild(grid);
+}
+async function galPost(payload) {
+  const r = await (await fetch('/api/gallery', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))})).json();
+  if (r.message && !r.ok) alert(r.message);
+  renderGallery();
+}
+function editImage(name) {
+  const prompt = window.prompt('Describe the edit for "' + name + '":');
+  if (!prompt) return;
+  galPost({op: 'edit', name: name, prompt: prompt});
 }
 
 // --- agenda (scheduled tasks + upcoming calendar) ---
@@ -1787,8 +1806,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/documents", "/api/compare",
-                        "/api/todos", "/api/register", "/api/login",
-                        "/api/logout", "/api/report", "/api/admin/act"):
+                        "/api/todos", "/api/gallery", "/api/register",
+                        "/api/login", "/api/logout", "/api/report",
+                        "/api/admin/act"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -1931,6 +1951,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "comparison not found"}, 404)
                 else:
                     self._json(out)
+            else:
+                self._json({"error": "unknown op"}, 400)
+            return
+
+        if path == "/api/gallery":
+            from . import gallery
+            op = str(payload.get("op", ""))
+            if op == "delete":
+                ok = gallery.delete_image(str(payload.get("name", "")))
+                self._json({"ok": ok, "images": gallery.list_images()})
+            elif op == "edit":
+                from . import media
+                msg = media.edit_image(str(payload.get("prompt", "")),
+                                       str(payload.get("name", "")))
+                self._json({"ok": msg.startswith("Edited"), "message": msg,
+                            "images": gallery.list_images()})
             else:
                 self._json({"error": "unknown op"}, 400)
             return

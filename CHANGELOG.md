@@ -19,6 +19,13 @@ carries a migration note here.
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
+- **Image editing** (`media.edit_image`, `edit_image` on Peitho/Iris,
+  `olympus gallery edit`, an Edit button in the `🖼 gallery` panel) — AI-edit an
+  existing workspace image by prompt, saving the result as a **new** file (the
+  original is never overwritten). Reads the source path-confined (image types
+  only, size-capped) and writes only to the confined workspace; degrades
+  gracefully without a media key. Uses a dependency-free multipart POST to the
+  images-edit endpoint — no new heavy image library.
 - **Runtime health reporting** (`olympus/health.py`, `olympus health`,
   `/api/health`) — a live "what's degraded right now" view of the moving parts
   (models, memory, gateway channels, search, push, connections), each reported

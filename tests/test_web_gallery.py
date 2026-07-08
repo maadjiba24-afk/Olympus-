@@ -75,3 +75,39 @@ def test_serve_rejects_traversal(server):
         assert False, "expected 404"
     except urllib.error.HTTPError as e:
         assert e.code == 404
+
+
+def _post(url, payload):
+    req = urllib.request.Request(
+        url + "/api/gallery", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    return json.loads(urllib.request.urlopen(req).read())
+
+
+def test_delete_via_post(server):
+    url, ws = server
+    (ws / "gone.png").write_bytes(_PNG)
+    out = _post(url, {"session": "s1", "op": "delete", "name": "gone.png"})
+    assert out["ok"] is True and out["images"] == []
+    assert not (ws / "gone.png").exists()
+
+
+def test_edit_via_post(server, monkeypatch):
+    from olympus import media
+    url, ws = server
+    (ws / "cat.png").write_bytes(_PNG)
+    monkeypatch.setattr(media, "edit_image",
+                        lambda prompt, name, filename="":
+                        "Edited image saved to workspace: cat-edited.png")
+    out = _post(url, {"session": "s1", "op": "edit", "name": "cat.png",
+                      "prompt": "make it blue"})
+    assert out["ok"] is True and "cat-edited.png" in out["message"]
+
+
+def test_unknown_op_is_400(server):
+    url, _ = server
+    try:
+        _post(url, {"session": "s1", "op": "frobnicate"})
+        assert False, "expected 400"
+    except urllib.error.HTTPError as e:
+        assert e.code == 400

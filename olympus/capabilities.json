@@ -144,7 +144,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 77,
+    "count": 78,
     "names": [
       "add_todo",
       "analyze_image",
@@ -167,6 +167,7 @@
       "create_skill",
       "current_time",
       "edit_file",
+      "edit_image",
       "gate_prompt",
       "gate_skills",
       "generate_benchmark",

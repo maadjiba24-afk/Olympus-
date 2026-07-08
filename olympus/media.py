@@ -80,6 +80,67 @@ def generate_image(prompt: str, filename: str = "") -> str:
     return f"Image saved to workspace: {name}"
 
 
+def _post_multipart(path: str, fields: dict, files: list[tuple],
+                    timeout: int = 180) -> bytes:
+    """POST multipart/form-data (for the images/edits endpoint, which takes a
+    file upload). `files` is [(field, filename, content_type, bytes)]. urllib
+    only — no deps."""
+    boundary = "----olympus" + base64.urlsafe_b64encode(
+        os.urandom(9)).decode().rstrip("=")
+    crlf = b"\r\n"
+    body = bytearray()
+    for k, v in fields.items():
+        body += b"--" + boundary.encode() + crlf
+        body += f'Content-Disposition: form-data; name="{k}"'.encode() + crlf + crlf
+        body += str(v).encode() + crlf
+    for field, fname, ctype, blob in files:
+        body += b"--" + boundary.encode() + crlf
+        body += (f'Content-Disposition: form-data; name="{field}"; '
+                 f'filename="{fname}"').encode() + crlf
+        body += f"Content-Type: {ctype}".encode() + crlf + crlf
+        body += blob + crlf
+    body += b"--" + boundary.encode() + b"--" + crlf
+    req = urllib.request.Request(
+        f"{_base()}{path}", data=bytes(body),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Authorization": f"Bearer {_api_key()}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def edit_image(prompt: str, source: str, filename: str = "") -> str:
+    """Edit an existing workspace image by prompt (AI image edit) and save the
+    result as a new workspace image. `source` is a workspace image name; the
+    original is left untouched. Returns a status string; degrades gracefully
+    without a key or a valid source."""
+    if not _api_key():
+        return ("Error: image editing needs an API key "
+                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
+    try:
+        src = sandbox._confine(source)
+    except ValueError:
+        return f"Error: '{source}' is outside the workspace."
+    ext = src.suffix.lower()
+    if not src.is_file() or ext not in _IMAGE_EXTS:
+        return f"Error: no workspace image named '{source}'."
+    try:
+        blob = src.read_bytes()
+        if len(blob) > _MAX_IMAGE_BYTES:
+            return f"Error: '{source}' is too large to edit."
+        raw = _post_multipart("/images/edits", {
+            "model": IMAGE_MODEL, "prompt": prompt, "n": 1,
+        }, [("image", src.name, _IMAGE_EXTS[ext], blob)])
+        data = json.loads(raw)
+        b64 = data["data"][0]["b64_json"]
+    except Exception as err:
+        return f"Error editing image: {str(err)[:200]}"
+    name = filename or f"{src.stem}-edited-{int(time.time())}.png"
+    res = sandbox.write_file(name, "")
+    with open(res["path"], "wb") as f:
+        f.write(base64.b64decode(b64))
+    return f"Edited image saved to workspace: {name}"
+
+
 def _post_multipart(path: str, fields: dict[str, str],
                     file_field: str, filename: str, blob: bytes,
                     timeout: int = 120) -> bytes:
