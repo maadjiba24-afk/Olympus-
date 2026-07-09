@@ -43,6 +43,13 @@ def test_bad_due_is_undated_not_rejected(user):
     assert it["due"] is None and it["text"] == "someday"
 
 
+def test_bool_due_is_not_an_epoch(user):
+    # JSON `true` arrives as Python bool (an int subclass) — must NOT become
+    # epoch 1.0 (1970). Treat it as undated.
+    assert todos.add(user, "x", due=True)["due"] is None
+    assert todos.add(user, "y", due=False)["due"] is None
+
+
 # --- complete / delete / clear ---------------------------------------------
 
 def test_complete(user):
@@ -91,6 +98,21 @@ def test_done_reminder_is_not_due(user):
     it = todos.add(user, "past", due=100.0)
     todos.complete(user, it["id"])
     assert todos.due_items(user, now=1000.0) == []
+
+
+def test_malformed_store_is_normalized_not_crashing(user):
+    # a hand-edited/corrupt file: a non-dict, an item with no id, and one
+    # missing text/kind — must not crash listing/complete/delete.
+    import json
+    todos._path(user).write_text(json.dumps([
+        "garbage",
+        {"text": "no id here"},
+        {"id": "ok1"},                       # missing text/kind/done
+    ]), encoding="utf-8")
+    items = todos.listing(user)
+    assert [it["id"] for it in items] == ["ok1"]
+    assert items[0]["text"] == "" and items[0]["kind"] == "todo"
+    assert todos.complete(user, "ok1") is True     # addressable, no KeyError
 
 
 def test_render_list_empty(user):

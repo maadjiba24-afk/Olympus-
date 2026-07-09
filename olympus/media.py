@@ -80,11 +80,13 @@ def generate_image(prompt: str, filename: str = "") -> str:
     return f"Image saved to workspace: {name}"
 
 
-def _post_multipart(path: str, fields: dict, files: list[tuple],
-                    timeout: int = 180) -> bytes:
-    """POST multipart/form-data (for the images/edits endpoint, which takes a
-    file upload). `files` is [(field, filename, content_type, bytes)]. urllib
-    only — no deps."""
+def _post_multipart_files(path: str, fields: dict, files: list[tuple],
+                          timeout: int = 180) -> bytes:
+    """POST multipart/form-data with one or more typed file parts (for the
+    images/edits endpoint). `files` is [(field, filename, content_type, bytes)].
+    Distinct from `_post_multipart` (the single-octet-stream audio uploader) —
+    they must not share a name or the later definition would shadow this one.
+    urllib only — no deps."""
     boundary = "----olympus" + base64.urlsafe_b64encode(
         os.urandom(9)).decode().rstrip("=")
     crlf = b"\r\n"
@@ -127,7 +129,7 @@ def edit_image(prompt: str, source: str, filename: str = "") -> str:
         blob = src.read_bytes()
         if len(blob) > _MAX_IMAGE_BYTES:
             return f"Error: '{source}' is too large to edit."
-        raw = _post_multipart("/images/edits", {
+        raw = _post_multipart_files("/images/edits", {
             "model": IMAGE_MODEL, "prompt": prompt, "n": 1,
         }, [("image", src.name, _IMAGE_EXTS[ext], blob)])
         data = json.loads(raw)

@@ -53,6 +53,13 @@ def test_other_when_no_signal():
     assert v["category"] == "other"
 
 
+def test_none_subject_or_snippet_does_not_leak_literal_none():
+    # a direct caller passing None must not put the string "None" in the scored
+    # blob (would spuriously match a future 'none' pattern).
+    v = spamtriage.classify("x@y.com", None, None)
+    assert v["category"] == "other"       # no signal, no crash
+
+
 def test_shouty_caps_subject_boosts_spam():
     v = spamtriage.classify("x@y.com", "FREE MONEY NOW!!!", "click here")
     assert v["category"] == "spam"

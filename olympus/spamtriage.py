@@ -52,7 +52,7 @@ def _score(text: str, patterns: list[str]) -> int:
 def classify(sender: str, subject: str, snippet: str) -> dict:
     """Return {category, reason} for one message."""
     subj = subject or ""
-    blob = f"{subject}\n{snippet}"
+    blob = f"{subj}\n{snippet or ''}"
     sender_l = (sender or "").lower()
 
     spam = _score(blob, _SPAM)

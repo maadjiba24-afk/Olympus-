@@ -79,6 +79,16 @@ def test_notify_unicode_title_does_not_crash(monkeypatch):
     assert sent["data"] == "done ✅".encode("utf-8")   # body keeps unicode
 
 
+def test_notify_truncation_never_splits_a_multibyte_char(monkeypatch):
+    monkeypatch.setenv("NTFY_TOPIC", "alerts")
+    monkeypatch.setattr(ntfy, "_MAX_BYTES", 10)      # force a mid-char cut
+    sent = _capture(monkeypatch)
+    # each emoji is 4 UTF-8 bytes; a raw 10-byte slice would split the 3rd one
+    ntfy.notify("🚀🚀🚀🚀")
+    # the body must still be valid UTF-8 (no partial trailing bytes)
+    assert sent["data"].decode("utf-8") == "🚀🚀"       # cleanly truncated
+
+
 def test_notify_returns_false_on_network_error(monkeypatch):
     monkeypatch.setenv("NTFY_TOPIC", "alerts")
 

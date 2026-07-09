@@ -63,6 +63,16 @@ def test_no_model_is_down(env, monkeypatch):
     assert rep["ok"] is False and "models" in rep["down"]
 
 
+def test_memory_probe_is_unique_and_cleans_up(env):
+    # concurrent /api/health polls must not collide on a shared probe filename,
+    # and a probe must not leave a leftover file behind.
+    import glob
+    for _ in range(5):
+        assert health._memory()["status"] == "ok"
+    leftovers = glob.glob(str(env / ".health_probe*"))
+    assert leftovers == []
+
+
 def test_unwritable_memory_is_down(env, monkeypatch):
     class Bad:
         def mkdir(self, *a, **k): raise OSError("read-only fs")
