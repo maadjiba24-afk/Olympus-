@@ -45,7 +45,11 @@ def notify(text: str, title: str = "Olympus") -> bool:
     if not topic:
         return False
     from . import secretref
-    body = (text or "").encode("utf-8")[:_MAX_BYTES]
+    # Truncate on a character boundary: a raw byte slice can split a multibyte
+    # UTF-8 sequence and send invalid bytes. `ignore` on decode drops any
+    # partial trailing char cleanly.
+    body = (text or "").encode("utf-8")[:_MAX_BYTES].decode("utf-8", "ignore") \
+        .encode("utf-8")
     url = f"{_server()}/{topic}"
     headers = {"Content-Type": "text/plain; charset=utf-8"}
     if title:

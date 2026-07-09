@@ -43,6 +43,13 @@ def test_bad_due_is_undated_not_rejected(user):
     assert it["due"] is None and it["text"] == "someday"
 
 
+def test_bool_due_is_not_an_epoch(user):
+    # JSON `true` arrives as Python bool (an int subclass) — must NOT become
+    # epoch 1.0 (1970). Treat it as undated.
+    assert todos.add(user, "x", due=True)["due"] is None
+    assert todos.add(user, "y", due=False)["due"] is None
+
+
 # --- complete / delete / clear ---------------------------------------------
 
 def test_complete(user):

@@ -54,8 +54,8 @@ def _save(user: str, items: list[dict]) -> None:
 def _parse_due(due: str | float | None) -> float | None:
     """Accept an epoch number or a forgiving date/datetime string; None if
     unparseable (the item is simply un-dated rather than rejected)."""
-    if due is None or due == "":
-        return None
+    if due is None or due == "" or isinstance(due, bool):
+        return None                    # bool is an int subclass — never a time
     if isinstance(due, (int, float)):
         return float(due)
     s = str(due).strip()

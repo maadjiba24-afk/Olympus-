@@ -41,13 +41,20 @@ def _models() -> dict:
 
 
 def _memory() -> dict:
+    import os
+    import threading
     from . import config
     try:
         d = config.MEMORY_DIR
         d.mkdir(parents=True, exist_ok=True)
-        probe = d / ".health_probe"
+        # Unique per-probe filename: /api/health can be polled concurrently, and
+        # a shared name would race (one probe unlinks while another writes).
+        probe = d / f".health_probe.{os.getpid()}.{threading.get_ident()}"
         probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
+        try:
+            probe.unlink()
+        except OSError:
+            pass                       # write proved writability; cleanup is best-effort
         return {"status": OK, "detail": f"writable at {d}"}
     except Exception as err:
         return {"status": DOWN, "detail": f"not writable: {str(err)[:120]}"}
