@@ -100,6 +100,21 @@ def test_done_reminder_is_not_due(user):
     assert todos.due_items(user, now=1000.0) == []
 
 
+def test_malformed_store_is_normalized_not_crashing(user):
+    # a hand-edited/corrupt file: a non-dict, an item with no id, and one
+    # missing text/kind — must not crash listing/complete/delete.
+    import json
+    todos._path(user).write_text(json.dumps([
+        "garbage",
+        {"text": "no id here"},
+        {"id": "ok1"},                       # missing text/kind/done
+    ]), encoding="utf-8")
+    items = todos.listing(user)
+    assert [it["id"] for it in items] == ["ok1"]
+    assert items[0]["text"] == "" and items[0]["kind"] == "todo"
+    assert todos.complete(user, "ok1") is True     # addressable, no KeyError
+
+
 def test_render_list_empty(user):
     assert "Nothing on your list" in todos.render_list(user)
 

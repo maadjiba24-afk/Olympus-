@@ -40,9 +40,21 @@ def _load(user: str) -> list[dict]:
         return []
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
     except (json.JSONDecodeError, OSError):
         return []
+    if not isinstance(data, list):
+        return []
+    # Normalize every item so downstream code (complete/delete/agenda) can index
+    # keys directly even if the on-disk file was hand-edited or truncated.
+    out = []
+    for it in data:
+        if not isinstance(it, dict) or "id" not in it:
+            continue                    # an item with no id can't be addressed
+        out.append({"id": str(it["id"]), "text": str(it.get("text", "")),
+                    "kind": "note" if it.get("kind") == "note" else "todo",
+                    "done": bool(it.get("done", False)),
+                    "due": it.get("due"), "created": it.get("created", 0)})
+    return out
 
 
 def _save(user: str, items: list[dict]) -> None:
