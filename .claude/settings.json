@@ -1,0 +1,5 @@
+{
+  "env": {
+    "OLYMPUS_MODELS": "[{\"provider\":\"anthropic\",\"model\":\"claude-sonnet-5\",\"api_key\":\"env:ANTHROPIC_API_KEY\"}]"
+  }
+}
