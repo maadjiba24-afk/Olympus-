@@ -15,6 +15,20 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Olympus assumes no model (vendor-neutral by default)
+
+Olympus no longer ships a baked-in default model. Previously an Anthropic
+setup with no `OLYMPUS_MODEL` silently ran `claude-opus-4-8`, and the replay
+gate silently used `claude-sonnet-4-6`; both assumptions are gone. The user
+chooses a model explicitly — `olympus setup` (which lists your key's real
+models), `OLYMPUS_MODEL`, or per-request BYOK — and a missing choice now fails
+fast with an actionable message (`config.require_model`), is flagged by
+`olympus doctor`, and reads as `models: down` in `olympus health`.
+**Migration:** if you relied on the implicit default, set it explicitly once:
+`olympus config set OLYMPUS_MODEL claude-opus-4-8` (or any model you prefer).
+`OLYMPUS_GATE_MODEL` is now purely optional: unset, the replay gate runs on
+your configured model.
+
 ### Added — workspace, operator, and gateway (Odysseus/Hermes/OpenClaw study)
 
 A three-phase build extending Olympus toward the archetypes it was closest to.

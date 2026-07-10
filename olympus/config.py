@@ -28,12 +28,12 @@ def use_active_settings(settings: "Settings"):
 def clear_active_settings(token) -> None:
     _ACTIVE_SETTINGS.reset(token)
 
-# Default model for the Anthropic backend. Opus 4.8 supports adaptive
-# thinking, effort control, and the server-side web_search/web_fetch tools.
+# Olympus assumes NO model: the user chooses one explicitly (OLYMPUS_MODEL,
+# `olympus setup`, or per-request BYOK) — there is no baked-in vendor default.
 # `MODEL` is the import-time snapshot; `default_model()` reads OLYMPUS_MODEL
 # LIVE — use it at call sites, because firstrun.load_env_file() loads the saved
 # config.env AFTER this module is imported, so the snapshot can be stale.
-MODEL = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+MODEL = os.environ.get("OLYMPUS_MODEL", "")
 
 
 def _split_keys(raw: str) -> tuple[str, ...]:
@@ -57,7 +57,22 @@ def mask_key(key: str) -> str:
 
 
 def default_model() -> str:
-    return os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+    """The user's explicitly chosen model (OLYMPUS_MODEL), or empty. Olympus
+    never assumes a model on the user's behalf."""
+    return os.environ.get("OLYMPUS_MODEL", "")
+
+
+def require_model(settings: "Settings") -> str:
+    """The model a request must run on — the settings' own, else the live
+    OLYMPUS_MODEL. Raises a clear, actionable error instead of letting an
+    empty model reach a provider API as a cryptic 400."""
+    model = settings.model or default_model()
+    if not model:
+        raise ValueError(
+            "No model configured — Olympus doesn't assume one. Set "
+            "OLYMPUS_MODEL (e.g. `olympus config set OLYMPUS_MODEL <id>`) or "
+            "run `olympus setup` to choose your provider and model.")
+    return model
 
 
 @dataclass(frozen=True)
@@ -73,7 +88,7 @@ class Settings:
     """
 
     provider: str = "anthropic"
-    model: str = "claude-opus-4-8"
+    model: str = ""                    # no baked-in model — the user chooses
     api_key: str | None = None
     base_url: str | None = None
     # Extra credentials for the same provider. When the active key hits a rate
@@ -98,11 +113,13 @@ class Settings:
         # (env:/file:/vault:/keychain:) resolved here, at the choke point.
         from . import secretref
         provider = os.environ.get("OLYMPUS_PROVIDER", "anthropic").lower()
+        # No provider gets an assumed model — the user chooses via
+        # OLYMPUS_MODEL / `olympus setup` (claude-code delegates to the CLI's
+        # own login default, which is that tool's choice, not ours).
+        model = os.environ.get("OLYMPUS_MODEL", "")
         if provider == "anthropic":
-            model = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
             key = secretref.getenv("ANTHROPIC_API_KEY") or None
         else:
-            model = os.environ.get("OLYMPUS_MODEL", "")
             key = (secretref.getenv("OLYMPUS_API_KEY")
                    or secretref.getenv("OPENAI_API_KEY") or None)
         # Outbound provider-key rotation pool. NOTE: this is deliberately a
@@ -137,8 +154,9 @@ class Settings:
         # user-supplied host. Treat both the same for credential carry-over.
         endpoint_switch = merged["base_url"] != self.base_url
         if provider_switch and "model" not in clean:
-            merged["model"] = ("claude-opus-4-8"
-                               if merged["provider"] == "anthropic" else "")
+            # A model belongs to its provider — never carry one across a
+            # switch, and never invent one (validate() asks the caller).
+            merged["model"] = ""
         if (provider_switch or endpoint_switch) and "api_key" not in clean:
             # Never carry the inherited key to a different provider or endpoint —
             # that would leak the operator's credential to the new host.
@@ -160,8 +178,18 @@ class Settings:
         if self.provider not in ("anthropic", "openai", "claude-code", "moa"):
             return (f"Unknown provider '{self.provider}' "
                     "(use anthropic, openai, claude-code, or moa).")
+        # Olympus never assumes a model. OpenAI-compatible settings must name
+        # one explicitly (an env OLYMPUS_MODEL belongs to the primary provider
+        # and could be a different vendor's ID). Anthropic settings may fall
+        # back to a live OLYMPUS_MODEL — that's the request path's actual
+        # behavior (require_model) — but with neither, fail clearly.
+        # (claude-code delegates to that CLI's own login default; moa rides
+        # its members' models.)
         if self.provider == "openai" and not self.model:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
+        if self.provider == "anthropic" and not (self.model or default_model()):
+            return ("No model chosen — Olympus doesn't assume one. Set "
+                    "OLYMPUS_MODEL or run `olympus setup`.")
         return None
 
     def usable(self) -> bool:
@@ -905,8 +933,7 @@ def free_chats() -> int:
     except ValueError:
         return 0
 
-# The gate proves *replay determinism*, which is model-independent — so it runs
-# on a cheaper model by default (≈5x less than Opus) to keep the weekly CI /
-# heartbeat tripwire affordable. Override for a full-fidelity run on your main
-# model: OLYMPUS_GATE_MODEL=claude-opus-4-8.
-GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "claude-sonnet-4-6")
+# The gate proves *replay determinism*, which is model-independent — set
+# OLYMPUS_GATE_MODEL to run it on a cheaper model than your main one. Unset,
+# the gate uses your configured model unchanged: Olympus assumes no model.
+GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "")

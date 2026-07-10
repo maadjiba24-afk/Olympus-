@@ -34,8 +34,16 @@ def _provider_checks() -> list[Check]:
     pool = config.ModelPool.from_env()
     primary = pool.primary()
     if firstrun.configured():
-        model = primary.model or "(provider default)"
-        out.append(Check("provider", OK, f"{primary.provider} / {model}"))
+        model = primary.model or config.default_model()
+        if primary.provider in ("anthropic", "openai") and not model:
+            out.append(Check("provider", FAIL,
+                             f"{primary.provider}: no model chosen — Olympus "
+                             "doesn't assume one; run `olympus setup` or set "
+                             "OLYMPUS_MODEL"))
+        else:
+            out.append(Check("provider", OK,
+                             f"{primary.provider} / "
+                             f"{model or '(tool login default)'}"))
     else:
         out.append(Check("provider", FAIL,
                          "no key/endpoint — run `olympus setup`"))

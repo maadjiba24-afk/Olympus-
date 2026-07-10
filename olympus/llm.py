@@ -70,7 +70,7 @@ def server_web_search(settings: config.Settings, query: str,
         return []
     try:
         resp = client(settings).messages.create(
-            model=settings.model or config.default_model(), max_tokens=1024,
+            model=config.require_model(settings), max_tokens=1024,
             tools=[{"type": "web_search_20250305", "name": "web_search",
                     "max_uses": 3}],
             messages=[{"role": "user",
@@ -122,7 +122,7 @@ def server_web_fetch(settings: config.Settings, url: str,
         return ""
     try:
         resp = client(settings).messages.create(
-            model=settings.model or config.default_model(), max_tokens=4096,
+            model=config.require_model(settings), max_tokens=4096,
             tools=[{"type": "web_fetch_20250910", "name": "web_fetch",
                     "max_uses": 1}],
             extra_headers={"anthropic-beta": "web-fetch-2025-09-10"},
@@ -203,7 +203,7 @@ def complete(
     """One streamed Messages API call; returns the final Message."""
     settings = settings or config.Settings.from_env()
     params: dict[str, Any] = {
-        "model": settings.model or config.default_model(),
+        "model": config.require_model(settings),
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [
             {
@@ -331,7 +331,7 @@ def stream_text(
     """Yield text deltas of a streamed Anthropic completion (no tools)."""
     settings = settings or config.Settings.from_env()
     params: dict[str, Any] = {
-        "model": settings.model or config.default_model(),
+        "model": config.require_model(settings),
         "max_tokens": max_tokens or config.MAX_TOKENS,
         "system": [{"type": "text", "text": system,
                     "cache_control": _cache_control()}],
