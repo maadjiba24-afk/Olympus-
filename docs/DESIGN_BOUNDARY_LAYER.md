@@ -7,8 +7,7 @@ actions spine (`actions.py`), the signed decision log (`trace.py`),
 `security.py`, and — conceptually — Document 1's `contracts.py`.
 **Companion doc:** `DESIGN_OUTPUT_CONTRACTS.md` (Document 1 — build that first).
 
-> This document is grounded in a Claude Code audit of the real repository
-> (branch `claude/olympus-audit-contracts-boundaries-qmc47r`). Every line
+> This document is grounded in an audit of the real repository. Every line
 > reference below was verified against source, not the README. Where the README
 > and the code disagreed, the code wins and the disagreement is flagged.
 
