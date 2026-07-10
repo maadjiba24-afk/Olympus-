@@ -68,6 +68,7 @@ def test_conversation_trigger(monkeypatch):
                         lambda settings=None: (ran.set() or "done"))
     monkeypatch.setattr(config, "AUDIT_EVERY_CHATS", 2)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8")   # chosen, not assumed
     orchestrator.note_conversation()
     assert not ran.is_set()
     orchestrator.note_conversation()

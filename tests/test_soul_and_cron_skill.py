@@ -7,6 +7,7 @@ from olympus import scheduler, skillpack, skills, soul
 
 def test_soul_block_empty_without_file(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_HOME", str(tmp_path))
+    monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8")   # chosen, not assumed
     assert soul.read() == ""
     assert soul.block() == ""
 
