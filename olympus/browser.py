@@ -224,6 +224,8 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
+                if params.get("returnByValue") is False:   # node handle wanted
+                    return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
                 if "__olySel" in expr:            # durable-selector lookup
                     value: Any = sel or ""        # offline: echo the matched css
                 elif "innerText" in expr:         # selector read → text or ''
@@ -277,7 +279,7 @@ class _RealTransport:
     minimal so a real attach works when configured.
     """
 
-    def __init__(self, ws_url: str) -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
@@ -288,6 +290,35 @@ class _RealTransport:
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        # The DevTools HTTP base (if we know it), so reattach() can resolve
+        # another page target's socket URL and switch which tab we drive.
+        self._http_base = (http_base or "").rstrip("/")
+
+    def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
+        """Re-bind this transport to a different page target's WebSocket, so the
+        session actually drives the tab it switched to (not just activates it).
+        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        if not self._http_base:
+            return False
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self._http_base + "/json", timeout=10) as r:
+                targets = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return False
+        ws = next((t.get("webSocketDebuggerUrl") for t in targets
+                   if t.get("id") == target_id and t.get("webSocketDebuggerUrl")),
+                  "")
+        if not ws:
+            return False
+        from websockets.sync.client import connect  # type: ignore
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._id = 0
+        return True
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         self._id += 1
@@ -441,7 +472,10 @@ def _build_transport() -> Transport:
             in ("1", "true", "yes", "on")
         endpoint = launch_local(headless=headless)
     if endpoint:
-        return _RealTransport(_resolve_page_ws(endpoint))
+        # Keep the DevTools HTTP base (when the endpoint is one) so the transport
+        # can reattach to another tab on switch_tab().
+        http_base = endpoint if endpoint.startswith(("http://", "https://")) else ""
+        return _RealTransport(_resolve_page_ws(endpoint), http_base=http_base)
     raise BrowserUnavailable(
         "no browser attached — set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
         "open one, or OLYMPUS_BROWSER_CDP_URL to attach to your own.")
@@ -588,7 +622,13 @@ class BrowserSession:
         tabs = self.list_tabs()
         if not (0 <= index < len(tabs)):
             return False
-        self._call("Target.activateTarget", targetId=tabs[index]["id"])
+        target_id = tabs[index]["id"]
+        self._call("Target.activateTarget", targetId=target_id)
+        # Actually drive the switched-to tab: re-bind the transport to its socket
+        # when it supports it (real browser). Offline the fake reflects the URL.
+        reattach = getattr(self._t, "reattach", None)
+        if reattach is not None:
+            reattach(target_id)
         self.url = tabs[index]["url"]
         return True
 
@@ -603,13 +643,14 @@ class BrowserSession:
             return f"Error: {err}"
         if not target.is_file():
             return f"Error: no such file in workspace: {path}"
-        if not self.exists(selector):
+        # DOM.setFileInputFiles operates on a node HANDLE, not a selector, so
+        # resolve the input to a CDP objectId first (deep — works inside shadow
+        # roots / same-origin iframes). Confinement + gating are enforced above.
+        object_id = self._resolve_object_id(selector)
+        if not object_id:
             return f"Error: no file input for {selector}."
-        # The CDP node-resolution dance (DOM.getDocument → querySelector →
-        # setFileInputFiles by nodeId) lives in the real transport; the governed
-        # contract — confinement, existence, gating — is enforced here.
         self._call("DOM.setFileInputFiles",
-                   files=[str(target)], selector=selector)
+                   files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
 
     def set_download_dir(self, path: str = "") -> str:
@@ -850,6 +891,16 @@ class BrowserSession:
         res = self._call("Runtime.evaluate", expression=self._prep(expression),
                          returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
+
+    def _resolve_object_id(self, selector: str) -> str:
+        """A CDP objectId (remote handle) for the element `selector` resolves to,
+        crossing shadow/iframe boundaries via __olyq. Empty if it isn't found.
+        Needed by CDP calls that operate on a node handle rather than a value
+        (e.g. DOM.setFileInputFiles for uploads)."""
+        res = self._call("Runtime.evaluate",
+                         expression=self._prep(f"__olyq({json.dumps(selector)})"),
+                         returnByValue=False)
+        return (res or {}).get("result", {}).get("objectId", "") or ""
 
     def exists(self, selector: str) -> bool:
         """Structured predicate: is the selector present? Returns a bool, never

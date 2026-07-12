@@ -89,3 +89,26 @@ def test_list_tabs_for_real(real_session):
     real_session.open(_page("<h1>tab</h1>"))
     tabs = real_session.list_tabs()
     assert tabs and any(t["url"].startswith("data:") for t in tabs)
+
+
+def test_upload_attaches_the_file_for_real(real_session, tmp_path):
+    (tmp_path / "up.txt").write_text("hello", encoding="utf-8")
+    real_session.open(_page("<input type=file id=f>"))
+    out = real_session.upload("#f", "up.txt")
+    assert "Uploaded up.txt" in out
+    # the file is actually attached to the input (objectId resolution worked)
+    assert real_session._eval("document.querySelector('#f').files.length") == "1"
+
+
+def test_switch_tab_actually_drives_the_new_tab(real_session):
+    import time
+    real_session.open(_page("<h1 id=t>TAB-ONE</h1>"))
+    real_session._call("Target.createTarget",
+                       url="data:text/html,<h1 id=t>TAB-TWO</h1>")
+    time.sleep(1.0)
+    tabs = real_session.list_tabs()
+    idx = next(i for i, t in enumerate(tabs) if "TAB-TWO" in t["url"])
+    assert real_session.switch_tab(idx)
+    # evals now run in the SECOND tab's context — the transport re-bound
+    assert real_session._eval(
+        "document.getElementById('t').innerText") == "TAB-TWO"

@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — browser harness: real-transport upload and multi-tab
+
+Two capabilities that the offline `FakeTransport` accepted but real Chrome
+rejected — now wired correctly and verified against headless Chromium.
+
+- **File upload** — `DOM.setFileInputFiles` operates on a node *handle*, not a
+  selector, so `upload()` now resolves the input to a CDP `objectId`
+  (`_resolve_object_id`, deep — works inside shadow roots / same-origin iframes)
+  and attaches by handle. Confirmed the file actually lands on the input against
+  real Chrome; confinement + operator gating unchanged.
+- **Multi-tab** — `switch_tab()` now genuinely *drives* the tab it switches to:
+  `_RealTransport.reattach()` re-binds the transport to the target tab's
+  WebSocket (resolved via the DevTools HTTP base), so subsequent
+  actions/observations run in the new tab's context — not just `activateTarget`.
+  Confirmed evals run in the switched-to tab against real Chrome.
+
+The real-Chromium smoke test now covers both.
+
 ### Added — browser harness: real-Chromium smoke test (ground truth)
 
 `tests/test_browser_real.py` drives an actual headless Chromium over CDP through
