@@ -95,9 +95,18 @@ _DEEP_JS = (
     "var n=e.getAttribute&&e.getAttribute('name');if(n)return t+'[name=\\''+n+'\\']';"
     "var a=e.getAttribute&&e.getAttribute('aria-label');"
     "if(a)return t+'[aria-label=\\''+a+'\\']';"
-    "var i=1;for(var s=e.previousElementSibling;s;s=s.previousElementSibling)"
-    "{if(s.tagName===e.tagName)i++;}"
-    "return t+':nth-of-type('+i+')';};"
+    # Otherwise build a ROOTED path up to the nearest ancestor with an id (or the
+    # local root), so the selector resolves unambiguously instead of matching any
+    # nth-of-type sibling anywhere on the page.
+    "var parts=[],cur=e,depth=0;"
+    "while(cur&&cur.tagName&&depth<8){"
+    "if(cur.id){parts.unshift('#'+cur.id);break;}"
+    "var tg=cur.tagName.toLowerCase(),i=1;"
+    "for(var s=cur.previousElementSibling;s;s=s.previousElementSibling)"
+    "{if(s.tagName===cur.tagName)i++;}"
+    "parts.unshift(tg+':nth-of-type('+i+')');"
+    "cur=cur.parentElement;depth++;}"
+    "return parts.join('>');};"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
 # The perception step of the harness, as ONE Runtime.evaluate: deep-walk the light

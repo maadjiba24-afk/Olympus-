@@ -15,6 +15,17 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Improved — browser harness: rooted, unambiguous durable selectors
+
+The durable-selector fallback for a control with no id/name/aria-label used to be
+a bare `tag:nth-of-type(k)`, which can match the k-th sibling *anywhere* on the
+page — so a promoted template or self-heal candidate could point at the wrong
+element. `__olySel` now builds a **rooted path** up to the nearest ancestor with
+an id (e.g. `#box>div:nth-of-type(1)>button:nth-of-type(2)`), so it resolves
+uniquely. Verified against real Chromium (two ambiguous sibling groups resolve to
+exactly the intended node). Directly strengthens template graduation and
+self-healing, which both rely on durable selectors.
+
 ### Added — browser harness: richer action verbs
 
 `browser_act` gains three interaction primitives, widening the flows the operator

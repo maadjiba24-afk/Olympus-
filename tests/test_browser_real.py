@@ -104,6 +104,21 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_durable_selector_is_rooted_and_unambiguous(real_session):
+    import json
+    # Two sibling groups each with two buttons — a bare nth-of-type is ambiguous.
+    real_session.open(_page(
+        "<section id=box><div><button>A</button><button>TARGET</button></div>"
+        "</section><div><button>C</button><button>D</button></div>"))
+    real_session.observe()
+    sel = real_session._durable_selector('[data-olympus-idx="1"]')
+    assert sel.startswith("#box")                       # anchored at the id
+    resolved = real_session._eval(
+        "(function(){var e=__olyq(%s);return e?e.innerText:'MISS';})()"
+        % json.dumps(sel))
+    assert resolved == "TARGET"                          # resolves uniquely
+
+
 def test_upload_attaches_the_file_for_real(real_session, tmp_path):
     (tmp_path / "up.txt").write_text("hello", encoding="utf-8")
     real_session.open(_page("<input type=file id=f>"))
