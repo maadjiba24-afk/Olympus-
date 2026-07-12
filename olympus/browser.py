@@ -61,6 +61,36 @@ _LOAD_TIMEOUT = 12.0          # bounded wait for document.readyState=complete
 _SKILL_STEPS_MAX = 10_000     # max chars of a recorded skill body
 _SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
 _SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
+_OBSERVE_MAX = 120            # max interactive elements returned by observe()
+_LABEL_MAX = 80               # per-element label cap (anti-injection: no prose)
+
+# The perception step of the harness, as ONE Runtime.evaluate: find the visible,
+# interactive elements, stamp each with a stable index (data-olympus-idx) that
+# act(index=N) resolves, and return a compact JSON list. Element *labels* are
+# page-controlled, so each is hard-capped to _LABEL_MAX chars — enough to pick
+# the right control, too short to smuggle a paragraph of injected instructions.
+_OBSERVE_JS = (
+    "(function(){"
+    "var q='a[href],button,input,select,textarea,[role=button],[role=link],"
+    "[role=checkbox],[role=tab],[role=menuitem],[onclick],"
+    "[contenteditable=true],summary,[tabindex]';"
+    "var els=Array.prototype.slice.call(document.querySelectorAll(q));"
+    "var out=[],idx=0;"
+    "for(var k=0;k<els.length&&out.length<LIMIT;k++){"
+    "var e=els[k];var r=e.getBoundingClientRect();"
+    "if(!(r.width>0&&r.height>0))continue;"
+    "if(e.disabled)continue;"
+    "var st=window.getComputedStyle(e);"
+    "if(st.visibility==='hidden'||st.display==='none')continue;"
+    "e.setAttribute('data-olympus-idx',idx);"
+    "var nm=(e.getAttribute('aria-label')||e.placeholder||e.value||"
+    "(e.innerText||e.textContent||'')||e.getAttribute('alt')||e.title||'');"
+    "nm=nm.replace(/\\s+/g,' ').trim().slice(0,CAP);"
+    "var tg=e.tagName.toLowerCase();"
+    "var ty=tg==='input'?('input:'+(e.getAttribute('type')||'text')):tg;"
+    "out.push({i:idx,t:ty,n:nm});idx++;}"
+    "return JSON.stringify(out);})()"
+)
 
 # --- transport -----------------------------------------------------------
 
@@ -88,7 +118,8 @@ class FakeTransport:
 
     def __init__(self, pages: dict[str, dict[str, str]] | None = None,
                  redirects: dict[str, str] | None = None,
-                 present: list[str] | None = None) -> None:
+                 present: list[str] | None = None,
+                 elements: list[dict[str, str]] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -97,6 +128,11 @@ class FakeTransport:
         # CSS selectors that "exist" on the page, so exists()/fill()/login() can
         # be driven offline. Tracks what fill() set, too.
         self.present = set(present or [])
+        # Scriptable interactive elements returned by observe(); each becomes a
+        # resolvable [data-olympus-idx="i"] selector so index actions work too.
+        self.elements = elements or []
+        for i in range(len(self.elements)):
+            self.present.add(f'[data-olympus-idx="{i}"]')
         self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
@@ -117,6 +153,10 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
+            if "querySelectorAll" in expr:        # observe() → indexed elements
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", "")}
+                       for i, e in enumerate(self.elements)]
+                return {"result": {"value": json.dumps(lst)}}
             if "querySelector" in expr:           # exists / fill / click / read
                 sel = self._matched_selector(expr)
                 if "innerText" in expr:           # selector read → text or ''
@@ -413,26 +453,107 @@ class BrowserSession:
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
+    def observe(self, limit: int = _OBSERVE_MAX) -> str:
+        """Perceive the page as a numbered map of its visible interactive
+        elements — the harness's 'look' step. Each element gets a stable index
+        (stamped as data-olympus-idx) that `act(..., index=N)` resolves, so the
+        model can drive an *arbitrary* page by index instead of guessing CSS
+        selectors. Labels are page-controlled (untrusted) and hard-capped, so
+        this is registered as ingestion, not an actuator."""
+        self.ingested_untrusted = True
+        landed = self._blocked_landing()
+        if landed:
+            return f"Error: current page is a blocked address ({landed})."
+        limit = max(1, min(int(limit), _OBSERVE_MAX))
+        raw = self._eval(_OBSERVE_JS.replace("LIMIT", str(limit))
+                                    .replace("CAP", str(_LABEL_MAX)))
+        try:
+            items = json.loads(raw or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return "(could not read the page's interactive elements)"
+        lines = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
+
     def act(self, action: str, *, selector: str = "", text: str = "",
-            x: int = 0, y: int = 0) -> str:
-        """Act on the page (click / type). Credentialed actuator — exposed only
-        as the ACTION_TOOL `browser_act`, so capability separation keeps it out
-        of any run that also ingests untrusted content."""
+            x: int = 0, y: int = 0, index: int | None = None,
+            key: str = "", value: str = "") -> str:
+        """Act on the page. Credentialed actuator — exposed only as the
+        ACTION_TOOL `browser_act`, so capability separation keeps it out of any
+        run that also ingests untrusted content. Targets can be given by
+        `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
+        Verbs: click, type, scroll, press, select, hover, back."""
         action = (action or "").lower()
+        # An index from observe() resolves to the stamped stable selector.
+        if index is not None:
+            selector = f'[data-olympus-idx="{int(index)}"]'
+
         if action == "click":
             if selector:
-                self._eval(f"(function(){{var e=document.querySelector("
-                           f"{json.dumps(selector)});if(e)e.click();"
-                           f"return !!e;}})()")
-                return f"Clicked {selector}."
+                ok = self._eval_bool(
+                    f"(function(){{var e=document.querySelector("
+                    f"{json.dumps(selector)});if(e){{e.click();return true;}}"
+                    f"return false;}})()")
+                return f"Clicked {selector}." if ok else \
+                    f"Error: no element for {selector}."
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
             self._call("Input.dispatchMouseEvent", type="mouseReleased",
                        x=x, y=y, button="left", clickCount=1)
             return f"Clicked at ({x}, {y})."
         if action == "type":
+            if selector:
+                return f"Typed into {selector}." if self.fill(selector, text) \
+                    else f"Error: no element for {selector}."
             self._call("Input.insertText", text=text)
             return f"Typed {len(text)} chars."
+        if action == "scroll":
+            if selector:
+                self._eval(f"(function(){{var e=document.querySelector("
+                           f"{json.dumps(selector)});if(e)e.scrollIntoView("
+                           f"{{block:'center'}});}})()")
+                return f"Scrolled to {selector}."
+            amount = int(y) or int(x) or 600
+            self._eval(f"window.scrollBy(0,{amount});")
+            return f"Scrolled {amount}px."
+        if action == "press":
+            k = key or text or "Enter"
+            target = (f"document.querySelector({json.dumps(selector)})"
+                      if selector else "document.activeElement")
+            self._eval(
+                f"(function(){{var e={target}||document.body;"
+                f"['keydown','keypress','keyup'].forEach(function(t){{"
+                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
+                f"bubbles:true}}));}});return true;}})()")
+            return f"Pressed {k}."
+        if action == "select":
+            if not selector:
+                return "Error: select needs an index or selector."
+            v = value or text
+            ok = self._eval_bool(
+                f"(function(){{var e=document.querySelector("
+                f"{json.dumps(selector)});if(!e)return false;"
+                f"e.value={json.dumps(v)};e.dispatchEvent("
+                f"new Event('change',{{bubbles:true}}));return true;}})()")
+            return f"Selected {v!r} in {selector}." if ok else \
+                f"Error: no element for {selector}."
+        if action == "hover":
+            if selector:
+                self._eval(f"(function(){{var e=document.querySelector("
+                           f"{json.dumps(selector)});if(e)e.dispatchEvent("
+                           f"new MouseEvent('mouseover',{{bubbles:true}}));}})()")
+                return f"Hovered {selector}."
+            self._call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
+            return f"Hovered at ({x}, {y})."
+        if action == "back":
+            self._eval("history.back();")
+            self._wait_ready()
+            return "Navigated back."
         return f"Error: unknown browser action '{action}'."
 
     def _eval(self, expression: str) -> str:
