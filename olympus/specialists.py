@@ -294,11 +294,15 @@ SPECIALISTS: dict[str, Specialist] = {
                         "open web; credentialed actions are scope/approval gated "
                         "and off by default (OLYMPUS_OPERATOR).",
             # Deliberately non-ingesting (web=False, no data MCP): _ingests() is
-            # False, so it legitimately keeps the actuator (browser_login). It is
-            # NOT given browser_open/browser_read — it never reads open-web prose
-            # as instructions. That is what lets it hold credentials safely while
-            # capability separation still holds across the system.
+            # False, so it legitimately keeps the actuators (browser_login, and
+            # the observe→act harness loop). It is NOT given browser_open/
+            # browser_read — it never reads open-web prose as instructions. That
+            # is what lets it hold credentials and perceive+drive an authorized,
+            # possibly logged-in page safely, while capability separation still
+            # holds across the system (browser_observe/act carry bounded,
+            # label-capped structure, not page prose).
             extra_tools=("browser_exists", "browser_login",
+                         "browser_observe", "browser_act", "browser_learn",
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",

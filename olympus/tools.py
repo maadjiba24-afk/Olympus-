@@ -1106,24 +1106,72 @@ def _browser_read(selector: str = "") -> str:
         return f"No browser attached: {err}"
 
 
-def _browser_act(action: str, selector: str = "", text: str = "",
-                 x: int = 0, y: int = 0) -> str:
-    # Credentialed actuator: gate like browser_login/operate — operator must be
-    # enabled and the CURRENT page's domain authorized, so it can't drive an
-    # arbitrary (possibly logged-in) tab without authorization.
+def _operator_authorized_session():
+    """Shared gate for the credentialed harness (observe + act): the operator
+    must be enabled and the CURRENT page's domain authorized. Returns
+    (session, None) on success or (None, error_string) to return to the model."""
     from urllib.parse import urlparse
     user = memory.current_user()
     if not operator.enabled(user):
-        return "Error: the operator isn't set up — ask me to set up this site first."
+        return None, ("Error: the operator isn't set up — ask me to set up this "
+                      "site first.")
     try:
         sess = browser.session()
     except browser.BrowserUnavailable as err:
-        return f"No browser attached: {err}"
+        return None, f"No browser attached: {err}"
     host = (urlparse(sess._current_url() or "").hostname or "").lower()
     if not operator.authorized(user, host):
-        return (f"Error: the current page ('{host or 'unknown'}') isn't an "
-                "authorized site for actions.")
-    return sess.act(action, selector=selector, text=text, x=int(x), y=int(y))
+        return None, (f"Error: the current page ('{host or 'unknown'}') isn't an "
+                      "authorized site for actions.")
+    return sess, None
+
+
+def _browser_observe(limit: int = 0) -> str:
+    # Structured perception of the CURRENT (credentialed) tab — a bounded,
+    # label-capped index of interactive elements, not page prose. Gated to
+    # authorized domains exactly like the actuator, so it can't map an arbitrary
+    # logged-in tab, and stripped from any prose-ingesting run (ACTION_TOOLS).
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    return sess.observe(int(limit) or browser._OBSERVE_MAX)
+
+
+def _browser_act(action: str, selector: str = "", text: str = "",
+                 x: int = 0, y: int = 0, index: int | None = None,
+                 key: str = "", value: str = "") -> str:
+    # Credentialed actuator: gate like browser_login/operate — operator must be
+    # enabled and the CURRENT page's domain authorized, so it can't drive an
+    # arbitrary (possibly logged-in) tab without authorization.
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    idx = int(index) if index is not None else None
+    return sess.act(action, selector=selector, text=text, x=int(x), y=int(y),
+                    index=idx, key=key, value=value)
+
+
+def _browser_learn(name: str) -> str:
+    # Close the evolution loop: crystallize the proven observe→act flow of the
+    # current authorized session into a reliability-scored skill. First-party
+    # (Olympus's own landed steps, credential-free), so it is a memory write —
+    # not an actuator — but it needs the authorized session to know the domain
+    # and read its journal.
+    from urllib.parse import urlparse
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    steps = sess.learned_steps()
+    if not steps:
+        return ("Nothing to learn yet — act on the page first, then learn the "
+                "flow that worked.")
+    host = (urlparse(sess._current_url() or "").hostname or "").lower()
+    skill = browser.record_skill(host, name,
+                                 security.sanitize_for_memory(steps),
+                                 source="learned")
+    return (f"Learned '{skill.name}' for {skill.domain} from what worked "
+            f"({skill.content_hash}). It now rides the reliability score and "
+            f"will be refined or pruned over time.")
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,
@@ -1425,7 +1473,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
         image, question),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
+    "browser_observe": _browser_observe,
     "browser_act": _browser_act,
+    "browser_learn": _browser_learn,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
     "browser_exists": _browser_exists,
@@ -1973,23 +2023,74 @@ BROWSER_READ = {
     },
 }
 
-BROWSER_ACT = {
-    "name": "browser_act",
+BROWSER_OBSERVE = {
+    "name": "browser_observe",
     "description": (
-        "Act on the current browser page — click an element (by CSS selector or "
-        "x/y) or type text into the focused field. This can operate a "
-        "LOGGED-IN session, so it is unavailable in any run that also reads "
-        "untrusted web content (capability separation)."
+        "Perceive the current authorized browser page as a numbered map of its "
+        "visible interactive elements — each line is '[i] type \"label\"'. This "
+        "is the harness working style: observe first, then act by index, instead "
+        "of guessing CSS selectors. Returns bounded, label-capped structure (not "
+        "page prose), and — like the actuator — drives a possibly LOGGED-IN "
+        "session, so it is unavailable in any run that also reads untrusted web "
+        "content (capability separation)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["click", "type"]},
+            "limit": {"type": "integer",
+                      "description": "Max elements to return (default 120)"},
+        },
+        "required": [],
+    },
+}
+
+BROWSER_ACT = {
+    "name": "browser_act",
+    "description": (
+        "Act on the current browser page. Prefer acting by 'index' from a "
+        "browser_observe map; a CSS selector or x/y also works. Verbs: click, "
+        "type (into a selector or the focused field), scroll (y pixels or into a "
+        "selector), press (a key like Enter), select (an option 'value' in a "
+        "selector), hover, back. This can operate a LOGGED-IN session, so it is "
+        "unavailable in any run that also reads untrusted web content "
+        "(capability separation)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string",
+                       "enum": ["click", "type", "scroll", "press", "select",
+                                "hover", "back"]},
+            "index": {"type": "integer",
+                      "description": "Element index from browser_observe"},
             "selector": {"type": "string", "description": "CSS selector for click"},
             "text": {"type": "string", "description": "Text to type"},
+            "key": {"type": "string", "description": "Key for press, e.g. 'Enter'"},
+            "value": {"type": "string", "description": "Option value for select"},
             "x": {"type": "integer"}, "y": {"type": "integer"},
         },
         "required": ["action"],
+    },
+}
+
+BROWSER_LEARN = {
+    "name": "browser_learn",
+    "description": (
+        "Crystallize the observe→act flow that just worked on the current "
+        "authorized site into a reusable, reliability-scored skill (named "
+        "'name'). This is how the harness evolves: a proven flow becomes a saved "
+        "recipe that future runs reuse and that Olympus refines or prunes by "
+        "measured success over time. Records only your own landed steps — never "
+        "the text you typed — so credentials never enter the skill store. Call "
+        "it after a task succeeds."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string",
+                     "description": "Short name for the learned flow"},
+        },
+        "required": ["name"],
     },
 }
 
@@ -2446,7 +2547,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,
+    "browser_observe": BROWSER_OBSERVE,
     "browser_act": BROWSER_ACT,
+    "browser_learn": BROWSER_LEARN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
     "browser_exists": BROWSER_EXISTS,

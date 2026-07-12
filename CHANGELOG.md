@@ -15,6 +15,40 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — native browser harness (perceive → act, governed)
+
+Olympus grows its **own** browser-agent working style, so no external browser
+harness has to be plugged in. The harness perceives an arbitrary page as an
+indexed map of its interactive elements and acts by index — the browser-use
+working style — but built the Olympus way: capability-separated, operator-gated,
+and wired to evolve.
+
+- **Indexed perception** (`browser.BrowserSession.observe`, `browser_observe`
+  tool) — a single sandboxed `Runtime.evaluate` pass finds the visible,
+  enabled interactive elements (links, buttons, inputs, selects, ARIA
+  roles, `contenteditable`, …), stamps each with `data-olympus-idx`, and
+  returns a numbered map (`[2] button "Sign in"`). The model acts by index
+  instead of guessing CSS selectors.
+- **Richer action set** (`browser.BrowserSession.act`, `browser_act`) — now
+  resolves an element by `index` from the map and supports click, type,
+  scroll, press (keys), select (options), hover, and back, over the same
+  audited CDP ledger.
+- **Governed like an actuator, not a reader.** `browser_observe` maps a
+  possibly logged-in tab, so it is classified in `ACTION_TOOLS`: stripped from
+  any prose-ingesting run (capability separation), gated to an
+  operator-enabled, authorized domain, and its element labels are hard-capped
+  so a map row can't smuggle a paragraph of instructions. The operator
+  (HERMES) holds the full `observe → act` loop; ingesting readers (Argus)
+  hold neither half. Threat-modeled and count-bound in `docs/THREAT_MODEL.md`.
+- **It evolves** (`browser_learn`) — the session keeps a bounded, first-party
+  journal of the act steps that actually landed (never the typed text, so
+  credentials never enter the store). When a task succeeds, HERMES crystallizes
+  that proven flow into a reliability-scored skill with `browser_learn`. From
+  there it rides the existing evolution machinery: future runs reuse it,
+  `mark_outcome` refines its measured score, Metis prunes it if it goes flaky,
+  and Prometheus proposes profile fixes — so the harness gets better on the
+  sites you actually use, without a human writing a selector script.
+
 ### Changed — Olympus assumes no model (vendor-neutral by default)
 
 Olympus no longer ships a baked-in default model. Previously an Anthropic
