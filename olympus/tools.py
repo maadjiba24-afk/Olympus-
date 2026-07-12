@@ -1168,10 +1168,12 @@ def _browser_learn(name: str) -> str:
     host = (urlparse(sess._current_url() or "").hostname or "").lower()
     skill = browser.record_skill(host, name,
                                  security.sanitize_for_memory(steps),
-                                 source="learned")
+                                 source="learned", recipe=sess.learned_recipe())
+    tail = (" Once it proves reliable it can auto-graduate into a governed "
+            "template.") if skill.recipe else ""
     return (f"Learned '{skill.name}' for {skill.domain} from what worked "
             f"({skill.content_hash}). It now rides the reliability score and "
-            f"will be refined or pruned over time.")
+            f"will be refined or pruned over time.{tail}")
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,

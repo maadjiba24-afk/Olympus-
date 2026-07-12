@@ -85,6 +85,19 @@ _DEEP_JS = (
     "if(d)walk(d,depth+1);}}}"
     "walk(document,0);return out;};"
     "window.__olyq=function(sel){return window.__olyAll(sel)[0]||null;};"
+    # __olySel(e): a DURABLE selector for an element (id, then [name], then
+    # [aria-label], then an nth-of-type path) — stable across reloads, unlike the
+    # ephemeral data-olympus-idx stamp. Used to promote a proven flow into a
+    # declarative template whose steps still resolve on a fresh page load.
+    "window.__olySel=function(e){if(!e||!e.tagName)return '';"
+    "var t=e.tagName.toLowerCase();"
+    "if(e.id)return '#'+e.id;"
+    "var n=e.getAttribute&&e.getAttribute('name');if(n)return t+'[name=\\''+n+'\\']';"
+    "var a=e.getAttribute&&e.getAttribute('aria-label');"
+    "if(a)return t+'[aria-label=\\''+a+'\\']';"
+    "var i=1;for(var s=e.previousElementSibling;s;s=s.previousElementSibling)"
+    "{if(s.tagName===e.tagName)i++;}"
+    "return t+':nth-of-type('+i+')';};"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
 # The perception step of the harness, as ONE Runtime.evaluate: deep-walk the light
@@ -190,8 +203,10 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
-                if "innerText" in expr:           # selector read → text or ''
-                    value: Any = page.get("text", "") if sel else ""
+                if "__olySel" in expr:            # durable-selector lookup
+                    value: Any = sel or ""        # offline: echo the matched css
+                elif "innerText" in expr:         # selector read → text or ''
+                    value = page.get("text", "") if sel else ""
                 else:                             # predicate / mutator → bool
                     if sel and "value=" in expr:
                         self.filled[sel] = "set"
@@ -424,12 +439,36 @@ class BrowserSession:
         # step reads "click \"Sign in\"", not a raw selector.
         self.journal: list[str] = []
         self._labels: dict[int, str] = {}
+        # The structured twin of the journal: {op, selector, value?} steps with
+        # DURABLE selectors (never the typed text). Only the promotable verbs
+        # (click, fill) are captured — enough to graduate a proven flow into a
+        # declarative template that still resolves on a fresh page load.
+        self.recipe: list[dict] = []
 
     def _journal_step(self, step: str) -> None:
         """Append a landed, replayable step (bounded; oldest dropped)."""
         self.journal.append(step)
         if len(self.journal) > _JOURNAL_MAX:
             del self.journal[0]
+
+    def _durable_selector(self, css: str) -> str:
+        """Ask the page for a reload-stable selector of the element `css`
+        resolves to (id / [name] / [aria-label] / nth-of-type). Falls back to
+        the input selector if the element is gone or unnamed."""
+        if not css:
+            return ""
+        out = self._eval(f"(function(){{var e=__olyq({json.dumps(css)});"
+                         f"return e?__olySel(e):'';}})()")
+        return out or css
+
+    def _recipe_step(self, op: str, css: str, value: str | None = None) -> None:
+        """Capture a promotable step with a durable selector (bounded)."""
+        entry: dict = {"op": op, "selector": self._durable_selector(css)}
+        if value is not None:
+            entry["value"] = value
+        self.recipe.append(entry)
+        if len(self.recipe) > _JOURNAL_MAX:
+            del self.recipe[0]
 
     def _call(self, method: str, **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
@@ -559,6 +598,7 @@ class BrowserSession:
                 if not ok:
                     return f"Error: no element for {selector}."
                 self._journal_step(f"click {target}")
+                self._recipe_step("click", selector)
                 return f"Clicked {selector}."
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
@@ -573,6 +613,7 @@ class BrowserSession:
                 if not self.fill(selector, text):
                     return f"Error: no element for {selector}."
                 self._journal_step(f"type into {target}")
+                self._recipe_step("fill", selector, "$" + _slug(label or selector))
                 return f"Typed into {selector}."
             self._call("Input.insertText", text=text)
             self._journal_step("type into focused field")
@@ -611,6 +652,7 @@ class BrowserSession:
             if not ok:
                 return f"Error: no element for {selector}."
             self._journal_step(f"select {v!r} in {target}")
+            self._recipe_step("fill", selector, "$" + _slug(label or selector))
             return f"Selected {v!r} in {selector}."
         if action == "hover":
             if selector:
@@ -634,6 +676,11 @@ class BrowserSession:
         session, as a replayable, human-readable recipe. First-party (Olympus's
         own actions) and credential-free — safe to crystallize into a skill."""
         return "; ".join(self.journal)
+
+    def learned_recipe(self) -> list[dict]:
+        """The structured, promotable twin of learned_steps(): {op, selector,
+        value?} steps with durable selectors, ready to graduate into a template."""
+        return [dict(s) for s in self.recipe]
 
     @staticmethod
     def _prep(expression: str) -> str:
@@ -775,6 +822,10 @@ class BrowserSkill:
     runs: int = 0
     successes: int = 0
     base_score: float = 0.0        # asserted prior before any runs (0..1)
+    # Structured, durable-selector steps ({op, selector, value?}) captured when
+    # the skill was learned. Empty for a hand-written skill; when present and the
+    # skill proves reliable, it can auto-graduate into a declarative template.
+    recipe: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.created:
@@ -800,6 +851,7 @@ class BrowserSkill:
             "source": self.source, "author": self.author,
             "created": self.created, "runs": self.runs,
             "successes": self.successes, "base_score": self.base_score,
+            "recipe": self.recipe,
         }
         d["content_hash"] = self.content_hash
         d["reliability"] = self.reliability
@@ -813,6 +865,7 @@ class BrowserSkill:
             created=d.get("created", ""), runs=int(d.get("runs", 0)),
             successes=int(d.get("successes", 0)),
             base_score=float(d.get("base_score", 0.0)),
+            recipe=d.get("recipe") if isinstance(d.get("recipe"), list) else [],
         )
 
 
@@ -858,14 +911,23 @@ def _clip(text: str, limit: int) -> str:
     return (text or "").strip()[:limit]
 
 
+def _slug(text: str) -> str:
+    """A safe param-name from a label or selector (alnum only), for a template
+    fill step's `$name` placeholder. Never carries the typed value."""
+    s = "".join(ch for ch in (text or "") if ch.isalnum())
+    return s[:40] or "value"
+
+
 def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
-                 author: str = "olympus", base_score: float = 0.0) -> BrowserSkill:
+                 author: str = "olympus", base_score: float = 0.0,
+                 recipe: list[dict] | None = None) -> BrowserSkill:
     """Insert or replace a skill (keyed by domain+name), preserving outcome
     counts on replacement so a re-recorded skill keeps its measured score.
 
     Inputs are length-capped and the library is bounded (lowest-reliability
     skills are dropped past _SKILLS_MAX) so an over-eager agent can't bloat the
-    on-disk store without limit.
+    on-disk store without limit. `recipe` (structured, durable-selector steps)
+    enables later auto-graduation into a declarative template.
     """
     domain = _clip(domain, _SKILL_FIELD_MAX)
     name = _clip(name, _SKILL_FIELD_MAX)
@@ -875,13 +937,16 @@ def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
         domain=domain, name=name, steps=_clip(steps, _SKILL_STEPS_MAX),
         source=_clip(source, _SKILL_FIELD_MAX) or "agent",
         author=_clip(author, _SKILL_FIELD_MAX) or "olympus",
-        base_score=max(0.0, min(1.0, base_score)))
+        base_score=max(0.0, min(1.0, base_score)),
+        recipe=[s for s in (recipe or []) if isinstance(s, dict)][:_JOURNAL_MAX])
     skills = _load_skills()
     out, replaced = [], False
     for existing in skills:
         if _key(existing.domain, existing.name) == _key(domain, name):
             skill.runs, skill.successes = existing.runs, existing.successes
             skill.created = existing.created
+            if not skill.recipe:          # keep a prior recipe if none re-supplied
+                skill.recipe = existing.recipe
             out.append(skill)
             replaced = True
         else:
@@ -1144,6 +1209,30 @@ def set_template(domain: str, name: str, risk: str, steps: list[dict],
         "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
     _store_profiles(profiles)
     return prof
+
+
+def promote_skill(domain: str, name: str, *, risk: str = "notable"
+                  ) -> tuple["SiteProfile", str] | None:
+    """Graduate a proven learned skill into a declarative action template.
+
+    Builds the template from the skill's structured `recipe` (durable-selector
+    click/fill steps), guarded by an `assert` on the first control so it fails
+    fast if the page drifted. Returns (profile, template_name), or None if the
+    skill has no promotable recipe. The template then rides the governed
+    `browser_operate` path — auto-run within scope for notable risk, approval
+    for anything higher — so graduation never widens the trust boundary."""
+    skill = next((s for s in _load_skills()
+                  if _key(s.domain, s.name) == _key(domain, name)), None)
+    if skill is None:
+        return None
+    steps = [dict(s) for s in skill.recipe
+             if isinstance(s, dict) and s.get("op") in ("click", "fill")
+             and s.get("selector")]
+    if not steps:
+        return None
+    guarded = [{"op": "assert", "selector": steps[0]["selector"]}] + steps
+    prof = set_template(skill.domain, skill.name, risk, guarded)
+    return prof, skill.name
 
 
 def operator_enabled() -> bool:

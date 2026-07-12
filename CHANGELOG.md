@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: proven skills auto-graduate into templates
+
+The evolution loop now closes fully: improvise → learn → prove → **formalize**.
+
+- **Structured recipe.** As the harness acts, it captures a structured twin of
+  its journal — `{op, selector, value?}` steps with **durable selectors**
+  (id → `[name]` → `[aria-label]` → nth-of-type path via a new `__olySel`
+  helper), never the typed text. `browser_learn` persists this recipe on the
+  learned skill.
+- **Auto-graduation.** A METIS review pass (`operator.promote_ready`, folded
+  into `operator.review_profiles`) graduates a learned skill into a declarative
+  action template once it has been tried enough times (`_PROMOTE_MIN_RUNS`) and
+  lands reliably enough (`_PROMOTE_RELIABILITY`). The generated template is
+  guarded by an `assert` on its first control so it fails fast if the page
+  drifted, and it rides the existing governed `browser_operate` path — auto-run
+  within scope for notable risk, approval for anything higher. Graduation
+  **formalizes** a proven flow without widening the trust boundary.
+- **Idempotent & bounded.** A skill whose template already exists is skipped;
+  recipes are capped and credential-free by construction.
+
 ### Added — browser harness depth: shadow DOM + same-origin iframes
 
 The harness now perceives and acts on controls that modern web apps hide behind
