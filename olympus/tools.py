@@ -1205,6 +1205,17 @@ def _browser_switch_tab(index: int) -> str:
     return f"Error: no tab at index {int(index)}."
 
 
+def _browser_save_auth(domain: str) -> str:
+    # Persist the current session for a domain (cookies → encrypted vault) so a
+    # later run skips re-login. Credentialed: operator-gated, domain-authorized.
+    return operator.save_auth(memory.current_user(), domain)
+
+
+def _browser_restore_auth(domain: str) -> str:
+    # Restore a saved session by injecting its vault-stored cookies.
+    return operator.restore_auth(memory.current_user(), domain)
+
+
 def _browser_upload(selector: str, path: str) -> str:
     # Uploading a local file to a site is data egress → credentialed actuator:
     # operator enabled AND the current page's domain authorized, and the path is
@@ -1238,6 +1249,23 @@ def _browser_learn(name: str) -> str:
     return (f"Learned '{skill.name}' for {skill.domain} from what worked "
             f"({skill.content_hash}). It now rides the reliability score and "
             f"will be refined or pruned over time.{tail}")
+
+
+def _browser_pattern(goal: str) -> str:
+    # Cross-site generalization: surface the most reliable learned flow (on any
+    # site) matching `goal` as a GENERALIZED scaffold — op sequence + intent
+    # hints, selectors omitted (site-specific). First-party read of own skills.
+    sug = browser.suggest_pattern(goal)
+    if not sug:
+        return (f"No proven cross-site pattern found for '{goal}'. "
+                "Learn one on a site and it can seed others.")
+    lines = [f"Pattern from {sug['from_domain']} · {sug['name']} "
+             f"(reliability {sug['reliability']}):"]
+    for i, st in enumerate(sug["steps"], 1):
+        lines.append(f"  {i}. {st['op']} — {st['hint']} "
+                     "(find the matching control on this site)")
+    lines.append("Adapt these steps to this site's own selectors, then learn it.")
+    return "\n".join(lines)
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,
@@ -1297,6 +1325,12 @@ def _browser_login(domain: str) -> str:
         return f"No browser attached: {err}"
     browser.mark_profile_outcome(domain, ok)
     if ok:
+        # Self-evolving: persist the fresh session so a later run can restore it
+        # instead of logging in again. Best-effort; failure never blocks login.
+        try:
+            operator.save_auth(user, domain)
+        except Exception:
+            pass
         return f"Logged in to {domain}."
     return (f"Sign-in to {domain} didn't go through — it may need 2FA/CAPTCHA, "
             "or the page changed. Want to sign in manually instead?")
@@ -1545,7 +1579,10 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_tabs": _browser_tabs,
     "browser_switch_tab": _browser_switch_tab,
     "browser_upload": _browser_upload,
+    "browser_save_auth": _browser_save_auth,
+    "browser_restore_auth": _browser_restore_auth,
     "browser_learn": _browser_learn,
+    "browser_pattern": _browser_pattern,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
     "browser_exists": _browser_exists,
@@ -2139,23 +2176,28 @@ BROWSER_ACT = {
         "Act on the current browser page. Prefer acting by 'index' from a "
         "browser_observe map; a CSS selector or x/y also works. Verbs: click, "
         "type (into a selector or the focused field), scroll (y pixels or into a "
-        "selector), press (a key like Enter), select (an option 'value' in a "
-        "selector), hover, back. This can operate a LOGGED-IN session, so it is "
-        "unavailable in any run that also reads untrusted web content "
-        "(capability separation)."
+        "selector), press (a key or modifier chord like 'Enter' or 'Control+a'), "
+        "select (an option 'value' in a selector), hover, rightclick, drag (from "
+        "the source selector/index to a target selector in 'value'), wait_for (an "
+        "element to appear, or disappear when value='gone'), back. This can "
+        "operate a LOGGED-IN session, so it is unavailable in any run that also "
+        "reads untrusted web content (capability separation)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {"type": "string",
                        "enum": ["click", "type", "scroll", "press", "select",
-                                "hover", "back"]},
+                                "hover", "rightclick", "drag", "wait_for",
+                                "back"]},
             "index": {"type": "integer",
                       "description": "Element index from browser_observe"},
             "selector": {"type": "string", "description": "CSS selector for click"},
             "text": {"type": "string", "description": "Text to type"},
-            "key": {"type": "string", "description": "Key for press, e.g. 'Enter'"},
-            "value": {"type": "string", "description": "Option value for select"},
+            "key": {"type": "string",
+                    "description": "Key/chord for press, e.g. 'Enter' or 'Control+a'"},
+            "value": {"type": "string",
+                      "description": "Option value for select, or drag target selector"},
             "x": {"type": "integer"}, "y": {"type": "integer"},
         },
         "required": ["action"],
@@ -2180,6 +2222,23 @@ BROWSER_LEARN = {
                      "description": "Short name for the learned flow"},
         },
         "required": ["name"],
+    },
+}
+
+BROWSER_PATTERN = {
+    "name": "browser_pattern",
+    "description": (
+        "Suggest a starting scaffold for a goal (e.g. 'login', 'checkout') by "
+        "generalizing the most reliable learned flow from ANOTHER site — the op "
+        "sequence and intent hints, with site-specific selectors omitted. Use it "
+        "to bootstrap a new site from a proven pattern instead of from scratch, "
+        "then adapt and learn it here."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"goal": {"type": "string",
+                                "description": "What you're trying to do"}},
+        "required": ["goal"],
     },
 }
 
@@ -2222,6 +2281,36 @@ BROWSER_UPLOAD = {
             "path": {"type": "string", "description": "Workspace file to upload"},
         },
         "required": ["selector", "path"],
+    },
+}
+
+BROWSER_SAVE_AUTH = {
+    "name": "browser_save_auth",
+    "description": (
+        "Save the current signed-in session for an authorized domain (its "
+        "cookies) into the encrypted vault, so a later run can restore it instead "
+        "of logging in again. Cookies are credentials — operator-gated, never "
+        "shown to the model. Happens automatically after a successful login too."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string",
+                                  "description": "Authorized site, e.g. 'shop.com'"}},
+        "required": ["domain"],
+    },
+}
+
+BROWSER_RESTORE_AUTH = {
+    "name": "browser_restore_auth",
+    "description": (
+        "Restore a previously-saved session for an authorized domain by injecting "
+        "its vault-stored cookies, so the operator skips re-login. Operator-gated."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string",
+                                  "description": "Authorized site, e.g. 'shop.com'"}},
+        "required": ["domain"],
     },
 }
 
@@ -2684,7 +2773,10 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_tabs": BROWSER_TABS,
     "browser_switch_tab": BROWSER_SWITCH_TAB,
     "browser_upload": BROWSER_UPLOAD,
+    "browser_save_auth": BROWSER_SAVE_AUTH,
+    "browser_restore_auth": BROWSER_RESTORE_AUTH,
     "browser_learn": BROWSER_LEARN,
+    "browser_pattern": BROWSER_PATTERN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
     "browser_exists": BROWSER_EXISTS,

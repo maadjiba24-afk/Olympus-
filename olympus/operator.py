@@ -95,9 +95,64 @@ def forget_site(user: str, domain: str) -> bool:
         from . import vault
         if vault.available():
             vault.delete(user, f"site:{domain}")
+            vault.delete(user, f"cookies:{domain}")   # drop any saved session too
     except Exception:
         pass
     return existed
+
+
+def save_auth(user: str, domain: str) -> str:
+    """Persist the current browser session for `domain` (its cookies) in the
+    ENCRYPTED vault, so a later run can restore it instead of logging in again.
+    Cookies are session credentials: operator-gated, domain-authorized, and never
+    surfaced to the model. Returns a short status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    try:
+        cookies = browser.session().get_cookies(domain)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    if not cookies:
+        return f"No session cookies to save for {domain}."
+    vault.put(user, f"cookies:{domain}", {"cookies": cookies})
+    return f"Saved the {domain} session ({len(cookies)} cookie(s), encrypted)."
+
+
+def restore_auth(user: str, domain: str) -> str:
+    """Restore a previously-saved session for `domain` by injecting its
+    vault-stored cookies, so the operator skips re-login. Returns a status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    blob = vault.get(user, f"cookies:{domain}")
+    cookies = blob.get("cookies") if isinstance(blob, dict) else None
+    if not cookies:
+        return f"No saved session for {domain} — log in once, then save it."
+    try:
+        n = browser.session().set_cookies(cookies)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    return f"Restored the {domain} session ({n} cookie(s))."
+
+
+def has_saved_auth(user: str, domain: str) -> bool:
+    """True if a saved session exists for `domain` (used to auto-restore)."""
+    from . import vault
+    if not vault.available():
+        return False
+    blob = vault.get(user, f"cookies:{(domain or '').strip().lower()}")
+    return bool(isinstance(blob, dict) and blob.get("cookies"))
 
 
 def authorized(user: str, domain: str) -> bool:
@@ -266,31 +321,62 @@ def execute(payload: dict) -> dict:
             "financial/irreversible browser templates are disabled by "
             "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
+    risk = tmpl.get("risk", "notable")
+    healed_note = ""
     try:
         result = sess.run_template(tmpl.get("steps", []), params)
     except browser.TemplateStepError as err:
         # Self-heal: the site likely drifted. Re-observe, look for the moved
         # control, and file a human-reviewed proposal — never auto-rewrite a
-        # credentialed template. The outcome is still an honest FAILED.
-        browser.mark_profile_outcome(domain, False)
-        note = _heal_and_propose(domain, name, err)
-        raise RuntimeError(f"{err}. {note}") from err
+        # credentialed template.
+        heal = _heal_and_propose(domain, name, err)
+        cand = heal.get("candidate")
+        # Gated retry: only a REVERSIBLE (notable) template may auto-retry the
+        # healed candidate to finish the run — an irreversible/financial step is
+        # never re-attempted on a guessed selector; it stays propose-only.
+        if risk == "notable" and cand:
+            patched = _patch_steps(tmpl.get("steps", []), err.index, cand)
+            try:
+                result = sess.run_template(patched, params)
+                healed_note = f" (self-healed: used {cand!r})"
+            except browser.TemplateStepError:
+                browser.mark_profile_outcome(domain, False)
+                browser.mark_template_outcome(domain, name, False)
+                raise RuntimeError(f"{err}. {heal['note']}") from err
+        else:
+            browser.mark_profile_outcome(domain, False)
+            browser.mark_template_outcome(domain, name, False)
+            raise RuntimeError(f"{err}. {heal['note']}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
         result["verified"] = ok
     browser.mark_profile_outcome(domain, ok)
+    browser.mark_template_outcome(domain, name, ok)
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
+    if healed_note:
+        result["healed"] = True
+        result["note"] = healed_note.strip()
     return result
 
 
+def _patch_steps(steps: list, index: int, selector: str) -> list:
+    """The remaining steps from `index` onward, with the failed step's selector
+    swapped to the healed candidate — so a retry continues the flow (steps before
+    `index` already ran) instead of repeating completed, possibly side-effecting
+    steps."""
+    tail = list(steps[index:]) or [{}]
+    tail[0] = {**tail[0], "selector": selector}
+    return tail
+
+
 def _heal_and_propose(domain: str, template: str,
-                      err: "browser.TemplateStepError") -> str:
+                      err: "browser.TemplateStepError") -> dict:
     """After a template step failed, re-observe and, if a likely-moved control is
-    found, file a Prometheus-style proposal to patch the template. Returns a
-    short human-facing note. Files nothing (beyond recording the drift) if no
-    confident candidate is found."""
+    found, file a Prometheus-style proposal to patch the template. Returns
+    {"note", "candidate"} — the candidate selector (or None) lets a reversible
+    template attempt a gated retry. Never auto-rewrites the stored template."""
     try:
         cand = browser.session().heal_candidate(err.selector)
     except Exception:
@@ -305,13 +391,15 @@ def _heal_and_propose(domain: str, template: str,
                 "Review and, if correct, update the template with "
                 "site_template_record.")
         _file_proposal(domain, f"template drift: {domain}/{template}", body)
-        return (f"Filed a self-heal proposal: {err.selector!r} may have moved to "
-                f"{cand['selector']!r} (for human review).")
+        return {"note": (f"Filed a self-heal proposal: {err.selector!r} may have "
+                         f"moved to {cand['selector']!r} (for human review)."),
+                "candidate": cand["selector"]}
     _file_proposal(domain, f"template drift: {domain}/{template}",
                    f"Template '{template}' step {err.index} selector "
                    f"{err.selector!r} no longer resolves and no confident "
                    "replacement was found on the page. Needs human attention.")
-    return "Filed a self-heal proposal (no confident replacement found)."
+    return {"note": "Filed a self-heal proposal (no confident replacement found).",
+            "candidate": None}
 
 
 def _file_proposal(domain: str, title: str, body: str) -> None:
@@ -458,12 +546,28 @@ def promote_ready(min_runs: int = _PROMOTE_MIN_RUNS,
     return out
 
 
+def demote_drifted(min_runs: int = _REVIEW_MIN_RUNS,
+                   floor: float = _REVIEW_FLOOR) -> list[str]:
+    """METIS hook (inverse of promote_ready): demote a graduated template that
+    has stopped working — its own measured reliability is below the floor over
+    enough runs — so the operator stops auto-running a dead recipe. Returns
+    report lines."""
+    out: list[str] = []
+    for p in browser.list_profiles():
+        for name, t in list((p.templates or {}).items()):
+            runs = int(t.get("runs", 0))
+            succ = int(t.get("successes", 0))
+            if runs >= min_runs and (succ / runs if runs else 0.0) < floor:
+                if browser.demote_template(p.domain, name):
+                    out.append(f"{p.domain}/{name} ({succ}/{runs})")
+    return out
+
+
 def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
                     floor: float = _REVIEW_FLOOR) -> str:
-    """METIS hook: prune site profiles that fail consistently (enough runs, low
-    reliability) so the operator stops trusting drifted recipes, and graduate
-    learned skills that have proven reliable into declarative templates. Returns
-    a short report."""
+    """METIS hook: prune site profiles that fail consistently, graduate learned
+    skills that have proven reliable into templates, and demote graduated
+    templates that have since drifted. Returns a short report."""
     profiles = browser._load_profiles()
     keep, pruned = [], []
     for p in profiles:
@@ -473,10 +577,13 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
             keep.append(p)
     if pruned:
         browser._store_profiles(keep)
+    demoted = demote_drifted(min_runs, floor)
     graduated = promote_ready()
     parts = []
     if pruned:
         parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
+    if demoted:
+        parts.append("Demoted drifted templates: " + "; ".join(demoted))
     if graduated:
         parts.append("Graduated proven skills to templates: "
                      + "; ".join(graduated))

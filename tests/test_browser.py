@@ -70,6 +70,35 @@ def test_observe_returns_indexed_interactive_map(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_wait_for_appears_and_gone(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#ready"])
+        # present element → appears immediately
+        assert "Appeared: #ready" in sess.act("wait_for", selector="#ready")
+        # absent element with value='gone' → already gone, immediately
+        assert "Gone: #missing" in sess.act(
+            "wait_for", selector="#missing", value="gone")
+        # a wait_for template op that can't be satisfied self-heals (typed error)
+        with pytest.raises(browser.TemplateStepError):
+            sess.wait_for = lambda *a, **k: False       # force timeout deterministically
+            sess.run_template([{"op": "wait_for", "selector": "#never"}])
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_act_supports_rightclick_drag_and_key_chords(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#src", "#dst", "#field"])
+        assert "Right-clicked #src" in sess.act("rightclick", selector="#src")
+        assert "Dragged #src to #dst" in sess.act(
+            "drag", selector="#src", value="#dst")
+        assert "Pressed Control+a" in sess.act("press", key="Control+a")
+        # drag needs a target; missing target fails gracefully
+        assert "drag needs" in sess.act("drag", selector="#src")
+    finally:
+        browser.set_transport_factory(None)
+
+
 def test_act_by_index_resolves_the_stamped_selector(monkeypatch):
     try:
         sess = _harness_session(monkeypatch, elements=[{"t": "button", "n": "Go"}])
@@ -263,6 +292,42 @@ def test_promote_skill_none_without_recipe():
     assert browser.promote_skill("shop.com", "manual") is None
 
 
+def test_drifted_template_is_demoted_by_review():
+    from olympus import operator
+    browser.set_template("shop.com", "buy", "notable",
+                         [{"op": "click", "selector": "#buy"}])
+    # the template keeps failing — its own reliability craters
+    for _ in range(4):
+        browser.mark_template_outcome("shop.com", "buy", False)
+    demoted = operator.demote_drifted()
+    assert any("shop.com/buy" in d for d in demoted)
+    assert "buy" not in (browser.get_profile("shop.com").templates or {})
+    # a healthy template is left alone
+    browser.set_template("shop.com", "good", "notable",
+                         [{"op": "click", "selector": "#ok"}])
+    for _ in range(4):
+        browser.mark_template_outcome("shop.com", "good", True)
+    assert operator.demote_drifted() == []
+
+
+def test_suggest_pattern_generalizes_across_sites():
+    # a proven login flow on one site scaffolds a new one — shape transfers,
+    # site-specific selectors do NOT.
+    browser.record_skill("a-shop.com", "login", "fill user; fill pass; click in",
+                         source="learned",
+                         recipe=[{"op": "fill", "selector": "#u", "value": "$user"},
+                                 {"op": "fill", "selector": "#p", "value": "$pass"},
+                                 {"op": "click", "selector": "#signin"}])
+    browser.mark_outcome("a-shop.com", "login", True)
+    sug = browser.suggest_pattern("login", exclude_domain="b-shop.com")
+    assert sug and sug["from_domain"] == "a-shop.com"
+    ops = [s["op"] for s in sug["steps"]]
+    assert ops == ["fill", "fill", "click"]              # the shape transfers
+    assert all("selector" not in s for s in sug["steps"])  # selectors omitted
+    # nothing close → None
+    assert browser.suggest_pattern("xyzzy-unrelated") is None
+
+
 def test_review_graduates_only_proven_skills_and_is_idempotent():
     from olympus import operator
     browser.record_skill("shop.com", "buy", "s",
@@ -276,6 +341,57 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert "buy" in browser.get_profile("shop.com").templates
     # running again is a no-op — the template already exists
     assert operator.promote_ready() == []
+
+
+# --- saved auth state: persist a session, restore instead of re-login -------
+
+def test_get_and_set_cookies_roundtrip(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        assert sess.set_cookies([{"name": "sid", "value": "abc",
+                                  "domain": "shop.com"}]) == 1
+        got = sess.get_cookies("shop.com")
+        assert got and got[0]["name"] == "sid"
+        # domain filtering excludes other sites
+        assert sess.get_cookies("other.com") == []
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_save_and_restore_auth_via_vault(monkeypatch):
+    from olympus import memory, operator, vault
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-test-passphrase")
+    if not vault.available():
+        pytest.skip("vault crypto backend unavailable")
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        memory.set_user("shared")
+        user = memory.current_user()
+        # a live session with a cookie for shop.com
+        browser.set_transport_factory(lambda: browser.FakeTransport())
+        browser.session().set_cookies([{"name": "sid", "value": "xyz",
+                                        "domain": "shop.com"}])
+        assert "Saved the shop.com session" in operator.save_auth(user, "shop.com")
+        # a fresh session has no cookies until we restore
+        browser.reset()
+        assert browser.session().get_cookies("shop.com") == []
+        assert "Restored the shop.com session" in operator.restore_auth(
+            user, "shop.com")
+        assert browser.session().get_cookies("shop.com")[0]["value"] == "xyz"
+        # unauthorized domain is refused
+        assert "isn't an authorized site" in operator.save_auth(user, "evil.com")
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_auth_tools_are_credentialed_actuators():
+    for name in ("browser_save_auth", "browser_restore_auth"):
+        assert name in security.ACTION_TOOLS
+        assert not security.should_wrap(name)
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_save_auth", "browser_restore_auth"} <= hermes
 
 
 # --- multi-tab, uploads, network-idle: governed plumbing --------------------
@@ -441,6 +557,55 @@ def test_execute_self_heals_and_files_a_proposal(monkeypatch):
         assert action.status == actions.FAILED                # honest failure
         assert "#buy-now" in (action.error or "")             # candidate surfaced
         assert "proposal" in (action.error or "").lower()
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_notable_template_self_heals_and_retries_to_completion(monkeypatch):
+    from olympus import actions, builtin_actions, memory, operator
+    builtin_actions.register_builtins()
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        memory.set_user("shared")
+        user = memory.current_user()
+        actions.set_autonomy(user, actions.L4_STANDING)
+        actions.grant_scope(user, operator.OPERATE_SCOPE)
+        browser.set_template("shop.com", "buy", "notable",
+                             [{"op": "assert", "selector": "#buy"}])
+        # #buy drifted, but a matching control (#buy2) is present now
+        browser.set_transport_factory(lambda: browser.FakeTransport(
+            elements=[{"t": "button", "n": "Buy", "s": "#buy2"}],
+            present=["#buy2"]))
+        action = operator.run(user, "shop.com", "buy", {})
+        assert action.status == actions.EXECUTED          # reversible → healed
+        assert action.result.get("healed") is True
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_irreversible_template_never_auto_retries(monkeypatch):
+    from olympus import builtin_actions, memory, operator
+    builtin_actions.register_builtins()
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+        monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        memory.set_user("shared")
+        user = memory.current_user()
+        browser.set_template("shop.com", "pay", "irreversible",
+                             [{"op": "assert", "selector": "#pay"}])
+        # even though a candidate (#pay2) IS present, a risky step is never
+        # re-attempted on a guessed selector — propose-only.
+        browser.set_transport_factory(lambda: browser.FakeTransport(
+            elements=[{"t": "button", "n": "Pay", "s": "#pay2"}],
+            present=["#pay2"]))
+        with pytest.raises(RuntimeError) as excinfo:
+            operator.execute({"domain": "shop.com", "template": "pay",
+                              "params": {}, "user": user})
+        assert "proposal" in str(excinfo.value).lower()
     finally:
         browser.set_transport_factory(None)
 

@@ -95,9 +95,18 @@ _DEEP_JS = (
     "var n=e.getAttribute&&e.getAttribute('name');if(n)return t+'[name=\\''+n+'\\']';"
     "var a=e.getAttribute&&e.getAttribute('aria-label');"
     "if(a)return t+'[aria-label=\\''+a+'\\']';"
-    "var i=1;for(var s=e.previousElementSibling;s;s=s.previousElementSibling)"
-    "{if(s.tagName===e.tagName)i++;}"
-    "return t+':nth-of-type('+i+')';};"
+    # Otherwise build a ROOTED path up to the nearest ancestor with an id (or the
+    # local root), so the selector resolves unambiguously instead of matching any
+    # nth-of-type sibling anywhere on the page.
+    "var parts=[],cur=e,depth=0;"
+    "while(cur&&cur.tagName&&depth<8){"
+    "if(cur.id){parts.unshift('#'+cur.id);break;}"
+    "var tg=cur.tagName.toLowerCase(),i=1;"
+    "for(var s=cur.previousElementSibling;s;s=s.previousElementSibling)"
+    "{if(s.tagName===cur.tagName)i++;}"
+    "parts.unshift(tg+':nth-of-type('+i+')');"
+    "cur=cur.parentElement;depth++;}"
+    "return parts.join('>');};"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
 # The perception step of the harness, as ONE Runtime.evaluate: deep-walk the light
@@ -196,6 +205,8 @@ class FakeTransport:
         self._url = "about:blank"
         # Scriptable page tabs for list_tabs()/switch_tab() offline.
         self.targets = targets or []
+        # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
+        self.cookies: list[dict] = []
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
@@ -224,6 +235,8 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
+                if params.get("returnByValue") is False:   # node handle wanted
+                    return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
                 if "__olySel" in expr:            # durable-selector lookup
                     value: Any = sel or ""        # offline: echo the matched css
                 elif "innerText" in expr:         # selector read → text or ''
@@ -258,6 +271,11 @@ class FakeTransport:
                 if t.get("targetId") == tid and t.get("url"):
                     self._url = t["url"]
             return {}
+        if method in ("Network.getCookies", "Storage.getCookies"):
+            return {"cookies": list(self.cookies)}
+        if method in ("Network.setCookies", "Storage.setCookies"):
+            self.cookies = list(params.get("cookies", []) or [])
+            return {}
         if method in ("DOM.setFileInputFiles", "Page.setDownloadBehavior"):
             return {}
         if method in ("Input.dispatchMouseEvent", "Input.insertText",
@@ -277,7 +295,7 @@ class _RealTransport:
     minimal so a real attach works when configured.
     """
 
-    def __init__(self, ws_url: str) -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
@@ -288,6 +306,35 @@ class _RealTransport:
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        # The DevTools HTTP base (if we know it), so reattach() can resolve
+        # another page target's socket URL and switch which tab we drive.
+        self._http_base = (http_base or "").rstrip("/")
+
+    def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
+        """Re-bind this transport to a different page target's WebSocket, so the
+        session actually drives the tab it switched to (not just activates it).
+        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        if not self._http_base:
+            return False
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self._http_base + "/json", timeout=10) as r:
+                targets = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return False
+        ws = next((t.get("webSocketDebuggerUrl") for t in targets
+                   if t.get("id") == target_id and t.get("webSocketDebuggerUrl")),
+                  "")
+        if not ws:
+            return False
+        from websockets.sync.client import connect  # type: ignore
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._id = 0
+        return True
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         self._id += 1
@@ -441,7 +488,10 @@ def _build_transport() -> Transport:
             in ("1", "true", "yes", "on")
         endpoint = launch_local(headless=headless)
     if endpoint:
-        return _RealTransport(_resolve_page_ws(endpoint))
+        # Keep the DevTools HTTP base (when the endpoint is one) so the transport
+        # can reattach to another tab on switch_tab().
+        http_base = endpoint if endpoint.startswith(("http://", "https://")) else ""
+        return _RealTransport(_resolve_page_ws(endpoint), http_base=http_base)
     raise BrowserUnavailable(
         "no browser attached — set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
         "open one, or OLYMPUS_BROWSER_CDP_URL to attach to your own.")
@@ -565,6 +615,19 @@ class BrowserSession:
                 last, stable_since = n, None
             time.sleep(0.1)
 
+    def wait_for(self, selector: str, gone: bool = False,
+                 timeout: float = _LOAD_TIMEOUT) -> bool:
+        """Wait until `selector` appears (or, with gone=True, disappears) — the
+        deterministic wait a dynamic UI needs between steps, instead of guessing
+        with a fixed sleep. Bounded by `timeout`; returns whether the condition
+        was met. Resolves deep (shadow/iframe) via exists()/__olyq."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.exists(selector) != gone:
+                return True
+            time.sleep(0.1)
+        return self.exists(selector) != gone
+
     def list_tabs(self) -> list[dict]:
         """List the browser's open page tabs as bounded {id, title, url} dicts.
         Reveals the (possibly credentialed) browser's tabs, so the tool
@@ -588,7 +651,13 @@ class BrowserSession:
         tabs = self.list_tabs()
         if not (0 <= index < len(tabs)):
             return False
-        self._call("Target.activateTarget", targetId=tabs[index]["id"])
+        target_id = tabs[index]["id"]
+        self._call("Target.activateTarget", targetId=target_id)
+        # Actually drive the switched-to tab: re-bind the transport to its socket
+        # when it supports it (real browser). Offline the fake reflects the URL.
+        reattach = getattr(self._t, "reattach", None)
+        if reattach is not None:
+            reattach(target_id)
         self.url = tabs[index]["url"]
         return True
 
@@ -603,14 +672,41 @@ class BrowserSession:
             return f"Error: {err}"
         if not target.is_file():
             return f"Error: no such file in workspace: {path}"
-        if not self.exists(selector):
+        # DOM.setFileInputFiles operates on a node HANDLE, not a selector, so
+        # resolve the input to a CDP objectId first (deep — works inside shadow
+        # roots / same-origin iframes). Confinement + gating are enforced above.
+        object_id = self._resolve_object_id(selector)
+        if not object_id:
             return f"Error: no file input for {selector}."
-        # The CDP node-resolution dance (DOM.getDocument → querySelector →
-        # setFileInputFiles by nodeId) lives in the real transport; the governed
-        # contract — confinement, existence, gating — is enforced here.
         self._call("DOM.setFileInputFiles",
-                   files=[str(target)], selector=selector)
+                   files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
+
+    def get_cookies(self, domain: str = "") -> list[dict]:
+        """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
+        just the current frame's), optionally filtered to `domain`. Cookies are
+        session credentials — the caller (operator.save_auth) stores them ONLY in
+        the encrypted vault and only for an authorized domain, never surfaced to
+        the model."""
+        res = self._call("Storage.getCookies")
+        cookies = (res or {}).get("cookies", []) or []
+        d = (domain or "").strip().lower().lstrip(".")
+        if not d:
+            return list(cookies)
+        out = []
+        for c in cookies:
+            cd = str(c.get("domain", "")).lower().lstrip(".")
+            if cd == d or cd.endswith("." + d) or d.endswith("." + cd):
+                out.append(c)
+        return out
+
+    def set_cookies(self, cookies: list[dict]) -> int:
+        """Inject cookies (CDP Network.setCookies) to restore a saved session, so
+        the operator need not re-login. Returns how many were set."""
+        clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
+        if clean:
+            self._call("Network.setCookies", cookies=clean)
+        return len(clean)
 
     def set_download_dir(self, path: str = "") -> str:
         """Confine any browser download to the workspace (default: its root), so
@@ -727,7 +823,9 @@ class BrowserSession:
         ACTION_TOOL `browser_act`, so capability separation keeps it out of any
         run that also ingests untrusted content. Targets can be given by
         `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
-        Verbs: click, type, scroll, press, select, hover, back."""
+        Verbs: click, type, scroll, press (modifier chords like 'Control+a'),
+        select, hover, rightclick, drag (source → target selector in `value`),
+        wait_for (an element to appear, or disappear when value='gone'), back."""
         action = (action or "").lower()
         # An index from observe() resolves to the stamped stable selector; the
         # observed label makes a learned step human-readable.
@@ -778,16 +876,26 @@ class BrowserSession:
             self._journal_step(f"scroll {amount}px")
             return f"Scrolled {amount}px."
         if action == "press":
-            k = key or text or "Enter"
+            # Supports modifier chords like "Control+a" / "Shift+Tab" / "Meta+c".
+            raw = key or text or "Enter"
+            parts = [p for p in raw.split("+") if p]
+            main = parts[-1] if parts else "Enter"
+            mods = {p.lower() for p in parts[:-1]}
+            ctrl = "true" if (mods & {"control", "ctrl"}) else "false"
+            alt = "true" if (mods & {"alt", "option"}) else "false"
+            shift = "true" if "shift" in mods else "false"
+            meta = "true" if (mods & {"meta", "cmd", "command"}) else "false"
+            init = (f"{{key:{json.dumps(main)},ctrlKey:{ctrl},altKey:{alt},"
+                    f"shiftKey:{shift},metaKey:{meta},bubbles:true}}")
             expr_target = (f"__olyq({json.dumps(selector)})"
                            if selector else "document.activeElement")
             self._eval(
                 f"(function(){{var e={expr_target}||document.body;"
                 f"['keydown','keypress','keyup'].forEach(function(t){{"
-                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
-                f"bubbles:true}}));}});return true;}})()")
-            self._journal_step(f"press {k}")
-            return f"Pressed {k}."
+                f"e.dispatchEvent(new KeyboardEvent(t,{init}));}});"
+                f"return true;}})()")
+            self._journal_step(f"press {raw}")
+            return f"Pressed {raw}."
         if action == "select":
             if not selector:
                 return "Error: select needs an index or selector."
@@ -812,11 +920,59 @@ class BrowserSession:
             self._call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
             self._journal_step(f"hover at ({x}, {y})")
             return f"Hovered at ({x}, {y})."
+        if action in ("rightclick", "contextmenu"):
+            if selector:
+                ok = self._eval_bool(
+                    f"(function(){{var e=__olyq({json.dumps(selector)});"
+                    f"if(!e)return false;e.dispatchEvent(new MouseEvent("
+                    f"'contextmenu',{{bubbles:true}}));return true;}})()")
+                if not ok:
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"right-click {target}")
+                return f"Right-clicked {selector}."
+            self._call("Input.dispatchMouseEvent", type="mousePressed",
+                       x=x, y=y, button="right", clickCount=1)
+            self._call("Input.dispatchMouseEvent", type="mouseReleased",
+                       x=x, y=y, button="right", clickCount=1)
+            self._journal_step(f"right-click at ({x}, {y})")
+            return f"Right-clicked at ({x}, {y})."
+        if action == "drag":
+            # Drag the source element onto a target selector (passed in `value`),
+            # via HTML5 drag events with a shared DataTransfer. Both resolve deep.
+            dst = value or text
+            if not selector or not dst:
+                return "Error: drag needs a source selector/index and a target " \
+                       "selector in 'value'."
+            ok = self._eval_bool(
+                f"(function(){{var s=__olyq({json.dumps(selector)}),"
+                f"d=__olyq({json.dumps(dst)});if(!s||!d)return false;"
+                f"var dt=new DataTransfer();"
+                f"s.dispatchEvent(new DragEvent('dragstart',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('dragover',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('drop',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"s.dispatchEvent(new DragEvent('dragend',"
+                f"{{bubbles:true,dataTransfer:dt}}));return true;}})()")
+            if not ok:
+                return f"Error: could not drag {selector} → {dst}."
+            self._journal_step(f"drag {target} to {dst}")
+            return f"Dragged {selector} to {dst}."
         if action == "back":
             self._eval("history.back();")
             self._wait_ready()
             self._journal_step("go back")
             return "Navigated back."
+        if action == "wait_for":
+            if not selector:
+                return "Error: wait_for needs an index or selector."
+            gone = (value or key or "").strip().lower() in (
+                "gone", "absent", "hidden", "disappear")
+            if self.wait_for(selector, gone=gone):
+                return f"{'Gone' if gone else 'Appeared'}: {selector}."
+            return (f"Error: timed out waiting for {selector} to "
+                    f"{'disappear' if gone else 'appear'}.")
         return f"Error: unknown browser action '{action}'."
 
     def learned_steps(self) -> str:
@@ -851,6 +1007,16 @@ class BrowserSession:
                          returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
 
+    def _resolve_object_id(self, selector: str) -> str:
+        """A CDP objectId (remote handle) for the element `selector` resolves to,
+        crossing shadow/iframe boundaries via __olyq. Empty if it isn't found.
+        Needed by CDP calls that operate on a node handle rather than a value
+        (e.g. DOM.setFileInputFiles for uploads)."""
+        res = self._call("Runtime.evaluate",
+                         expression=self._prep(f"__olyq({json.dumps(selector)})"),
+                         returnByValue=False)
+        return (res or {}).get("result", {}).get("objectId", "") or ""
+
     def exists(self, selector: str) -> bool:
         """Structured predicate: is the selector present? Returns a bool, never
         page prose — so the actuator-holder can branch without ingesting text."""
@@ -872,9 +1038,11 @@ class BrowserSession:
         """Execute a declarative action template step by step. Supported ops:
         `assert` (selector must exist), `click` (selector), `fill`
         (selector+value; value '$name' pulls from params), `wait`, `wait_idle`
-        (settle dynamic content). Raises TemplateStepError on an unresolved step
-        (so the operator can self-heal) or RuntimeError on an unknown op. Page
-        prose is never read as instructions; only selectors are touched."""
+        (settle dynamic content), `wait_for` (selector appears, or disappears
+        with `gone: true`). Raises TemplateStepError on an unresolved or
+        timed-out step (so the operator can self-heal) or RuntimeError on an
+        unknown op. Page prose is never read as instructions; only selectors are
+        touched."""
         params = params or {}
         done: list[str] = []
         for i, step in enumerate(steps or []):
@@ -909,6 +1077,13 @@ class BrowserSession:
             elif op == "wait_idle":
                 self.wait_idle()
                 done.append("wait_idle")
+            elif op == "wait_for":
+                if not self.wait_for(sel, gone=bool(step.get("gone"))):
+                    raise TemplateStepError(
+                        f"step {i}: {sel!r} never "
+                        f"{'disappeared' if step.get('gone') else 'appeared'}",
+                        op=op, selector=sel, index=i)
+                done.append(f"wait_for {sel}")
             else:
                 raise RuntimeError(f"step {i}: unknown op {op!r}")
         return {"steps": done}
@@ -1427,11 +1602,79 @@ def set_template(domain: str, name: str, risk: str, steps: list[dict],
         prof = SiteProfile(domain=domain)
         profiles.append(prof)
     prof.templates = dict(prof.templates or {})
+    prior = prof.templates.get(name, {})
     prof.templates[name] = {
         "risk": risk, "steps": steps[:64],
-        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
+        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX),
+        # Preserve per-template outcome counts across a re-record, so a drift
+        # demotion can be measured (the inverse of graduation).
+        "runs": int(prior.get("runs", 0)),
+        "successes": int(prior.get("successes", 0))}
     _store_profiles(profiles)
     return prof
+
+
+def mark_template_outcome(domain: str, name: str, success: bool) -> None:
+    """Record a run outcome for ONE template (not just the whole profile), so a
+    template that drifts can be demoted on its own measured reliability."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates[name])
+            t["runs"] = int(t.get("runs", 0)) + 1
+            if success:
+                t["successes"] = int(t.get("successes", 0)) + 1
+            p.templates = {**p.templates, name: t}
+            _store_profiles(profiles)
+            return
+
+
+def demote_template(domain: str, name: str) -> bool:
+    """Remove a template from a profile (the inverse of promote_skill): a
+    graduated flow that has stopped working loses its promotion, so the operator
+    stops auto-running a dead recipe."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates)
+            t.pop(name, None)
+            p.templates = t
+            _store_profiles(profiles)
+            return True
+    return False
+
+
+def suggest_pattern(goal: str, exclude_domain: str = "") -> dict | None:
+    """Cross-site generalization: find the most reliable learned skill on ANOTHER
+    domain whose intent matches `goal`, and return its flow as a GENERALIZED
+    scaffold — the op sequence with intent hints but selectors blanked (those are
+    site-specific). Lets a new site bootstrap from a proven pattern (e.g. a
+    login/checkout shape) instead of from scratch. Returns None if nothing close
+    is found. First-party (own skills); never surfaces another site's selectors
+    as if they applied here."""
+    goal_slug = _slug(goal)
+    if not goal_slug:
+        return None
+    ex = (exclude_domain or "").strip().lower()
+    best, best_score = None, 0.0
+    for s in list_skills():
+        if not s.recipe or (ex and s.domain.strip().lower() == ex):
+            continue
+        # match on the skill's intent, weighted by its measured reliability
+        score = _match_score(goal_slug, s.name, s.name) * (0.5 + 0.5 * s.reliability)
+        if score > best_score:
+            best, best_score = s, score
+    if best is None or best_score < 0.30:
+        return None
+    steps = []
+    for st in best.recipe:
+        op = st.get("op", "")
+        hint = str(st.get("value", "")).lstrip("$") or op
+        steps.append({"op": op, "hint": hint})   # selector intentionally omitted
+    return {"from_domain": best.domain, "name": best.name,
+            "reliability": best.reliability, "steps": steps}
 
 
 def promote_skill(domain: str, name: str, *, risk: str = "notable"

@@ -15,6 +15,123 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: cross-site patterns + template demotion
+
+Two evolution mechanisms that make the skill store *converge* over time.
+
+- **Template demotion** (`operator.demote_drifted`, in the review cycle) — the
+  inverse of graduation. Each template now tracks its **own** run/success counts
+  (`mark_template_outcome`, recorded on every `browser_operate`); a graduated
+  template whose measured reliability craters is **demoted** — removed from the
+  profile — so the operator stops auto-running a dead recipe. Promotion is now
+  reversible, not a one-way ratchet.
+- **Cross-site generalization** (`browser_pattern`, `suggest_pattern`) — a proven
+  flow on one site can **seed** another: the tool returns the most reliable
+  learned flow matching a goal (e.g. "login", "checkout") as a **generalized
+  scaffold** — the op sequence and intent hints with **selectors omitted** (those
+  are site-specific and never presented as applying elsewhere). A new site
+  bootstraps from a proven shape instead of from scratch, then adapts and learns
+  it locally. First-party read; no cross-site selector is ever asserted.
+
+### Added — browser harness: gated self-heal retry
+
+Self-healing now *completes* more runs, without ever taking a risky guess.
+
+- When a **reversible (notable)** template step drifts and a confident
+  replacement is found, the operator retries the flow from the failed step with
+  the healed selector — continuing (not repeating) the completed steps — and the
+  run succeeds, marked `healed`. It still files the human-review proposal so the
+  fix can be made permanent.
+- An **irreversible/financial** step is **never** auto-retried on a guessed
+  selector — it stays propose-only, even when a candidate is present. The gate is
+  the template's risk class, so healing can't quietly escalate a risky action.
+
+### Added — browser harness: deterministic waits (`wait_for`)
+
+Instead of racing a fixed sleep on a dynamic page, the harness can wait for a
+specific condition:
+
+- **`wait_for`** — a new `browser_act` verb *and* template op that blocks until a
+  selector **appears** (or **disappears**, with `value='gone'` / `gone: true`),
+  bounded by a timeout, resolving deep (shadow/iframe). A template `wait_for`
+  that times out raises the typed `TemplateStepError`, so it feeds the same
+  self-healing path as any other unresolved step.
+- Verified against real Chromium (an element injected after 400 ms is waited for,
+  not missed).
+
+### Added — browser harness: saved auth state (session persistence)
+
+The operator can now remember a signed-in session and restore it, instead of
+logging in from scratch every run.
+
+- **`browser_save_auth` / `browser_restore_auth`** — capture an authorized
+  domain's cookies (CDP `Storage.getCookies`, filtered to the domain) into the
+  **Fernet-encrypted vault**, and re-inject them (`Network.setCookies`) to
+  restore the session. Cookies are session credentials, so both are credentialed
+  actuators: operator-gated, domain-authorized, stripped from any prose-ingesting
+  run, and never surfaced to the model.
+- **Self-evolving** — a successful `browser_login` now auto-saves the fresh
+  session (best-effort), so the operator's authenticated state persists across
+  runs without extra prompting; `forget_site` drops the saved session too.
+- Verified end-to-end against real Chromium (cookie set → read-back roundtrip)
+  and offline through the vault.
+
+### Improved — browser harness: rooted, unambiguous durable selectors
+
+The durable-selector fallback for a control with no id/name/aria-label used to be
+a bare `tag:nth-of-type(k)`, which can match the k-th sibling *anywhere* on the
+page — so a promoted template or self-heal candidate could point at the wrong
+element. `__olySel` now builds a **rooted path** up to the nearest ancestor with
+an id (e.g. `#box>div:nth-of-type(1)>button:nth-of-type(2)`), so it resolves
+uniquely. Verified against real Chromium (two ambiguous sibling groups resolve to
+exactly the intended node). Directly strengthens template graduation and
+self-healing, which both rely on durable selectors.
+
+### Added — browser harness: richer action verbs
+
+`browser_act` gains three interaction primitives, widening the flows the operator
+can drive:
+
+- **`rightclick`** (a.k.a. `contextmenu`) — opens context menus, by index/selector
+  or x/y.
+- **`drag`** — drag the source element onto a target selector (passed in `value`)
+  via HTML5 drag events with a shared `DataTransfer` — reorderable lists, kanban,
+  sliders.
+- **Modifier chords in `press`** — `Control+a`, `Shift+Tab`, `Meta+c`, etc., parsed
+  into the dispatched `KeyboardEvent`.
+
+All resolve deep (shadow/iframe), stay on the credentialed-actuator side
+(capability-separated), and are verified against real Chromium (right-click and
+Ctrl+A fire genuine DOM events).
+
+### Fixed — browser harness: real-transport upload and multi-tab
+
+Two capabilities that the offline `FakeTransport` accepted but real Chrome
+rejected — now wired correctly and verified against headless Chromium.
+
+- **File upload** — `DOM.setFileInputFiles` operates on a node *handle*, not a
+  selector, so `upload()` now resolves the input to a CDP `objectId`
+  (`_resolve_object_id`, deep — works inside shadow roots / same-origin iframes)
+  and attaches by handle. Confirmed the file actually lands on the input against
+  real Chrome; confinement + operator gating unchanged.
+- **Multi-tab** — `switch_tab()` now genuinely *drives* the tab it switches to:
+  `_RealTransport.reattach()` re-binds the transport to the target tab's
+  WebSocket (resolved via the DevTools HTTP base), so subsequent
+  actions/observations run in the new tab's context — not just `activateTarget`.
+  Confirmed evals run in the switched-to tab against real Chrome.
+
+The real-Chromium smoke test now covers both.
+
+### Added — browser harness: real-Chromium smoke test (ground truth)
+
+`tests/test_browser_real.py` drives an actual headless Chromium over CDP through
+the same `BrowserSession` the offline suite exercises with `FakeTransport` — the
+ground truth the doubles stand in for, catching transport-level gaps (node
+resolution, target attach, live network) the fakes can't. Opt-in and
+self-skipping (`OLYMPUS_BROWSER_REAL=1` + a discoverable Chromium), so default CI
+stays green. Confirms open/observe/act-by-index, **shadow-DOM reach**, fill/select,
+real PNG screenshots, and tab listing against a live browser.
+
 ### Added — browser harness: multi-tab, uploads, network-idle waits
 
 Governed plumbing that widens the range of flows the operator can automate.
