@@ -1205,6 +1205,17 @@ def _browser_switch_tab(index: int) -> str:
     return f"Error: no tab at index {int(index)}."
 
 
+def _browser_save_auth(domain: str) -> str:
+    # Persist the current session for a domain (cookies → encrypted vault) so a
+    # later run skips re-login. Credentialed: operator-gated, domain-authorized.
+    return operator.save_auth(memory.current_user(), domain)
+
+
+def _browser_restore_auth(domain: str) -> str:
+    # Restore a saved session by injecting its vault-stored cookies.
+    return operator.restore_auth(memory.current_user(), domain)
+
+
 def _browser_upload(selector: str, path: str) -> str:
     # Uploading a local file to a site is data egress → credentialed actuator:
     # operator enabled AND the current page's domain authorized, and the path is
@@ -1297,6 +1308,12 @@ def _browser_login(domain: str) -> str:
         return f"No browser attached: {err}"
     browser.mark_profile_outcome(domain, ok)
     if ok:
+        # Self-evolving: persist the fresh session so a later run can restore it
+        # instead of logging in again. Best-effort; failure never blocks login.
+        try:
+            operator.save_auth(user, domain)
+        except Exception:
+            pass
         return f"Logged in to {domain}."
     return (f"Sign-in to {domain} didn't go through — it may need 2FA/CAPTCHA, "
             "or the page changed. Want to sign in manually instead?")
@@ -1545,6 +1562,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_tabs": _browser_tabs,
     "browser_switch_tab": _browser_switch_tab,
     "browser_upload": _browser_upload,
+    "browser_save_auth": _browser_save_auth,
+    "browser_restore_auth": _browser_restore_auth,
     "browser_learn": _browser_learn,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
@@ -2228,6 +2247,36 @@ BROWSER_UPLOAD = {
     },
 }
 
+BROWSER_SAVE_AUTH = {
+    "name": "browser_save_auth",
+    "description": (
+        "Save the current signed-in session for an authorized domain (its "
+        "cookies) into the encrypted vault, so a later run can restore it instead "
+        "of logging in again. Cookies are credentials — operator-gated, never "
+        "shown to the model. Happens automatically after a successful login too."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string",
+                                  "description": "Authorized site, e.g. 'shop.com'"}},
+        "required": ["domain"],
+    },
+}
+
+BROWSER_RESTORE_AUTH = {
+    "name": "browser_restore_auth",
+    "description": (
+        "Restore a previously-saved session for an authorized domain by injecting "
+        "its vault-stored cookies, so the operator skips re-login. Operator-gated."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string",
+                                  "description": "Authorized site, e.g. 'shop.com'"}},
+        "required": ["domain"],
+    },
+}
+
 BROWSER_SKILL_RECORD = {
     "name": "browser_skill_record",
     "description": (
@@ -2687,6 +2736,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_tabs": BROWSER_TABS,
     "browser_switch_tab": BROWSER_SWITCH_TAB,
     "browser_upload": BROWSER_UPLOAD,
+    "browser_save_auth": BROWSER_SAVE_AUTH,
+    "browser_restore_auth": BROWSER_RESTORE_AUTH,
     "browser_learn": BROWSER_LEARN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,

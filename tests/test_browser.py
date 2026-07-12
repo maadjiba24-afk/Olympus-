@@ -291,6 +291,57 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert operator.promote_ready() == []
 
 
+# --- saved auth state: persist a session, restore instead of re-login -------
+
+def test_get_and_set_cookies_roundtrip(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        assert sess.set_cookies([{"name": "sid", "value": "abc",
+                                  "domain": "shop.com"}]) == 1
+        got = sess.get_cookies("shop.com")
+        assert got and got[0]["name"] == "sid"
+        # domain filtering excludes other sites
+        assert sess.get_cookies("other.com") == []
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_save_and_restore_auth_via_vault(monkeypatch):
+    from olympus import memory, operator, vault
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-test-passphrase")
+    if not vault.available():
+        pytest.skip("vault crypto backend unavailable")
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        memory.set_user("shared")
+        user = memory.current_user()
+        # a live session with a cookie for shop.com
+        browser.set_transport_factory(lambda: browser.FakeTransport())
+        browser.session().set_cookies([{"name": "sid", "value": "xyz",
+                                        "domain": "shop.com"}])
+        assert "Saved the shop.com session" in operator.save_auth(user, "shop.com")
+        # a fresh session has no cookies until we restore
+        browser.reset()
+        assert browser.session().get_cookies("shop.com") == []
+        assert "Restored the shop.com session" in operator.restore_auth(
+            user, "shop.com")
+        assert browser.session().get_cookies("shop.com")[0]["value"] == "xyz"
+        # unauthorized domain is refused
+        assert "isn't an authorized site" in operator.save_auth(user, "evil.com")
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_auth_tools_are_credentialed_actuators():
+    for name in ("browser_save_auth", "browser_restore_auth"):
+        assert name in security.ACTION_TOOLS
+        assert not security.should_wrap(name)
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_save_auth", "browser_restore_auth"} <= hermes
+
+
 # --- multi-tab, uploads, network-idle: governed plumbing --------------------
 
 def test_wait_idle_returns_when_resources_settle(monkeypatch):

@@ -95,9 +95,64 @@ def forget_site(user: str, domain: str) -> bool:
         from . import vault
         if vault.available():
             vault.delete(user, f"site:{domain}")
+            vault.delete(user, f"cookies:{domain}")   # drop any saved session too
     except Exception:
         pass
     return existed
+
+
+def save_auth(user: str, domain: str) -> str:
+    """Persist the current browser session for `domain` (its cookies) in the
+    ENCRYPTED vault, so a later run can restore it instead of logging in again.
+    Cookies are session credentials: operator-gated, domain-authorized, and never
+    surfaced to the model. Returns a short status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    try:
+        cookies = browser.session().get_cookies(domain)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    if not cookies:
+        return f"No session cookies to save for {domain}."
+    vault.put(user, f"cookies:{domain}", {"cookies": cookies})
+    return f"Saved the {domain} session ({len(cookies)} cookie(s), encrypted)."
+
+
+def restore_auth(user: str, domain: str) -> str:
+    """Restore a previously-saved session for `domain` by injecting its
+    vault-stored cookies, so the operator skips re-login. Returns a status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    blob = vault.get(user, f"cookies:{domain}")
+    cookies = blob.get("cookies") if isinstance(blob, dict) else None
+    if not cookies:
+        return f"No saved session for {domain} — log in once, then save it."
+    try:
+        n = browser.session().set_cookies(cookies)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    return f"Restored the {domain} session ({n} cookie(s))."
+
+
+def has_saved_auth(user: str, domain: str) -> bool:
+    """True if a saved session exists for `domain` (used to auto-restore)."""
+    from . import vault
+    if not vault.available():
+        return False
+    blob = vault.get(user, f"cookies:{(domain or '').strip().lower()}")
+    return bool(isinstance(blob, dict) and blob.get("cookies"))
 
 
 def authorized(user: str, domain: str) -> bool:

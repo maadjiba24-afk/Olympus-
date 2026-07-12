@@ -205,6 +205,8 @@ class FakeTransport:
         self._url = "about:blank"
         # Scriptable page tabs for list_tabs()/switch_tab() offline.
         self.targets = targets or []
+        # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
+        self.cookies: list[dict] = []
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
@@ -268,6 +270,11 @@ class FakeTransport:
             for t in self.targets:            # reflect the switch in the URL
                 if t.get("targetId") == tid and t.get("url"):
                     self._url = t["url"]
+            return {}
+        if method in ("Network.getCookies", "Storage.getCookies"):
+            return {"cookies": list(self.cookies)}
+        if method in ("Network.setCookies", "Storage.setCookies"):
+            self.cookies = list(params.get("cookies", []) or [])
             return {}
         if method in ("DOM.setFileInputFiles", "Page.setDownloadBehavior"):
             return {}
@@ -661,6 +668,32 @@ class BrowserSession:
         self._call("DOM.setFileInputFiles",
                    files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
+
+    def get_cookies(self, domain: str = "") -> list[dict]:
+        """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
+        just the current frame's), optionally filtered to `domain`. Cookies are
+        session credentials — the caller (operator.save_auth) stores them ONLY in
+        the encrypted vault and only for an authorized domain, never surfaced to
+        the model."""
+        res = self._call("Storage.getCookies")
+        cookies = (res or {}).get("cookies", []) or []
+        d = (domain or "").strip().lower().lstrip(".")
+        if not d:
+            return list(cookies)
+        out = []
+        for c in cookies:
+            cd = str(c.get("domain", "")).lower().lstrip(".")
+            if cd == d or cd.endswith("." + d) or d.endswith("." + cd):
+                out.append(c)
+        return out
+
+    def set_cookies(self, cookies: list[dict]) -> int:
+        """Inject cookies (CDP Network.setCookies) to restore a saved session, so
+        the operator need not re-login. Returns how many were set."""
+        clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
+        if clean:
+            self._call("Network.setCookies", cookies=clean)
+        return len(clean)
 
     def set_download_dir(self, path: str = "") -> str:
         """Confine any browser download to the workspace (default: its root), so

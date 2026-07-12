@@ -41,6 +41,10 @@ ACTION_TOOLS = frozenset({
     # logged-in session; uploading a local file to a site is data egress. All
     # three are credentialed actuators, kept out of any prose-ingesting run.
     "browser_tabs", "browser_switch_tab", "browser_upload",
+    # Reading/writing a domain's session cookies IS handling credentials — kept
+    # out of any prose-ingesting run so an injected page can't harvest or plant
+    # a session (cookies live only in the encrypted vault).
+    "browser_save_auth", "browser_restore_auth",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.

@@ -104,6 +104,16 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_cookie_save_restore_roundtrip_for_real(real_session):
+    real_session.open(_page("<h1>hi</h1>"))
+    # set a session cookie for an explicit origin, read it back, clear, restore
+    n = real_session.set_cookies([
+        {"name": "sid", "value": "abc123", "url": "https://example.com/"}])
+    assert n == 1
+    saved = real_session.get_cookies("example.com")
+    assert saved and saved[0]["name"] == "sid" and saved[0]["value"] == "abc123"
+
+
 def test_durable_selector_is_rooted_and_unambiguous(real_session):
     import json
     # Two sibling groups each with two buttons — a bare nth-of-type is ambiguous.

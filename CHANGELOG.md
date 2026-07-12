@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: saved auth state (session persistence)
+
+The operator can now remember a signed-in session and restore it, instead of
+logging in from scratch every run.
+
+- **`browser_save_auth` / `browser_restore_auth`** — capture an authorized
+  domain's cookies (CDP `Storage.getCookies`, filtered to the domain) into the
+  **Fernet-encrypted vault**, and re-inject them (`Network.setCookies`) to
+  restore the session. Cookies are session credentials, so both are credentialed
+  actuators: operator-gated, domain-authorized, stripped from any prose-ingesting
+  run, and never surfaced to the model.
+- **Self-evolving** — a successful `browser_login` now auto-saves the fresh
+  session (best-effort), so the operator's authenticated state persists across
+  runs without extra prompting; `forget_site` drops the saved session too.
+- Verified end-to-end against real Chromium (cookie set → read-back roundtrip)
+  and offline through the vault.
+
 ### Improved — browser harness: rooted, unambiguous durable selectors
 
 The durable-selector fallback for a control with no id/name/aria-label used to be

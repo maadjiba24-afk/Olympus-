@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 84 tools in
+Olympus exposes a **finite, named** tool surface — the 86 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -75,6 +75,8 @@ surface. So the surface and its threat model can't drift apart.
 | `browser_tabs` | List the browser's open page tabs (bounded id/title/url) | external actuator | Reveals the credentialed browser's tabs — operator-gated and stripped from any ingesting run; titles/urls length-capped | Reconnaissance of your logged-in sessions from an injected run — unreachable from an ingesting run and needs the operator enabled |
 | `browser_switch_tab` | Switch the active browser tab by index | external actuator | Operator-gated; after switching, `browser_act`/`browser_observe` re-check the newly-current domain's authorization | Redirecting the actuator onto an unauthorized logged-in tab — the post-switch domain re-check refuses it |
 | `browser_upload` | Attach a workspace file to a file input on the current page | external actuator | **Data egress** — operator-gated (current domain authorized) AND the path is confined to the workspace (`_confine`) | Exfiltrating a local file to an unauthorized site — refused off-domain and unable to escape the workspace |
+| `browser_save_auth` | Save an authorized domain's session cookies into the encrypted vault | external actuator | **Credentials** — operator-gated + domain-authorized; cookies stored only in the Fernet-encrypted vault, filtered to the domain, never surfaced to the model; stripped from any ingesting run | Harvesting session tokens via an injected run — unreachable from an ingesting run, refused off-domain, and only the authorized domain's cookies are touched |
+| `browser_restore_auth` | Restore a saved session by injecting a domain's vault-stored cookies | external actuator | **Credentials** — operator-gated + domain-authorized; reads only the vault; stripped from any ingesting run | Planting a forged session from an injected run — unreachable from an ingesting run and refused off-domain |
 | `browser_learn` | Crystallize the current session's proven observe→act flow into a reliability-scored skill | first-party write | Records only Olympus's own landed steps (never the typed text, so credentials never enter the store); sanitized at write; gated to the authorized session | Credential leak or skill poisoning — typed text is excluded by construction and steps pass `sanitize_for_memory`; learned skills ride the same measured-reliability scoring/pruning as any other |
 | `browser_skill_record` | Save a browser skill with provenance + score | first-party write | Steps sanitized at write; provenance + content hash recorded | Skill poisoning via injection-shaped steps — `sanitize_for_memory` |
 | `browser_skills` | List browser skills ranked by reliability | first-party read | Read-only; own recorded skills | None significant — own content, scored not trusted blindly |
