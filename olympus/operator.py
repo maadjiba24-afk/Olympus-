@@ -266,7 +266,15 @@ def execute(payload: dict) -> dict:
             "financial/irreversible browser templates are disabled by "
             "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
-    result = sess.run_template(tmpl.get("steps", []), params)
+    try:
+        result = sess.run_template(tmpl.get("steps", []), params)
+    except browser.TemplateStepError as err:
+        # Self-heal: the site likely drifted. Re-observe, look for the moved
+        # control, and file a human-reviewed proposal — never auto-rewrite a
+        # credentialed template. The outcome is still an honest FAILED.
+        browser.mark_profile_outcome(domain, False)
+        note = _heal_and_propose(domain, name, err)
+        raise RuntimeError(f"{err}. {note}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
@@ -275,6 +283,42 @@ def execute(payload: dict) -> dict:
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
     return result
+
+
+def _heal_and_propose(domain: str, template: str,
+                      err: "browser.TemplateStepError") -> str:
+    """After a template step failed, re-observe and, if a likely-moved control is
+    found, file a Prometheus-style proposal to patch the template. Returns a
+    short human-facing note. Files nothing (beyond recording the drift) if no
+    confident candidate is found."""
+    try:
+        cand = browser.session().heal_candidate(err.selector)
+    except Exception:
+        cand = None
+    if cand and cand.get("selector"):
+        body = (f"Template '{template}' on {domain} drifted.\n"
+                f"Step {err.index} ({err.op}) selector {err.selector!r} no "
+                f"longer resolves.\n"
+                f"Likely moved to: {cand['selector']!r} "
+                f"(label {cand.get('label','')!r}, "
+                f"match {cand.get('score')}).\n"
+                "Review and, if correct, update the template with "
+                "site_template_record.")
+        _file_proposal(domain, f"template drift: {domain}/{template}", body)
+        return (f"Filed a self-heal proposal: {err.selector!r} may have moved to "
+                f"{cand['selector']!r} (for human review).")
+    _file_proposal(domain, f"template drift: {domain}/{template}",
+                   f"Template '{template}' step {err.index} selector "
+                   f"{err.selector!r} no longer resolves and no confident "
+                   "replacement was found on the page. Needs human attention.")
+    return "Filed a self-heal proposal (no confident replacement found)."
+
+
+def _file_proposal(domain: str, title: str, body: str) -> None:
+    """Record a human-reviewable operator proposal in memory (never auto-applied)."""
+    user = memory.current_user()
+    memory.set_user(user)
+    memory.save("upgrades", title, security.sanitize_for_memory(body))
 
 
 def register_operator_actions() -> None:

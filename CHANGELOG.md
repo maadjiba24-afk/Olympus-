@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: self-healing templates
+
+When a site is redesigned, a template no longer fails silently — it diagnoses the
+drift and proposes the fix.
+
+- **Drift is detected, not swallowed.** `run_template` now raises a typed
+  `TemplateStepError` when a step can't resolve — including a failed *click*,
+  which previously passed unnoticed.
+- **Re-observe and locate the moved control.** On a step failure during
+  `browser_operate`, the operator re-observes the page and finds the control
+  that most likely *is* the moved one, matching the failed selector's intent
+  (exact slug → substring containment → trigram similarity) against the current
+  elements' labels and durable selectors.
+- **Propose, never self-rewrite.** A candidate becomes a human-reviewed
+  proposal (`site_template_record` to enact) — Olympus never auto-edits a
+  credentialed template, so self-healing can't be turned into an injection
+  primitive. The run still reports an honest FAILED, now with the likely fix
+  attached, and the outcome feeds the reliability score that prunes dead
+  templates.
+
 ### Added — browser harness: proven skills auto-graduate into templates
 
 The evolution loop now closes fully: improvise → learn → prove → **formalize**.

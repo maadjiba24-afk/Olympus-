@@ -124,7 +124,7 @@ _OBSERVE_JS = (
     "nm=nm.replace(/\\s+/g,' ').trim().slice(0,CAP);"
     "var tg=e.tagName.toLowerCase();"
     "var ty=tg==='input'?('input:'+(e.getAttribute('type')||'text')):tg;"
-    "out.push({i:idx,t:ty,n:nm});idx++;}"
+    "out.push({i:idx,t:ty,n:nm,s:__olySel(e)});idx++;}"
     "function walk(root,depth){if(depth>DMAX)return;"
     "var all;try{all=root.querySelectorAll('*');}catch(x){return;}"
     "for(var i=0;i<all.length&&out.length<LIMIT;i++){var el=all[i];"
@@ -150,6 +150,19 @@ class Transport(Protocol):
 
 class BrowserUnavailable(RuntimeError):
     """No browser is attached and none can be built from the environment."""
+
+
+class TemplateStepError(RuntimeError):
+    """A declarative template step failed to resolve (e.g. the site was
+    redesigned and the selector no longer matches). Carries the failed step so
+    the operator can attempt to self-heal by re-observing and proposing a fix."""
+
+    def __init__(self, message: str, *, op: str = "", selector: str = "",
+                 index: int = -1) -> None:
+        super().__init__(message)
+        self.op = op
+        self.selector = selector
+        self.index = index
 
 
 class FakeTransport:
@@ -198,7 +211,8 @@ class FakeTransport:
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
             if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
-                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", "")}
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                        "s": e.get("s", f'[data-olympus-idx="{i}"]')}
                        for i, e in enumerate(self.elements)]
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
@@ -547,30 +561,44 @@ class BrowserSession:
         prose-ingesting run and gated to authorized domains. Labels are
         page-controlled (untrusted) and hard-capped, so a map row can carry no
         more than a short, bounded string — never a paragraph of instructions."""
+        items = self._observe_raw(limit)
+        if items is None:
+            return "(could not read the page's interactive elements)"
+        lines = []
+        for it in items:
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
+
+    def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
+        """The structured perception: a list of {i, t, n, s} dicts (index, type,
+        label, durable selector) for the visible interactive elements across the
+        deep tree. Backs both observe() (the model-facing map) and self-healing
+        (which needs each candidate's selector). Returns None if the page can't
+        be read; refuses a blocked landing. Also refreshes the index→label map."""
         self.ingested_untrusted = True
-        landed = self._blocked_landing()
-        if landed:
-            return f"Error: current page is a blocked address ({landed})."
+        if self._blocked_landing():
+            return None
         limit = max(1, min(int(limit), _OBSERVE_MAX))
         raw = self._eval(_OBSERVE_JS.replace("LIMIT", str(limit))
                                     .replace("CAP", str(_LABEL_MAX)))
         try:
             items = json.loads(raw or "[]")
         except (json.JSONDecodeError, TypeError):
-            return "(could not read the page's interactive elements)"
-        lines = []
-        self._labels = {}
+            return None
+        out, self._labels = [], {}
         for it in items[:limit]:
             if not isinstance(it, dict):
                 continue
-            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
-            label = f' "{name}"' if name else ""
-            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+            out.append(it)
             try:                       # remember for readable learned steps
-                self._labels[int(it.get("i"))] = name or str(it.get("t") or "")
+                self._labels[int(it.get("i"))] = (
+                    str(it.get("n") or "").strip()[:_LABEL_MAX]
+                    or str(it.get("t") or ""))
             except (TypeError, ValueError):
                 pass
-        return "\n".join(lines) or "(no interactive elements found)"
+        return out
 
     def act(self, action: str, *, selector: str = "", text: str = "",
             x: int = 0, y: int = 0, index: int | None = None,
@@ -685,9 +713,12 @@ class BrowserSession:
     @staticmethod
     def _prep(expression: str) -> str:
         """Auto-install the deep-query helper for any expression that uses it, so
-        selector resolution crosses shadow/iframe boundaries identically to
-        observe()'s stamping. Expressions that don't call __olyq are untouched."""
-        return _DEEP_JS + expression if "__olyq" in expression else expression
+        selector resolution (and observe()'s durable-selector stamping) cross
+        shadow/iframe boundaries. Expressions that call neither helper are
+        untouched, so plain evals (readyState, title) route unchanged."""
+        if "__olyq" in expression or "__olySel" in expression:
+            return _DEEP_JS + expression
+        return expression
 
     def _eval(self, expression: str) -> str:
         res = self._call("Runtime.evaluate", expression=self._prep(expression),
@@ -730,17 +761,26 @@ class BrowserSession:
             sel = step.get("selector", "")
             if op == "assert":
                 if not self.exists(sel):
-                    raise RuntimeError(f"step {i}: required element {sel!r} "
-                                       "is missing")
+                    raise TemplateStepError(
+                        f"step {i}: required element {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"assert {sel}")
             elif op == "click":
-                self.act("click", selector=sel)
+                # A failed click was previously silent; detect the missing
+                # target so a drifted template surfaces (and can self-heal).
+                if self.act("click", selector=sel).startswith("Error:"):
+                    raise TemplateStepError(
+                        f"step {i}: click target {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"click {sel}")
             elif op == "fill":
                 val = step.get("value", "")
                 if isinstance(val, str) and val.startswith("$"):
                     val = str(params.get(val[1:], ""))
-                self.fill(sel, val)
+                if not self.fill(sel, val):
+                    raise TemplateStepError(
+                        f"step {i}: fill target {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"fill {sel}")
             elif op == "wait":
                 self._wait_ready()
@@ -748,6 +788,33 @@ class BrowserSession:
             else:
                 raise RuntimeError(f"step {i}: unknown op {op!r}")
         return {"steps": done}
+
+    def heal_candidate(self, failed_selector: str,
+                       min_similarity: float = 0.34) -> dict | None:
+        """Self-healing lookup: after a step failed to resolve, re-observe the
+        page and find the control that most likely IS the moved one, matching the
+        failed selector's intent (its slug) against the current elements' labels
+        and selectors. Returns {"selector", "label", "score"} for the best match
+        above `min_similarity`, else None. This never acts and never rewrites the
+        template — it only surfaces a candidate for a human-reviewed proposal."""
+        target = _slug(failed_selector)
+        if not target:
+            return None
+        items = self._observe_raw()
+        if not items:
+            return None
+        best, best_score = None, 0.0
+        for it in items:
+            cand = str(it.get("s") or "")
+            if not cand or cand == failed_selector:
+                continue
+            score = _match_score(target, str(it.get("n") or ""), cand)
+            if score > best_score:
+                best, best_score = it, score
+        if best is None or best_score < min_similarity:
+            return None
+        return {"selector": str(best.get("s") or ""),
+                "label": str(best.get("n") or ""), "score": round(best_score, 3)}
 
     def login(self, profile: "SiteProfile", creds: dict) -> bool:
         """Drive a declarative login: navigate to the profile's login URL (SSRF/
@@ -916,6 +983,38 @@ def _slug(text: str) -> str:
     fill step's `$name` placeholder. Never carries the typed value."""
     s = "".join(ch for ch in (text or "") if ch.isalnum())
     return s[:40] or "value"
+
+
+def _similarity(a: str, b: str) -> float:
+    """Cheap character-trigram Jaccard similarity in [0,1], for matching a
+    drifted selector's intent against the labels/selectors now on the page."""
+    a, b = (a or "").lower(), (b or "").lower()
+
+    def grams(s: str) -> set[str]:
+        s = f"  {s} "
+        return {s[i:i + 3] for i in range(len(s) - 2)} if len(s) >= 3 else {s}
+
+    ga, gb = grams(a), grams(b)
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / len(ga | gb)
+
+
+def _match_score(target_slug: str, cand_label: str, cand_selector: str) -> float:
+    """How likely is (label, selector) the moved control for `target_slug`?
+    Exact slug match scores highest, then substring containment (a short intent
+    like 'buy' inside 'buynow'), then trigram similarity as a soft fallback."""
+    best = 0.0
+    for h in (_slug(cand_label), _slug(cand_selector)):
+        if not h:
+            continue
+        if target_slug == h:
+            return 1.0
+        if target_slug in h or h in target_slug:
+            best = max(best, 0.9)
+        else:
+            best = max(best, _similarity(target_slug, h))
+    return best
 
 
 def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
