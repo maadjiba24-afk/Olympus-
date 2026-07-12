@@ -278,6 +278,51 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert operator.promote_ready() == []
 
 
+# --- vision perception: screenshot + describe, governed as ingestion --------
+
+def test_screenshot_captures_base64(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        b64 = sess.screenshot()
+        import base64 as _b64
+        assert b64 and _b64.b64decode(b64)                 # valid base64 bytes
+        methods = [c["method"] for c in sess.ledger]
+        assert "Page.captureScreenshot" in methods
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_screenshot_refuses_blocked_landing():
+    # A session sitting on an internal address must not capture its pixels.
+    t = browser.FakeTransport(
+        {"http://169.254.169.254/": {"title": "x", "text": "SECRET"}})
+    t._url = "http://169.254.169.254/"
+    sess = browser.BrowserSession(t)
+    assert sess.screenshot() == ""
+
+
+def test_browser_screenshot_is_ingestion_not_actuator():
+    # Vision perception reads untrusted pixels, so it is an INGESTION reader:
+    # wrapped as untrusted, and stripped from any run that also holds an actuator.
+    assert "browser_screenshot" in security.INGESTION_TOOLS
+    assert security.should_wrap("browser_screenshot")
+    assert "browser_screenshot" not in security.ACTION_TOOLS
+    defs = [tools.BROWSER_SCREENSHOT, tools.BROWSER_ACT]
+    kept = {d["name"] for d in security.filter_tools(defs, ingests_external=True)}
+    assert "browser_screenshot" in kept and "browser_act" not in kept
+
+
+def test_browser_screenshot_handler_describes(monkeypatch):
+    try:
+        from olympus import media
+        monkeypatch.setattr(media, "analyze_image_data",
+                            lambda b64, q="", mime="image/png": f"described:{bool(b64)}")
+        _harness_session(monkeypatch)
+        assert tools._browser_screenshot("what is here") == "described:True"
+    finally:
+        browser.set_transport_factory(None)
+
+
 # --- self-healing: a drifted template re-observes and proposes a fix --------
 
 def test_run_template_raises_typed_error_on_missing_step(monkeypatch):

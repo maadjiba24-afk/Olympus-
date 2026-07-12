@@ -15,6 +15,22 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: visual perception (screenshot + describe)
+
+For canvas/chart/image-heavy pages that a text map can't capture, the harness can
+now *look* at the page.
+
+- **`browser_screenshot`.** Captures the current page (CDP
+  `Page.captureScreenshot`) and describes it with the vision model
+  (`media.analyze_image_data`, a new in-memory path — no workspace file needed),
+  optionally answering a question about it.
+- **Governed as a reader, not an actuator.** The pixels are untrusted external
+  content (text-in-image is still injection), so `browser_screenshot` is an
+  INGESTION tool: its description is wrapped, and capability separation strips it
+  from any run that also holds an actuator. It refuses a blocked landing (never
+  captures internal content) and caps the decoded image size. Given to the
+  reader (Argus), never the operator.
+
 ### Added — browser harness: self-healing templates
 
 When a site is redesigned, a template no longer fails silently — it diagnoses the

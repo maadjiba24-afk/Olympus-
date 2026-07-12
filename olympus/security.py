@@ -56,6 +56,9 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "analyze_image",
                              # The governed CDP harness loads real web pages.
                              "browser_open", "browser_read",
+                             # A vision description of the page's pixels is
+                             # external content too (text-in-image injection).
+                             "browser_screenshot",
                              # A transcript of arbitrary audio is external
                              # content too — spoken injection is still injection.
                              "transcribe_audio",

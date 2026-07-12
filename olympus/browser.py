@@ -193,6 +193,10 @@ class FakeTransport:
         self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
+        # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
+        self.screenshot_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
+            "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
 
     def _matched_selector(self, expr: str) -> str | None:
         for sel in self.present:
@@ -237,6 +241,10 @@ class FakeTransport:
             else:
                 value = page.get("text", "")
             return {"result": {"type": "string", "value": value}}
+        if method == "Page.captureScreenshot":
+            # A deterministic 1x1 PNG so the screenshot path is exercisable
+            # offline without a real browser.
+            return {"data": self.screenshot_b64}
         if method in ("Input.dispatchMouseEvent", "Input.insertText",
                       "Input.dispatchKeyEvent"):
             return {}
@@ -550,6 +558,19 @@ class BrowserSession:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
+
+    def screenshot(self) -> str:
+        """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
+        for visual perception of canvas/image-heavy pages that observe() can't
+        map. Refuses a blocked landing (never captures internal content). Returns
+        base64 data, or "" if nothing was captured. The pixels are untrusted
+        external content — the caller (browser_screenshot) is an INGESTION tool
+        and its description is wrapped, exactly like browser_read."""
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return ""
+        res = self._call("Page.captureScreenshot", format="png")
+        return str((res or {}).get("data", "") or "")
 
     def observe(self, limit: int = _OBSERVE_MAX) -> str:
         """Perceive the page as a numbered map of its visible interactive

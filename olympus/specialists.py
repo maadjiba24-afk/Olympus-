@@ -242,8 +242,9 @@ SPECIALISTS: dict[str, Specialist] = {
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
             extra_tools=("browse_page", "analyze_image", "browser_open",
-                         "browser_read", "browser_act", "browser_skills",
-                         "browser_skill_record", "trigger_research"),
+                         "browser_read", "browser_screenshot", "browser_act",
+                         "browser_skills", "browser_skill_record",
+                         "trigger_research"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),
