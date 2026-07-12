@@ -22,6 +22,8 @@ OPERATE_SCOPE = "browser.operate"      # one coarse scope enables the operator
 _REVIEW_MIN_RUNS = 3
 _REVIEW_FLOOR = 0.34                    # prune profiles that fail >2/3 of the time
 _SETTINGS_KEY = "operator"             # per-user prefs blob
+_PROMOTE_MIN_RUNS = 4                  # a learned skill must be tried this often…
+_PROMOTE_RELIABILITY = 0.75            # …and land this reliably to graduate
 
 
 # --- per-user settings (the conversational surface) ----------------------
@@ -264,7 +266,15 @@ def execute(payload: dict) -> dict:
             "financial/irreversible browser templates are disabled by "
             "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
-    result = sess.run_template(tmpl.get("steps", []), params)
+    try:
+        result = sess.run_template(tmpl.get("steps", []), params)
+    except browser.TemplateStepError as err:
+        # Self-heal: the site likely drifted. Re-observe, look for the moved
+        # control, and file a human-reviewed proposal — never auto-rewrite a
+        # credentialed template. The outcome is still an honest FAILED.
+        browser.mark_profile_outcome(domain, False)
+        note = _heal_and_propose(domain, name, err)
+        raise RuntimeError(f"{err}. {note}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
@@ -273,6 +283,42 @@ def execute(payload: dict) -> dict:
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
     return result
+
+
+def _heal_and_propose(domain: str, template: str,
+                      err: "browser.TemplateStepError") -> str:
+    """After a template step failed, re-observe and, if a likely-moved control is
+    found, file a Prometheus-style proposal to patch the template. Returns a
+    short human-facing note. Files nothing (beyond recording the drift) if no
+    confident candidate is found."""
+    try:
+        cand = browser.session().heal_candidate(err.selector)
+    except Exception:
+        cand = None
+    if cand and cand.get("selector"):
+        body = (f"Template '{template}' on {domain} drifted.\n"
+                f"Step {err.index} ({err.op}) selector {err.selector!r} no "
+                f"longer resolves.\n"
+                f"Likely moved to: {cand['selector']!r} "
+                f"(label {cand.get('label','')!r}, "
+                f"match {cand.get('score')}).\n"
+                "Review and, if correct, update the template with "
+                "site_template_record.")
+        _file_proposal(domain, f"template drift: {domain}/{template}", body)
+        return (f"Filed a self-heal proposal: {err.selector!r} may have moved to "
+                f"{cand['selector']!r} (for human review).")
+    _file_proposal(domain, f"template drift: {domain}/{template}",
+                   f"Template '{template}' step {err.index} selector "
+                   f"{err.selector!r} no longer resolves and no confident "
+                   "replacement was found on the page. Needs human attention.")
+    return "Filed a self-heal proposal (no confident replacement found)."
+
+
+def _file_proposal(domain: str, title: str, body: str) -> None:
+    """Record a human-reviewable operator proposal in memory (never auto-applied)."""
+    user = memory.current_user()
+    memory.set_user(user)
+    memory.save("upgrades", title, security.sanitize_for_memory(body))
 
 
 def register_operator_actions() -> None:
@@ -390,11 +436,34 @@ def run_due(now: float | None = None) -> list[str]:
 
 # --- Phase 4: METIS review + Prometheus proposals ------------------------
 
+def promote_ready(min_runs: int = _PROMOTE_MIN_RUNS,
+                  min_reliability: float = _PROMOTE_RELIABILITY) -> list[str]:
+    """METIS hook: auto-graduate learned skills that have proven reliable into
+    declarative action templates. A skill qualifies once it carries a structured
+    recipe, has been tried >= min_runs times, and lands >= min_reliability of the
+    time; skills whose template already exists are skipped (idempotent). The
+    template rides the governed browser_operate path, so graduation formalizes a
+    proven flow without widening the trust boundary. Returns report lines."""
+    out: list[str] = []
+    for s in browser.list_skills():
+        if not s.recipe or s.runs < min_runs or s.reliability < min_reliability:
+            continue
+        prof = browser.get_profile(s.domain)
+        if prof is not None and s.name in (prof.templates or {}):
+            continue                    # already graduated — idempotent
+        promoted = browser.promote_skill(s.domain, s.name)
+        if promoted is not None:
+            out.append(f"{s.domain} · {s.name} → template "
+                       f"({s.reliability} over {s.runs} runs)")
+    return out
+
+
 def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
                     floor: float = _REVIEW_FLOOR) -> str:
     """METIS hook: prune site profiles that fail consistently (enough runs, low
-    reliability) so the operator stops trusting drifted recipes. Returns a
-    short report."""
+    reliability) so the operator stops trusting drifted recipes, and graduate
+    learned skills that have proven reliable into declarative templates. Returns
+    a short report."""
     profiles = browser._load_profiles()
     keep, pruned = [], []
     for p in profiles:
@@ -404,8 +473,16 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
             keep.append(p)
     if pruned:
         browser._store_profiles(keep)
-        return "Pruned flaky site profiles: " + "; ".join(pruned)
-    return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
+    graduated = promote_ready()
+    parts = []
+    if pruned:
+        parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
+    if graduated:
+        parts.append("Graduated proven skills to templates: "
+                     + "; ".join(graduated))
+    if not parts:
+        return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
+    return " ".join(parts)
 
 
 def propose_profile(domain: str, rationale: str, *, login_url: str = "",

@@ -277,6 +277,32 @@ def analyze_image(image: str, question: str = "") -> str:
     src = _image_source(image)
     if isinstance(src, str):        # an error message
         return src
+    return _vision_describe(src, question)
+
+
+def analyze_image_data(b64: str, question: str = "",
+                       mime: str = "image/png") -> str:
+    """Describe a base64-encoded image passed in memory (e.g. a browser
+    screenshot) — no workspace file needed. Same untrusted-content contract as
+    analyze_image: the answer is external content and callers wrap it."""
+    if not _api_key():
+        return ("Error: image analysis needs an API key "
+                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
+    if not b64:
+        return "Error: no image data to analyze."
+    try:
+        nbytes = len(base64.b64decode(b64, validate=False))
+    except Exception:
+        return "Error: image data is not valid base64."
+    if nbytes > _MAX_IMAGE_BYTES:
+        return (f"Error: image is {nbytes // 1024} KB, over the "
+                f"{_MAX_IMAGE_BYTES // (1024 * 1024)} MB inline limit.")
+    return _vision_describe({"url": f"data:{mime};base64,{b64}"}, question)
+
+
+def _vision_describe(src: dict, question: str = "") -> str:
+    """Shared vision call: send `src` (an OpenAI-compat image_url value) to the
+    vision model with a describe prompt. Returns the model's text or an error."""
     prompt = (question or "").strip() or (
         "Describe this image in detail: what it shows, any text present, and "
         "anything notable.")

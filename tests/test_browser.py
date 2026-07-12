@@ -94,6 +94,63 @@ def test_act_supports_the_richer_verb_set(monkeypatch):
         browser.set_transport_factory(None)
 
 
+# --- depth: observe + act reach into shadow DOM and same-origin iframes ----
+
+def test_observe_deep_walks_shadow_and_iframes():
+    # The perception script must recurse through open shadow roots and
+    # same-origin iframes (most modern web apps hide controls there), and skip
+    # cross-origin frames rather than trying to defeat the same-origin policy.
+    js = browser._OBSERVE_JS
+    assert "shadowRoot" in js and "contentDocument" in js
+    assert "el.matches" in js                     # tests each node in the deep tree
+    # cross-origin frame access is wrapped in try/catch (honored, not defeated)
+    assert "catch" in js
+
+
+def test_selector_resolution_is_deep_everywhere():
+    # Every act/read/exists resolution goes through __olyq (the deep query), so
+    # an index stamped inside a shadow root or iframe still resolves. Guard
+    # against a regression back to a shallow document.querySelector.
+    import inspect
+    src = inspect.getsource(browser.BrowserSession)
+    assert "document.querySelector(" not in src   # no shallow resolution left
+    assert "__olyq(" in src
+    # the deep helper honors the same-origin boundary explicitly
+    assert "shadowRoot" in browser._DEEP_JS and "contentDocument" in browser._DEEP_JS
+
+
+def test_deep_traversal_is_depth_bounded():
+    # A hostile or pathological page can nest shadow roots / iframes arbitrarily;
+    # the walk must be depth-capped so it can't hang or overflow the stack.
+    assert browser._DEEP_MAX_DEPTH > 0
+    assert f"depth>{browser._DEEP_MAX_DEPTH}" in browser._DEEP_JS
+    assert f"depth>{browser._DEEP_MAX_DEPTH}" in browser._OBSERVE_JS
+    # the observe script still carries its LIMIT/CAP placeholders for call-time
+    assert "LIMIT" in browser._OBSERVE_JS and "CAP" in browser._OBSERVE_JS
+
+
+def test_deep_prelude_installs_only_when_used(monkeypatch):
+    # _prep prepends the helper exactly to expressions that call __olyq, leaving
+    # plain evals (readyState, title) untouched — so the offline transport can
+    # still route them and a real browser doesn't reinstall the helper needlessly.
+    prep = browser.BrowserSession._prep
+    assert prep("document.readyState") == "document.readyState"
+    out = prep("(function(){return __olyq('#x');})()")
+    assert out.startswith(browser._DEEP_JS) and "__olyq('#x')" in out
+
+
+def test_index_action_still_resolves_offline_after_deep_rewrite(monkeypatch):
+    # End-to-end offline: observe stamps, act-by-index resolves via __olyq, and
+    # the fake transport routes both through the new markers.
+    try:
+        sess = _harness_session(monkeypatch, elements=[{"t": "button", "n": "Go"}])
+        assert '[0] button "Go"' in sess.observe()
+        out = sess.act("click", index=0)
+        assert "Clicked" in out and 'data-olympus-idx="0"' in out
+    finally:
+        browser.set_transport_factory(None)
+
+
 # --- the evolution loop: a proven observe→act flow becomes a scored skill ---
 
 def test_act_journals_landed_steps_readably(monkeypatch):
@@ -151,6 +208,239 @@ def test_learn_reports_when_nothing_landed_yet(monkeypatch):
         memory.set_user("shared")
         _harness_session(monkeypatch)                # authorized, but no acts
         assert "Nothing to learn" in tools._browser_learn("empty")
+    finally:
+        browser.set_transport_factory(None)
+
+
+# --- promotion: a proven learned skill graduates into a governed template ---
+
+def test_act_captures_a_durable_recipe_credential_free(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy", "#qty"])
+        sess.act("click", selector="#buy")
+        sess.act("type", selector="#qty", text="super-secret")
+        recipe = sess.learned_recipe()
+        assert {"op": "click", "selector": "#buy"} in recipe
+        fill = [s for s in recipe if s["op"] == "fill"][0]
+        assert fill["selector"] == "#qty"
+        assert fill["value"].startswith("$")          # a param placeholder…
+        assert "super-secret" not in str(recipe)      # …never the typed value
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_learn_persists_the_recipe_on_the_skill(monkeypatch):
+    from olympus import memory
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
+        memory.set_user("shared")
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        sess.act("click", selector="#buy")
+        tools._browser_learn("checkout")
+        skill = browser.list_skills("ex.com")[0]
+        assert skill.recipe and skill.recipe[0]["op"] == "click"
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_promote_skill_builds_a_guarded_template(monkeypatch):
+    browser.record_skill("shop.com", "buy", "click #buy; fill #qty",
+                         source="learned",
+                         recipe=[{"op": "click", "selector": "#buy"},
+                                 {"op": "fill", "selector": "#qty", "value": "$qty"}])
+    result = browser.promote_skill("shop.com", "buy")
+    assert result is not None
+    prof, tname = result
+    tmpl = prof.templates["buy"]
+    assert tmpl["risk"] == "notable"
+    assert tmpl["steps"][0] == {"op": "assert", "selector": "#buy"}   # fail-fast
+    assert {"op": "click", "selector": "#buy"} in tmpl["steps"]
+
+
+def test_promote_skill_none_without_recipe():
+    browser.record_skill("shop.com", "manual", "do things by hand")  # no recipe
+    assert browser.promote_skill("shop.com", "manual") is None
+
+
+def test_review_graduates_only_proven_skills_and_is_idempotent():
+    from olympus import operator
+    browser.record_skill("shop.com", "buy", "s",
+                         recipe=[{"op": "click", "selector": "#buy"}])
+    # unproven → not graduated
+    assert operator.promote_ready() == []
+    for _ in range(4):
+        browser.mark_outcome("shop.com", "buy", True)      # 4/4 reliable
+    graduated = operator.promote_ready()
+    assert any("shop.com" in g and "buy" in g for g in graduated)
+    assert "buy" in browser.get_profile("shop.com").templates
+    # running again is a no-op — the template already exists
+    assert operator.promote_ready() == []
+
+
+# --- multi-tab, uploads, network-idle: governed plumbing --------------------
+
+def test_wait_idle_returns_when_resources_settle(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        sess.wait_idle(quiet=0.0)                          # stable count offline
+        # exercised without hanging; the readiness + resource evals ran
+        exprs = [c["params"].get("expression", "") for c in sess.ledger
+                 if c["method"] == "Runtime.evaluate"]
+        assert any("performance" in e for e in exprs)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_list_and_switch_tabs(monkeypatch):
+    try:
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        targets = [{"type": "page", "targetId": "A", "title": "One",
+                    "url": "https://a.com/"},
+                   {"type": "page", "targetId": "B", "title": "Two",
+                    "url": "https://b.com/"},
+                   {"type": "background_page", "targetId": "X", "title": "bg",
+                    "url": "chrome://x"}]
+        browser.set_transport_factory(
+            lambda: browser.FakeTransport(targets=targets))
+        sess = browser.session()
+        tabs = sess.list_tabs()
+        assert [t["url"] for t in tabs] == ["https://a.com/", "https://b.com/"]
+        assert sess.switch_tab(1) and sess._current_url() == "https://b.com/"
+        assert sess.switch_tab(9) is False                 # out of range
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_upload_is_confined_to_the_workspace(monkeypatch, tmp_path):
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        (tmp_path / "ok.txt").write_text("hi", encoding="utf-8")
+        sess = _harness_session(monkeypatch, present=["#file"])
+        # path traversal is refused before any CDP call
+        assert "Error" in sess.upload("#file", "../../etc/passwd")
+        # a real workspace file uploads
+        out = sess.upload("#file", "ok.txt")
+        assert "Uploaded ok.txt to #file" in out
+        assert any(c["method"] == "DOM.setFileInputFiles" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_tab_and_upload_tools_are_credentialed_actuators():
+    for name in ("browser_tabs", "browser_switch_tab", "browser_upload"):
+        assert name in security.ACTION_TOOLS
+        assert not security.should_wrap(name)
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_tabs", "browser_switch_tab", "browser_upload"} <= hermes
+    argus = {d.get("name") for d in SPECIALISTS["argus"].tool_defs("anthropic")}
+    assert not ({"browser_tabs", "browser_switch_tab", "browser_upload"} & argus)
+
+
+def test_set_download_dir_confines_to_workspace(monkeypatch, tmp_path):
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        sess = _harness_session(monkeypatch)
+        out = sess.set_download_dir()
+        assert str(tmp_path) in out
+        assert any(c["method"] == "Page.setDownloadBehavior" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
+# --- vision perception: screenshot + describe, governed as ingestion --------
+
+def test_screenshot_captures_base64(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        b64 = sess.screenshot()
+        import base64 as _b64
+        assert b64 and _b64.b64decode(b64)                 # valid base64 bytes
+        methods = [c["method"] for c in sess.ledger]
+        assert "Page.captureScreenshot" in methods
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_screenshot_refuses_blocked_landing():
+    # A session sitting on an internal address must not capture its pixels.
+    t = browser.FakeTransport(
+        {"http://169.254.169.254/": {"title": "x", "text": "SECRET"}})
+    t._url = "http://169.254.169.254/"
+    sess = browser.BrowserSession(t)
+    assert sess.screenshot() == ""
+
+
+def test_browser_screenshot_is_ingestion_not_actuator():
+    # Vision perception reads untrusted pixels, so it is an INGESTION reader:
+    # wrapped as untrusted, and stripped from any run that also holds an actuator.
+    assert "browser_screenshot" in security.INGESTION_TOOLS
+    assert security.should_wrap("browser_screenshot")
+    assert "browser_screenshot" not in security.ACTION_TOOLS
+    defs = [tools.BROWSER_SCREENSHOT, tools.BROWSER_ACT]
+    kept = {d["name"] for d in security.filter_tools(defs, ingests_external=True)}
+    assert "browser_screenshot" in kept and "browser_act" not in kept
+
+
+def test_browser_screenshot_handler_describes(monkeypatch):
+    try:
+        from olympus import media
+        monkeypatch.setattr(media, "analyze_image_data",
+                            lambda b64, q="", mime="image/png": f"described:{bool(b64)}")
+        _harness_session(monkeypatch)
+        assert tools._browser_screenshot("what is here") == "described:True"
+    finally:
+        browser.set_transport_factory(None)
+
+
+# --- self-healing: a drifted template re-observes and proposes a fix --------
+
+def test_run_template_raises_typed_error_on_missing_step(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=[])       # nothing present
+        with pytest.raises(browser.TemplateStepError):
+            sess.run_template([{"op": "assert", "selector": "#buy"}])
+        # a failed CLICK is no longer silent — it surfaces as a typed error
+        with pytest.raises(browser.TemplateStepError):
+            sess.run_template([{"op": "click", "selector": "#gone"}])
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_heal_candidate_finds_the_moved_control(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, elements=[
+            {"t": "button", "n": "Buy Now", "s": "#buy-now"},
+            {"t": "a", "n": "Help", "s": "#help"}])
+        cand = sess.heal_candidate("#buy")
+        assert cand and cand["selector"] == "#buy-now"        # matched by intent
+        # an unrelated intent finds nothing confident
+        assert sess.heal_candidate("#zzzzzzzz-unrelated") is None
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_execute_self_heals_and_files_a_proposal(monkeypatch):
+    from olympus import actions, builtin_actions, memory, operator
+    builtin_actions.register_builtins()
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        memory.set_user("shared")
+        user = memory.current_user()
+        actions.set_autonomy(user, actions.L4_STANDING)
+        actions.grant_scope(user, operator.OPERATE_SCOPE)
+        # a template whose first control has drifted away…
+        browser.set_template("shop.com", "buy", "notable",
+                             [{"op": "assert", "selector": "#buy"}])
+        # …but a clearly-similar control is present on the page now
+        browser.set_transport_factory(lambda: browser.FakeTransport(
+            elements=[{"t": "button", "n": "Buy Now", "s": "#buy-now"}]))
+        action = operator.run(user, "shop.com", "buy", {})
+        assert action.status == actions.FAILED                # honest failure
+        assert "#buy-now" in (action.error or "")             # candidate surfaced
+        assert "proposal" in (action.error or "").lower()
     finally:
         browser.set_transport_factory(None)
 

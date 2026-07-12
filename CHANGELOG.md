@@ -15,6 +15,104 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: multi-tab, uploads, network-idle waits
+
+Governed plumbing that widens the range of flows the operator can automate.
+
+- **Multi-tab** — `browser_tabs` lists the browser's open page tabs (bounded
+  id/title/url) and `browser_switch_tab` activates one by index. Both are
+  operator-gated credentialed actuators; after a switch, `browser_act`/
+  `browser_observe` re-check the newly-current domain's authorization, so
+  switching can never point the actuator at an unauthorized logged-in tab.
+- **File upload** — `browser_upload` attaches a **workspace-confined** file to a
+  file input on the current authorized page. Uploading a local file is data
+  egress, so it's operator-gated (current domain authorized) and the path can
+  never escape the sandbox (`_confine`).
+- **Downloads confined** — `set_download_dir()` directs any browser download
+  into the workspace, so a site can't drop a file outside the sandbox.
+- **Network-idle wait** — `wait_idle()` (and the new `wait_idle` template op)
+  waits for the page to load *and* its resource count to hold steady for a short
+  quiet window — a dependency-free heuristic for dynamic pages whose content
+  arrives after `readyState=complete`. Bounded and best-effort.
+
+### Added — browser harness: visual perception (screenshot + describe)
+
+For canvas/chart/image-heavy pages that a text map can't capture, the harness can
+now *look* at the page.
+
+- **`browser_screenshot`.** Captures the current page (CDP
+  `Page.captureScreenshot`) and describes it with the vision model
+  (`media.analyze_image_data`, a new in-memory path — no workspace file needed),
+  optionally answering a question about it.
+- **Governed as a reader, not an actuator.** The pixels are untrusted external
+  content (text-in-image is still injection), so `browser_screenshot` is an
+  INGESTION tool: its description is wrapped, and capability separation strips it
+  from any run that also holds an actuator. It refuses a blocked landing (never
+  captures internal content) and caps the decoded image size. Given to the
+  reader (Argus), never the operator.
+
+### Added — browser harness: self-healing templates
+
+When a site is redesigned, a template no longer fails silently — it diagnoses the
+drift and proposes the fix.
+
+- **Drift is detected, not swallowed.** `run_template` now raises a typed
+  `TemplateStepError` when a step can't resolve — including a failed *click*,
+  which previously passed unnoticed.
+- **Re-observe and locate the moved control.** On a step failure during
+  `browser_operate`, the operator re-observes the page and finds the control
+  that most likely *is* the moved one, matching the failed selector's intent
+  (exact slug → substring containment → trigram similarity) against the current
+  elements' labels and durable selectors.
+- **Propose, never self-rewrite.** A candidate becomes a human-reviewed
+  proposal (`site_template_record` to enact) — Olympus never auto-edits a
+  credentialed template, so self-healing can't be turned into an injection
+  primitive. The run still reports an honest FAILED, now with the likely fix
+  attached, and the outcome feeds the reliability score that prunes dead
+  templates.
+
+### Added — browser harness: proven skills auto-graduate into templates
+
+The evolution loop now closes fully: improvise → learn → prove → **formalize**.
+
+- **Structured recipe.** As the harness acts, it captures a structured twin of
+  its journal — `{op, selector, value?}` steps with **durable selectors**
+  (id → `[name]` → `[aria-label]` → nth-of-type path via a new `__olySel`
+  helper), never the typed text. `browser_learn` persists this recipe on the
+  learned skill.
+- **Auto-graduation.** A METIS review pass (`operator.promote_ready`, folded
+  into `operator.review_profiles`) graduates a learned skill into a declarative
+  action template once it has been tried enough times (`_PROMOTE_MIN_RUNS`) and
+  lands reliably enough (`_PROMOTE_RELIABILITY`). The generated template is
+  guarded by an `assert` on its first control so it fails fast if the page
+  drifted, and it rides the existing governed `browser_operate` path — auto-run
+  within scope for notable risk, approval for anything higher. Graduation
+  **formalizes** a proven flow without widening the trust boundary.
+- **Idempotent & bounded.** A skill whose template already exists is skipped;
+  recipes are capped and credential-free by construction.
+
+### Added — browser harness depth: shadow DOM + same-origin iframes
+
+The harness now perceives and acts on controls that modern web apps hide behind
+component boundaries, not just the top-level document.
+
+- **Deep perception & resolution.** `observe()` deep-walks the light DOM plus
+  every **open shadow root** and **same-origin iframe**, stamping controls found
+  anywhere in that tree; a shared `__olyq` deep-query helper backs every
+  `act`/`read`/`exists`/`fill`/template resolution, so an index stamped inside a
+  shadow root or frame still resolves. Most componentized sites that previously
+  showed a near-empty map now expose their real controls.
+- **Boundary honored, not defeated.** Cross-origin frames throw on access and are
+  skipped — Olympus works within the same-origin policy rather than trying to
+  bypass it.
+- **Hardened.** The shadow/iframe recursion is depth-bounded
+  (`_DEEP_MAX_DEPTH`) so a pathological or hostile page can't hang the walk or
+  overflow the stack; observe output stays capped at `_OBSERVE_MAX` with labels
+  capped at `_LABEL_MAX`.
+- **Evolves for free.** Because the perceive→act loop now reaches these controls,
+  `browser_learn` captures shadow/iframe flows into the same reliability-scored
+  skill store — deeper reach, same governance.
+
 ### Added — native browser harness (perceive → act, governed)
 
 Olympus grows its **own** browser-agent working style, so no external browser

@@ -1106,6 +1106,22 @@ def _browser_read(selector: str = "") -> str:
         return f"No browser attached: {err}"
 
 
+def _browser_screenshot(question: str = "") -> str:
+    # Visual perception: capture the current page and describe it with the vision
+    # model, for canvas/image-heavy pages that observe() can't map. A READER, not
+    # an actuator — it ingests untrusted pixels (text-in-image injection is still
+    # injection), so it is an INGESTION tool, wrapped and capability-separated.
+    from . import media
+    try:
+        b64 = browser.session().screenshot()
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    if not b64:
+        return ("Error: could not capture the page (it may be a blocked address "
+                "or nothing is loaded).")
+    return media.analyze_image_data(b64, question)
+
+
 def _operator_authorized_session():
     """Shared gate for the credentialed harness (observe + act): the operator
     must be enabled and the CURRENT page's domain authorized. Returns
@@ -1151,6 +1167,54 @@ def _browser_act(action: str, selector: str = "", text: str = "",
                     index=idx, key=key, value=value)
 
 
+def _operator_enabled_session():
+    """Lighter gate for tab navigation: the operator must be enabled, but no
+    current-domain check (you are choosing WHICH tab to go to). Any subsequent
+    act/observe still re-checks the newly-current domain, so this can't reach an
+    unauthorized site's actuator. Returns (session, None) or (None, error)."""
+    user = memory.current_user()
+    if not operator.enabled(user):
+        return None, ("Error: the operator isn't set up — ask me to set up this "
+                      "site first.")
+    try:
+        return browser.session(), None
+    except browser.BrowserUnavailable as err:
+        return None, f"No browser attached: {err}"
+
+
+def _browser_tabs() -> str:
+    # Reveal the (credentialed) browser's open page tabs as a bounded, numbered
+    # list. Actuator-class (reveals the logged-in browser), operator-gated, and
+    # stripped from any prose-ingesting run.
+    sess, err = _operator_enabled_session()
+    if err:
+        return err
+    tabs = sess.list_tabs()
+    if not tabs:
+        return "No open browser tabs."
+    return "\n".join(f"[{i}] {t['title']} — {t['url']}"
+                     for i, t in enumerate(tabs))
+
+
+def _browser_switch_tab(index: int) -> str:
+    sess, err = _operator_enabled_session()
+    if err:
+        return err
+    if sess.switch_tab(int(index)):
+        return f"Switched to tab [{int(index)}] ({sess.url})."
+    return f"Error: no tab at index {int(index)}."
+
+
+def _browser_upload(selector: str, path: str) -> str:
+    # Uploading a local file to a site is data egress → credentialed actuator:
+    # operator enabled AND the current page's domain authorized, and the path is
+    # confined to the workspace.
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    return sess.upload(selector, path)
+
+
 def _browser_learn(name: str) -> str:
     # Close the evolution loop: crystallize the proven observe→act flow of the
     # current authorized session into a reliability-scored skill. First-party
@@ -1168,10 +1232,12 @@ def _browser_learn(name: str) -> str:
     host = (urlparse(sess._current_url() or "").hostname or "").lower()
     skill = browser.record_skill(host, name,
                                  security.sanitize_for_memory(steps),
-                                 source="learned")
+                                 source="learned", recipe=sess.learned_recipe())
+    tail = (" Once it proves reliable it can auto-graduate into a governed "
+            "template.") if skill.recipe else ""
     return (f"Learned '{skill.name}' for {skill.domain} from what worked "
             f"({skill.content_hash}). It now rides the reliability score and "
-            f"will be refined or pruned over time.")
+            f"will be refined or pruned over time.{tail}")
 
 
 def _browser_skill_record(domain: str, name: str, steps: str,
@@ -1473,8 +1539,12 @@ HANDLERS: dict[str, Callable[..., str]] = {
         image, question),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
+    "browser_screenshot": _browser_screenshot,
     "browser_observe": _browser_observe,
     "browser_act": _browser_act,
+    "browser_tabs": _browser_tabs,
+    "browser_switch_tab": _browser_switch_tab,
+    "browser_upload": _browser_upload,
     "browser_learn": _browser_learn,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
@@ -2023,6 +2093,25 @@ BROWSER_READ = {
     },
 }
 
+BROWSER_SCREENSHOT = {
+    "name": "browser_screenshot",
+    "description": (
+        "Capture the current browser page as an image and describe it with a "
+        "vision model — for canvas/chart/image-heavy pages that browser_read "
+        "and browser_observe can't map as text. Optionally pass a 'question' to "
+        "ask about the page. The description is untrusted external content "
+        "(text-in-image can carry injection), treated exactly like browser_read."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string",
+                         "description": "Optional question about the page"},
+        },
+        "required": [],
+    },
+}
+
 BROWSER_OBSERVE = {
     "name": "browser_observe",
     "description": (
@@ -2091,6 +2180,48 @@ BROWSER_LEARN = {
                      "description": "Short name for the learned flow"},
         },
         "required": ["name"],
+    },
+}
+
+BROWSER_TABS = {
+    "name": "browser_tabs",
+    "description": (
+        "List the browser's open page tabs as a numbered list ([i] title — url). "
+        "Reveals the (possibly logged-in) browser's tabs, so it is operator-gated "
+        "and unavailable in any run that also reads untrusted web content."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+BROWSER_SWITCH_TAB = {
+    "name": "browser_switch_tab",
+    "description": (
+        "Switch the active browser tab to the given index from browser_tabs. "
+        "Any subsequent action re-checks the newly-current page's domain "
+        "authorization, so switching never bypasses the operator gate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"index": {"type": "integer",
+                                 "description": "Tab index from browser_tabs"}},
+        "required": ["index"],
+    },
+}
+
+BROWSER_UPLOAD = {
+    "name": "browser_upload",
+    "description": (
+        "Attach a file from the confined workspace to a file input on the current "
+        "authorized page. Uploading a local file to a site is data egress, so it "
+        "is operator-gated and the path can never leave the workspace."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS file-input selector"},
+            "path": {"type": "string", "description": "Workspace file to upload"},
+        },
+        "required": ["selector", "path"],
     },
 }
 
@@ -2547,8 +2678,12 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,
+    "browser_screenshot": BROWSER_SCREENSHOT,
     "browser_observe": BROWSER_OBSERVE,
     "browser_act": BROWSER_ACT,
+    "browser_tabs": BROWSER_TABS,
+    "browser_switch_tab": BROWSER_SWITCH_TAB,
+    "browser_upload": BROWSER_UPLOAD,
     "browser_learn": BROWSER_LEARN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
