@@ -1602,11 +1602,79 @@ def set_template(domain: str, name: str, risk: str, steps: list[dict],
         prof = SiteProfile(domain=domain)
         profiles.append(prof)
     prof.templates = dict(prof.templates or {})
+    prior = prof.templates.get(name, {})
     prof.templates[name] = {
         "risk": risk, "steps": steps[:64],
-        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
+        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX),
+        # Preserve per-template outcome counts across a re-record, so a drift
+        # demotion can be measured (the inverse of graduation).
+        "runs": int(prior.get("runs", 0)),
+        "successes": int(prior.get("successes", 0))}
     _store_profiles(profiles)
     return prof
+
+
+def mark_template_outcome(domain: str, name: str, success: bool) -> None:
+    """Record a run outcome for ONE template (not just the whole profile), so a
+    template that drifts can be demoted on its own measured reliability."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates[name])
+            t["runs"] = int(t.get("runs", 0)) + 1
+            if success:
+                t["successes"] = int(t.get("successes", 0)) + 1
+            p.templates = {**p.templates, name: t}
+            _store_profiles(profiles)
+            return
+
+
+def demote_template(domain: str, name: str) -> bool:
+    """Remove a template from a profile (the inverse of promote_skill): a
+    graduated flow that has stopped working loses its promotion, so the operator
+    stops auto-running a dead recipe."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates)
+            t.pop(name, None)
+            p.templates = t
+            _store_profiles(profiles)
+            return True
+    return False
+
+
+def suggest_pattern(goal: str, exclude_domain: str = "") -> dict | None:
+    """Cross-site generalization: find the most reliable learned skill on ANOTHER
+    domain whose intent matches `goal`, and return its flow as a GENERALIZED
+    scaffold — the op sequence with intent hints but selectors blanked (those are
+    site-specific). Lets a new site bootstrap from a proven pattern (e.g. a
+    login/checkout shape) instead of from scratch. Returns None if nothing close
+    is found. First-party (own skills); never surfaces another site's selectors
+    as if they applied here."""
+    goal_slug = _slug(goal)
+    if not goal_slug:
+        return None
+    ex = (exclude_domain or "").strip().lower()
+    best, best_score = None, 0.0
+    for s in list_skills():
+        if not s.recipe or (ex and s.domain.strip().lower() == ex):
+            continue
+        # match on the skill's intent, weighted by its measured reliability
+        score = _match_score(goal_slug, s.name, s.name) * (0.5 + 0.5 * s.reliability)
+        if score > best_score:
+            best, best_score = s, score
+    if best is None or best_score < 0.30:
+        return None
+    steps = []
+    for st in best.recipe:
+        op = st.get("op", "")
+        hint = str(st.get("value", "")).lstrip("$") or op
+        steps.append({"op": op, "hint": hint})   # selector intentionally omitted
+    return {"from_domain": best.domain, "name": best.name,
+            "reliability": best.reliability, "steps": steps}
 
 
 def promote_skill(domain: str, name: str, *, risk: str = "notable"

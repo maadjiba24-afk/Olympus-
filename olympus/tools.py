@@ -1251,6 +1251,23 @@ def _browser_learn(name: str) -> str:
             f"will be refined or pruned over time.{tail}")
 
 
+def _browser_pattern(goal: str) -> str:
+    # Cross-site generalization: surface the most reliable learned flow (on any
+    # site) matching `goal` as a GENERALIZED scaffold — op sequence + intent
+    # hints, selectors omitted (site-specific). First-party read of own skills.
+    sug = browser.suggest_pattern(goal)
+    if not sug:
+        return (f"No proven cross-site pattern found for '{goal}'. "
+                "Learn one on a site and it can seed others.")
+    lines = [f"Pattern from {sug['from_domain']} · {sug['name']} "
+             f"(reliability {sug['reliability']}):"]
+    for i, st in enumerate(sug["steps"], 1):
+        lines.append(f"  {i}. {st['op']} — {st['hint']} "
+                     "(find the matching control on this site)")
+    lines.append("Adapt these steps to this site's own selectors, then learn it.")
+    return "\n".join(lines)
+
+
 def _browser_skill_record(domain: str, name: str, steps: str,
                           source: str = "agent") -> str:
     skill = browser.record_skill(domain, name,
@@ -1565,6 +1582,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_save_auth": _browser_save_auth,
     "browser_restore_auth": _browser_restore_auth,
     "browser_learn": _browser_learn,
+    "browser_pattern": _browser_pattern,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
     "browser_exists": _browser_exists,
@@ -2207,6 +2225,23 @@ BROWSER_LEARN = {
     },
 }
 
+BROWSER_PATTERN = {
+    "name": "browser_pattern",
+    "description": (
+        "Suggest a starting scaffold for a goal (e.g. 'login', 'checkout') by "
+        "generalizing the most reliable learned flow from ANOTHER site — the op "
+        "sequence and intent hints, with site-specific selectors omitted. Use it "
+        "to bootstrap a new site from a proven pattern instead of from scratch, "
+        "then adapt and learn it here."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"goal": {"type": "string",
+                                "description": "What you're trying to do"}},
+        "required": ["goal"],
+    },
+}
+
 BROWSER_TABS = {
     "name": "browser_tabs",
     "description": (
@@ -2741,6 +2776,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_save_auth": BROWSER_SAVE_AUTH,
     "browser_restore_auth": BROWSER_RESTORE_AUTH,
     "browser_learn": BROWSER_LEARN,
+    "browser_pattern": BROWSER_PATTERN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
     "browser_exists": BROWSER_EXISTS,

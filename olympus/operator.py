@@ -341,15 +341,18 @@ def execute(payload: dict) -> dict:
                 healed_note = f" (self-healed: used {cand!r})"
             except browser.TemplateStepError:
                 browser.mark_profile_outcome(domain, False)
+                browser.mark_template_outcome(domain, name, False)
                 raise RuntimeError(f"{err}. {heal['note']}") from err
         else:
             browser.mark_profile_outcome(domain, False)
+            browser.mark_template_outcome(domain, name, False)
             raise RuntimeError(f"{err}. {heal['note']}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
         result["verified"] = ok
     browser.mark_profile_outcome(domain, ok)
+    browser.mark_template_outcome(domain, name, ok)
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
     if healed_note:
@@ -543,12 +546,28 @@ def promote_ready(min_runs: int = _PROMOTE_MIN_RUNS,
     return out
 
 
+def demote_drifted(min_runs: int = _REVIEW_MIN_RUNS,
+                   floor: float = _REVIEW_FLOOR) -> list[str]:
+    """METIS hook (inverse of promote_ready): demote a graduated template that
+    has stopped working — its own measured reliability is below the floor over
+    enough runs — so the operator stops auto-running a dead recipe. Returns
+    report lines."""
+    out: list[str] = []
+    for p in browser.list_profiles():
+        for name, t in list((p.templates or {}).items()):
+            runs = int(t.get("runs", 0))
+            succ = int(t.get("successes", 0))
+            if runs >= min_runs and (succ / runs if runs else 0.0) < floor:
+                if browser.demote_template(p.domain, name):
+                    out.append(f"{p.domain}/{name} ({succ}/{runs})")
+    return out
+
+
 def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
                     floor: float = _REVIEW_FLOOR) -> str:
-    """METIS hook: prune site profiles that fail consistently (enough runs, low
-    reliability) so the operator stops trusting drifted recipes, and graduate
-    learned skills that have proven reliable into declarative templates. Returns
-    a short report."""
+    """METIS hook: prune site profiles that fail consistently, graduate learned
+    skills that have proven reliable into templates, and demote graduated
+    templates that have since drifted. Returns a short report."""
     profiles = browser._load_profiles()
     keep, pruned = [], []
     for p in profiles:
@@ -558,10 +577,13 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
             keep.append(p)
     if pruned:
         browser._store_profiles(keep)
+    demoted = demote_drifted(min_runs, floor)
     graduated = promote_ready()
     parts = []
     if pruned:
         parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
+    if demoted:
+        parts.append("Demoted drifted templates: " + "; ".join(demoted))
     if graduated:
         parts.append("Graduated proven skills to templates: "
                      + "; ".join(graduated))

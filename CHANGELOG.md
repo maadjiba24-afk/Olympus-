@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: cross-site patterns + template demotion
+
+Two evolution mechanisms that make the skill store *converge* over time.
+
+- **Template demotion** (`operator.demote_drifted`, in the review cycle) — the
+  inverse of graduation. Each template now tracks its **own** run/success counts
+  (`mark_template_outcome`, recorded on every `browser_operate`); a graduated
+  template whose measured reliability craters is **demoted** — removed from the
+  profile — so the operator stops auto-running a dead recipe. Promotion is now
+  reversible, not a one-way ratchet.
+- **Cross-site generalization** (`browser_pattern`, `suggest_pattern`) — a proven
+  flow on one site can **seed** another: the tool returns the most reliable
+  learned flow matching a goal (e.g. "login", "checkout") as a **generalized
+  scaffold** — the op sequence and intent hints with **selectors omitted** (those
+  are site-specific and never presented as applying elsewhere). A new site
+  bootstraps from a proven shape instead of from scratch, then adapts and learns
+  it locally. First-party read; no cross-site selector is ever asserted.
+
 ### Added — browser harness: gated self-heal retry
 
 Self-healing now *completes* more runs, without ever taking a risky guess.

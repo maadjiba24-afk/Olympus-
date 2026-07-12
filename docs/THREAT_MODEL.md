@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 86 tools in
+Olympus exposes a **finite, named** tool surface — the 87 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -80,6 +80,7 @@ surface. So the surface and its threat model can't drift apart.
 | `browser_learn` | Crystallize the current session's proven observe→act flow into a reliability-scored skill | first-party write | Records only Olympus's own landed steps (never the typed text, so credentials never enter the store); sanitized at write; gated to the authorized session | Credential leak or skill poisoning — typed text is excluded by construction and steps pass `sanitize_for_memory`; learned skills ride the same measured-reliability scoring/pruning as any other |
 | `browser_skill_record` | Save a browser skill with provenance + score | first-party write | Steps sanitized at write; provenance + content hash recorded | Skill poisoning via injection-shaped steps — `sanitize_for_memory` |
 | `browser_skills` | List browser skills ranked by reliability | first-party read | Read-only; own recorded skills | None significant — own content, scored not trusted blindly |
+| `browser_pattern` | Suggest a generalized scaffold for a goal from the most reliable learned flow on another site | first-party read | Read-only; own skills; returns op sequence + intent hints with selectors omitted (a site's selectors are never presented as applying elsewhere) | None significant — own content; no cross-site selector is asserted, only a shape to adapt |
 | `browser_exists` | Probe whether a CSS selector is present | structured predicate | Returns a bool, never page prose | Not an ingestion vector — no page text crosses into instructions |
 | `browser_login` | Log in via a site profile + vaulted credentials | credentialed actuator | Off by default (`OLYMPUS_OPERATOR`); domain must be allowlisted *and* on the egress allowlist; vault entry required; password never enters model context; fails closed on a missing success marker (2FA/CAPTCHA) | Unauthorized login / credential leak — deny-first gates + vault isolation; injected page can't redirect it (declarative profile only) |
 | `site_profile_record` | Save a domain's declarative login recipe | first-party write | Selectors only (no credentials); length-capped; provenance + reliability tracked | Profile poisoning — no secrets stored here; credentials live in the vault |

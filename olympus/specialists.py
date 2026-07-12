@@ -304,6 +304,7 @@ SPECIALISTS: dict[str, Specialist] = {
             # label-capped structure, not page prose).
             extra_tools=("browser_exists", "browser_login",
                          "browser_observe", "browser_act", "browser_learn",
+                         "browser_pattern",
                          "browser_tabs", "browser_switch_tab", "browser_upload",
                          "browser_save_auth", "browser_restore_auth",
                          "site_profiles", "site_profile_record",

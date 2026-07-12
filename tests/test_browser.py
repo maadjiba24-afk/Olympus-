@@ -292,6 +292,42 @@ def test_promote_skill_none_without_recipe():
     assert browser.promote_skill("shop.com", "manual") is None
 
 
+def test_drifted_template_is_demoted_by_review():
+    from olympus import operator
+    browser.set_template("shop.com", "buy", "notable",
+                         [{"op": "click", "selector": "#buy"}])
+    # the template keeps failing — its own reliability craters
+    for _ in range(4):
+        browser.mark_template_outcome("shop.com", "buy", False)
+    demoted = operator.demote_drifted()
+    assert any("shop.com/buy" in d for d in demoted)
+    assert "buy" not in (browser.get_profile("shop.com").templates or {})
+    # a healthy template is left alone
+    browser.set_template("shop.com", "good", "notable",
+                         [{"op": "click", "selector": "#ok"}])
+    for _ in range(4):
+        browser.mark_template_outcome("shop.com", "good", True)
+    assert operator.demote_drifted() == []
+
+
+def test_suggest_pattern_generalizes_across_sites():
+    # a proven login flow on one site scaffolds a new one — shape transfers,
+    # site-specific selectors do NOT.
+    browser.record_skill("a-shop.com", "login", "fill user; fill pass; click in",
+                         source="learned",
+                         recipe=[{"op": "fill", "selector": "#u", "value": "$user"},
+                                 {"op": "fill", "selector": "#p", "value": "$pass"},
+                                 {"op": "click", "selector": "#signin"}])
+    browser.mark_outcome("a-shop.com", "login", True)
+    sug = browser.suggest_pattern("login", exclude_domain="b-shop.com")
+    assert sug and sug["from_domain"] == "a-shop.com"
+    ops = [s["op"] for s in sug["steps"]]
+    assert ops == ["fill", "fill", "click"]              # the shape transfers
+    assert all("selector" not in s for s in sug["steps"])  # selectors omitted
+    # nothing close → None
+    assert browser.suggest_pattern("xyzzy-unrelated") is None
+
+
 def test_review_graduates_only_proven_skills_and_is_idempotent():
     from olympus import operator
     browser.record_skill("shop.com", "buy", "s",
