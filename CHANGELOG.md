@@ -15,6 +15,16 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: real-Chromium smoke test (ground truth)
+
+`tests/test_browser_real.py` drives an actual headless Chromium over CDP through
+the same `BrowserSession` the offline suite exercises with `FakeTransport` — the
+ground truth the doubles stand in for, catching transport-level gaps (node
+resolution, target attach, live network) the fakes can't. Opt-in and
+self-skipping (`OLYMPUS_BROWSER_REAL=1` + a discoverable Chromium), so default CI
+stays green. Confirms open/observe/act-by-index, **shadow-DOM reach**, fill/select,
+real PNG screenshots, and tab listing against a live browser.
+
 ### Added — browser harness: multi-tab, uploads, network-idle waits
 
 Governed plumbing that widens the range of flows the operator can automate.

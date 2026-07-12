@@ -1,0 +1,91 @@
+"""Real-browser smoke test: drives an actual headless Chromium over CDP through
+the SAME BrowserSession the offline suite exercises with FakeTransport. This is
+the ground truth the offline doubles stand in for — it catches transport-level
+gaps (node resolution, target attach, live network) the fakes can't.
+
+Opt-in and self-skipping: it runs only when OLYMPUS_BROWSER_REAL=1 AND a
+Chrome/Chromium binary is discoverable, so default CI (no browser) stays green.
+Run it with:
+
+    OLYMPUS_BROWSER_REAL=1 python -m pytest tests/test_browser_real.py -q
+"""
+
+import os
+
+import pytest
+
+from olympus import browser, security
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("OLYMPUS_BROWSER_REAL", "").strip() not in ("1", "true", "yes")
+    or browser._find_chrome() is None,
+    reason="real-browser smoke test (set OLYMPUS_BROWSER_REAL=1 with Chromium)")
+
+
+@pytest.fixture
+def real_session(monkeypatch, tmp_path):
+    """A session bound to a freshly-launched headless Chromium, torn down after."""
+    monkeypatch.setenv("OLYMPUS_BROWSER_AUTOLAUNCH", "1")
+    monkeypatch.setenv("OLYMPUS_BROWSER_HEADLESS", "1")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    # data: URLs are the test fixtures; the SSRF gate is unit-tested elsewhere.
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    browser.set_transport_factory(None)
+    browser.reset()
+    yield browser.session()
+    browser.reset()
+    if browser._launched is not None:
+        try:
+            browser._launched[0].terminate()
+        except Exception:
+            pass
+        browser._launched = None
+
+
+def _page(body: str) -> str:
+    return "data:text/html,<html><body>" + body + "</body></html>"
+
+
+def test_open_observe_act_by_index(real_session):
+    real_session.open(_page(
+        "<button id=go onclick=\"document.title='clicked'\">Go</button>"
+        "<input id=q>"))
+    obs = real_session.observe()
+    assert '[0] button "Go"' in obs
+    out = real_session.act("click", index=0)
+    assert "Clicked" in out
+    assert real_session._eval("document.title") == "clicked"
+
+
+def test_shadow_dom_is_reached_for_real(real_session):
+    # A control inside an OPEN shadow root must appear in observe() and resolve.
+    real_session.open(_page(
+        "<div id=host></div><script>"
+        "var h=document.getElementById('host').attachShadow({mode:'open'});"
+        "h.innerHTML='<button id=sb>Shadow</button>';</script>"))
+    obs = real_session.observe()
+    assert 'button "Shadow"' in obs
+
+
+def test_fill_and_select_for_real(real_session):
+    real_session.open(_page(
+        "<input id=q>"
+        "<select id=s><option value=a>A</option><option value=b>B</option></select>"))
+    real_session.act("type", selector="#q", text="hello world")
+    assert real_session._eval("document.querySelector('#q').value") == "hello world"
+    real_session.act("select", selector="#s", value="b")
+    assert real_session._eval("document.querySelector('#s').value") == "b"
+
+
+def test_screenshot_returns_png_bytes(real_session):
+    import base64
+    real_session.open(_page("<h1>hi</h1>"))
+    b64 = real_session.screenshot()
+    raw = base64.b64decode(b64)
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"      # a real PNG signature
+
+
+def test_list_tabs_for_real(real_session):
+    real_session.open(_page("<h1>tab</h1>"))
+    tabs = real_session.list_tabs()
+    assert tabs and any(t["url"].startswith("data:") for t in tabs)
