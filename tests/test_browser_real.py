@@ -91,6 +91,19 @@ def test_list_tabs_for_real(real_session):
     assert tabs and any(t["url"].startswith("data:") for t in tabs)
 
 
+def test_rightclick_and_key_chord_for_real(real_session):
+    real_session.open(_page(
+        "<div id=d oncontextmenu=\"this.setAttribute('data-ctx','1')\">D</div>"
+        "<input id=q onkeydown=\"if(event.ctrlKey&&event.key==='a')"
+        "this.setAttribute('data-chord','1')\">"))
+    real_session.act("rightclick", selector="#d")
+    assert real_session._eval("document.querySelector('#d').getAttribute('data-ctx')") == "1"
+    real_session.act("type", selector="#q", text="x")
+    real_session.act("press", selector="#q", key="Control+a")
+    assert real_session._eval(
+        "document.querySelector('#q').getAttribute('data-chord')") == "1"
+
+
 def test_upload_attaches_the_file_for_real(real_session, tmp_path):
     (tmp_path / "up.txt").write_text("hello", encoding="utf-8")
     real_session.open(_page("<input type=file id=f>"))

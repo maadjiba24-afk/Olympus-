@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: richer action verbs
+
+`browser_act` gains three interaction primitives, widening the flows the operator
+can drive:
+
+- **`rightclick`** (a.k.a. `contextmenu`) — opens context menus, by index/selector
+  or x/y.
+- **`drag`** — drag the source element onto a target selector (passed in `value`)
+  via HTML5 drag events with a shared `DataTransfer` — reorderable lists, kanban,
+  sliders.
+- **Modifier chords in `press`** — `Control+a`, `Shift+Tab`, `Meta+c`, etc., parsed
+  into the dispatched `KeyboardEvent`.
+
+All resolve deep (shadow/iframe), stay on the credentialed-actuator side
+(capability-separated), and are verified against real Chromium (right-click and
+Ctrl+A fire genuine DOM events).
+
 ### Fixed — browser harness: real-transport upload and multi-tab
 
 Two capabilities that the offline `FakeTransport` accepted but real Chrome

@@ -768,7 +768,9 @@ class BrowserSession:
         ACTION_TOOL `browser_act`, so capability separation keeps it out of any
         run that also ingests untrusted content. Targets can be given by
         `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
-        Verbs: click, type, scroll, press, select, hover, back."""
+        Verbs: click, type, scroll, press (modifier chords like 'Control+a'),
+        select, hover, rightclick, drag (source → target selector in `value`),
+        back."""
         action = (action or "").lower()
         # An index from observe() resolves to the stamped stable selector; the
         # observed label makes a learned step human-readable.
@@ -819,16 +821,26 @@ class BrowserSession:
             self._journal_step(f"scroll {amount}px")
             return f"Scrolled {amount}px."
         if action == "press":
-            k = key or text or "Enter"
+            # Supports modifier chords like "Control+a" / "Shift+Tab" / "Meta+c".
+            raw = key or text or "Enter"
+            parts = [p for p in raw.split("+") if p]
+            main = parts[-1] if parts else "Enter"
+            mods = {p.lower() for p in parts[:-1]}
+            ctrl = "true" if (mods & {"control", "ctrl"}) else "false"
+            alt = "true" if (mods & {"alt", "option"}) else "false"
+            shift = "true" if "shift" in mods else "false"
+            meta = "true" if (mods & {"meta", "cmd", "command"}) else "false"
+            init = (f"{{key:{json.dumps(main)},ctrlKey:{ctrl},altKey:{alt},"
+                    f"shiftKey:{shift},metaKey:{meta},bubbles:true}}")
             expr_target = (f"__olyq({json.dumps(selector)})"
                            if selector else "document.activeElement")
             self._eval(
                 f"(function(){{var e={expr_target}||document.body;"
                 f"['keydown','keypress','keyup'].forEach(function(t){{"
-                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
-                f"bubbles:true}}));}});return true;}})()")
-            self._journal_step(f"press {k}")
-            return f"Pressed {k}."
+                f"e.dispatchEvent(new KeyboardEvent(t,{init}));}});"
+                f"return true;}})()")
+            self._journal_step(f"press {raw}")
+            return f"Pressed {raw}."
         if action == "select":
             if not selector:
                 return "Error: select needs an index or selector."
@@ -853,6 +865,45 @@ class BrowserSession:
             self._call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
             self._journal_step(f"hover at ({x}, {y})")
             return f"Hovered at ({x}, {y})."
+        if action in ("rightclick", "contextmenu"):
+            if selector:
+                ok = self._eval_bool(
+                    f"(function(){{var e=__olyq({json.dumps(selector)});"
+                    f"if(!e)return false;e.dispatchEvent(new MouseEvent("
+                    f"'contextmenu',{{bubbles:true}}));return true;}})()")
+                if not ok:
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"right-click {target}")
+                return f"Right-clicked {selector}."
+            self._call("Input.dispatchMouseEvent", type="mousePressed",
+                       x=x, y=y, button="right", clickCount=1)
+            self._call("Input.dispatchMouseEvent", type="mouseReleased",
+                       x=x, y=y, button="right", clickCount=1)
+            self._journal_step(f"right-click at ({x}, {y})")
+            return f"Right-clicked at ({x}, {y})."
+        if action == "drag":
+            # Drag the source element onto a target selector (passed in `value`),
+            # via HTML5 drag events with a shared DataTransfer. Both resolve deep.
+            dst = value or text
+            if not selector or not dst:
+                return "Error: drag needs a source selector/index and a target " \
+                       "selector in 'value'."
+            ok = self._eval_bool(
+                f"(function(){{var s=__olyq({json.dumps(selector)}),"
+                f"d=__olyq({json.dumps(dst)});if(!s||!d)return false;"
+                f"var dt=new DataTransfer();"
+                f"s.dispatchEvent(new DragEvent('dragstart',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('dragover',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('drop',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"s.dispatchEvent(new DragEvent('dragend',"
+                f"{{bubbles:true,dataTransfer:dt}}));return true;}})()")
+            if not ok:
+                return f"Error: could not drag {selector} → {dst}."
+            self._journal_step(f"drag {target} to {dst}")
+            return f"Dragged {selector} to {dst}."
         if action == "back":
             self._eval("history.back();")
             self._wait_ready()

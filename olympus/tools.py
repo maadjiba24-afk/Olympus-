@@ -2139,23 +2139,26 @@ BROWSER_ACT = {
         "Act on the current browser page. Prefer acting by 'index' from a "
         "browser_observe map; a CSS selector or x/y also works. Verbs: click, "
         "type (into a selector or the focused field), scroll (y pixels or into a "
-        "selector), press (a key like Enter), select (an option 'value' in a "
-        "selector), hover, back. This can operate a LOGGED-IN session, so it is "
-        "unavailable in any run that also reads untrusted web content "
-        "(capability separation)."
+        "selector), press (a key or modifier chord like 'Enter' or 'Control+a'), "
+        "select (an option 'value' in a selector), hover, rightclick, drag (from "
+        "the source selector/index to a target selector in 'value'), back. This "
+        "can operate a LOGGED-IN session, so it is unavailable in any run that "
+        "also reads untrusted web content (capability separation)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {"type": "string",
                        "enum": ["click", "type", "scroll", "press", "select",
-                                "hover", "back"]},
+                                "hover", "rightclick", "drag", "back"]},
             "index": {"type": "integer",
                       "description": "Element index from browser_observe"},
             "selector": {"type": "string", "description": "CSS selector for click"},
             "text": {"type": "string", "description": "Text to type"},
-            "key": {"type": "string", "description": "Key for press, e.g. 'Enter'"},
-            "value": {"type": "string", "description": "Option value for select"},
+            "key": {"type": "string",
+                    "description": "Key/chord for press, e.g. 'Enter' or 'Control+a'"},
+            "value": {"type": "string",
+                      "description": "Option value for select, or drag target selector"},
             "x": {"type": "integer"}, "y": {"type": "integer"},
         },
         "required": ["action"],

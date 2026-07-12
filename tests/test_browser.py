@@ -70,6 +70,19 @@ def test_observe_returns_indexed_interactive_map(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_act_supports_rightclick_drag_and_key_chords(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#src", "#dst", "#field"])
+        assert "Right-clicked #src" in sess.act("rightclick", selector="#src")
+        assert "Dragged #src to #dst" in sess.act(
+            "drag", selector="#src", value="#dst")
+        assert "Pressed Control+a" in sess.act("press", key="Control+a")
+        # drag needs a target; missing target fails gracefully
+        assert "drag needs" in sess.act("drag", selector="#src")
+    finally:
+        browser.set_transport_factory(None)
+
+
 def test_act_by_index_resolves_the_stamped_selector(monkeypatch):
     try:
         sess = _harness_session(monkeypatch, elements=[{"t": "button", "n": "Go"}])
