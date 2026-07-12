@@ -40,6 +40,14 @@ and wired to evolve.
   so a map row can't smuggle a paragraph of instructions. The operator
   (HERMES) holds the full `observe → act` loop; ingesting readers (Argus)
   hold neither half. Threat-modeled and count-bound in `docs/THREAT_MODEL.md`.
+- **It evolves** (`browser_learn`) — the session keeps a bounded, first-party
+  journal of the act steps that actually landed (never the typed text, so
+  credentials never enter the store). When a task succeeds, HERMES crystallizes
+  that proven flow into a reliability-scored skill with `browser_learn`. From
+  there it rides the existing evolution machinery: future runs reuse it,
+  `mark_outcome` refines its measured score, Metis prunes it if it goes flaky,
+  and Prometheus proposes profile fixes — so the harness gets better on the
+  sites you actually use, without a human writing a selector script.
 
 ### Changed — Olympus assumes no model (vendor-neutral by default)
 

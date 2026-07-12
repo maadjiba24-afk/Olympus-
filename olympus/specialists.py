@@ -302,7 +302,7 @@ SPECIALISTS: dict[str, Specialist] = {
             # holds across the system (browser_observe/act carry bounded,
             # label-capped structure, not page prose).
             extra_tools=("browser_exists", "browser_login",
-                         "browser_observe", "browser_act",
+                         "browser_observe", "browser_act", "browser_learn",
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",

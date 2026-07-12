@@ -63,6 +63,7 @@ _SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
 _SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
 _OBSERVE_MAX = 120            # max interactive elements returned by observe()
 _LABEL_MAX = 80               # per-element label cap (anti-injection: no prose)
+_JOURNAL_MAX = 80             # max first-party act steps kept for skill-learning
 
 # The perception step of the harness, as ONE Runtime.evaluate: find the visible,
 # interactive elements, stamp each with a stable index (data-olympus-idx) that
@@ -385,6 +386,20 @@ class BrowserSession:
         # content is untrusted. Surfaced so the tool layer / orchestrator can
         # reason about capability separation.
         self.ingested_untrusted: bool = False
+        # The evolution substrate: a bounded, first-party journal of the act
+        # steps that actually landed this session (NOT page prose, and never the
+        # typed text — credentials must not enter the skill store). learn_steps()
+        # crystallizes it into a reliability-scored skill that Olympus refines
+        # over time. _labels remembers each observed index's label so a learned
+        # step reads "click \"Sign in\"", not a raw selector.
+        self.journal: list[str] = []
+        self._labels: dict[int, str] = {}
+
+    def _journal_step(self, step: str) -> None:
+        """Append a landed, replayable step (bounded; oldest dropped)."""
+        self.journal.append(step)
+        if len(self.journal) > _JOURNAL_MAX:
+            del self.journal[0]
 
     def _call(self, method: str, **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
@@ -458,8 +473,11 @@ class BrowserSession:
         elements — the harness's 'look' step. Each element gets a stable index
         (stamped as data-olympus-idx) that `act(..., index=N)` resolves, so the
         model can drive an *arbitrary* page by index instead of guessing CSS
-        selectors. Labels are page-controlled (untrusted) and hard-capped, so
-        this is registered as ingestion, not an actuator."""
+        selectors. Because it maps a possibly credentialed tab, the tool
+        (`browser_observe`) is governed as an actuator: kept out of any
+        prose-ingesting run and gated to authorized domains. Labels are
+        page-controlled (untrusted) and hard-capped, so a map row can carry no
+        more than a short, bounded string — never a paragraph of instructions."""
         self.ingested_untrusted = True
         landed = self._blocked_landing()
         if landed:
@@ -472,12 +490,17 @@ class BrowserSession:
         except (json.JSONDecodeError, TypeError):
             return "(could not read the page's interactive elements)"
         lines = []
+        self._labels = {}
         for it in items[:limit]:
             if not isinstance(it, dict):
                 continue
             name = str(it.get("n") or "").strip()[:_LABEL_MAX]
             label = f' "{name}"' if name else ""
             lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+            try:                       # remember for readable learned steps
+                self._labels[int(it.get("i"))] = name or str(it.get("t") or "")
+            except (TypeError, ValueError):
+                pass
         return "\n".join(lines) or "(no interactive elements found)"
 
     def act(self, action: str, *, selector: str = "", text: str = "",
@@ -489,9 +512,13 @@ class BrowserSession:
         `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
         Verbs: click, type, scroll, press, select, hover, back."""
         action = (action or "").lower()
-        # An index from observe() resolves to the stamped stable selector.
+        # An index from observe() resolves to the stamped stable selector; the
+        # observed label makes a learned step human-readable.
+        label = ""
         if index is not None:
+            label = self._labels.get(int(index), "")
             selector = f'[data-olympus-idx="{int(index)}"]'
+        target = f'"{label}"' if label else (selector or f"({x}, {y})")
 
         if action == "click":
             if selector:
@@ -499,37 +526,48 @@ class BrowserSession:
                     f"(function(){{var e=document.querySelector("
                     f"{json.dumps(selector)});if(e){{e.click();return true;}}"
                     f"return false;}})()")
-                return f"Clicked {selector}." if ok else \
-                    f"Error: no element for {selector}."
+                if not ok:
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"click {target}")
+                return f"Clicked {selector}."
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
             self._call("Input.dispatchMouseEvent", type="mouseReleased",
                        x=x, y=y, button="left", clickCount=1)
+            self._journal_step(f"click at ({x}, {y})")
             return f"Clicked at ({x}, {y})."
         if action == "type":
+            # Never journal the typed text — it may be a credential. The learned
+            # step records only that a field was filled, not with what.
             if selector:
-                return f"Typed into {selector}." if self.fill(selector, text) \
-                    else f"Error: no element for {selector}."
+                if not self.fill(selector, text):
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"type into {target}")
+                return f"Typed into {selector}."
             self._call("Input.insertText", text=text)
+            self._journal_step("type into focused field")
             return f"Typed {len(text)} chars."
         if action == "scroll":
             if selector:
                 self._eval(f"(function(){{var e=document.querySelector("
                            f"{json.dumps(selector)});if(e)e.scrollIntoView("
                            f"{{block:'center'}});}})()")
+                self._journal_step(f"scroll to {target}")
                 return f"Scrolled to {selector}."
             amount = int(y) or int(x) or 600
             self._eval(f"window.scrollBy(0,{amount});")
+            self._journal_step(f"scroll {amount}px")
             return f"Scrolled {amount}px."
         if action == "press":
             k = key or text or "Enter"
-            target = (f"document.querySelector({json.dumps(selector)})"
-                      if selector else "document.activeElement")
+            expr_target = (f"document.querySelector({json.dumps(selector)})"
+                           if selector else "document.activeElement")
             self._eval(
-                f"(function(){{var e={target}||document.body;"
+                f"(function(){{var e={expr_target}||document.body;"
                 f"['keydown','keypress','keyup'].forEach(function(t){{"
                 f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
                 f"bubbles:true}}));}});return true;}})()")
+            self._journal_step(f"press {k}")
             return f"Pressed {k}."
         if action == "select":
             if not selector:
@@ -540,21 +578,32 @@ class BrowserSession:
                 f"{json.dumps(selector)});if(!e)return false;"
                 f"e.value={json.dumps(v)};e.dispatchEvent("
                 f"new Event('change',{{bubbles:true}}));return true;}})()")
-            return f"Selected {v!r} in {selector}." if ok else \
-                f"Error: no element for {selector}."
+            if not ok:
+                return f"Error: no element for {selector}."
+            self._journal_step(f"select {v!r} in {target}")
+            return f"Selected {v!r} in {selector}."
         if action == "hover":
             if selector:
                 self._eval(f"(function(){{var e=document.querySelector("
                            f"{json.dumps(selector)});if(e)e.dispatchEvent("
                            f"new MouseEvent('mouseover',{{bubbles:true}}));}})()")
+                self._journal_step(f"hover {target}")
                 return f"Hovered {selector}."
             self._call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
+            self._journal_step(f"hover at ({x}, {y})")
             return f"Hovered at ({x}, {y})."
         if action == "back":
             self._eval("history.back();")
             self._wait_ready()
+            self._journal_step("go back")
             return "Navigated back."
         return f"Error: unknown browser action '{action}'."
+
+    def learned_steps(self) -> str:
+        """The proven flow so far: the journal of act steps that landed this
+        session, as a replayable, human-readable recipe. First-party (Olympus's
+        own actions) and credential-free — safe to crystallize into a skill."""
+        return "; ".join(self.journal)
 
     def _eval(self, expression: str) -> str:
         res = self._call("Runtime.evaluate", expression=expression,

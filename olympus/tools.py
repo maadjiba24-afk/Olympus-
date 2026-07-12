@@ -1151,6 +1151,29 @@ def _browser_act(action: str, selector: str = "", text: str = "",
                     index=idx, key=key, value=value)
 
 
+def _browser_learn(name: str) -> str:
+    # Close the evolution loop: crystallize the proven observe→act flow of the
+    # current authorized session into a reliability-scored skill. First-party
+    # (Olympus's own landed steps, credential-free), so it is a memory write —
+    # not an actuator — but it needs the authorized session to know the domain
+    # and read its journal.
+    from urllib.parse import urlparse
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    steps = sess.learned_steps()
+    if not steps:
+        return ("Nothing to learn yet — act on the page first, then learn the "
+                "flow that worked.")
+    host = (urlparse(sess._current_url() or "").hostname or "").lower()
+    skill = browser.record_skill(host, name,
+                                 security.sanitize_for_memory(steps),
+                                 source="learned")
+    return (f"Learned '{skill.name}' for {skill.domain} from what worked "
+            f"({skill.content_hash}). It now rides the reliability score and "
+            f"will be refined or pruned over time.")
+
+
 def _browser_skill_record(domain: str, name: str, steps: str,
                           source: str = "agent") -> str:
     skill = browser.record_skill(domain, name,
@@ -1452,6 +1475,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_read": _browser_read,
     "browser_observe": _browser_observe,
     "browser_act": _browser_act,
+    "browser_learn": _browser_learn,
     "browser_skill_record": _browser_skill_record,
     "browser_skills": _browser_skills,
     "browser_exists": _browser_exists,
@@ -2049,6 +2073,27 @@ BROWSER_ACT = {
     },
 }
 
+BROWSER_LEARN = {
+    "name": "browser_learn",
+    "description": (
+        "Crystallize the observe→act flow that just worked on the current "
+        "authorized site into a reusable, reliability-scored skill (named "
+        "'name'). This is how the harness evolves: a proven flow becomes a saved "
+        "recipe that future runs reuse and that Olympus refines or prunes by "
+        "measured success over time. Records only your own landed steps — never "
+        "the text you typed — so credentials never enter the skill store. Call "
+        "it after a task succeeds."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string",
+                     "description": "Short name for the learned flow"},
+        },
+        "required": ["name"],
+    },
+}
+
 BROWSER_SKILL_RECORD = {
     "name": "browser_skill_record",
     "description": (
@@ -2504,6 +2549,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_read": BROWSER_READ,
     "browser_observe": BROWSER_OBSERVE,
     "browser_act": BROWSER_ACT,
+    "browser_learn": BROWSER_LEARN,
     "browser_skill_record": BROWSER_SKILL_RECORD,
     "browser_skills": BROWSER_SKILLS,
     "browser_exists": BROWSER_EXISTS,
