@@ -94,6 +94,63 @@ def test_act_supports_the_richer_verb_set(monkeypatch):
         browser.set_transport_factory(None)
 
 
+# --- depth: observe + act reach into shadow DOM and same-origin iframes ----
+
+def test_observe_deep_walks_shadow_and_iframes():
+    # The perception script must recurse through open shadow roots and
+    # same-origin iframes (most modern web apps hide controls there), and skip
+    # cross-origin frames rather than trying to defeat the same-origin policy.
+    js = browser._OBSERVE_JS
+    assert "shadowRoot" in js and "contentDocument" in js
+    assert "el.matches" in js                     # tests each node in the deep tree
+    # cross-origin frame access is wrapped in try/catch (honored, not defeated)
+    assert "catch" in js
+
+
+def test_selector_resolution_is_deep_everywhere():
+    # Every act/read/exists resolution goes through __olyq (the deep query), so
+    # an index stamped inside a shadow root or iframe still resolves. Guard
+    # against a regression back to a shallow document.querySelector.
+    import inspect
+    src = inspect.getsource(browser.BrowserSession)
+    assert "document.querySelector(" not in src   # no shallow resolution left
+    assert "__olyq(" in src
+    # the deep helper honors the same-origin boundary explicitly
+    assert "shadowRoot" in browser._DEEP_JS and "contentDocument" in browser._DEEP_JS
+
+
+def test_deep_traversal_is_depth_bounded():
+    # A hostile or pathological page can nest shadow roots / iframes arbitrarily;
+    # the walk must be depth-capped so it can't hang or overflow the stack.
+    assert browser._DEEP_MAX_DEPTH > 0
+    assert f"depth>{browser._DEEP_MAX_DEPTH}" in browser._DEEP_JS
+    assert f"depth>{browser._DEEP_MAX_DEPTH}" in browser._OBSERVE_JS
+    # the observe script still carries its LIMIT/CAP placeholders for call-time
+    assert "LIMIT" in browser._OBSERVE_JS and "CAP" in browser._OBSERVE_JS
+
+
+def test_deep_prelude_installs_only_when_used(monkeypatch):
+    # _prep prepends the helper exactly to expressions that call __olyq, leaving
+    # plain evals (readyState, title) untouched — so the offline transport can
+    # still route them and a real browser doesn't reinstall the helper needlessly.
+    prep = browser.BrowserSession._prep
+    assert prep("document.readyState") == "document.readyState"
+    out = prep("(function(){return __olyq('#x');})()")
+    assert out.startswith(browser._DEEP_JS) and "__olyq('#x')" in out
+
+
+def test_index_action_still_resolves_offline_after_deep_rewrite(monkeypatch):
+    # End-to-end offline: observe stamps, act-by-index resolves via __olyq, and
+    # the fake transport routes both through the new markers.
+    try:
+        sess = _harness_session(monkeypatch, elements=[{"t": "button", "n": "Go"}])
+        assert '[0] button "Go"' in sess.observe()
+        out = sess.act("click", index=0)
+        assert "Clicked" in out and 'data-olympus-idx="0"' in out
+    finally:
+        browser.set_transport_factory(None)
+
+
 # --- the evolution loop: a proven observe→act flow becomes a scored skill ---
 
 def test_act_journals_landed_steps_readably(monkeypatch):

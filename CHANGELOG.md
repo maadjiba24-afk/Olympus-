@@ -15,6 +15,28 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness depth: shadow DOM + same-origin iframes
+
+The harness now perceives and acts on controls that modern web apps hide behind
+component boundaries, not just the top-level document.
+
+- **Deep perception & resolution.** `observe()` deep-walks the light DOM plus
+  every **open shadow root** and **same-origin iframe**, stamping controls found
+  anywhere in that tree; a shared `__olyq` deep-query helper backs every
+  `act`/`read`/`exists`/`fill`/template resolution, so an index stamped inside a
+  shadow root or frame still resolves. Most componentized sites that previously
+  showed a near-empty map now expose their real controls.
+- **Boundary honored, not defeated.** Cross-origin frames throw on access and are
+  skipped — Olympus works within the same-origin policy rather than trying to
+  bypass it.
+- **Hardened.** The shadow/iframe recursion is depth-bounded
+  (`_DEEP_MAX_DEPTH`) so a pathological or hostile page can't hang the walk or
+  overflow the stack; observe output stays capped at `_OBSERVE_MAX` with labels
+  capped at `_LABEL_MAX`.
+- **Evolves for free.** Because the perceive→act loop now reaches these controls,
+  `browser_learn` captures shadow/iframe flows into the same reliability-scored
+  skill store — deeper reach, same governance.
+
 ### Added — native browser harness (perceive → act, governed)
 
 Olympus grows its **own** browser-agent working style, so no external browser

@@ -65,24 +65,46 @@ _OBSERVE_MAX = 120            # max interactive elements returned by observe()
 _LABEL_MAX = 80               # per-element label cap (anti-injection: no prose)
 _JOURNAL_MAX = 80             # max first-party act steps kept for skill-learning
 
-# The perception step of the harness, as ONE Runtime.evaluate: find the visible,
-# interactive elements, stamp each with a stable index (data-olympus-idx) that
-# act(index=N) resolves, and return a compact JSON list. Element *labels* are
-# page-controlled, so each is hard-capped to _LABEL_MAX chars — enough to pick
-# the right control, too short to smuggle a paragraph of injected instructions.
+# Deep-query prelude: installs __olyAll(sel)/__olyq(sel) that walk not just the
+# light DOM but every OPEN shadow root and SAME-ORIGIN iframe, so the harness can
+# perceive and act on components that hide their controls behind those boundaries
+# (most modern web apps). Cross-origin frames throw on access and are skipped —
+# the same-origin policy is a boundary we honor, not one we try to defeat. This
+# prelude is auto-prepended (see _eval/_eval_bool) to any expression that calls
+# __olyq, so observe() stamps and act(index=N) resolve over the identical tree.
+_DEEP_MAX_DEPTH = 12          # bound shadow/iframe recursion (anti-hang/overflow)
+_DEEP_JS = (
+    "window.__olyAll=function(sel){var out=[];"
+    "function walk(root,depth){if(depth>DMAX)return;"
+    "var m;try{m=root.querySelectorAll(sel);}catch(e){return;}"
+    "for(var i=0;i<m.length;i++)out.push(m[i]);"
+    "var all;try{all=root.querySelectorAll('*');}catch(e){all=[];}"
+    "for(var j=0;j<all.length;j++){var el=all[j];"
+    "if(el.shadowRoot)walk(el.shadowRoot,depth+1);"
+    "if(el.tagName==='IFRAME'){var d=null;try{d=el.contentDocument;}catch(e){d=null;}"
+    "if(d)walk(d,depth+1);}}}"
+    "walk(document,0);return out;};"
+    "window.__olyq=function(sel){return window.__olyAll(sel)[0]||null;};"
+).replace("DMAX", str(_DEEP_MAX_DEPTH))
+
+# The perception step of the harness, as ONE Runtime.evaluate: deep-walk the light
+# DOM plus open shadow roots and same-origin iframes, find the visible interactive
+# elements, stamp each with a stable index (data-olympus-idx) that act(index=N)
+# resolves, and return a compact JSON list. The __OLY_OBSERVE__ marker lets the
+# offline transport route this without depending on incidental substrings. Element
+# *labels* are page-controlled, so each is hard-capped to _LABEL_MAX chars — enough
+# to pick the right control, too short to smuggle a paragraph of injected prose.
 _OBSERVE_JS = (
-    "(function(){"
+    "(function(){/*__OLY_OBSERVE__*/"
     "var q='a[href],button,input,select,textarea,[role=button],[role=link],"
     "[role=checkbox],[role=tab],[role=menuitem],[onclick],"
     "[contenteditable=true],summary,[tabindex]';"
-    "var els=Array.prototype.slice.call(document.querySelectorAll(q));"
     "var out=[],idx=0;"
-    "for(var k=0;k<els.length&&out.length<LIMIT;k++){"
-    "var e=els[k];var r=e.getBoundingClientRect();"
-    "if(!(r.width>0&&r.height>0))continue;"
-    "if(e.disabled)continue;"
-    "var st=window.getComputedStyle(e);"
-    "if(st.visibility==='hidden'||st.display==='none')continue;"
+    "function vis(e){var r=e.getBoundingClientRect();"
+    "if(!(r.width>0&&r.height>0))return false;if(e.disabled)return false;"
+    "var st;try{st=window.getComputedStyle(e);}catch(x){return false;}"
+    "if(st.visibility==='hidden'||st.display==='none')return false;return true;}"
+    "function take(e){if(out.length>=LIMIT)return;if(!vis(e))return;"
     "e.setAttribute('data-olympus-idx',idx);"
     "var nm=(e.getAttribute('aria-label')||e.placeholder||e.value||"
     "(e.innerText||e.textContent||'')||e.getAttribute('alt')||e.title||'');"
@@ -90,8 +112,16 @@ _OBSERVE_JS = (
     "var tg=e.tagName.toLowerCase();"
     "var ty=tg==='input'?('input:'+(e.getAttribute('type')||'text')):tg;"
     "out.push({i:idx,t:ty,n:nm});idx++;}"
+    "function walk(root,depth){if(depth>DMAX)return;"
+    "var all;try{all=root.querySelectorAll('*');}catch(x){return;}"
+    "for(var i=0;i<all.length&&out.length<LIMIT;i++){var el=all[i];"
+    "try{if(el.matches&&el.matches(q))take(el);}catch(x){}"
+    "if(el.shadowRoot)walk(el.shadowRoot,depth+1);"
+    "if(el.tagName==='IFRAME'){var d=null;try{d=el.contentDocument;}catch(x){d=null;}"
+    "if(d)walk(d,depth+1);}}}"
+    "walk(document,0);"
     "return JSON.stringify(out);})()"
-)
+).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
 # --- transport -----------------------------------------------------------
 
@@ -154,11 +184,11 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
-            if "querySelectorAll" in expr:        # observe() → indexed elements
+            if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
                 lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", "")}
                        for i, e in enumerate(self.elements)]
                 return {"result": {"value": json.dumps(lst)}}
-            if "querySelector" in expr:           # exists / fill / click / read
+            if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
                 if "innerText" in expr:           # selector read → text or ''
                     value: Any = page.get("text", "") if sel else ""
@@ -461,7 +491,7 @@ class BrowserSession:
         if landed:
             return f"Error: current page is a blocked address ({landed})."
         if selector:
-            expr = (f"(function(){{var e=document.querySelector("
+            expr = (f"(function(){{var e=__olyq("
                     f"{json.dumps(selector)});return e?e.innerText:'';}})()")
         else:
             expr = "document.body ? document.body.innerText : ''"
@@ -523,7 +553,7 @@ class BrowserSession:
         if action == "click":
             if selector:
                 ok = self._eval_bool(
-                    f"(function(){{var e=document.querySelector("
+                    f"(function(){{var e=__olyq("
                     f"{json.dumps(selector)});if(e){{e.click();return true;}}"
                     f"return false;}})()")
                 if not ok:
@@ -549,7 +579,7 @@ class BrowserSession:
             return f"Typed {len(text)} chars."
         if action == "scroll":
             if selector:
-                self._eval(f"(function(){{var e=document.querySelector("
+                self._eval(f"(function(){{var e=__olyq("
                            f"{json.dumps(selector)});if(e)e.scrollIntoView("
                            f"{{block:'center'}});}})()")
                 self._journal_step(f"scroll to {target}")
@@ -560,7 +590,7 @@ class BrowserSession:
             return f"Scrolled {amount}px."
         if action == "press":
             k = key or text or "Enter"
-            expr_target = (f"document.querySelector({json.dumps(selector)})"
+            expr_target = (f"__olyq({json.dumps(selector)})"
                            if selector else "document.activeElement")
             self._eval(
                 f"(function(){{var e={expr_target}||document.body;"
@@ -574,7 +604,7 @@ class BrowserSession:
                 return "Error: select needs an index or selector."
             v = value or text
             ok = self._eval_bool(
-                f"(function(){{var e=document.querySelector("
+                f"(function(){{var e=__olyq("
                 f"{json.dumps(selector)});if(!e)return false;"
                 f"e.value={json.dumps(v)};e.dispatchEvent("
                 f"new Event('change',{{bubbles:true}}));return true;}})()")
@@ -584,7 +614,7 @@ class BrowserSession:
             return f"Selected {v!r} in {selector}."
         if action == "hover":
             if selector:
-                self._eval(f"(function(){{var e=document.querySelector("
+                self._eval(f"(function(){{var e=__olyq("
                            f"{json.dumps(selector)});if(e)e.dispatchEvent("
                            f"new MouseEvent('mouseover',{{bubbles:true}}));}})()")
                 self._journal_step(f"hover {target}")
@@ -605,14 +635,21 @@ class BrowserSession:
         own actions) and credential-free — safe to crystallize into a skill."""
         return "; ".join(self.journal)
 
+    @staticmethod
+    def _prep(expression: str) -> str:
+        """Auto-install the deep-query helper for any expression that uses it, so
+        selector resolution crosses shadow/iframe boundaries identically to
+        observe()'s stamping. Expressions that don't call __olyq are untouched."""
+        return _DEEP_JS + expression if "__olyq" in expression else expression
+
     def _eval(self, expression: str) -> str:
-        res = self._call("Runtime.evaluate", expression=expression,
+        res = self._call("Runtime.evaluate", expression=self._prep(expression),
                          returnByValue=True)
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
 
     def _eval_bool(self, expression: str) -> bool:
-        res = self._call("Runtime.evaluate", expression=expression,
+        res = self._call("Runtime.evaluate", expression=self._prep(expression),
                          returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
 
@@ -620,12 +657,12 @@ class BrowserSession:
         """Structured predicate: is the selector present? Returns a bool, never
         page prose — so the actuator-holder can branch without ingesting text."""
         return self._eval_bool(
-            f"!!document.querySelector({json.dumps(selector)})")
+            f"!!__olyq({json.dumps(selector)})")
 
     def fill(self, selector: str, value: str) -> bool:
         """Set an input's value and fire input/change. `value` is sent to Chrome
         to type, never returned to the model (used for vault-sourced secrets)."""
-        expr = (f"(function(){{var e=document.querySelector("
+        expr = (f"(function(){{var e=__olyq("
                 f"{json.dumps(selector)});if(!e)return false;e.focus();"
                 f"e.value={json.dumps(value)};"
                 f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
