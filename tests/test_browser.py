@@ -149,6 +149,33 @@ def test_browser_readers_are_wrapped_as_untrusted():
     assert not security.should_wrap("browser_act")
 
 
+def test_observe_is_a_credentialed_actuator_not_a_reader():
+    # observe returns bounded structure of a possibly-logged-in tab, so it is
+    # gated like the actuator: an action tool, stripped from ingesting runs,
+    # and NOT wrapped-as-untrusted (it is first-party structure, not prose).
+    assert "browser_observe" in security.ACTION_TOOLS
+    assert not security.should_wrap("browser_observe")
+    defs = [tools.BROWSER_OBSERVE, tools.BROWSER_OPEN]
+    kept = {d["name"] for d in security.filter_tools(defs, ingests_external=True)}
+    assert "browser_observe" not in kept and "browser_open" in kept
+
+
+def test_hermes_holds_the_observe_act_loop_argus_does_not():
+    # The operator (non-ingesting) gets the full perceive→act harness loop;
+    # Argus ingests untrusted web content, so both halves are stripped from it.
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    argus = {d.get("name") for d in SPECIALISTS["argus"].tool_defs("anthropic")}
+    assert {"browser_observe", "browser_act"} <= hermes
+    assert "browser_observe" not in argus and "browser_act" not in argus
+
+
+def test_observe_and_act_are_threat_modeled():
+    documented = threatmodel.documented_tools(
+        threatmodel.doc_path().read_text(encoding="utf-8"))
+    for name in ("browser_observe", "browser_act"):
+        assert name in tools.HANDLERS and name in documented
+
+
 # --- moat: provenance-stamped, reliability-scored skill library -----------
 
 def test_recorded_skill_has_provenance_and_hash():

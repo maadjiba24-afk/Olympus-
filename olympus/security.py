@@ -33,6 +33,10 @@ ACTION_TOOLS = frozenset({
     # an action: capability separation strips it from any run that also ingests
     # untrusted page content (an injected page can't reach your logged-in tabs).
     "browser_act",
+    # Observing the interactive map of a *credentialed* tab is the perception
+    # half of the same actuator loop — bounded structure, not prose, and kept
+    # out of any prose-ingesting run so an injected page can't map your tabs.
+    "browser_observe",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.

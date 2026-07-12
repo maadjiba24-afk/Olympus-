@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 78 tools in
+Olympus exposes a **finite, named** tool surface — the 79 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -69,7 +69,8 @@ surface. So the surface and its threat model can't drift apart.
 | `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
-| `browser_act` | Click/type on the current (possibly logged-in) page | external actuator | **Credentialed action** — stripped from any ingesting run (capability separation) AND gated: operator must be enabled and the current page's domain authorized | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run and refused on an unauthorized domain |
+| `browser_observe` | Map the current (possibly logged-in) page's interactive elements by index | external actuator | **Credentialed perception** — returns bounded, label-capped structure (not prose); stripped from any ingesting run (capability separation) AND gated: operator enabled and the current domain authorized | Injection reconnaissance of your authenticated tabs — unreachable from an ingesting run, refused on an unauthorized domain, labels hard-capped so a map row can't carry a paragraph of instructions |
+| `browser_act` | Click/type/scroll/press/select/hover on the current (possibly logged-in) page, by index or selector | external actuator | **Credentialed action** — stripped from any ingesting run (capability separation) AND gated: operator must be enabled and the current page's domain authorized | Injection-driven action on your authenticated tabs — actuator unreachable from an ingesting run and refused on an unauthorized domain |
 | `browser_skill_record` | Save a browser skill with provenance + score | first-party write | Steps sanitized at write; provenance + content hash recorded | Skill poisoning via injection-shaped steps — `sanitize_for_memory` |
 | `browser_skills` | List browser skills ranked by reliability | first-party read | Read-only; own recorded skills | None significant — own content, scored not trusted blindly |
 | `browser_exists` | Probe whether a CSS selector is present | structured predicate | Returns a bool, never page prose | Not an ingestion vector — no page text crosses into instructions |
