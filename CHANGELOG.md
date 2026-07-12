@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: multi-tab, uploads, network-idle waits
+
+Governed plumbing that widens the range of flows the operator can automate.
+
+- **Multi-tab** — `browser_tabs` lists the browser's open page tabs (bounded
+  id/title/url) and `browser_switch_tab` activates one by index. Both are
+  operator-gated credentialed actuators; after a switch, `browser_act`/
+  `browser_observe` re-check the newly-current domain's authorization, so
+  switching can never point the actuator at an unauthorized logged-in tab.
+- **File upload** — `browser_upload` attaches a **workspace-confined** file to a
+  file input on the current authorized page. Uploading a local file is data
+  egress, so it's operator-gated (current domain authorized) and the path can
+  never escape the sandbox (`_confine`).
+- **Downloads confined** — `set_download_dir()` directs any browser download
+  into the workspace, so a site can't drop a file outside the sandbox.
+- **Network-idle wait** — `wait_idle()` (and the new `wait_idle` template op)
+  waits for the page to load *and* its resource count to hold steady for a short
+  quiet window — a dependency-free heuristic for dynamic pages whose content
+  arrives after `readyState=complete`. Bounded and best-effort.
+
 ### Added — browser harness: visual perception (screenshot + describe)
 
 For canvas/chart/image-heavy pages that a text map can't capture, the harness can

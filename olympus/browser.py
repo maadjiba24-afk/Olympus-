@@ -176,7 +176,8 @@ class FakeTransport:
     def __init__(self, pages: dict[str, dict[str, str]] | None = None,
                  redirects: dict[str, str] | None = None,
                  present: list[str] | None = None,
-                 elements: list[dict[str, str]] | None = None) -> None:
+                 elements: list[dict[str, str]] | None = None,
+                 targets: list[dict] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -193,6 +194,8 @@ class FakeTransport:
         self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
+        # Scriptable page tabs for list_tabs()/switch_tab() offline.
+        self.targets = targets or []
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
@@ -230,7 +233,9 @@ class FakeTransport:
                         self.filled[sel] = "set"
                     value = sel is not None
                 return {"result": {"value": value}}
-            if "readyState" in expr:
+            if "performance" in expr:      # wait_idle() → stable resource count
+                value = "0"
+            elif "readyState" in expr:
                 value = "complete"
             elif "document.title" in expr:
                 value = page.get("title", "")
@@ -245,6 +250,16 @@ class FakeTransport:
             # A deterministic 1x1 PNG so the screenshot path is exercisable
             # offline without a real browser.
             return {"data": self.screenshot_b64}
+        if method == "Target.getTargets":
+            return {"targetInfos": self.targets}
+        if method == "Target.activateTarget":
+            tid = params.get("targetId")
+            for t in self.targets:            # reflect the switch in the URL
+                if t.get("targetId") == tid and t.get("url"):
+                    self._url = t["url"]
+            return {}
+        if method in ("DOM.setFileInputFiles", "Page.setDownloadBehavior"):
+            return {}
         if method in ("Input.dispatchMouseEvent", "Input.insertText",
                       "Input.dispatchKeyEvent"):
             return {}
@@ -525,6 +540,90 @@ class BrowserSession:
                 return
             time.sleep(0.25)
 
+    def wait_idle(self, quiet: float = 0.5, timeout: float = _LOAD_TIMEOUT) -> None:
+        """Wait for the page to load AND its resource count to hold steady for a
+        short quiet window — a dependency-free 'network idle' heuristic for
+        dynamic pages whose content arrives after readyState=complete. Bounded by
+        `timeout`; best-effort (never raises)."""
+        self._wait_ready(timeout)
+        deadline = time.monotonic() + timeout
+        last, stable_since = -1, None
+        while time.monotonic() < deadline:
+            try:
+                n = int(float(self._eval(
+                    "(performance.getEntriesByType('resource')||[]).length")
+                    or 0))
+            except Exception:
+                return
+            now = time.monotonic()
+            if n == last:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= quiet:
+                    return
+            else:
+                last, stable_since = n, None
+            time.sleep(0.1)
+
+    def list_tabs(self) -> list[dict]:
+        """List the browser's open page tabs as bounded {id, title, url} dicts.
+        Reveals the (possibly credentialed) browser's tabs, so the tool
+        (browser_tabs) is operator-gated and capability-separated."""
+        res = self._call("Target.getTargets")
+        out = []
+        for t in (res or {}).get("targetInfos", []) or []:
+            if t.get("type") != "page":
+                continue
+            out.append({"id": str(t.get("targetId", "")),
+                        "title": str(t.get("title", ""))[:_LABEL_MAX],
+                        "url": str(t.get("url", ""))[:200]})
+            if len(out) >= 50:
+                break
+        return out
+
+    def switch_tab(self, index: int) -> bool:
+        """Activate the page tab at `index` (from list_tabs). After switching,
+        act()/observe() re-check the NEW current page's domain, so switching can
+        never point the actuator at an unauthorized site without a fresh check."""
+        tabs = self.list_tabs()
+        if not (0 <= index < len(tabs)):
+            return False
+        self._call("Target.activateTarget", targetId=tabs[index]["id"])
+        self.url = tabs[index]["url"]
+        return True
+
+    def upload(self, selector: str, path: str) -> str:
+        """Attach a WORKSPACE-CONFINED file to a file input. Uploading a local
+        file to a remote site is data egress, so this is a credentialed actuator
+        (operator-gated) and the path can never escape the confined workspace."""
+        from . import sandbox
+        try:
+            target = sandbox._confine(path)
+        except ValueError as err:
+            return f"Error: {err}"
+        if not target.is_file():
+            return f"Error: no such file in workspace: {path}"
+        if not self.exists(selector):
+            return f"Error: no file input for {selector}."
+        # The CDP node-resolution dance (DOM.getDocument → querySelector →
+        # setFileInputFiles by nodeId) lives in the real transport; the governed
+        # contract — confinement, existence, gating — is enforced here.
+        self._call("DOM.setFileInputFiles",
+                   files=[str(target)], selector=selector)
+        return f"Uploaded {target.name} to {selector}."
+
+    def set_download_dir(self, path: str = "") -> str:
+        """Confine any browser download to the workspace (default: its root), so
+        a site can't drop a file outside the sandbox. Best-effort."""
+        from . import sandbox
+        try:
+            target = sandbox._confine(path or ".")
+        except ValueError as err:
+            return f"Error: {err}"
+        self._call("Page.setDownloadBehavior", behavior="allow",
+                   downloadPath=str(target))
+        return str(target)
+
     def open(self, url: str) -> str:
         """Navigate to `url` through the SSRF + egress gate, return a snapshot."""
         reason = security.url_block_reason(url)
@@ -772,9 +871,10 @@ class BrowserSession:
     def run_template(self, steps: list[dict], params: dict | None = None) -> dict:
         """Execute a declarative action template step by step. Supported ops:
         `assert` (selector must exist), `click` (selector), `fill`
-        (selector+value; value '$name' pulls from params), `wait`. Raises on a
-        failed assert or unknown op — the spine turns that into a FAILED action.
-        Page prose is never read as instructions; only selectors are touched."""
+        (selector+value; value '$name' pulls from params), `wait`, `wait_idle`
+        (settle dynamic content). Raises TemplateStepError on an unresolved step
+        (so the operator can self-heal) or RuntimeError on an unknown op. Page
+        prose is never read as instructions; only selectors are touched."""
         params = params or {}
         done: list[str] = []
         for i, step in enumerate(steps or []):
@@ -806,6 +906,9 @@ class BrowserSession:
             elif op == "wait":
                 self._wait_ready()
                 done.append("wait")
+            elif op == "wait_idle":
+                self.wait_idle()
+                done.append("wait_idle")
             else:
                 raise RuntimeError(f"step {i}: unknown op {op!r}")
         return {"steps": done}

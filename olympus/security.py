@@ -37,6 +37,10 @@ ACTION_TOOLS = frozenset({
     # half of the same actuator loop — bounded structure, not prose, and kept
     # out of any prose-ingesting run so an injected page can't map your tabs.
     "browser_observe",
+    # Listing/switching the credentialed browser's tabs reveals and redirects a
+    # logged-in session; uploading a local file to a site is data egress. All
+    # three are credentialed actuators, kept out of any prose-ingesting run.
+    "browser_tabs", "browser_switch_tab", "browser_upload",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.

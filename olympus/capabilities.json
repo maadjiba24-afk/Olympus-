@@ -144,7 +144,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 81,
+    "count": 84,
     "names": [
       "add_todo",
       "analyze_image",
@@ -161,6 +161,9 @@
       "browser_screenshot",
       "browser_skill_record",
       "browser_skills",
+      "browser_switch_tab",
+      "browser_tabs",
+      "browser_upload",
       "cache_fact",
       "call_webhook",
       "codegraph_impact",

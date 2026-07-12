@@ -278,6 +278,76 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert operator.promote_ready() == []
 
 
+# --- multi-tab, uploads, network-idle: governed plumbing --------------------
+
+def test_wait_idle_returns_when_resources_settle(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        sess.wait_idle(quiet=0.0)                          # stable count offline
+        # exercised without hanging; the readiness + resource evals ran
+        exprs = [c["params"].get("expression", "") for c in sess.ledger
+                 if c["method"] == "Runtime.evaluate"]
+        assert any("performance" in e for e in exprs)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_list_and_switch_tabs(monkeypatch):
+    try:
+        monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+        targets = [{"type": "page", "targetId": "A", "title": "One",
+                    "url": "https://a.com/"},
+                   {"type": "page", "targetId": "B", "title": "Two",
+                    "url": "https://b.com/"},
+                   {"type": "background_page", "targetId": "X", "title": "bg",
+                    "url": "chrome://x"}]
+        browser.set_transport_factory(
+            lambda: browser.FakeTransport(targets=targets))
+        sess = browser.session()
+        tabs = sess.list_tabs()
+        assert [t["url"] for t in tabs] == ["https://a.com/", "https://b.com/"]
+        assert sess.switch_tab(1) and sess._current_url() == "https://b.com/"
+        assert sess.switch_tab(9) is False                 # out of range
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_upload_is_confined_to_the_workspace(monkeypatch, tmp_path):
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        (tmp_path / "ok.txt").write_text("hi", encoding="utf-8")
+        sess = _harness_session(monkeypatch, present=["#file"])
+        # path traversal is refused before any CDP call
+        assert "Error" in sess.upload("#file", "../../etc/passwd")
+        # a real workspace file uploads
+        out = sess.upload("#file", "ok.txt")
+        assert "Uploaded ok.txt to #file" in out
+        assert any(c["method"] == "DOM.setFileInputFiles" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_tab_and_upload_tools_are_credentialed_actuators():
+    for name in ("browser_tabs", "browser_switch_tab", "browser_upload"):
+        assert name in security.ACTION_TOOLS
+        assert not security.should_wrap(name)
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_tabs", "browser_switch_tab", "browser_upload"} <= hermes
+    argus = {d.get("name") for d in SPECIALISTS["argus"].tool_defs("anthropic")}
+    assert not ({"browser_tabs", "browser_switch_tab", "browser_upload"} & argus)
+
+
+def test_set_download_dir_confines_to_workspace(monkeypatch, tmp_path):
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        sess = _harness_session(monkeypatch)
+        out = sess.set_download_dir()
+        assert str(tmp_path) in out
+        assert any(c["method"] == "Page.setDownloadBehavior" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
 # --- vision perception: screenshot + describe, governed as ingestion --------
 
 def test_screenshot_captures_base64(monkeypatch):
