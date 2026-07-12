@@ -104,6 +104,17 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_wait_for_element_appears_for_real(real_session):
+    # An element that appears after a short delay — wait_for must block until it's
+    # there, not race a fixed sleep.
+    real_session.open(_page(
+        "<div id=box></div><script>setTimeout(function(){"
+        "document.getElementById('box').innerHTML="
+        "'<button id=late>Late</button>';},400);</script>"))
+    assert real_session.wait_for("#late", timeout=5.0) is True
+    assert real_session.exists("#late")
+
+
 def test_cookie_save_restore_roundtrip_for_real(real_session):
     real_session.open(_page("<h1>hi</h1>"))
     # set a session cookie for an explicit origin, read it back, clear, restore

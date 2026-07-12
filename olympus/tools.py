@@ -2160,16 +2160,18 @@ BROWSER_ACT = {
         "type (into a selector or the focused field), scroll (y pixels or into a "
         "selector), press (a key or modifier chord like 'Enter' or 'Control+a'), "
         "select (an option 'value' in a selector), hover, rightclick, drag (from "
-        "the source selector/index to a target selector in 'value'), back. This "
-        "can operate a LOGGED-IN session, so it is unavailable in any run that "
-        "also reads untrusted web content (capability separation)."
+        "the source selector/index to a target selector in 'value'), wait_for (an "
+        "element to appear, or disappear when value='gone'), back. This can "
+        "operate a LOGGED-IN session, so it is unavailable in any run that also "
+        "reads untrusted web content (capability separation)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {"type": "string",
                        "enum": ["click", "type", "scroll", "press", "select",
-                                "hover", "rightclick", "drag", "back"]},
+                                "hover", "rightclick", "drag", "wait_for",
+                                "back"]},
             "index": {"type": "integer",
                       "description": "Element index from browser_observe"},
             "selector": {"type": "string", "description": "CSS selector for click"},

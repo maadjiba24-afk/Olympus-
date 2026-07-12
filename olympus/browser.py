@@ -615,6 +615,19 @@ class BrowserSession:
                 last, stable_since = n, None
             time.sleep(0.1)
 
+    def wait_for(self, selector: str, gone: bool = False,
+                 timeout: float = _LOAD_TIMEOUT) -> bool:
+        """Wait until `selector` appears (or, with gone=True, disappears) — the
+        deterministic wait a dynamic UI needs between steps, instead of guessing
+        with a fixed sleep. Bounded by `timeout`; returns whether the condition
+        was met. Resolves deep (shadow/iframe) via exists()/__olyq."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.exists(selector) != gone:
+                return True
+            time.sleep(0.1)
+        return self.exists(selector) != gone
+
     def list_tabs(self) -> list[dict]:
         """List the browser's open page tabs as bounded {id, title, url} dicts.
         Reveals the (possibly credentialed) browser's tabs, so the tool
@@ -812,7 +825,7 @@ class BrowserSession:
         `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
         Verbs: click, type, scroll, press (modifier chords like 'Control+a'),
         select, hover, rightclick, drag (source → target selector in `value`),
-        back."""
+        wait_for (an element to appear, or disappear when value='gone'), back."""
         action = (action or "").lower()
         # An index from observe() resolves to the stamped stable selector; the
         # observed label makes a learned step human-readable.
@@ -951,6 +964,15 @@ class BrowserSession:
             self._wait_ready()
             self._journal_step("go back")
             return "Navigated back."
+        if action == "wait_for":
+            if not selector:
+                return "Error: wait_for needs an index or selector."
+            gone = (value or key or "").strip().lower() in (
+                "gone", "absent", "hidden", "disappear")
+            if self.wait_for(selector, gone=gone):
+                return f"{'Gone' if gone else 'Appeared'}: {selector}."
+            return (f"Error: timed out waiting for {selector} to "
+                    f"{'disappear' if gone else 'appear'}.")
         return f"Error: unknown browser action '{action}'."
 
     def learned_steps(self) -> str:
@@ -1016,9 +1038,11 @@ class BrowserSession:
         """Execute a declarative action template step by step. Supported ops:
         `assert` (selector must exist), `click` (selector), `fill`
         (selector+value; value '$name' pulls from params), `wait`, `wait_idle`
-        (settle dynamic content). Raises TemplateStepError on an unresolved step
-        (so the operator can self-heal) or RuntimeError on an unknown op. Page
-        prose is never read as instructions; only selectors are touched."""
+        (settle dynamic content), `wait_for` (selector appears, or disappears
+        with `gone: true`). Raises TemplateStepError on an unresolved or
+        timed-out step (so the operator can self-heal) or RuntimeError on an
+        unknown op. Page prose is never read as instructions; only selectors are
+        touched."""
         params = params or {}
         done: list[str] = []
         for i, step in enumerate(steps or []):
@@ -1053,6 +1077,13 @@ class BrowserSession:
             elif op == "wait_idle":
                 self.wait_idle()
                 done.append("wait_idle")
+            elif op == "wait_for":
+                if not self.wait_for(sel, gone=bool(step.get("gone"))):
+                    raise TemplateStepError(
+                        f"step {i}: {sel!r} never "
+                        f"{'disappeared' if step.get('gone') else 'appeared'}",
+                        op=op, selector=sel, index=i)
+                done.append(f"wait_for {sel}")
             else:
                 raise RuntimeError(f"step {i}: unknown op {op!r}")
         return {"steps": done}

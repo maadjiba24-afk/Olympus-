@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: deterministic waits (`wait_for`)
+
+Instead of racing a fixed sleep on a dynamic page, the harness can wait for a
+specific condition:
+
+- **`wait_for`** — a new `browser_act` verb *and* template op that blocks until a
+  selector **appears** (or **disappears**, with `value='gone'` / `gone: true`),
+  bounded by a timeout, resolving deep (shadow/iframe). A template `wait_for`
+  that times out raises the typed `TemplateStepError`, so it feeds the same
+  self-healing path as any other unresolved step.
+- Verified against real Chromium (an element injected after 400 ms is waited for,
+  not missed).
+
 ### Added — browser harness: saved auth state (session persistence)
 
 The operator can now remember a signed-in session and restore it, instead of

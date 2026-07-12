@@ -70,6 +70,22 @@ def test_observe_returns_indexed_interactive_map(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_wait_for_appears_and_gone(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#ready"])
+        # present element → appears immediately
+        assert "Appeared: #ready" in sess.act("wait_for", selector="#ready")
+        # absent element with value='gone' → already gone, immediately
+        assert "Gone: #missing" in sess.act(
+            "wait_for", selector="#missing", value="gone")
+        # a wait_for template op that can't be satisfied self-heals (typed error)
+        with pytest.raises(browser.TemplateStepError):
+            sess.wait_for = lambda *a, **k: False       # force timeout deterministically
+            sess.run_template([{"op": "wait_for", "selector": "#never"}])
+    finally:
+        browser.set_transport_factory(None)
+
+
 def test_act_supports_rightclick_drag_and_key_chords(monkeypatch):
     try:
         sess = _harness_session(monkeypatch, present=["#src", "#dst", "#field"])
