@@ -321,15 +321,30 @@ def execute(payload: dict) -> dict:
             "financial/irreversible browser templates are disabled by "
             "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
+    risk = tmpl.get("risk", "notable")
+    healed_note = ""
     try:
         result = sess.run_template(tmpl.get("steps", []), params)
     except browser.TemplateStepError as err:
         # Self-heal: the site likely drifted. Re-observe, look for the moved
         # control, and file a human-reviewed proposal — never auto-rewrite a
-        # credentialed template. The outcome is still an honest FAILED.
-        browser.mark_profile_outcome(domain, False)
-        note = _heal_and_propose(domain, name, err)
-        raise RuntimeError(f"{err}. {note}") from err
+        # credentialed template.
+        heal = _heal_and_propose(domain, name, err)
+        cand = heal.get("candidate")
+        # Gated retry: only a REVERSIBLE (notable) template may auto-retry the
+        # healed candidate to finish the run — an irreversible/financial step is
+        # never re-attempted on a guessed selector; it stays propose-only.
+        if risk == "notable" and cand:
+            patched = _patch_steps(tmpl.get("steps", []), err.index, cand)
+            try:
+                result = sess.run_template(patched, params)
+                healed_note = f" (self-healed: used {cand!r})"
+            except browser.TemplateStepError:
+                browser.mark_profile_outcome(domain, False)
+                raise RuntimeError(f"{err}. {heal['note']}") from err
+        else:
+            browser.mark_profile_outcome(domain, False)
+            raise RuntimeError(f"{err}. {heal['note']}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
@@ -337,15 +352,28 @@ def execute(payload: dict) -> dict:
     browser.mark_profile_outcome(domain, ok)
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
+    if healed_note:
+        result["healed"] = True
+        result["note"] = healed_note.strip()
     return result
 
 
+def _patch_steps(steps: list, index: int, selector: str) -> list:
+    """The remaining steps from `index` onward, with the failed step's selector
+    swapped to the healed candidate — so a retry continues the flow (steps before
+    `index` already ran) instead of repeating completed, possibly side-effecting
+    steps."""
+    tail = list(steps[index:]) or [{}]
+    tail[0] = {**tail[0], "selector": selector}
+    return tail
+
+
 def _heal_and_propose(domain: str, template: str,
-                      err: "browser.TemplateStepError") -> str:
+                      err: "browser.TemplateStepError") -> dict:
     """After a template step failed, re-observe and, if a likely-moved control is
-    found, file a Prometheus-style proposal to patch the template. Returns a
-    short human-facing note. Files nothing (beyond recording the drift) if no
-    confident candidate is found."""
+    found, file a Prometheus-style proposal to patch the template. Returns
+    {"note", "candidate"} — the candidate selector (or None) lets a reversible
+    template attempt a gated retry. Never auto-rewrites the stored template."""
     try:
         cand = browser.session().heal_candidate(err.selector)
     except Exception:
@@ -360,13 +388,15 @@ def _heal_and_propose(domain: str, template: str,
                 "Review and, if correct, update the template with "
                 "site_template_record.")
         _file_proposal(domain, f"template drift: {domain}/{template}", body)
-        return (f"Filed a self-heal proposal: {err.selector!r} may have moved to "
-                f"{cand['selector']!r} (for human review).")
+        return {"note": (f"Filed a self-heal proposal: {err.selector!r} may have "
+                         f"moved to {cand['selector']!r} (for human review)."),
+                "candidate": cand["selector"]}
     _file_proposal(domain, f"template drift: {domain}/{template}",
                    f"Template '{template}' step {err.index} selector "
                    f"{err.selector!r} no longer resolves and no confident "
                    "replacement was found on the page. Needs human attention.")
-    return "Filed a self-heal proposal (no confident replacement found)."
+    return {"note": "Filed a self-heal proposal (no confident replacement found).",
+            "candidate": None}
 
 
 def _file_proposal(domain: str, title: str, body: str) -> None:

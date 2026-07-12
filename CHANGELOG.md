@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: gated self-heal retry
+
+Self-healing now *completes* more runs, without ever taking a risky guess.
+
+- When a **reversible (notable)** template step drifts and a confident
+  replacement is found, the operator retries the flow from the failed step with
+  the healed selector — continuing (not repeating) the completed steps — and the
+  run succeeds, marked `healed`. It still files the human-review proposal so the
+  fix can be made permanent.
+- An **irreversible/financial** step is **never** auto-retried on a guessed
+  selector — it stays propose-only, even when a candidate is present. The gate is
+  the template's risk class, so healing can't quietly escalate a risky action.
+
 ### Added — browser harness: deterministic waits (`wait_for`)
 
 Instead of racing a fixed sleep on a dynamic page, the harness can wait for a
