@@ -145,6 +145,36 @@ _OBSERVE_JS = (
     "return JSON.stringify(out);})()"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
+# Human-verification checkpoint DETECTOR (the moat's "detect, don't defeat"
+# step). It recognizes the common human-check widgets/flows by their stable
+# markers and returns a TYPE ENUM only — never page prose — so nothing here is a
+# defeat attempt or an injection surface. The __OLY_CHECKPOINT__ marker lets the
+# offline transport route it. Providers are matched by their own iframe/src
+# fingerprints (which are visible even on a cross-origin challenge frame, without
+# reaching INTO it — we honor the origin boundary, we just see the wall).
+_CHECKPOINT_JS = (
+    "(function(){/*__OLY_CHECKPOINT__*/"
+    "function has(s){try{return !!document.querySelector(s);}catch(e){return false;}}"
+    "if(has('.g-recaptcha')||has(\"iframe[src*='recaptcha']\")||"
+    "has(\"iframe[title*='recaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'recaptcha'});"
+    "if(has('.h-captcha')||has(\"iframe[src*='hcaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'hcaptcha'});"
+    "if(has('.cf-turnstile')||has(\"iframe[src*='challenges.cloudflare.com']\"))"
+    "return JSON.stringify({type:'captcha',detail:'turnstile'});"
+    "if(has(\"input[autocomplete='one-time-code']\")||"
+    "has(\"input[name*='otp']\")||has(\"input[name*='onetime']\"))"
+    "return JSON.stringify({type:'otp',detail:'one-time-code'});"
+    "var t=((document.body?document.body.innerText:'')||'').toLowerCase();"
+    "var cues=['verify it','two-factor','two factor','2-step','2 step',"
+    "'enter the code we','confirm your identity','verify your identity'];"
+    "for(var i=0;i<cues.length;i++){if(t.indexOf(cues[i])>=0)"
+    "return JSON.stringify({type:'step_up',detail:'interstitial'});}"
+    "return JSON.stringify({type:'none',detail:''});})()"
+)
+
+_CHECKPOINT_KINDS = ("captcha", "otp", "step_up", "none")
+
 # --- transport -----------------------------------------------------------
 
 
@@ -153,7 +183,8 @@ class Transport(Protocol):
     Chrome; the fake one answers in-memory. Either way the session only needs
     request/response and a close."""
 
-    def send(self, method: str, params: dict | None = None) -> dict: ...
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict: ...
     def close(self) -> None: ...
 
 
@@ -186,7 +217,8 @@ class FakeTransport:
                  redirects: dict[str, str] | None = None,
                  present: list[str] | None = None,
                  elements: list[dict[str, str]] | None = None,
-                 targets: list[dict] | None = None) -> None:
+                 targets: list[dict] | None = None,
+                 checkpoint: dict | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -211,10 +243,23 @@ class FakeTransport:
         self.dialog_accept = False
         self.dialog_text = ""
         self.inflight_seq: list[int] = []
+        # Scriptable human-verification checkpoint for detect_checkpoint() offline.
+        self.checkpoint: dict = checkpoint or {"type": "none", "detail": ""}
+        # Scriptable cross-origin (OOPIF) frames: list of {sessionId, url}, plus
+        # per-frame observe elements keyed by sessionId, so the governed
+        # cross-origin observation path is exercisable offline.
+        self.frames_list: list[dict] = []
+        self.frame_elements: dict[str, list[dict]] = {}
+        # Selectors that "exist" inside a given frame session, so frame acts
+        # (click/fill/select in a cross-origin frame) resolve offline.
+        self.frame_present: dict[str, set] = {}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
             "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+
+    def frames(self) -> list[dict]:
+        return list(self.frames_list)
 
     def set_dialog_policy(self, accept: bool, text: str = "") -> None:
         self.dialog_accept = bool(accept)
@@ -230,9 +275,26 @@ class FakeTransport:
                 return sel
         return None
 
-    def send(self, method: str, params: dict | None = None) -> dict:
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:
         params = params or {}
-        self.calls.append({"method": method, "params": params})
+        self.calls.append({"method": method, "params": params,
+                           "session_id": session_id})
+        # A sessionId-routed observe reads a scripted cross-origin frame's map.
+        if session_id and method == "Runtime.evaluate":
+            expr = params.get("expression", "")
+            if "__OLY_OBSERVE__" in expr:
+                els = self.frame_elements.get(session_id, [])
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                        "s": e.get("s", f'[data-olympus-idx="{i}"]')}
+                       for i, e in enumerate(els)]
+                return {"result": {"value": json.dumps(lst)}}
+            if "__olyq" in expr:      # frame act: resolve against the frame's set
+                pres = self.frame_present.get(session_id, set())
+                sel = next((s for s in pres if json.dumps(s) in expr), None)
+                return {"result": {"value": sel is not None}}
+            # any other frame eval (e.g. document.location/title) → benign string
+            return {"result": {"value": ""}}
         if method == "Page.navigate":
             target = params.get("url", self._url)
             self._url = self.redirects.get(target, target)   # follow redirect
@@ -240,6 +302,8 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
+            if "__OLY_CHECKPOINT__" in expr:      # detect_checkpoint()
+                return {"result": {"value": json.dumps(self.checkpoint)}}
             if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
                 lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
                         "s": e.get("s", f'[data-olympus-idx="{i}"]')}
@@ -343,6 +407,7 @@ class _RealTransport:
         self._dialog_accept = False
         self._dialog_text = ""
         self._inflight = 0                       # open network requests (idle wait)
+        self._frames: dict[str, dict] = {}       # sessionId -> {url} for OOPIFs
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -350,12 +415,22 @@ class _RealTransport:
 
     def _arm(self) -> None:  # pragma: no cover - needs a browser
         """Enable the domains whose events we consume (Page for dialogs, Network
-        for in-flight tracking). Best-effort; a target that refuses is tolerated."""
+        for in-flight tracking) and auto-attach to child frames so cross-origin
+        (out-of-process) iframes surface with their own sessionId. Best-effort."""
         for dom in ("Page.enable", "Network.enable"):
             try:
                 self.send(dom)
             except Exception:
                 pass
+        try:
+            self.send("Target.setAutoAttach", {"autoAttach": True,
+                      "waitForDebuggerOnStart": False, "flatten": True})
+        except Exception:
+            pass
+
+    def frames(self) -> list[dict]:  # pragma: no cover - needs a browser
+        return [{"sessionId": sid, "url": info.get("url", "")}
+                for sid, info in self._frames.items()]
 
     def set_dialog_policy(self, accept: bool, text: str = "") -> None:  # pragma: no cover
         self._dialog_accept = bool(accept)
@@ -401,6 +476,15 @@ class _RealTransport:
             self._inflight += 1
         elif method in ("Network.loadingFinished", "Network.loadingFailed"):
             self._inflight = max(0, self._inflight - 1)
+        elif method == "Target.attachedToTarget":
+            p = msg.get("params", {})
+            info = p.get("targetInfo", {})
+            sid = p.get("sessionId")
+            if sid and info.get("type") == "iframe":   # a cross-origin (OOPIF)
+                self._frames[sid] = {"url": info.get("url", ""),
+                                     "targetId": info.get("targetId", "")}
+        elif method == "Target.detachedFromTarget":
+            self._frames.pop(msg.get("params", {}).get("sessionId", ""), None)
 
     def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
         with self._id_lock:
@@ -477,17 +561,19 @@ class _RealTransport:
             self._arm()
             return True
 
-    def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:  # pragma: no cover
         try:
-            return self._send_once(method, params)
+            return self._send_once(method, params, session_id)
         except (ConnectionError, OSError) as err:
             # A dropped socket: reconnect once and retry. A genuine CDP error
             # (RuntimeError) is NOT retried — only transport-level failures.
             if self._closed or not self._reconnect():
                 raise RuntimeError(f"CDP transport lost: {err}") from err
-            return self._send_once(method, params)
+            return self._send_once(method, params, session_id)
 
-    def _send_once(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+    def _send_once(self, method: str, params: dict | None = None,
+                   session_id: str | None = None) -> dict:  # pragma: no cover
         with self._id_lock:
             self._id += 1
             mid = self._id
@@ -495,9 +581,11 @@ class _RealTransport:
         slot = [ev, None]
         with self._pending_lock:
             self._pending[mid] = slot
+        msg = {"id": mid, "method": method, "params": params or {}}
+        if session_id:                           # route into a child frame session
+            msg["sessionId"] = session_id
         try:
-            self._conn.send(json.dumps(
-                {"id": mid, "method": method, "params": params or {}}))
+            self._conn.send(json.dumps(msg))
         except Exception as err:
             with self._pending_lock:
                 self._pending.pop(mid, None)
@@ -718,9 +806,10 @@ class BrowserSession:
         if len(self.recipe) > _JOURNAL_MAX:
             del self.recipe[0]
 
-    def _call(self, method: str, **params: Any) -> dict:
+    def _call(self, method: str, *, _session_id: str | None = None,
+              **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
-        return self._t.send(method, params)
+        return self._t.send(method, params, session_id=_session_id)
 
     def _current_url(self) -> str:
         """The URL actually loaded right now (after any redirect / JS nav)."""
@@ -1048,6 +1137,147 @@ class BrowserSession:
             label = f' "{name}"' if name else ""
             lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
         return "\n".join(lines) or "(no interactive elements found)"
+
+    def detect_checkpoint(self) -> dict:
+        """Detect a human-verification checkpoint on the current page — the moat's
+        'detect, don't defeat' step. Returns {"type", "detail"} where type is one
+        of captcha / otp / step_up / none. It NEVER tries to solve or bypass the
+        check and returns only a bounded enum (no page prose), so it is a
+        structured predicate, not an ingestion or a defeat attempt. On a blocked
+        landing it reports none rather than reading the page."""
+        if self._blocked_landing():
+            return {"type": "none", "detail": ""}
+        try:
+            raw = self._eval(_CHECKPOINT_JS)
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError, Exception):
+            return {"type": "none", "detail": ""}
+        kind = d.get("type") if isinstance(d, dict) else None
+        if kind not in _CHECKPOINT_KINDS:
+            return {"type": "none", "detail": ""}
+        return {"type": kind, "detail": str(d.get("detail", ""))[:40]}
+
+    def list_frames(self) -> list[dict]:
+        """The cross-origin (out-of-process) iframes attached to this page, each
+        as {sessionId, url, origin}. Same-origin frames are already reachable by
+        the deep walk; these are the ones behind the origin boundary. The tool
+        layer annotates each with whether its origin is an AUTHORIZED operator
+        site — the governed-crossing gate."""
+        fn = getattr(self._t, "frames", None)
+        if fn is None:
+            return []
+        out = []
+        for f in fn() or []:
+            sid = f.get("sessionId", "")
+            url = f.get("url", "")
+            if not url and sid:      # attach-time url is often stale/empty — ask
+                try:                 # the frame itself for its live location
+                    url = self._eval_in(
+                        sid, "document.location?document.location.href:''") or ""
+                except Exception:
+                    url = ""
+            origin = _origin_of(url)
+            # Only real, loaded web origins are authorizable/driveable. An
+            # unloaded / blank / errored frame (about:blank, chrome-error://, a
+            # data: sub-frame) has no authorizable origin — skip it so it can't be
+            # listed as reachable or (mis)authorized.
+            if not origin.startswith(("http://", "https://")):
+                continue
+            out.append({"sessionId": sid, "url": url, "origin": origin})
+        return out
+
+    def _eval_in(self, session_id: str, expression: str) -> str:
+        """Evaluate an expression INSIDE a child frame's CDP session (OOPIF),
+        routed by sessionId. Used only after the frame's origin is authorized."""
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        value = (res or {}).get("result", {}).get("value", "")
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def _eval_bool_in(self, session_id: str, expression: str) -> bool:
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        return bool((res or {}).get("result", {}).get("value"))
+
+    def fill_in(self, session_id: str, selector: str, value: str) -> bool:
+        """fill(), scoped to a child frame session. `value` (possibly a secret)
+        is sent to the frame, never returned to the model."""
+        expr = (f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(!e)return false;e.focus();e.value={json.dumps(value)};"
+                f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"return true;}})()")
+        return self._eval_bool_in(session_id, expr)
+
+    def observe_frame(self, session_id: str, limit: int = _OBSERVE_MAX) -> str:
+        """Perceive a cross-origin frame's interactive elements as a numbered map
+        — the governed crossing. Gating (the frame origin must be authorized) is
+        enforced by the caller; this only runs once permitted. Content is
+        untrusted, like any page perception."""
+        self.ingested_untrusted = True
+        limit = max(1, min(int(limit), _OBSERVE_MAX))
+        raw = self._eval_in(session_id, _OBSERVE_JS.replace("LIMIT", str(limit))
+                                                   .replace("CAP", str(_LABEL_MAX)))
+        try:
+            items = json.loads(raw or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return "(could not read the frame's interactive elements)"
+        lines = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
+
+    def act_in_frame(self, session_id: str, action: str, *, selector: str = "",
+                     text: str = "", value: str = "", key: str = "") -> str:
+        """Act INSIDE an authorized cross-origin frame (the governed crossing's
+        write half). Selector-based verbs only — click, type, select, press — the
+        form interactions a payment/login frame needs; coordinate/scroll verbs
+        are page-level and don't apply. The caller enforces per-origin
+        authorization. Landed steps are journaled (with an 'in frame' marker) so a
+        proven cross-frame flow can be learned like any other."""
+        action = (action or "").lower()
+        if action in ("click", "type", "select") and not selector:
+            return f"Error: '{action}' in a frame needs a selector."
+        if action == "click":
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(e){{e.click();return true;}}return false;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"click {selector} (in frame)")
+            return f"Clicked {selector} in frame."
+        if action == "type":
+            if not self.fill_in(session_id, selector, text):
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"type into {selector} (in frame)")
+            return f"Typed into {selector} in frame."
+        if action == "select":
+            v = value or text
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                f"return false;e.value={json.dumps(v)};e.dispatchEvent("
+                f"new Event('change',{{bubbles:true}}));return true;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"select {v!r} in {selector} (in frame)")
+            return f"Selected {v!r} in {selector} in frame."
+        if action == "press":
+            k = key or text or "Enter"
+            tgt = (f"__olyq({json.dumps(selector)})" if selector
+                   else "document.activeElement")
+            self._eval_in(session_id,
+                f"(function(){{var e={tgt}||document.body;"
+                f"['keydown','keypress','keyup'].forEach(function(t){{"
+                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
+                f"bubbles:true}}));}});return true;}})()")
+            self._journal_step(f"press {k} (in frame)")
+            return f"Pressed {k} in frame."
+        return (f"Error: '{action}' isn't supported inside a frame "
+                "(use click/type/select/press).")
 
     def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
         """The structured perception: a list of {i, t, n, s} dicts (index, type,
@@ -1544,6 +1774,20 @@ def _slug(text: str) -> str:
     fill step's `$name` placeholder. Never carries the typed value."""
     s = "".join(ch for ch in (text or "") if ch.isalnum())
     return s[:40] or "value"
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of a URL — the unit cross-origin frame authorization
+    is granted against."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except ValueError:
+        return ""
+    if not p.scheme or not p.hostname:
+        return ""
+    host = p.hostname + (f":{p.port}" if p.port else "")
+    return f"{p.scheme}://{host}"
 
 
 def _similarity(a: str, b: str) -> float:

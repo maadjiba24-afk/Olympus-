@@ -15,6 +15,128 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Verifiable attestation receipts (moat, outward-facing)
+
+The signed human-attestation becomes a shareable trust artifact.
+
+- **`operator_attest_receipt`** exports a human-cleared attestation as a portable,
+  human-readable **receipt** (facts + signer public key + signature; nothing
+  secret). **`operator_verify_receipt`** verifies a pasted receipt: signature
+  validity, and — with the expected pinned key (`OLYMPUS_ATTEST_PIN`) — whether
+  it was signed by the trusted signer. Tampering any field (domain, kind, time)
+  fails verification.
+- This is the check a **third party** runs, holding the key out of band — so
+  Olympus can *prove to someone else* that a human cleared a specific
+  verification on a specific site at a specific time. First-party crypto tools
+  (read-only; a receipt is crypto-verified, never executed).
+
+### Added — Governed cross-origin frame *acting* + hardening (moat)
+
+Completes the governed crossing with the write half.
+
+- **`browser_frame_act`** — click / type / select / press INSIDE a cross-origin
+  frame (by index), permitted **only if the frame's origin is an authorized
+  operator site** (same default-deny per-origin gate as `browser_frame_observe`).
+  Selector-based verbs only (the form interactions a payment/login frame needs);
+  typed text is never journaled; landed steps ARE journaled (with an "in frame"
+  marker) so a proven cross-frame flow can be learned like any other — the moat
+  self-evolves. Operator-gated, capability-separated.
+- **Hardened:** `list_frames` now lists only frames with a real, loaded
+  `http(s)` origin — an `about:blank` / `chrome-error://` / unloaded sub-frame
+  has no authorizable origin and is skipped, so it can't be mis-authorized or
+  driven. (Note: a fully *loaded* cross-origin frame's content can't be
+  demonstrated in a sandbox whose Private-Network-Access/proxy policy blocks
+  iframe loads; the OOPIF attach + sessionId routing the frame ops ride is
+  verified against real Chromium at the transport level.)
+
+### Added — Governed cross-origin frames (moat)
+
+The second boundary turned into a moat: reach *into* a cross-origin (third-party)
+iframe — but **only under per-origin authorization**, never casually.
+
+- **OOPIF-aware transport.** The event-driven `_RealTransport` now auto-attaches
+  to child frames (`Target.setAutoAttach` flatten) and tracks out-of-process
+  iframes by their CDP `sessionId`; commands route into a child frame session via
+  a new `session_id` on `send`. (Same-origin frames were already reached by the
+  deep walk; this adds the cross-origin ones behind the same-origin boundary.)
+- **Governed crossing** — `browser_frames` lists a page's cross-origin frames
+  with each origin's authorization status; `browser_frame_observe` perceives
+  inside one **only if its origin is an authorized operator site** (default
+  deny), reusing the existing authorization concept — so an injected ad/widget
+  frame is listed but never reached into. Both operator-gated, capability-
+  separated. The same-origin policy is crossed *only* under explicit per-origin
+  authorization, honored as a governed act rather than defeated.
+- Verified against real Chromium: a real cross-site iframe surfaces as an
+  out-of-process session and eval routes into it. Governance (list + per-origin
+  gate + refuse-by-default) covered offline.
+
+### Added — Attested Human Handoff: evolve + honest-automation policy (moat, part 4/4)
+
+The moat compounds and the stance is documented.
+
+- **Need it less over time.** `attest.burden_by_domain()` / `evolution_report()`
+  track how often each site required a human — folded into the operator review
+  cycle, which now surfaces the heaviest sites and prompts saving their sessions
+  (`browser_save_auth`), so a cleared 2FA is reused and the checkpoint rate
+  falls. Clear once, reuse many; every action stays attested.
+- **Honest automation, documented** (`docs/DESIGN_HANDOFF.md`): no CAPTCHA
+  solvers, no anti-bot / fingerprint evasion, no 2FA bypass — refused by design
+  and pinned by test; prefer official APIs, otherwise operate transparently.
+  Olympus is detectable and attested, and treats that as the trust feature.
+
+### Added — Attested Human Handoff: the handoff + operator wiring (moat, part 3/…)
+
+The loop closes: detect → hand off → verify cleared → attest.
+
+- **Operate is checkpoint-aware.** When a template step can't proceed,
+  `operator.execute` now first checks for a human-verification checkpoint; if one
+  is present it reports a **handoff** ("clear it in the browser, then I'll
+  continue and record a signed attestation") instead of mistaking it for
+  template drift — no spurious self-heal proposal, never a solve attempt.
+- **`browser_attest_human`** records the signed attestation *only after
+  re-checking the live page and confirming the checkpoint is gone* — the proof
+  is minted when the check is verifiably cleared, never on the model's say-so.
+  Operator-gated, capability-separated, bound to the credentialed session.
+- **`operator_attestations`** renders the signed audit trail (first-party read),
+  each entry shown with its verify status — proof a human was in the loop for
+  every verification.
+
+### Added — Attested Human Handoff: signed attestations (moat, part 2/…)
+
+The moat core: a cleared human-verification check becomes a **cryptographically
+signed attestation** (`olympus/attest.py`), signed with the same Ed25519
+root-of-trust that signs the decision log (`olympus.witness`).
+
+- `attest(kind, domain)` mints a signed record ("a human cleared a
+  `captcha`/`otp`/`step_up` verification on `domain` at `time`");
+  `verify_attestation` is tamper-evident (forging the domain or kind breaks the
+  signature) and **pin-bindable** (`OLYMPUS_ATTEST_PIN`) so a third-party
+  verifier holding the expected key out-of-band can check it. Fails closed
+  without the crypto backend — an unsigned "proof" is never minted.
+- Attestations persist to an append-only ledger (`attestations.jsonl`);
+  `latest_attestation(domain)` binds a later credentialed action to the
+  human-check that preceded it, and `summary()` renders the audit trail. This is
+  a proof a bypass-first agent structurally cannot produce — having defeated the
+  human, it has nothing to attest.
+
+### Added — Attested Human Handoff: checkpoint detection (moat, part 1/…)
+
+Olympus turns the CAPTCHA/2FA boundary into a moat by refusing to defeat it and
+instead *proving a human cleared it*. The first piece is **detection, not
+defeat**.
+
+- **`browser_checkpoint` / `detect_checkpoint()`** recognizes a human-verification
+  checkpoint on the current authorized page — CAPTCHA (reCAPTCHA / hCaptcha /
+  Cloudflare Turnstile), one-time-code / 2FA inputs, or a "verify it's you"
+  step-up interstitial — by stable markers, and returns **only a type enum**
+  (never page prose, never a solve attempt). Providers are matched by their own
+  frame fingerprints, so a cross-origin challenge frame is *seen* without
+  reaching into it (the origin boundary is honored, not defeated).
+- Governed as **credentialed perception**: operator-gated, domain-authorized,
+  capability-separated (in `ACTION_TOOLS`), refuses a blocked landing. The
+  "never solve/bypass" stance is pinned to code by a test over the detector
+  script. Subsequent parts wire the handoff and the witness-signed attestation.
+
 ### Improved — browser harness: transport auto-reconnect
 
 A dropped WebSocket used to wedge the harness. `_RealTransport` now remembers its
