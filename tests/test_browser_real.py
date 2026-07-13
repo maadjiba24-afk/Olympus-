@@ -85,6 +85,28 @@ def test_screenshot_returns_png_bytes(real_session):
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"      # a real PNG signature
 
 
+def test_element_and_full_page_screenshots_for_real(real_session):
+    import base64
+    real_session.open(_page(
+        "<div style='height:3000px'>tall</div>"
+        "<button id=b style='width:80px;height:30px'>Btn</button>"))
+    viewport = len(base64.b64decode(real_session.screenshot()))
+    full = len(base64.b64decode(real_session.screenshot(full_page=True)))
+    element = len(base64.b64decode(real_session.screenshot(selector="#b")))
+    # full page (3000px tall) is bigger than the viewport; one element is smaller
+    assert full > viewport > element > 0
+
+
+def test_transport_reconnects_after_a_dropped_socket(real_session):
+    real_session.open(_page("<h1 id=t>ALIVE</h1>"))
+    assert real_session._eval("document.getElementById('t').innerText") == "ALIVE"
+    # forcibly drop the underlying WebSocket
+    real_session._t._conn.close()
+    # the next call transparently reconnects to the same tab and succeeds
+    assert real_session._eval("1+1") == "2"
+    assert real_session._eval("document.getElementById('t').innerText") == "ALIVE"
+
+
 def test_list_tabs_for_real(real_session):
     real_session.open(_page("<h1>tab</h1>"))
     tabs = real_session.list_tabs()
@@ -104,6 +126,30 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_js_dialog_does_not_hang_and_respects_policy(real_session):
+    # A click that pops confirm() must not wedge the harness. Default policy
+    # dismisses (confirm→false); accept makes it confirm (confirm→true).
+    page = ("<button id=go onclick=\"document.title="
+            "window.confirm('ok?')?'YES':'NO'\">Go</button>")
+    real_session.open(_page(page))
+    real_session.act("click", selector="#go")             # default: dismiss
+    assert real_session._eval("document.title") == "NO"
+    real_session.set_dialog_policy(True)                   # now accept
+    real_session.open(_page(page))
+    real_session.act("click", selector="#go")
+    assert real_session._eval("document.title") == "YES"
+
+
+def test_network_idle_tracks_real_requests(real_session):
+    # The transport tracks in-flight requests from the CDP event stream, so
+    # wait_idle is a true network-idle (not a heuristic) and ends at zero.
+    real_session.open(_page(
+        "hi<script>fetch('data:text/plain,'+new Array(500).join('x'))"
+        ".then(function(r){return r.text();});</script>"))
+    real_session.wait_idle(quiet=0.2, timeout=5.0)
+    assert real_session._t.inflight() == 0                # settled
+
+
 def test_wait_for_element_appears_for_real(real_session):
     # An element that appears after a short delay — wait_for must block until it's
     # there, not race a fixed sleep.
@@ -113,6 +159,15 @@ def test_wait_for_element_appears_for_real(real_session):
         "'<button id=late>Late</button>';},400);</script>"))
     assert real_session.wait_for("#late", timeout=5.0) is True
     assert real_session.exists("#late")
+
+
+def test_download_capture_for_real(real_session, tmp_path):
+    # A download link click lands a real file in the confined workspace.
+    real_session.open(_page(
+        "<a id=dl download='hello.txt' href='data:text/plain,hello-world'>get</a>"))
+    out = real_session.download("#dl", timeout=15.0)
+    assert "Downloaded hello.txt" in out
+    assert (tmp_path / "hello.txt").read_text() == "hello-world"
 
 
 def test_cookie_save_restore_roundtrip_for_real(real_session):

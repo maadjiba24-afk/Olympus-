@@ -343,6 +343,30 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert operator.promote_ready() == []
 
 
+# --- robustness: JS dialogs can't wedge a click -----------------------------
+
+def test_dialog_policy_wires_to_transport_and_defaults_dismiss(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        # default (fresh transport) is the SAFE dismiss policy
+        assert sess._t.dialog_accept is False
+        out = sess.set_dialog_policy(True, "hello")
+        assert "accept" in out and sess._t.dialog_accept is True
+        assert sess._t.dialog_text == "hello"
+        assert "dismiss" in sess.set_dialog_policy(False)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_browser_dialog_is_a_gated_actuator():
+    assert "browser_dialog" in security.ACTION_TOOLS
+    assert not security.should_wrap("browser_dialog")
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert "browser_dialog" in hermes
+    argus = {d.get("name") for d in SPECIALISTS["argus"].tool_defs("anthropic")}
+    assert "browser_dialog" not in argus
+
+
 # --- saved auth state: persist a session, restore instead of re-login -------
 
 def test_get_and_set_cookies_roundtrip(monkeypatch):
@@ -396,14 +420,14 @@ def test_auth_tools_are_credentialed_actuators():
 
 # --- multi-tab, uploads, network-idle: governed plumbing --------------------
 
-def test_wait_idle_returns_when_resources_settle(monkeypatch):
+def test_wait_idle_waits_for_inflight_requests_to_drain(monkeypatch):
     try:
         sess = _harness_session(monkeypatch)
-        sess.wait_idle(quiet=0.0)                          # stable count offline
-        # exercised without hanging; the readiness + resource evals ran
-        exprs = [c["params"].get("expression", "") for c in sess.ledger
-                 if c["method"] == "Runtime.evaluate"]
-        assert any("performance" in e for e in exprs)
+        # script the transport's in-flight count draining to zero
+        sess._t.inflight_seq = [3, 2, 1, 0, 0]
+        sess.wait_idle(quiet=0.0)                          # true idle path
+        # it consumed the sequence until zero (didn't return while busy)
+        assert sess._t.inflight_seq == []
     finally:
         browser.set_transport_factory(None)
 
@@ -453,6 +477,31 @@ def test_tab_and_upload_tools_are_credentialed_actuators():
     assert not ({"browser_tabs", "browser_switch_tab", "browser_upload"} & argus)
 
 
+def test_download_waits_for_a_new_workspace_file(monkeypatch, tmp_path):
+    import threading
+    import time as _time
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        sess = _harness_session(monkeypatch)
+        # a file lands in the workspace shortly after the wait begins
+        def drop():
+            _time.sleep(0.3)
+            (tmp_path / "report.pdf").write_bytes(b"%PDF-1.4 body")
+        threading.Thread(target=drop, daemon=True).start()
+        out = sess.download(timeout=5.0)
+        assert "Downloaded report.pdf" in out
+        assert any(c["method"] == "Page.setDownloadBehavior" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_download_tool_is_a_gated_actuator():
+    assert "browser_download" in security.ACTION_TOOLS
+    assert not security.should_wrap("browser_download")
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert "browser_download" in hermes
+
+
 def test_set_download_dir_confines_to_workspace(monkeypatch, tmp_path):
     try:
         monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
@@ -474,6 +523,26 @@ def test_screenshot_captures_base64(monkeypatch):
         assert b64 and _b64.b64decode(b64)                 # valid base64 bytes
         methods = [c["method"] for c in sess.ledger]
         assert "Page.captureScreenshot" in methods
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_screenshot_variants_set_the_right_clip(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#b"])
+        sess.screenshot()                                  # viewport
+        sess.screenshot(full_page=True)                    # whole page
+        sess.screenshot(selector="#b")                     # one element
+        caps = [c["params"] for c in sess.ledger
+                if c["method"] == "Page.captureScreenshot"]
+        assert "clip" not in caps[0]                       # viewport: no clip
+        assert caps[1]["clip"]["height"] == 3000           # full page dimensions
+        assert caps[1].get("captureBeyondViewport") is True
+        assert caps[2]["clip"] == {"x": 10, "y": 20, "width": 80,
+                                   "height": 30, "scale": 1}
+        assert caps[2].get("captureBeyondViewport") is True
+        # a missing element captures nothing (no clip on a phantom box)
+        assert sess.screenshot(selector="#missing") == ""
     finally:
         browser.set_transport_factory(None)
 

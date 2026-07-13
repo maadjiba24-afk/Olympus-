@@ -207,10 +207,22 @@ class FakeTransport:
         self.targets = targets or []
         # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
         self.cookies: list[dict] = []
+        # Dialog policy + a scriptable network-idle sequence for offline tests.
+        self.dialog_accept = False
+        self.dialog_text = ""
+        self.inflight_seq: list[int] = []
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
             "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:
+        self.dialog_accept = bool(accept)
+        self.dialog_text = text or ""
+
+    def inflight(self) -> int:
+        # Pop the scripted sequence so wait_idle() can watch it drain to zero.
+        return self.inflight_seq.pop(0) if self.inflight_seq else 0
 
     def _matched_selector(self, expr: str) -> str | None:
         for sel in self.present:
@@ -235,6 +247,9 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
+                if "getBoundingClientRect" in expr:   # element screenshot clip
+                    box = json.dumps({"x": 10, "y": 20, "w": 80, "h": 30})
+                    return {"result": {"value": box if sel else ""}}
                 if params.get("returnByValue") is False:   # node handle wanted
                     return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
                 if "__olySel" in expr:            # durable-selector lookup
@@ -246,6 +261,9 @@ class FakeTransport:
                         self.filled[sel] = "set"
                     value = sel is not None
                 return {"result": {"value": value}}
+            if "scrollWidth" in expr:      # full-page screenshot dimensions
+                return {"result": {"value": json.dumps(
+                    {"x": 0, "y": 0, "w": 1200, "h": 3000})}}
             if "performance" in expr:      # wait_idle() → stable resource count
                 value = "0"
             elif "readyState" in expr:
@@ -293,27 +311,110 @@ class _RealTransport:
     Built lazily so `websockets` stays an optional extra; importing this module
     never pulls it in. Not exercised in CI (no browser), but kept honest and
     minimal so a real attach works when configured.
+
+    A single background reader thread demultiplexes the socket: id-matched
+    replies wake their waiting `send()`, while unsolicited CDP *events* are
+    routed to handlers. That is what lets the harness (a) auto-handle JS dialogs
+    so `confirm()`/`alert()` can't wedge a click, and (b) track in-flight network
+    requests for a real network-idle wait — neither possible with a purely
+    request/response loop.
     """
 
-    def __init__(self, ws_url: str, http_base: str = "") -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:  # pragma: no cover - needs a browser
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
             raise BrowserUnavailable(
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
+        self._connect = connect
+        self._ws_url = ws_url                    # remembered for auto-reconnect
         # Bound a single CDP message so a hostile/huge page can't OOM us; we
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
-        # The DevTools HTTP base (if we know it), so reattach() can resolve
-        # another page target's socket URL and switch which tab we drive.
+        self._reconnect_lock = threading.Lock()
+        self._id_lock = threading.Lock()
+        self._pending: dict[int, list] = {}     # id -> [Event, message]
+        self._pending_lock = threading.Lock()
         self._http_base = (http_base or "").rstrip("/")
+        # Dialog policy: SAFE DEFAULT is to DISMISS (never auto-confirm an
+        # irreversible prompt); the operator opts into accept for a known flow.
+        self._dialog_accept = False
+        self._dialog_text = ""
+        self._inflight = 0                       # open network requests (idle wait)
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
+
+    def _arm(self) -> None:  # pragma: no cover - needs a browser
+        """Enable the domains whose events we consume (Page for dialogs, Network
+        for in-flight tracking). Best-effort; a target that refuses is tolerated."""
+        for dom in ("Page.enable", "Network.enable"):
+            try:
+                self.send(dom)
+            except Exception:
+                pass
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:  # pragma: no cover
+        self._dialog_accept = bool(accept)
+        self._dialog_text = text or ""
+
+    def inflight(self) -> int:  # pragma: no cover - needs a browser
+        return max(0, self._inflight)
+
+    def _read_loop(self) -> None:  # pragma: no cover - needs a browser
+        while not self._closed:
+            try:
+                raw = self._conn.recv(timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                if self._closed:
+                    return
+                time.sleep(0.05)
+                continue
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            mid = msg.get("id")
+            if mid is not None:
+                with self._pending_lock:
+                    slot = self._pending.get(mid)
+                if slot is not None:
+                    slot[1] = msg
+                    slot[0].set()
+            else:
+                self._on_event(msg)
+
+    def _on_event(self, msg: dict) -> None:  # pragma: no cover - needs a browser
+        method = msg.get("method", "")
+        if method == "Page.javascriptDialogOpening":
+            # Answer per policy WITHOUT waiting (we're on the reader thread;
+            # blocking here would deadlock the very reply we'd wait for).
+            self._send_nowait("Page.handleJavaScriptDialog",
+                              {"accept": self._dialog_accept,
+                               "promptText": self._dialog_text})
+        elif method == "Network.requestWillBeSent":
+            self._inflight += 1
+        elif method in ("Network.loadingFinished", "Network.loadingFailed"):
+            self._inflight = max(0, self._inflight - 1)
+
+    def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        try:
+            self._conn.send(json.dumps(
+                {"id": mid, "method": method, "params": params or {}}))
+        except Exception:
+            pass
 
     def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
         """Re-bind this transport to a different page target's WebSocket, so the
-        session actually drives the tab it switched to (not just activates it).
-        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        session actually drives the tab it switched to (not just activates it)."""
         if not self._http_base:
             return False
         import urllib.request
@@ -327,33 +428,93 @@ class _RealTransport:
                   "")
         if not ws:
             return False
-        from websockets.sync.client import connect  # type: ignore
+        self._closed = True                      # stop the old reader
         try:
             self._conn.close()
         except Exception:
             pass
-        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._reader.join(timeout=2.0)
+        with self._pending_lock:
+            self._pending.clear()
+        self._conn = self._connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        self._inflight = 0
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
         return True
 
+    def _reconnect(self) -> bool:  # pragma: no cover - needs a browser
+        """Re-open the WebSocket to the SAME target after a drop, so a transient
+        disconnect doesn't wedge the whole harness. Serialized so concurrent
+        callers reconnect once, not N times."""
+        with self._reconnect_lock:
+            # Another thread may have already reconnected while we waited.
+            try:
+                self._conn.ping()                # cheap liveness probe
+                return True
+            except Exception:
+                pass
+            self._closed = True
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._reader.join(timeout=2.0)
+            with self._pending_lock:
+                self._pending.clear()
+            try:
+                self._conn = self._connect(self._ws_url, open_timeout=10,
+                                           max_size=_WS_MAX_FRAME)
+            except Exception:
+                return False
+            self._id = 0
+            self._inflight = 0
+            self._closed = False
+            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader.start()
+            self._arm()
+            return True
+
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
-        self._id += 1
-        self._conn.send(json.dumps(
-            {"id": self._id, "method": method, "params": params or {}}))
-        # Read replies until ours arrives, but never block past the deadline
-        # (a hung tab or a dropped reply must not wedge the whole agent).
-        deadline = time.monotonic() + _RECV_TIMEOUT
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"CDP call {method} timed out")
-            msg = json.loads(self._conn.recv(timeout=remaining))
-            if msg.get("id") == self._id:
-                if "error" in msg:
-                    raise RuntimeError(msg["error"].get("message", "CDP error"))
-                return msg.get("result", {})
+        try:
+            return self._send_once(method, params)
+        except (ConnectionError, OSError) as err:
+            # A dropped socket: reconnect once and retry. A genuine CDP error
+            # (RuntimeError) is NOT retried — only transport-level failures.
+            if self._closed or not self._reconnect():
+                raise RuntimeError(f"CDP transport lost: {err}") from err
+            return self._send_once(method, params)
+
+    def _send_once(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        ev = threading.Event()
+        slot = [ev, None]
+        with self._pending_lock:
+            self._pending[mid] = slot
+        try:
+            self._conn.send(json.dumps(
+                {"id": mid, "method": method, "params": params or {}}))
+        except Exception as err:
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise ConnectionError(f"CDP send failed: {err}") from err
+        if not ev.wait(timeout=_RECV_TIMEOUT):
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise TimeoutError(f"CDP call {method} timed out")
+        with self._pending_lock:
+            self._pending.pop(mid, None)
+        reply = slot[1] or {}
+        if "error" in reply:
+            raise RuntimeError(reply["error"].get("message", "CDP error"))
+        return reply.get("result", {})
 
     def close(self) -> None:  # pragma: no cover
+        self._closed = True
         try:
             self._conn.close()
         except Exception:
@@ -591,29 +752,54 @@ class BrowserSession:
             time.sleep(0.25)
 
     def wait_idle(self, quiet: float = 0.5, timeout: float = _LOAD_TIMEOUT) -> None:
-        """Wait for the page to load AND its resource count to hold steady for a
-        short quiet window — a dependency-free 'network idle' heuristic for
-        dynamic pages whose content arrives after readyState=complete. Bounded by
-        `timeout`; best-effort (never raises)."""
+        """Wait for the page to load AND the network to go idle for a short quiet
+        window. When the transport tracks in-flight requests from the CDP event
+        stream (real browser), 'idle' means ZERO open requests — a true
+        network-idle. Otherwise it falls back to a resource-count-stable
+        heuristic. Bounded by `timeout`; best-effort (never raises)."""
         self._wait_ready(timeout)
+        inflight = getattr(self._t, "inflight", None)
         deadline = time.monotonic() + timeout
         last, stable_since = -1, None
         while time.monotonic() < deadline:
             try:
-                n = int(float(self._eval(
-                    "(performance.getEntriesByType('resource')||[]).length")
-                    or 0))
+                if inflight is not None:            # true idle: zero open requests
+                    n = int(inflight())
+                    now = time.monotonic()
+                    if n == 0:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        stable_since = None
+                else:                               # heuristic: resource count stable
+                    n = int(float(self._eval(
+                        "(performance.getEntriesByType('resource')||[]).length")
+                        or 0))
+                    now = time.monotonic()
+                    if n == last:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        last, stable_since = n, None
             except Exception:
                 return
-            now = time.monotonic()
-            if n == last:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= quiet:
-                    return
-            else:
-                last, stable_since = n, None
             time.sleep(0.1)
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> str:
+        """Decide how native JS dialogs (alert/confirm/prompt) are answered, so
+        they can't wedge a click. SAFE DEFAULT is dismiss (accept=False) — an
+        irreversible confirm is never auto-accepted; the operator opts into
+        accept for a known flow, optionally supplying prompt text."""
+        setter = getattr(self._t, "set_dialog_policy", None)
+        if setter is not None:
+            setter(bool(accept), text or "")
+        verb = "accept" if accept else "dismiss"
+        extra = f" (answering prompts with {text!r})" if accept and text else ""
+        return f"Dialogs will now {verb} automatically{extra}."
 
     def wait_for(self, selector: str, gone: bool = False,
                  timeout: float = _LOAD_TIMEOUT) -> bool:
@@ -681,6 +867,45 @@ class BrowserSession:
         self._call("DOM.setFileInputFiles",
                    files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
+
+    def download(self, trigger_selector: str = "", timeout: float = 30.0) -> str:
+        """Capture a browser download into the confined workspace: point downloads
+        at the workspace, (optionally) click `trigger_selector` to start one, then
+        wait for a NEW, complete file to appear (ignoring Chrome's `.crdownload`
+        temp and requiring a stable size). Returns the captured filename. The file
+        is untrusted external content — read it afterwards via read_file /
+        analyze_image (path-confined), never surfaced here as page prose."""
+        from . import sandbox
+        root = sandbox.workdir()
+        self.set_download_dir()                  # confine downloads to the workspace
+        try:
+            before = set(os.listdir(root))
+        except OSError as err:
+            return f"Error: workspace unavailable ({err})."
+        if trigger_selector:
+            out = self.act("click", selector=trigger_selector)
+            if out.startswith("Error:"):
+                return out
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                fresh = [f for f in set(os.listdir(root)) - before
+                         if not f.endswith(".crdownload")]
+            except OSError:
+                fresh = []
+            for name in fresh:
+                p = root / name
+                try:
+                    size = p.stat().st_size
+                    time.sleep(0.3)
+                    if p.exists() and p.stat().st_size == size:   # settled
+                        return (f"Downloaded {name} to the workspace "
+                                f"({p.stat().st_size} bytes). Read it with "
+                                "read_file or analyze_image.")
+                except OSError:
+                    continue
+            time.sleep(0.3)
+        return "Error: no download completed within the timeout."
 
     def get_cookies(self, domain: str = "") -> list[dict]:
         """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
@@ -754,18 +979,55 @@ class BrowserSession:
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
-    def screenshot(self) -> str:
+    def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
         for visual perception of canvas/image-heavy pages that observe() can't
-        map. Refuses a blocked landing (never captures internal content). Returns
+        map. With `selector`, captures just that element's box; with `full_page`,
+        the whole scrollable page (beyond the viewport); otherwise the viewport.
+        Refuses a blocked landing (never captures internal content). Returns
         base64 data, or "" if nothing was captured. The pixels are untrusted
         external content — the caller (browser_screenshot) is an INGESTION tool
         and its description is wrapped, exactly like browser_read."""
         self.ingested_untrusted = True
         if self._blocked_landing():
             return ""
-        res = self._call("Page.captureScreenshot", format="png")
+        params: dict[str, Any] = {"format": "png"}
+        if selector:
+            box = self._eval(
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                "return '';var r=e.getBoundingClientRect();return JSON.stringify("
+                "{x:r.left+window.scrollX,y:r.top+window.scrollY,"
+                "w:r.width,h:r.height});})()")
+            clip = self._clip_from(box)
+            if clip is None:
+                return ""
+            params["clip"] = clip
+            params["captureBeyondViewport"] = True
+        elif full_page:
+            dim = self._eval(
+                "JSON.stringify({x:0,y:0,"
+                "w:Math.max(document.body?document.body.scrollWidth:0,"
+                "document.documentElement.scrollWidth),"
+                "h:Math.max(document.body?document.body.scrollHeight:0,"
+                "document.documentElement.scrollHeight)})")
+            clip = self._clip_from(dim)
+            if clip is not None:
+                params["clip"] = clip
+                params["captureBeyondViewport"] = True
+        res = self._call("Page.captureScreenshot", **params)
         return str((res or {}).get("data", "") or "")
+
+    @staticmethod
+    def _clip_from(raw: str) -> dict | None:
+        """Parse a {x,y,w,h} JSON box into a CDP clip, or None if unusable."""
+        try:
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(d, dict) or (d.get("w", 0) < 1 or d.get("h", 0) < 1):
+            return None
+        return {"x": d.get("x", 0), "y": d.get("y", 0),
+                "width": d["w"], "height": d["h"], "scale": 1}
 
     def observe(self, limit: int = _OBSERVE_MAX) -> str:
         """Perceive the page as a numbered map of its visible interactive

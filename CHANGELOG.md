@@ -15,6 +15,65 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Improved — browser harness: transport auto-reconnect
+
+A dropped WebSocket used to wedge the harness. `_RealTransport` now remembers its
+target socket and, on a transport-level failure (a genuine CDP error is *not*
+retried), transparently reconnects once and retries the call — serialized so
+concurrent callers reconnect a single time, and re-arming Page/Network events on
+the fresh connection. Verified against real Chromium (forcibly closing the socket
+mid-session; the next call reconnects to the same tab and the page state is
+intact).
+
+### Improved — browser harness: element- and full-page screenshots
+
+`browser_screenshot` was viewport-only; it now also captures **one element**
+(pass a `selector` — clipped to its bounding box) or the **whole scrollable
+page** (`full_page: true` — `captureBeyondViewport` over the full document
+dimensions). Same INGESTION governance (untrusted pixels, wrapped,
+capability-separated); no new tool. Verified against real Chromium (a 3000 px
+page's full-page capture is larger than the viewport, and a single element's is
+smaller).
+
+### Added — browser harness: download capture
+
+`set_download_dir` only *confined* where downloads land; now the harness can
+actually **capture** one. `browser_download` (session `download()`) points
+downloads at the workspace, optionally clicks a trigger, and waits for a **new,
+complete** file to appear (ignoring Chrome's `.crdownload` temp and requiring a
+stable size), returning its name. The file is untrusted external content, so it's
+read separately via path-confined `read_file`/`analyze_image` — never surfaced as
+page prose. Operator-gated (clicking is an action), workspace-confined, and
+capability-separated. Verified against real Chromium (a download link click lands
+the real file with correct contents in the sandbox).
+
+### Improved — browser harness: true network-idle
+
+`wait_idle` now uses **real** in-flight-request tracking from the CDP event
+stream (the reader thread counts `Network.requestWillBeSent` vs
+`loadingFinished`/`loadingFailed`), so "idle" means **zero open network
+requests** — not a resource-count guess. It waits for genuinely-pending fetches
+(XHR/fetch/beacon) to settle before proceeding, and falls back to the previous
+heuristic only when a transport can't report in-flight counts. Verified against
+real Chromium (a page holding a `fetch` open settles to zero, then proceeds).
+
+### Fixed — browser harness: JS dialogs no longer wedge the harness
+
+A page that pops `alert()`/`confirm()`/`prompt()` on a click used to **hang** the
+harness — the click's CDP call blocked until the dialog was handled, and nothing
+handled it.
+
+- **Event-driven transport.** `_RealTransport` now runs a single background
+  reader thread that demultiplexes the socket: id-matched replies wake their
+  waiting `send()`, while unsolicited CDP **events** are routed to handlers. This
+  is the foundation that also enables true network-idle and resilience.
+- **Auto-handled dialogs.** A `Page.javascriptDialogOpening` event is answered
+  automatically. **Safe default is dismiss** — an irreversible `confirm()` is
+  never auto-accepted; the operator opts into accept (optionally with prompt
+  text) via the new **`browser_dialog`** tool, which is operator-gated and
+  capability-separated. Verified against real Chromium (a `confirm()` click that
+  previously hung now completes, and honors dismiss vs. accept).
+
 ### Added — browser harness: cross-site patterns + template demotion
 
 Two evolution mechanisms that make the skill store *converge* over time.
