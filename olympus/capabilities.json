@@ -144,7 +144,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 88,
+    "count": 89,
     "names": [
       "add_todo",
       "analyze_image",
@@ -152,6 +152,7 @@
       "browse_page",
       "browser_act",
       "browser_dialog",
+      "browser_download",
       "browser_exists",
       "browser_learn",
       "browser_login",

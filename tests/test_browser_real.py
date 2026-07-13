@@ -139,6 +139,15 @@ def test_wait_for_element_appears_for_real(real_session):
     assert real_session.exists("#late")
 
 
+def test_download_capture_for_real(real_session, tmp_path):
+    # A download link click lands a real file in the confined workspace.
+    real_session.open(_page(
+        "<a id=dl download='hello.txt' href='data:text/plain,hello-world'>get</a>"))
+    out = real_session.download("#dl", timeout=15.0)
+    assert "Downloaded hello.txt" in out
+    assert (tmp_path / "hello.txt").read_text() == "hello-world"
+
+
 def test_cookie_save_restore_roundtrip_for_real(real_session):
     real_session.open(_page("<h1>hi</h1>"))
     # set a session cookie for an explicit origin, read it back, clear, restore

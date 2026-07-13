@@ -818,6 +818,45 @@ class BrowserSession:
                    files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
 
+    def download(self, trigger_selector: str = "", timeout: float = 30.0) -> str:
+        """Capture a browser download into the confined workspace: point downloads
+        at the workspace, (optionally) click `trigger_selector` to start one, then
+        wait for a NEW, complete file to appear (ignoring Chrome's `.crdownload`
+        temp and requiring a stable size). Returns the captured filename. The file
+        is untrusted external content — read it afterwards via read_file /
+        analyze_image (path-confined), never surfaced here as page prose."""
+        from . import sandbox
+        root = sandbox.workdir()
+        self.set_download_dir()                  # confine downloads to the workspace
+        try:
+            before = set(os.listdir(root))
+        except OSError as err:
+            return f"Error: workspace unavailable ({err})."
+        if trigger_selector:
+            out = self.act("click", selector=trigger_selector)
+            if out.startswith("Error:"):
+                return out
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                fresh = [f for f in set(os.listdir(root)) - before
+                         if not f.endswith(".crdownload")]
+            except OSError:
+                fresh = []
+            for name in fresh:
+                p = root / name
+                try:
+                    size = p.stat().st_size
+                    time.sleep(0.3)
+                    if p.exists() and p.stat().st_size == size:   # settled
+                        return (f"Downloaded {name} to the workspace "
+                                f"({p.stat().st_size} bytes). Read it with "
+                                "read_file or analyze_image.")
+                except OSError:
+                    continue
+            time.sleep(0.3)
+        return "Error: no download completed within the timeout."
+
     def get_cookies(self, domain: str = "") -> list[dict]:
         """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
         just the current frame's), optionally filtered to `domain`. Cookies are

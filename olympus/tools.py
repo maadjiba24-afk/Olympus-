@@ -1205,6 +1205,16 @@ def _browser_switch_tab(index: int) -> str:
     return f"Error: no tab at index {int(index)}."
 
 
+def _browser_download(selector: str = "") -> str:
+    # Capture a download into the confined workspace (optionally clicking a
+    # trigger). Clicking is a credentialed action, so operator-gated; the file
+    # lands in the sandbox and is read separately (untrusted) via read_file.
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    return sess.download(selector)
+
+
 def _browser_dialog(accept: bool = False, text: str = "") -> str:
     # Set how native JS dialogs (alert/confirm/prompt) are answered on the current
     # authorized page. Credentialed: accepting a confirm can commit an action, so
@@ -1592,6 +1602,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_save_auth": _browser_save_auth,
     "browser_restore_auth": _browser_restore_auth,
     "browser_dialog": _browser_dialog,
+    "browser_download": _browser_download,
     "browser_learn": _browser_learn,
     "browser_pattern": _browser_pattern,
     "browser_skill_record": _browser_skill_record,
@@ -2295,6 +2306,24 @@ BROWSER_UPLOAD = {
     },
 }
 
+BROWSER_DOWNLOAD = {
+    "name": "browser_download",
+    "description": (
+        "Capture a file download into the confined workspace. Optionally pass a "
+        "'selector' to click the download trigger first; waits for the file to "
+        "finish and returns its name. The file is untrusted — read it afterwards "
+        "with read_file or analyze_image. Operator-gated (clicking is an action)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "selector": {"type": "string",
+                         "description": "Optional CSS selector of the download link/button"},
+        },
+        "required": [],
+    },
+}
+
 BROWSER_DIALOG = {
     "name": "browser_dialog",
     "description": (
@@ -2807,6 +2836,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_save_auth": BROWSER_SAVE_AUTH,
     "browser_restore_auth": BROWSER_RESTORE_AUTH,
     "browser_dialog": BROWSER_DIALOG,
+    "browser_download": BROWSER_DOWNLOAD,
     "browser_learn": BROWSER_LEARN,
     "browser_pattern": BROWSER_PATTERN,
     "browser_skill_record": BROWSER_SKILL_RECORD,

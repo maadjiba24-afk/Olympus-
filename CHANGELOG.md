@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: download capture
+
+`set_download_dir` only *confined* where downloads land; now the harness can
+actually **capture** one. `browser_download` (session `download()`) points
+downloads at the workspace, optionally clicks a trigger, and waits for a **new,
+complete** file to appear (ignoring Chrome's `.crdownload` temp and requiring a
+stable size), returning its name. The file is untrusted external content, so it's
+read separately via path-confined `read_file`/`analyze_image` — never surfaced as
+page prose. Operator-gated (clicking is an action), workspace-confined, and
+capability-separated. Verified against real Chromium (a download link click lands
+the real file with correct contents in the sandbox).
+
 ### Improved — browser harness: true network-idle
 
 `wait_idle` now uses **real** in-flight-request tracking from the CDP event

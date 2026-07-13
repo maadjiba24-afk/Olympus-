@@ -477,6 +477,31 @@ def test_tab_and_upload_tools_are_credentialed_actuators():
     assert not ({"browser_tabs", "browser_switch_tab", "browser_upload"} & argus)
 
 
+def test_download_waits_for_a_new_workspace_file(monkeypatch, tmp_path):
+    import threading
+    import time as _time
+    try:
+        monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+        sess = _harness_session(monkeypatch)
+        # a file lands in the workspace shortly after the wait begins
+        def drop():
+            _time.sleep(0.3)
+            (tmp_path / "report.pdf").write_bytes(b"%PDF-1.4 body")
+        threading.Thread(target=drop, daemon=True).start()
+        out = sess.download(timeout=5.0)
+        assert "Downloaded report.pdf" in out
+        assert any(c["method"] == "Page.setDownloadBehavior" for c in sess.ledger)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_download_tool_is_a_gated_actuator():
+    assert "browser_download" in security.ACTION_TOOLS
+    assert not security.should_wrap("browser_download")
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert "browser_download" in hermes
+
+
 def test_set_download_dir_confines_to_workspace(monkeypatch, tmp_path):
     try:
         monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))

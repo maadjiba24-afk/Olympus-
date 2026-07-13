@@ -307,7 +307,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "browser_pattern",
                          "browser_tabs", "browser_switch_tab", "browser_upload",
                          "browser_save_auth", "browser_restore_auth",
-                         "browser_dialog",
+                         "browser_dialog", "browser_download",
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",

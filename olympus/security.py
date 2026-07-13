@@ -48,6 +48,9 @@ ACTION_TOOLS = frozenset({
     # Accepting a JS dialog can commit an action on a credentialed page, so the
     # dialog policy is an actuator, kept out of any prose-ingesting run.
     "browser_dialog",
+    # Capturing a download clicks a trigger and writes into the workspace — a
+    # credentialed action, kept out of any prose-ingesting run.
+    "browser_download",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.
