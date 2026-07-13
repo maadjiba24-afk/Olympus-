@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness advances (beyond the open-web pattern's ceiling)
+
+- **In-page sub-resource egress enforcement.** The egress gate previously
+  covered only the top-level navigation; a loaded page's own sub-resource
+  requests (`fetch`/XHR, `<img>` beacons, tracking pixels) were ungated.
+  `Network.setBlockedURLs` (from the new `security.subresource_block_patterns`)
+  now blocks sub-resource requests to metadata hosts and IP-literal
+  private/loopback/link-local targets at the network layer, installed before
+  the first navigation. Honest limit documented: string-pattern matching, so
+  the navigation gate's resolve-time IP check still guards the top-level
+  document; this is defense-in-depth beneath it.
+- **Accessibility-tree perception** (`browser_read_ax`). Reads the page's AX
+  tree (role + accessible name per node) — far more resilient to CSS/DOM
+  redesigns than selectors and cheaper than a screenshot. Untrusted,
+  blocked-landing-guarded, node/label capped.
+- **Verifiable capture.** `browser_save_pdf` prints the current page to a PDF
+  in the workspace (durable evidence of a confirmation/receipt for the
+  approval + goal-verification loops; blocked-landing-guarded, path-confined).
+  `browser_console` returns the page's captured console messages (real
+  debugging signal; page-controlled text treated as untrusted).
+
 ### Added — browser harness: cross-site patterns + template demotion
 
 Two evolution mechanisms that make the skill store *converge* over time.
