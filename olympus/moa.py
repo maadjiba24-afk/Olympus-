@@ -35,6 +35,11 @@ _AGGREGATE_NOTE = (
 
 def _members() -> list[config.Settings]:
     """Reference members: every usable non-moa pool member (bounded)."""
+    from . import firstrun
+    if not firstrun.configured():
+        raise RuntimeError(
+            "no model is configured — run `olympus setup` or set "
+            "ANTHROPIC_API_KEY / OLYMPUS_API_KEY before using the ensemble.")
     pool = config.ModelPool.from_env()
     refs = [m for m in pool.members if m.provider != "moa"][:MAX_REFERENCE]
     if not refs:
@@ -123,7 +128,10 @@ def one_shot(prompt: str, *, show_drafts: bool = True,
     before the aggregate — the Hermes-style visible ensemble."""
     from . import backend
     runner = runner or backend.complete_text
-    refs = _members()
+    try:
+        refs = _members()
+    except RuntimeError as err:
+        return str(err)
     system = "Answer the user's question well. Be concrete."
     messages = [{"role": "user", "content": prompt}]
     if len(refs) == 1:
