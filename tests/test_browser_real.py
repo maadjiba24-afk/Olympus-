@@ -129,16 +129,19 @@ def test_rightclick_and_key_chord_for_real(real_session):
 def test_cross_origin_frame_surfaces_as_oopif_for_real(real_session):
     import time
     # A real cross-site iframe becomes an out-of-process target with its own CDP
-    # session; eval routes INTO it. (Content may not load if the sandbox blocks
-    # the iframe's egress, but the OOPIF session + sessionId routing still hold.)
+    # session, and commands route INTO it via that sessionId. NOTE: this sandbox's
+    # Private-Network-Access / proxy policy blocks the iframe's own content load
+    # (→ chrome-error), so list_frames() (which lists only loaded http(s) origins)
+    # is empty here; the transport-level OOPIF attach + sessionId eval — the
+    # mechanism observe_frame/act_in_frame ride — is what we verify.
     real_session.open(_page(
         "<h1>parent</h1><iframe src='https://example.com/'></iframe>"))
     time.sleep(3.0)
-    frames = real_session.list_frames()
-    if not frames:
+    raw = real_session._t.frames()               # OOPIF sessions the transport saw
+    if not raw:
         pytest.skip("no out-of-process iframe surfaced in this environment")
-    sid = frames[0]["sessionId"]
-    assert sid                                   # a distinct child session
+    sid = raw[0]["sessionId"]
+    assert sid                                   # a distinct child frame session
     title = real_session._eval_in(sid, "document.title")
     assert isinstance(title, str)                # eval routed into the frame
 

@@ -1214,6 +1214,28 @@ def _browser_frame_observe(index: int = 0) -> str:
     return sess.observe_frame(frame["sessionId"])
 
 
+def _browser_frame_act(index: int = 0, action: str = "click", selector: str = "",
+                       text: str = "", value: str = "", key: str = "") -> str:
+    # Act (click/type/select/press) INSIDE a cross-origin frame — but ONLY if its
+    # origin is an authorized operator site (governed crossing; default deny).
+    from urllib.parse import urlparse
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    user = memory.current_user()
+    frames = sess.list_frames()
+    i = int(index)
+    if not (0 <= i < len(frames)):
+        return f"Error: no cross-origin frame at index {i}."
+    frame = frames[i]
+    host = (urlparse(frame["origin"]).hostname or "").lower()
+    if not operator.authorized(user, host):
+        return (f"Error: the frame origin '{frame['origin']}' isn't an authorized "
+                "site — I don't act inside unauthorized origins.")
+    return sess.act_in_frame(frame["sessionId"], action, selector=selector,
+                             text=text, value=value, key=key)
+
+
 def _browser_attest_human(kind: str = "step_up") -> str:
     # After a human clears a verification check, record a SIGNED attestation that
     # they did. We first re-detect: if the same checkpoint is still on the page,
@@ -1242,6 +1264,29 @@ def _operator_attestations(domain: str = "") -> str:
     # First-party read of the signed human-verification audit trail.
     from . import attest
     return attest.summary(domain)
+
+
+def _operator_attest_receipt(domain: str) -> str:
+    # Export the latest human-cleared attestation for a domain as a portable,
+    # verifiable receipt a third party can check out of band.
+    from . import attest
+    rec = attest.latest_attestation((domain or "").strip().lower())
+    if not rec:
+        return f"No attestation to export for '{domain}'."
+    return attest.export_receipt(rec)
+
+
+def _operator_verify_receipt(receipt: str) -> str:
+    # Verify a pasted attestation receipt — the check a third-party verifier runs.
+    from . import attest
+    r = attest.verify_receipt(receipt)
+    if not r["ok"]:
+        return "Receipt INVALID: " + "; ".join(r["problems"] or ["unparseable"])
+    trust = ("trusted — matches the expected pinned key" if r["trusted"]
+             else "valid signature (set OLYMPUS_ATTEST_PIN to bind it to the "
+                  "expected signer)")
+    return (f"Receipt VALID — a human cleared a {r['kind']} check on "
+            f"{r['domain']} at {r['at']}; signer {r['signer'][:16]}…; {trust}.")
 
 
 def _browser_act(action: str, selector: str = "", text: str = "",
@@ -1689,8 +1734,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_checkpoint": _browser_checkpoint,
     "browser_frames": _browser_frames,
     "browser_frame_observe": _browser_frame_observe,
+    "browser_frame_act": _browser_frame_act,
     "browser_attest_human": _browser_attest_human,
     "operator_attestations": _operator_attestations,
+    "operator_attest_receipt": _operator_attest_receipt,
+    "operator_verify_receipt": _operator_verify_receipt,
     "browser_act": _browser_act,
     "browser_tabs": _browser_tabs,
     "browser_switch_tab": _browser_switch_tab,
@@ -2293,6 +2341,36 @@ BROWSER_OBSERVE = {
     },
 }
 
+OPERATOR_ATTEST_RECEIPT = {
+    "name": "operator_attest_receipt",
+    "description": (
+        "Export the latest human-verification attestation for a site as a "
+        "portable, signed RECEIPT — text a third party can verify out of band "
+        "(with operator_verify_receipt and the expected pinned key) as proof a "
+        "human cleared the check. Contains nothing secret."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"domain": {"type": "string", "description": "Site, e.g. 'bank.com'"}},
+        "required": ["domain"],
+    },
+}
+
+OPERATOR_VERIFY_RECEIPT = {
+    "name": "operator_verify_receipt",
+    "description": (
+        "Verify a pasted Olympus attestation receipt: reports whether its "
+        "signature is valid and (with OLYMPUS_ATTEST_PIN set) whether it was "
+        "signed by the expected key. The check a third-party verifier runs."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"receipt": {"type": "string",
+                                   "description": "The receipt text to verify"}},
+        "required": ["receipt"],
+    },
+}
+
 BROWSER_FRAMES = {
     "name": "browser_frames",
     "description": (
@@ -2318,6 +2396,29 @@ BROWSER_FRAME_OBSERVE = {
         "properties": {"index": {"type": "integer",
                                  "description": "Frame index from browser_frames"}},
         "required": ["index"],
+    },
+}
+
+BROWSER_FRAME_ACT = {
+    "name": "browser_frame_act",
+    "description": (
+        "Act inside a cross-origin frame (by its index from browser_frames): "
+        "click, type, select, or press on a selector within the frame. Permitted "
+        "only if the frame's origin is an authorized operator site (governed "
+        "crossing; default deny). Operator-gated; typed text is never journaled."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "index": {"type": "integer", "description": "Frame index from browser_frames"},
+            "action": {"type": "string",
+                       "enum": ["click", "type", "select", "press"]},
+            "selector": {"type": "string", "description": "CSS selector inside the frame"},
+            "text": {"type": "string", "description": "Text to type"},
+            "value": {"type": "string", "description": "Option value for select"},
+            "key": {"type": "string", "description": "Key for press, e.g. 'Enter'"},
+        },
+        "required": ["index", "action"],
     },
 }
 
@@ -3008,8 +3109,11 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_checkpoint": BROWSER_CHECKPOINT,
     "browser_frames": BROWSER_FRAMES,
     "browser_frame_observe": BROWSER_FRAME_OBSERVE,
+    "browser_frame_act": BROWSER_FRAME_ACT,
     "browser_attest_human": BROWSER_ATTEST_HUMAN,
     "operator_attestations": OPERATOR_ATTESTATIONS,
+    "operator_attest_receipt": OPERATOR_ATTEST_RECEIPT,
+    "operator_verify_receipt": OPERATOR_VERIFY_RECEIPT,
     "browser_act": BROWSER_ACT,
     "browser_tabs": BROWSER_TABS,
     "browser_switch_tab": BROWSER_SWITCH_TAB,

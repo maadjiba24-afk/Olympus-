@@ -15,6 +15,40 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Verifiable attestation receipts (moat, outward-facing)
+
+The signed human-attestation becomes a shareable trust artifact.
+
+- **`operator_attest_receipt`** exports a human-cleared attestation as a portable,
+  human-readable **receipt** (facts + signer public key + signature; nothing
+  secret). **`operator_verify_receipt`** verifies a pasted receipt: signature
+  validity, and — with the expected pinned key (`OLYMPUS_ATTEST_PIN`) — whether
+  it was signed by the trusted signer. Tampering any field (domain, kind, time)
+  fails verification.
+- This is the check a **third party** runs, holding the key out of band — so
+  Olympus can *prove to someone else* that a human cleared a specific
+  verification on a specific site at a specific time. First-party crypto tools
+  (read-only; a receipt is crypto-verified, never executed).
+
+### Added — Governed cross-origin frame *acting* + hardening (moat)
+
+Completes the governed crossing with the write half.
+
+- **`browser_frame_act`** — click / type / select / press INSIDE a cross-origin
+  frame (by index), permitted **only if the frame's origin is an authorized
+  operator site** (same default-deny per-origin gate as `browser_frame_observe`).
+  Selector-based verbs only (the form interactions a payment/login frame needs);
+  typed text is never journaled; landed steps ARE journaled (with an "in frame"
+  marker) so a proven cross-frame flow can be learned like any other — the moat
+  self-evolves. Operator-gated, capability-separated.
+- **Hardened:** `list_frames` now lists only frames with a real, loaded
+  `http(s)` origin — an `about:blank` / `chrome-error://` / unloaded sub-frame
+  has no authorizable origin and is skipped, so it can't be mis-authorized or
+  driven. (Note: a fully *loaded* cross-origin frame's content can't be
+  demonstrated in a sandbox whose Private-Network-Access/proxy policy blocks
+  iframe loads; the OOPIF attach + sessionId routing the frame ops ride is
+  verified against real Chromium at the transport level.)
+
 ### Added — Governed cross-origin frames (moat)
 
 The second boundary turned into a moat: reach *into* a cross-origin (third-party)

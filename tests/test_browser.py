@@ -421,8 +421,51 @@ def test_cross_origin_frame_crossing_is_governed_per_origin(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_cross_origin_frame_acting_is_governed_per_origin(monkeypatch):
+    from olympus import memory
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
+        memory.set_user("shared")
+        sess = _harness_session(monkeypatch)
+        sess._t.frames_list = [{"sessionId": "S1", "url": "https://pay.other.com/f"}]
+        sess._t.frame_present = {"S1": {"#submit"}}
+        # acting inside an UNauthorized frame origin is refused (default deny)
+        assert "isn't an authorized" in tools._browser_frame_act(
+            0, "click", selector="#submit")
+        # authorize the frame's origin, then the governed write is permitted
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com,pay.other.com")
+        assert "Clicked #submit in frame" in tools._browser_frame_act(
+            0, "click", selector="#submit")
+        # a missing element in the frame fails gracefully
+        assert "no element" in tools._browser_frame_act(
+            0, "click", selector="#nope")
+        # a coordinate/scroll verb isn't supported inside a frame
+        assert "isn't supported inside a frame" in sess.act_in_frame(
+            "S1", "scroll")
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_list_frames_skips_unloadable_origins(monkeypatch):
+    # A blank / errored / data: sub-frame has no authorizable origin — it must not
+    # be listed as reachable (so it can't be mis-authorized or driven).
+    try:
+        sess = _harness_session(monkeypatch)
+        sess._t.frames_list = [
+            {"sessionId": "A", "url": "https://good.com/f"},
+            {"sessionId": "B", "url": "chrome-error://chromewebdata"},
+            {"sessionId": "C", "url": "about:blank"},
+            {"sessionId": "D", "url": ""},
+        ]
+        origins = [f["origin"] for f in sess.list_frames()]
+        assert origins == ["https://good.com"]      # only the real web origin
+    finally:
+        browser.set_transport_factory(None)
+
+
 def test_frame_tools_are_operator_gated_actuators():
-    for name in ("browser_frames", "browser_frame_observe"):
+    for name in ("browser_frames", "browser_frame_observe", "browser_frame_act"):
         assert name in security.ACTION_TOOLS
         assert not security.should_wrap(name)
     hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}

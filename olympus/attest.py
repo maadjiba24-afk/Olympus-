@@ -96,6 +96,76 @@ def verify_attestation(record: dict, *, pin: str | None = None) -> bool:
     return pub == witness.public_key_hex()
 
 
+_RECEIPT_HEADER = "-----OLYMPUS ATTESTATION-----"
+_RECEIPT_FOOTER = "-----END OLYMPUS ATTESTATION-----"
+
+
+def export_receipt(record: dict) -> str:
+    """Render a signed attestation as a portable, human-readable RECEIPT a third
+    party can verify out of band — the moat made outward-facing. It carries the
+    facts, the signer's public key, and the signature; nothing secret. Pair it
+    with the expected pinned key (published once, out of band) to verify."""
+    core = _core(record.get("kind", ""), record.get("domain", ""),
+                 record.get("at", ""))
+    integ = record.get("integrity") or {}
+    body = {
+        "schema": record.get("schema", SCHEMA),
+        "id": record.get("id", _id(core)),
+        **core,
+        "publicKey": integ.get("publicKey", ""),
+        "signature": integ.get("signature", ""),
+    }
+    return (_RECEIPT_HEADER + "\n"
+            + json.dumps(body, indent=2, sort_keys=True) + "\n"
+            + _RECEIPT_FOOTER)
+
+
+def verify_receipt(text: str, *, pin: str | None = None) -> dict:
+    """Verify an exported receipt (the inverse of export_receipt). Returns
+    {ok, kind, domain, at, signer, trusted, problems}. `ok` means the signature
+    is valid over the facts; `trusted` additionally means it was signed by the
+    expected pinned key (`pin` or OLYMPUS_ATTEST_PIN) — the check a third-party
+    verifier runs holding the key out of band. Fails closed without crypto."""
+    body = _parse_receipt(text)
+    if body is None:
+        return {"ok": False, "trusted": False,
+                "problems": ["not a well-formed Olympus attestation receipt"]}
+    record = {
+        "schema": body.get("schema"), "kind": body.get("kind"),
+        "domain": body.get("domain"), "at": body.get("at"),
+        "id": body.get("id"),
+        "integrity": {"publicKey": body.get("publicKey"),
+                      "signature": body.get("signature")},
+    }
+    signer = (body.get("publicKey") or "").strip()
+    ok = verify_attestation(record)                 # signature valid at all?
+    out = {"ok": bool(ok), "kind": body.get("kind"), "domain": body.get("domain"),
+           "at": body.get("at"), "signer": signer, "trusted": False,
+           "problems": []}
+    if not ok:
+        out["problems"].append("signature INVALID — the receipt was altered or "
+                               "not signed by a real key")
+        return out
+    if pin is None:
+        pin = (os.environ.get("OLYMPUS_ATTEST_PIN") or "").strip() or None
+    out["trusted"] = bool(pin) and signer.lower() == pin.lower()
+    if pin and not out["trusted"]:
+        out["problems"].append("valid signature, but NOT by the expected pinned "
+                               "key (untrusted signer)")
+    return out
+
+
+def _parse_receipt(text: str) -> dict | None:
+    if not isinstance(text, str) or _RECEIPT_HEADER not in text:
+        return None
+    try:
+        inner = text.split(_RECEIPT_HEADER, 1)[1].split(_RECEIPT_FOOTER, 1)[0]
+        body = json.loads(inner)
+    except (IndexError, json.JSONDecodeError, TypeError):
+        return None
+    return body if isinstance(body, dict) else None
+
+
 def _path():
     return config.MEMORY_DIR / "attestations.jsonl"
 

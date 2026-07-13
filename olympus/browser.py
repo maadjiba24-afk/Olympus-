@@ -250,6 +250,9 @@ class FakeTransport:
         # cross-origin observation path is exercisable offline.
         self.frames_list: list[dict] = []
         self.frame_elements: dict[str, list[dict]] = {}
+        # Selectors that "exist" inside a given frame session, so frame acts
+        # (click/fill/select in a cross-origin frame) resolve offline.
+        self.frame_present: dict[str, set] = {}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
@@ -278,13 +281,20 @@ class FakeTransport:
         self.calls.append({"method": method, "params": params,
                            "session_id": session_id})
         # A sessionId-routed observe reads a scripted cross-origin frame's map.
-        if session_id and method == "Runtime.evaluate" \
-                and "__OLY_OBSERVE__" in params.get("expression", ""):
-            els = self.frame_elements.get(session_id, [])
-            lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
-                    "s": e.get("s", f'[data-olympus-idx="{i}"]')}
-                   for i, e in enumerate(els)]
-            return {"result": {"value": json.dumps(lst)}}
+        if session_id and method == "Runtime.evaluate":
+            expr = params.get("expression", "")
+            if "__OLY_OBSERVE__" in expr:
+                els = self.frame_elements.get(session_id, [])
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                        "s": e.get("s", f'[data-olympus-idx="{i}"]')}
+                       for i, e in enumerate(els)]
+                return {"result": {"value": json.dumps(lst)}}
+            if "__olyq" in expr:      # frame act: resolve against the frame's set
+                pres = self.frame_present.get(session_id, set())
+                sel = next((s for s in pres if json.dumps(s) in expr), None)
+                return {"result": {"value": sel is not None}}
+            # any other frame eval (e.g. document.location/title) → benign string
+            return {"result": {"value": ""}}
         if method == "Page.navigate":
             target = params.get("url", self._url)
             self._url = self.redirects.get(target, target)   # follow redirect
@@ -1166,7 +1176,14 @@ class BrowserSession:
                         sid, "document.location?document.location.href:''") or ""
                 except Exception:
                     url = ""
-            out.append({"sessionId": sid, "url": url, "origin": _origin_of(url)})
+            origin = _origin_of(url)
+            # Only real, loaded web origins are authorizable/driveable. An
+            # unloaded / blank / errored frame (about:blank, chrome-error://, a
+            # data: sub-frame) has no authorizable origin — skip it so it can't be
+            # listed as reachable or (mis)authorized.
+            if not origin.startswith(("http://", "https://")):
+                continue
+            out.append({"sessionId": sid, "url": url, "origin": origin})
         return out
 
     def _eval_in(self, session_id: str, expression: str) -> str:
@@ -1176,6 +1193,21 @@ class BrowserSession:
                          expression=self._prep(expression), returnByValue=True)
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
+
+    def _eval_bool_in(self, session_id: str, expression: str) -> bool:
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        return bool((res or {}).get("result", {}).get("value"))
+
+    def fill_in(self, session_id: str, selector: str, value: str) -> bool:
+        """fill(), scoped to a child frame session. `value` (possibly a secret)
+        is sent to the frame, never returned to the model."""
+        expr = (f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(!e)return false;e.focus();e.value={json.dumps(value)};"
+                f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"return true;}})()")
+        return self._eval_bool_in(session_id, expr)
 
     def observe_frame(self, session_id: str, limit: int = _OBSERVE_MAX) -> str:
         """Perceive a cross-origin frame's interactive elements as a numbered map
@@ -1198,6 +1230,54 @@ class BrowserSession:
             label = f' "{name}"' if name else ""
             lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
         return "\n".join(lines) or "(no interactive elements found)"
+
+    def act_in_frame(self, session_id: str, action: str, *, selector: str = "",
+                     text: str = "", value: str = "", key: str = "") -> str:
+        """Act INSIDE an authorized cross-origin frame (the governed crossing's
+        write half). Selector-based verbs only — click, type, select, press — the
+        form interactions a payment/login frame needs; coordinate/scroll verbs
+        are page-level and don't apply. The caller enforces per-origin
+        authorization. Landed steps are journaled (with an 'in frame' marker) so a
+        proven cross-frame flow can be learned like any other."""
+        action = (action or "").lower()
+        if action in ("click", "type", "select") and not selector:
+            return f"Error: '{action}' in a frame needs a selector."
+        if action == "click":
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(e){{e.click();return true;}}return false;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"click {selector} (in frame)")
+            return f"Clicked {selector} in frame."
+        if action == "type":
+            if not self.fill_in(session_id, selector, text):
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"type into {selector} (in frame)")
+            return f"Typed into {selector} in frame."
+        if action == "select":
+            v = value or text
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                f"return false;e.value={json.dumps(v)};e.dispatchEvent("
+                f"new Event('change',{{bubbles:true}}));return true;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"select {v!r} in {selector} (in frame)")
+            return f"Selected {v!r} in {selector} in frame."
+        if action == "press":
+            k = key or text or "Enter"
+            tgt = (f"__olyq({json.dumps(selector)})" if selector
+                   else "document.activeElement")
+            self._eval_in(session_id,
+                f"(function(){{var e={tgt}||document.body;"
+                f"['keydown','keypress','keyup'].forEach(function(t){{"
+                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
+                f"bubbles:true}}));}});return true;}})()")
+            self._journal_step(f"press {k} (in frame)")
+            return f"Pressed {k} in frame."
+        return (f"Error: '{action}' isn't supported inside a frame "
+                "(use click/type/select/press).")
 
     def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
         """The structured perception: a list of {i, t, n, s} dicts (index, type,

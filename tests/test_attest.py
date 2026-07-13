@@ -71,6 +71,27 @@ def test_burden_tracking_drives_the_evolution_report():
     assert "heavy.com" in report and "save this session" in report.lower()
 
 
+def test_receipt_export_and_third_party_verify():
+    rec = attest.attest("captcha", "bank.com")
+    receipt = attest.export_receipt(rec)
+    assert "OLYMPUS ATTESTATION" in receipt and "captcha" in receipt
+    # a third party verifies the signature, and binds trust to the expected key
+    v = attest.verify_receipt(receipt)
+    assert v["ok"] and v["kind"] == "captcha" and v["domain"] == "bank.com"
+    trusted = attest.verify_receipt(receipt, pin=witness.public_key_hex())
+    assert trusted["ok"] and trusted["trusted"] is True
+    wrong = attest.verify_receipt(receipt, pin="00" * 32)
+    assert wrong["ok"] and wrong["trusted"] is False       # valid but untrusted
+
+
+def test_tampered_receipt_fails_verification():
+    rec = attest.attest("otp", "shop.com")
+    receipt = attest.export_receipt(rec).replace("shop.com", "evil.com")
+    v = attest.verify_receipt(receipt)
+    assert v["ok"] is False and any("INVALID" in p for p in v["problems"])
+    assert attest.verify_receipt("not a receipt at all")["ok"] is False
+
+
 def test_malformed_ledger_lines_are_skipped():
     attest.attest_and_record("captcha", "shop.com")
     path = attest._path()

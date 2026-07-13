@@ -144,7 +144,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 94,
+    "count": 97,
     "names": [
       "add_todo",
       "analyze_image",
@@ -156,6 +156,7 @@
       "browser_dialog",
       "browser_download",
       "browser_exists",
+      "browser_frame_act",
       "browser_frame_observe",
       "browser_frames",
       "browser_learn",
@@ -193,6 +194,7 @@
       "list_documents",
       "list_source_files",
       "list_todos",
+      "operator_attest_receipt",
       "operator_attestations",
       "operator_authorize_site",
       "operator_forget_site",
@@ -201,6 +203,7 @@
       "operator_review",
       "operator_schedule",
       "operator_status",
+      "operator_verify_receipt",
       "prepare_action",
       "propose_playbook",
       "propose_site_profile",
