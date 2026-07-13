@@ -138,6 +138,7 @@ def distill(source: str, *, allow_paths: bool,
                              "Distill the single most useful reusable skill."}],
                            SKILL_SCHEMA)
     except Exception as err:
+        _telemetry("fail", str(err)[:120])
         return f"Distillation failed: {str(err)[:200]}"
 
     parsed = {"name": str(parsed.get("name", "")).strip()[:80],
@@ -154,10 +155,20 @@ def distill(source: str, *, allow_paths: bool,
     # become durable instructions, even after distillation.
     reason = skillpack.scan_reason(parsed)
     if reason:
+        _telemetry("degraded", f"refused: {reason[:80]}")
         return f"Refused to keep the distilled skill — {reason}."
 
     msg = skills.create(parsed["name"], parsed["description"],
                         parsed["instructions"],
                         specialist=parsed["specialist"], provisional=True)
+    _telemetry("ok")
     return (f"Learned from {origin}: {msg} It will be benchmark-gated "
             "(promoted only if it measurably helps; reverted otherwise).")
+
+
+def _telemetry(outcome: str, detail: str = "") -> None:
+    try:
+        from . import evolve
+        evolve.record("learn", outcome, detail)
+    except Exception:
+        pass

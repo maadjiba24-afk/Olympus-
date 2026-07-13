@@ -17,7 +17,7 @@ from olympus import adminpanel, goals, scheduler, skills, web
 
 SECTIONS = ("instance", "flags", "models", "budget", "channels", "heartbeat",
             "goals", "approvals", "skills", "schedules", "connectors",
-            "config", "security", "health", "errors")
+            "config", "evolution", "security", "health", "errors")
 
 
 @pytest.fixture(autouse=True)

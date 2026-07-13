@@ -62,6 +62,8 @@ _SKILL_STEPS_MAX = 10_000     # max chars of a recorded skill body
 _SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
 _SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
 _OBSERVE_MAX = 120            # max interactive elements returned by observe()
+_AX_MAX = 200                 # max accessibility-tree nodes returned by read_ax()
+_CONSOLE_MAX = 200            # max console messages returned by console_logs()
 _LABEL_MAX = 80               # per-element label cap (anti-injection: no prose)
 _JOURNAL_MAX = 80             # max first-party act steps kept for skill-learning
 
@@ -218,7 +220,18 @@ class FakeTransport:
                  present: list[str] | None = None,
                  elements: list[dict[str, str]] | None = None,
                  targets: list[dict] | None = None,
-                 checkpoint: dict | None = None) -> None:
+                 checkpoint: dict | None = None,
+                 ax_nodes: list[dict] | None = None,
+                 console: list[dict] | None = None,
+                 pdf_b64: str = "JVBERi0xLjQK") -> None:
+        # Scriptable Accessibility.getFullAXTree nodes (role/name/value/ignored).
+        self.ax_nodes = ax_nodes or []
+        # Console messages the page has "emitted" (level/text) — what a real
+        # transport's event pump would accumulate; here it's scriptable.
+        self.console = console or []
+        # Deterministic base64 PDF payload for Page.printToPDF (default: a tiny
+        # valid PDF header) so the capture path is exercisable offline.
+        self.pdf_b64 = pdf_b64
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -345,6 +358,10 @@ class FakeTransport:
             # A deterministic 1x1 PNG so the screenshot path is exercisable
             # offline without a real browser.
             return {"data": self.screenshot_b64}
+        if method == "Accessibility.getFullAXTree":
+            return {"nodes": list(self.ax_nodes)}
+        if method == "Page.printToPDF":
+            return {"data": self.pdf_b64}
         if method == "Target.getTargets":
             return {"targetInfos": self.targets}
         if method == "Target.activateTarget":
@@ -402,6 +419,9 @@ class _RealTransport:
         self._pending: dict[int, list] = {}     # id -> [Event, message]
         self._pending_lock = threading.Lock()
         self._http_base = (http_base or "").rstrip("/")
+        # Console/log messages accumulated from CDP events (bounded). Populated
+        # once Runtime/Log are enabled; drained by console_logs().
+        self.console: deque[dict] = deque(maxlen=_CONSOLE_MAX)
         # Dialog policy: SAFE DEFAULT is to DISMISS (never auto-confirm an
         # irreversible prompt); the operator opts into accept for a known flow.
         self._dialog_accept = False
@@ -417,7 +437,8 @@ class _RealTransport:
         """Enable the domains whose events we consume (Page for dialogs, Network
         for in-flight tracking) and auto-attach to child frames so cross-origin
         (out-of-process) iframes surface with their own sessionId. Best-effort."""
-        for dom in ("Page.enable", "Network.enable"):
+        for dom in ("Page.enable", "Network.enable", "Runtime.enable",
+                    "Log.enable"):
             try:
                 self.send(dom)
             except Exception:
@@ -485,6 +506,19 @@ class _RealTransport:
                                      "targetId": info.get("targetId", "")}
         elif method == "Target.detachedFromTarget":
             self._frames.pop(msg.get("params", {}).get("sessionId", ""), None)
+        elif method == "Runtime.consoleAPICalled":
+            p = msg.get("params", {}) or {}
+            text = " ".join(str(a.get("value", a.get("description", "")))
+                            for a in (p.get("args", []) or []))
+            self.console.append({"level": p.get("type", "log"), "text": text})
+        elif method == "Log.entryAdded":
+            e = (msg.get("params", {}) or {}).get("entry", {}) or {}
+            self.console.append({"level": e.get("level", "log"),
+                                 "text": str(e.get("text", ""))})
+        elif method == "Runtime.exceptionThrown":
+            d = (msg.get("params", {}) or {}).get("exceptionDetails", {}) or {}
+            self.console.append({"level": "error",
+                                 "text": str(d.get("text", "exception"))})
 
     def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
         with self._id_lock:
@@ -780,6 +814,30 @@ class BrowserSession:
         # (click, fill) are captured — enough to graduate a proven flow into a
         # declarative template that still resolves on a fresh page load.
         self.recipe: list[dict] = []
+        # Whether the sub-resource egress gate has been installed on this
+        # target yet (Network.setBlockedURLs persists once set, so apply once).
+        self._subres_gated: bool = False
+
+    def _apply_subresource_gate(self) -> None:
+        """Install the network-layer block on sub-resource requests to SSRF
+        targets (see security.subresource_block_patterns). Best-effort and
+        idempotent: a transport without the Network domain simply leaves the
+        navigation gate as the hard guarantee, so this never breaks browsing.
+        Recorded in the ledger like every other CDP call, so the enforcement
+        is auditable."""
+        if self._subres_gated:
+            return
+        self._subres_gated = True                # set first: never retry-loop
+        try:
+            self._call("Network.enable")
+            self._call("Network.setBlockedURLs",
+                       urls=security.subresource_block_patterns())
+            # Enable console/log capture so console_logs() has real signal on a
+            # live browser (best-effort; the fake transport ignores these).
+            self._call("Runtime.enable")
+            self._call("Log.enable")
+        except Exception:
+            self._subres_gated = False           # allow a later retry on reopen
 
     def _journal_step(self, step: str) -> None:
         """Append a landed, replayable step (bounded; oldest dropped)."""
@@ -1039,6 +1097,10 @@ class BrowserSession:
         reason = security.url_block_reason(url)
         if reason:
             return f"Error: {reason}."
+        # Install the sub-resource network gate BEFORE the page can issue its
+        # own requests, so a hostile/injected page's beacons to internal hosts
+        # are blocked at the network layer, not just the navigation.
+        self._apply_subresource_gate()
         self._call("Page.navigate", url=url)
         self.url = url
         self.ingested_untrusted = True
@@ -1067,6 +1129,46 @@ class BrowserSession:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
+
+    def read_ax(self, limit: int = 0) -> str:
+        """Perceive the page through its ACCESSIBILITY TREE (CDP
+        Accessibility.getFullAXTree) — role + accessible name for every
+        meaningful node. This is the most redesign-resilient way to read a
+        page: the AX tree is the semantic contract a site exposes to assistive
+        tech, so it survives CSS/DOM churn that breaks selectors and pixel
+        coordinates, and it is far cheaper than a screenshot. Untrusted, like
+        every read (blocked-landing guard; bounded output; the tool layer
+        wraps it). Falls back with a clear message if the browser doesn't
+        expose the Accessibility domain."""
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return "Error: current page is a blocked address."
+        cap = max(1, min(int(limit) or _AX_MAX, _AX_MAX))
+        try:
+            self._call("Accessibility.enable")
+            res = self._call("Accessibility.getFullAXTree")
+        except Exception as err:
+            return f"Error: accessibility tree unavailable ({str(err)[:120]})."
+        nodes = (res or {}).get("nodes", []) or []
+        lines, seen = [], 0
+        for n in nodes:
+            if not isinstance(n, dict) or n.get("ignored"):
+                continue
+            role = ((n.get("role") or {}).get("value") or "").strip()
+            name = ((n.get("name") or {}).get("value") or "").strip()
+            if not role or role in ("none", "generic", "InlineTextBox") or not name:
+                continue
+            val = ((n.get("value") or {}).get("value") or "")
+            label = f"{role}: {name[:_LABEL_MAX]}"
+            if val:
+                label += f" = {str(val)[:_LABEL_MAX]}"
+            lines.append(label)
+            seen += 1
+            if seen >= cap:
+                break
+        if not lines:
+            return "(no labelled accessibility nodes on this page)"
+        return "\n".join(lines)[:_TEXT_LIMIT]
 
     def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
@@ -1105,6 +1207,57 @@ class BrowserSession:
                 params["captureBeyondViewport"] = True
         res = self._call("Page.captureScreenshot", **params)
         return str((res or {}).get("data", "") or "")
+
+    def save_pdf(self, name: str = "") -> str:
+        """Print the current page to a PDF in the confined workspace (CDP
+        Page.printToPDF) — a durable, verifiable artifact of what was on screen
+        (a confirmation page, a receipt, a submitted form). Feeds the
+        evidence-based verification loop: 'the operator did X' becomes a file
+        an approver — or the goal judge — can open. Refuses a blocked landing
+        (never archives internal content) and confines the path to the
+        workspace, like every other file write."""
+        import base64
+
+        from . import sandbox
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return "Error: current page is a blocked address."
+        fname = name or f"page-{int(time.time())}.pdf"
+        if not fname.lower().endswith(".pdf"):
+            fname += ".pdf"
+        try:
+            res = self._call("Page.printToPDF", printBackground=True)
+        except Exception as err:
+            return f"Error: PDF capture unavailable ({str(err)[:120]})."
+        data = (res or {}).get("data", "")
+        if not data:
+            return "Error: the page produced no PDF."
+        try:
+            raw = base64.b64decode(data)
+            written = sandbox.write_file(fname, "")     # confine + create path
+            with open(written["path"], "wb") as f:
+                f.write(raw)
+        except Exception as err:
+            return f"Error: could not save the PDF ({str(err)[:120]})."
+        return f"Saved page PDF to workspace: {fname} ({len(raw)} bytes)."
+
+    def console_logs(self, limit: int = 0) -> str:
+        """Return the console messages the page has emitted this session
+        (errors, warnings, logs) — real debugging signal for the coding
+        specialist, and evidence of a page's behaviour. The buffer is drained
+        by the transport's event pump when the real Console/Log domain is
+        enabled; a transport without it returns an empty, honest result rather
+        than failing. Untrusted: a page controls its own console output."""
+        cap = max(1, min(int(limit) or _CONSOLE_MAX, _CONSOLE_MAX))
+        logs = list(getattr(self._t, "console", []) or [])[-cap:]
+        if not logs:
+            return "(no console messages captured)"
+        out = []
+        for m in logs:
+            level = str(m.get("level", "log"))[:12]
+            text = str(m.get("text", ""))[:_LABEL_MAX * 4]
+            out.append(f"[{level}] {text}")
+        return "\n".join(out)[:_TEXT_LIMIT]
 
     @staticmethod
     def _clip_from(raw: str) -> dict | None:

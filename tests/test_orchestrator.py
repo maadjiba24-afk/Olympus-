@@ -146,7 +146,7 @@ def test_heartbeat_nothing_due():
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
                                "daily_learning", "dreaming", "train",
                                "evolution_audit", "skill_curation",
-                               "replay_gate", "backup")}
+                               "feature_evolution", "replay_gate", "backup")}
     assert heartbeat.tick(state) == []
 
 

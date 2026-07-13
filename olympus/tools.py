@@ -1094,14 +1094,51 @@ def _watch_youtube(url: str) -> str:
 
 def _browser_open(url: str) -> str:
     try:
-        return browser.session().open(url)
+        out = browser.session().open(url)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
+    try:                                    # feed the self-evolution loop
+        from . import evolve
+        evolve.record("browser_open", evolve.FAIL if out.startswith("Error")
+                      else evolve.OK)
+    except Exception:
+        pass
+    return out
 
 
 def _browser_read(selector: str = "") -> str:
     try:
         return browser.session().read(selector)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+
+
+def _browser_read_ax(limit: int = 0) -> str:
+    # Semantic perception via the accessibility tree — role + name per node,
+    # resilient to CSS/DOM churn that breaks selectors. A READER: ingests
+    # untrusted page semantics, so it's an INGESTION tool, wrapped and
+    # capability-separated exactly like browser_read.
+    try:
+        return browser.session().read_ax(int(limit))
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+
+
+def _browser_save_pdf(name: str = "") -> str:
+    # Verifiable capture: print the current page to a PDF in the workspace, as
+    # durable evidence of what was on screen (a confirmation, a receipt). A
+    # first-party WRITE confined to the workspace; refuses a blocked landing.
+    try:
+        return browser.session().save_pdf(name)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+
+
+def _browser_console(limit: int = 0) -> str:
+    # First-party read of the page's console output (errors/warnings/logs) —
+    # debugging signal for web apps and evidence of page behaviour.
+    try:
+        return browser.session().console_logs(int(limit))
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
@@ -1729,6 +1766,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
         image, question),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
+    "browser_read_ax": _browser_read_ax,
+    "browser_save_pdf": _browser_save_pdf,
+    "browser_console": _browser_console,
     "browser_screenshot": _browser_screenshot,
     "browser_observe": _browser_observe,
     "browser_checkpoint": _browser_checkpoint,
@@ -2291,6 +2331,61 @@ BROWSER_READ = {
         "properties": {
             "selector": {"type": "string",
                          "description": "Optional CSS selector; omit for whole page"},
+        },
+        "required": [],
+    },
+}
+
+BROWSER_READ_AX = {
+    "name": "browser_read_ax",
+    "description": (
+        "Read the current page through its ACCESSIBILITY TREE — role + name "
+        "for each meaningful element (e.g. 'button: Sign in', 'textbox: "
+        "Email'). More robust than browser_read/CSS selectors because it "
+        "survives visual redesigns, and cheaper than a screenshot. Best for "
+        "understanding a page's structure and controls. Returned content is "
+        "untrusted external data."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer",
+                      "description": "Max nodes to return (default 200)"},
+        },
+        "required": [],
+    },
+}
+
+BROWSER_SAVE_PDF = {
+    "name": "browser_save_pdf",
+    "description": (
+        "Print the current browser page to a PDF saved in the workspace — a "
+        "durable, shareable record of what was on screen (a confirmation "
+        "page, receipt, or completed form). Use it to produce evidence that "
+        "an action actually happened. Optionally pass a filename."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string",
+                     "description": "Optional output filename (.pdf)"},
+        },
+        "required": [],
+    },
+}
+
+BROWSER_CONSOLE = {
+    "name": "browser_console",
+    "description": (
+        "Return the current page's console messages (errors, warnings, logs) "
+        "captured this session — real debugging signal when a web app "
+        "misbehaves, and evidence of how a page behaved."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "limit": {"type": "integer",
+                      "description": "Max messages to return (default 200)"},
         },
         "required": [],
     },
@@ -3104,6 +3199,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,
+    "browser_read_ax": BROWSER_READ_AX,
+    "browser_save_pdf": BROWSER_SAVE_PDF,
+    "browser_console": BROWSER_CONSOLE,
     "browser_screenshot": BROWSER_SCREENSHOT,
     "browser_observe": BROWSER_OBSERVE,
     "browser_checkpoint": BROWSER_CHECKPOINT,

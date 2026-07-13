@@ -82,6 +82,13 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "analyze_image",
                              # The governed CDP harness loads real web pages.
                              "browser_open", "browser_read",
+                             # The accessibility tree is page-supplied semantics
+                             # — untrusted external content, same as read.
+                             "browser_read_ax",
+                             # Console output is page-controlled text — a page
+                             # can write injection into console.log, so treat
+                             # captured console messages as untrusted too.
+                             "browser_console",
                              # A vision description of the page's pixels is
                              # external content too (text-in-image injection).
                              "browser_screenshot",
@@ -463,3 +470,39 @@ def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
         return (f"sovereign mode: egress to '{host}' is not on the allowlist "
                 "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None
+
+
+# --- sub-resource egress (browser harness) --------------------------------
+# `url_block_reason` gates the top-level NAVIGATION (with full DNS+IP checks).
+# But once a page loads, its OWN sub-resource requests — fetch()/XHR, an <img>
+# beacon, a tracking pixel — are not navigations and never hit that gate. A
+# prompt-injected or hostile page can therefore beacon to an internal/metadata
+# host or exfiltrate to a private IP without the harness seeing it. These
+# CDP wildcard patterns (fed to Network.setBlockedURLs) block sub-resource
+# requests to the known SSRF targets at the network layer, closing that hole.
+#
+# Honest limit: setBlockedURLs matches the URL STRING, so it catches
+# metadata hostnames and IP-LITERAL private/link-local targets, but cannot
+# catch a public hostname that DNS-rebinds to a private IP for a sub-resource
+# (CDP doesn't expose the resolved IP here). The navigation gate still does
+# full resolve-time IP validation for the top-level document; this is
+# defense-in-depth beneath it, not a replacement.
+
+def subresource_block_patterns() -> list[str]:
+    """CDP `Network.setBlockedURLs` patterns blocking sub-resource requests to
+    SSRF/metadata targets. Stable, deterministic; the single source of truth
+    the browser harness applies per session."""
+    pats = [
+        "file://*",                       # never let a page pull local files
+        "*://metadata.google.internal/*", "*://metadata/*",
+        "*://localhost/*", "*://localhost:*/*",
+        "*://127.*",                      # IPv4 loopback
+        "*://169.254.*",                  # link-local incl. cloud metadata IP
+        "*://10.*",                       # RFC1918
+        "*://192.168.*",
+        "*://[::1]*", "*://[::1]:*",       # IPv6 loopback
+        "*://[fd*", "*://[fc*",            # IPv6 ULA (fc00::/7)
+        "*://[fe80*",                     # IPv6 link-local
+    ]
+    pats += [f"*://172.{n}.*" for n in range(16, 32)]   # 172.16.0.0/12
+    return pats

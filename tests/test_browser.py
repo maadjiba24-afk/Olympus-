@@ -33,9 +33,45 @@ def test_open_navigates_and_returns_snapshot(fake_browser, monkeypatch):
     assert "Example" in out and "hello world" in out
     # Every CDP call is on the auditable/replayable ledger, in order.
     methods = [c["method"] for c in browser.session().ledger]
-    assert methods[0] == "Page.navigate"
+    # The sub-resource egress gate is installed BEFORE the first navigation.
+    assert methods.index("Network.setBlockedURLs") < methods.index("Page.navigate")
     assert "Runtime.evaluate" in methods
     assert browser.session().ingested_untrusted is True
+
+
+# --- sub-resource egress gate (in-page fetch/beacon SSRF, closed) ---------
+
+def test_subresource_gate_blocks_ssrf_targets(fake_browser, monkeypatch):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    browser.session().open("https://example.com/")
+    calls = {c["method"]: c["params"] for c in browser.session().ledger}
+    assert "Network.enable" in calls
+    urls = calls["Network.setBlockedURLs"]["urls"]
+    # The known cloud-metadata IP, loopback, RFC1918, and file scheme are all
+    # blocked at the network layer for the page's own sub-resource requests.
+    assert "*://169.254.*" in urls          # cloud metadata (169.254.169.254)
+    assert "*://127.*" in urls              # loopback
+    assert "*://10.*" in urls and "*://192.168.*" in urls
+    assert "*://172.16.*" in urls and "*://172.31.*" in urls
+    assert "file://*" in urls
+    assert "*://metadata.google.internal/*" in urls
+
+
+def test_subresource_gate_installed_once(fake_browser, monkeypatch):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    sess = browser.session()
+    sess.open("https://example.com/")
+    sess.open("https://example.com/")
+    n = sum(1 for c in sess.ledger if c["method"] == "Network.setBlockedURLs")
+    assert n == 1                            # persists once, not re-sent per open
+
+
+def test_subresource_patterns_are_source_of_truth():
+    pats = security.subresource_block_patterns()
+    # Every RFC1918 /12 sub-block is enumerated (172.16 … 172.31).
+    for n in range(16, 32):
+        assert f"*://172.{n}.*" in pats
+    assert "*://[::1]*" in pats               # IPv6 loopback covered too
 
 
 def test_read_selector(fake_browser, monkeypatch):
@@ -1031,3 +1067,103 @@ def test_browser_tools_are_threat_modeled():
         assert name in tools.HANDLERS
         assert name in documented
     assert threatmodel.check_repo() == []
+
+
+# --- accessibility-tree perception (redesign-resilient reading) -----------
+
+def test_read_ax_returns_role_and_name(monkeypatch):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    ax = [
+        {"role": {"value": "button"}, "name": {"value": "Sign in"}},
+        {"role": {"value": "textbox"}, "name": {"value": "Email"},
+         "value": {"value": "a@b.c"}},
+        {"role": {"value": "generic"}, "name": {"value": "wrapper"}},   # dropped
+        {"role": {"value": "link"}, "name": {"value": ""}},             # dropped
+        {"role": {"value": "img"}, "name": {"value": "hidden"},
+         "ignored": True},                                              # dropped
+    ]
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport({"https://x/": {}}, ax_nodes=ax))
+    sess = browser.session()
+    sess.open("https://x/")
+    out = sess.read_ax()
+    assert "button: Sign in" in out
+    assert "textbox: Email = a@b.c" in out
+    assert "generic" not in out and "wrapper" not in out   # noise filtered
+    assert out.count("\n") == 1                            # only 2 real nodes
+    browser.set_transport_factory(None)
+
+
+def test_read_ax_refuses_blocked_landing():
+    # A session sitting on an internal address must not surface its AX tree.
+    t = browser.FakeTransport(
+        {"http://169.254.169.254/": {"title": "x", "text": "SECRET"}},
+        ax_nodes=[{"role": {"value": "heading"}, "name": {"value": "SECRET"}}])
+    t._url = "http://169.254.169.254/"
+    sess = browser.BrowserSession(t)
+    assert "blocked address" in sess.read_ax()
+
+
+def test_read_ax_is_ingestion_and_registered():
+    assert "browser_read_ax" in tools.HANDLERS
+    assert "browser_read_ax" in security.INGESTION_TOOLS
+    # A reader must never also be an actuator.
+    assert "browser_read_ax" not in security.ACTION_TOOLS
+
+
+# --- verifiable capture: PDF + console logs -------------------------------
+
+def test_save_pdf_writes_workspace_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        {"https://x/": {"title": "T", "text": "b"}}))
+    sess = browser.session()
+    sess.open("https://x/")
+    out = sess.save_pdf("receipt.pdf")
+    assert "Saved page PDF" in out and "receipt.pdf" in out
+    assert (tmp_path / "receipt.pdf").exists()
+    assert (tmp_path / "receipt.pdf").read_bytes().startswith(b"%PDF")
+    browser.set_transport_factory(None)
+
+
+def test_save_pdf_refuses_blocked_landing(tmp_path, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    t = browser.FakeTransport({"http://169.254.169.254/": {"title": "x", "text": "SECRET"}})
+    t._url = "http://169.254.169.254/"
+    sess = browser.BrowserSession(t)
+    assert "blocked address" in sess.save_pdf()
+    assert not list(tmp_path.glob("*.pdf"))       # nothing archived
+
+
+def test_console_logs_returns_captured_messages(monkeypatch):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    logs = [{"level": "error", "text": "TypeError: x is undefined"},
+            {"level": "log", "text": "loaded"}]
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        {"https://x/": {}}, console=logs))
+    sess = browser.session()
+    sess.open("https://x/")
+    out = sess.console_logs()
+    assert "[error] TypeError: x is undefined" in out
+    assert "[log] loaded" in out
+    browser.set_transport_factory(None)
+
+
+def test_console_empty_is_honest(monkeypatch):
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    browser.set_transport_factory(lambda: browser.FakeTransport({"https://x/": {}}))
+    sess = browser.session()
+    sess.open("https://x/")
+    assert "no console messages" in sess.console_logs()
+    browser.set_transport_factory(None)
+
+
+def test_capture_tools_registered_and_classified():
+    assert "browser_save_pdf" in tools.HANDLERS
+    assert "browser_console" in tools.HANDLERS
+    # save_pdf is a first-party write (not an ingestion reader, not an actuator)
+    assert "browser_save_pdf" not in security.INGESTION_TOOLS
+    assert "browser_save_pdf" not in security.ACTION_TOOLS
+    # console output is page-controlled → untrusted ingestion
+    assert "browser_console" in security.INGESTION_TOOLS

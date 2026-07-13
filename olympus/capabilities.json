@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 99,
+    "count": 100,
     "names": [
       "actions",
       "add-mcp",
@@ -68,6 +68,7 @@
       "email",
       "errors",
       "eval",
+      "evolve",
       "explain",
       "export-trajectories",
       "gallery",
@@ -144,7 +145,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 97,
+    "count": 100,
     "names": [
       "add_todo",
       "analyze_image",
@@ -153,6 +154,7 @@
       "browser_act",
       "browser_attest_human",
       "browser_checkpoint",
+      "browser_console",
       "browser_dialog",
       "browser_download",
       "browser_exists",
@@ -166,8 +168,10 @@
       "browser_operate",
       "browser_pattern",
       "browser_read",
+      "browser_read_ax",
       "browser_restore_auth",
       "browser_save_auth",
+      "browser_save_pdf",
       "browser_screenshot",
       "browser_skill_record",
       "browser_skills",

@@ -15,6 +15,47 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — feature self-evolution (`olympus/evolve.py`)
+
+- **Capabilities that measure and improve themselves.** Every instrumented
+  feature (MoA, goals, curator, /learn, browser_open) records success /
+  degraded / failure outcomes; a daily heartbeat review
+  (`OLYMPUS_FEATURE_EVOLUTION_EVERY`, also `olympus evolve review`) computes
+  per-feature health and **auto-tunes only registered, non-security
+  parameters within hard `[lo, hi]` guardrails, reversibly** — MoA narrows
+  its reference-model fan-out when the ensemble is flaky; the goal cadence
+  backs off for goals that keep failing to close; the curator prunes more
+  cautiously when the benchmark keeps reverting its prunes. Anything not
+  safely auto-tunable is *surfaced as a suggestion*, never imposed, and no
+  egress/auth/capability setting is reachable by the reviewer (enforced by
+  test). Health board on the admin panel and `olympus evolve status`.
+
+### Hardening
+
+- Goal text/contract are length-bounded on add; MoA telemetry-drives its own
+  fan-out; the curator's hard prune cap is now an absolute ceiling the tuner
+  can only narrow within.
+
+### Added — browser harness advances (beyond the open-web pattern's ceiling)
+
+- **In-page sub-resource egress enforcement.** The egress gate previously
+  covered only the top-level navigation; a loaded page's own sub-resource
+  requests (`fetch`/XHR, `<img>` beacons, tracking pixels) were ungated.
+  `Network.setBlockedURLs` (from the new `security.subresource_block_patterns`)
+  now blocks sub-resource requests to metadata hosts and IP-literal
+  private/loopback/link-local targets at the network layer, installed before
+  the first navigation. Honest limit documented: string-pattern matching, so
+  the navigation gate's resolve-time IP check still guards the top-level
+  document; this is defense-in-depth beneath it.
+- **Accessibility-tree perception** (`browser_read_ax`). Reads the page's AX
+  tree (role + accessible name per node) — far more resilient to CSS/DOM
+  redesigns than selectors and cheaper than a screenshot. Untrusted,
+  blocked-landing-guarded, node/label capped.
+- **Verifiable capture.** `browser_save_pdf` prints the current page to a PDF
+  in the workspace (durable evidence of a confirmation/receipt for the
+  approval + goal-verification loops; blocked-landing-guarded, path-confined).
+  `browser_console` returns the page's captured console messages (real
+  debugging signal; page-controlled text treated as untrusted).
 ### Added — Verifiable attestation receipts (moat, outward-facing)
 
 The signed human-attestation becomes a shareable trust artifact.
