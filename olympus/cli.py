@@ -399,6 +399,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_un.add_argument("action_id")
     p_au = sub.add_parser("autonomy", help="show or set the autonomy level (0-4)")
     p_au.add_argument("level", nargs="?", type=int)
+    p_ea = sub.add_parser("earned-autonomy",
+                          help="show or toggle earned per-domain autonomy (on/off)")
+    p_ea.add_argument("state", nargs="?", choices=["on", "off"])
     p_gr = sub.add_parser("grant", help="grant a permission scope (e.g. email)")
     p_gr.add_argument("scope")
     p_rv = sub.add_parser("revoke", help="revoke a scope ('all' = kill switch)")
@@ -1197,7 +1200,8 @@ def main(argv: list[str] | None = None) -> int:
         from . import config
         print(config.ModelPool.from_env().assignment())
     elif args.command in ("actions", "approve", "reject", "edit", "undo",
-                          "autonomy", "grant", "revoke", "limit"):
+                          "autonomy", "earned-autonomy", "grant", "revoke",
+                          "limit"):
         from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
         user = "cli"
         if args.command == "actions":
@@ -1236,6 +1240,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Autonomy level: L{actions.autonomy_level(user)}")
             else:
                 print(actions.set_autonomy(user, args.level))
+        elif args.command == "earned-autonomy":
+            from . import trust
+            if args.state is None:
+                print(trust.report(user))
+            else:
+                print(trust.set_enabled(user, args.state == "on"))
         elif args.command == "grant":
             print(actions.grant_scope(user, args.scope))
         elif args.command == "revoke":

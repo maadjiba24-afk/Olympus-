@@ -1266,6 +1266,21 @@ def _operator_attestations(domain: str = "") -> str:
     return attest.summary(domain)
 
 
+def _operator_trust(domain: str = "") -> str:
+    # First-party read of the earned per-domain autonomy ladder: which sites have
+    # proven themselves enough to auto-run their safe/reversible actions, and how
+    # close each is to the next tier. Read-only — never changes the setting.
+    from . import memory, trust
+    user = memory.current_user()
+    d = (domain or "").strip().lower()
+    if d:
+        return (f"{d}: {trust.tier_name(trust.tier(user, d))} "
+                f"(clean streak {trust.streak(user, d)}). Earned autonomy is "
+                f"{'ON' if trust.enabled(user) else 'off'}; it only ever auto-runs "
+                "reversible actions — money/irreversible steps always ask.")
+    return trust.report(user)
+
+
 def _operator_attest_receipt(domain: str) -> str:
     # Export the latest human-cleared attestation for a domain as a portable,
     # verifiable receipt a third party can check out of band.
@@ -1737,6 +1752,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_frame_act": _browser_frame_act,
     "browser_attest_human": _browser_attest_human,
     "operator_attestations": _operator_attestations,
+    "operator_trust": _operator_trust,
     "operator_attest_receipt": _operator_attest_receipt,
     "operator_verify_receipt": _operator_verify_receipt,
     "browser_act": _browser_act,
@@ -2441,6 +2457,25 @@ BROWSER_ATTEST_HUMAN = {
     },
 }
 
+OPERATOR_TRUST = {
+    "name": "operator_trust",
+    "description": (
+        "Show the earned per-domain autonomy ladder — which authorized sites have "
+        "built a long enough clean track record that Olympus may auto-run their "
+        "safe, REVERSIBLE actions without asking each time, and how close each is "
+        "to the next tier. Money, deletions, and other irreversible steps always "
+        "still require approval, and any surprise snaps a site back to probation. "
+        "Optionally filter to one domain. Read-only."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "description": "Optional site filter"},
+        },
+        "required": [],
+    },
+}
+
 OPERATOR_ATTESTATIONS = {
     "name": "operator_attestations",
     "description": (
@@ -3112,6 +3147,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_frame_act": BROWSER_FRAME_ACT,
     "browser_attest_human": BROWSER_ATTEST_HUMAN,
     "operator_attestations": OPERATOR_ATTESTATIONS,
+    "operator_trust": OPERATOR_TRUST,
     "operator_attest_receipt": OPERATOR_ATTEST_RECEIPT,
     "operator_verify_receipt": OPERATOR_VERIFY_RECEIPT,
     "browser_act": BROWSER_ACT,

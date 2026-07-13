@@ -905,6 +905,16 @@ def browser_financial_enabled() -> bool:
                           "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def earned_autonomy_enabled() -> bool:
+    """Global default for earned per-domain autonomy (OLYMPUS_EARNED_AUTONOMY=1).
+    OFF BY DEFAULT. When on, a site that has built a long clean track record may
+    have its safe, REVERSIBLE actions auto-run without a per-action approval; the
+    approval gate on irreversible/financial/legal actions is never affected. This
+    is the instance-wide switch; individual users can also opt in per-user."""
+    return os.environ.get("OLYMPUS_EARNED_AUTONOMY",
+                          "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def egress_guard_enabled() -> bool:
     """Route outbound data through the egress gateway (OLYMPUS_EGRESS_GUARD=1).
     OFF BY DEFAULT — inert until an operator opts in, so it can't surprise a

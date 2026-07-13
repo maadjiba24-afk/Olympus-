@@ -65,3 +65,41 @@ domain-authorized, and capability-separated (in `security.ACTION_TOOLS`), so an
 injected/prose-ingesting run can neither probe your authenticated tabs for
 checkpoints nor forge a human-in-the-loop proof. `operator_attestations` is a
 first-party read of your own signed records.
+
+## The other side of the moat: earned autonomy
+
+The handoff is about *not overreaching* — never defeating a human-check. Its
+counterpart is *not under-reaching*: Olympus should not have to ask permission
+for every safe, reversible action on a site it has already proven itself on.
+Both are governed by the same principle — **the human sits only at the gate that
+can't be walked back.**
+
+`olympus/trust.py` grades a **domain's** trust from Olympus's own witnessed
+action history:
+
+1. **Earn slowly.** An unbroken run of clean, governed successes on that exact
+   domain raises its tier: `probation` → `trusted` (5 clean runs) →
+   `established` (20).
+2. **Snap back fast.** A single surprise — a failed run, an undo, a rejection,
+   or a human-verification checkpoint (all of which land as non-success in the
+   immutable audit log) — resets the domain to zero. Regaining a tier means
+   rebuilding the whole streak. The asymmetry is the point.
+3. **Pure function of the audit log.** Trust is derived, never stored — there is
+   no counter for a prompt-injected agent to inflate.
+
+Two invariants keep it inside the moat, mirroring the handoff's "never solve"
+line:
+
+- Earned trust can only ever widen auto-execution for **reversible** actions.
+  Money, deletions, and other irreversible steps always still ask, however
+  trusted the site (their min-to-auto level stays 99).
+- The boost is always **re-capped by the conversation's capability profile**, so
+  an ingesting or guest run can never be lifted by it.
+
+It is OFF until opted in (`OLYMPUS_EARNED_AUTONOMY=1` or per-user
+`olympus earned-autonomy on`), never bypasses a permission scope, and is visible
+at any time via `operator_trust`. The same attestation root-of-trust that proves
+a human cleared a checkpoint is what makes unattended autonomy safe: every
+autonomous action is capability-separated, gated, and written to the
+tamper-evident decision log — so freedom is earned by accountability, not by
+removing the human.

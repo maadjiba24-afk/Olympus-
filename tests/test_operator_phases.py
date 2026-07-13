@@ -125,6 +125,56 @@ def test_operate_hands_off_on_a_human_checkpoint(monkeypatch):
     assert "captcha" in (action.error or "").lower()
 
 
+# --- earned per-domain autonomy: a proven site auto-runs safe actions ----
+
+def _seed_clean_runs(user, domain, n):
+    """Write `n` EXECUTED governed runs into the audit trail (earns trust)."""
+    import uuid
+    for i in range(n):
+        actions._save(actions.Action(
+            id=uuid.uuid4().hex[:12], user=memory.safe_id(user),
+            type="browser_operate", title="op", payload={"domain": domain},
+            risk_class=actions.NOTABLE, reversible=True,
+            status=actions.EXECUTED, created_at=100 + i))
+
+
+def test_earned_autonomy_auto_runs_reversible_on_a_proven_site(monkeypatch):
+    from olympus import trust
+    # A cautious user at the DEFAULT autonomy (L1 prepare) — no blanket standing
+    # authority anywhere.
+    _authorize(monkeypatch, autonomy=actions.L1_PREPARE)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    user = memory.current_user()
+    # Without earned autonomy, a notable template holds for approval at L1.
+    held = operator.run(user, "shop.com", "buy", {})
+    assert held.status == actions.PREPARED
+    # Opt in and let the site prove itself over a long clean run…
+    trust.set_enabled(user, True)
+    _seed_clean_runs(user, "shop.com", 20)                 # → established tier
+    ran = operator.run(user, "shop.com", "buy", {})
+    assert ran.status == actions.EXECUTED                  # earned freedom, no ask
+
+
+def test_earned_autonomy_never_lifts_an_irreversible_template(monkeypatch):
+    from olympus import trust
+    _authorize(monkeypatch, autonomy=actions.L1_PREPARE)
+    monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="irreversible")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    user = memory.current_user()
+    trust.set_enabled(user, True)
+    _seed_clean_runs(user, "shop.com", 30)                 # maximally trusted
+    action = operator.run(user, "shop.com", "buy", {})
+    # However trusted the site, an irreversible step still waits for a human.
+    assert action.status == actions.PREPARED
+    assert action.risk_class == actions.IRREVERSIBLE
+
+
 # --- Phase 3: always-on jobs through the heartbeat ------------------------
 
 def test_run_due_is_noop_when_operator_disabled(monkeypatch):
