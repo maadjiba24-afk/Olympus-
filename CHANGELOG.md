@@ -15,6 +15,39 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Earned per-domain autonomy (moat, self-evolving)
+
+Freedom without a blanket blank cheque: Olympus stops asking permission for
+safe, reversible actions on a site it has *already proven itself on*, while a
+human stays at the one gate that can't be walked back.
+
+- **`olympus/trust.py`** grades a **domain's** trust from Olympus's own witnessed
+  action history. Trust is **earned slowly** (an unbroken run of clean, governed
+  successes on that exact domain) and **snaps back fast** — a single surprise
+  (a failed run, a reversal/undo, a rejection, or a human-verification checkpoint,
+  all of which land as non-success in the immutable audit log) resets the domain
+  to zero. Tiers: `probation` → `trusted` (5 clean runs) → `established` (20).
+- The score is a **pure function of the append-only audit log** — there is no
+  mutable trust counter for a prompt-injected agent to inflate.
+- Two hard invariants keep it inside the moat: (1) earned trust can only ever
+  widen auto-execution for **reversible** actions — the approval gate on
+  irreversible / financial / legal actions is never touched (min-to-auto stays
+  99); (2) the boost is always **re-capped by the conversation's capability
+  profile**, so an ingesting or guest run can never be lifted by it.
+- Two runaway guards on top of the streak, both of which fall back to asking
+  (never fail an action): a **post-surprise cooling-off window** (a site that
+  just surprised us must settle for an hour before it can re-earn trust, so a
+  compromised session can't fail-then-rapidly-succeed to re-arm unattended
+  auto-run) and a **per-domain daily auto-run ceiling** (a proven site still
+  can't fire an unbounded number of unattended actions in a day). Both are
+  surfaced in the `operator_trust` report.
+- Wired through the spine: `actions.can_auto_execute` / `auto_or_hold` take an
+  optional earned level; `operator.run` computes the domain's effective level.
+- **`operator_trust`** (read-only tool) and `olympus earned-autonomy [on|off]`
+  (CLI) surface and toggle the ladder; the operator review folds in a hint about
+  which proven sites have earned auto-run. OFF by default — opt in per-user or
+  instance-wide with `OLYMPUS_EARNED_AUTONOMY=1`.
+
 ### Added — feature self-evolution (`olympus/evolve.py`)
 
 - **Capabilities that measure and improve themselves.** Every instrumented
@@ -56,6 +89,7 @@ carries a migration note here.
   approval + goal-verification loops; blocked-landing-guarded, path-confined).
   `browser_console` returns the page's captured console messages (real
   debugging signal; page-controlled text treated as untrusted).
+
 ### Added — Verifiable attestation receipts (moat, outward-facing)
 
 The signed human-attestation becomes a shareable trust artifact.

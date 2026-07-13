@@ -329,14 +329,27 @@ def edit(user: str, action_id: str, changes: dict,
     return action
 
 
-def can_auto_execute(action: Action) -> bool:
-    """True if policy allows running this without a per-action approval."""
+def can_auto_execute(action: Action, level: int | None = None) -> bool:
+    """True if policy allows running this without a per-action approval.
+
+    `level` lets a caller supply an effective autonomy level in place of the
+    user's global one — this is how earned per-domain trust (see `trust.py`)
+    widens the safe envelope for a proven site. A caller-supplied level can never
+    exceed the conversation's capability-profile cap, so it can only ever relax
+    the gate for REVERSIBLE actions on a trusted domain, never lift an ingesting
+    run or auto-run an irreversible/financial action (those need level 99).
+    """
     at = _REGISTRY.get(action.type)
     if at is None:
         return False
     if at.scope and at.scope not in granted_scopes(action.user):
         return False
-    return autonomy_level(action.user) >= _min_level_to_auto(action.risk_class)
+    if level is None:
+        lvl = autonomy_level(action.user)
+    else:
+        from . import capprofile
+        lvl = min(int(level), capprofile.autonomy_cap(action.user))
+    return lvl >= _min_level_to_auto(action.risk_class)
 
 
 def _execute(action: Action) -> Action:
@@ -413,9 +426,11 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     return action
 
 
-def auto_or_hold(action: Action) -> Action:
-    """Run automatically if policy allows; otherwise leave it for approval."""
-    if can_auto_execute(action):
+def auto_or_hold(action: Action, level: int | None = None) -> Action:
+    """Run automatically if policy allows; otherwise leave it for approval.
+    `level` optionally supplies an earned per-domain autonomy level (see
+    `can_auto_execute`)."""
+    if can_auto_execute(action, level):
         action.status = APPROVED
         action.approved_at = time.time()
         _save(action); _audit(action, "auto_approved")

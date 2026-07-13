@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 100 tools in
+Olympus exposes a **finite, named** tool surface — the 101 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -107,6 +107,7 @@ surface. So the surface and its threat model can't drift apart.
 | `operator_forget_site` | De-authorize a site and delete its saved sign-in | first-party write | Removes the prefs entry and any vault credentials for the domain | None significant — strictly reduces capability |
 | `operator_status` | Show which sites the operator is set up for | first-party read | Read-only; own settings; no secrets shown | None significant — own settings |
 | `operator_history` | Report what the operator did on the user's accounts | first-party read | Read-only over the user's own action audit trail; no secrets shown | None significant — own audit data, per-user namespaced |
+| `operator_trust` | Show the earned per-domain autonomy ladder (which proven sites may auto-run safe/reversible actions, and how close each is to the next tier) | first-party read | Read-only; derives each site's tier purely from the immutable action audit log (no mutable counter to inflate); never changes the setting; only reversible actions are ever auto-run and the result is re-capped by the conversation's capability profile | Self-escalation via injected content — read-only (never toggles earned autonomy), earned trust never lifts irreversible/financial actions (min-to-auto 99) nor an ingesting/guest run (capped), and any FAILED/UNDONE/REJECTED run snaps the domain back to probation |
 | `operator_remember_login` | Start saving a site sign-in for auto-login | first-party (gated) | Records a pending request only; the password is captured out-of-band by a private prompt and stored in the vault — it never passes through the model or this tool | Password exposure to the model — the secret never enters the model loop by construction |
 | `set_advanced_mode` | Toggle plain-English vs. engineer surface | first-party write | Per-user UI preference; no capability change | None — purely a presentation setting |
 | `recent_learning` | Summarize the autonomous loop's recent activity | first-party read | Read-only over heartbeat state + own memory; no model calls | None significant — own content, no secrets |

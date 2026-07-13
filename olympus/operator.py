@@ -449,7 +449,13 @@ def run(user: str, domain: str, template: str, params: dict) -> actions.Action:
         {"domain": domain, "template": template, "params": params,
          "user": user},
         title=f"Operate '{template}' on {domain}", why="HERMES operator")
-    return actions.auto_or_hold(action)
+    # Fold in earned per-domain trust: a site with a long clean track record may
+    # auto-run its safe/reversible actions without a per-action approval. This
+    # only ever RELAXES the gate for reversible risk classes on a proven domain —
+    # irreversible/financial templates still require explicit approval (their
+    # min-to-auto level is 99), and the capability-profile cap still bounds it.
+    from . import trust
+    return actions.auto_or_hold(action, level=trust.effective_autonomy(user, domain))
 
 
 # --- Phase 3: always-on operator jobs (run by the heartbeat) -------------
@@ -590,6 +596,7 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
     demoted = demote_drifted(min_runs, floor)
     graduated = promote_ready()
     heavy = _handoff_burden_hint()
+    earned = _earned_autonomy_hint()
     parts = []
     if pruned:
         parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
@@ -600,9 +607,23 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
                      + "; ".join(graduated))
     if heavy:
         parts.append(heavy)
+    if earned:
+        parts.append(earned)
     if not parts:
         return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
     return " ".join(parts)
+
+
+def _earned_autonomy_hint() -> str:
+    """Self-evolution for earned autonomy: surface which proven sites have earned
+    auto-run for their safe/reversible actions, so the operator (and the user)
+    can see the trust envelope widening where it's been earned — and narrowing
+    the instant a site surprises us."""
+    try:
+        from . import trust
+        return trust.earned_hint(memory.current_user())
+    except Exception:
+        return ""
 
 
 def _handoff_burden_hint() -> str:

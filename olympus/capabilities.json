@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 100,
+    "count": 101,
     "names": [
       "actions",
       "add-mcp",
@@ -64,6 +64,7 @@
       "docs",
       "doctor",
       "documents",
+      "earned-autonomy",
       "edit",
       "email",
       "errors",
@@ -145,7 +146,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 100,
+    "count": 101,
     "names": [
       "add_todo",
       "analyze_image",
@@ -207,6 +208,7 @@
       "operator_review",
       "operator_schedule",
       "operator_status",
+      "operator_trust",
       "operator_verify_receipt",
       "prepare_action",
       "propose_playbook",
