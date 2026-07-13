@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — feature self-evolution (`olympus/evolve.py`)
+
+- **Capabilities that measure and improve themselves.** Every instrumented
+  feature (MoA, goals, curator, /learn, browser_open) records success /
+  degraded / failure outcomes; a daily heartbeat review
+  (`OLYMPUS_FEATURE_EVOLUTION_EVERY`, also `olympus evolve review`) computes
+  per-feature health and **auto-tunes only registered, non-security
+  parameters within hard `[lo, hi]` guardrails, reversibly** — MoA narrows
+  its reference-model fan-out when the ensemble is flaky; the goal cadence
+  backs off for goals that keep failing to close; the curator prunes more
+  cautiously when the benchmark keeps reverting its prunes. Anything not
+  safely auto-tunable is *surfaced as a suggestion*, never imposed, and no
+  egress/auth/capability setting is reachable by the reviewer (enforced by
+  test). Health board on the admin panel and `olympus evolve status`.
+
+### Hardening
+
+- Goal text/contract are length-bounded on add; MoA telemetry-drives its own
+  fan-out; the curator's hard prune cap is now an absolute ceiling the tuner
+  can only narrow within.
+
 ### Added — browser harness advances (beyond the open-web pattern's ceiling)
 
 - **In-page sub-resource egress enforcement.** The egress gate previously

@@ -1094,9 +1094,16 @@ def _watch_youtube(url: str) -> str:
 
 def _browser_open(url: str) -> str:
     try:
-        return browser.session().open(url)
+        out = browser.session().open(url)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
+    try:                                    # feed the self-evolution loop
+        from . import evolve
+        evolve.record("browser_open", evolve.FAIL if out.startswith("Error")
+                      else evolve.OK)
+    except Exception:
+        pass
+    return out
 
 
 def _browser_read(selector: str = "") -> str:

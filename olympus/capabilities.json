@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 99,
+    "count": 100,
     "names": [
       "actions",
       "add-mcp",
@@ -68,6 +68,7 @@
       "email",
       "errors",
       "eval",
+      "evolve",
       "explain",
       "export-trajectories",
       "gallery",

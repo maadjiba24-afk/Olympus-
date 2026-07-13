@@ -41,7 +41,14 @@ def _members() -> list[config.Settings]:
             "no model is configured — run `olympus setup` or set "
             "ANTHROPIC_API_KEY / OLYMPUS_API_KEY before using the ensemble.")
     pool = config.ModelPool.from_env()
-    refs = [m for m in pool.members if m.provider != "moa"][:MAX_REFERENCE]
+    # Self-tuned fan-out: the reviewer narrows the reference count (within
+    # [2, 6]) if the ensemble keeps producing degraded results.
+    try:
+        from . import evolve
+        cap = int(evolve.current("moa", "reference_count"))
+    except Exception:
+        cap = MAX_REFERENCE
+    refs = [m for m in pool.members if m.provider != "moa"][:max(1, cap)]
     if not refs:
         raise RuntimeError(
             "moa provider needs at least one non-moa member in the pool — "
@@ -68,6 +75,19 @@ def _drafts(refs: list[config.Settings], system: str,
     with ThreadPoolExecutor(max_workers=len(refs)) as ex:
         results = list(ex.map(one, refs))
     drafts = [r for r in results if r]
+    # Telemetry: a full sweep is OK; a partial sweep (some members died) is a
+    # degraded ensemble; none is a failure — this drives the self-tuning.
+    try:
+        from . import evolve
+        if not drafts:
+            evolve.record("moa", evolve.FAIL, "all reference models failed")
+        elif len(drafts) < len(refs):
+            evolve.record("moa", evolve.DEGRADED,
+                          f"{len(refs) - len(drafts)}/{len(refs)} members failed")
+        else:
+            evolve.record("moa", evolve.OK)
+    except Exception:
+        pass
     if not drafts:
         raise RuntimeError("every moa reference model failed")
     return drafts

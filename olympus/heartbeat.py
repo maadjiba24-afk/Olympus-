@@ -164,6 +164,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Curator failed:\n" + traceback.format_exc())
         state["skill_curation"] = now
 
+    from . import evolve
+    if _due(state, "feature_evolution", config.FEATURE_EVOLUTION_EVERY, now):
+        try:
+            log.append(evolve.review())
+        except Exception:
+            log.append("Feature-evolution review failed:\n"
+                       + traceback.format_exc())
+        state["feature_evolution"] = now
+
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
         try:

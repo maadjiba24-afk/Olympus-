@@ -36,6 +36,7 @@ def _cadences() -> dict[str, int]:
         "train": config.TRAIN_EVERY,
         "evolution_audit": config.EVOLUTION_AUDIT_EVERY,
         "skill_curation": curator.curation_every(),
+        "feature_evolution": config.FEATURE_EVOLUTION_EVERY,
         "replay_gate": config.REPLAY_GATE_EVERY,
         "backup": config.BACKUP_EVERY,
     }
