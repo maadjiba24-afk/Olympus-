@@ -326,9 +326,19 @@ def execute(payload: dict) -> dict:
     try:
         result = sess.run_template(tmpl.get("steps", []), params)
     except browser.TemplateStepError as err:
-        # Self-heal: the site likely drifted. Re-observe, look for the moved
-        # control, and file a human-reviewed proposal — never auto-rewrite a
-        # credentialed template.
+        # First: is this a HUMAN-VERIFICATION checkpoint, not template drift? If
+        # so, hand off — never solve it, never mistake it for a broken selector.
+        cp = sess.detect_checkpoint()
+        if cp["type"] != "none":
+            browser.mark_profile_outcome(domain, False)
+            browser.mark_template_outcome(domain, name, False)
+            raise RuntimeError(
+                f"A human-verification checkpoint ({cp['type']}) is blocking "
+                f"'{name}' on {domain}. I never solve these — clear it in the "
+                "browser, then tell me and I'll continue and record a signed "
+                "attestation that you did.") from err
+        # Otherwise self-heal: the site likely drifted. Re-observe, look for the
+        # moved control, and file a human-reviewed proposal — never auto-rewrite.
         heal = _heal_and_propose(domain, name, err)
         cand = heal.get("candidate")
         # Gated retry: only a REVERSIBLE (notable) template may auto-retry the
@@ -579,6 +589,7 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
         browser._store_profiles(keep)
     demoted = demote_drifted(min_runs, floor)
     graduated = promote_ready()
+    heavy = _handoff_burden_hint()
     parts = []
     if pruned:
         parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
@@ -587,9 +598,25 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
     if graduated:
         parts.append("Graduated proven skills to templates: "
                      + "; ".join(graduated))
+    if heavy:
+        parts.append(heavy)
     if not parts:
         return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
     return " ".join(parts)
+
+
+def _handoff_burden_hint() -> str:
+    """Self-evolution for the Attested Human Handoff: surface sites that keep
+    needing a human-check, so the operator saves their sessions to cut the burden
+    (the moat compounds — clear once, reuse many)."""
+    try:
+        from . import attest
+        heavy = [d for d, n in attest.burden_by_domain().items() if n >= 3]
+    except Exception:
+        heavy = []
+    if not heavy:
+        return ""
+    return ("Save sessions to cut repeat human-checks on: " + ", ".join(heavy[:5]))
 
 
 def propose_profile(domain: str, rationale: str, *, login_url: str = "",

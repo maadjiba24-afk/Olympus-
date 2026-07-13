@@ -147,6 +147,36 @@ _OBSERVE_JS = (
     "return JSON.stringify(out);})()"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
+# Human-verification checkpoint DETECTOR (the moat's "detect, don't defeat"
+# step). It recognizes the common human-check widgets/flows by their stable
+# markers and returns a TYPE ENUM only — never page prose — so nothing here is a
+# defeat attempt or an injection surface. The __OLY_CHECKPOINT__ marker lets the
+# offline transport route it. Providers are matched by their own iframe/src
+# fingerprints (which are visible even on a cross-origin challenge frame, without
+# reaching INTO it — we honor the origin boundary, we just see the wall).
+_CHECKPOINT_JS = (
+    "(function(){/*__OLY_CHECKPOINT__*/"
+    "function has(s){try{return !!document.querySelector(s);}catch(e){return false;}}"
+    "if(has('.g-recaptcha')||has(\"iframe[src*='recaptcha']\")||"
+    "has(\"iframe[title*='recaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'recaptcha'});"
+    "if(has('.h-captcha')||has(\"iframe[src*='hcaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'hcaptcha'});"
+    "if(has('.cf-turnstile')||has(\"iframe[src*='challenges.cloudflare.com']\"))"
+    "return JSON.stringify({type:'captcha',detail:'turnstile'});"
+    "if(has(\"input[autocomplete='one-time-code']\")||"
+    "has(\"input[name*='otp']\")||has(\"input[name*='onetime']\"))"
+    "return JSON.stringify({type:'otp',detail:'one-time-code'});"
+    "var t=((document.body?document.body.innerText:'')||'').toLowerCase();"
+    "var cues=['verify it','two-factor','two factor','2-step','2 step',"
+    "'enter the code we','confirm your identity','verify your identity'];"
+    "for(var i=0;i<cues.length;i++){if(t.indexOf(cues[i])>=0)"
+    "return JSON.stringify({type:'step_up',detail:'interstitial'});}"
+    "return JSON.stringify({type:'none',detail:''});})()"
+)
+
+_CHECKPOINT_KINDS = ("captcha", "otp", "step_up", "none")
+
 # --- transport -----------------------------------------------------------
 
 
@@ -155,7 +185,8 @@ class Transport(Protocol):
     Chrome; the fake one answers in-memory. Either way the session only needs
     request/response and a close."""
 
-    def send(self, method: str, params: dict | None = None) -> dict: ...
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict: ...
     def close(self) -> None: ...
 
 
@@ -189,6 +220,7 @@ class FakeTransport:
                  present: list[str] | None = None,
                  elements: list[dict[str, str]] | None = None,
                  targets: list[dict] | None = None,
+                 checkpoint: dict | None = None,
                  ax_nodes: list[dict] | None = None,
                  console: list[dict] | None = None,
                  pdf_b64: str = "JVBERi0xLjQK") -> None:
@@ -220,10 +252,35 @@ class FakeTransport:
         self.targets = targets or []
         # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
         self.cookies: list[dict] = []
+        # Dialog policy + a scriptable network-idle sequence for offline tests.
+        self.dialog_accept = False
+        self.dialog_text = ""
+        self.inflight_seq: list[int] = []
+        # Scriptable human-verification checkpoint for detect_checkpoint() offline.
+        self.checkpoint: dict = checkpoint or {"type": "none", "detail": ""}
+        # Scriptable cross-origin (OOPIF) frames: list of {sessionId, url}, plus
+        # per-frame observe elements keyed by sessionId, so the governed
+        # cross-origin observation path is exercisable offline.
+        self.frames_list: list[dict] = []
+        self.frame_elements: dict[str, list[dict]] = {}
+        # Selectors that "exist" inside a given frame session, so frame acts
+        # (click/fill/select in a cross-origin frame) resolve offline.
+        self.frame_present: dict[str, set] = {}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
             "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+
+    def frames(self) -> list[dict]:
+        return list(self.frames_list)
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:
+        self.dialog_accept = bool(accept)
+        self.dialog_text = text or ""
+
+    def inflight(self) -> int:
+        # Pop the scripted sequence so wait_idle() can watch it drain to zero.
+        return self.inflight_seq.pop(0) if self.inflight_seq else 0
 
     def _matched_selector(self, expr: str) -> str | None:
         for sel in self.present:
@@ -231,9 +288,26 @@ class FakeTransport:
                 return sel
         return None
 
-    def send(self, method: str, params: dict | None = None) -> dict:
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:
         params = params or {}
-        self.calls.append({"method": method, "params": params})
+        self.calls.append({"method": method, "params": params,
+                           "session_id": session_id})
+        # A sessionId-routed observe reads a scripted cross-origin frame's map.
+        if session_id and method == "Runtime.evaluate":
+            expr = params.get("expression", "")
+            if "__OLY_OBSERVE__" in expr:
+                els = self.frame_elements.get(session_id, [])
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                        "s": e.get("s", f'[data-olympus-idx="{i}"]')}
+                       for i, e in enumerate(els)]
+                return {"result": {"value": json.dumps(lst)}}
+            if "__olyq" in expr:      # frame act: resolve against the frame's set
+                pres = self.frame_present.get(session_id, set())
+                sel = next((s for s in pres if json.dumps(s) in expr), None)
+                return {"result": {"value": sel is not None}}
+            # any other frame eval (e.g. document.location/title) → benign string
+            return {"result": {"value": ""}}
         if method == "Page.navigate":
             target = params.get("url", self._url)
             self._url = self.redirects.get(target, target)   # follow redirect
@@ -241,6 +315,8 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
+            if "__OLY_CHECKPOINT__" in expr:      # detect_checkpoint()
+                return {"result": {"value": json.dumps(self.checkpoint)}}
             if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
                 lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
                         "s": e.get("s", f'[data-olympus-idx="{i}"]')}
@@ -248,6 +324,9 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
+                if "getBoundingClientRect" in expr:   # element screenshot clip
+                    box = json.dumps({"x": 10, "y": 20, "w": 80, "h": 30})
+                    return {"result": {"value": box if sel else ""}}
                 if params.get("returnByValue") is False:   # node handle wanted
                     return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
                 if "__olySel" in expr:            # durable-selector lookup
@@ -259,6 +338,9 @@ class FakeTransport:
                         self.filled[sel] = "set"
                     value = sel is not None
                 return {"result": {"value": value}}
+            if "scrollWidth" in expr:      # full-page screenshot dimensions
+                return {"result": {"value": json.dumps(
+                    {"x": 0, "y": 0, "w": 1200, "h": 3000})}}
             if "performance" in expr:      # wait_idle() → stable resource count
                 value = "0"
             elif "readyState" in expr:
@@ -310,30 +392,147 @@ class _RealTransport:
     Built lazily so `websockets` stays an optional extra; importing this module
     never pulls it in. Not exercised in CI (no browser), but kept honest and
     minimal so a real attach works when configured.
+
+    A single background reader thread demultiplexes the socket: id-matched
+    replies wake their waiting `send()`, while unsolicited CDP *events* are
+    routed to handlers. That is what lets the harness (a) auto-handle JS dialogs
+    so `confirm()`/`alert()` can't wedge a click, and (b) track in-flight network
+    requests for a real network-idle wait — neither possible with a purely
+    request/response loop.
     """
 
-    def __init__(self, ws_url: str, http_base: str = "") -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:  # pragma: no cover - needs a browser
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
             raise BrowserUnavailable(
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
+        self._connect = connect
+        self._ws_url = ws_url                    # remembered for auto-reconnect
         # Bound a single CDP message so a hostile/huge page can't OOM us; we
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
-        # The DevTools HTTP base (if we know it), so reattach() can resolve
-        # another page target's socket URL and switch which tab we drive.
+        self._reconnect_lock = threading.Lock()
+        self._id_lock = threading.Lock()
+        self._pending: dict[int, list] = {}     # id -> [Event, message]
+        self._pending_lock = threading.Lock()
         self._http_base = (http_base or "").rstrip("/")
-        # Console/log messages accumulated from CDP events seen while awaiting
-        # command replies (bounded). Populated once Runtime/Log are enabled.
+        # Console/log messages accumulated from CDP events (bounded). Populated
+        # once Runtime/Log are enabled; drained by console_logs().
         self.console: deque[dict] = deque(maxlen=_CONSOLE_MAX)
+        # Dialog policy: SAFE DEFAULT is to DISMISS (never auto-confirm an
+        # irreversible prompt); the operator opts into accept for a known flow.
+        self._dialog_accept = False
+        self._dialog_text = ""
+        self._inflight = 0                       # open network requests (idle wait)
+        self._frames: dict[str, dict] = {}       # sessionId -> {url} for OOPIFs
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
+
+    def _arm(self) -> None:  # pragma: no cover - needs a browser
+        """Enable the domains whose events we consume (Page for dialogs, Network
+        for in-flight tracking) and auto-attach to child frames so cross-origin
+        (out-of-process) iframes surface with their own sessionId. Best-effort."""
+        for dom in ("Page.enable", "Network.enable", "Runtime.enable",
+                    "Log.enable"):
+            try:
+                self.send(dom)
+            except Exception:
+                pass
+        try:
+            self.send("Target.setAutoAttach", {"autoAttach": True,
+                      "waitForDebuggerOnStart": False, "flatten": True})
+        except Exception:
+            pass
+
+    def frames(self) -> list[dict]:  # pragma: no cover - needs a browser
+        return [{"sessionId": sid, "url": info.get("url", "")}
+                for sid, info in self._frames.items()]
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:  # pragma: no cover
+        self._dialog_accept = bool(accept)
+        self._dialog_text = text or ""
+
+    def inflight(self) -> int:  # pragma: no cover - needs a browser
+        return max(0, self._inflight)
+
+    def _read_loop(self) -> None:  # pragma: no cover - needs a browser
+        while not self._closed:
+            try:
+                raw = self._conn.recv(timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                if self._closed:
+                    return
+                time.sleep(0.05)
+                continue
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            mid = msg.get("id")
+            if mid is not None:
+                with self._pending_lock:
+                    slot = self._pending.get(mid)
+                if slot is not None:
+                    slot[1] = msg
+                    slot[0].set()
+            else:
+                self._on_event(msg)
+
+    def _on_event(self, msg: dict) -> None:  # pragma: no cover - needs a browser
+        method = msg.get("method", "")
+        if method == "Page.javascriptDialogOpening":
+            # Answer per policy WITHOUT waiting (we're on the reader thread;
+            # blocking here would deadlock the very reply we'd wait for).
+            self._send_nowait("Page.handleJavaScriptDialog",
+                              {"accept": self._dialog_accept,
+                               "promptText": self._dialog_text})
+        elif method == "Network.requestWillBeSent":
+            self._inflight += 1
+        elif method in ("Network.loadingFinished", "Network.loadingFailed"):
+            self._inflight = max(0, self._inflight - 1)
+        elif method == "Target.attachedToTarget":
+            p = msg.get("params", {})
+            info = p.get("targetInfo", {})
+            sid = p.get("sessionId")
+            if sid and info.get("type") == "iframe":   # a cross-origin (OOPIF)
+                self._frames[sid] = {"url": info.get("url", ""),
+                                     "targetId": info.get("targetId", "")}
+        elif method == "Target.detachedFromTarget":
+            self._frames.pop(msg.get("params", {}).get("sessionId", ""), None)
+        elif method == "Runtime.consoleAPICalled":
+            p = msg.get("params", {}) or {}
+            text = " ".join(str(a.get("value", a.get("description", "")))
+                            for a in (p.get("args", []) or []))
+            self.console.append({"level": p.get("type", "log"), "text": text})
+        elif method == "Log.entryAdded":
+            e = (msg.get("params", {}) or {}).get("entry", {}) or {}
+            self.console.append({"level": e.get("level", "log"),
+                                 "text": str(e.get("text", ""))})
+        elif method == "Runtime.exceptionThrown":
+            d = (msg.get("params", {}) or {}).get("exceptionDetails", {}) or {}
+            self.console.append({"level": "error",
+                                 "text": str(d.get("text", "exception"))})
+
+    def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        try:
+            self._conn.send(json.dumps(
+                {"id": mid, "method": method, "params": params or {}}))
+        except Exception:
+            pass
 
     def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
         """Re-bind this transport to a different page target's WebSocket, so the
-        session actually drives the tab it switched to (not just activates it).
-        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        session actually drives the tab it switched to (not just activates it)."""
         if not self._http_base:
             return False
         import urllib.request
@@ -347,53 +546,97 @@ class _RealTransport:
                   "")
         if not ws:
             return False
-        from websockets.sync.client import connect  # type: ignore
+        self._closed = True                      # stop the old reader
         try:
             self._conn.close()
         except Exception:
             pass
-        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._reader.join(timeout=2.0)
+        with self._pending_lock:
+            self._pending.clear()
+        self._conn = self._connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        self._inflight = 0
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
         return True
 
-    def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
-        self._id += 1
-        self._conn.send(json.dumps(
-            {"id": self._id, "method": method, "params": params or {}}))
-        # Read replies until ours arrives, but never block past the deadline
-        # (a hung tab or a dropped reply must not wedge the whole agent).
-        deadline = time.monotonic() + _RECV_TIMEOUT
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"CDP call {method} timed out")
-            msg = json.loads(self._conn.recv(timeout=remaining))
-            if msg.get("id") == self._id:
-                if "error" in msg:
-                    raise RuntimeError(msg["error"].get("message", "CDP error"))
-                return msg.get("result", {})
-            # A CDP event (no id / a different id). Capture console output so
-            # console_logs() can surface it; ignore everything else.
-            self._note_event(msg)
+    def _reconnect(self) -> bool:  # pragma: no cover - needs a browser
+        """Re-open the WebSocket to the SAME target after a drop, so a transient
+        disconnect doesn't wedge the whole harness. Serialized so concurrent
+        callers reconnect once, not N times."""
+        with self._reconnect_lock:
+            # Another thread may have already reconnected while we waited.
+            try:
+                self._conn.ping()                # cheap liveness probe
+                return True
+            except Exception:
+                pass
+            self._closed = True
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._reader.join(timeout=2.0)
+            with self._pending_lock:
+                self._pending.clear()
+            try:
+                self._conn = self._connect(self._ws_url, open_timeout=10,
+                                           max_size=_WS_MAX_FRAME)
+            except Exception:
+                return False
+            self._id = 0
+            self._inflight = 0
+            self._closed = False
+            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader.start()
+            self._arm()
+            return True
 
-    def _note_event(self, msg: dict) -> None:  # pragma: no cover - needs a browser
-        m = msg.get("method", "")
-        p = msg.get("params", {}) or {}
-        if m == "Runtime.consoleAPICalled":
-            args = p.get("args", []) or []
-            text = " ".join(str(a.get("value", a.get("description", "")))
-                            for a in args)
-            self.console.append({"level": p.get("type", "log"), "text": text})
-        elif m == "Log.entryAdded":
-            e = p.get("entry", {}) or {}
-            self.console.append({"level": e.get("level", "log"),
-                                 "text": str(e.get("text", ""))})
-        elif m == "Runtime.exceptionThrown":
-            d = (p.get("exceptionDetails") or {})
-            self.console.append({"level": "error",
-                                 "text": str(d.get("text", "exception"))})
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:  # pragma: no cover
+        try:
+            return self._send_once(method, params, session_id)
+        except (ConnectionError, OSError) as err:
+            # A dropped socket: reconnect once and retry. A genuine CDP error
+            # (RuntimeError) is NOT retried — only transport-level failures.
+            if self._closed or not self._reconnect():
+                raise RuntimeError(f"CDP transport lost: {err}") from err
+            return self._send_once(method, params, session_id)
+
+    def _send_once(self, method: str, params: dict | None = None,
+                   session_id: str | None = None) -> dict:  # pragma: no cover
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        ev = threading.Event()
+        slot = [ev, None]
+        with self._pending_lock:
+            self._pending[mid] = slot
+        msg = {"id": mid, "method": method, "params": params or {}}
+        if session_id:                           # route into a child frame session
+            msg["sessionId"] = session_id
+        try:
+            self._conn.send(json.dumps(msg))
+        except Exception as err:
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise ConnectionError(f"CDP send failed: {err}") from err
+        if not ev.wait(timeout=_RECV_TIMEOUT):
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise TimeoutError(f"CDP call {method} timed out")
+        with self._pending_lock:
+            self._pending.pop(mid, None)
+        reply = slot[1] or {}
+        if "error" in reply:
+            raise RuntimeError(reply["error"].get("message", "CDP error"))
+        return reply.get("result", {})
 
     def close(self) -> None:  # pragma: no cover
+        self._closed = True
         try:
             self._conn.close()
         except Exception:
@@ -621,9 +864,10 @@ class BrowserSession:
         if len(self.recipe) > _JOURNAL_MAX:
             del self.recipe[0]
 
-    def _call(self, method: str, **params: Any) -> dict:
+    def _call(self, method: str, *, _session_id: str | None = None,
+              **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
-        return self._t.send(method, params)
+        return self._t.send(method, params, session_id=_session_id)
 
     def _current_url(self) -> str:
         """The URL actually loaded right now (after any redirect / JS nav)."""
@@ -655,29 +899,54 @@ class BrowserSession:
             time.sleep(0.25)
 
     def wait_idle(self, quiet: float = 0.5, timeout: float = _LOAD_TIMEOUT) -> None:
-        """Wait for the page to load AND its resource count to hold steady for a
-        short quiet window — a dependency-free 'network idle' heuristic for
-        dynamic pages whose content arrives after readyState=complete. Bounded by
-        `timeout`; best-effort (never raises)."""
+        """Wait for the page to load AND the network to go idle for a short quiet
+        window. When the transport tracks in-flight requests from the CDP event
+        stream (real browser), 'idle' means ZERO open requests — a true
+        network-idle. Otherwise it falls back to a resource-count-stable
+        heuristic. Bounded by `timeout`; best-effort (never raises)."""
         self._wait_ready(timeout)
+        inflight = getattr(self._t, "inflight", None)
         deadline = time.monotonic() + timeout
         last, stable_since = -1, None
         while time.monotonic() < deadline:
             try:
-                n = int(float(self._eval(
-                    "(performance.getEntriesByType('resource')||[]).length")
-                    or 0))
+                if inflight is not None:            # true idle: zero open requests
+                    n = int(inflight())
+                    now = time.monotonic()
+                    if n == 0:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        stable_since = None
+                else:                               # heuristic: resource count stable
+                    n = int(float(self._eval(
+                        "(performance.getEntriesByType('resource')||[]).length")
+                        or 0))
+                    now = time.monotonic()
+                    if n == last:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        last, stable_since = n, None
             except Exception:
                 return
-            now = time.monotonic()
-            if n == last:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= quiet:
-                    return
-            else:
-                last, stable_since = n, None
             time.sleep(0.1)
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> str:
+        """Decide how native JS dialogs (alert/confirm/prompt) are answered, so
+        they can't wedge a click. SAFE DEFAULT is dismiss (accept=False) — an
+        irreversible confirm is never auto-accepted; the operator opts into
+        accept for a known flow, optionally supplying prompt text."""
+        setter = getattr(self._t, "set_dialog_policy", None)
+        if setter is not None:
+            setter(bool(accept), text or "")
+        verb = "accept" if accept else "dismiss"
+        extra = f" (answering prompts with {text!r})" if accept and text else ""
+        return f"Dialogs will now {verb} automatically{extra}."
 
     def wait_for(self, selector: str, gone: bool = False,
                  timeout: float = _LOAD_TIMEOUT) -> bool:
@@ -745,6 +1014,45 @@ class BrowserSession:
         self._call("DOM.setFileInputFiles",
                    files=[str(target)], objectId=object_id)
         return f"Uploaded {target.name} to {selector}."
+
+    def download(self, trigger_selector: str = "", timeout: float = 30.0) -> str:
+        """Capture a browser download into the confined workspace: point downloads
+        at the workspace, (optionally) click `trigger_selector` to start one, then
+        wait for a NEW, complete file to appear (ignoring Chrome's `.crdownload`
+        temp and requiring a stable size). Returns the captured filename. The file
+        is untrusted external content — read it afterwards via read_file /
+        analyze_image (path-confined), never surfaced here as page prose."""
+        from . import sandbox
+        root = sandbox.workdir()
+        self.set_download_dir()                  # confine downloads to the workspace
+        try:
+            before = set(os.listdir(root))
+        except OSError as err:
+            return f"Error: workspace unavailable ({err})."
+        if trigger_selector:
+            out = self.act("click", selector=trigger_selector)
+            if out.startswith("Error:"):
+                return out
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                fresh = [f for f in set(os.listdir(root)) - before
+                         if not f.endswith(".crdownload")]
+            except OSError:
+                fresh = []
+            for name in fresh:
+                p = root / name
+                try:
+                    size = p.stat().st_size
+                    time.sleep(0.3)
+                    if p.exists() and p.stat().st_size == size:   # settled
+                        return (f"Downloaded {name} to the workspace "
+                                f"({p.stat().st_size} bytes). Read it with "
+                                "read_file or analyze_image.")
+                except OSError:
+                    continue
+            time.sleep(0.3)
+        return "Error: no download completed within the timeout."
 
     def get_cookies(self, domain: str = "") -> list[dict]:
         """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
@@ -862,17 +1170,42 @@ class BrowserSession:
             return "(no labelled accessibility nodes on this page)"
         return "\n".join(lines)[:_TEXT_LIMIT]
 
-    def screenshot(self) -> str:
+    def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
         for visual perception of canvas/image-heavy pages that observe() can't
-        map. Refuses a blocked landing (never captures internal content). Returns
+        map. With `selector`, captures just that element's box; with `full_page`,
+        the whole scrollable page (beyond the viewport); otherwise the viewport.
+        Refuses a blocked landing (never captures internal content). Returns
         base64 data, or "" if nothing was captured. The pixels are untrusted
         external content — the caller (browser_screenshot) is an INGESTION tool
         and its description is wrapped, exactly like browser_read."""
         self.ingested_untrusted = True
         if self._blocked_landing():
             return ""
-        res = self._call("Page.captureScreenshot", format="png")
+        params: dict[str, Any] = {"format": "png"}
+        if selector:
+            box = self._eval(
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                "return '';var r=e.getBoundingClientRect();return JSON.stringify("
+                "{x:r.left+window.scrollX,y:r.top+window.scrollY,"
+                "w:r.width,h:r.height});})()")
+            clip = self._clip_from(box)
+            if clip is None:
+                return ""
+            params["clip"] = clip
+            params["captureBeyondViewport"] = True
+        elif full_page:
+            dim = self._eval(
+                "JSON.stringify({x:0,y:0,"
+                "w:Math.max(document.body?document.body.scrollWidth:0,"
+                "document.documentElement.scrollWidth),"
+                "h:Math.max(document.body?document.body.scrollHeight:0,"
+                "document.documentElement.scrollHeight)})")
+            clip = self._clip_from(dim)
+            if clip is not None:
+                params["clip"] = clip
+                params["captureBeyondViewport"] = True
+        res = self._call("Page.captureScreenshot", **params)
         return str((res or {}).get("data", "") or "")
 
     def save_pdf(self, name: str = "") -> str:
@@ -926,6 +1259,18 @@ class BrowserSession:
             out.append(f"[{level}] {text}")
         return "\n".join(out)[:_TEXT_LIMIT]
 
+    @staticmethod
+    def _clip_from(raw: str) -> dict | None:
+        """Parse a {x,y,w,h} JSON box into a CDP clip, or None if unusable."""
+        try:
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(d, dict) or (d.get("w", 0) < 1 or d.get("h", 0) < 1):
+            return None
+        return {"x": d.get("x", 0), "y": d.get("y", 0),
+                "width": d["w"], "height": d["h"], "scale": 1}
+
     def observe(self, limit: int = _OBSERVE_MAX) -> str:
         """Perceive the page as a numbered map of its visible interactive
         elements — the harness's 'look' step. Each element gets a stable index
@@ -945,6 +1290,147 @@ class BrowserSession:
             label = f' "{name}"' if name else ""
             lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
         return "\n".join(lines) or "(no interactive elements found)"
+
+    def detect_checkpoint(self) -> dict:
+        """Detect a human-verification checkpoint on the current page — the moat's
+        'detect, don't defeat' step. Returns {"type", "detail"} where type is one
+        of captcha / otp / step_up / none. It NEVER tries to solve or bypass the
+        check and returns only a bounded enum (no page prose), so it is a
+        structured predicate, not an ingestion or a defeat attempt. On a blocked
+        landing it reports none rather than reading the page."""
+        if self._blocked_landing():
+            return {"type": "none", "detail": ""}
+        try:
+            raw = self._eval(_CHECKPOINT_JS)
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError, Exception):
+            return {"type": "none", "detail": ""}
+        kind = d.get("type") if isinstance(d, dict) else None
+        if kind not in _CHECKPOINT_KINDS:
+            return {"type": "none", "detail": ""}
+        return {"type": kind, "detail": str(d.get("detail", ""))[:40]}
+
+    def list_frames(self) -> list[dict]:
+        """The cross-origin (out-of-process) iframes attached to this page, each
+        as {sessionId, url, origin}. Same-origin frames are already reachable by
+        the deep walk; these are the ones behind the origin boundary. The tool
+        layer annotates each with whether its origin is an AUTHORIZED operator
+        site — the governed-crossing gate."""
+        fn = getattr(self._t, "frames", None)
+        if fn is None:
+            return []
+        out = []
+        for f in fn() or []:
+            sid = f.get("sessionId", "")
+            url = f.get("url", "")
+            if not url and sid:      # attach-time url is often stale/empty — ask
+                try:                 # the frame itself for its live location
+                    url = self._eval_in(
+                        sid, "document.location?document.location.href:''") or ""
+                except Exception:
+                    url = ""
+            origin = _origin_of(url)
+            # Only real, loaded web origins are authorizable/driveable. An
+            # unloaded / blank / errored frame (about:blank, chrome-error://, a
+            # data: sub-frame) has no authorizable origin — skip it so it can't be
+            # listed as reachable or (mis)authorized.
+            if not origin.startswith(("http://", "https://")):
+                continue
+            out.append({"sessionId": sid, "url": url, "origin": origin})
+        return out
+
+    def _eval_in(self, session_id: str, expression: str) -> str:
+        """Evaluate an expression INSIDE a child frame's CDP session (OOPIF),
+        routed by sessionId. Used only after the frame's origin is authorized."""
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        value = (res or {}).get("result", {}).get("value", "")
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def _eval_bool_in(self, session_id: str, expression: str) -> bool:
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        return bool((res or {}).get("result", {}).get("value"))
+
+    def fill_in(self, session_id: str, selector: str, value: str) -> bool:
+        """fill(), scoped to a child frame session. `value` (possibly a secret)
+        is sent to the frame, never returned to the model."""
+        expr = (f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(!e)return false;e.focus();e.value={json.dumps(value)};"
+                f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
+                f"e.dispatchEvent(new Event('change',{{bubbles:true}}));"
+                f"return true;}})()")
+        return self._eval_bool_in(session_id, expr)
+
+    def observe_frame(self, session_id: str, limit: int = _OBSERVE_MAX) -> str:
+        """Perceive a cross-origin frame's interactive elements as a numbered map
+        — the governed crossing. Gating (the frame origin must be authorized) is
+        enforced by the caller; this only runs once permitted. Content is
+        untrusted, like any page perception."""
+        self.ingested_untrusted = True
+        limit = max(1, min(int(limit), _OBSERVE_MAX))
+        raw = self._eval_in(session_id, _OBSERVE_JS.replace("LIMIT", str(limit))
+                                                   .replace("CAP", str(_LABEL_MAX)))
+        try:
+            items = json.loads(raw or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return "(could not read the frame's interactive elements)"
+        lines = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
+
+    def act_in_frame(self, session_id: str, action: str, *, selector: str = "",
+                     text: str = "", value: str = "", key: str = "") -> str:
+        """Act INSIDE an authorized cross-origin frame (the governed crossing's
+        write half). Selector-based verbs only — click, type, select, press — the
+        form interactions a payment/login frame needs; coordinate/scroll verbs
+        are page-level and don't apply. The caller enforces per-origin
+        authorization. Landed steps are journaled (with an 'in frame' marker) so a
+        proven cross-frame flow can be learned like any other."""
+        action = (action or "").lower()
+        if action in ("click", "type", "select") and not selector:
+            return f"Error: '{action}' in a frame needs a selector."
+        if action == "click":
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});"
+                f"if(e){{e.click();return true;}}return false;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"click {selector} (in frame)")
+            return f"Clicked {selector} in frame."
+        if action == "type":
+            if not self.fill_in(session_id, selector, text):
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"type into {selector} (in frame)")
+            return f"Typed into {selector} in frame."
+        if action == "select":
+            v = value or text
+            ok = self._eval_bool_in(session_id,
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                f"return false;e.value={json.dumps(v)};e.dispatchEvent("
+                f"new Event('change',{{bubbles:true}}));return true;}})()")
+            if not ok:
+                return f"Error: no element for {selector} in frame."
+            self._journal_step(f"select {v!r} in {selector} (in frame)")
+            return f"Selected {v!r} in {selector} in frame."
+        if action == "press":
+            k = key or text or "Enter"
+            tgt = (f"__olyq({json.dumps(selector)})" if selector
+                   else "document.activeElement")
+            self._eval_in(session_id,
+                f"(function(){{var e={tgt}||document.body;"
+                f"['keydown','keypress','keyup'].forEach(function(t){{"
+                f"e.dispatchEvent(new KeyboardEvent(t,{{key:{json.dumps(k)},"
+                f"bubbles:true}}));}});return true;}})()")
+            self._journal_step(f"press {k} (in frame)")
+            return f"Pressed {k} in frame."
+        return (f"Error: '{action}' isn't supported inside a frame "
+                "(use click/type/select/press).")
 
     def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
         """The structured perception: a list of {i, t, n, s} dicts (index, type,
@@ -1441,6 +1927,20 @@ def _slug(text: str) -> str:
     fill step's `$name` placeholder. Never carries the typed value."""
     s = "".join(ch for ch in (text or "") if ch.isalnum())
     return s[:40] or "value"
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of a URL — the unit cross-origin frame authorization
+    is granted against."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except ValueError:
+        return ""
+    if not p.scheme or not p.hostname:
+        return ""
+    host = p.hostname + (f":{p.port}" if p.port else "")
+    return f"{p.scheme}://{host}"
 
 
 def _similarity(a: str, b: str) -> float:

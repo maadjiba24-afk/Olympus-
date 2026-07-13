@@ -37,6 +37,18 @@ ACTION_TOOLS = frozenset({
     # half of the same actuator loop — bounded structure, not prose, and kept
     # out of any prose-ingesting run so an injected page can't map your tabs.
     "browser_observe",
+    # Detecting a human-verification checkpoint perceives a credentialed page
+    # (bounded enum, never a bypass) — same actuator-class gating as observe.
+    "browser_checkpoint",
+    # Listing/reading/ACTING INTO cross-origin frames of a credentialed page is
+    # actuator-class, gated per-origin (governed crossing) and kept out of any
+    # prose-ingesting run.
+    "browser_frames", "browser_frame_observe", "browser_frame_act",
+    # Minting a signed human-cleared attestation is bound to the credentialed
+    # session (re-checks the live page before signing) — operator-only, kept out
+    # of any prose-ingesting run so an injected page can't forge a human-in-loop
+    # proof.
+    "browser_attest_human",
     # Listing/switching the credentialed browser's tabs reveals and redirects a
     # logged-in session; uploading a local file to a site is data egress. All
     # three are credentialed actuators, kept out of any prose-ingesting run.
@@ -45,6 +57,12 @@ ACTION_TOOLS = frozenset({
     # out of any prose-ingesting run so an injected page can't harvest or plant
     # a session (cookies live only in the encrypted vault).
     "browser_save_auth", "browser_restore_auth",
+    # Accepting a JS dialog can commit an action on a credentialed page, so the
+    # dialog policy is an actuator, kept out of any prose-ingesting run.
+    "browser_dialog",
+    # Capturing a download clicks a trigger and writes into the workspace — a
+    # credentialed action, kept out of any prose-ingesting run.
+    "browser_download",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.
