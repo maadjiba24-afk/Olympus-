@@ -15,6 +15,16 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Improved — browser harness: true network-idle
+
+`wait_idle` now uses **real** in-flight-request tracking from the CDP event
+stream (the reader thread counts `Network.requestWillBeSent` vs
+`loadingFinished`/`loadingFailed`), so "idle" means **zero open network
+requests** — not a resource-count guess. It waits for genuinely-pending fetches
+(XHR/fetch/beacon) to settle before proceeding, and falls back to the previous
+heuristic only when a transport can't report in-flight counts. Verified against
+real Chromium (a page holding a `fetch` open settles to zero, then proceeds).
+
 ### Fixed — browser harness: JS dialogs no longer wedge the harness
 
 A page that pops `alert()`/`confirm()`/`prompt()` on a click used to **hang** the

@@ -118,6 +118,16 @@ def test_js_dialog_does_not_hang_and_respects_policy(real_session):
     assert real_session._eval("document.title") == "YES"
 
 
+def test_network_idle_tracks_real_requests(real_session):
+    # The transport tracks in-flight requests from the CDP event stream, so
+    # wait_idle is a true network-idle (not a heuristic) and ends at zero.
+    real_session.open(_page(
+        "hi<script>fetch('data:text/plain,'+new Array(500).join('x'))"
+        ".then(function(r){return r.text();});</script>"))
+    real_session.wait_idle(quiet=0.2, timeout=5.0)
+    assert real_session._t.inflight() == 0                # settled
+
+
 def test_wait_for_element_appears_for_real(real_session):
     # An element that appears after a short delay — wait_for must block until it's
     # there, not race a fixed sleep.

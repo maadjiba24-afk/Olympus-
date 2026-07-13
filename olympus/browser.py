@@ -702,28 +702,41 @@ class BrowserSession:
             time.sleep(0.25)
 
     def wait_idle(self, quiet: float = 0.5, timeout: float = _LOAD_TIMEOUT) -> None:
-        """Wait for the page to load AND its resource count to hold steady for a
-        short quiet window — a dependency-free 'network idle' heuristic for
-        dynamic pages whose content arrives after readyState=complete. Bounded by
-        `timeout`; best-effort (never raises)."""
+        """Wait for the page to load AND the network to go idle for a short quiet
+        window. When the transport tracks in-flight requests from the CDP event
+        stream (real browser), 'idle' means ZERO open requests — a true
+        network-idle. Otherwise it falls back to a resource-count-stable
+        heuristic. Bounded by `timeout`; best-effort (never raises)."""
         self._wait_ready(timeout)
+        inflight = getattr(self._t, "inflight", None)
         deadline = time.monotonic() + timeout
         last, stable_since = -1, None
         while time.monotonic() < deadline:
             try:
-                n = int(float(self._eval(
-                    "(performance.getEntriesByType('resource')||[]).length")
-                    or 0))
+                if inflight is not None:            # true idle: zero open requests
+                    n = int(inflight())
+                    now = time.monotonic()
+                    if n == 0:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        stable_since = None
+                else:                               # heuristic: resource count stable
+                    n = int(float(self._eval(
+                        "(performance.getEntriesByType('resource')||[]).length")
+                        or 0))
+                    now = time.monotonic()
+                    if n == last:
+                        if stable_since is None:
+                            stable_since = now
+                        elif now - stable_since >= quiet:
+                            return
+                    else:
+                        last, stable_since = n, None
             except Exception:
                 return
-            now = time.monotonic()
-            if n == last:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= quiet:
-                    return
-            else:
-                last, stable_since = n, None
             time.sleep(0.1)
 
     def set_dialog_policy(self, accept: bool, text: str = "") -> str:

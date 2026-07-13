@@ -420,14 +420,14 @@ def test_auth_tools_are_credentialed_actuators():
 
 # --- multi-tab, uploads, network-idle: governed plumbing --------------------
 
-def test_wait_idle_returns_when_resources_settle(monkeypatch):
+def test_wait_idle_waits_for_inflight_requests_to_drain(monkeypatch):
     try:
         sess = _harness_session(monkeypatch)
-        sess.wait_idle(quiet=0.0)                          # stable count offline
-        # exercised without hanging; the readiness + resource evals ran
-        exprs = [c["params"].get("expression", "") for c in sess.ledger
-                 if c["method"] == "Runtime.evaluate"]
-        assert any("performance" in e for e in exprs)
+        # script the transport's in-flight count draining to zero
+        sess._t.inflight_seq = [3, 2, 1, 0, 0]
+        sess.wait_idle(quiet=0.0)                          # true idle path
+        # it consumed the sequence until zero (didn't return while busy)
+        assert sess._t.inflight_seq == []
     finally:
         browser.set_transport_factory(None)
 
