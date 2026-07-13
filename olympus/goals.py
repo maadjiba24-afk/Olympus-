@@ -214,6 +214,11 @@ def judge(g: Goal, judge_fn: Callable[..., dict] | None = None) -> dict:
     `judge_fn(system, messages, schema)` is injectable for tests; production
     uses the pool's verify-role model (the hallucination-controller seat)."""
     if judge_fn is None:
+        from . import firstrun
+        if not firstrun.configured():
+            return {"done": False, "confidence": 0.0, "evidence": "",
+                    "missing": "no model configured — set a provider key to "
+                               "judge goal completion"}
         from . import backend
         pool = config.ModelPool.from_env()
 

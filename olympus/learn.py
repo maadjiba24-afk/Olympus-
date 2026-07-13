@@ -109,6 +109,13 @@ def distill(source: str, *, allow_paths: bool,
         origin = f"the local content at {source}"
 
     if distiller is None:
+        # Guarded here (after source resolution, incl. the operator-only path
+        # refusal) so a security refusal always wins over "no model".
+        from . import firstrun
+        if not firstrun.configured():
+            return ("No model is configured — run `olympus setup` or set "
+                    "ANTHROPIC_API_KEY / OLYMPUS_API_KEY before I can distill "
+                    "a skill.")
         from . import backend
         pool = config.ModelPool.from_env()
 

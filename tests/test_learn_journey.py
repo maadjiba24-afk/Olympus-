@@ -229,3 +229,23 @@ def test_gateway_learn_refuses_paths_and_journey_lists():
     memory.save("lessons", "gateway lesson", "body")
     out = gateway.reply_for({}, "U1", "/journey", prefix="sl")
     assert "gateway lesson" in out[0]
+
+
+# --- graceful degradation without a configured model -------------------------
+
+def test_no_key_paths_degrade_cleanly(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLYMPUS_API_KEY",
+                "OLYMPUS_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    from olympus import firstrun
+    monkeypatch.setattr(firstrun, "CONFIG_ENV",
+                        firstrun.CONFIG_DIR / "does-not-exist.env")
+    # moa one-shot: was a raw SDK TypeError / traceback.
+    assert "no model is configured" in moa.one_shot("q")
+    # learn: was a raw SDK auth error string.
+    assert "No model is configured" in learn.distill("a workflow",
+                                                     allow_paths=False)
+    # goal judge: degrades to a clear 'missing' reason, never raises.
+    goals.add("cli", "g")
+    v = goals.judge(goals.active("cli")[0])
+    assert v["done"] is False and "no model configured" in v["missing"]
