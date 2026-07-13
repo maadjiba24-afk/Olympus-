@@ -183,7 +183,8 @@ class Transport(Protocol):
     Chrome; the fake one answers in-memory. Either way the session only needs
     request/response and a close."""
 
-    def send(self, method: str, params: dict | None = None) -> dict: ...
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict: ...
     def close(self) -> None: ...
 
 
@@ -244,10 +245,18 @@ class FakeTransport:
         self.inflight_seq: list[int] = []
         # Scriptable human-verification checkpoint for detect_checkpoint() offline.
         self.checkpoint: dict = checkpoint or {"type": "none", "detail": ""}
+        # Scriptable cross-origin (OOPIF) frames: list of {sessionId, url}, plus
+        # per-frame observe elements keyed by sessionId, so the governed
+        # cross-origin observation path is exercisable offline.
+        self.frames_list: list[dict] = []
+        self.frame_elements: dict[str, list[dict]] = {}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
             "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+
+    def frames(self) -> list[dict]:
+        return list(self.frames_list)
 
     def set_dialog_policy(self, accept: bool, text: str = "") -> None:
         self.dialog_accept = bool(accept)
@@ -263,9 +272,19 @@ class FakeTransport:
                 return sel
         return None
 
-    def send(self, method: str, params: dict | None = None) -> dict:
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:
         params = params or {}
-        self.calls.append({"method": method, "params": params})
+        self.calls.append({"method": method, "params": params,
+                           "session_id": session_id})
+        # A sessionId-routed observe reads a scripted cross-origin frame's map.
+        if session_id and method == "Runtime.evaluate" \
+                and "__OLY_OBSERVE__" in params.get("expression", ""):
+            els = self.frame_elements.get(session_id, [])
+            lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                    "s": e.get("s", f'[data-olympus-idx="{i}"]')}
+                   for i, e in enumerate(els)]
+            return {"result": {"value": json.dumps(lst)}}
         if method == "Page.navigate":
             target = params.get("url", self._url)
             self._url = self.redirects.get(target, target)   # follow redirect
@@ -378,6 +397,7 @@ class _RealTransport:
         self._dialog_accept = False
         self._dialog_text = ""
         self._inflight = 0                       # open network requests (idle wait)
+        self._frames: dict[str, dict] = {}       # sessionId -> {url} for OOPIFs
         self._closed = False
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -385,12 +405,22 @@ class _RealTransport:
 
     def _arm(self) -> None:  # pragma: no cover - needs a browser
         """Enable the domains whose events we consume (Page for dialogs, Network
-        for in-flight tracking). Best-effort; a target that refuses is tolerated."""
+        for in-flight tracking) and auto-attach to child frames so cross-origin
+        (out-of-process) iframes surface with their own sessionId. Best-effort."""
         for dom in ("Page.enable", "Network.enable"):
             try:
                 self.send(dom)
             except Exception:
                 pass
+        try:
+            self.send("Target.setAutoAttach", {"autoAttach": True,
+                      "waitForDebuggerOnStart": False, "flatten": True})
+        except Exception:
+            pass
+
+    def frames(self) -> list[dict]:  # pragma: no cover - needs a browser
+        return [{"sessionId": sid, "url": info.get("url", "")}
+                for sid, info in self._frames.items()]
 
     def set_dialog_policy(self, accept: bool, text: str = "") -> None:  # pragma: no cover
         self._dialog_accept = bool(accept)
@@ -436,6 +466,15 @@ class _RealTransport:
             self._inflight += 1
         elif method in ("Network.loadingFinished", "Network.loadingFailed"):
             self._inflight = max(0, self._inflight - 1)
+        elif method == "Target.attachedToTarget":
+            p = msg.get("params", {})
+            info = p.get("targetInfo", {})
+            sid = p.get("sessionId")
+            if sid and info.get("type") == "iframe":   # a cross-origin (OOPIF)
+                self._frames[sid] = {"url": info.get("url", ""),
+                                     "targetId": info.get("targetId", "")}
+        elif method == "Target.detachedFromTarget":
+            self._frames.pop(msg.get("params", {}).get("sessionId", ""), None)
 
     def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
         with self._id_lock:
@@ -512,17 +551,19 @@ class _RealTransport:
             self._arm()
             return True
 
-    def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+    def send(self, method: str, params: dict | None = None,
+             session_id: str | None = None) -> dict:  # pragma: no cover
         try:
-            return self._send_once(method, params)
+            return self._send_once(method, params, session_id)
         except (ConnectionError, OSError) as err:
             # A dropped socket: reconnect once and retry. A genuine CDP error
             # (RuntimeError) is NOT retried — only transport-level failures.
             if self._closed or not self._reconnect():
                 raise RuntimeError(f"CDP transport lost: {err}") from err
-            return self._send_once(method, params)
+            return self._send_once(method, params, session_id)
 
-    def _send_once(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+    def _send_once(self, method: str, params: dict | None = None,
+                   session_id: str | None = None) -> dict:  # pragma: no cover
         with self._id_lock:
             self._id += 1
             mid = self._id
@@ -530,9 +571,11 @@ class _RealTransport:
         slot = [ev, None]
         with self._pending_lock:
             self._pending[mid] = slot
+        msg = {"id": mid, "method": method, "params": params or {}}
+        if session_id:                           # route into a child frame session
+            msg["sessionId"] = session_id
         try:
-            self._conn.send(json.dumps(
-                {"id": mid, "method": method, "params": params or {}}))
+            self._conn.send(json.dumps(msg))
         except Exception as err:
             with self._pending_lock:
                 self._pending.pop(mid, None)
@@ -753,9 +796,10 @@ class BrowserSession:
         if len(self.recipe) > _JOURNAL_MAX:
             del self.recipe[0]
 
-    def _call(self, method: str, **params: Any) -> dict:
+    def _call(self, method: str, *, _session_id: str | None = None,
+              **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
-        return self._t.send(method, params)
+        return self._t.send(method, params, session_id=_session_id)
 
     def _current_url(self) -> str:
         """The URL actually loaded right now (after any redirect / JS nav)."""
@@ -1102,6 +1146,58 @@ class BrowserSession:
         if kind not in _CHECKPOINT_KINDS:
             return {"type": "none", "detail": ""}
         return {"type": kind, "detail": str(d.get("detail", ""))[:40]}
+
+    def list_frames(self) -> list[dict]:
+        """The cross-origin (out-of-process) iframes attached to this page, each
+        as {sessionId, url, origin}. Same-origin frames are already reachable by
+        the deep walk; these are the ones behind the origin boundary. The tool
+        layer annotates each with whether its origin is an AUTHORIZED operator
+        site — the governed-crossing gate."""
+        fn = getattr(self._t, "frames", None)
+        if fn is None:
+            return []
+        out = []
+        for f in fn() or []:
+            sid = f.get("sessionId", "")
+            url = f.get("url", "")
+            if not url and sid:      # attach-time url is often stale/empty — ask
+                try:                 # the frame itself for its live location
+                    url = self._eval_in(
+                        sid, "document.location?document.location.href:''") or ""
+                except Exception:
+                    url = ""
+            out.append({"sessionId": sid, "url": url, "origin": _origin_of(url)})
+        return out
+
+    def _eval_in(self, session_id: str, expression: str) -> str:
+        """Evaluate an expression INSIDE a child frame's CDP session (OOPIF),
+        routed by sessionId. Used only after the frame's origin is authorized."""
+        res = self._call("Runtime.evaluate", _session_id=session_id,
+                         expression=self._prep(expression), returnByValue=True)
+        value = (res or {}).get("result", {}).get("value", "")
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def observe_frame(self, session_id: str, limit: int = _OBSERVE_MAX) -> str:
+        """Perceive a cross-origin frame's interactive elements as a numbered map
+        — the governed crossing. Gating (the frame origin must be authorized) is
+        enforced by the caller; this only runs once permitted. Content is
+        untrusted, like any page perception."""
+        self.ingested_untrusted = True
+        limit = max(1, min(int(limit), _OBSERVE_MAX))
+        raw = self._eval_in(session_id, _OBSERVE_JS.replace("LIMIT", str(limit))
+                                                   .replace("CAP", str(_LABEL_MAX)))
+        try:
+            items = json.loads(raw or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return "(could not read the frame's interactive elements)"
+        lines = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
 
     def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
         """The structured perception: a list of {i, t, n, s} dicts (index, type,
@@ -1598,6 +1694,20 @@ def _slug(text: str) -> str:
     fill step's `$name` placeholder. Never carries the typed value."""
     s = "".join(ch for ch in (text or "") if ch.isalnum())
     return s[:40] or "value"
+
+
+def _origin_of(url: str) -> str:
+    """scheme://host[:port] of a URL — the unit cross-origin frame authorization
+    is granted against."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url or "")
+    except ValueError:
+        return ""
+    if not p.scheme or not p.hostname:
+        return ""
+    host = p.hostname + (f":{p.port}" if p.port else "")
+    return f"{p.scheme}://{host}"
 
 
 def _similarity(a: str, b: str) -> float:

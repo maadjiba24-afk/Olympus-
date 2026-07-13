@@ -398,6 +398,39 @@ def test_attest_human_only_after_the_check_is_cleared(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_cross_origin_frame_crossing_is_governed_per_origin(monkeypatch):
+    from olympus import memory
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")  # top page only
+        memory.set_user("shared")
+        sess = _harness_session(monkeypatch)                      # current: ex.com
+        sess._t.frames_list = [
+            {"sessionId": "S1", "url": "https://widget.other.com/f"}]
+        sess._t.frame_elements = {"S1": [{"t": "button", "n": "Pay"}]}
+        # the frame is listed but its origin is NOT an authorized site
+        listing = tools._browser_frames()
+        assert "widget.other.com" in listing and "NOT authorized" in listing
+        # reaching INTO it is refused by default (never cross casually)
+        assert "isn't an authorized site" in tools._browser_frame_observe(0)
+        # authorize the frame's origin, and the governed crossing is permitted
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com,widget.other.com")
+        assert "— authorized" in tools._browser_frames()
+        assert '[0] button "Pay"' in tools._browser_frame_observe(0)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_frame_tools_are_operator_gated_actuators():
+    for name in ("browser_frames", "browser_frame_observe"):
+        assert name in security.ACTION_TOOLS
+        assert not security.should_wrap(name)
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_frames", "browser_frame_observe"} <= hermes
+    # a plain transport with no frame support degrades to an empty list
+    assert browser.BrowserSession(browser.FakeTransport()).list_frames() == []
+
+
 def test_attest_human_and_attestations_governance():
     assert "browser_attest_human" in security.ACTION_TOOLS       # signed, gated
     assert "operator_attestations" not in security.ACTION_TOOLS  # first-party read

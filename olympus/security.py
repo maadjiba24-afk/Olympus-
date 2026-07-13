@@ -40,6 +40,10 @@ ACTION_TOOLS = frozenset({
     # Detecting a human-verification checkpoint perceives a credentialed page
     # (bounded enum, never a bypass) — same actuator-class gating as observe.
     "browser_checkpoint",
+    # Listing/reading INTO cross-origin frames of a credentialed page is
+    # actuator-class perception, gated per-origin (governed crossing) and kept
+    # out of any prose-ingesting run.
+    "browser_frames", "browser_frame_observe",
     # Minting a signed human-cleared attestation is bound to the credentialed
     # session (re-checks the live page before signing) — operator-only, kept out
     # of any prose-ingesting run so an injected page can't forge a human-in-loop

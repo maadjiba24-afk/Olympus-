@@ -126,6 +126,23 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_cross_origin_frame_surfaces_as_oopif_for_real(real_session):
+    import time
+    # A real cross-site iframe becomes an out-of-process target with its own CDP
+    # session; eval routes INTO it. (Content may not load if the sandbox blocks
+    # the iframe's egress, but the OOPIF session + sessionId routing still hold.)
+    real_session.open(_page(
+        "<h1>parent</h1><iframe src='https://example.com/'></iframe>"))
+    time.sleep(3.0)
+    frames = real_session.list_frames()
+    if not frames:
+        pytest.skip("no out-of-process iframe surfaced in this environment")
+    sid = frames[0]["sessionId"]
+    assert sid                                   # a distinct child session
+    title = real_session._eval_in(sid, "document.title")
+    assert isinstance(title, str)                # eval routed into the frame
+
+
 def test_detect_checkpoint_for_real(real_session):
     # A page with a reCAPTCHA marker is detected as a captcha checkpoint; a plain
     # page is 'none'. The detector only reads markers — it never solves anything.

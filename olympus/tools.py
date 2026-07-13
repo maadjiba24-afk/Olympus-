@@ -1171,6 +1171,49 @@ def _browser_checkpoint() -> str:
             "record a signed attestation that you did.")
 
 
+def _browser_frames() -> str:
+    # List cross-origin (OOPIF) frames on the current authorized page, each with
+    # whether its origin is an AUTHORIZED operator site — the governed-crossing
+    # gate. Operator-gated perception.
+    from urllib.parse import urlparse
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    user = memory.current_user()
+    frames = sess.list_frames()
+    if not frames:
+        return "No cross-origin frames on this page."
+    lines = []
+    for i, f in enumerate(frames):
+        host = (urlparse(f["origin"]).hostname or "").lower()
+        mark = "authorized" if operator.authorized(user, host) else "NOT authorized"
+        lines.append(f"[{i}] {f['origin']} — {mark}")
+    lines.append("Authorize a frame's origin as an operator site to drive it; "
+                 "an unauthorized origin is never reached into.")
+    return "\n".join(lines)
+
+
+def _browser_frame_observe(index: int = 0) -> str:
+    # Perceive inside a cross-origin frame — but ONLY if its origin is an
+    # authorized operator site (governed crossing; default deny).
+    from urllib.parse import urlparse
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    user = memory.current_user()
+    frames = sess.list_frames()
+    i = int(index)
+    if not (0 <= i < len(frames)):
+        return f"Error: no cross-origin frame at index {i}."
+    frame = frames[i]
+    host = (urlparse(frame["origin"]).hostname or "").lower()
+    if not operator.authorized(user, host):
+        return (f"Error: the frame origin '{frame['origin']}' isn't an authorized "
+                "site — I don't reach into unauthorized origins. Authorize it "
+                "first (operator_authorize_site), then I can read inside it.")
+    return sess.observe_frame(frame["sessionId"])
+
+
 def _browser_attest_human(kind: str = "step_up") -> str:
     # After a human clears a verification check, record a SIGNED attestation that
     # they did. We first re-detect: if the same checkpoint is still on the page,
@@ -1644,6 +1687,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_screenshot": _browser_screenshot,
     "browser_observe": _browser_observe,
     "browser_checkpoint": _browser_checkpoint,
+    "browser_frames": _browser_frames,
+    "browser_frame_observe": _browser_frame_observe,
     "browser_attest_human": _browser_attest_human,
     "operator_attestations": _operator_attestations,
     "browser_act": _browser_act,
@@ -2245,6 +2290,34 @@ BROWSER_OBSERVE = {
                       "description": "Max elements to return (default 120)"},
         },
         "required": [],
+    },
+}
+
+BROWSER_FRAMES = {
+    "name": "browser_frames",
+    "description": (
+        "List the cross-origin (third-party) iframes on the current authorized "
+        "page — each with its origin and whether that origin is an authorized "
+        "operator site. Olympus reaches INTO a cross-origin frame only when its "
+        "origin is explicitly authorized (governed crossing; default deny), so an "
+        "injected ad/widget frame can never be driven. Operator-gated."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+BROWSER_FRAME_OBSERVE = {
+    "name": "browser_frame_observe",
+    "description": (
+        "Perceive the interactive elements inside a cross-origin frame (by its "
+        "index from browser_frames) as a numbered map — but only if the frame's "
+        "origin is an authorized operator site. An unauthorized origin is refused "
+        "and never reached into. Operator-gated."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"index": {"type": "integer",
+                                 "description": "Frame index from browser_frames"}},
+        "required": ["index"],
     },
 }
 
@@ -2933,6 +3006,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_screenshot": BROWSER_SCREENSHOT,
     "browser_observe": BROWSER_OBSERVE,
     "browser_checkpoint": BROWSER_CHECKPOINT,
+    "browser_frames": BROWSER_FRAMES,
+    "browser_frame_observe": BROWSER_FRAME_OBSERVE,
     "browser_attest_human": BROWSER_ATTEST_HUMAN,
     "operator_attestations": OPERATOR_ATTESTATIONS,
     "browser_act": BROWSER_ACT,

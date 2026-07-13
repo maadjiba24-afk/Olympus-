@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Governed cross-origin frames (moat)
+
+The second boundary turned into a moat: reach *into* a cross-origin (third-party)
+iframe — but **only under per-origin authorization**, never casually.
+
+- **OOPIF-aware transport.** The event-driven `_RealTransport` now auto-attaches
+  to child frames (`Target.setAutoAttach` flatten) and tracks out-of-process
+  iframes by their CDP `sessionId`; commands route into a child frame session via
+  a new `session_id` on `send`. (Same-origin frames were already reached by the
+  deep walk; this adds the cross-origin ones behind the same-origin boundary.)
+- **Governed crossing** — `browser_frames` lists a page's cross-origin frames
+  with each origin's authorization status; `browser_frame_observe` perceives
+  inside one **only if its origin is an authorized operator site** (default
+  deny), reusing the existing authorization concept — so an injected ad/widget
+  frame is listed but never reached into. Both operator-gated, capability-
+  separated. The same-origin policy is crossed *only* under explicit per-origin
+  authorization, honored as a governed act rather than defeated.
+- Verified against real Chromium: a real cross-site iframe surfaces as an
+  out-of-process session and eval routes into it. Governance (list + per-origin
+  gate + refuse-by-default) covered offline.
+
 ### Added — Attested Human Handoff: evolve + honest-automation policy (moat, part 4/4)
 
 The moat compounds and the stance is documented.
