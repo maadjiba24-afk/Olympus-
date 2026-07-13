@@ -104,6 +104,20 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_js_dialog_does_not_hang_and_respects_policy(real_session):
+    # A click that pops confirm() must not wedge the harness. Default policy
+    # dismisses (confirm→false); accept makes it confirm (confirm→true).
+    page = ("<button id=go onclick=\"document.title="
+            "window.confirm('ok?')?'YES':'NO'\">Go</button>")
+    real_session.open(_page(page))
+    real_session.act("click", selector="#go")             # default: dismiss
+    assert real_session._eval("document.title") == "NO"
+    real_session.set_dialog_policy(True)                   # now accept
+    real_session.open(_page(page))
+    real_session.act("click", selector="#go")
+    assert real_session._eval("document.title") == "YES"
+
+
 def test_wait_for_element_appears_for_real(real_session):
     # An element that appears after a short delay — wait_for must block until it's
     # there, not race a fixed sleep.

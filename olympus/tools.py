@@ -1205,6 +1205,16 @@ def _browser_switch_tab(index: int) -> str:
     return f"Error: no tab at index {int(index)}."
 
 
+def _browser_dialog(accept: bool = False, text: str = "") -> str:
+    # Set how native JS dialogs (alert/confirm/prompt) are answered on the current
+    # authorized page. Credentialed: accepting a confirm can commit an action, so
+    # it is operator-gated and capability-separated. Default policy is dismiss.
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    return sess.set_dialog_policy(bool(accept), text)
+
+
 def _browser_save_auth(domain: str) -> str:
     # Persist the current session for a domain (cookies → encrypted vault) so a
     # later run skips re-login. Credentialed: operator-gated, domain-authorized.
@@ -1581,6 +1591,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_upload": _browser_upload,
     "browser_save_auth": _browser_save_auth,
     "browser_restore_auth": _browser_restore_auth,
+    "browser_dialog": _browser_dialog,
     "browser_learn": _browser_learn,
     "browser_pattern": _browser_pattern,
     "browser_skill_record": _browser_skill_record,
@@ -2284,6 +2295,26 @@ BROWSER_UPLOAD = {
     },
 }
 
+BROWSER_DIALOG = {
+    "name": "browser_dialog",
+    "description": (
+        "Set how native browser dialogs (alert/confirm/prompt) are answered on "
+        "the current authorized page, so they can't stall a click. Default is to "
+        "dismiss; set accept=true to confirm (optionally with prompt 'text'). "
+        "Accepting a confirm can commit an action, so this is operator-gated."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "accept": {"type": "boolean",
+                       "description": "Accept (true) or dismiss (false) dialogs"},
+            "text": {"type": "string",
+                     "description": "Answer text for prompt() dialogs"},
+        },
+        "required": [],
+    },
+}
+
 BROWSER_SAVE_AUTH = {
     "name": "browser_save_auth",
     "description": (
@@ -2775,6 +2806,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_upload": BROWSER_UPLOAD,
     "browser_save_auth": BROWSER_SAVE_AUTH,
     "browser_restore_auth": BROWSER_RESTORE_AUTH,
+    "browser_dialog": BROWSER_DIALOG,
     "browser_learn": BROWSER_LEARN,
     "browser_pattern": BROWSER_PATTERN,
     "browser_skill_record": BROWSER_SKILL_RECORD,

@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — browser harness: JS dialogs no longer wedge the harness
+
+A page that pops `alert()`/`confirm()`/`prompt()` on a click used to **hang** the
+harness — the click's CDP call blocked until the dialog was handled, and nothing
+handled it.
+
+- **Event-driven transport.** `_RealTransport` now runs a single background
+  reader thread that demultiplexes the socket: id-matched replies wake their
+  waiting `send()`, while unsolicited CDP **events** are routed to handlers. This
+  is the foundation that also enables true network-idle and resilience.
+- **Auto-handled dialogs.** A `Page.javascriptDialogOpening` event is answered
+  automatically. **Safe default is dismiss** — an irreversible `confirm()` is
+  never auto-accepted; the operator opts into accept (optionally with prompt
+  text) via the new **`browser_dialog`** tool, which is operator-gated and
+  capability-separated. Verified against real Chromium (a `confirm()` click that
+  previously hung now completes, and honors dismiss vs. accept).
+
 ### Added — browser harness: cross-site patterns + template demotion
 
 Two evolution mechanisms that make the skill store *converge* over time.

@@ -343,6 +343,30 @@ def test_review_graduates_only_proven_skills_and_is_idempotent():
     assert operator.promote_ready() == []
 
 
+# --- robustness: JS dialogs can't wedge a click -----------------------------
+
+def test_dialog_policy_wires_to_transport_and_defaults_dismiss(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)
+        # default (fresh transport) is the SAFE dismiss policy
+        assert sess._t.dialog_accept is False
+        out = sess.set_dialog_policy(True, "hello")
+        assert "accept" in out and sess._t.dialog_accept is True
+        assert sess._t.dialog_text == "hello"
+        assert "dismiss" in sess.set_dialog_policy(False)
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_browser_dialog_is_a_gated_actuator():
+    assert "browser_dialog" in security.ACTION_TOOLS
+    assert not security.should_wrap("browser_dialog")
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert "browser_dialog" in hermes
+    argus = {d.get("name") for d in SPECIALISTS["argus"].tool_defs("anthropic")}
+    assert "browser_dialog" not in argus
+
+
 # --- saved auth state: persist a session, restore instead of re-login -------
 
 def test_get_and_set_cookies_roundtrip(monkeypatch):

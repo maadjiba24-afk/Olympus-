@@ -207,10 +207,22 @@ class FakeTransport:
         self.targets = targets or []
         # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
         self.cookies: list[dict] = []
+        # Dialog policy + a scriptable network-idle sequence for offline tests.
+        self.dialog_accept = False
+        self.dialog_text = ""
+        self.inflight_seq: list[int] = []
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
             "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:
+        self.dialog_accept = bool(accept)
+        self.dialog_text = text or ""
+
+    def inflight(self) -> int:
+        # Pop the scripted sequence so wait_idle() can watch it drain to zero.
+        return self.inflight_seq.pop(0) if self.inflight_seq else 0
 
     def _matched_selector(self, expr: str) -> str | None:
         for sel in self.present:
@@ -293,27 +305,108 @@ class _RealTransport:
     Built lazily so `websockets` stays an optional extra; importing this module
     never pulls it in. Not exercised in CI (no browser), but kept honest and
     minimal so a real attach works when configured.
+
+    A single background reader thread demultiplexes the socket: id-matched
+    replies wake their waiting `send()`, while unsolicited CDP *events* are
+    routed to handlers. That is what lets the harness (a) auto-handle JS dialogs
+    so `confirm()`/`alert()` can't wedge a click, and (b) track in-flight network
+    requests for a real network-idle wait — neither possible with a purely
+    request/response loop.
     """
 
-    def __init__(self, ws_url: str, http_base: str = "") -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:  # pragma: no cover - needs a browser
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
             raise BrowserUnavailable(
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
+        self._connect = connect
         # Bound a single CDP message so a hostile/huge page can't OOM us; we
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
-        # The DevTools HTTP base (if we know it), so reattach() can resolve
-        # another page target's socket URL and switch which tab we drive.
+        self._id_lock = threading.Lock()
+        self._pending: dict[int, list] = {}     # id -> [Event, message]
+        self._pending_lock = threading.Lock()
         self._http_base = (http_base or "").rstrip("/")
+        # Dialog policy: SAFE DEFAULT is to DISMISS (never auto-confirm an
+        # irreversible prompt); the operator opts into accept for a known flow.
+        self._dialog_accept = False
+        self._dialog_text = ""
+        self._inflight = 0                       # open network requests (idle wait)
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
+
+    def _arm(self) -> None:  # pragma: no cover - needs a browser
+        """Enable the domains whose events we consume (Page for dialogs, Network
+        for in-flight tracking). Best-effort; a target that refuses is tolerated."""
+        for dom in ("Page.enable", "Network.enable"):
+            try:
+                self.send(dom)
+            except Exception:
+                pass
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:  # pragma: no cover
+        self._dialog_accept = bool(accept)
+        self._dialog_text = text or ""
+
+    def inflight(self) -> int:  # pragma: no cover - needs a browser
+        return max(0, self._inflight)
+
+    def _read_loop(self) -> None:  # pragma: no cover - needs a browser
+        while not self._closed:
+            try:
+                raw = self._conn.recv(timeout=1.0)
+            except TimeoutError:
+                continue
+            except Exception:
+                if self._closed:
+                    return
+                time.sleep(0.05)
+                continue
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            mid = msg.get("id")
+            if mid is not None:
+                with self._pending_lock:
+                    slot = self._pending.get(mid)
+                if slot is not None:
+                    slot[1] = msg
+                    slot[0].set()
+            else:
+                self._on_event(msg)
+
+    def _on_event(self, msg: dict) -> None:  # pragma: no cover - needs a browser
+        method = msg.get("method", "")
+        if method == "Page.javascriptDialogOpening":
+            # Answer per policy WITHOUT waiting (we're on the reader thread;
+            # blocking here would deadlock the very reply we'd wait for).
+            self._send_nowait("Page.handleJavaScriptDialog",
+                              {"accept": self._dialog_accept,
+                               "promptText": self._dialog_text})
+        elif method == "Network.requestWillBeSent":
+            self._inflight += 1
+        elif method in ("Network.loadingFinished", "Network.loadingFailed"):
+            self._inflight = max(0, self._inflight - 1)
+
+    def _send_nowait(self, method: str, params: dict | None = None) -> None:  # pragma: no cover
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        try:
+            self._conn.send(json.dumps(
+                {"id": mid, "method": method, "params": params or {}}))
+        except Exception:
+            pass
 
     def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
         """Re-bind this transport to a different page target's WebSocket, so the
-        session actually drives the tab it switched to (not just activates it).
-        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        session actually drives the tab it switched to (not just activates it)."""
         if not self._http_base:
             return False
         import urllib.request
@@ -327,33 +420,51 @@ class _RealTransport:
                   "")
         if not ws:
             return False
-        from websockets.sync.client import connect  # type: ignore
+        self._closed = True                      # stop the old reader
         try:
             self._conn.close()
         except Exception:
             pass
-        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._reader.join(timeout=2.0)
+        with self._pending_lock:
+            self._pending.clear()
+        self._conn = self._connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        self._inflight = 0
+        self._closed = False
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        self._arm()
         return True
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
-        self._id += 1
-        self._conn.send(json.dumps(
-            {"id": self._id, "method": method, "params": params or {}}))
-        # Read replies until ours arrives, but never block past the deadline
-        # (a hung tab or a dropped reply must not wedge the whole agent).
-        deadline = time.monotonic() + _RECV_TIMEOUT
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"CDP call {method} timed out")
-            msg = json.loads(self._conn.recv(timeout=remaining))
-            if msg.get("id") == self._id:
-                if "error" in msg:
-                    raise RuntimeError(msg["error"].get("message", "CDP error"))
-                return msg.get("result", {})
+        with self._id_lock:
+            self._id += 1
+            mid = self._id
+        ev = threading.Event()
+        slot = [ev, None]
+        with self._pending_lock:
+            self._pending[mid] = slot
+        try:
+            self._conn.send(json.dumps(
+                {"id": mid, "method": method, "params": params or {}}))
+        except Exception as err:
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise RuntimeError(f"CDP send failed: {err}") from err
+        if not ev.wait(timeout=_RECV_TIMEOUT):
+            with self._pending_lock:
+                self._pending.pop(mid, None)
+            raise TimeoutError(f"CDP call {method} timed out")
+        with self._pending_lock:
+            self._pending.pop(mid, None)
+        reply = slot[1] or {}
+        if "error" in reply:
+            raise RuntimeError(reply["error"].get("message", "CDP error"))
+        return reply.get("result", {})
 
     def close(self) -> None:  # pragma: no cover
+        self._closed = True
         try:
             self._conn.close()
         except Exception:
@@ -614,6 +725,18 @@ class BrowserSession:
             else:
                 last, stable_since = n, None
             time.sleep(0.1)
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> str:
+        """Decide how native JS dialogs (alert/confirm/prompt) are answered, so
+        they can't wedge a click. SAFE DEFAULT is dismiss (accept=False) — an
+        irreversible confirm is never auto-accepted; the operator opts into
+        accept for a known flow, optionally supplying prompt text."""
+        setter = getattr(self._t, "set_dialog_policy", None)
+        if setter is not None:
+            setter(bool(accept), text or "")
+        verb = "accept" if accept else "dismiss"
+        extra = f" (answering prompts with {text!r})" if accept and text else ""
+        return f"Dialogs will now {verb} automatically{extra}."
 
     def wait_for(self, selector: str, gone: bool = False,
                  timeout: float = _LOAD_TIMEOUT) -> bool:
