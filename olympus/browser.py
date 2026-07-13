@@ -247,6 +247,9 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
+                if "getBoundingClientRect" in expr:   # element screenshot clip
+                    box = json.dumps({"x": 10, "y": 20, "w": 80, "h": 30})
+                    return {"result": {"value": box if sel else ""}}
                 if params.get("returnByValue") is False:   # node handle wanted
                     return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
                 if "__olySel" in expr:            # durable-selector lookup
@@ -258,6 +261,9 @@ class FakeTransport:
                         self.filled[sel] = "set"
                     value = sel is not None
                 return {"result": {"value": value}}
+            if "scrollWidth" in expr:      # full-page screenshot dimensions
+                return {"result": {"value": json.dumps(
+                    {"x": 0, "y": 0, "w": 1200, "h": 3000})}}
             if "performance" in expr:      # wait_idle() → stable resource count
                 value = "0"
             elif "readyState" in expr:
@@ -322,10 +328,12 @@ class _RealTransport:
                 "real browser attach needs the optional 'websockets' package: "
                 "pip install websockets") from err
         self._connect = connect
+        self._ws_url = ws_url                    # remembered for auto-reconnect
         # Bound a single CDP message so a hostile/huge page can't OOM us; we
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        self._reconnect_lock = threading.Lock()
         self._id_lock = threading.Lock()
         self._pending: dict[int, list] = {}     # id -> [Event, message]
         self._pending_lock = threading.Lock()
@@ -437,7 +445,49 @@ class _RealTransport:
         self._arm()
         return True
 
+    def _reconnect(self) -> bool:  # pragma: no cover - needs a browser
+        """Re-open the WebSocket to the SAME target after a drop, so a transient
+        disconnect doesn't wedge the whole harness. Serialized so concurrent
+        callers reconnect once, not N times."""
+        with self._reconnect_lock:
+            # Another thread may have already reconnected while we waited.
+            try:
+                self._conn.ping()                # cheap liveness probe
+                return True
+            except Exception:
+                pass
+            self._closed = True
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._reader.join(timeout=2.0)
+            with self._pending_lock:
+                self._pending.clear()
+            try:
+                self._conn = self._connect(self._ws_url, open_timeout=10,
+                                           max_size=_WS_MAX_FRAME)
+            except Exception:
+                return False
+            self._id = 0
+            self._inflight = 0
+            self._closed = False
+            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader.start()
+            self._arm()
+            return True
+
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
+        try:
+            return self._send_once(method, params)
+        except (ConnectionError, OSError) as err:
+            # A dropped socket: reconnect once and retry. A genuine CDP error
+            # (RuntimeError) is NOT retried — only transport-level failures.
+            if self._closed or not self._reconnect():
+                raise RuntimeError(f"CDP transport lost: {err}") from err
+            return self._send_once(method, params)
+
+    def _send_once(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         with self._id_lock:
             self._id += 1
             mid = self._id
@@ -451,7 +501,7 @@ class _RealTransport:
         except Exception as err:
             with self._pending_lock:
                 self._pending.pop(mid, None)
-            raise RuntimeError(f"CDP send failed: {err}") from err
+            raise ConnectionError(f"CDP send failed: {err}") from err
         if not ev.wait(timeout=_RECV_TIMEOUT):
             with self._pending_lock:
                 self._pending.pop(mid, None)
@@ -929,18 +979,55 @@ class BrowserSession:
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
-    def screenshot(self) -> str:
+    def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
         for visual perception of canvas/image-heavy pages that observe() can't
-        map. Refuses a blocked landing (never captures internal content). Returns
+        map. With `selector`, captures just that element's box; with `full_page`,
+        the whole scrollable page (beyond the viewport); otherwise the viewport.
+        Refuses a blocked landing (never captures internal content). Returns
         base64 data, or "" if nothing was captured. The pixels are untrusted
         external content — the caller (browser_screenshot) is an INGESTION tool
         and its description is wrapped, exactly like browser_read."""
         self.ingested_untrusted = True
         if self._blocked_landing():
             return ""
-        res = self._call("Page.captureScreenshot", format="png")
+        params: dict[str, Any] = {"format": "png"}
+        if selector:
+            box = self._eval(
+                f"(function(){{var e=__olyq({json.dumps(selector)});if(!e)"
+                "return '';var r=e.getBoundingClientRect();return JSON.stringify("
+                "{x:r.left+window.scrollX,y:r.top+window.scrollY,"
+                "w:r.width,h:r.height});})()")
+            clip = self._clip_from(box)
+            if clip is None:
+                return ""
+            params["clip"] = clip
+            params["captureBeyondViewport"] = True
+        elif full_page:
+            dim = self._eval(
+                "JSON.stringify({x:0,y:0,"
+                "w:Math.max(document.body?document.body.scrollWidth:0,"
+                "document.documentElement.scrollWidth),"
+                "h:Math.max(document.body?document.body.scrollHeight:0,"
+                "document.documentElement.scrollHeight)})")
+            clip = self._clip_from(dim)
+            if clip is not None:
+                params["clip"] = clip
+                params["captureBeyondViewport"] = True
+        res = self._call("Page.captureScreenshot", **params)
         return str((res or {}).get("data", "") or "")
+
+    @staticmethod
+    def _clip_from(raw: str) -> dict | None:
+        """Parse a {x,y,w,h} JSON box into a CDP clip, or None if unusable."""
+        try:
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(d, dict) or (d.get("w", 0) < 1 or d.get("h", 0) < 1):
+            return None
+        return {"x": d.get("x", 0), "y": d.get("y", 0),
+                "width": d["w"], "height": d["h"], "scale": 1}
 
     def observe(self, limit: int = _OBSERVE_MAX) -> str:
         """Perceive the page as a numbered map of its visible interactive

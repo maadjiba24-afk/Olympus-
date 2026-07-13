@@ -527,6 +527,26 @@ def test_screenshot_captures_base64(monkeypatch):
         browser.set_transport_factory(None)
 
 
+def test_screenshot_variants_set_the_right_clip(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#b"])
+        sess.screenshot()                                  # viewport
+        sess.screenshot(full_page=True)                    # whole page
+        sess.screenshot(selector="#b")                     # one element
+        caps = [c["params"] for c in sess.ledger
+                if c["method"] == "Page.captureScreenshot"]
+        assert "clip" not in caps[0]                       # viewport: no clip
+        assert caps[1]["clip"]["height"] == 3000           # full page dimensions
+        assert caps[1].get("captureBeyondViewport") is True
+        assert caps[2]["clip"] == {"x": 10, "y": 20, "width": 80,
+                                   "height": 30, "scale": 1}
+        assert caps[2].get("captureBeyondViewport") is True
+        # a missing element captures nothing (no clip on a phantom box)
+        assert sess.screenshot(selector="#missing") == ""
+    finally:
+        browser.set_transport_factory(None)
+
+
 def test_screenshot_refuses_blocked_landing():
     # A session sitting on an internal address must not capture its pixels.
     t = browser.FakeTransport(

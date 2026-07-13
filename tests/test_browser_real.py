@@ -85,6 +85,28 @@ def test_screenshot_returns_png_bytes(real_session):
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"      # a real PNG signature
 
 
+def test_element_and_full_page_screenshots_for_real(real_session):
+    import base64
+    real_session.open(_page(
+        "<div style='height:3000px'>tall</div>"
+        "<button id=b style='width:80px;height:30px'>Btn</button>"))
+    viewport = len(base64.b64decode(real_session.screenshot()))
+    full = len(base64.b64decode(real_session.screenshot(full_page=True)))
+    element = len(base64.b64decode(real_session.screenshot(selector="#b")))
+    # full page (3000px tall) is bigger than the viewport; one element is smaller
+    assert full > viewport > element > 0
+
+
+def test_transport_reconnects_after_a_dropped_socket(real_session):
+    real_session.open(_page("<h1 id=t>ALIVE</h1>"))
+    assert real_session._eval("document.getElementById('t').innerText") == "ALIVE"
+    # forcibly drop the underlying WebSocket
+    real_session._t._conn.close()
+    # the next call transparently reconnects to the same tab and succeeds
+    assert real_session._eval("1+1") == "2"
+    assert real_session._eval("document.getElementById('t').innerText") == "ALIVE"
+
+
 def test_list_tabs_for_real(real_session):
     real_session.open(_page("<h1>tab</h1>"))
     tabs = real_session.list_tabs()

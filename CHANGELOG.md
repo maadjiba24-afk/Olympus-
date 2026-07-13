@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Improved — browser harness: transport auto-reconnect
+
+A dropped WebSocket used to wedge the harness. `_RealTransport` now remembers its
+target socket and, on a transport-level failure (a genuine CDP error is *not*
+retried), transparently reconnects once and retries the call — serialized so
+concurrent callers reconnect a single time, and re-arming Page/Network events on
+the fresh connection. Verified against real Chromium (forcibly closing the socket
+mid-session; the next call reconnects to the same tab and the page state is
+intact).
+
+### Improved — browser harness: element- and full-page screenshots
+
+`browser_screenshot` was viewport-only; it now also captures **one element**
+(pass a `selector` — clipped to its bounding box) or the **whole scrollable
+page** (`full_page: true` — `captureBeyondViewport` over the full document
+dimensions). Same INGESTION governance (untrusted pixels, wrapped,
+capability-separated); no new tool. Verified against real Chromium (a 3000 px
+page's full-page capture is larger than the viewport, and a single element's is
+smaller).
+
 ### Added — browser harness: download capture
 
 `set_download_dir` only *confined* where downloads land; now the harness can
