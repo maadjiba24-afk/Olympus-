@@ -1157,6 +1157,20 @@ def _browser_observe(limit: int = 0) -> str:
     return sess.observe(int(limit) or browser._OBSERVE_MAX)
 
 
+def _browser_checkpoint() -> str:
+    # Detect (never defeat) a human-verification checkpoint on the current
+    # authorized page. Bounded enum, operator-gated, capability-separated.
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    cp = sess.detect_checkpoint()
+    if cp["type"] == "none":
+        return "No human-verification checkpoint detected."
+    return (f"Human-verification checkpoint: {cp['type']} ({cp['detail']}). "
+            "I never solve or bypass these — this needs you to clear it, and I'll "
+            "record a signed attestation that you did.")
+
+
 def _browser_act(action: str, selector: str = "", text: str = "",
                  x: int = 0, y: int = 0, index: int | None = None,
                  key: str = "", value: str = "") -> str:
@@ -1599,6 +1613,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_read": _browser_read,
     "browser_screenshot": _browser_screenshot,
     "browser_observe": _browser_observe,
+    "browser_checkpoint": _browser_checkpoint,
     "browser_act": _browser_act,
     "browser_tabs": _browser_tabs,
     "browser_switch_tab": _browser_switch_tab,
@@ -2199,6 +2214,18 @@ BROWSER_OBSERVE = {
         },
         "required": [],
     },
+}
+
+BROWSER_CHECKPOINT = {
+    "name": "browser_checkpoint",
+    "description": (
+        "Detect — never solve — a human-verification checkpoint (CAPTCHA, "
+        "one-time-code / 2FA, or a 'verify it's you' step) on the current "
+        "authorized page. Returns the checkpoint type so the operator can hand "
+        "off to the human, who clears it; Olympus then records a signed "
+        "attestation that a human did. Operator-gated; never a bypass attempt."
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
 BROWSER_ACT = {
@@ -2838,6 +2865,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_read": BROWSER_READ,
     "browser_screenshot": BROWSER_SCREENSHOT,
     "browser_observe": BROWSER_OBSERVE,
+    "browser_checkpoint": BROWSER_CHECKPOINT,
     "browser_act": BROWSER_ACT,
     "browser_tabs": BROWSER_TABS,
     "browser_switch_tab": BROWSER_SWITCH_TAB,

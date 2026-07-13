@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Attested Human Handoff: checkpoint detection (moat, part 1/…)
+
+Olympus turns the CAPTCHA/2FA boundary into a moat by refusing to defeat it and
+instead *proving a human cleared it*. The first piece is **detection, not
+defeat**.
+
+- **`browser_checkpoint` / `detect_checkpoint()`** recognizes a human-verification
+  checkpoint on the current authorized page — CAPTCHA (reCAPTCHA / hCaptcha /
+  Cloudflare Turnstile), one-time-code / 2FA inputs, or a "verify it's you"
+  step-up interstitial — by stable markers, and returns **only a type enum**
+  (never page prose, never a solve attempt). Providers are matched by their own
+  frame fingerprints, so a cross-origin challenge frame is *seen* without
+  reaching into it (the origin boundary is honored, not defeated).
+- Governed as **credentialed perception**: operator-gated, domain-authorized,
+  capability-separated (in `ACTION_TOOLS`), refuses a blocked landing. The
+  "never solve/bypass" stance is pinned to code by a test over the detector
+  script. Subsequent parts wire the handoff and the witness-signed attestation.
+
 ### Improved — browser harness: transport auto-reconnect
 
 A dropped WebSocket used to wedge the harness. `_RealTransport` now remembers its

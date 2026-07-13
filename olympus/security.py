@@ -37,6 +37,9 @@ ACTION_TOOLS = frozenset({
     # half of the same actuator loop — bounded structure, not prose, and kept
     # out of any prose-ingesting run so an injected page can't map your tabs.
     "browser_observe",
+    # Detecting a human-verification checkpoint perceives a credentialed page
+    # (bounded enum, never a bypass) — same actuator-class gating as observe.
+    "browser_checkpoint",
     # Listing/switching the credentialed browser's tabs reveals and redirects a
     # logged-in session; uploading a local file to a site is data egress. All
     # three are credentialed actuators, kept out of any prose-ingesting run.

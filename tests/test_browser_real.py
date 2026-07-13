@@ -126,6 +126,20 @@ def test_rightclick_and_key_chord_for_real(real_session):
         "document.querySelector('#q').getAttribute('data-chord')") == "1"
 
 
+def test_detect_checkpoint_for_real(real_session):
+    # A page with a reCAPTCHA marker is detected as a captcha checkpoint; a plain
+    # page is 'none'. The detector only reads markers — it never solves anything.
+    real_session.open(_page("<div class='g-recaptcha'></div>"))
+    assert real_session.detect_checkpoint()["type"] == "captcha"
+    real_session.open(_page(
+        "<input autocomplete='one-time-code' name='otp'>"))
+    assert real_session.detect_checkpoint()["type"] == "otp"
+    real_session.open(_page("<p>Two-factor authentication required</p>"))
+    assert real_session.detect_checkpoint()["type"] == "step_up"
+    real_session.open(_page("<h1>ordinary page</h1>"))
+    assert real_session.detect_checkpoint()["type"] == "none"
+
+
 def test_js_dialog_does_not_hang_and_respects_policy(real_session):
     # A click that pops confirm() must not wedge the harness. Default policy
     # dismisses (confirm→false); accept makes it confirm (confirm→true).

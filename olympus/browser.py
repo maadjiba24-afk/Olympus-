@@ -145,6 +145,36 @@ _OBSERVE_JS = (
     "return JSON.stringify(out);})()"
 ).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
+# Human-verification checkpoint DETECTOR (the moat's "detect, don't defeat"
+# step). It recognizes the common human-check widgets/flows by their stable
+# markers and returns a TYPE ENUM only — never page prose — so nothing here is a
+# defeat attempt or an injection surface. The __OLY_CHECKPOINT__ marker lets the
+# offline transport route it. Providers are matched by their own iframe/src
+# fingerprints (which are visible even on a cross-origin challenge frame, without
+# reaching INTO it — we honor the origin boundary, we just see the wall).
+_CHECKPOINT_JS = (
+    "(function(){/*__OLY_CHECKPOINT__*/"
+    "function has(s){try{return !!document.querySelector(s);}catch(e){return false;}}"
+    "if(has('.g-recaptcha')||has(\"iframe[src*='recaptcha']\")||"
+    "has(\"iframe[title*='recaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'recaptcha'});"
+    "if(has('.h-captcha')||has(\"iframe[src*='hcaptcha']\"))"
+    "return JSON.stringify({type:'captcha',detail:'hcaptcha'});"
+    "if(has('.cf-turnstile')||has(\"iframe[src*='challenges.cloudflare.com']\"))"
+    "return JSON.stringify({type:'captcha',detail:'turnstile'});"
+    "if(has(\"input[autocomplete='one-time-code']\")||"
+    "has(\"input[name*='otp']\")||has(\"input[name*='onetime']\"))"
+    "return JSON.stringify({type:'otp',detail:'one-time-code'});"
+    "var t=((document.body?document.body.innerText:'')||'').toLowerCase();"
+    "var cues=['verify it','two-factor','two factor','2-step','2 step',"
+    "'enter the code we','confirm your identity','verify your identity'];"
+    "for(var i=0;i<cues.length;i++){if(t.indexOf(cues[i])>=0)"
+    "return JSON.stringify({type:'step_up',detail:'interstitial'});}"
+    "return JSON.stringify({type:'none',detail:''});})()"
+)
+
+_CHECKPOINT_KINDS = ("captcha", "otp", "step_up", "none")
+
 # --- transport -----------------------------------------------------------
 
 
@@ -211,6 +241,8 @@ class FakeTransport:
         self.dialog_accept = False
         self.dialog_text = ""
         self.inflight_seq: list[int] = []
+        # Scriptable human-verification checkpoint for detect_checkpoint() offline.
+        self.checkpoint: dict = {"type": "none", "detail": ""}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
@@ -240,6 +272,8 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
+            if "__OLY_CHECKPOINT__" in expr:      # detect_checkpoint()
+                return {"result": {"value": json.dumps(self.checkpoint)}}
             if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
                 lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
                         "s": e.get("s", f'[data-olympus-idx="{i}"]')}
@@ -1048,6 +1082,25 @@ class BrowserSession:
             label = f' "{name}"' if name else ""
             lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
         return "\n".join(lines) or "(no interactive elements found)"
+
+    def detect_checkpoint(self) -> dict:
+        """Detect a human-verification checkpoint on the current page — the moat's
+        'detect, don't defeat' step. Returns {"type", "detail"} where type is one
+        of captcha / otp / step_up / none. It NEVER tries to solve or bypass the
+        check and returns only a bounded enum (no page prose), so it is a
+        structured predicate, not an ingestion or a defeat attempt. On a blocked
+        landing it reports none rather than reading the page."""
+        if self._blocked_landing():
+            return {"type": "none", "detail": ""}
+        try:
+            raw = self._eval(_CHECKPOINT_JS)
+            d = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError, Exception):
+            return {"type": "none", "detail": ""}
+        kind = d.get("type") if isinstance(d, dict) else None
+        if kind not in _CHECKPOINT_KINDS:
+            return {"type": "none", "detail": ""}
+        return {"type": kind, "detail": str(d.get("detail", ""))[:40]}
 
     def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
         """The structured perception: a list of {i, t, n, s} dicts (index, type,
