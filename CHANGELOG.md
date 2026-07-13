@@ -34,6 +34,13 @@ human stays at the one gate that can't be walked back.
   irreversible / financial / legal actions is never touched (min-to-auto stays
   99); (2) the boost is always **re-capped by the conversation's capability
   profile**, so an ingesting or guest run can never be lifted by it.
+- Two runaway guards on top of the streak, both of which fall back to asking
+  (never fail an action): a **post-surprise cooling-off window** (a site that
+  just surprised us must settle for an hour before it can re-earn trust, so a
+  compromised session can't fail-then-rapidly-succeed to re-arm unattended
+  auto-run) and a **per-domain daily auto-run ceiling** (a proven site still
+  can't fire an unbounded number of unattended actions in a day). Both are
+  surfaced in the `operator_trust` report.
 - Wired through the spine: `actions.can_auto_execute` / `auto_or_hold` take an
   optional earned level; `operator.run` computes the domain's effective level.
 - **`operator_trust`** (read-only tool) and `olympus earned-autonomy [on|off]`

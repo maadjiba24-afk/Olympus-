@@ -30,6 +30,8 @@ caps all still apply underneath it.
 
 from __future__ import annotations
 
+import time
+
 from . import actions, config, prefs
 
 # Trust tiers — a step function of the clean-run streak.
@@ -42,6 +44,20 @@ _TIER_NAMES = {PROBATION: "probation", TRUSTED: "trusted",
 # regaining a tier means rebuilding the whole run (the asymmetry is the point).
 _TRUSTED_AFTER = 5
 _ESTABLISHED_AFTER = 20
+
+# Two runaway guards on top of the streak, both of which force a fall-back to
+# per-action approval (they never fail an action — they just make Olympus ask):
+#
+#   Cooling-off: after a surprise, a domain must SETTLE before it can be trusted
+#   again, so a compromised session can't fail-then-rapidly-succeed to re-arm
+#   unattended auto-run. During the window the boost is suppressed even if a
+#   burst of clean runs has numerically rebuilt the streak.
+#
+#   Daily ceiling: a proven site still can't fire an unbounded number of
+#   unattended actions in a day — past the ceiling, further actions hold for
+#   approval until tomorrow.
+_COOLDOWN_SECS = 3600            # 1h to settle after any surprise
+_DAILY_AUTO_CEILING = 25         # max earned auto-runs per domain per day
 
 _PREF_KEY = "earned_autonomy"
 
@@ -118,9 +134,52 @@ def tier_name(t: int) -> str:
     return _TIER_NAMES.get(t, "probation")
 
 
+# --- runaway guards (both fall back to approval, never fail an action) ----
+
+def _is_surprise(a) -> bool:
+    return a.status in (actions.FAILED, actions.REJECTED, actions.UNDONE)
+
+
+def cooling_off(user: str, domain: str, *, now: float | None = None) -> float:
+    """Seconds remaining in the post-surprise cooling-off window for `domain`
+    (0.0 when the domain has settled). While this is positive, earned trust is
+    suppressed no matter what the streak says — a site that just surprised us
+    can't buy its way back with a quick burst of successes."""
+    domain = (domain or "").strip().lower()
+    if not domain:
+        return 0.0
+    now = time.time() if now is None else now
+    last = 0.0
+    for a in actions.history(user, limit=1000):
+        if _is_operate(a) and _domain_of(a) == domain and _is_surprise(a):
+            last = max(last, getattr(a, "created_at", 0.0) or 0.0)
+    if not last:
+        return 0.0
+    remaining = _COOLDOWN_SECS - (now - last)
+    return remaining if remaining > 0 else 0.0
+
+
+def auto_runs_today(user: str, domain: str, *, now: float | None = None) -> int:
+    """Governed actions that have EXECUTED on `domain` so far today — the count
+    the per-domain daily ceiling bounds."""
+    domain = (domain or "").strip().lower()
+    if not domain:
+        return 0
+    now = time.time() if now is None else now
+    midnight = now - (now % 86400)
+    n = 0
+    for a in actions.history(user, limit=1000):
+        if (_is_operate(a) and _domain_of(a) == domain
+                and a.status == actions.EXECUTED
+                and (getattr(a, "executed_at", None) or 0.0) >= midnight):
+            n += 1
+    return n
+
+
 # --- the gate modifier ----------------------------------------------------
 
-def effective_autonomy(user: str, domain: str) -> int:
+def effective_autonomy(user: str, domain: str, *,
+                       now: float | None = None) -> int:
     """The autonomy level to use for a REVERSIBLE action on `domain`, folding in
     earned trust. Returns the user's global level unchanged when earned autonomy
     is off or the domain hasn't earned anything.
@@ -132,6 +191,13 @@ def effective_autonomy(user: str, domain: str) -> int:
     """
     base = actions.autonomy_level(user)
     if not enabled(user):
+        return base
+    # A site that recently surprised us must settle before it earns anything back…
+    if cooling_off(user, domain, now=now) > 0:
+        return base
+    # …and even a proven site can't fire an unbounded number of unattended
+    # actions in one day — past the ceiling it falls back to asking.
+    if auto_runs_today(user, domain, now=now) >= _DAILY_AUTO_CEILING:
         return base
     t = tier(user, domain)
     if t >= ESTABLISHED:
@@ -175,6 +241,12 @@ def report(user: str) -> str:
         else:
             nxt_streak = _ESTABLISHED_AFTER if t == TRUSTED else _TRUSTED_AFTER
             toward = f" — {nxt_streak - s} more clean run(s) to {_TIER_NAMES[t + 1]}"
+        cool = cooling_off(user, d)
+        if cool > 0:
+            toward += f" — cooling off {int(cool // 60)}m after a surprise"
+        used = auto_runs_today(user, d)
+        if used >= _DAILY_AUTO_CEILING:
+            toward += " — daily auto-run ceiling reached (asking until tomorrow)"
         lines.append(f"  • {d}: {_TIER_NAMES[t]} (clean streak {s}){toward}")
     return "\n".join(lines)
 

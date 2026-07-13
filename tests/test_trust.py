@@ -17,13 +17,13 @@ def _isolate(tmp_path, monkeypatch):
 
 
 def _run(user, domain, status, ts, type_name="browser_operate",
-         risk=actions.NOTABLE):
+         risk=actions.NOTABLE, executed_at=None):
     """Write one governed operator action into the audit trail directly."""
     a = actions.Action(
         id=uuid.uuid4().hex[:12], user=memory.safe_id(user), type=type_name,
         title="op", payload={"domain": domain}, risk_class=risk,
         reversible=(risk in (actions.TRIVIAL, actions.NOTABLE)),
-        status=status, created_at=ts)
+        status=status, created_at=ts, executed_at=executed_at)
     actions._save(a)
     return a
 
@@ -116,6 +116,8 @@ def test_env_switch_enables_globally(monkeypatch):
 # --- the hard gate: irreversible never auto-runs, however trusted --------
 
 def _register(name, risk):
+    # Distinct throwaway type names so we never clobber the real operate
+    # ActionTypes in the shared global registry (test-order independence).
     actions.register(actions.ActionType(
         name=name, risk_class=risk, scope="browser.operate",
         preview=lambda p: "", execute=lambda p: {}))
@@ -124,8 +126,8 @@ def _register(name, risk):
 def test_irreversible_is_never_auto_even_at_max_level():
     u = "u8"
     prefs.set(memory.safe_id(u), "scopes", ["browser.operate"])
-    _register("browser_operate_irreversible", actions.IRREVERSIBLE)
-    a = actions.prepare(u, "browser_operate_irreversible", {"domain": "bank.com"})
+    _register("browser_operate_trust_irrev", actions.IRREVERSIBLE)
+    a = actions.prepare(u, "browser_operate_trust_irrev", {"domain": "bank.com"})
     # even handed the top autonomy level, an irreversible action holds for approval
     assert actions.can_auto_execute(a, level=actions.L4_STANDING) is False
 
@@ -133,13 +135,50 @@ def test_irreversible_is_never_auto_even_at_max_level():
 def test_reversible_auto_runs_with_earned_level_but_respects_cap():
     u = "u9"
     prefs.set(memory.safe_id(u), "scopes", ["browser.operate"])
-    _register("browser_operate", actions.NOTABLE)
-    a = actions.prepare(u, "browser_operate", {"domain": "shop.com"})
+    _register("browser_operate_trust_rev", actions.NOTABLE)
+    a = actions.prepare(u, "browser_operate_trust_rev", {"domain": "shop.com"})
     assert actions.can_auto_execute(a, level=actions.L4_STANDING) is True
     assert actions.can_auto_execute(a, level=actions.L1_PREPARE) is False
     # a caller-supplied level is still clamped by the capability-profile cap
     capprofile.assign(u, "reader")
     assert actions.can_auto_execute(a, level=actions.L4_STANDING) is False
+
+
+# --- runaway guards: cooling-off + daily ceiling -------------------------
+
+def test_cooling_off_suppresses_boost_after_a_surprise():
+    u = "uc"
+    trust.set_enabled(u, True)
+    # a surprise, then a burst of clean runs that numerically rebuilds trust
+    _run(u, "site.com", actions.FAILED, ts=1000)
+    for i in range(20):
+        _run(u, "site.com", actions.EXECUTED, ts=1001 + i)
+    assert trust.tier(u, "site.com") == trust.ESTABLISHED
+    # within the cooling-off window the boost is withheld despite the streak…
+    soon = 1000 + trust._COOLDOWN_SECS - 5
+    assert trust.effective_autonomy(u, "site.com", now=soon) == actions.autonomy_level(u)
+    assert trust.cooling_off(u, "site.com", now=soon) > 0
+    # …and returns once the site has settled
+    later = 1000 + trust._COOLDOWN_SECS + 5
+    assert trust.effective_autonomy(u, "site.com", now=later) == actions.L4_STANDING
+    assert trust.cooling_off(u, "site.com", now=later) == 0.0
+
+
+def test_daily_ceiling_falls_back_to_asking():
+    u = "ud"
+    trust.set_enabled(u, True)
+    day = 10 * 86400
+    # exactly at the ceiling: every run executed "today"
+    for i in range(trust._DAILY_AUTO_CEILING):
+        _run(u, "site.com", actions.EXECUTED, ts=day + i, executed_at=day + i)
+    at = day + trust._DAILY_AUTO_CEILING
+    assert trust.auto_runs_today(u, "site.com", now=at) == trust._DAILY_AUTO_CEILING
+    # past the ceiling, earned autonomy withholds the boost (holds for approval)
+    assert trust.effective_autonomy(u, "site.com", now=at) == actions.autonomy_level(u)
+    # a NEW day resets the count, so the proven site auto-runs again
+    next_day = day + 86400
+    assert trust.auto_runs_today(u, "site.com", now=next_day) == 0
+    assert trust.effective_autonomy(u, "site.com", now=next_day) == actions.L4_STANDING
 
 
 # --- surfaces ------------------------------------------------------------
