@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Attested Human Handoff: signed attestations (moat, part 2/…)
+
+The moat core: a cleared human-verification check becomes a **cryptographically
+signed attestation** (`olympus/attest.py`), signed with the same Ed25519
+root-of-trust that signs the decision log (`olympus.witness`).
+
+- `attest(kind, domain)` mints a signed record ("a human cleared a
+  `captcha`/`otp`/`step_up` verification on `domain` at `time`");
+  `verify_attestation` is tamper-evident (forging the domain or kind breaks the
+  signature) and **pin-bindable** (`OLYMPUS_ATTEST_PIN`) so a third-party
+  verifier holding the expected key out-of-band can check it. Fails closed
+  without the crypto backend — an unsigned "proof" is never minted.
+- Attestations persist to an append-only ledger (`attestations.jsonl`);
+  `latest_attestation(domain)` binds a later credentialed action to the
+  human-check that preceded it, and `summary()` renders the audit trail. This is
+  a proof a bypass-first agent structurally cannot produce — having defeated the
+  human, it has nothing to attest.
+
 ### Added — Attested Human Handoff: checkpoint detection (moat, part 1/…)
 
 Olympus turns the CAPTCHA/2FA boundary into a moat by refusing to defeat it and
