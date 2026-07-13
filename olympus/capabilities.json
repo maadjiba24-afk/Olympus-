@@ -144,13 +144,14 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 90,
+    "count": 92,
     "names": [
       "add_todo",
       "analyze_image",
       "ask_user",
       "browse_page",
       "browser_act",
+      "browser_attest_human",
       "browser_checkpoint",
       "browser_dialog",
       "browser_download",
@@ -190,6 +191,7 @@
       "list_documents",
       "list_source_files",
       "list_todos",
+      "operator_attestations",
       "operator_authorize_site",
       "operator_forget_site",
       "operator_history",

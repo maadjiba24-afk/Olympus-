@@ -1171,6 +1171,36 @@ def _browser_checkpoint() -> str:
             "record a signed attestation that you did.")
 
 
+def _browser_attest_human(kind: str = "step_up") -> str:
+    # After a human clears a verification check, record a SIGNED attestation that
+    # they did. We first re-detect: if the same checkpoint is still on the page,
+    # we refuse to attest — the proof is only minted once the wall is verifiably
+    # down, never on the model's say-so.
+    from urllib.parse import urlparse
+    from . import attest
+    sess, err = _operator_authorized_session()
+    if err:
+        return err
+    kind = kind if kind in attest.KINDS else "step_up"
+    still = sess.detect_checkpoint()
+    if still["type"] == kind:
+        return (f"The {kind} check is still on the page — clear it in the browser "
+                "first, then tell me and I'll record the attestation.")
+    host = (urlparse(sess._current_url() or "").hostname or "").lower()
+    try:
+        rec = attest.attest_and_record(kind, host)
+    except attest.AttestError as exc:
+        return f"Error: {exc}."
+    return (f"Recorded a signed attestation that you cleared a {kind} check on "
+            f"{host} ({rec['id']}). Credentialed actions from here reference it.")
+
+
+def _operator_attestations(domain: str = "") -> str:
+    # First-party read of the signed human-verification audit trail.
+    from . import attest
+    return attest.summary(domain)
+
+
 def _browser_act(action: str, selector: str = "", text: str = "",
                  x: int = 0, y: int = 0, index: int | None = None,
                  key: str = "", value: str = "") -> str:
@@ -1614,6 +1644,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "browser_screenshot": _browser_screenshot,
     "browser_observe": _browser_observe,
     "browser_checkpoint": _browser_checkpoint,
+    "browser_attest_human": _browser_attest_human,
+    "operator_attestations": _operator_attestations,
     "browser_act": _browser_act,
     "browser_tabs": _browser_tabs,
     "browser_switch_tab": _browser_switch_tab,
@@ -2211,6 +2243,41 @@ BROWSER_OBSERVE = {
         "properties": {
             "limit": {"type": "integer",
                       "description": "Max elements to return (default 120)"},
+        },
+        "required": [],
+    },
+}
+
+BROWSER_ATTEST_HUMAN = {
+    "name": "browser_attest_human",
+    "description": (
+        "After the human clears a verification check (CAPTCHA / one-time-code / "
+        "step-up), record a cryptographically SIGNED attestation that they did — "
+        "pass the 'kind' that was cleared. It first re-checks the page and "
+        "refuses if the same checkpoint is still there, so the proof is only "
+        "minted once the check is verifiably cleared. Operator-gated."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["captcha", "otp", "step_up"],
+                     "description": "The kind of check the human cleared"},
+        },
+        "required": [],
+    },
+}
+
+OPERATOR_ATTESTATIONS = {
+    "name": "operator_attestations",
+    "description": (
+        "Show the signed human-verification audit trail — the record of which "
+        "human-checks a person cleared, on which sites, when. Optionally filter "
+        "to one domain. Proof that a human was in the loop for each verification."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "description": "Optional site filter"},
         },
         "required": [],
     },
@@ -2866,6 +2933,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "browser_screenshot": BROWSER_SCREENSHOT,
     "browser_observe": BROWSER_OBSERVE,
     "browser_checkpoint": BROWSER_CHECKPOINT,
+    "browser_attest_human": BROWSER_ATTEST_HUMAN,
+    "operator_attestations": OPERATOR_ATTESTATIONS,
     "browser_act": BROWSER_ACT,
     "browser_tabs": BROWSER_TABS,
     "browser_switch_tab": BROWSER_SWITCH_TAB,

@@ -145,6 +145,32 @@ def latest_attestation(domain: str) -> dict | None:
     return None
 
 
+def burden_by_domain() -> dict[str, int]:
+    """How many human-checks each site has required (from the attestation ledger)
+    — the metric the moat drives toward zero as saved sessions cut re-checks."""
+    counts: dict[str, int] = {}
+    for r in list_attestations():
+        d = r.get("domain", "")
+        counts[d] = counts.get(d, 0) + 1
+    return counts
+
+
+def evolution_report() -> str:
+    """METIS-facing: where the human-check burden sits, so the operator can cut
+    it — a saved session (browser_save_auth) + 'remember this device' means the
+    human clears a check ONCE and the agent reuses it, so the rate should fall
+    over time. Highlights the heaviest sites to target next."""
+    counts = burden_by_domain()
+    if not counts:
+        return "No human-verification checkpoints have needed a human yet."
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    lines = ["Human-check burden (drive toward zero via saved sessions):"]
+    for domain, n in ranked[:10]:
+        hint = " — save this session to stop re-clearing it" if n >= 3 else ""
+        lines.append(f"- {domain}: {n} human-check(s){hint}")
+    return "\n".join(lines)
+
+
 def summary(domain: str = "") -> str:
     """A short, human-facing rundown of the signed human-attestations — the audit
     trail that proves a human cleared each verification."""

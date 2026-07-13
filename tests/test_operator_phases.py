@@ -110,6 +110,21 @@ def test_operate_blocked_without_scope(monkeypatch):
     assert "Awaiting your approval" in out
 
 
+def test_operate_hands_off_on_a_human_checkpoint(monkeypatch):
+    # A blocking human-verification checkpoint must be reported as a handoff —
+    # never solved, and never mistaken for template drift (no self-heal proposal).
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")            # asserts #buy, which is absent below
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        checkpoint={"type": "captcha", "detail": "recaptcha"}))
+    user = memory.current_user()
+    action = operator.run(user, "shop.com", "buy", {})
+    assert action.status == actions.FAILED
+    assert "human-verification checkpoint" in (action.error or "").lower()
+    assert "captcha" in (action.error or "").lower()
+
+
 # --- Phase 3: always-on jobs through the heartbeat ------------------------
 
 def test_run_due_is_noop_when_operator_disabled(monkeypatch):

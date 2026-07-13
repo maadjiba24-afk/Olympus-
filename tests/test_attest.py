@@ -60,6 +60,17 @@ def test_summary_reports_validity():
     assert "shop.com" in out and "captcha" in out and "valid" in out
 
 
+def test_burden_tracking_drives_the_evolution_report():
+    for _ in range(3):
+        attest.attest_and_record("captcha", "heavy.com")
+    attest.attest_and_record("otp", "light.com")
+    burden = attest.burden_by_domain()
+    assert burden["heavy.com"] == 3 and burden["light.com"] == 1
+    report = attest.evolution_report()
+    # the heaviest site is flagged to save its session (cut repeat checks)
+    assert "heavy.com" in report and "save this session" in report.lower()
+
+
 def test_malformed_ledger_lines_are_skipped():
     attest.attest_and_record("captcha", "shop.com")
     path = attest._path()

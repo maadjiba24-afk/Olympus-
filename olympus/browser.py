@@ -216,7 +216,8 @@ class FakeTransport:
                  redirects: dict[str, str] | None = None,
                  present: list[str] | None = None,
                  elements: list[dict[str, str]] | None = None,
-                 targets: list[dict] | None = None) -> None:
+                 targets: list[dict] | None = None,
+                 checkpoint: dict | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -242,7 +243,7 @@ class FakeTransport:
         self.dialog_text = ""
         self.inflight_seq: list[int] = []
         # Scriptable human-verification checkpoint for detect_checkpoint() offline.
-        self.checkpoint: dict = {"type": "none", "detail": ""}
+        self.checkpoint: dict = checkpoint or {"type": "none", "detail": ""}
         # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
         self.screenshot_b64 = (
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"

@@ -376,6 +376,35 @@ def test_browser_checkpoint_is_operator_gated_perception():
     assert "browser_checkpoint" in hermes
 
 
+def test_attest_human_only_after_the_check_is_cleared(monkeypatch):
+    from olympus import memory, witness
+    if not witness.available():
+        pytest.skip("cryptography backend unavailable")
+    try:
+        monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
+        monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
+        memory.set_user("shared")
+        sess = _harness_session(monkeypatch)
+        # while the checkpoint stands, we refuse to attest (no say-so proofs)
+        sess._t.checkpoint = {"type": "captcha", "detail": "recaptcha"}
+        assert "still on the page" in tools._browser_attest_human("captcha")
+        # once cleared (detector returns none), the signed attestation is minted
+        sess._t.checkpoint = {"type": "none", "detail": ""}
+        out = tools._browser_attest_human("captcha")
+        assert "Recorded a signed attestation" in out and "ex.com" in out
+        # and it shows up, verified, in the audit trail
+        assert "valid" in tools._operator_attestations("ex.com")
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_attest_human_and_attestations_governance():
+    assert "browser_attest_human" in security.ACTION_TOOLS       # signed, gated
+    assert "operator_attestations" not in security.ACTION_TOOLS  # first-party read
+    hermes = {d.get("name") for d in SPECIALISTS["hermes"].tool_defs("anthropic")}
+    assert {"browser_attest_human", "operator_attestations"} <= hermes
+
+
 # --- robustness: JS dialogs can't wedge a click -----------------------------
 
 def test_dialog_policy_wires_to_transport_and_defaults_dismiss(monkeypatch):

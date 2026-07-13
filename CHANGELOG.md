@@ -15,6 +15,37 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Attested Human Handoff: evolve + honest-automation policy (moat, part 4/4)
+
+The moat compounds and the stance is documented.
+
+- **Need it less over time.** `attest.burden_by_domain()` / `evolution_report()`
+  track how often each site required a human — folded into the operator review
+  cycle, which now surfaces the heaviest sites and prompts saving their sessions
+  (`browser_save_auth`), so a cleared 2FA is reused and the checkpoint rate
+  falls. Clear once, reuse many; every action stays attested.
+- **Honest automation, documented** (`docs/DESIGN_HANDOFF.md`): no CAPTCHA
+  solvers, no anti-bot / fingerprint evasion, no 2FA bypass — refused by design
+  and pinned by test; prefer official APIs, otherwise operate transparently.
+  Olympus is detectable and attested, and treats that as the trust feature.
+
+### Added — Attested Human Handoff: the handoff + operator wiring (moat, part 3/…)
+
+The loop closes: detect → hand off → verify cleared → attest.
+
+- **Operate is checkpoint-aware.** When a template step can't proceed,
+  `operator.execute` now first checks for a human-verification checkpoint; if one
+  is present it reports a **handoff** ("clear it in the browser, then I'll
+  continue and record a signed attestation") instead of mistaking it for
+  template drift — no spurious self-heal proposal, never a solve attempt.
+- **`browser_attest_human`** records the signed attestation *only after
+  re-checking the live page and confirming the checkpoint is gone* — the proof
+  is minted when the check is verifiably cleared, never on the model's say-so.
+  Operator-gated, capability-separated, bound to the credentialed session.
+- **`operator_attestations`** renders the signed audit trail (first-party read),
+  each entry shown with its verify status — proof a human was in the loop for
+  every verification.
+
 ### Added — Attested Human Handoff: signed attestations (moat, part 2/…)
 
 The moat core: a cleared human-verification check becomes a **cryptographically
