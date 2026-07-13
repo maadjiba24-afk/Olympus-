@@ -68,12 +68,12 @@ def _verify_run_combined(run_id: str, require_production: bool) -> int:
     # (signed by the public default key) is integrity-only by definition and is
     # handled by the dev label / --require-production gate below, not by the pin
     # (which is the production trust anchor).
-    pin = witness.pinned_pubkey()
+    pins = witness.pinned_pubkeys()
     signer = ((run.get("log_signature") or {}).get("publicKey") or "").lower()
-    if sig_ok and posture == "production" and pin and signer != pin.lower():
+    if sig_ok and posture == "production" and pins and signer not in pins:
         sig_ok = False
-        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that does not "
-                   f"match the pinned public key {pin.lower()[:16]}…")
+        sig_msg = (f"signed by an UNTRUSTED key {signer[:16]}… that matches "
+                   f"none of the {len(pins)} pinned public key(s)")
 
     print(f"Run {run_id} — verification ({posture} signing posture)")
     print(f"  replay    : {'PASS' if replay_ok else 'FAIL'} — {replay_msg}")
@@ -104,7 +104,24 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("chat", help="interactive conversation (default)")
-    sub.add_parser("setup", help="choose your AI provider & save your API key")
+    p_setup = sub.add_parser(
+        "setup", help="choose your AI provider & save your API key; or edit one "
+                      "section: setup <model|terminal|gateway|tools>")
+    p_setup.add_argument("section", nargs="?",
+                         help="edit just one part (model/terminal/gateway/tools)")
+    p_cfg = sub.add_parser(
+        "config", help="view or change saved settings (secrets are masked)")
+    p_cfg.add_argument("action", nargs="?", default="show",
+                       choices=["show", "set", "edit"])
+    p_cfg.add_argument("kv", nargs="*",
+                       help="for set: <KEY> <VALUE>")
+    sub.add_parser("doctor", help="check readiness: provider, sandbox, security, "
+                                  "memory, optional capabilities")
+    p_soul = sub.add_parser(
+        "soul", help="view or edit Olympus's personality (~/.olympus/soul.md), "
+                     "injected into every reply")
+    p_soul.add_argument("action", nargs="?", default="show",
+                        choices=["show", "edit"])
     sub.add_parser("version", help="show the installed Olympus version")
     sub.add_parser("growth", help="show how Olympus has adapted to you over time")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
@@ -158,6 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    sub.add_parser("routing-stats",
+                   help="routing-outcome telemetry (SPEC-04 Phase A) + the "
+                        "Phase B data-gate readiness check")
     sub.add_parser("learned", help="what Olympus learned/did on its own "
                                    "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
@@ -232,6 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("witness-pubkey", aliases=["pubkey"],
                    help="print the Ed25519 public key for the "
                                           "current signing seed (to pin it)")
+    p_keygen = sub.add_parser(
+        "keygen", help="generate a 256-bit signing seed file (mode 0600) and "
+                       "print the public key to pin — see docs/SIGNING.md")
+    p_keygen.add_argument("--out", metavar="PATH", default=None,
+                          help="where to write the seed file "
+                               "(default: <memory dir>/signing_seed)")
+    p_keygen.add_argument("--force", action="store_true",
+                          help="overwrite an existing seed file (the old key "
+                               "becomes unrecoverable)")
 
     p_ask = sub.add_parser("ask", help="one-shot question through the full pipeline")
     p_ask.add_argument("question", nargs="+")
@@ -239,6 +268,16 @@ def build_parser() -> argparse.ArgumentParser:
                        default=None,
                        help="data-sensitivity class for routing; 'restricted' "
                             "stays local even with sovereign mode off")
+
+    p_res = sub.add_parser(
+        "research",
+        help="deep research: plan → iterative web search/read → cited report")
+    p_res.add_argument("question", nargs="+")
+    p_res.add_argument("--rounds", type=int, default=None,
+                       help="search/read rounds (default "
+                            "OLYMPUS_RESEARCH_ROUNDS or 4)")
+    p_res.add_argument("--out", default=None,
+                       help="also write the report to this markdown file")
 
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
@@ -274,7 +313,11 @@ def build_parser() -> argparse.ArgumentParser:
                          help="e.g. daily, hourly, 'every 6h'")
     p_sched.add_argument("prompt", nargs="*", help="the task to run each time")
     p_sched.add_argument("--to", default="", dest="deliver_to",
-                         help="deliver result to: telegram|discord|slack|signal")
+                         help="deliver result to: telegram|discord|slack|signal|ntfy")
+    p_sched.add_argument("--on-exit", type=int, default=0, dest="on_exit_pid",
+                         metavar="PID",
+                         help="event-driven: run once when this process exits "
+                              "(the interval argument is ignored)")
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
@@ -302,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("code-eval", help="run execution-scored coding benchmarks "
                                      "(runs Hephaestus's code against tests)")
     sub.add_parser("skills", help="list the self-built skill library")
+    sub.add_parser("skills-starter",
+                   help="install a small curated starter-skill pack "
+                        "(provisional — benchmark-gated like any other skill)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
@@ -309,7 +355,10 @@ def build_parser() -> argparse.ArgumentParser:
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
                                                  "file(s) into the skill library")
-    p_skim.add_argument("path", help="a SKILL.md, its directory, or a tree to scan")
+    p_skim.add_argument("path", help="a SKILL.md, its directory, a tree to "
+                                     "scan, or a public GitHub URL (repo, "
+                                     "tree, blob, or raw SKILL.md — remote "
+                                     "imports are always provisional)")
     p_skim.add_argument("--provisional", action="store_true",
                         help="route imports through the benchmark gate")
     p_skex = sub.add_parser("skill-export", help="export a skill as an "
@@ -379,6 +428,129 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
+    p_gw = sub.add_parser(
+        "gateway", help="run ALL configured chat channels together in one "
+                        "always-on daemon (Telegram/Discord/Slack/Signal/"
+                        "WhatsApp/email/webhook)")
+    p_gw.add_argument("--only", default="",
+                      help="comma-separated subset of channels to run "
+                           "(default: every configured channel)")
+    p_gw.add_argument("--list", action="store_true", dest="list_channels",
+                      help="list which channels are configured, then exit")
+    p_gw.add_argument("--status", action="store_true", dest="gw_status",
+                      help="report a running daemon's per-channel health "
+                           "(reads its status file), then exit")
+    p_secret = sub.add_parser(
+        "secret", help="named secrets for SecretRef config indirection — "
+                       "reference them as vault:NAME instead of pasting "
+                       "credentials into config/env")
+    p_secret.add_argument("action", nargs="?", default="ls",
+                          choices=["set", "ls", "rm"])
+    p_secret.add_argument("name", nargs="?", default="")
+    p_wiki = sub.add_parser(
+        "wiki", help="the memory wiki: concept pages maintained by nightly "
+                     "dreaming (list | show <page> | lint | dream | rm <page>)")
+    p_wiki.add_argument("action", nargs="?", default="list",
+                        choices=["list", "show", "lint", "dream", "rm"])
+    p_wiki.add_argument("page", nargs="?", default="")
+    p_wiki.add_argument("--user", default="shared",
+                        help="memory namespace (default: shared)")
+    p_restrict = sub.add_parser(
+        "restrict", help="scope a conversation/user to a capability profile "
+                         "(full | reader | guest | custom)")
+    p_restrict.add_argument("user", nargs="?", default="",
+                            help="conversation/user id (e.g. tg-12345)")
+    p_restrict.add_argument("profile", nargs="?", default="",
+                            help="profile name; omit to show current")
+    p_restrict.add_argument("--clear", action="store_true",
+                            help="remove the explicit restriction")
+    p_restrict.add_argument("--profiles", action="store_true",
+                            dest="list_profiles", help="list known profiles")
+    p_pair = sub.add_parser(
+        "pair", help="mint a one-time pairing code so a chat can talk to "
+                     "Olympus (channels are untrusted by default)")
+    p_pair.add_argument("channel", nargs="?", default="telegram",
+                        help="channel to pair (default: telegram)")
+    p_pair.add_argument("--revoke", metavar="SENDER_ID",
+                        help="unpair a previously paired chat/sender id")
+    p_pair.add_argument("--list", action="store_true", dest="list_paired",
+                        help="list paired sender ids for the channel")
+    p_doc = sub.add_parser(
+        "documents", aliases=["docs"],
+        help="your document workspace: list | read <name> | delete <name>")
+    p_doc.add_argument("action", nargs="?", default="list",
+                       choices=["list", "read", "delete"])
+    p_doc.add_argument("name", nargs="?", help="document name (read/delete)")
+
+    p_gal = sub.add_parser(
+        "gallery", aliases=["images"],
+        help="images generated into the workspace: list | delete <name>")
+    p_gal.add_argument("action", nargs="?", default="list",
+                       choices=["list", "delete", "edit"])
+    p_gal.add_argument("name", nargs="?", help="image file name (delete/edit)")
+    p_gal.add_argument("prompt", nargs="*", help="edit prompt (edit)")
+
+    sub.add_parser(
+        "agenda",
+        help="your scheduled tasks and upcoming calendar events in one view")
+
+    p_todo = sub.add_parser(
+        "todo", aliases=["todos", "notes"],
+        help="your notes, todos, and reminders: list | add <text> | done <id> "
+             "| rm <id> | clear")
+    p_todo.add_argument("action", nargs="?", default="list",
+                        choices=["list", "add", "done", "rm", "clear"])
+    p_todo.add_argument("text", nargs="*", help="item text (add) or id (done/rm)")
+    p_todo.add_argument("--due", default="",
+                        help="due time for a reminder, e.g. '2026-07-10 09:00'")
+    p_todo.add_argument("--note", action="store_true",
+                        help="add as a kept note instead of a tickable todo")
+
+    p_health = sub.add_parser(
+        "health",
+        help="runtime health of the moving parts (models, memory, gateway, "
+             "search, push, connections); exits non-zero if anything is down")
+    p_health.add_argument("--json", action="store_true", dest="as_json",
+                          help="emit the structured report as JSON")
+
+    p_triage = sub.add_parser(
+        "triage",
+        help="triage the inbox into important/promotions/spam/other "
+             "(read-only; needs a connected Google account)")
+    p_triage.add_argument("--query", default="in:inbox",
+                          help="Gmail search (default 'in:inbox')")
+    p_triage.add_argument("--max", type=int, default=20, dest="max_results",
+                          help="how many messages to triage (default 20)")
+
+    p_cmp = sub.add_parser(
+        "compare",
+        help="blind multi-model compare: same prompt, every configured model, "
+             "revealed only after you pick")
+    p_cmp.add_argument("prompt", nargs="?", help="the prompt to compare")
+    p_cmp.add_argument("--pick", metavar="LABEL",
+                       help="record a pick (A/B/…) for --reveal")
+    p_cmp.add_argument("--reveal", metavar="ID",
+                       help="reveal a prior comparison by id")
+    p_cmp.add_argument("--tally", action="store_true",
+                       help="show your running blind-pick tally")
+
+    p_op = sub.add_parser(
+        "operator",
+        help="manage the Hermes operator (acts on YOUR authorized accounts)")
+    p_op.add_argument(
+        "action", nargs="?", default="status",
+        choices=["status", "enable", "disable", "authorize", "forget",
+                 "list", "history"],
+        help="status (default) | enable | disable | authorize <domain> | "
+             "forget <domain> | list (site profiles) | history")
+    p_op.add_argument("target", nargs="?",
+                      help="domain, for authorize/forget")
+    p_op.add_argument("--remember", action="store_true",
+                      help="authorize with saved-password (remember) login "
+                           "instead of manual sign-in")
+    p_op.add_argument("--limit", type=int, default=20,
+                      help="rows to show for history (default 20)")
+
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
                                            "(needs WHATSAPP_* env vars)")
     p_wa.add_argument("--host", default="0.0.0.0")
@@ -396,6 +568,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
+    p_email = sub.add_parser("email", help="run the email gateway — answer "
+                                           "unread mail via the Gmail adapter")
+    p_email.add_argument("--interval", type=int, default=60,
+                         help="seconds between inbox polls (default 60)")
+    p_hook = sub.add_parser("webhook", help="serve the inbound webhook gateway "
+                                            "(POST {user,text} → {reply})")
+    p_hook.add_argument("--host", default="0.0.0.0")
+    p_hook.add_argument("--port", type=int, default=8487)
 
     return parser
 
@@ -421,8 +601,43 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass                        # a broken vault must never block the CLI
 
+    # Sovereign boot invariant: a sovereign instance must not run on the PUBLIC
+    # default signing seed (its decision logs and backups would be forgeable).
+    # Checked here — after the saved env is loaded, before any command runs —
+    # so the failure is one actionable line at boot, not a surprise later.
+    # `keygen` is exempt: it is the fix the error prescribes. Non-sovereign
+    # instances are untouched. witness.sign() re-checks (defense in depth).
+    if args.command != "keygen":
+        from . import config as _config, witness as _witness
+        if _config.sovereign_mode():
+            try:
+                _witness.check_sovereign_seed()
+            except _witness.WitnessError as err:
+                print(f"[sovereign] {err}", file=sys.stderr)
+                return 1
+
     if args.command == "setup":
-        firstrun.wizard()
+        if getattr(args, "section", None):
+            firstrun.setup_section(args.section)
+        else:
+            firstrun.wizard()
+    elif args.command == "config":
+        if args.action == "show":
+            print(firstrun.show_config())
+        elif args.action == "edit":
+            print(firstrun.open_in_editor())
+        elif args.action == "set":
+            if len(args.kv) < 2:
+                print("Usage: olympus config set <KEY> <VALUE>")
+                return 1
+            print(firstrun.config_set(args.kv[0], " ".join(args.kv[1:])))
+    elif args.command == "doctor":
+        from . import doctor
+        print(doctor.render())
+        return 0 if doctor.is_ready() else 1
+    elif args.command == "soul":
+        from . import soul
+        print(soul.edit() if args.action == "edit" else soul.show())
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")
@@ -745,13 +960,39 @@ def main(argv: list[str] | None = None) -> int:
                   "See docs/SIGNING.md (HSM/KMS recommended for the seed).",
                   file=sys.stderr)
         else:
-            pin = witness.pinned_pubkey()
-            state = ("matches the pinned key" if pin and pin.lower() == pub.lower()
+            pins = witness.pinned_pubkeys()
+            state = ("matches a pinned key" if pub.lower() in pins
                      else "NOT yet pinned — add it to witness_pubkey.txt / "
-                          "OLYMPUS_PINNED_PUBKEY" if not pin
-                     else "DIFFERS from the pinned key (rotation in progress?)")
+                          "OLYMPUS_PINNED_PUBKEY" if not pins
+                     else "matches NONE of the pinned keys (rotation in "
+                          "progress? append it to witness_pubkey.txt)")
             print(f"\nposture: PRODUCTION — derived from OLYMPUS_SIGNING_SEED; "
                   f"{state}.", file=sys.stderr)
+    elif args.command == "keygen":
+        from pathlib import Path
+        from . import config, witness
+        out = Path(args.out) if args.out else config.MEMORY_DIR / "signing_seed"
+        try:
+            seed = witness.write_seed_file(out, force=args.force)
+        except witness.WitnessError as err:
+            print(f"[keygen] {err}")
+            return 1
+        # The seed itself is NEVER printed — only where it lives and the
+        # derived PUBLIC key an operator pins for verifiers.
+        print(f"Wrote a new 256-bit signing seed: {out}  (mode 0600)")
+        if witness.available():
+            print(f"  public key: {witness.pubkey_for_seed(seed)}")
+        else:
+            print("  public key: (cannot derive here — the cryptography "
+                  "backend is unavailable; run `olympus pubkey` with the seed "
+                  "configured on a host where it is)")
+        print("\nNext steps:")
+        print(f"  export OLYMPUS_SIGNING_SEED_FILE={out}")
+        print("  # pin the public key for verifiers: set OLYMPUS_PINNED_PUBKEY "
+              "to it,\n"
+              "  # or add it to olympus/witness_pubkey.txt (one key per line).\n"
+              "  # systemd LoadCredential / Docker-secrets recipes: "
+              "docs/SIGNING.md")
     elif args.command == "verify":
         from pathlib import Path
         from . import witness
@@ -899,6 +1140,19 @@ def main(argv: list[str] | None = None) -> int:
             report=lambda msg: print(f"  {msg}", file=sys.stderr),
             pool=pool)
         print(bot.ask(" ".join(args.question)))
+    elif args.command == "research":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import research
+        report = research.run(" ".join(args.question),
+                              report=lambda msg: print(f"  {msg}",
+                                                       file=sys.stderr),
+                              rounds=args.rounds)
+        print(report)
+        if args.out:
+            from pathlib import Path
+            Path(args.out).write_text(report, encoding="utf-8")
+            print(f"\n[written to {args.out}]", file=sys.stderr)
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
     elif args.command == "audit":
@@ -919,6 +1173,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skills":
         from . import skills
         print(skills.index())
+    elif args.command == "skills-starter":
+        from . import skillpack
+        msgs = skillpack.install_starter_pack()
+        print("Installed the starter pack (provisional — run `olympus gate` to "
+              "benchmark them):")
+        for m in msgs:
+            print(f"  · {m}")
     elif args.command == "gate":
         print(orchestrator.gate_skills())
     elif args.command == "curate":
@@ -992,6 +1253,193 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{args.type}: {actions.daily_limit(user, args.type) or 'unlimited'} per day")
             else:
                 print(actions.set_limit(user, args.type, args.n))
+    elif args.command in ("documents", "docs"):
+        from . import documents
+        user = "cli"
+        if args.action == "list":
+            print(documents.render_list(user))
+        elif args.action == "read":
+            if not args.name:
+                print("Usage: olympus documents read <name>")
+                return 1
+            body = documents.read(user, args.name)
+            print(body if body is not None else f"No document named '{args.name}'.")
+        elif args.action == "delete":
+            if not args.name:
+                print("Usage: olympus documents delete <name>")
+                return 1
+            print(f"Deleted '{args.name}'." if documents.delete(user, args.name)
+                  else f"No document named '{args.name}'.")
+    elif args.command in ("gallery", "images"):
+        from . import gallery
+        if args.action == "list":
+            print(gallery.render_list())
+        elif args.action == "delete":
+            if not args.name:
+                print("Usage: olympus gallery delete <name>")
+                return 1
+            print(f"Deleted '{args.name}'." if gallery.delete_image(args.name)
+                  else f"No image named '{args.name}'.")
+        elif args.action == "edit":
+            prompt = " ".join(args.prompt).strip()
+            if not args.name or not prompt:
+                print('Usage: olympus gallery edit <name> "<edit prompt>"')
+                return 1
+            from . import media
+            print(media.edit_image(prompt, args.name))
+    elif args.command == "agenda":
+        from . import scheduler
+        print(scheduler.summary())
+        from . import calendar as gcal
+        if gcal.configured():
+            try:
+                events = gcal.upcoming()
+            except Exception as err:
+                events = None
+                print(f"\nCalendar unavailable: {str(err)[:120]}")
+            if events:
+                print("\nUpcoming calendar:")
+                for e in events:
+                    print(f"  {e['start']}  {e['summary']}")
+            elif events is not None:
+                print("\nNo calendar events in the next two weeks.")
+        else:
+            print("\n(Connect a Google account to see upcoming calendar events.)")
+    elif args.command in ("todo", "todos", "notes"):
+        from . import todos
+        user = "cli"
+        if args.action == "list":
+            print(todos.render_list(user))
+        elif args.action == "add":
+            text = " ".join(args.text).strip()
+            if not text:
+                print('Usage: olympus todo add "buy milk" [--due "2026-07-10 09:00"] [--note]')
+                return 1
+            it = todos.add(user, text, kind="note" if args.note else "todo",
+                           due=args.due or None)
+            print(f"Added [{it['id']}]: {it['text']}")
+        elif args.action == "done":
+            tid = (args.text[0] if args.text else "")
+            print("Marked done." if todos.complete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "rm":
+            tid = (args.text[0] if args.text else "")
+            print("Removed." if todos.delete(user, tid)
+                  else f"No item with id '{tid}'.")
+        elif args.action == "clear":
+            n = todos.clear_done(user)
+            print(f"Cleared {n} done item(s).")
+    elif args.command == "health":
+        from . import health
+        rep = health.report()
+        if args.as_json:
+            import json as _json
+            print(_json.dumps(rep, indent=2))
+        else:
+            print(health.render(rep))
+        return 0 if rep["ok"] else 1
+    elif args.command == "triage":
+        from . import spamtriage, gmail
+        if not gmail.configured():
+            print("No Google account connected. Connect one (GMAIL_* env or the "
+                  "web OAuth flow) to triage your inbox.")
+            return 1
+        print(spamtriage.render(args.query, max(1, min(args.max_results, 50))))
+    elif args.command == "compare":
+        from . import compare
+        user = "cli"
+        if args.tally:
+            print(compare.render_tally(user))
+            return 0
+        if args.reveal:
+            out = compare.reveal(user, args.reveal, args.pick or "")
+            if out is None:
+                print(f"No comparison with id '{args.reveal}'.")
+                return 1
+            print("Which model wrote each answer:")
+            for label, model in sorted(out["mapping"].items()):
+                mark = "  ← your pick" if out.get("choice") == label else ""
+                print(f"  {label}: {model}{mark}")
+            return 0
+        if not args.prompt:
+            print('Usage: olympus compare "<prompt>"   '
+                  '(or --reveal <id> [--pick A] | --tally)')
+            return 1
+        result = compare.run(user, args.prompt)
+        if "error" in result:
+            print(result.get("hint") or result["error"])
+            if result.get("models"):
+                print("Configured: " + ", ".join(result["models"]))
+            return 1
+        print(f"Blind comparison {result['id']} — pick the best answer:\n")
+        for a in result["answers"]:
+            print(f"── Answer {a['label']} " + "─" * 40)
+            print(a["text"].strip() + "\n")
+        # Interactive reveal when attached to a terminal; otherwise print how.
+        import sys as _sys
+        if _sys.stdin.isatty():
+            choice = input("Which is best? [label / Enter to skip] ").strip()
+            out = compare.reveal(user, result["id"], choice)
+            print("\nWhich model wrote each answer:")
+            for label, model in sorted(out["mapping"].items()):
+                mark = "  ← your pick" if out.get("choice") == label else ""
+                print(f"  {label}: {model}{mark}")
+        else:
+            print(f"Reveal with: olympus compare --reveal {result['id']} "
+                  f"[--pick <label>]")
+    elif args.command == "operator":
+        from . import browser, operator
+        user = "cli"
+        act = args.action
+        if act == "status":
+            print(operator.status_summary(user))
+        elif act == "enable":
+            s = operator._settings(user)
+            s["enabled"] = True
+            operator._save_settings(user, s)
+            print("Operator enabled. Next: authorize a site with "
+                  "`olympus operator authorize <domain>`, and grant the scope "
+                  "with `olympus grant browser.operate`.")
+        elif act == "disable":
+            s = operator._settings(user)
+            s["enabled"] = False
+            operator._save_settings(user, s)
+            print("Operator disabled. Authorized sites are kept; re-enable "
+                  "anytime with `olympus operator enable`.")
+        elif act == "authorize":
+            if not args.target:
+                print("Usage: olympus operator authorize <domain> [--remember]")
+                return 1
+            mode = "remember" if args.remember else "manual"
+            d = operator.authorize_site(user, args.target, mode)
+            print(f"Authorized {d} (login: {mode}).")
+            if mode == "remember":
+                print("Run the interactive app (`olympus`) and you'll be "
+                      "prompted to enter the password privately — it never "
+                      "passes through the model.")
+            else:
+                print("Manual login: you sign in yourself in the browser "
+                      "(handles 2FA); Olympus reuses that session.")
+        elif act == "forget":
+            if not args.target:
+                print("Usage: olympus operator forget <domain>")
+                return 1
+            ok = operator.forget_site(user, args.target)
+            print(f"Forgot {args.target.strip().lower()} (authorization + any "
+                  "saved credentials removed)." if ok
+                  else f"{args.target} was not authorized.")
+        elif act == "list":
+            profs = browser.list_profiles()
+            if not profs:
+                print("No site profiles yet. Built-in profiles ship in "
+                      "olympus/profiles/; Hermes records new ones as it learns "
+                      "a site.")
+            for p in profs:
+                tmpls = ", ".join(p.templates) or "—"
+                print(f"  {p.domain}  [{p.source}]  reliability "
+                      f"{p.reliability}  templates: {tmpls}")
+        elif act == "history":
+            print(operator.render_history(user, args.limit))
     elif args.command == "budget":
         from . import usage
         if args.amount is None:
@@ -1004,6 +1452,66 @@ def main(argv: list[str] | None = None) -> int:
                       f"spent today" + ("  ⚠ reached" if b["exceeded"] else ""))
         else:
             print(usage.set_budget(args.amount))
+    elif args.command == "routing-stats":
+        from . import routing_outcomes as ro
+        g = ro.gate_status()
+        s = g["stats"]
+        print("Routing-outcome telemetry (SPEC-04 Phase A — passive; changes no "
+              "routing)")
+        print(f"  rows total       : {s['total_rows']} "
+              f"(synthetic {s['synthetic_rows']}, pending {s['pending_rows']})")
+        print(f"  labeled (real)   : {s['labeled']}")
+        print(f"  distinct sources : {s['distinct_users']}")
+        if s["task_types"]:
+            print("  by task-type     :")
+            for t, n in sorted(s["task_types"].items(), key=lambda kv: -kv[1]):
+                print(f"      {t:12s} {n}")
+        if s["by_specialist_model"]:
+            print("  by specialist/model :")
+            for mk, n in sorted(s["by_specialist_model"].items(),
+                                key=lambda kv: -kv[1])[:20]:
+                print(f"      {mk:28s} {n}")
+        if any(s["signals"].values()):
+            print("  signals          : "
+                  + ", ".join(f"{k}={v}" for k, v in s["signals"].items() if v))
+        th = g["thresholds"]
+        print()
+        if g["met"]:
+            print("  GATE READINESS   : ✅ MET — Phase B data threshold reached "
+                  f"(≥{th['labeled']} labeled, ≥{th['task_types']} task-types, "
+                  f"≥{th['distinct_users']} sources).")
+        else:
+            print("  GATE READINESS   : ⛔ NOT MET — "
+                  + "; ".join(g["reasons"]) + ".")
+        from . import learned_routing
+        ls = learned_routing.status()
+        print()
+        print("Learned routing (SPEC-04 Phase B — evidence-gated selector)")
+        print(f"  opt-in flag      : "
+              + ("ON (OLYMPUS_LEARNED_ROUTING)" if ls["flag_enabled"]
+                 else "off — set OLYMPUS_LEARNED_ROUTING=1 to enable"))
+        print(f"  status           : "
+              + ("🟢 ACTIVE — may override the keyword heuristic where a "
+                 "(specialist, model) cell has evidence" if ls["active"]
+                 else "⚪ dormant — routing is the keyword heuristic, unchanged"
+                 + ("" if ls["flag_enabled"] else " (flag off)")
+                 + ("" if ls["gate_met"] else " (data gate not met)")))
+        known = [c for c in ls["cells"] if c["known"]]
+        if ls["cells"]:
+            print(f"  evidence cells   : {len(ls['cells'])} "
+                  f"({len(known)} with ≥{ls['min_cell_samples']} samples — "
+                  "only these can influence a choice):")
+            for c in ls["cells"][:15]:
+                mark = "●" if c["known"] else "○"
+                print(f"      {mark} {c['specialist']}/{c['model']:24s} "
+                      f"n={c['n']:<5d} rate={c['rate']:.2f} "
+                      f"wilsonLB={c['wilson_lb']:.2f}")
+        else:
+            print("  evidence cells   : none yet")
+        print("  (The selector overrides the heuristic only when BOTH the "
+              "challenger and the incumbent cells are known and the challenger's "
+              "Wilson lower bound is strictly higher; otherwise the heuristic "
+              "stands. Replay always uses the recorded decisions.)")
     elif args.command == "scores":
         from . import evals
         scores = evals.per_specialist_scores()
@@ -1039,7 +1547,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "skill-import":
         from . import skillpack
         import os.path
-        if os.path.isdir(args.path) and not os.path.isfile(
+        if "://" in args.path:
+            print("\n".join(skillpack.import_url(args.path)))
+        elif os.path.isdir(args.path) and not os.path.isfile(
                 os.path.join(args.path, "SKILL.md")):
             msgs = skillpack.import_dir(args.path, provisional=args.provisional)
             print("\n".join(msgs) if msgs else "No SKILL.md files found.")
@@ -1087,10 +1597,21 @@ def main(argv: list[str] | None = None) -> int:
                 print('Usage: olympus schedule add <name> <interval> "<prompt>" '
                       '[--to telegram]')
                 return 1
-            job = scheduler.add(args.name, args.interval, prompt,
-                                deliver_to=args.deliver_to, user="cli")
-            print(f"Scheduled '{job.name}' every "
-                  f"{scheduler._human_interval(job.interval)}.")
+            if args.on_exit_pid:
+                try:
+                    job = scheduler.add_on_exit(
+                        args.name, args.on_exit_pid, prompt,
+                        deliver_to=args.deliver_to, user="cli")
+                except ValueError as err:
+                    print(err)
+                    return 1
+                print(f"Scheduled '{job.name}' to run once when pid "
+                      f"{job.watch_pid} exits.")
+            else:
+                job = scheduler.add(args.name, args.interval, prompt,
+                                    deliver_to=args.deliver_to, user="cli")
+                print(f"Scheduled '{job.name}' every "
+                      f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
             print("Removed." if scheduler.remove(args.name) else "No such job.")
         elif args.action in ("enable", "disable"):
@@ -1160,6 +1681,119 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "gateway":
+        from . import gateway
+        if args.gw_status:
+            st = gateway.read_status()
+            if not st.get("running"):
+                print(f"Gateway daemon: not running ({st.get('reason', 'unknown')}).")
+                return 1
+            print(f"Gateway daemon: RUNNING (pid {st['pid']}, "
+                  f"heartbeat {st['age_secs']}s ago)")
+            for name, s in sorted((st.get("channels") or {}).items()):
+                mark = {"running": "✓", "restarting": "↻", "failed": "✗",
+                        "stopped": "•"}.get(s.get("status"), "•")
+                extra = (f" — {s['last_error']}" if s.get("last_error") else "")
+                rc = s.get("restarts", 0)
+                print(f"  {mark} {name}: {s.get('status')}"
+                      f"{f' ({rc} restart(s))' if rc else ''}{extra}")
+        elif args.list_channels:
+            live = gateway.configured_channels()
+            print("Configured channels: " + (", ".join(live) if live
+                  else "none (set a channel's env vars — see docs/GATEWAY.md)"))
+        else:
+            only = [c for c in args.only.split(",") if c.strip()] or None
+            gateway.run_all(only=only)
+    elif args.command == "secret":
+        from . import secretref, vault
+        if args.action == "set":
+            if not args.name:
+                print("Usage: olympus secret set <name>")
+                return 1
+            import getpass
+            value = getpass.getpass(f"value for '{args.name}' (hidden): ")
+            if not value:
+                print("Nothing entered — nothing stored.")
+                return 1
+            try:
+                ref = secretref.store(args.name, value)
+            except Exception as err:
+                print(f"Could not store secret: {err}")
+                return 1
+            print(f"Stored. Reference it in config as: {ref}")
+        elif args.action == "ls":
+            try:
+                names = [n.removeprefix("secretref:")
+                         for n in vault.names("operator")
+                         if n.startswith("secretref:")]
+            except vault.VaultError as err:
+                print(f"Cannot open the vault: {err}")
+                return 1
+            print("\n".join(names) if names
+                  else "No named secrets. Add one: olympus secret set <name>")
+        elif args.action == "rm":
+            if not args.name:
+                print("Usage: olympus secret rm <name>")
+                return 1
+            try:
+                vault.delete("operator", f"secretref:{args.name}")
+            except vault.VaultError as err:
+                print(f"Cannot open the vault: {err}")
+                return 1
+            print("Removed (if it existed).")
+    elif args.command == "wiki":
+        from . import wiki
+        if args.action == "list":
+            print(wiki.summary(args.user))
+        elif args.action == "show":
+            if not args.page:
+                print("Usage: olympus wiki show <page>")
+                return 1
+            print(wiki.read(args.user, args.page))
+        elif args.action == "lint":
+            issues = wiki.lint(args.user)
+            print("\n".join(issues) if issues
+                  else "Wiki is fresh — no issues.")
+        elif args.action == "dream":
+            print(wiki.dream(args.user))
+        elif args.action == "rm":
+            if not args.page:
+                print("Usage: olympus wiki rm <page>")
+                return 1
+            print("Removed." if wiki.remove(args.user, args.page)
+                  else "No such page.")
+    elif args.command == "restrict":
+        from . import capprofile
+        if args.list_profiles:
+            for name, spec in sorted(capprofile.profiles().items()):
+                denied = (f"{len(spec['deny'])} tools denied" if spec["deny"]
+                          else "no restriction")
+                print(f"{name:8s} {denied}, autonomy cap "
+                      f"L{spec.get('max_autonomy', 4)}")
+        elif not args.user:
+            print("Usage: olympus restrict <user> <profile> "
+                  "| --clear | --profiles")
+            return 1
+        elif args.clear:
+            print(capprofile.clear(args.user))
+        elif args.profile:
+            print(capprofile.assign(args.user, args.profile))
+        else:
+            print(capprofile.summary(args.user))
+    elif args.command == "pair":
+        from . import pairing
+        if args.list_paired:
+            ids = pairing.paired(args.channel)
+            print("\n".join(ids) if ids else
+                  f"No {args.channel} chats are paired.")
+        elif args.revoke:
+            gone = pairing.unpair(args.channel, args.revoke)
+            print("Unpaired." if gone else "That id wasn't paired.")
+        else:
+            code = pairing.issue_code(args.channel)
+            print(f"Pairing code for {args.channel}: {code}\n"
+                  f"Send `/pair {code}` to the bot within "
+                  f"{pairing.PAIR_TTL // 60} minutes. Single use.")
     elif args.command == "whatsapp":
         from . import whatsapp
         try:
@@ -1184,6 +1818,18 @@ def main(argv: list[str] | None = None) -> int:
             signal_gw.run_bot()
         except KeyboardInterrupt:
             print("\nSignal gateway stopped.")
+    elif args.command == "email":
+        from . import email_gateway
+        try:
+            email_gateway.run(poll_seconds=args.interval)
+        except KeyboardInterrupt:
+            print("\nEmail gateway stopped.")
+    elif args.command == "webhook":
+        from . import webhook_gateway
+        try:
+            webhook_gateway.run_server(host=args.host, port=args.port)
+        except KeyboardInterrupt:
+            print("\nWebhook gateway stopped.")
     return 0
 
 

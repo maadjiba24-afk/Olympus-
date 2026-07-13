@@ -97,6 +97,163 @@ def save_env_value(key: str, value: str) -> None:
     _save(values)
 
 
+# Keys whose values are secrets — masked when shown, never printed in full.
+_SECRET_HINT = ("KEY", "TOKEN", "SECRET", "PASSWORD", "SEED")
+
+
+def _is_secret(key: str) -> bool:
+    return any(h in key.upper() for h in _SECRET_HINT)
+
+
+def show_config() -> str:
+    """Render the saved config with any secret values masked. Read-only."""
+    from . import config as cfg
+    saved = _read_saved()
+    if not saved:
+        return (f"No saved config at {CONFIG_ENV}.\n"
+                "Run `olympus setup` to create one.")
+    lines = [f"Saved config ({CONFIG_ENV}, owner-only):", ""]
+    for k in sorted(saved):
+        v = saved[k]
+        shown = cfg.mask_key(v) if _is_secret(k) else v
+        overridden = k in os.environ and os.environ[k] != v
+        tag = "   ← overridden by an env var" if overridden else ""
+        lines.append(f"  {k}={shown}{tag}")
+    return "\n".join(lines)
+
+
+def config_set(key: str, value: str) -> str:
+    """Set one config value (owner-only file). Never echoes a secret back."""
+    key = key.strip()
+    if not key:
+        return "Usage: olympus config set <KEY> <VALUE>"
+    # A genuine external override is an env var that differs from our saved
+    # value (env loaded from our own file matches, so it isn't an override).
+    external = key in os.environ and os.environ[key] != _read_saved().get(key)
+    save_env_value(key, value)
+    from . import config as cfg
+    shown = cfg.mask_key(value) if _is_secret(key) else value
+    note = ("  (a real environment variable of the same name is set and will "
+            "still override this)") if external else ""
+    return f"Saved {key}={shown} to {CONFIG_ENV}.{note}"
+
+
+def open_in_editor() -> str:
+    """Open the saved config in $EDITOR (nano fallback). Returns a status line."""
+    import shutil
+    import subprocess
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_ENV.exists():
+        _save({})
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if not editor:
+        editor = "nano" if shutil.which("nano") else "vi"
+    try:
+        subprocess.call([editor, str(CONFIG_ENV)])
+    except Exception as err:
+        return (f"Could not launch '{editor}': {err}\n"
+                f"Edit it yourself: {CONFIG_ENV}")
+    return f"Edited {CONFIG_ENV}."
+
+
+def _offer_detected(members: list) -> None:
+    """If provider keys are already in the environment, offer to use them
+    without making the user paste anything (auto-detection, #9)."""
+    from . import providers
+    for prov, key in _env_detected():
+        name = prov.label.split(' —')[0]
+        if _yes(f"Found {prov.key_env} in your environment — use {name}?", True):
+            model = _pick_model(prov, key, prov.base_url)
+            if model:
+                members.append(providers.Member(
+                    backend=prov.backend, model=model, api_key=key,
+                    base_url=prov.base_url))
+                print(f"  ✓ Using {name} from your environment  ({model})")
+
+
+def _configure_providers(scan_env: bool = True) -> list:
+    """The provider-composition loop, shared by the full wizard and
+    `setup model`. Returns the chosen Members (possibly empty)."""
+    members: list = []
+    if scan_env:
+        _offer_detected(members)
+    entries = _picker_entries()
+    labels = [f"{lbl}" + (f"   ({trade})" if trade else "")
+              for (lbl, trade, _res) in entries]
+    while True:
+        # Once we have members (from env-scan or a prior pick), ask before
+        # forcing another manual pick — so a detected key doesn't require one.
+        if members and not _yes("Add another provider to compose a pool?", False):
+            break
+        print("  Add a provider:")
+        idx = _choose("Choose a provider", labels, 1)
+        prov = entries[idx - 1][2]()          # resolver() → Provider
+        if prov is None:
+            continue
+        member = _configure_member(prov)
+        if member:
+            members.append(member)
+            print(f"  ✓ Added {prov.label.split(' —')[0]}"
+                  + (f"  ({member.model})" if member.model else "")
+                  + f"  — {len(members)} in the pool now")
+        elif not members:
+            # First attempt produced nothing — offer a clean way out.
+            if not _yes("Add a provider to compose a pool?", False):
+                break
+    return members
+
+
+def setup_section(section: str) -> bool:
+    """Edit ONE part of the config without re-running the whole wizard —
+    mirrors `olympus setup model|terminal|gateway|tools`. Returns True if saved."""
+    section = (section or "").strip().lower()
+    values = _read_saved()
+
+    if section in ("model", "models", "provider"):
+        members = _configure_providers()
+        if not members:
+            print("  Nothing chosen — no changes.")
+            return False
+        from . import providers
+        for k in ("OLYMPUS_PROVIDER", "OLYMPUS_MODEL", "OLYMPUS_API_KEY",
+                  "OLYMPUS_BASE_URL", "OLYMPUS_MODELS", "ANTHROPIC_API_KEY"):
+            values.pop(k, None)
+        values.update(providers.build_pool_config(members))
+        _save(values)
+        print(f"  ✓ Pool updated ({len(members)} provider(s)).")
+        return True
+
+    if section in ("gateway", "gateways", "messaging"):
+        _configure_gateway(values)
+        _save(values)
+        return True
+
+    if section in ("terminal", "exec", "sandbox", "tools"):
+        if _yes("Allow Olympus to run commands/edit files in a sandbox?", True):
+            be = _choose("Execution backend",
+                         ["local (this machine)", "docker (isolated container)"], 1)
+            values["OLYMPUS_EXEC_BACKEND"] = "docker" if be == 2 else "local"
+        modes = ["enforce (block catastrophic commands — recommended)",
+                 "paranoid (also block risky commands)",
+                 "audit (classify only, never block)",
+                 "off (no screening — not recommended)"]
+        pick = _choose("Command security gate", modes, 1)
+        values["OLYMPUS_EXEC_SECURITY"] = ["enforce", "paranoid", "audit",
+                                           "off"][pick - 1]
+        if section == "tools":
+            key = _ask_secret("  Media/vision API key (OPENAI_API_KEY) — "
+                              "enables image gen, TTS, analyze_image (blank to skip)")
+            if key:
+                values["OPENAI_API_KEY"] = key
+        _save(values)
+        print("  ✓ Saved.")
+        return True
+
+    print(f"  Unknown section '{section}'. "
+          "Try: model | terminal | gateway | tools  (or `olympus setup` for all).")
+    return False
+
+
 def _choose(prompt: str, labels: list[str], default: int = 1) -> int:
     """Numbered picker (1-based). Robust everywhere — SSH, WSL, dumb terminals."""
     for i, label in enumerate(labels, 1):
@@ -118,6 +275,40 @@ def _yes(prompt: str, default_yes: bool = False) -> bool:
     if not ans:
         return default_yes
     return ans in ("y", "yes")
+
+
+def _env_detected() -> list[tuple]:
+    """Provider keys already present in the environment — for auto-detection
+    ('Found DEEPSEEK_API_KEY — use it?'). Returns (Provider, key) pairs."""
+    from . import providers
+    found = []
+    for prov in providers.CATALOG:
+        if prov.key_env and os.environ.get(prov.key_env):
+            found.append((prov, os.environ[prov.key_env]))
+    return found
+
+
+def _picker_entries():
+    """Provider choices for the wizard. The two Anthropic rows (subscription vs
+    API key) are merged into ONE 'Anthropic (Claude)' entry that asks auth mode
+    when chosen — auth-mode-first, so users don't puzzle over two Claude rows.
+    Returns a list of (label, tradeoff, resolver) where resolver() -> Provider."""
+    from . import providers
+
+    def resolve_anthropic():
+        mode = _choose("How do you want to authenticate Claude?",
+                       ["Claude Pro/Max subscription — no API key",
+                        "Anthropic API key"], 1)
+        return providers.get("claude-code" if mode == 1 else "anthropic")
+
+    entries = [("Anthropic (Claude)", "subscription or API key",
+                resolve_anthropic)]
+    for prov in providers.CATALOG:
+        if prov.key in ("claude-code", "anthropic"):
+            continue                       # folded into the merged entry above
+        entries.append((prov.label, prov.tradeoff,
+                        (lambda p=prov: p)))
+    return entries
 
 
 def _pick_model(prov, api_key: str, base_url: str) -> str:
@@ -166,7 +357,13 @@ def _configure_member(prov):
             return None
     api_key = ""
     if prov.auth != "local":
-        api_key = _ask_secret(f"  Paste your {prov.label.split(' —')[0]} API key")
+        if prov.key_url:
+            print(f"  Get one at: {prov.key_url}")
+        # Providers show a key exactly once — nudge the user to save it now.
+        print("  (tip: your provider shows the key only once — save it now; "
+              "Olympus stores it in the owner-only config.env)")
+        api_key = _ask_secret(f"  Paste your {prov.label.split(' —')[0]} API key "
+                              "(blank to skip)")
         if not api_key and prov.key != "custom":
             print("  No key entered — skipping this provider.")
             return None
@@ -202,6 +399,18 @@ def _configure_gateway(values: dict) -> None:
     print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
 
 
+def _current_pool_line() -> str:
+    """One-line view of the currently-configured pool, for a re-run."""
+    from . import config as cfg
+    try:
+        pool = cfg.ModelPool.from_env()
+        members = ", ".join(f"{m.provider}/{m.model or 'default'}"
+                            for m in pool.members)
+        return f"  Currently configured: {members}"
+    except Exception:
+        return ""
+
+
 def wizard() -> bool:
     """Guided setup: compose one or more providers (incl. a Claude subscription)
     into Olympus's model pool, with model auto-discovery; optionally set up a
@@ -211,36 +420,63 @@ def wizard() -> bool:
     print("  ⚡ Welcome to OLYMPUS — guided setup")
     print("  Bring API keys and/or a Claude subscription; Olympus composes them")
     print("  into one brain (each model used where it's strongest).")
+    # Config-location block up front, so users always know where keys land.
+    print(f"  Config is saved to: {CONFIG_ENV} (owner-only; env vars override).")
+    rerun = configured()
+    if rerun:
+        line = _current_pool_line()
+        if line:
+            print(line)
     print()
 
-    members = []
-    while True:
-        print("  Add a provider:")
-        prov = providers.CATALOG[_choose(
-            "Choose a provider", [p.label for p in providers.CATALOG], 1) - 1]
-        member = _configure_member(prov)
-        if member:
-            members.append(member)
-            print(f"  ✓ Added {prov.label.split(' —')[0]}"
-                  + (f"  ({member.model})" if member.model else ""))
-        if not _yes("Add another provider to compose a pool?",
-                    default_yes=False):
-            break
+    # Quick / Full fork — most people want one provider and sane defaults.
+    style = _choose(
+        "Setup style",
+        ["Quick — one provider, recommended defaults (free/no-setup where possible)",
+         "Full — configure the pool, sandbox, security, and messaging"], 1)
+    quick = (style == 1)
 
+    members = _configure_providers()
     if not members:
         print("  Nothing configured — setup cancelled.")
         return False
 
     values = providers.build_pool_config(members)
 
-    if len(members) > 1 or _yes("Enable fast mode (lower latency)?", True):
+    if quick:
+        # Recommended defaults, no further questions.
         values["OLYMPUS_FAST"] = "1"
-    if _yes("Allow Olympus to run commands/edit files in a sandbox?"):
-        be = _choose("Execution backend",
-                     ["local (this machine)", "docker (isolated container)"], 1)
-        values["OLYMPUS_EXEC_BACKEND"] = "docker" if be == 2 else "local"
-    if _yes("Connect a messaging platform now (Telegram/Discord/Slack/Signal)?"):
-        _configure_gateway(values)
+        values.setdefault("OLYMPUS_EXEC_SECURITY", "enforce")
+        print("  ✓ Quick defaults: fast mode on, command security = enforce, "
+              "sandbox off (enable later with `olympus setup terminal`).")
+    else:
+        cur = _read_saved()
+        fast_default = cur.get("OLYMPUS_FAST", "1" if len(members) > 1 else "") == "1"
+        if len(members) > 1:
+            values["OLYMPUS_FAST"] = "1"
+            print("  ✓ Fast mode on (a pool routes light stages to the quickest model).")
+        elif _yes("Enable fast mode? (lower latency; skips one optional review)",
+                  fast_default):
+            values["OLYMPUS_FAST"] = "1"
+        if _yes("Allow Olympus to run commands/edit files in a sandbox? "
+                "(it still needs your approval per action)", False):
+            be = _choose("Execution backend  (local = this machine; "
+                         "docker = isolated, safer for untrusted code)",
+                         ["local (this machine)", "docker (isolated container)"], 1)
+            values["OLYMPUS_EXEC_BACKEND"] = "docker" if be == 2 else "local"
+            # Only ask about the command gate when the sandbox is enabled.
+            modes = ["enforce — block catastrophic commands (recommended)",
+                     "paranoid — also block risky commands (sudo, curl|sh)",
+                     "audit — classify only, never block",
+                     "off — no screening (not recommended)"]
+            pick = _choose("Command security gate", modes, 1)
+            values["OLYMPUS_EXEC_SECURITY"] = ["enforce", "paranoid", "audit",
+                                               "off"][pick - 1]
+        else:
+            values.setdefault("OLYMPUS_EXEC_SECURITY", "enforce")
+        if _yes("Connect a messaging platform now "
+                "(Telegram/Discord/Slack/Signal)?", False):
+            _configure_gateway(values)
 
     # Merge: replace provider-related keys, keep any unrelated saved settings.
     existing = _read_saved()
@@ -255,6 +491,13 @@ def wizard() -> bool:
     print(f"  ✓ Pool: {len(members)} provider(s) composed into one brain.")
     print("  ✓ You're set — type `olympus` to chat. `olympus models` shows the pool.")
     print()
+    # End on the same readiness picture `olympus doctor` shows.
+    try:
+        from . import doctor
+        print(doctor.render())
+        print()
+    except Exception:
+        pass
     return True
 
 

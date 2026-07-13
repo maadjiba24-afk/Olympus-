@@ -68,6 +68,7 @@ def test_conversation_trigger(monkeypatch):
                         lambda settings=None: (ran.set() or "done"))
     monkeypatch.setattr(config, "AUDIT_EVERY_CHATS", 2)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8")   # chosen, not assumed
     orchestrator.note_conversation()
     assert not ran.is_set()
     orchestrator.note_conversation()
@@ -120,7 +121,8 @@ def test_reverify_divergence_is_not_masked(monkeypatch):
     monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
         {"id": "s1", "specialist": "argus", "task": "t", "depends_on": []}])
     monkeypatch.setattr(bot, "_dispatch_dag", lambda steps, tr: [("argus", "out")])
-    monkeypatch.setattr(bot, "_dispatch", lambda redo, tr: [("argus", "redone")])
+    monkeypatch.setattr(bot, "_dispatch",
+                        lambda redo, tr, overrides=None: [("argus", "redone")])
     # First verify succeeds; Athena orders a retry; the reverify call diverges.
     calls = {"verify": 0}
 
@@ -142,8 +144,9 @@ def test_reverify_divergence_is_not_masked(monkeypatch):
 def test_heartbeat_nothing_due():
     from olympus import heartbeat
     state = {k: 1e18 for k in ("opportunity_scan", "watchlist", "maintenance",
-                               "daily_learning", "train", "evolution_audit",
-                               "skill_curation", "replay_gate", "backup")}
+                               "daily_learning", "dreaming", "train",
+                               "evolution_audit", "skill_curation",
+                               "replay_gate", "backup")}
     assert heartbeat.tick(state) == []
 
 

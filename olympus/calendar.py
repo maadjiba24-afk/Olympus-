@@ -72,6 +72,38 @@ def list_events(time_min: str, time_max: str, max_results: int = 20) -> str:
     return "\n\n".join(out)
 
 
+def upcoming(days: int = 14, max_results: int = 20) -> list[dict]:
+    """Structured upcoming events (for the agenda UI), from now to `days` out.
+    Read-only. Returns [] on any Calendar error so a UI can degrade gracefully
+    rather than surfacing a stack trace."""
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    time_min = now.isoformat()
+    time_max = (now + datetime.timedelta(days=max(1, days))).isoformat()
+    q = urllib.parse.urlencode({
+        "timeMin": time_min, "timeMax": time_max,
+        "maxResults": max(1, min(max_results, 50)),
+        "singleEvents": "true", "orderBy": "startTime",
+    })
+    try:
+        data = _request("GET", f"/events?{q}")
+    except CalendarError:
+        return []
+    out = []
+    for e in data.get("items", []):
+        start = e.get("start", {})
+        end = e.get("end", {})
+        out.append({
+            "id": e.get("id", ""),
+            "summary": e.get("summary", "(no title)"),
+            "start": start.get("dateTime") or start.get("date", ""),
+            "end": end.get("dateTime") or end.get("date", ""),
+            "all_day": "date" in start and "dateTime" not in start,
+            "attendees": [a.get("email", "") for a in e.get("attendees", [])],
+        })
+    return out
+
+
 # --- operations (used by gated Action types) ----------------------------
 
 def create_event(summary: str, start: str, end: str,

@@ -57,8 +57,10 @@ def test_configured_detects_any_key(monkeypatch):
 def test_wizard_anthropic_saves_and_restricts(monkeypatch):
     from olympus import providers
     monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: [])  # no network
-    # provider #2 (anthropic) → model #1 (sample) → no more → fast n, sandbox n, msg n
-    answers = iter(["2", "1", "n", "n", "n", "n"])
+    monkeypatch.setattr(firstrun, "_env_detected", lambda: [])
+    # Full; Anthropic is the merged entry #1 → auth mode #2 (API key) → model #1
+    # → no more → fast n, sandbox n, msg n
+    answers = iter(["2", "1", "2", "1", "n", "n", "n", "n"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "sk-ant-wizard")
     assert firstrun.wizard() is True
@@ -71,8 +73,9 @@ def test_wizard_anthropic_saves_and_restricts(monkeypatch):
 def test_wizard_empty_key_cancels(monkeypatch):
     from olympus import providers
     monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: [])
-    # provider #3 (openai) but no key → skipped; decline another → no members
-    answers = iter(["3", "n"])
+    monkeypatch.setattr(firstrun, "_env_detected", lambda: [])
+    # Full; provider #2 (openai) but no key → skipped; decline another → none
+    answers = iter(["2", "2", "n"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "")
     assert firstrun.wizard() is False

@@ -136,3 +136,180 @@ def import_dir(root: str, *, provisional: bool = False) -> list[str]:
     for skill_md in sorted(base.rglob("SKILL.md")):
         out.append(import_file(str(skill_md), provisional=provisional))
     return out
+
+
+# --- import from public GitHub URLs ---------------------------------------
+# Adopted from Odysseus (import SKILL.md bundles straight from a repo URL).
+# Remote skills are ALWAYS imported provisional: they're third-party
+# instructions, so beyond the injection/credential scan they must also prove
+# themselves through the same benchmark gate as self-written skills.
+
+_MAX_ARCHIVE = 20 * 1024 * 1024      # tarball cap
+_MAX_SKILL = 100 * 1024              # single SKILL.md cap
+_MAX_SKILLS_PER_IMPORT = 50
+
+_GH_BLOB = None                       # compiled lazily (module import stays cheap)
+_GH_TREE = None
+
+
+def _fetch_bytes(url: str, cap: int = _MAX_ARCHIVE) -> bytes:
+    """Fetch a remote file over the same SSRF/rebinding-pinned path as web
+    fetches, with a size cap. Raises ValueError when blocked or oversized."""
+    from . import security, tools
+    leak = security.secret_exfil_reason(url)
+    if leak:
+        raise ValueError(f"blocked: {leak}")
+    reason = security.url_block_reason(url)
+    if reason:
+        raise ValueError(reason)
+    req = tools._urlreq.Request(url, headers={"User-Agent": tools._UA})
+    with tools._pinned_opener().open(req, timeout=60) as resp:
+        blob = resp.read(cap + 1)
+    if len(blob) > cap:
+        raise ValueError(f"remote file exceeds the {cap // (1024 * 1024)}MB cap")
+    return blob
+
+
+def _import_text(text: str, origin: str, *, provisional: bool) -> str:
+    parsed = parse_skill_md(text)
+    reason = scan_reason(parsed)
+    if reason:
+        return (f"Error: refused to import '{parsed.get('name') or origin}' — "
+                f"{reason}.")
+    return skills.create(parsed["name"], parsed["description"],
+                         parsed["instructions"],
+                         specialist=parsed["specialist"],
+                         provisional=provisional)
+
+
+def _import_tarball(blob: bytes, subpath: str | None) -> list[str]:
+    """Import every SKILL.md inside a repo tarball — read in memory, never
+    extracted to disk (no path-traversal surface)."""
+    import io
+    import tarfile
+    out: list[str] = []
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        for member in tar:
+            if not member.isfile() or member.size > _MAX_SKILL:
+                continue
+            # member names look like "<repo>-<ref>/path/to/SKILL.md"
+            parts = member.name.split("/", 1)
+            rel = parts[1] if len(parts) == 2 else parts[0]
+            if Path(rel).name != "SKILL.md":
+                continue
+            if subpath and not rel.startswith(subpath.rstrip("/") + "/") \
+                    and rel != f"{subpath.rstrip('/')}/SKILL.md" \
+                    and not rel.startswith(subpath.rstrip("/")):
+                continue
+            fh = tar.extractfile(member)
+            if fh is None:
+                continue
+            text = fh.read().decode("utf-8", errors="replace")
+            out.append(_import_text(text, rel, provisional=True))
+            if len(out) >= _MAX_SKILLS_PER_IMPORT:
+                out.append(f"…stopped at {_MAX_SKILLS_PER_IMPORT} skills.")
+                break
+    return out
+
+
+def _default_branch(owner: str, repo: str) -> str:
+    import json
+    try:
+        data = json.loads(_fetch_bytes(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            cap=1024 * 1024).decode("utf-8", "replace"))
+        return str(data.get("default_branch") or "main")
+    except Exception:
+        return "main"
+
+
+def import_url(url: str) -> list[str]:
+    """Import skills from a public URL: a direct SKILL.md link, a GitHub blob
+    link, or a GitHub repo/tree URL (the whole bundle). Remote imports are
+    always provisional — the benchmark gate decides if they stay."""
+    global _GH_BLOB, _GH_TREE
+    import re
+    if _GH_BLOB is None:
+        _GH_BLOB = re.compile(
+            r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$")
+        _GH_TREE = re.compile(
+            r"^https://github\.com/([^/]+)/([^/]+?)"
+            r"(?:\.git)?(?:/tree/([^/]+)(?:/(.*))?)?/?$")
+    url = url.strip()
+    m = _GH_BLOB.match(url)
+    if m:                                     # blob page → raw file
+        owner, repo, ref, path = m.groups()
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
+    if url.lower().endswith(".md"):           # direct SKILL.md (any host)
+        try:
+            text = _fetch_bytes(url, cap=_MAX_SKILL).decode("utf-8", "replace")
+        except ValueError as err:
+            return [f"Error: {err}"]
+        return [_import_text(text, url, provisional=True)]
+    m = _GH_TREE.match(url)
+    if not m:
+        return ["Error: expected a SKILL.md link or a github.com repo/tree URL."]
+    owner, repo, ref, subpath = m.groups()
+    ref = ref or _default_branch(owner, repo)
+    try:
+        blob = _fetch_bytes(
+            f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}")
+    except ValueError as err:
+        return [f"Error: {err}"]
+    except Exception as err:
+        return [f"Error: could not download {owner}/{repo}@{ref}: "
+                f"{str(err)[:120]}"]
+    try:
+        msgs = _import_tarball(blob, subpath)
+    except Exception as err:
+        return [f"Error: could not read the archive: {str(err)[:120]}"]
+    return msgs or [f"No SKILL.md files found in {owner}/{repo}@{ref}."]
+
+
+# --- curated starter pack ------------------------------------------------
+# A tiny, opt-in set of general-purpose skills, installed PROVISIONAL so they
+# go through the same benchmark gate as anything the system writes itself —
+# nothing curated gets a free pass. They pair with scheduled jobs (a cron job
+# can name one via `schedule_task(..., skill=...)`).
+
+STARTER_PACK: tuple[dict, ...] = (
+    {"name": "daily-brief",
+     "description": "A concise morning brief: what changed, what needs a "
+                    "decision today, and the single most important next action.",
+     "instructions": (
+         "Produce a short daily brief. Structure:\n"
+         "1. **Headlines** — 2-4 bullets of what actually changed since "
+         "yesterday (skip noise).\n"
+         "2. **Needs a decision** — anything waiting on the user, with the "
+         "options stated plainly.\n"
+         "3. **One next action** — the single highest-leverage thing to do "
+         "today, and why.\n"
+         "Be ruthless about brevity; lead with the decision, cut the filler.")},
+    {"name": "weekly-report",
+     "description": "A structured weekly report: progress, blockers, metrics, "
+                    "and next week's focus.",
+     "instructions": (
+         "Write a weekly report with these sections: **Shipped** (concrete "
+         "outcomes), **In progress** (with % done), **Blockers** (and what "
+         "would unblock each), **Metrics** (numbers that moved), **Next week** "
+         "(top 3 priorities). Keep each bullet to one line; prefer numbers to "
+         "adjectives.")},
+    {"name": "inbox-triage",
+     "description": "Turn a pile of messages into a prioritized, actionable "
+                    "list with suggested replies.",
+     "instructions": (
+         "Given a set of messages, triage them: group into **Urgent / "
+         "reply today**, **Can wait**, and **FYI / no action**. For each item "
+         "in the first two groups, give a one-line suggested reply or next "
+         "step. Never send anything — only propose. Flag anything that looks "
+         "like a deadline or a commitment.")},
+)
+
+
+def install_starter_pack() -> list[str]:
+    """Install the curated starter skills (PROVISIONAL). Returns messages."""
+    out = []
+    for s in STARTER_PACK:
+        out.append(skills.create(s["name"], s["description"], s["instructions"],
+                                 provisional=True))
+    return out

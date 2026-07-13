@@ -33,6 +33,8 @@ class Provider:
     key_env: str = ""            # the env var users usually hold this key in
     sample_models: tuple[str, ...] = field(default_factory=tuple)
     note: str = ""
+    key_url: str = ""            # where to get an API key ("Get one at …")
+    tradeoff: str = ""           # one-line cost/latency hint shown in the picker
 
 
 # Ordered for display. Subscription/login options first (no API spend), then the
@@ -41,46 +43,67 @@ CATALOG: tuple[Provider, ...] = (
     Provider("claude-code", "Claude — via Claude Code subscription (no API key)",
              "claude-code", auth="subscription",
              sample_models=("claude-opus-4-8", "claude-sonnet-4-6"),
+             tradeoff="no API spend — uses your Claude Pro/Max login",
              note="Runs on your Claude Pro/Max login via the `claude` CLI — "
                   "personal use; no web tools (single-turn)."),
     Provider("anthropic", "Anthropic (Claude) — API key",
              "anthropic", base_url="https://api.anthropic.com",
              key_env="ANTHROPIC_API_KEY",
+             key_url="https://console.anthropic.com/settings/keys",
+             tradeoff="top quality; premium pricing",
              sample_models=("claude-opus-4-8", "claude-sonnet-4-6")),
     Provider("openai", "OpenAI (GPT) — API key",
              "openai", base_url="https://api.openai.com/v1",
              key_env="OPENAI_API_KEY",
+             key_url="https://platform.openai.com/api-keys",
+             tradeoff="strong all-round; mid pricing",
              sample_models=("gpt-4o", "gpt-4o-mini")),
     Provider("deepseek", "DeepSeek — API key",
              "openai", base_url="https://api.deepseek.com",
              key_env="DEEPSEEK_API_KEY",
+             key_url="https://platform.deepseek.com/api_keys",
+             tradeoff="very cheap; strong at reasoning/code",
              sample_models=("deepseek-chat", "deepseek-reasoner")),
     Provider("glm", "Z.AI / GLM (Zhipu) — API key",
              "openai", base_url="https://open.bigmodel.cn/api/paas/v4",
              key_env="GLM_API_KEY",
+             key_url="https://open.bigmodel.cn/usercenter/apikeys",
+             tradeoff="cheap; a free flash tier",
              sample_models=("glm-4.5-flash", "glm-4.5-air", "glm-4.6")),
     Provider("kimi", "Kimi / Moonshot — API key",
              "openai", base_url="https://api.moonshot.ai/v1",
              key_env="MOONSHOT_API_KEY",
+             key_url="https://platform.moonshot.ai/console/api-keys",
+             tradeoff="cheap; long context",
              sample_models=("moonshot-v1-128k", "moonshot-v1-8k", "kimi-k2.5")),
     Provider("groq", "Groq — API key (very fast)",
              "openai", base_url="https://api.groq.com/openai/v1",
              key_env="GROQ_API_KEY",
+             key_url="https://console.groq.com/keys",
+             tradeoff="fastest tokens; open models; a free tier",
              sample_models=("llama-3.3-70b-versatile",)),
     Provider("openrouter", "OpenRouter (100+ models) — API key",
              "openai", base_url="https://openrouter.ai/api/v1",
              key_env="OPENROUTER_API_KEY",
+             key_url="https://openrouter.ai/keys",
+             tradeoff="one key, 100+ models, live pricing",
              sample_models=("openai/gpt-4o", "anthropic/claude-sonnet-4")),
     Provider("gemini", "Google Gemini (OpenAI-compatible) — API key",
              "openai",
              base_url="https://generativelanguage.googleapis.com/v1beta/openai",
              key_env="GEMINI_API_KEY",
+             key_url="https://aistudio.google.com/apikey",
+             tradeoff="huge context; a free tier",
              sample_models=("gemini-2.5-flash", "gemini-2.5-pro")),
     Provider("mistral", "Mistral — API key",
              "openai", base_url="https://api.mistral.ai/v1",
-             key_env="MISTRAL_API_KEY", sample_models=("mistral-large-latest",)),
+             key_env="MISTRAL_API_KEY",
+             key_url="https://console.mistral.ai/api-keys",
+             tradeoff="mid pricing; EU-hosted",
+             sample_models=("mistral-large-latest",)),
     Provider("ollama", "Ollama (local models) — no key",
              "openai", auth="local", base_url="http://localhost:11434/v1",
+             tradeoff="free; runs on your machine; no cloud",
              sample_models=("llama3.1", "qwen2.5")),
     Provider("custom", "Custom OpenAI-compatible endpoint",
              "openai", auth="api_key",
@@ -133,6 +156,39 @@ def fetch_models(provider: Provider, api_key: str = "",
     except Exception:
         return []
     return []
+
+
+def fetch_pricing(provider: Provider, api_key: str = "",
+                  base_url: str = "") -> dict[str, float]:
+    """Return live blended $/Mtok per model where the provider publishes it.
+
+    OpenRouter exposes per-token pricing in its /models payload; we blend prompt
+    and completion into one rough $/Mtok figure for cost-aware routing. Best-
+    effort: returns {} on any error or for providers without published pricing.
+    """
+    base = (base_url or provider.base_url).rstrip("/")
+    if "openrouter" not in base and provider.key != "openrouter":
+        return {}
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        data = _http_json(base + "/models", headers)
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for m in data.get("data", []) if isinstance(data, dict) else []:
+        mid = m.get("id")
+        pricing = m.get("pricing") or {}
+        try:
+            # OpenRouter prices are per-token strings; blend prompt+completion.
+            prompt = float(pricing.get("prompt", 0) or 0)
+            completion = float(pricing.get("completion", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if mid and (prompt or completion):
+            # Weight completion a bit heavier (output is usually the larger cost).
+            blended = (prompt * 0.4 + completion * 0.6) * 1_000_000
+            out[str(mid).lower()] = round(blended, 4)
+    return out
 
 
 @dataclass

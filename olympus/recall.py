@@ -207,24 +207,61 @@ def extract(user: str, user_msg: str, reply: str,
     try:
         convo = (f"User said:\n{user_msg[:2000]}\n\n"
                  f"Assistant replied:\n{reply[:1500]}")
-        out = backend.complete_json(
-            settings, _EXTRACT_SYSTEM,
-            [{"role": "user", "content": convo}], EXTRACT_SCHEMA, effort="low")
-        eid = usermem.record_event(
-            user, "turn", {"user": user_msg[:500]}, source="user")
-        for cand in (out.get("memories") or []):
-            content = security.sanitize_for_memory(str(cand.get("content", "")))
-            if not content.strip():
-                continue
-            cand["content"] = content
-            action = _gate(user, cand, eid)
-            summary[action] = summary.get(action, 0) + 1
-        rels = relgraph.ingest(user, out.get("relationships") or [])
-        if rels:
-            summary["relationships"] = rels
+        summary = _run_extractor(user, convo, settings,
+                                 event_kind="turn",
+                                 event_payload={"user": user_msg[:500]})
     except Exception as err:
         from . import errors
         errors.capture("recall.extract", err, context=(user_msg or "")[:120])
+    return summary
+
+
+def _run_extractor(user: str, convo: str, settings: config.Settings,
+                   event_kind: str, event_payload: dict) -> dict:
+    """One extractor call over `convo` + the write policy for its output."""
+    summary: dict[str, int] = {}
+    out = backend.complete_json(
+        settings, _EXTRACT_SYSTEM,
+        [{"role": "user", "content": convo}], EXTRACT_SCHEMA, effort="low")
+    eid = usermem.record_event(user, event_kind, event_payload, source="user")
+    for cand in (out.get("memories") or []):
+        content = security.sanitize_for_memory(str(cand.get("content", "")))
+        if not content.strip():
+            continue
+        cand["content"] = content
+        action = _gate(user, cand, eid)
+        summary[action] = summary.get(action, 0) + 1
+    rels = relgraph.ingest(user, out.get("relationships") or [])
+    if rels:
+        summary["relationships"] = rels
+    return summary
+
+
+def flush_slice(user: str, history_text: str,
+                settings: config.Settings) -> dict:
+    """Pre-compaction memory flush: run the extractor once over the slice of
+    history that is about to be folded into a prose summary, so its durable
+    facts survive compaction as typed memories — not only as whatever the
+    summarizer happened to keep. Best-effort: never raises into compaction."""
+    summary: dict[str, int] = {}
+    if not config.MEMORY_ENABLED:
+        return summary
+    if len((history_text or "").strip()) < config.MEMORY_MIN_CHARS:
+        return summary
+    from . import usage
+    try:
+        usage.check_budget()
+    except usage.BudgetExceeded:
+        return summary
+    try:
+        convo = ("The following conversation turns are about to be compacted "
+                 "away. Extract anything durable:\n\n" + history_text[:6000])
+        summary = _run_extractor(user, convo, settings,
+                                 event_kind="compaction_flush",
+                                 event_payload={"chars": len(history_text)})
+    except Exception as err:
+        from . import errors
+        errors.capture("recall.flush_slice", err)
     return summary
 
 

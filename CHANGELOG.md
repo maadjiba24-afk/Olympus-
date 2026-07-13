@@ -15,14 +15,480 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — browser harness: cross-site patterns + template demotion
+
+Two evolution mechanisms that make the skill store *converge* over time.
+
+- **Template demotion** (`operator.demote_drifted`, in the review cycle) — the
+  inverse of graduation. Each template now tracks its **own** run/success counts
+  (`mark_template_outcome`, recorded on every `browser_operate`); a graduated
+  template whose measured reliability craters is **demoted** — removed from the
+  profile — so the operator stops auto-running a dead recipe. Promotion is now
+  reversible, not a one-way ratchet.
+- **Cross-site generalization** (`browser_pattern`, `suggest_pattern`) — a proven
+  flow on one site can **seed** another: the tool returns the most reliable
+  learned flow matching a goal (e.g. "login", "checkout") as a **generalized
+  scaffold** — the op sequence and intent hints with **selectors omitted** (those
+  are site-specific and never presented as applying elsewhere). A new site
+  bootstraps from a proven shape instead of from scratch, then adapts and learns
+  it locally. First-party read; no cross-site selector is ever asserted.
+
+### Added — browser harness: gated self-heal retry
+
+Self-healing now *completes* more runs, without ever taking a risky guess.
+
+- When a **reversible (notable)** template step drifts and a confident
+  replacement is found, the operator retries the flow from the failed step with
+  the healed selector — continuing (not repeating) the completed steps — and the
+  run succeeds, marked `healed`. It still files the human-review proposal so the
+  fix can be made permanent.
+- An **irreversible/financial** step is **never** auto-retried on a guessed
+  selector — it stays propose-only, even when a candidate is present. The gate is
+  the template's risk class, so healing can't quietly escalate a risky action.
+
+### Added — browser harness: deterministic waits (`wait_for`)
+
+Instead of racing a fixed sleep on a dynamic page, the harness can wait for a
+specific condition:
+
+- **`wait_for`** — a new `browser_act` verb *and* template op that blocks until a
+  selector **appears** (or **disappears**, with `value='gone'` / `gone: true`),
+  bounded by a timeout, resolving deep (shadow/iframe). A template `wait_for`
+  that times out raises the typed `TemplateStepError`, so it feeds the same
+  self-healing path as any other unresolved step.
+- Verified against real Chromium (an element injected after 400 ms is waited for,
+  not missed).
+
+### Added — browser harness: saved auth state (session persistence)
+
+The operator can now remember a signed-in session and restore it, instead of
+logging in from scratch every run.
+
+- **`browser_save_auth` / `browser_restore_auth`** — capture an authorized
+  domain's cookies (CDP `Storage.getCookies`, filtered to the domain) into the
+  **Fernet-encrypted vault**, and re-inject them (`Network.setCookies`) to
+  restore the session. Cookies are session credentials, so both are credentialed
+  actuators: operator-gated, domain-authorized, stripped from any prose-ingesting
+  run, and never surfaced to the model.
+- **Self-evolving** — a successful `browser_login` now auto-saves the fresh
+  session (best-effort), so the operator's authenticated state persists across
+  runs without extra prompting; `forget_site` drops the saved session too.
+- Verified end-to-end against real Chromium (cookie set → read-back roundtrip)
+  and offline through the vault.
+
+### Improved — browser harness: rooted, unambiguous durable selectors
+
+The durable-selector fallback for a control with no id/name/aria-label used to be
+a bare `tag:nth-of-type(k)`, which can match the k-th sibling *anywhere* on the
+page — so a promoted template or self-heal candidate could point at the wrong
+element. `__olySel` now builds a **rooted path** up to the nearest ancestor with
+an id (e.g. `#box>div:nth-of-type(1)>button:nth-of-type(2)`), so it resolves
+uniquely. Verified against real Chromium (two ambiguous sibling groups resolve to
+exactly the intended node). Directly strengthens template graduation and
+self-healing, which both rely on durable selectors.
+
+### Added — browser harness: richer action verbs
+
+`browser_act` gains three interaction primitives, widening the flows the operator
+can drive:
+
+- **`rightclick`** (a.k.a. `contextmenu`) — opens context menus, by index/selector
+  or x/y.
+- **`drag`** — drag the source element onto a target selector (passed in `value`)
+  via HTML5 drag events with a shared `DataTransfer` — reorderable lists, kanban,
+  sliders.
+- **Modifier chords in `press`** — `Control+a`, `Shift+Tab`, `Meta+c`, etc., parsed
+  into the dispatched `KeyboardEvent`.
+
+All resolve deep (shadow/iframe), stay on the credentialed-actuator side
+(capability-separated), and are verified against real Chromium (right-click and
+Ctrl+A fire genuine DOM events).
+
+### Fixed — browser harness: real-transport upload and multi-tab
+
+Two capabilities that the offline `FakeTransport` accepted but real Chrome
+rejected — now wired correctly and verified against headless Chromium.
+
+- **File upload** — `DOM.setFileInputFiles` operates on a node *handle*, not a
+  selector, so `upload()` now resolves the input to a CDP `objectId`
+  (`_resolve_object_id`, deep — works inside shadow roots / same-origin iframes)
+  and attaches by handle. Confirmed the file actually lands on the input against
+  real Chrome; confinement + operator gating unchanged.
+- **Multi-tab** — `switch_tab()` now genuinely *drives* the tab it switches to:
+  `_RealTransport.reattach()` re-binds the transport to the target tab's
+  WebSocket (resolved via the DevTools HTTP base), so subsequent
+  actions/observations run in the new tab's context — not just `activateTarget`.
+  Confirmed evals run in the switched-to tab against real Chrome.
+
+The real-Chromium smoke test now covers both.
+
+### Added — browser harness: real-Chromium smoke test (ground truth)
+
+`tests/test_browser_real.py` drives an actual headless Chromium over CDP through
+the same `BrowserSession` the offline suite exercises with `FakeTransport` — the
+ground truth the doubles stand in for, catching transport-level gaps (node
+resolution, target attach, live network) the fakes can't. Opt-in and
+self-skipping (`OLYMPUS_BROWSER_REAL=1` + a discoverable Chromium), so default CI
+stays green. Confirms open/observe/act-by-index, **shadow-DOM reach**, fill/select,
+real PNG screenshots, and tab listing against a live browser.
+
+### Added — browser harness: multi-tab, uploads, network-idle waits
+
+Governed plumbing that widens the range of flows the operator can automate.
+
+- **Multi-tab** — `browser_tabs` lists the browser's open page tabs (bounded
+  id/title/url) and `browser_switch_tab` activates one by index. Both are
+  operator-gated credentialed actuators; after a switch, `browser_act`/
+  `browser_observe` re-check the newly-current domain's authorization, so
+  switching can never point the actuator at an unauthorized logged-in tab.
+- **File upload** — `browser_upload` attaches a **workspace-confined** file to a
+  file input on the current authorized page. Uploading a local file is data
+  egress, so it's operator-gated (current domain authorized) and the path can
+  never escape the sandbox (`_confine`).
+- **Downloads confined** — `set_download_dir()` directs any browser download
+  into the workspace, so a site can't drop a file outside the sandbox.
+- **Network-idle wait** — `wait_idle()` (and the new `wait_idle` template op)
+  waits for the page to load *and* its resource count to hold steady for a short
+  quiet window — a dependency-free heuristic for dynamic pages whose content
+  arrives after `readyState=complete`. Bounded and best-effort.
+
+### Added — browser harness: visual perception (screenshot + describe)
+
+For canvas/chart/image-heavy pages that a text map can't capture, the harness can
+now *look* at the page.
+
+- **`browser_screenshot`.** Captures the current page (CDP
+  `Page.captureScreenshot`) and describes it with the vision model
+  (`media.analyze_image_data`, a new in-memory path — no workspace file needed),
+  optionally answering a question about it.
+- **Governed as a reader, not an actuator.** The pixels are untrusted external
+  content (text-in-image is still injection), so `browser_screenshot` is an
+  INGESTION tool: its description is wrapped, and capability separation strips it
+  from any run that also holds an actuator. It refuses a blocked landing (never
+  captures internal content) and caps the decoded image size. Given to the
+  reader (Argus), never the operator.
+
+### Added — browser harness: self-healing templates
+
+When a site is redesigned, a template no longer fails silently — it diagnoses the
+drift and proposes the fix.
+
+- **Drift is detected, not swallowed.** `run_template` now raises a typed
+  `TemplateStepError` when a step can't resolve — including a failed *click*,
+  which previously passed unnoticed.
+- **Re-observe and locate the moved control.** On a step failure during
+  `browser_operate`, the operator re-observes the page and finds the control
+  that most likely *is* the moved one, matching the failed selector's intent
+  (exact slug → substring containment → trigram similarity) against the current
+  elements' labels and durable selectors.
+- **Propose, never self-rewrite.** A candidate becomes a human-reviewed
+  proposal (`site_template_record` to enact) — Olympus never auto-edits a
+  credentialed template, so self-healing can't be turned into an injection
+  primitive. The run still reports an honest FAILED, now with the likely fix
+  attached, and the outcome feeds the reliability score that prunes dead
+  templates.
+
+### Added — browser harness: proven skills auto-graduate into templates
+
+The evolution loop now closes fully: improvise → learn → prove → **formalize**.
+
+- **Structured recipe.** As the harness acts, it captures a structured twin of
+  its journal — `{op, selector, value?}` steps with **durable selectors**
+  (id → `[name]` → `[aria-label]` → nth-of-type path via a new `__olySel`
+  helper), never the typed text. `browser_learn` persists this recipe on the
+  learned skill.
+- **Auto-graduation.** A METIS review pass (`operator.promote_ready`, folded
+  into `operator.review_profiles`) graduates a learned skill into a declarative
+  action template once it has been tried enough times (`_PROMOTE_MIN_RUNS`) and
+  lands reliably enough (`_PROMOTE_RELIABILITY`). The generated template is
+  guarded by an `assert` on its first control so it fails fast if the page
+  drifted, and it rides the existing governed `browser_operate` path — auto-run
+  within scope for notable risk, approval for anything higher. Graduation
+  **formalizes** a proven flow without widening the trust boundary.
+- **Idempotent & bounded.** A skill whose template already exists is skipped;
+  recipes are capped and credential-free by construction.
+
+### Added — browser harness depth: shadow DOM + same-origin iframes
+
+The harness now perceives and acts on controls that modern web apps hide behind
+component boundaries, not just the top-level document.
+
+- **Deep perception & resolution.** `observe()` deep-walks the light DOM plus
+  every **open shadow root** and **same-origin iframe**, stamping controls found
+  anywhere in that tree; a shared `__olyq` deep-query helper backs every
+  `act`/`read`/`exists`/`fill`/template resolution, so an index stamped inside a
+  shadow root or frame still resolves. Most componentized sites that previously
+  showed a near-empty map now expose their real controls.
+- **Boundary honored, not defeated.** Cross-origin frames throw on access and are
+  skipped — Olympus works within the same-origin policy rather than trying to
+  bypass it.
+- **Hardened.** The shadow/iframe recursion is depth-bounded
+  (`_DEEP_MAX_DEPTH`) so a pathological or hostile page can't hang the walk or
+  overflow the stack; observe output stays capped at `_OBSERVE_MAX` with labels
+  capped at `_LABEL_MAX`.
+- **Evolves for free.** Because the perceive→act loop now reaches these controls,
+  `browser_learn` captures shadow/iframe flows into the same reliability-scored
+  skill store — deeper reach, same governance.
+
+### Added — native browser harness (perceive → act, governed)
+
+Olympus grows its **own** browser-agent working style, so no external browser
+harness has to be plugged in. The harness perceives an arbitrary page as an
+indexed map of its interactive elements and acts by index — the browser-use
+working style — but built the Olympus way: capability-separated, operator-gated,
+and wired to evolve.
+
+- **Indexed perception** (`browser.BrowserSession.observe`, `browser_observe`
+  tool) — a single sandboxed `Runtime.evaluate` pass finds the visible,
+  enabled interactive elements (links, buttons, inputs, selects, ARIA
+  roles, `contenteditable`, …), stamps each with `data-olympus-idx`, and
+  returns a numbered map (`[2] button "Sign in"`). The model acts by index
+  instead of guessing CSS selectors.
+- **Richer action set** (`browser.BrowserSession.act`, `browser_act`) — now
+  resolves an element by `index` from the map and supports click, type,
+  scroll, press (keys), select (options), hover, and back, over the same
+  audited CDP ledger.
+- **Governed like an actuator, not a reader.** `browser_observe` maps a
+  possibly logged-in tab, so it is classified in `ACTION_TOOLS`: stripped from
+  any prose-ingesting run (capability separation), gated to an
+  operator-enabled, authorized domain, and its element labels are hard-capped
+  so a map row can't smuggle a paragraph of instructions. The operator
+  (HERMES) holds the full `observe → act` loop; ingesting readers (Argus)
+  hold neither half. Threat-modeled and count-bound in `docs/THREAT_MODEL.md`.
+- **It evolves** (`browser_learn`) — the session keeps a bounded, first-party
+  journal of the act steps that actually landed (never the typed text, so
+  credentials never enter the store). When a task succeeds, HERMES crystallizes
+  that proven flow into a reliability-scored skill with `browser_learn`. From
+  there it rides the existing evolution machinery: future runs reuse it,
+  `mark_outcome` refines its measured score, Metis prunes it if it goes flaky,
+  and Prometheus proposes profile fixes — so the harness gets better on the
+  sites you actually use, without a human writing a selector script.
+
+### Changed — Olympus assumes no model (vendor-neutral by default)
+
+Olympus no longer ships a baked-in default model. Previously an Anthropic
+setup with no `OLYMPUS_MODEL` silently ran `claude-opus-4-8`, and the replay
+gate silently used `claude-sonnet-4-6`; both assumptions are gone. The user
+chooses a model explicitly — `olympus setup` (which lists your key's real
+models), `OLYMPUS_MODEL`, or per-request BYOK — and a missing choice now fails
+fast with an actionable message (`config.require_model`), is flagged by
+`olympus doctor`, and reads as `models: down` in `olympus health`.
+**Migration:** if you relied on the implicit default, set it explicitly once:
+`olympus config set OLYMPUS_MODEL claude-opus-4-8` (or any model you prefer).
+`OLYMPUS_GATE_MODEL` is now purely optional: unset, the replay gate runs on
+your configured model.
+
+### Added — workspace, operator, and gateway (Odysseus/Hermes/OpenClaw study)
+
+A three-phase build extending Olympus toward the archetypes it was closest to.
+
+- **Image editing** (`media.edit_image`, `edit_image` on Peitho/Iris,
+  `olympus gallery edit`, an Edit button in the `🖼 gallery` panel) — AI-edit an
+  existing workspace image by prompt, saving the result as a **new** file (the
+  original is never overwritten). Reads the source path-confined (image types
+  only, size-capped) and writes only to the confined workspace; degrades
+  gracefully without a media key. Uses a dependency-free multipart POST to the
+  images-edit endpoint — no new heavy image library.
+- **Runtime health reporting** (`olympus/health.py`, `olympus health`,
+  `/api/health`) — a live "what's degraded right now" view of the moving parts
+  (models, memory, gateway channels, search, push, connections), each reported
+  **ok / degraded / down**. Distinct from `doctor` (setup readiness): `health`
+  is pollable, `olympus health` exits non-zero when anything is down, and an
+  absent optional piece is *degraded*, not a failure, so a minimal install still
+  reads healthy.
+- **ntfy push channel** (`olympus/ntfy.py`) — a lightweight publish-to-a-topic
+  delivery target for scheduled jobs and proactive alerts, alongside
+  Telegram/Discord/Slack/Signal. Configure with `NTFY_TOPIC` (+ optional
+  `NTFY_SERVER` for self-hosted and `NTFY_TOKEN` for a protected topic); wired
+  into the scheduler (`--to ntfy`), the gateway fan-out, and the heartbeat, and
+  reported by `olympus doctor`. Best-effort — a push failure never breaks the
+  job that produced the result.
+- **MCP server — workspace reads** (`olympus/mcp_server.py`, `olympus mcp-serve`)
+  — the existing MCP server now also exposes three **read-only** workspace tools
+  to any MCP client (Claude Desktop, IDEs, other agents): `olympus_search_documents`,
+  `olympus_list_todos`, and `olympus_recall_memory`, scoped to `OLYMPUS_MCP_USER`
+  (default the shared namespace). No write or actuator ever crosses the boundary.
+- **Email spam triage** (`olympus/spamtriage.py`, `triage_inbox` on Angelos,
+  `olympus triage`) — a read-only heuristic classifier that sorts the inbox into
+  important / promotions / spam / other with a reason for each. No model call
+  (works even where egress is locked down), never deletes or moves anything, and
+  message content stays untrusted (the tool is wrapped like other inbox reads).
+- **Notes / todos / reminders** (`olympus/todos.py`, `olympus todo`, web UI
+  "Your list" in the `📅 agenda` panel) — a small per-user checklist store:
+  notes (kept scraps), todos (tickable), and reminders (todos with a due time).
+  Open items and overdue reminders surface in the agenda; `list_todos` /
+  `add_todo` / `complete_todo` on Chronos are first-party and ungated (the
+  user's own data, no external side effect).
+
+- **Documents workspace** (`olympus/documents.py`, `olympus documents`, web UI
+  `📄 docs` panel) — a per-user Markdown store the assistant can read and, with
+  approval, write. The agent's `write_document` tool stages every save through
+  the approval spine (reversible, never silent); the user editing in the web UI
+  saves directly. `list_documents`/`read_document`/`write_document` on Peitho.
+- **Personal-document RAG** (`olympus/docrag.py`, `search_documents` on Peitho)
+  — retrieval over the user's own documents, grounded into the synthesis
+  prompt. Semantic (cosine over embeddings) when an embeddings endpoint is
+  configured, lexical overlap otherwise; a per-user index re-embeds only the
+  documents whose mtime changed. First-party content (grounded like memory, not
+  wrapped as untrusted).
+- **Gallery** (`olympus/gallery.py`, `olympus gallery`, web UI `🖼 gallery`
+  panel) — surfaces images generated into the confined workspace. Serving is
+  path-confined (traversal refused via `_confine`), image-types only, and
+  size-capped; the panel lazy-loads thumbnails and opens full images in a tab.
+- **Agenda** (`_agenda_view` + `/api/agenda`, `olympus agenda`, web UI
+  `📅 agenda` panel) — one view of the user's scheduled tasks (from the
+  natural-language scheduler, filtered to the principal plus shared jobs) and
+  their upcoming calendar events. Calendar reads are read-only, scoped to the
+  connected Google account, and degrade to "not connected" instead of erroring
+  when no account is linked or egress is blocked.
+- **Blind multi-model compare** (`olympus/compare.py`, `olympus compare`, web UI
+  `⚖ compare` panel) — the same prompt against every configured model with
+  labels shuffled, revealed only after you pick, and picks accumulated into a
+  per-user tally so preference reflects output rather than brand. Each model is
+  called with no cross-member failover (`backend.complete_text_once`), so a
+  failing model shows its own error under its own label instead of being
+  silently answered by another. Needs ≥2 models (via `OLYMPUS_MODELS`).
+- **Hermes operator, made usable** — `olympus operator`
+  (status/enable/authorize/forget/list/history), a built-in site-profile
+  catalog (`olympus/profiles/`), a plain-English review surface in CLI and chat
+  (`operator_status`/`operator_history`), and `docs/OPERATOR_GUIDE.md`. Built on
+  the existing governed operator; no bypass of its gates.
+- **Unified gateway daemon** (`olympus gateway`) — runs every configured chat
+  channel (Telegram/Discord/Slack/Signal/WhatsApp/email/webhook) in one
+  supervised process with auto-restart + backoff and a cross-process health
+  file (`gateway --status`). `docs/GATEWAY.md`.
+
+### Added — capabilities studied from Odysseus
+
+A batch distilled from analyzing the Odysseus self-hosted AI workspace
+(`pewdiepie-archdaemon/odysseus`) and adopting its best agent ideas the
+Olympus-native way — verified, gated, headless-first. See the release-tracking
+analysis for the full feature comparison.
+
+- **Deep Research pipeline** (`olympus/research.py`, `olympus research`) — an
+  IterResearch-style engine: plan sub-questions → iterative search/read/extract
+  loop the model drives → cited markdown report. Pool-aware staging (reasoning
+  plans/synthesizes, general extracts, verify checks the draft against the
+  evidence), a never-laundered verification-notes section, date-grounded
+  queries, low-quality-domain and duplicate-query filtering, and every fetched
+  page wrapped untrusted through the SSRF/rebinding-pinned path. On the
+  Anthropic backend, search/fetch run through Anthropic's **server-side** web
+  tools — so Deep Research reaches the open web even where the host's outbound
+  egress is locked down to a proxy allowlist — falling back to the client-side
+  provider layer for local/non-Anthropic models.
+- **Code-navigation tools for Hephaestus** — `grep_files` (bounded regex
+  search), `glob_files` (pathlib-style `**/`, newest-first), and `read_file`
+  line-range slicing, plus `edit_file`: exact-string editing staged for
+  explicit approval (always-hold — never auto-executes, since it rides on the
+  always-ingesting Hephaestus) whose preview *is* the unified diff. A
+  case-insensitive sensitive-file deny-list (`.env`, keys, `.ssh`/`.aws`, …)
+  guards read/grep/glob/edit.
+- **Per-turn dynamic tool selection** (`olympus/toolselect.py`) — ranks a
+  specialist's loadout against the current task and drops the least-relevant
+  tail of oversized loadouts, saving prompt tokens each round. Runs strictly
+  after every security filter (it can only drop, never re-admit a stripped
+  tool); BASE/server-side/`prepare_action`/`ask_user` are never dropped.
+  `OLYMPUS_TOOL_SELECT_MAX` tunes the cap (set low for small-context models).
+- **Teacher escalation** (`olympus/teacher.py`) — an Athena-ordered rework
+  reruns on the strongest pool member for that role, and the fix is distilled
+  into a provisional, benchmark-gated, specialist-scoped skill so the weaker
+  model learns. No-op with a single-member pool or an already-strongest
+  specialist. `OLYMPUS_TEACHER_ESCALATION=0` disables.
+- **Pluggable web-search providers** (`olympus/websearch.py`) — SearXNG, Brave,
+  Tavily, Serper, and Google PSE behind one seam with DDG as the keyless
+  fallback; ordered try-through, 429 cooldown, and a shared result cache.
+  Endpoints ride the sovereign egress choke. The `web_search` tool and Deep
+  Research both use it.
+- **Skill import from public GitHub URLs** (`skillpack.import_url`) — direct
+  SKILL.md links, GitHub blob links, and whole repo/tree bundles (read in
+  memory, never extracted to disk). Remote imports are always provisional and
+  pass the injection/credential scan before the benchmark gate.
+- **`ask_user` tool** (`olympus/interaction.py`) — specialists can ask a
+  focused multiple-choice question mid-run through a thread-local provider;
+  interactive surfaces prompt the terminal, headless runs proceed with a stated
+  assumption instead of blocking. Available to every specialist and safe under
+  capability separation.
+- **Style-matched email drafting** (`olympus/emailstyle.py`) — Angelos distills
+  the user's writing voice from sent mail (quotes/signatures stripped, bodies
+  wrapped untrusted, guide scrubbed for injection) and drafts replies in it; a
+  `refresh_email_style` tool rebuilds on demand.
+
+### Security
+
+- **DNS-rebinding defense for outbound fetches** — `security.resolve_pinned_ip`
+  validates every resolved address and returns the exact IP to dial;
+  `tools._PinnedHTTP(S)Connection` connect to that pinned IP (HTTPS keeps
+  SNI/cert checks on the hostname), closing the validate-then-reconnect window
+  the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
+  delivery use the pinned opener. (Adapted from Odysseus fix #704; the
+  case-insensitive sensitive-file deny-list mirrors their #5097.)
+
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
-> and `0.23.0` sections below were prepared and dated but **never tagged or
+> through `0.24.0` sections below were prepared and dated but **never tagged or
 > published** — so they are not releases yet, and everything from `0.22.0`
 > down to this note is effectively unreleased pending a tagging decision (see
 > RELEASING.md). The dated headers are kept for review; re-date and tag them
-> when a release is actually cut. `pyproject.toml` currently reads `0.23.0` as
+> when a release is actually cut. `pyproject.toml` currently reads `0.24.0` as
 > the in-development version, not a shipped one.
+
+## [0.24.0] — 2026-07-03
+
+A trust-and-adaptation release distilled from a close study of the Hermes agent:
+adopt the best of its UX, but build the Olympus-native step beyond — verified,
+lightweight, cost-aware, headless-first. See `docs/VISION.md` for the full
+screen-by-screen analysis and the backlog these changes came from.
+
+### Added — trust core
+
+- **Command security gate** (`olympus/cmdguard.py`) — a deterministic,
+  dependency-free classifier that screens every shell command before
+  `sandbox.run()` executes it, refusing catastrophic ones (`rm -rf /`, `mkfs`,
+  fork bombs, disk writes, host power-off) **even after human approval**.
+  Fail-closed: an unknown `OLYMPUS_EXEC_SECURITY` mode falls back to `enforce`.
+  The shell analogue of the Aletheia hallucination gate.
+- **`clarify` route** — Zeus can ask 1–2 crisp questions on a genuinely
+  ambiguous request instead of guessing (gated in the prompt so it won't nag).
+- **`analyze_image` tool** — vision analysis over an OpenAI-compatible endpoint
+  (URL or workspace file; path-confined, size-capped, output treated as
+  untrusted). Closes the one real capability gap vs. Hermes.
+
+### Added — cost & pool intelligence
+
+- **Pricing-aware routing** — a `$/Mtok` table (with live OpenRouter pricing via
+  `providers.fetch_pricing`) breaks genuine capability ties toward the cheaper
+  model; `ModelPool.assignment()` shows per-role price.
+- **Per-provider credential rotation** — `Settings` carries a key pool; the
+  OpenAI-compatible backend rotates to the next key on 429/quota and remembers
+  the exhausted one, with masked provenance via `rotation_report()`.
+- **Context-fraction history budget** — compaction now scales to each model's
+  context window (`OLYMPUS_HISTORY_CONTEXT_FRACTION`), with the absolute
+  `OLYMPUS_HISTORY_TOKEN_BUDGET` kept as an override.
+
+### Added — CLI, readiness & UX
+
+- **`olympus doctor`** — a readiness check (provider, sandbox, command gate,
+  workspace, memory, optional media/gateways) with a ✓/⚠/✗ summary and a
+  capability dashboard; reused at the end of `olympus setup`. Also `/doctor`.
+- **`olympus config show|set|edit`** (secrets masked, never echoed) and
+  **`olympus setup <model|terminal|gateway|tools>`** section editors.
+- **Progress verbosity modes** — `OLYMPUS_PROGRESS` / in-chat `/progress`
+  (`off|stages|all|verbose`); verification activity always shows from `stages`.
+- **Distill-then-clear `/reset`** — folds a conversation into durable state,
+  then starts fresh; idle gateway sessions are swept on a cadence.
+- **Live DAG checklist**, a **context-usage status line**, and a smoother
+  **setup wizard** (Quick/Full fork, env key auto-detection, merged Anthropic
+  auth-mode entry, "get one at" key URLs + save-now note, trade-off labels).
+
+### Added — personality, content & reach
+
+- **`~/.olympus/soul.md`** — an editable owner personality directive injected
+  into Zeus at routing and synthesis (`olympus soul [show|edit]`).
+- **Cron-attached skills** — a scheduled job can name a skill to load before it
+  runs (`schedule_task(..., skill=...)`).
+- **Curated starter-skill pack** (`olympus skills-starter`, provisional/gated)
+  and **email + inbound-webhook gateways** (`olympus email`, `olympus webhook`)
+  reusing the shared gateway pipeline.
 
 ### Added
 

@@ -132,6 +132,12 @@ def run(command: str, *, timeout: int | None = None,
     non-zero exit — that's reported in the Result; only truly broken setups
     (missing docker, etc.) surface as ok=False with the error in output.
 
+    Before anything executes, the command passes through the security gate
+    (cmdguard). A catastrophic command (rm -rf /, mkfs, fork bomb, …) is
+    refused here — fail-closed — even if a human already approved the action.
+    This protects *every* caller of run() (interactive, scheduled, heartbeat),
+    not just the approval prompt.
+
     The timeout is activity-based: `timeout` seconds of *silence* kills the
     command, but a command that is still producing output keeps its lease,
     up to the MAX_TIMEOUT wall-clock ceiling. A silent `sleep 5` with
@@ -144,6 +150,13 @@ def run(command: str, *, timeout: int | None = None,
     like "ERROR" or "listening on" without re-parsing the full log."""
     if not (command or "").strip():
         return Result(False, 2, "empty command")
+    from . import cmdguard
+    allowed, verdict = cmdguard.check(command)
+    if not allowed:
+        return Result(False, 126,
+                      f"blocked by the command security gate — {verdict.reason} "
+                      f"[rule: {verdict.rule}]. Set OLYMPUS_EXEC_SECURITY=off to "
+                      "override (not recommended).")
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
     root = workdir()
     be = (be or backend()).lower()
@@ -283,14 +296,223 @@ def undo_write(result: dict) -> str:
     return "nothing to undo"
 
 
-def read_file(path: str) -> str:
+# Files that hold credentials by convention. The file tools refuse to read
+# them and the search tools skip them: a workspace accumulates .env files and
+# keys over time, and an agent has no business feeding those to a model.
+# Matched CASE-INSENSITIVELY against every path component (".ENV" and
+# "ID_RSA.BAK" are the same secret — the case-sensitive version of this list
+# was an actual Odysseus vulnerability, fixed upstream as #5097).
+_SENSITIVE_PATTERNS = (
+    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
+    "*.keystore", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",
+    "credentials", "credentials.*", "secrets.*", ".netrc", "_netrc",
+    ".htpasswd", ".npmrc", ".pypirc", ".git-credentials", "*.kdbx",
+)
+_SENSITIVE_DIRS = frozenset({".ssh", ".aws", ".gnupg", ".gpg"})
+
+
+def is_sensitive_path(path: "Path | str") -> bool:
+    """Whether any component of `path` names a credential file or directory."""
+    import fnmatch
+    parts = Path(path).parts
+    for part in parts:
+        low = part.lower()
+        if low in _SENSITIVE_DIRS:
+            return True
+        if any(fnmatch.fnmatch(low, pat) for pat in _SENSITIVE_PATTERNS):
+            return True
+    return False
+
+
+def read_file(path: str, start_line: int | None = None,
+              end_line: int | None = None) -> str:
+    """Read a workspace file, optionally only lines [start_line, end_line]
+    (1-indexed, inclusive) — a large file need not cost its whole length."""
     try:
         target = _confine(path)
     except ValueError as err:
         return f"Error: {err}"
     if not target.is_file():
         return f"Error: no such file in workspace: {path}"
-    return target.read_text(encoding="utf-8", errors="replace")[:OUTPUT_CAP]
+    if is_sensitive_path(target):
+        return f"Error: refusing to read a credential file: {path}"
+    text = target.read_text(encoding="utf-8", errors="replace")
+    if start_line is not None or end_line is not None:
+        lines = text.splitlines(keepends=True)
+        lo = max(1, int(start_line or 1))
+        hi = int(end_line) if end_line is not None else len(lines)
+        if lo > len(lines):
+            return f"Error: start_line {lo} is past the end of {path} ({len(lines)} lines)"
+        text = "".join(lines[lo - 1:hi])
+    return text[:OUTPUT_CAP]
+
+
+# Walking a big workspace has to stop somewhere; these bound grep/glob so a
+# node_modules tree can't eat the request. Skipped directories mirror what a
+# developer would never want searched.
+_WALK_SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv",
+                             "venv", ".tox", ".mypy_cache", ".pytest_cache",
+                             "dist", "build", ".cache"})
+_GREP_MAX_FILES = 5_000
+_GREP_MAX_MATCHES = 200
+_GREP_MAX_FILE_BYTES = 2_000_000
+
+
+def _walk_files(root: Path):
+    """Confined, bounded, deny-list-aware file walk (sorted for determinism)."""
+    import os as _os
+    seen = 0
+    for dirpath, dirnames, filenames in _os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _WALK_SKIP_DIRS
+                             and d.lower() not in _SENSITIVE_DIRS)
+        for name in sorted(filenames):
+            p = Path(dirpath) / name
+            if p.is_symlink() or is_sensitive_path(p):
+                continue
+            seen += 1
+            if seen > _GREP_MAX_FILES:
+                return
+            yield p
+
+
+def _glob_match(rel: str, name: str, pattern: str) -> bool:
+    """fnmatch with pathlib-style '**/' semantics: '**/*.py' matches top-level
+    files too (plain fnmatch would demand at least one slash)."""
+    import fnmatch
+    if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern):
+        return True
+    return pattern.startswith("**/") and fnmatch.fnmatch(rel, pattern[3:])
+
+
+def grep_files(pattern: str, path: str = ".", glob: str = "") -> str:
+    """Regex-search text files under a workspace directory. Returns
+    'relpath:lineno: line' matches, bounded and binary-safe."""
+    import re as _re
+    try:
+        rx = _re.compile(pattern)
+    except _re.error as err:
+        return f"Error: bad regex: {err}"
+    try:
+        root = _confine(path)
+    except ValueError as err:
+        return f"Error: {err}"
+    if not root.is_dir():
+        return f"Error: no such directory in workspace: {path}"
+    base, out, truncated = workdir(), [], False
+    for p in _walk_files(root):
+        rel = p.relative_to(base)
+        if glob and not _glob_match(str(rel), p.name, glob):
+            continue
+        try:
+            if p.stat().st_size > _GREP_MAX_FILE_BYTES:
+                continue
+            blob = p.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in blob[:8192]:                     # binary
+            continue
+        for i, line in enumerate(blob.decode("utf-8", "replace").splitlines(), 1):
+            if rx.search(line):
+                out.append(f"{rel}:{i}: {line.strip()[:300]}")
+                if len(out) >= _GREP_MAX_MATCHES:
+                    truncated = True
+                    break
+        if truncated:
+            break
+    if truncated:
+        out.append(f"…[truncated at {_GREP_MAX_MATCHES} matches — "
+                   "narrow the pattern or glob]")
+    return "\n".join(out) or "No matches."
+
+
+def glob_files(pattern: str, path: str = ".") -> str:
+    """List workspace files matching a glob pattern ('**/*.py' style),
+    newest-modified first — 'what did we just touch' sorts to the top."""
+    try:
+        root = _confine(path)
+    except ValueError as err:
+        return f"Error: {err}"
+    if not root.is_dir():
+        return f"Error: no such directory in workspace: {path}"
+    base, hits = workdir(), []
+    for p in _walk_files(root):
+        rel = str(p.relative_to(base))
+        if _glob_match(rel, p.name, pattern):
+            try:
+                hits.append((p.stat().st_mtime, rel))
+            except OSError:
+                continue
+    hits.sort(reverse=True)
+    return "\n".join(rel for _, rel in hits[:500]) or "No matches."
+
+
+def edit_file(path: str, old_string: str, new_string: str,
+              replace_all: bool = False) -> dict:
+    """Exact-string replacement in a workspace file — the execute half of the
+    'edit_file' ActionType. Result carries the prior content (undo_write
+    reverses it) and the same post-write `check` as write_file."""
+    target = _confine(path)
+    if not target.is_file():
+        raise ValueError(f"no such file in workspace: {path}")
+    if is_sensitive_path(target):
+        raise ValueError(f"refusing to edit a credential file: {path}")
+    if not old_string:
+        raise ValueError("old_string must be non-empty")
+    if old_string == new_string:
+        raise ValueError("old_string and new_string are identical")
+    prior = target.read_text(encoding="utf-8", errors="replace")
+    n = prior.count(old_string)
+    if n == 0:
+        raise ValueError(f"old_string not found in {path}")
+    if n > 1 and not replace_all:
+        raise ValueError(f"old_string occurs {n} times in {path} — make it "
+                         "unique (add surrounding lines) or set replace_all")
+    content = (prior.replace(old_string, new_string) if replace_all
+               else prior.replace(old_string, new_string, 1))
+    target.write_text(content, encoding="utf-8")
+    return {"path": str(target), "existed": True, "prior": prior,
+            "replacements": n if replace_all else 1,
+            "bytes": len(content.encode("utf-8")),
+            "check": check_written(target, content)}
+
+
+def edit_file_diff(path: str, old_string: str, new_string: str,
+                   replace_all: bool = False) -> str:
+    """Unified diff of what edit_file WOULD do — the preview half. Never
+    writes. Returns the diff, or the reason the edit cannot apply."""
+    import difflib
+    try:
+        target = _confine(path)
+    except ValueError as err:
+        return f"(cannot apply: {err})"
+    if not target.is_file():
+        return f"(cannot apply: no such file in workspace: {path})"
+    if is_sensitive_path(target):
+        return f"(cannot apply: refusing to edit a credential file: {path})"
+    prior = target.read_text(encoding="utf-8", errors="replace")
+    n = prior.count(old_string) if old_string else 0
+    if n == 0:
+        return f"(cannot apply: old_string not found in {path})"
+    if n > 1 and not replace_all:
+        return (f"(cannot apply: old_string occurs {n} times in {path} — "
+                "make it unique or set replace_all)")
+    after = (prior.replace(old_string, new_string) if replace_all
+             else prior.replace(old_string, new_string, 1))
+    diff = difflib.unified_diff(prior.splitlines(keepends=True),
+                                after.splitlines(keepends=True),
+                                fromfile=f"a/{path}", tofile=f"b/{path}")
+    text = "".join(diff)
+    if not text:
+        return "(no textual change)"
+    # The preview goes on a human approval card. If it's too big to show whole,
+    # say so explicitly — never present a silently-truncated diff as the full
+    # change an approver is signing off on.
+    if len(text) > 4_000:
+        return (text[:4_000] + f"\n… [diff truncated — showing 4000 of "
+                f"{len(text)} characters; the FULL edit will apply if "
+                "approved. Review the complete change before approving.]")
+    return text
 
 
 def list_dir(path: str = ".") -> str:

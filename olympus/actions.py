@@ -48,9 +48,13 @@ DEFAULT_AUTONOMY = L1_PREPARE
 
 def autonomy_level(user: str) -> int:
     try:
-        return int(prefs.get(user, "autonomy", DEFAULT_AUTONOMY))
+        level = int(prefs.get(user, "autonomy", DEFAULT_AUTONOMY))
     except (TypeError, ValueError):
-        return DEFAULT_AUTONOMY
+        level = DEFAULT_AUTONOMY
+    # A conversation's capability profile caps how autonomous it can be —
+    # a guest chat can never talk itself into standing authority.
+    from . import capprofile
+    return min(level, capprofile.autonomy_cap(user))
 
 
 def set_autonomy(user: str, level: int) -> str:

@@ -61,6 +61,89 @@ _LOAD_TIMEOUT = 12.0          # bounded wait for document.readyState=complete
 _SKILL_STEPS_MAX = 10_000     # max chars of a recorded skill body
 _SKILL_FIELD_MAX = 200        # max chars for domain/name/source/author
 _SKILLS_MAX = 500             # cap the library; trim lowest-reliability beyond
+_OBSERVE_MAX = 120            # max interactive elements returned by observe()
+_LABEL_MAX = 80               # per-element label cap (anti-injection: no prose)
+_JOURNAL_MAX = 80             # max first-party act steps kept for skill-learning
+
+# Deep-query prelude: installs __olyAll(sel)/__olyq(sel) that walk not just the
+# light DOM but every OPEN shadow root and SAME-ORIGIN iframe, so the harness can
+# perceive and act on components that hide their controls behind those boundaries
+# (most modern web apps). Cross-origin frames throw on access and are skipped —
+# the same-origin policy is a boundary we honor, not one we try to defeat. This
+# prelude is auto-prepended (see _eval/_eval_bool) to any expression that calls
+# __olyq, so observe() stamps and act(index=N) resolve over the identical tree.
+_DEEP_MAX_DEPTH = 12          # bound shadow/iframe recursion (anti-hang/overflow)
+_DEEP_JS = (
+    "window.__olyAll=function(sel){var out=[];"
+    "function walk(root,depth){if(depth>DMAX)return;"
+    "var m;try{m=root.querySelectorAll(sel);}catch(e){return;}"
+    "for(var i=0;i<m.length;i++)out.push(m[i]);"
+    "var all;try{all=root.querySelectorAll('*');}catch(e){all=[];}"
+    "for(var j=0;j<all.length;j++){var el=all[j];"
+    "if(el.shadowRoot)walk(el.shadowRoot,depth+1);"
+    "if(el.tagName==='IFRAME'){var d=null;try{d=el.contentDocument;}catch(e){d=null;}"
+    "if(d)walk(d,depth+1);}}}"
+    "walk(document,0);return out;};"
+    "window.__olyq=function(sel){return window.__olyAll(sel)[0]||null;};"
+    # __olySel(e): a DURABLE selector for an element (id, then [name], then
+    # [aria-label], then an nth-of-type path) — stable across reloads, unlike the
+    # ephemeral data-olympus-idx stamp. Used to promote a proven flow into a
+    # declarative template whose steps still resolve on a fresh page load.
+    "window.__olySel=function(e){if(!e||!e.tagName)return '';"
+    "var t=e.tagName.toLowerCase();"
+    "if(e.id)return '#'+e.id;"
+    "var n=e.getAttribute&&e.getAttribute('name');if(n)return t+'[name=\\''+n+'\\']';"
+    "var a=e.getAttribute&&e.getAttribute('aria-label');"
+    "if(a)return t+'[aria-label=\\''+a+'\\']';"
+    # Otherwise build a ROOTED path up to the nearest ancestor with an id (or the
+    # local root), so the selector resolves unambiguously instead of matching any
+    # nth-of-type sibling anywhere on the page.
+    "var parts=[],cur=e,depth=0;"
+    "while(cur&&cur.tagName&&depth<8){"
+    "if(cur.id){parts.unshift('#'+cur.id);break;}"
+    "var tg=cur.tagName.toLowerCase(),i=1;"
+    "for(var s=cur.previousElementSibling;s;s=s.previousElementSibling)"
+    "{if(s.tagName===cur.tagName)i++;}"
+    "parts.unshift(tg+':nth-of-type('+i+')');"
+    "cur=cur.parentElement;depth++;}"
+    "return parts.join('>');};"
+).replace("DMAX", str(_DEEP_MAX_DEPTH))
+
+# The perception step of the harness, as ONE Runtime.evaluate: deep-walk the light
+# DOM plus open shadow roots and same-origin iframes, find the visible interactive
+# elements, stamp each with a stable index (data-olympus-idx) that act(index=N)
+# resolves, and return a compact JSON list. The __OLY_OBSERVE__ marker lets the
+# offline transport route this without depending on incidental substrings. Element
+# *labels* are page-controlled, so each is hard-capped to _LABEL_MAX chars — enough
+# to pick the right control, too short to smuggle a paragraph of injected prose.
+_OBSERVE_JS = (
+    "(function(){/*__OLY_OBSERVE__*/"
+    "var q='a[href],button,input,select,textarea,[role=button],[role=link],"
+    "[role=checkbox],[role=tab],[role=menuitem],[onclick],"
+    "[contenteditable=true],summary,[tabindex]';"
+    "var out=[],idx=0;"
+    "function vis(e){var r=e.getBoundingClientRect();"
+    "if(!(r.width>0&&r.height>0))return false;if(e.disabled)return false;"
+    "var st;try{st=window.getComputedStyle(e);}catch(x){return false;}"
+    "if(st.visibility==='hidden'||st.display==='none')return false;return true;}"
+    "function take(e){if(out.length>=LIMIT)return;if(!vis(e))return;"
+    "e.setAttribute('data-olympus-idx',idx);"
+    "var nm=(e.getAttribute('aria-label')||e.placeholder||e.value||"
+    "(e.innerText||e.textContent||'')||e.getAttribute('alt')||e.title||'');"
+    "nm=nm.replace(/\\s+/g,' ').trim().slice(0,CAP);"
+    "var tg=e.tagName.toLowerCase();"
+    "var ty=tg==='input'?('input:'+(e.getAttribute('type')||'text')):tg;"
+    "out.push({i:idx,t:ty,n:nm,s:__olySel(e)});idx++;}"
+    "function walk(root,depth){if(depth>DMAX)return;"
+    "var all;try{all=root.querySelectorAll('*');}catch(x){return;}"
+    "for(var i=0;i<all.length&&out.length<LIMIT;i++){var el=all[i];"
+    "try{if(el.matches&&el.matches(q))take(el);}catch(x){}"
+    "if(el.shadowRoot)walk(el.shadowRoot,depth+1);"
+    "if(el.tagName==='IFRAME'){var d=null;try{d=el.contentDocument;}catch(x){d=null;}"
+    "if(d)walk(d,depth+1);}}}"
+    "walk(document,0);"
+    "return JSON.stringify(out);})()"
+).replace("DMAX", str(_DEEP_MAX_DEPTH))
 
 # --- transport -----------------------------------------------------------
 
@@ -78,6 +161,19 @@ class BrowserUnavailable(RuntimeError):
     """No browser is attached and none can be built from the environment."""
 
 
+class TemplateStepError(RuntimeError):
+    """A declarative template step failed to resolve (e.g. the site was
+    redesigned and the selector no longer matches). Carries the failed step so
+    the operator can attempt to self-heal by re-observing and proposing a fix."""
+
+    def __init__(self, message: str, *, op: str = "", selector: str = "",
+                 index: int = -1) -> None:
+        super().__init__(message)
+        self.op = op
+        self.selector = selector
+        self.index = index
+
+
 class FakeTransport:
     """Deterministic, offline CDP stand-in for tests and headless CI.
 
@@ -88,7 +184,9 @@ class FakeTransport:
 
     def __init__(self, pages: dict[str, dict[str, str]] | None = None,
                  redirects: dict[str, str] | None = None,
-                 present: list[str] | None = None) -> None:
+                 present: list[str] | None = None,
+                 elements: list[dict[str, str]] | None = None,
+                 targets: list[dict] | None = None) -> None:
         # url -> {"title": ..., "text": ...}
         self.pages = pages or {}
         # navigated-url -> landed-url, to simulate a server/JS redirect so the
@@ -97,9 +195,22 @@ class FakeTransport:
         # CSS selectors that "exist" on the page, so exists()/fill()/login() can
         # be driven offline. Tracks what fill() set, too.
         self.present = set(present or [])
+        # Scriptable interactive elements returned by observe(); each becomes a
+        # resolvable [data-olympus-idx="i"] selector so index actions work too.
+        self.elements = elements or []
+        for i in range(len(self.elements)):
+            self.present.add(f'[data-olympus-idx="{i}"]')
         self.filled: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
         self._url = "about:blank"
+        # Scriptable page tabs for list_tabs()/switch_tab() offline.
+        self.targets = targets or []
+        # An in-memory cookie jar so save_auth/restore_auth roundtrip offline.
+        self.cookies: list[dict] = []
+        # A tiny valid base64 PNG so screenshot() has deterministic bytes offline.
+        self.screenshot_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4"
+            "nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=")
 
     def _matched_selector(self, expr: str) -> str | None:
         for sel in self.present:
@@ -117,16 +228,27 @@ class FakeTransport:
         if method == "Runtime.evaluate":
             expr = params.get("expression", "")
             page = self.pages.get(self._url, {})
-            if "querySelector" in expr:           # exists / fill / click / read
+            if "__OLY_OBSERVE__" in expr:         # observe() → indexed elements
+                lst = [{"i": i, "t": e.get("t", "button"), "n": e.get("n", ""),
+                        "s": e.get("s", f'[data-olympus-idx="{i}"]')}
+                       for i, e in enumerate(self.elements)]
+                return {"result": {"value": json.dumps(lst)}}
+            if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
-                if "innerText" in expr:           # selector read → text or ''
-                    value: Any = page.get("text", "") if sel else ""
+                if params.get("returnByValue") is False:   # node handle wanted
+                    return {"result": ({"objectId": f"obj-{sel}"} if sel else {})}
+                if "__olySel" in expr:            # durable-selector lookup
+                    value: Any = sel or ""        # offline: echo the matched css
+                elif "innerText" in expr:         # selector read → text or ''
+                    value = page.get("text", "") if sel else ""
                 else:                             # predicate / mutator → bool
                     if sel and "value=" in expr:
                         self.filled[sel] = "set"
                     value = sel is not None
                 return {"result": {"value": value}}
-            if "readyState" in expr:
+            if "performance" in expr:      # wait_idle() → stable resource count
+                value = "0"
+            elif "readyState" in expr:
                 value = "complete"
             elif "document.title" in expr:
                 value = page.get("title", "")
@@ -137,6 +259,25 @@ class FakeTransport:
             else:
                 value = page.get("text", "")
             return {"result": {"type": "string", "value": value}}
+        if method == "Page.captureScreenshot":
+            # A deterministic 1x1 PNG so the screenshot path is exercisable
+            # offline without a real browser.
+            return {"data": self.screenshot_b64}
+        if method == "Target.getTargets":
+            return {"targetInfos": self.targets}
+        if method == "Target.activateTarget":
+            tid = params.get("targetId")
+            for t in self.targets:            # reflect the switch in the URL
+                if t.get("targetId") == tid and t.get("url"):
+                    self._url = t["url"]
+            return {}
+        if method in ("Network.getCookies", "Storage.getCookies"):
+            return {"cookies": list(self.cookies)}
+        if method in ("Network.setCookies", "Storage.setCookies"):
+            self.cookies = list(params.get("cookies", []) or [])
+            return {}
+        if method in ("DOM.setFileInputFiles", "Page.setDownloadBehavior"):
+            return {}
         if method in ("Input.dispatchMouseEvent", "Input.insertText",
                       "Input.dispatchKeyEvent"):
             return {}
@@ -154,7 +295,7 @@ class _RealTransport:
     minimal so a real attach works when configured.
     """
 
-    def __init__(self, ws_url: str) -> None:
+    def __init__(self, ws_url: str, http_base: str = "") -> None:
         try:
             from websockets.sync.client import connect  # type: ignore
         except Exception as err:  # pragma: no cover - optional dependency
@@ -165,6 +306,35 @@ class _RealTransport:
         # truncate text to _TEXT_LIMIT anyway.
         self._conn = connect(ws_url, open_timeout=10, max_size=_WS_MAX_FRAME)
         self._id = 0
+        # The DevTools HTTP base (if we know it), so reattach() can resolve
+        # another page target's socket URL and switch which tab we drive.
+        self._http_base = (http_base or "").rstrip("/")
+
+    def reattach(self, target_id: str) -> bool:  # pragma: no cover - needs a browser
+        """Re-bind this transport to a different page target's WebSocket, so the
+        session actually drives the tab it switched to (not just activates it).
+        Needs the DevTools HTTP base to resolve the target's socket URL."""
+        if not self._http_base:
+            return False
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self._http_base + "/json", timeout=10) as r:
+                targets = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return False
+        ws = next((t.get("webSocketDebuggerUrl") for t in targets
+                   if t.get("id") == target_id and t.get("webSocketDebuggerUrl")),
+                  "")
+        if not ws:
+            return False
+        from websockets.sync.client import connect  # type: ignore
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = connect(ws, open_timeout=10, max_size=_WS_MAX_FRAME)
+        self._id = 0
+        return True
 
     def send(self, method: str, params: dict | None = None) -> dict:  # pragma: no cover
         self._id += 1
@@ -318,7 +488,10 @@ def _build_transport() -> Transport:
             in ("1", "true", "yes", "on")
         endpoint = launch_local(headless=headless)
     if endpoint:
-        return _RealTransport(_resolve_page_ws(endpoint))
+        # Keep the DevTools HTTP base (when the endpoint is one) so the transport
+        # can reattach to another tab on switch_tab().
+        http_base = endpoint if endpoint.startswith(("http://", "https://")) else ""
+        return _RealTransport(_resolve_page_ws(endpoint), http_base=http_base)
     raise BrowserUnavailable(
         "no browser attached — set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
         "open one, or OLYMPUS_BROWSER_CDP_URL to attach to your own.")
@@ -345,6 +518,44 @@ class BrowserSession:
         # content is untrusted. Surfaced so the tool layer / orchestrator can
         # reason about capability separation.
         self.ingested_untrusted: bool = False
+        # The evolution substrate: a bounded, first-party journal of the act
+        # steps that actually landed this session (NOT page prose, and never the
+        # typed text — credentials must not enter the skill store). learn_steps()
+        # crystallizes it into a reliability-scored skill that Olympus refines
+        # over time. _labels remembers each observed index's label so a learned
+        # step reads "click \"Sign in\"", not a raw selector.
+        self.journal: list[str] = []
+        self._labels: dict[int, str] = {}
+        # The structured twin of the journal: {op, selector, value?} steps with
+        # DURABLE selectors (never the typed text). Only the promotable verbs
+        # (click, fill) are captured — enough to graduate a proven flow into a
+        # declarative template that still resolves on a fresh page load.
+        self.recipe: list[dict] = []
+
+    def _journal_step(self, step: str) -> None:
+        """Append a landed, replayable step (bounded; oldest dropped)."""
+        self.journal.append(step)
+        if len(self.journal) > _JOURNAL_MAX:
+            del self.journal[0]
+
+    def _durable_selector(self, css: str) -> str:
+        """Ask the page for a reload-stable selector of the element `css`
+        resolves to (id / [name] / [aria-label] / nth-of-type). Falls back to
+        the input selector if the element is gone or unnamed."""
+        if not css:
+            return ""
+        out = self._eval(f"(function(){{var e=__olyq({json.dumps(css)});"
+                         f"return e?__olySel(e):'';}})()")
+        return out or css
+
+    def _recipe_step(self, op: str, css: str, value: str | None = None) -> None:
+        """Capture a promotable step with a durable selector (bounded)."""
+        entry: dict = {"op": op, "selector": self._durable_selector(css)}
+        if value is not None:
+            entry["value"] = value
+        self.recipe.append(entry)
+        if len(self.recipe) > _JOURNAL_MAX:
+            del self.recipe[0]
 
     def _call(self, method: str, **params: Any) -> dict:
         self.ledger.append({"method": method, "params": params})
@@ -379,6 +590,136 @@ class BrowserSession:
                 return
             time.sleep(0.25)
 
+    def wait_idle(self, quiet: float = 0.5, timeout: float = _LOAD_TIMEOUT) -> None:
+        """Wait for the page to load AND its resource count to hold steady for a
+        short quiet window — a dependency-free 'network idle' heuristic for
+        dynamic pages whose content arrives after readyState=complete. Bounded by
+        `timeout`; best-effort (never raises)."""
+        self._wait_ready(timeout)
+        deadline = time.monotonic() + timeout
+        last, stable_since = -1, None
+        while time.monotonic() < deadline:
+            try:
+                n = int(float(self._eval(
+                    "(performance.getEntriesByType('resource')||[]).length")
+                    or 0))
+            except Exception:
+                return
+            now = time.monotonic()
+            if n == last:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= quiet:
+                    return
+            else:
+                last, stable_since = n, None
+            time.sleep(0.1)
+
+    def wait_for(self, selector: str, gone: bool = False,
+                 timeout: float = _LOAD_TIMEOUT) -> bool:
+        """Wait until `selector` appears (or, with gone=True, disappears) — the
+        deterministic wait a dynamic UI needs between steps, instead of guessing
+        with a fixed sleep. Bounded by `timeout`; returns whether the condition
+        was met. Resolves deep (shadow/iframe) via exists()/__olyq."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.exists(selector) != gone:
+                return True
+            time.sleep(0.1)
+        return self.exists(selector) != gone
+
+    def list_tabs(self) -> list[dict]:
+        """List the browser's open page tabs as bounded {id, title, url} dicts.
+        Reveals the (possibly credentialed) browser's tabs, so the tool
+        (browser_tabs) is operator-gated and capability-separated."""
+        res = self._call("Target.getTargets")
+        out = []
+        for t in (res or {}).get("targetInfos", []) or []:
+            if t.get("type") != "page":
+                continue
+            out.append({"id": str(t.get("targetId", "")),
+                        "title": str(t.get("title", ""))[:_LABEL_MAX],
+                        "url": str(t.get("url", ""))[:200]})
+            if len(out) >= 50:
+                break
+        return out
+
+    def switch_tab(self, index: int) -> bool:
+        """Activate the page tab at `index` (from list_tabs). After switching,
+        act()/observe() re-check the NEW current page's domain, so switching can
+        never point the actuator at an unauthorized site without a fresh check."""
+        tabs = self.list_tabs()
+        if not (0 <= index < len(tabs)):
+            return False
+        target_id = tabs[index]["id"]
+        self._call("Target.activateTarget", targetId=target_id)
+        # Actually drive the switched-to tab: re-bind the transport to its socket
+        # when it supports it (real browser). Offline the fake reflects the URL.
+        reattach = getattr(self._t, "reattach", None)
+        if reattach is not None:
+            reattach(target_id)
+        self.url = tabs[index]["url"]
+        return True
+
+    def upload(self, selector: str, path: str) -> str:
+        """Attach a WORKSPACE-CONFINED file to a file input. Uploading a local
+        file to a remote site is data egress, so this is a credentialed actuator
+        (operator-gated) and the path can never escape the confined workspace."""
+        from . import sandbox
+        try:
+            target = sandbox._confine(path)
+        except ValueError as err:
+            return f"Error: {err}"
+        if not target.is_file():
+            return f"Error: no such file in workspace: {path}"
+        # DOM.setFileInputFiles operates on a node HANDLE, not a selector, so
+        # resolve the input to a CDP objectId first (deep — works inside shadow
+        # roots / same-origin iframes). Confinement + gating are enforced above.
+        object_id = self._resolve_object_id(selector)
+        if not object_id:
+            return f"Error: no file input for {selector}."
+        self._call("DOM.setFileInputFiles",
+                   files=[str(target)], objectId=object_id)
+        return f"Uploaded {target.name} to {selector}."
+
+    def get_cookies(self, domain: str = "") -> list[dict]:
+        """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
+        just the current frame's), optionally filtered to `domain`. Cookies are
+        session credentials — the caller (operator.save_auth) stores them ONLY in
+        the encrypted vault and only for an authorized domain, never surfaced to
+        the model."""
+        res = self._call("Storage.getCookies")
+        cookies = (res or {}).get("cookies", []) or []
+        d = (domain or "").strip().lower().lstrip(".")
+        if not d:
+            return list(cookies)
+        out = []
+        for c in cookies:
+            cd = str(c.get("domain", "")).lower().lstrip(".")
+            if cd == d or cd.endswith("." + d) or d.endswith("." + cd):
+                out.append(c)
+        return out
+
+    def set_cookies(self, cookies: list[dict]) -> int:
+        """Inject cookies (CDP Network.setCookies) to restore a saved session, so
+        the operator need not re-login. Returns how many were set."""
+        clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
+        if clean:
+            self._call("Network.setCookies", cookies=clean)
+        return len(clean)
+
+    def set_download_dir(self, path: str = "") -> str:
+        """Confine any browser download to the workspace (default: its root), so
+        a site can't drop a file outside the sandbox. Best-effort."""
+        from . import sandbox
+        try:
+            target = sandbox._confine(path or ".")
+        except ValueError as err:
+            return f"Error: {err}"
+        self._call("Page.setDownloadBehavior", behavior="allow",
+                   downloadPath=str(target))
+        return str(target)
+
     def open(self, url: str) -> str:
         """Navigate to `url` through the SSRF + egress gate, return a snapshot."""
         reason = security.url_block_reason(url)
@@ -406,56 +747,286 @@ class BrowserSession:
         if landed:
             return f"Error: current page is a blocked address ({landed})."
         if selector:
-            expr = (f"(function(){{var e=document.querySelector("
+            expr = (f"(function(){{var e=__olyq("
                     f"{json.dumps(selector)});return e?e.innerText:'';}})()")
         else:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
 
+    def screenshot(self) -> str:
+        """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
+        for visual perception of canvas/image-heavy pages that observe() can't
+        map. Refuses a blocked landing (never captures internal content). Returns
+        base64 data, or "" if nothing was captured. The pixels are untrusted
+        external content — the caller (browser_screenshot) is an INGESTION tool
+        and its description is wrapped, exactly like browser_read."""
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return ""
+        res = self._call("Page.captureScreenshot", format="png")
+        return str((res or {}).get("data", "") or "")
+
+    def observe(self, limit: int = _OBSERVE_MAX) -> str:
+        """Perceive the page as a numbered map of its visible interactive
+        elements — the harness's 'look' step. Each element gets a stable index
+        (stamped as data-olympus-idx) that `act(..., index=N)` resolves, so the
+        model can drive an *arbitrary* page by index instead of guessing CSS
+        selectors. Because it maps a possibly credentialed tab, the tool
+        (`browser_observe`) is governed as an actuator: kept out of any
+        prose-ingesting run and gated to authorized domains. Labels are
+        page-controlled (untrusted) and hard-capped, so a map row can carry no
+        more than a short, bounded string — never a paragraph of instructions."""
+        items = self._observe_raw(limit)
+        if items is None:
+            return "(could not read the page's interactive elements)"
+        lines = []
+        for it in items:
+            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            label = f' "{name}"' if name else ""
+            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
+        return "\n".join(lines) or "(no interactive elements found)"
+
+    def _observe_raw(self, limit: int = _OBSERVE_MAX) -> list[dict] | None:
+        """The structured perception: a list of {i, t, n, s} dicts (index, type,
+        label, durable selector) for the visible interactive elements across the
+        deep tree. Backs both observe() (the model-facing map) and self-healing
+        (which needs each candidate's selector). Returns None if the page can't
+        be read; refuses a blocked landing. Also refreshes the index→label map."""
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return None
+        limit = max(1, min(int(limit), _OBSERVE_MAX))
+        raw = self._eval(_OBSERVE_JS.replace("LIMIT", str(limit))
+                                    .replace("CAP", str(_LABEL_MAX)))
+        try:
+            items = json.loads(raw or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        out, self._labels = [], {}
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            out.append(it)
+            try:                       # remember for readable learned steps
+                self._labels[int(it.get("i"))] = (
+                    str(it.get("n") or "").strip()[:_LABEL_MAX]
+                    or str(it.get("t") or ""))
+            except (TypeError, ValueError):
+                pass
+        return out
+
     def act(self, action: str, *, selector: str = "", text: str = "",
-            x: int = 0, y: int = 0) -> str:
-        """Act on the page (click / type). Credentialed actuator — exposed only
-        as the ACTION_TOOL `browser_act`, so capability separation keeps it out
-        of any run that also ingests untrusted content."""
+            x: int = 0, y: int = 0, index: int | None = None,
+            key: str = "", value: str = "") -> str:
+        """Act on the page. Credentialed actuator — exposed only as the
+        ACTION_TOOL `browser_act`, so capability separation keeps it out of any
+        run that also ingests untrusted content. Targets can be given by
+        `index` (from observe()), a CSS `selector`, or `x`/`y` coordinates.
+        Verbs: click, type, scroll, press (modifier chords like 'Control+a'),
+        select, hover, rightclick, drag (source → target selector in `value`),
+        wait_for (an element to appear, or disappear when value='gone'), back."""
         action = (action or "").lower()
+        # An index from observe() resolves to the stamped stable selector; the
+        # observed label makes a learned step human-readable.
+        label = ""
+        if index is not None:
+            label = self._labels.get(int(index), "")
+            selector = f'[data-olympus-idx="{int(index)}"]'
+        target = f'"{label}"' if label else (selector or f"({x}, {y})")
+
         if action == "click":
             if selector:
-                self._eval(f"(function(){{var e=document.querySelector("
-                           f"{json.dumps(selector)});if(e)e.click();"
-                           f"return !!e;}})()")
+                ok = self._eval_bool(
+                    f"(function(){{var e=__olyq("
+                    f"{json.dumps(selector)});if(e){{e.click();return true;}}"
+                    f"return false;}})()")
+                if not ok:
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"click {target}")
+                self._recipe_step("click", selector)
                 return f"Clicked {selector}."
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
             self._call("Input.dispatchMouseEvent", type="mouseReleased",
                        x=x, y=y, button="left", clickCount=1)
+            self._journal_step(f"click at ({x}, {y})")
             return f"Clicked at ({x}, {y})."
         if action == "type":
+            # Never journal the typed text — it may be a credential. The learned
+            # step records only that a field was filled, not with what.
+            if selector:
+                if not self.fill(selector, text):
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"type into {target}")
+                self._recipe_step("fill", selector, "$" + _slug(label or selector))
+                return f"Typed into {selector}."
             self._call("Input.insertText", text=text)
+            self._journal_step("type into focused field")
             return f"Typed {len(text)} chars."
+        if action == "scroll":
+            if selector:
+                self._eval(f"(function(){{var e=__olyq("
+                           f"{json.dumps(selector)});if(e)e.scrollIntoView("
+                           f"{{block:'center'}});}})()")
+                self._journal_step(f"scroll to {target}")
+                return f"Scrolled to {selector}."
+            amount = int(y) or int(x) or 600
+            self._eval(f"window.scrollBy(0,{amount});")
+            self._journal_step(f"scroll {amount}px")
+            return f"Scrolled {amount}px."
+        if action == "press":
+            # Supports modifier chords like "Control+a" / "Shift+Tab" / "Meta+c".
+            raw = key or text or "Enter"
+            parts = [p for p in raw.split("+") if p]
+            main = parts[-1] if parts else "Enter"
+            mods = {p.lower() for p in parts[:-1]}
+            ctrl = "true" if (mods & {"control", "ctrl"}) else "false"
+            alt = "true" if (mods & {"alt", "option"}) else "false"
+            shift = "true" if "shift" in mods else "false"
+            meta = "true" if (mods & {"meta", "cmd", "command"}) else "false"
+            init = (f"{{key:{json.dumps(main)},ctrlKey:{ctrl},altKey:{alt},"
+                    f"shiftKey:{shift},metaKey:{meta},bubbles:true}}")
+            expr_target = (f"__olyq({json.dumps(selector)})"
+                           if selector else "document.activeElement")
+            self._eval(
+                f"(function(){{var e={expr_target}||document.body;"
+                f"['keydown','keypress','keyup'].forEach(function(t){{"
+                f"e.dispatchEvent(new KeyboardEvent(t,{init}));}});"
+                f"return true;}})()")
+            self._journal_step(f"press {raw}")
+            return f"Pressed {raw}."
+        if action == "select":
+            if not selector:
+                return "Error: select needs an index or selector."
+            v = value or text
+            ok = self._eval_bool(
+                f"(function(){{var e=__olyq("
+                f"{json.dumps(selector)});if(!e)return false;"
+                f"e.value={json.dumps(v)};e.dispatchEvent("
+                f"new Event('change',{{bubbles:true}}));return true;}})()")
+            if not ok:
+                return f"Error: no element for {selector}."
+            self._journal_step(f"select {v!r} in {target}")
+            self._recipe_step("fill", selector, "$" + _slug(label or selector))
+            return f"Selected {v!r} in {selector}."
+        if action == "hover":
+            if selector:
+                self._eval(f"(function(){{var e=__olyq("
+                           f"{json.dumps(selector)});if(e)e.dispatchEvent("
+                           f"new MouseEvent('mouseover',{{bubbles:true}}));}})()")
+                self._journal_step(f"hover {target}")
+                return f"Hovered {selector}."
+            self._call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y)
+            self._journal_step(f"hover at ({x}, {y})")
+            return f"Hovered at ({x}, {y})."
+        if action in ("rightclick", "contextmenu"):
+            if selector:
+                ok = self._eval_bool(
+                    f"(function(){{var e=__olyq({json.dumps(selector)});"
+                    f"if(!e)return false;e.dispatchEvent(new MouseEvent("
+                    f"'contextmenu',{{bubbles:true}}));return true;}})()")
+                if not ok:
+                    return f"Error: no element for {selector}."
+                self._journal_step(f"right-click {target}")
+                return f"Right-clicked {selector}."
+            self._call("Input.dispatchMouseEvent", type="mousePressed",
+                       x=x, y=y, button="right", clickCount=1)
+            self._call("Input.dispatchMouseEvent", type="mouseReleased",
+                       x=x, y=y, button="right", clickCount=1)
+            self._journal_step(f"right-click at ({x}, {y})")
+            return f"Right-clicked at ({x}, {y})."
+        if action == "drag":
+            # Drag the source element onto a target selector (passed in `value`),
+            # via HTML5 drag events with a shared DataTransfer. Both resolve deep.
+            dst = value or text
+            if not selector or not dst:
+                return "Error: drag needs a source selector/index and a target " \
+                       "selector in 'value'."
+            ok = self._eval_bool(
+                f"(function(){{var s=__olyq({json.dumps(selector)}),"
+                f"d=__olyq({json.dumps(dst)});if(!s||!d)return false;"
+                f"var dt=new DataTransfer();"
+                f"s.dispatchEvent(new DragEvent('dragstart',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('dragover',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"d.dispatchEvent(new DragEvent('drop',"
+                f"{{bubbles:true,dataTransfer:dt}}));"
+                f"s.dispatchEvent(new DragEvent('dragend',"
+                f"{{bubbles:true,dataTransfer:dt}}));return true;}})()")
+            if not ok:
+                return f"Error: could not drag {selector} → {dst}."
+            self._journal_step(f"drag {target} to {dst}")
+            return f"Dragged {selector} to {dst}."
+        if action == "back":
+            self._eval("history.back();")
+            self._wait_ready()
+            self._journal_step("go back")
+            return "Navigated back."
+        if action == "wait_for":
+            if not selector:
+                return "Error: wait_for needs an index or selector."
+            gone = (value or key or "").strip().lower() in (
+                "gone", "absent", "hidden", "disappear")
+            if self.wait_for(selector, gone=gone):
+                return f"{'Gone' if gone else 'Appeared'}: {selector}."
+            return (f"Error: timed out waiting for {selector} to "
+                    f"{'disappear' if gone else 'appear'}.")
         return f"Error: unknown browser action '{action}'."
 
+    def learned_steps(self) -> str:
+        """The proven flow so far: the journal of act steps that landed this
+        session, as a replayable, human-readable recipe. First-party (Olympus's
+        own actions) and credential-free — safe to crystallize into a skill."""
+        return "; ".join(self.journal)
+
+    def learned_recipe(self) -> list[dict]:
+        """The structured, promotable twin of learned_steps(): {op, selector,
+        value?} steps with durable selectors, ready to graduate into a template."""
+        return [dict(s) for s in self.recipe]
+
+    @staticmethod
+    def _prep(expression: str) -> str:
+        """Auto-install the deep-query helper for any expression that uses it, so
+        selector resolution (and observe()'s durable-selector stamping) cross
+        shadow/iframe boundaries. Expressions that call neither helper are
+        untouched, so plain evals (readyState, title) route unchanged."""
+        if "__olyq" in expression or "__olySel" in expression:
+            return _DEEP_JS + expression
+        return expression
+
     def _eval(self, expression: str) -> str:
-        res = self._call("Runtime.evaluate", expression=expression,
+        res = self._call("Runtime.evaluate", expression=self._prep(expression),
                          returnByValue=True)
         value = (res or {}).get("result", {}).get("value", "")
         return value if isinstance(value, str) else json.dumps(value)
 
     def _eval_bool(self, expression: str) -> bool:
-        res = self._call("Runtime.evaluate", expression=expression,
+        res = self._call("Runtime.evaluate", expression=self._prep(expression),
                          returnByValue=True)
         return bool((res or {}).get("result", {}).get("value"))
+
+    def _resolve_object_id(self, selector: str) -> str:
+        """A CDP objectId (remote handle) for the element `selector` resolves to,
+        crossing shadow/iframe boundaries via __olyq. Empty if it isn't found.
+        Needed by CDP calls that operate on a node handle rather than a value
+        (e.g. DOM.setFileInputFiles for uploads)."""
+        res = self._call("Runtime.evaluate",
+                         expression=self._prep(f"__olyq({json.dumps(selector)})"),
+                         returnByValue=False)
+        return (res or {}).get("result", {}).get("objectId", "") or ""
 
     def exists(self, selector: str) -> bool:
         """Structured predicate: is the selector present? Returns a bool, never
         page prose — so the actuator-holder can branch without ingesting text."""
         return self._eval_bool(
-            f"!!document.querySelector({json.dumps(selector)})")
+            f"!!__olyq({json.dumps(selector)})")
 
     def fill(self, selector: str, value: str) -> bool:
         """Set an input's value and fire input/change. `value` is sent to Chrome
         to type, never returned to the model (used for vault-sourced secrets)."""
-        expr = (f"(function(){{var e=document.querySelector("
+        expr = (f"(function(){{var e=__olyq("
                 f"{json.dumps(selector)});if(!e)return false;e.focus();"
                 f"e.value={json.dumps(value)};"
                 f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
@@ -466,9 +1037,12 @@ class BrowserSession:
     def run_template(self, steps: list[dict], params: dict | None = None) -> dict:
         """Execute a declarative action template step by step. Supported ops:
         `assert` (selector must exist), `click` (selector), `fill`
-        (selector+value; value '$name' pulls from params), `wait`. Raises on a
-        failed assert or unknown op — the spine turns that into a FAILED action.
-        Page prose is never read as instructions; only selectors are touched."""
+        (selector+value; value '$name' pulls from params), `wait`, `wait_idle`
+        (settle dynamic content), `wait_for` (selector appears, or disappears
+        with `gone: true`). Raises TemplateStepError on an unresolved or
+        timed-out step (so the operator can self-heal) or RuntimeError on an
+        unknown op. Page prose is never read as instructions; only selectors are
+        touched."""
         params = params or {}
         done: list[str] = []
         for i, step in enumerate(steps or []):
@@ -476,24 +1050,70 @@ class BrowserSession:
             sel = step.get("selector", "")
             if op == "assert":
                 if not self.exists(sel):
-                    raise RuntimeError(f"step {i}: required element {sel!r} "
-                                       "is missing")
+                    raise TemplateStepError(
+                        f"step {i}: required element {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"assert {sel}")
             elif op == "click":
-                self.act("click", selector=sel)
+                # A failed click was previously silent; detect the missing
+                # target so a drifted template surfaces (and can self-heal).
+                if self.act("click", selector=sel).startswith("Error:"):
+                    raise TemplateStepError(
+                        f"step {i}: click target {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"click {sel}")
             elif op == "fill":
                 val = step.get("value", "")
                 if isinstance(val, str) and val.startswith("$"):
                     val = str(params.get(val[1:], ""))
-                self.fill(sel, val)
+                if not self.fill(sel, val):
+                    raise TemplateStepError(
+                        f"step {i}: fill target {sel!r} is missing",
+                        op=op, selector=sel, index=i)
                 done.append(f"fill {sel}")
             elif op == "wait":
                 self._wait_ready()
                 done.append("wait")
+            elif op == "wait_idle":
+                self.wait_idle()
+                done.append("wait_idle")
+            elif op == "wait_for":
+                if not self.wait_for(sel, gone=bool(step.get("gone"))):
+                    raise TemplateStepError(
+                        f"step {i}: {sel!r} never "
+                        f"{'disappeared' if step.get('gone') else 'appeared'}",
+                        op=op, selector=sel, index=i)
+                done.append(f"wait_for {sel}")
             else:
                 raise RuntimeError(f"step {i}: unknown op {op!r}")
         return {"steps": done}
+
+    def heal_candidate(self, failed_selector: str,
+                       min_similarity: float = 0.34) -> dict | None:
+        """Self-healing lookup: after a step failed to resolve, re-observe the
+        page and find the control that most likely IS the moved one, matching the
+        failed selector's intent (its slug) against the current elements' labels
+        and selectors. Returns {"selector", "label", "score"} for the best match
+        above `min_similarity`, else None. This never acts and never rewrites the
+        template — it only surfaces a candidate for a human-reviewed proposal."""
+        target = _slug(failed_selector)
+        if not target:
+            return None
+        items = self._observe_raw()
+        if not items:
+            return None
+        best, best_score = None, 0.0
+        for it in items:
+            cand = str(it.get("s") or "")
+            if not cand or cand == failed_selector:
+                continue
+            score = _match_score(target, str(it.get("n") or ""), cand)
+            if score > best_score:
+                best, best_score = it, score
+        if best is None or best_score < min_similarity:
+            return None
+        return {"selector": str(best.get("s") or ""),
+                "label": str(best.get("n") or ""), "score": round(best_score, 3)}
 
     def login(self, profile: "SiteProfile", creds: dict) -> bool:
         """Drive a declarative login: navigate to the profile's login URL (SSRF/
@@ -568,6 +1188,10 @@ class BrowserSkill:
     runs: int = 0
     successes: int = 0
     base_score: float = 0.0        # asserted prior before any runs (0..1)
+    # Structured, durable-selector steps ({op, selector, value?}) captured when
+    # the skill was learned. Empty for a hand-written skill; when present and the
+    # skill proves reliable, it can auto-graduate into a declarative template.
+    recipe: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.created:
@@ -593,6 +1217,7 @@ class BrowserSkill:
             "source": self.source, "author": self.author,
             "created": self.created, "runs": self.runs,
             "successes": self.successes, "base_score": self.base_score,
+            "recipe": self.recipe,
         }
         d["content_hash"] = self.content_hash
         d["reliability"] = self.reliability
@@ -606,6 +1231,7 @@ class BrowserSkill:
             created=d.get("created", ""), runs=int(d.get("runs", 0)),
             successes=int(d.get("successes", 0)),
             base_score=float(d.get("base_score", 0.0)),
+            recipe=d.get("recipe") if isinstance(d.get("recipe"), list) else [],
         )
 
 
@@ -651,14 +1277,55 @@ def _clip(text: str, limit: int) -> str:
     return (text or "").strip()[:limit]
 
 
+def _slug(text: str) -> str:
+    """A safe param-name from a label or selector (alnum only), for a template
+    fill step's `$name` placeholder. Never carries the typed value."""
+    s = "".join(ch for ch in (text or "") if ch.isalnum())
+    return s[:40] or "value"
+
+
+def _similarity(a: str, b: str) -> float:
+    """Cheap character-trigram Jaccard similarity in [0,1], for matching a
+    drifted selector's intent against the labels/selectors now on the page."""
+    a, b = (a or "").lower(), (b or "").lower()
+
+    def grams(s: str) -> set[str]:
+        s = f"  {s} "
+        return {s[i:i + 3] for i in range(len(s) - 2)} if len(s) >= 3 else {s}
+
+    ga, gb = grams(a), grams(b)
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / len(ga | gb)
+
+
+def _match_score(target_slug: str, cand_label: str, cand_selector: str) -> float:
+    """How likely is (label, selector) the moved control for `target_slug`?
+    Exact slug match scores highest, then substring containment (a short intent
+    like 'buy' inside 'buynow'), then trigram similarity as a soft fallback."""
+    best = 0.0
+    for h in (_slug(cand_label), _slug(cand_selector)):
+        if not h:
+            continue
+        if target_slug == h:
+            return 1.0
+        if target_slug in h or h in target_slug:
+            best = max(best, 0.9)
+        else:
+            best = max(best, _similarity(target_slug, h))
+    return best
+
+
 def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
-                 author: str = "olympus", base_score: float = 0.0) -> BrowserSkill:
+                 author: str = "olympus", base_score: float = 0.0,
+                 recipe: list[dict] | None = None) -> BrowserSkill:
     """Insert or replace a skill (keyed by domain+name), preserving outcome
     counts on replacement so a re-recorded skill keeps its measured score.
 
     Inputs are length-capped and the library is bounded (lowest-reliability
     skills are dropped past _SKILLS_MAX) so an over-eager agent can't bloat the
-    on-disk store without limit.
+    on-disk store without limit. `recipe` (structured, durable-selector steps)
+    enables later auto-graduation into a declarative template.
     """
     domain = _clip(domain, _SKILL_FIELD_MAX)
     name = _clip(name, _SKILL_FIELD_MAX)
@@ -668,13 +1335,16 @@ def record_skill(domain: str, name: str, steps: str, *, source: str = "agent",
         domain=domain, name=name, steps=_clip(steps, _SKILL_STEPS_MAX),
         source=_clip(source, _SKILL_FIELD_MAX) or "agent",
         author=_clip(author, _SKILL_FIELD_MAX) or "olympus",
-        base_score=max(0.0, min(1.0, base_score)))
+        base_score=max(0.0, min(1.0, base_score)),
+        recipe=[s for s in (recipe or []) if isinstance(s, dict)][:_JOURNAL_MAX])
     skills = _load_skills()
     out, replaced = [], False
     for existing in skills:
         if _key(existing.domain, existing.name) == _key(domain, name):
             skill.runs, skill.successes = existing.runs, existing.successes
             skill.created = existing.created
+            if not skill.recipe:          # keep a prior recipe if none re-supplied
+                skill.recipe = existing.recipe
             out.append(skill)
             replaced = True
         else:
@@ -846,16 +1516,56 @@ def record_profile(domain: str, *, login_url: str = "",
     return prof
 
 
+def _builtin_profiles_dir() -> "config.Path":  # type: ignore[name-defined]
+    return config.Path(__file__).resolve().parent / "profiles"
+
+
+def builtin_profiles() -> list[SiteProfile]:
+    """Curated site profiles shipped with Olympus (olympus/profiles/*.json),
+    so the operator can act on common sites without the user authoring CSS
+    selectors. Read-only seeds: marked source='builtin'; a user's own recorded
+    profile for the same domain always wins (see _merged_profiles). Malformed
+    or unreadable seed files are skipped, never fatal."""
+    out: list[SiteProfile] = []
+    d = _builtin_profiles_dir()
+    if not d.is_dir():
+        return out
+    for path in sorted(d.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for entry in (raw if isinstance(raw, list) else [raw]):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                prof = SiteProfile.from_dict(entry)
+            except (KeyError, TypeError, ValueError):
+                continue
+            prof.source = "builtin"
+            out.append(prof)
+    return out
+
+
+def _merged_profiles() -> list[SiteProfile]:
+    """User-recorded profiles overlaid on the built-in catalog, keyed by
+    domain — the user's own recipe for a domain always shadows the seed."""
+    by_domain: dict[str, SiteProfile] = {p.domain: p for p in builtin_profiles()}
+    for p in _load_profiles():                 # user recordings win
+        by_domain[p.domain] = p
+    return list(by_domain.values())
+
+
 def get_profile(domain: str) -> SiteProfile | None:
     d = (domain or "").strip().lower()
-    for p in _load_profiles():
+    for p in _merged_profiles():
         if p.domain == d:
             return p
     return None
 
 
 def list_profiles() -> list[SiteProfile]:
-    return sorted(_load_profiles(), key=lambda p: (p.reliability, p.runs),
+    return sorted(_merged_profiles(), key=lambda p: (p.reliability, p.runs),
                   reverse=True)
 
 
@@ -892,11 +1602,103 @@ def set_template(domain: str, name: str, risk: str, steps: list[dict],
         prof = SiteProfile(domain=domain)
         profiles.append(prof)
     prof.templates = dict(prof.templates or {})
+    prior = prof.templates.get(name, {})
     prof.templates[name] = {
         "risk": risk, "steps": steps[:64],
-        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX)}
+        "success_selector": _clip(success_selector, _SKILL_FIELD_MAX),
+        # Preserve per-template outcome counts across a re-record, so a drift
+        # demotion can be measured (the inverse of graduation).
+        "runs": int(prior.get("runs", 0)),
+        "successes": int(prior.get("successes", 0))}
     _store_profiles(profiles)
     return prof
+
+
+def mark_template_outcome(domain: str, name: str, success: bool) -> None:
+    """Record a run outcome for ONE template (not just the whole profile), so a
+    template that drifts can be demoted on its own measured reliability."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates[name])
+            t["runs"] = int(t.get("runs", 0)) + 1
+            if success:
+                t["successes"] = int(t.get("successes", 0)) + 1
+            p.templates = {**p.templates, name: t}
+            _store_profiles(profiles)
+            return
+
+
+def demote_template(domain: str, name: str) -> bool:
+    """Remove a template from a profile (the inverse of promote_skill): a
+    graduated flow that has stopped working loses its promotion, so the operator
+    stops auto-running a dead recipe."""
+    domain = (domain or "").strip().lower()
+    profiles = _load_profiles()
+    for p in profiles:
+        if p.domain == domain and name in (p.templates or {}):
+            t = dict(p.templates)
+            t.pop(name, None)
+            p.templates = t
+            _store_profiles(profiles)
+            return True
+    return False
+
+
+def suggest_pattern(goal: str, exclude_domain: str = "") -> dict | None:
+    """Cross-site generalization: find the most reliable learned skill on ANOTHER
+    domain whose intent matches `goal`, and return its flow as a GENERALIZED
+    scaffold — the op sequence with intent hints but selectors blanked (those are
+    site-specific). Lets a new site bootstrap from a proven pattern (e.g. a
+    login/checkout shape) instead of from scratch. Returns None if nothing close
+    is found. First-party (own skills); never surfaces another site's selectors
+    as if they applied here."""
+    goal_slug = _slug(goal)
+    if not goal_slug:
+        return None
+    ex = (exclude_domain or "").strip().lower()
+    best, best_score = None, 0.0
+    for s in list_skills():
+        if not s.recipe or (ex and s.domain.strip().lower() == ex):
+            continue
+        # match on the skill's intent, weighted by its measured reliability
+        score = _match_score(goal_slug, s.name, s.name) * (0.5 + 0.5 * s.reliability)
+        if score > best_score:
+            best, best_score = s, score
+    if best is None or best_score < 0.30:
+        return None
+    steps = []
+    for st in best.recipe:
+        op = st.get("op", "")
+        hint = str(st.get("value", "")).lstrip("$") or op
+        steps.append({"op": op, "hint": hint})   # selector intentionally omitted
+    return {"from_domain": best.domain, "name": best.name,
+            "reliability": best.reliability, "steps": steps}
+
+
+def promote_skill(domain: str, name: str, *, risk: str = "notable"
+                  ) -> tuple["SiteProfile", str] | None:
+    """Graduate a proven learned skill into a declarative action template.
+
+    Builds the template from the skill's structured `recipe` (durable-selector
+    click/fill steps), guarded by an `assert` on the first control so it fails
+    fast if the page drifted. Returns (profile, template_name), or None if the
+    skill has no promotable recipe. The template then rides the governed
+    `browser_operate` path — auto-run within scope for notable risk, approval
+    for anything higher — so graduation never widens the trust boundary."""
+    skill = next((s for s in _load_skills()
+                  if _key(s.domain, s.name) == _key(domain, name)), None)
+    if skill is None:
+        return None
+    steps = [dict(s) for s in skill.recipe
+             if isinstance(s, dict) and s.get("op") in ("click", "fill")
+             and s.get("selector")]
+    if not steps:
+        return None
+    guarded = [{"op": "assert", "selector": steps[0]["selector"]}] + steps
+    prof = set_template(skill.domain, skill.name, risk, guarded)
+    return prof, skill.name
 
 
 def operator_enabled() -> bool:

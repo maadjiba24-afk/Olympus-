@@ -27,20 +27,20 @@ def _fingerprint(s: config.Settings) -> tuple:
 
 
 def _fallback_chain(settings: config.Settings) -> list[config.Settings]:
-    """Alternate members to try when `settings` fails. Only operator-pool
-    members are eligible, and only when `settings` itself IS one of them."""
+    """Alternate members to try when `settings` fails, strongest-for-the-
+    failing-member's-role first (or the explicit OLYMPUS_ROLE_FALLBACKS
+    order). Only operator-pool members are eligible, and only when `settings`
+    itself IS one of them."""
     if not _fallback_enabled():
         return []
     try:
-        members = config.ModelPool.from_env().members
+        pool = config.ModelPool.from_env()
     except Exception:
         return []
-    fps = {_fingerprint(m) for m in members}
+    fps = {_fingerprint(m) for m in pool.members}
     if _fingerprint(settings) not in fps:
         return []          # per-request/BYOK creds: never silently switch
-    return [m for m in members
-            if _fingerprint(m) != _fingerprint(settings)
-            and m.provider != "moa"]
+    return [m for m in pool.fallbacks_for(settings) if m.provider != "moa"]
 
 
 def _should_failover(err: Exception) -> bool:
@@ -74,21 +74,35 @@ def _with_failover(settings: config.Settings,
         raise last
 
 
+def _dispatch_text(s: config.Settings, system: str,
+                   messages: list[dict[str, Any]], effort: str) -> str:
+    if s.provider == "moa":
+        from . import moa
+        return moa.complete_text(s, system, messages, effort)
+    if s.provider == "anthropic":
+        response = llm.complete(system, messages, settings=s, effort=effort)
+        if response.stop_reason == "refusal":
+            return "[The model declined this request for safety reasons.]"
+        return llm.text_of(response)
+    if s.provider == "claude-code":
+        return claude_code.complete_text(s, system, messages, effort)
+    return openai_compat.complete_text(s, system, messages, effort)
+
+
 def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
-    def call(s: config.Settings) -> str:
-        if s.provider == "moa":
-            from . import moa
-            return moa.complete_text(s, system, messages, effort)
-        if s.provider == "anthropic":
-            response = llm.complete(system, messages, settings=s, effort=effort)
-            if response.stop_reason == "refusal":
-                return "[The model declined this request for safety reasons.]"
-            return llm.text_of(response)
-        if s.provider == "claude-code":
-            return claude_code.complete_text(s, system, messages, effort)
-        return openai_compat.complete_text(s, system, messages, effort)
-    return _with_failover(settings, call)
+    return _with_failover(
+        settings,
+        lambda s: _dispatch_text(s, system, messages, effort))
+
+
+def complete_text_once(settings: config.Settings, system: str,
+                       messages: list[dict[str, Any]],
+                       effort: str = "high") -> str:
+    """Run exactly this model — NO cross-member failover. Used by blind compare,
+    where substituting another model's answer for a failing one would corrupt
+    the very thing being measured."""
+    return _dispatch_text(settings, system, messages, effort)
 
 
 def complete_json(settings: config.Settings, system: str,

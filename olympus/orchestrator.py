@@ -39,7 +39,7 @@ from .specialists import SPECIALISTS, roster
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "mode": {"type": "string", "enum": ["direct", "delegate"]},
+        "mode": {"type": "string", "enum": ["direct", "delegate", "clarify"]},
         "direct_reply": {
             "type": ["string", "null"],
             "description": "The complete reply when mode is 'direct', else null",
@@ -53,6 +53,13 @@ ROUTE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Task brief for the supervisor when mode is 'delegate'",
         },
+        "clarifying_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "1-2 crisp questions when mode is 'clarify' — only "
+            "when the request is genuinely ambiguous AND you cannot proceed on "
+            "a reasonable assumption. Empty otherwise.",
+        },
         "needs_verification": {
             "type": "boolean",
             "description": "True when the answer will contain factual claims "
@@ -60,11 +67,30 @@ ROUTE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["mode", "direct_reply", "specialists", "brief",
-                 "needs_verification"],
+                 "clarifying_questions", "needs_verification"],
     "additionalProperties": False,
 }
 
+
+def _format_clarify(questions: list[str]) -> str:
+    """Render 1-2 clarifying questions as Zeus's reply to the user."""
+    lines = ["Before I dive in, a couple of quick things so I get this right:"]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"  {i}. {q}")
+    lines.append("\n(Answer what you can — I'll take it from there.)")
+    return "\n".join(lines)
+
 Reporter = Callable[[str], None]
+
+
+def _wiki_block(user: str, user_message: str) -> str:
+    """Consolidated concept pages relevant to this message (never fatal —
+    the wiki is an enrichment, not a dependency)."""
+    try:
+        from . import wiki
+        return wiki.context_block(user, user_message)
+    except Exception:
+        return ""
 
 
 def _silent(_: str) -> None:
@@ -109,6 +135,14 @@ class Olympus:
         # on its strongest model). A single Settings becomes a pool of one.
         self.pool = pool or config.ModelPool.of(
             settings or config.Settings.from_env())
+        # A conversation-level model pin (/model opus) narrows the pool to the
+        # pinned member — but only for default env-pool sessions: a caller who
+        # brought explicit settings/pool (BYOK) is never silently switched.
+        if settings is None and pool is None:
+            from . import modelpin
+            pinned = modelpin.resolve(user)
+            if pinned is not None:
+                self.pool = config.ModelPool.of(pinned)
         self.settings = self.pool.primary()
         self.user = memory.safe_id(user)
         self.conversation_id = conversation_id
@@ -116,6 +150,12 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        # Interaction provider for the ask_user tool: interactive surfaces
+        # install one; captured here so worker threads (which don't inherit
+        # thread-locals) can re-install it. None = headless (ask_user returns
+        # a proceed-with-assumption instruction instead of blocking).
+        from . import interaction
+        self._ask_provider = interaction.current()
         connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
@@ -148,11 +188,14 @@ class Olympus:
         mem_ctx = replaystore.frozen_context("route", lambda: (
             profile.card(self.user)
             + recall.context_block(self.user, user_message)
+            + _wiki_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)
             + codegraph.context_block("self", user_message)))
-        system = (agent.load_prompt("zeus") + "\n\n## Specialist roster\n"
+        from . import soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + "\n\n## Specialist roster\n"
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
@@ -175,12 +218,12 @@ class Olympus:
             return {"mode": "direct",
                     "direct_reply": "I can't help with that request.",
                     "specialists": [], "brief": None,
-                    "needs_verification": False}
+                    "clarifying_questions": [], "needs_verification": False}
         except Exception:
             # Any other provider failure — degrade gracefully to delegation.
             return {"mode": "delegate", "direct_reply": None,
                     "specialists": [], "brief": user_message,
-                    "needs_verification": True}
+                    "clarifying_questions": [], "needs_verification": True}
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
@@ -326,9 +369,12 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+        from . import docrag, soul
+        system = (agent.load_prompt("zeus") + soul.block()
+                  + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
+                  + docrag.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
                   + relgraph.context_block(self.user, user_message)
                   + companion.model_block(self.user)
@@ -350,8 +396,11 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
-    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace") -> str:
-        """Run a single specialist with failure isolation, on its best model.
+    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace",
+                 settings_override: config.Settings | None = None) -> str:
+        """Run a single specialist with failure isolation, on its best model
+        (or on `settings_override` when the caller escalates — the teacher
+        path routes a failed rework to the strongest pool member).
 
         This is the single funnel for the main pipeline: both dispatch paths
         (`_dispatch_dag` and the rework `_dispatch`) call it, so the hard output
@@ -372,10 +421,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        from . import interaction
+        ask_prev = interaction.set_provider(self._ask_provider)
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
-                    task, settings=self.pool.for_specialist(key),
+                    task,
+                    settings=settings_override or self.pool.for_specialist(key),
                     effort=SPECIALISTS[key].effort)
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
@@ -409,11 +461,15 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 
     def _dispatch(self, assignments: list[dict[str, str]],
-                  tr: "trace_mod.Trace") -> list[tuple[str, str]]:
-        """Run flat (independent) assignments in parallel. Used by rework."""
+                  tr: "trace_mod.Trace",
+                  overrides: dict[str, config.Settings] | None = None,
+                  ) -> list[tuple[str, str]]:
+        """Run flat (independent) assignments in parallel. Used by rework.
+        `overrides` maps specialist key → escalated Settings (teacher path)."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
@@ -421,7 +477,9 @@ class Olympus:
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
             results = list(pool.map(
                 lambda item: (item["specialist"],
-                              self._run_one(item["specialist"], item["task"], tr)),
+                              self._run_one(item["specialist"], item["task"], tr,
+                                            (overrides or {}).get(
+                                                item["specialist"]))),
                 assignments))
         # Workers appended their contract/egress decisions in completion order;
         # canonicalize this parallel slice so replay is order-stable.
@@ -441,6 +499,18 @@ class Olympus:
         outputs: list[tuple[str, str]] = []
         remaining = dict(by_id)
         level = 0
+
+        # Show the whole plan up front as a checklist, so the user can watch it
+        # tick off. Each line: ☐ Specialist — task (← after any upstream deps).
+        if len(steps) > 1:
+            plan_lines = ["🦉 Athena's plan:"]
+            for s in steps:
+                dep = (f"  ← after {', '.join(SPECIALISTS[by_id[d]['specialist']].name for d in s['depends_on'] if d in by_id)}"
+                       if s["depends_on"] else "")
+                plan_lines.append(
+                    f"   ☐ {SPECIALISTS[s['specialist']].name}: "
+                    f"{s['task'][:60]}{dep}")
+            self.report("\n".join(plan_lines))
 
         while remaining:
             ready = [s for s in remaining.values()
@@ -481,6 +551,10 @@ class Olympus:
                 done[sid] = (key, out)
                 outputs.append((key, out))
                 remaining.pop(sid, None)
+            # Tick the completed steps off the checklist.
+            self.report("   ☑ " + ", ".join(
+                f"{SPECIALISTS[s['specialist']].name}" for s in ready)
+                + f"  ({len(done)}/{len(by_id)} done)")
 
         return outputs
 
@@ -514,6 +588,18 @@ class Olympus:
 
         if route.get("mode") == "direct" and route.get("direct_reply"):
             return "direct", "", route["direct_reply"]
+
+        # Clarify: the request is genuinely ambiguous — ask 1-2 questions instead
+        # of guessing. Gated on Zeus choosing this mode (see zeus.md), so it
+        # doesn't nag on requests it can reasonably proceed with.
+        if route.get("mode") == "clarify":
+            qs = [q.strip() for q in (route.get("clarifying_questions") or [])
+                  if isinstance(q, str) and q.strip()][:2]
+            if qs:
+                tr.event("clarify", questions=qs)
+                return "clarify", "", _format_clarify(qs)
+            # Model asked to clarify but gave no questions — fall through to a
+            # normal delegation rather than replying with nothing.
 
         brief = route.get("brief") or user_message
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
@@ -576,8 +662,28 @@ class Olympus:
                           "the feedback.")}
                 for k in retry_keys
             ]
+            # Teacher escalation: a rework is the pipeline's own signal that
+            # the specialist's usual model wasn't good enough — rerun it on
+            # the strongest pool member for that role, when one exists.
+            from . import teacher as teacher_mod
+            escalated: dict[str, config.Settings] = {}
+            for k in retry_keys:
+                t = teacher_mod.teacher_for(self.pool, k)
+                if t is not None:
+                    escalated[k] = t
+                    self.report(f"🎓 {SPECIALISTS[k].name}'s rework escalates "
+                                f"to the teacher model ({t.model}).")
+                    tr.event("teacher.escalated", specialist=k, model=t.model)
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo, tr))
+                redone = dict(self._dispatch(redo, tr, overrides=escalated))
+            # The teacher's fix becomes homework: distill a provisional,
+            # benchmark-gated skill for the student model, in the background.
+            for k, t in escalated.items():
+                fix = redone.get(k, "")
+                if fix and not fix.startswith("["):     # skip failure markers
+                    teacher_mod.distill_async(
+                        k, by_key.get(k, brief),
+                        review.get("feedback", ""), fix, t)
             outputs = [(k, redone.get(k, v)) for k, v in outputs]
             self.report("🔍 Aletheia re-verifies the rework...")
             try:
@@ -590,7 +696,37 @@ class Olympus:
                 verified = "\n\n".join(
                     f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
 
+        # SPEC-04 Phase A: passive routing-outcome telemetry. Records which
+        # specialist ran on which model and the verify/review verdict as the
+        # outcome signal — it decides nothing. Best-effort and never emitted
+        # during replay (keeps replay a pure, side-effect-free verification).
+        self._record_routing_outcome(tr, user_message, assignments, review)
+
         return "delegate", brief, verified
+
+    def _record_routing_outcome(self, tr, user_message, assignments, review) -> None:
+        """Emit one routing-outcome row per dispatched specialist (Phase A).
+        Fully isolated: any failure is swallowed so telemetry can never break a
+        run, and the model/role are READ from the deterministic selection —
+        nothing about routing is changed."""
+        try:
+            if replaystore.replaying():
+                return
+            from . import routing_outcomes
+            keys = [a["specialist"] for a in assignments
+                    if a.get("specialist") in SPECIALISTS]
+            if not keys:
+                return
+            models = {k: (self.pool.for_specialist(k).model
+                          or config.default_model()) for k in keys}
+            roles = {k: config.specialist_role(k) for k in keys}
+            routing_outcomes.record_run(
+                self.user, tr.id, user_message, keys,
+                models=models, roles=roles,
+                review_verdict=review.get("verdict"),
+                synthetic=config.routing_synthetic())
+        except Exception:
+            pass
 
     def _finish(self, user_message: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_message})
@@ -649,8 +785,10 @@ class Olympus:
         there is always an older slice to fold away. (A single huge paste alone
         does NOT compact at turn one: the recent tail is always replayed
         verbatim, so compaction waits until history grows past HISTORY_KEEP_TURNS
-        entries.)"""
-        if self._estimate_tokens(self.history) <= config.HISTORY_TOKEN_BUDGET:
+        entries.) The budget scales to the active model's context window; an
+        explicit OLYMPUS_HISTORY_TOKEN_BUDGET overrides it absolutely."""
+        budget = config.history_token_budget(self.settings.model)
+        if self._estimate_tokens(self.history) <= budget:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:
             return  # everything is in the verbatim tail; nothing to fold away
@@ -666,6 +804,14 @@ class Olympus:
         old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
+        # Pre-compaction memory flush: whatever durable facts live only in the
+        # turns being folded away are extracted into typed memory FIRST, so
+        # compaction can never silently lose them (the prose summary below is
+        # for conversational continuity, not durability).
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         try:
             summary = backend.complete_text(
                 self.settings,
@@ -706,7 +852,7 @@ class Olympus:
         connectors.emit("run_start", self.user, user_message)
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 reply = result
             else:
                 self.report("⚡ Zeus composes the final answer...")
@@ -759,12 +905,14 @@ class Olympus:
             self.conversation_id or f"user-{self.user}")
         try:
             mode, brief, result = self._pipeline(user_message, tr)
-            if mode == "direct":
+            if mode in ("direct", "clarify"):
                 yield result
                 self._finish(user_message, result)
                 return
             self.report("⚡ Zeus composes the final answer...")
-            system = (agent.load_prompt("zeus") + i18n.directive(self.user)
+            from . import soul
+            system = (agent.load_prompt("zeus") + soul.block()
+                      + i18n.directive(self.user)
                       + profile.card(self.user)
                       + recall.context_block(self.user, user_message)
                       + playbooks.context_block(self.user, user_message)
@@ -833,6 +981,54 @@ class Olympus:
         return (f"Removed the last {removed} exchange(s) from the "
                 "conversation. The next question continues from before them.")
 
+    def reset(self) -> str:
+        """Distill the conversation into durable state, then clear it.
+
+        Unlike a plain wipe, this *keeps what matters*: before dropping the
+        turns it folds the whole conversation into a compact state block (facts,
+        decisions, preferences, open threads) and seeds the fresh history with
+        it, so the next turn starts clean but not amnesiac. Durable per-user
+        memory (lessons/facts) is untouched — only the working transcript is
+        distilled. Used by /reset and by scheduled gateway session resets."""
+        memory.set_user(self.user)
+        turns = len([m for m in self.history if m.get("role") == "user"])
+        if not self.history:
+            return "Nothing to reset — the conversation is already empty."
+        as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
+                            for m in self.history)
+        # Same pre-clear flush as compaction: durable facts leave the
+        # transcript as typed memory before the turns are dropped.
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
+        summary = ""
+        try:
+            summary = backend.complete_text(
+                self.settings,
+                "Distill this conversation into a compact durable state — facts, "
+                "decisions, user preferences, and open threads only. This will be "
+                "the sole memory of the chat, so keep everything that matters and "
+                "nothing that doesn't.",
+                [{"role": "user", "content": as_text}], effort="low").strip()
+        except Exception:
+            summary = ""
+        if summary:
+            self.history = [
+                {"role": "user",
+                 "content": "[Conversation state — distilled from a prior "
+                            "session]\n" + summary},
+                {"role": "assistant",
+                 "content": "Understood — continuing with that context."},
+            ]
+            tail = "kept a distilled summary of what we covered"
+        else:
+            self.history = []
+            tail = "cleared the transcript"
+        if self.conversation_id:
+            memory.save_conversation(self.conversation_id, self.history)
+        return f"Fresh start — {tail} ({turns} turn(s) folded away)."
+
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""
         memory.set_user(self.user)
@@ -850,6 +1046,13 @@ class Olympus:
             return "Nothing to rate yet."
         user_msg = self.history[-2].get("content", "")
         reply = self.history[-1].get("content", "")
+        # SPEC-04 Phase A: an explicit 👍/👎 is the top-precedence outcome
+        # signal — upgrade this run's routing-outcome rows. Best-effort.
+        try:
+            from . import routing_outcomes
+            routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
+        except Exception:
+            pass
         verdict = "positive" if verdict.lower() in ("up", "good", "positive",
                                                     "+1", "👍") else "negative"
         memory.save(

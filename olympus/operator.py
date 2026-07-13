@@ -22,6 +22,8 @@ OPERATE_SCOPE = "browser.operate"      # one coarse scope enables the operator
 _REVIEW_MIN_RUNS = 3
 _REVIEW_FLOOR = 0.34                    # prune profiles that fail >2/3 of the time
 _SETTINGS_KEY = "operator"             # per-user prefs blob
+_PROMOTE_MIN_RUNS = 4                  # a learned skill must be tried this often…
+_PROMOTE_RELIABILITY = 0.75            # …and land this reliably to graduate
 
 
 # --- per-user settings (the conversational surface) ----------------------
@@ -93,9 +95,64 @@ def forget_site(user: str, domain: str) -> bool:
         from . import vault
         if vault.available():
             vault.delete(user, f"site:{domain}")
+            vault.delete(user, f"cookies:{domain}")   # drop any saved session too
     except Exception:
         pass
     return existed
+
+
+def save_auth(user: str, domain: str) -> str:
+    """Persist the current browser session for `domain` (its cookies) in the
+    ENCRYPTED vault, so a later run can restore it instead of logging in again.
+    Cookies are session credentials: operator-gated, domain-authorized, and never
+    surfaced to the model. Returns a short status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    try:
+        cookies = browser.session().get_cookies(domain)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    if not cookies:
+        return f"No session cookies to save for {domain}."
+    vault.put(user, f"cookies:{domain}", {"cookies": cookies})
+    return f"Saved the {domain} session ({len(cookies)} cookie(s), encrypted)."
+
+
+def restore_auth(user: str, domain: str) -> str:
+    """Restore a previously-saved session for `domain` by injecting its
+    vault-stored cookies, so the operator skips re-login. Returns a status."""
+    domain = (domain or "").strip().lower()
+    if not enabled(user):
+        return "Error: the operator isn't set up for this."
+    if not authorized(user, domain):
+        return f"Error: '{domain or 'unknown'}' isn't an authorized site."
+    from . import vault
+    if not vault.available():
+        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    blob = vault.get(user, f"cookies:{domain}")
+    cookies = blob.get("cookies") if isinstance(blob, dict) else None
+    if not cookies:
+        return f"No saved session for {domain} — log in once, then save it."
+    try:
+        n = browser.session().set_cookies(cookies)
+    except browser.BrowserUnavailable as err:
+        return f"No browser attached: {err}"
+    return f"Restored the {domain} session ({n} cookie(s))."
+
+
+def has_saved_auth(user: str, domain: str) -> bool:
+    """True if a saved session exists for `domain` (used to auto-restore)."""
+    from . import vault
+    if not vault.available():
+        return False
+    blob = vault.get(user, f"cookies:{(domain or '').strip().lower()}")
+    return bool(isinstance(blob, dict) and blob.get("cookies"))
 
 
 def authorized(user: str, domain: str) -> bool:
@@ -130,6 +187,70 @@ def remember_credentials(user: str, domain: str, username: str,
                                         "password": password})
     authorize_site(user, domain, "remember")
     return domain
+
+
+# --- review surface: what the operator did on your accounts ---------------
+#
+# The data already exists (every operate is an Action with an immutable audit
+# trail); this surfaces it in plain English so a non-technical user can see and
+# trust what ran on their accounts.
+
+# The three operate ActionTypes plus the credentialed login actuator.
+OPERATOR_ACTION_TYPES = frozenset({
+    "browser_operate", "browser_operate_irreversible",
+    "browser_operate_financial",
+})
+
+
+def history(user: str, limit: int = 20) -> list["actions.Action"]:
+    """Recent operator actions for `user`, newest first — filtered from the
+    action history to just the credentialed-operate types."""
+    return [a for a in actions.history(user, limit=max(limit * 4, 80))
+            if a.type in OPERATOR_ACTION_TYPES][:limit]
+
+
+def render_history(user: str, limit: int = 20) -> str:
+    """Plain-English 'what Olympus did on my accounts' report."""
+    items = history(user, limit)
+    if not items:
+        return "No operator actions yet."
+    lines = []
+    for a in items:
+        domain = (a.payload or {}).get("domain", "?")
+        tmpl = (a.payload or {}).get("template", a.type)
+        when = time.strftime("%Y-%m-%d %H:%M",
+                             time.localtime(getattr(a, "created_at", 0) or 0))
+        mark = {"executed": "✓", "failed": "✗", "rejected": "⊘",
+                "prepared": "…", "approved": "→", "undone": "↺"}.get(
+                    a.status, "•")
+        lines.append(f"{mark} {when}  {domain}  {tmpl}  [{a.status}]")
+    return "\n".join(lines)
+
+
+def status_summary(user: str) -> str:
+    """Plain-English operator status: on/off, authorized sites (+ login mode),
+    pending approvals, and the last few actions."""
+    on = enabled(user)
+    lines = [f"Operator: {'ON' if on else 'off'}"]
+    if not on:
+        lines.append("  Ask me to do something on a site, or run "
+                     "`olympus operator enable`, to turn it on.")
+    site_map = sites(user)
+    if site_map:
+        lines.append("Authorized sites:")
+        for d in sorted(site_map):
+            lines.append(f"  • {d} (login: {login_mode(user, d)})")
+    else:
+        lines.append("Authorized sites: none yet.")
+    pend = [a for a in actions.pending(user) if a.type in OPERATOR_ACTION_TYPES]
+    if pend:
+        lines.append(f"Awaiting your approval: {len(pend)} operator "
+                     "action(s) — run `olympus actions` to review.")
+    recent = render_history(user, 5)
+    if recent != "No operator actions yet.":
+        lines.append("Recent actions:")
+        lines += [f"  {ln}" for ln in recent.splitlines()]
+    return "\n".join(lines)
 
 
 # --- risk → spine ActionType ---------------------------------------------
@@ -190,16 +311,102 @@ def execute(payload: dict) -> dict:
     _, tmpl = _template(domain, name)
     if not tmpl:
         raise RuntimeError(f"no template '{name}' for {domain}")
+    # The two highest-risk action types are DISABLED BY DEFAULT and fail
+    # closed at the execution door (mirroring the sovereign gates): even a
+    # previously prepared/approved action refuses without the explicit opt-in.
+    if type_for_risk(tmpl.get("risk", "notable")) in (
+            "browser_operate_financial", "browser_operate_irreversible") \
+            and not config.browser_financial_enabled():
+        raise RuntimeError(
+            "financial/irreversible browser templates are disabled by "
+            "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
     sess = browser.session()
-    result = sess.run_template(tmpl.get("steps", []), params)
+    risk = tmpl.get("risk", "notable")
+    healed_note = ""
+    try:
+        result = sess.run_template(tmpl.get("steps", []), params)
+    except browser.TemplateStepError as err:
+        # Self-heal: the site likely drifted. Re-observe, look for the moved
+        # control, and file a human-reviewed proposal — never auto-rewrite a
+        # credentialed template.
+        heal = _heal_and_propose(domain, name, err)
+        cand = heal.get("candidate")
+        # Gated retry: only a REVERSIBLE (notable) template may auto-retry the
+        # healed candidate to finish the run — an irreversible/financial step is
+        # never re-attempted on a guessed selector; it stays propose-only.
+        if risk == "notable" and cand:
+            patched = _patch_steps(tmpl.get("steps", []), err.index, cand)
+            try:
+                result = sess.run_template(patched, params)
+                healed_note = f" (self-healed: used {cand!r})"
+            except browser.TemplateStepError:
+                browser.mark_profile_outcome(domain, False)
+                browser.mark_template_outcome(domain, name, False)
+                raise RuntimeError(f"{err}. {heal['note']}") from err
+        else:
+            browser.mark_profile_outcome(domain, False)
+            browser.mark_template_outcome(domain, name, False)
+            raise RuntimeError(f"{err}. {heal['note']}") from err
     ok = True
     if tmpl.get("success_selector"):
         ok = sess.exists(tmpl["success_selector"])
         result["verified"] = ok
     browser.mark_profile_outcome(domain, ok)
+    browser.mark_template_outcome(domain, name, ok)
     if not ok:
         raise RuntimeError("template ran but the success marker never appeared")
+    if healed_note:
+        result["healed"] = True
+        result["note"] = healed_note.strip()
     return result
+
+
+def _patch_steps(steps: list, index: int, selector: str) -> list:
+    """The remaining steps from `index` onward, with the failed step's selector
+    swapped to the healed candidate — so a retry continues the flow (steps before
+    `index` already ran) instead of repeating completed, possibly side-effecting
+    steps."""
+    tail = list(steps[index:]) or [{}]
+    tail[0] = {**tail[0], "selector": selector}
+    return tail
+
+
+def _heal_and_propose(domain: str, template: str,
+                      err: "browser.TemplateStepError") -> dict:
+    """After a template step failed, re-observe and, if a likely-moved control is
+    found, file a Prometheus-style proposal to patch the template. Returns
+    {"note", "candidate"} — the candidate selector (or None) lets a reversible
+    template attempt a gated retry. Never auto-rewrites the stored template."""
+    try:
+        cand = browser.session().heal_candidate(err.selector)
+    except Exception:
+        cand = None
+    if cand and cand.get("selector"):
+        body = (f"Template '{template}' on {domain} drifted.\n"
+                f"Step {err.index} ({err.op}) selector {err.selector!r} no "
+                f"longer resolves.\n"
+                f"Likely moved to: {cand['selector']!r} "
+                f"(label {cand.get('label','')!r}, "
+                f"match {cand.get('score')}).\n"
+                "Review and, if correct, update the template with "
+                "site_template_record.")
+        _file_proposal(domain, f"template drift: {domain}/{template}", body)
+        return {"note": (f"Filed a self-heal proposal: {err.selector!r} may have "
+                         f"moved to {cand['selector']!r} (for human review)."),
+                "candidate": cand["selector"]}
+    _file_proposal(domain, f"template drift: {domain}/{template}",
+                   f"Template '{template}' step {err.index} selector "
+                   f"{err.selector!r} no longer resolves and no confident "
+                   "replacement was found on the page. Needs human attention.")
+    return {"note": "Filed a self-heal proposal (no confident replacement found).",
+            "candidate": None}
+
+
+def _file_proposal(domain: str, title: str, body: str) -> None:
+    """Record a human-reviewable operator proposal in memory (never auto-applied)."""
+    user = memory.current_user()
+    memory.set_user(user)
+    memory.save("upgrades", title, security.sanitize_for_memory(body))
 
 
 def register_operator_actions() -> None:
@@ -317,11 +524,50 @@ def run_due(now: float | None = None) -> list[str]:
 
 # --- Phase 4: METIS review + Prometheus proposals ------------------------
 
+def promote_ready(min_runs: int = _PROMOTE_MIN_RUNS,
+                  min_reliability: float = _PROMOTE_RELIABILITY) -> list[str]:
+    """METIS hook: auto-graduate learned skills that have proven reliable into
+    declarative action templates. A skill qualifies once it carries a structured
+    recipe, has been tried >= min_runs times, and lands >= min_reliability of the
+    time; skills whose template already exists are skipped (idempotent). The
+    template rides the governed browser_operate path, so graduation formalizes a
+    proven flow without widening the trust boundary. Returns report lines."""
+    out: list[str] = []
+    for s in browser.list_skills():
+        if not s.recipe or s.runs < min_runs or s.reliability < min_reliability:
+            continue
+        prof = browser.get_profile(s.domain)
+        if prof is not None and s.name in (prof.templates or {}):
+            continue                    # already graduated — idempotent
+        promoted = browser.promote_skill(s.domain, s.name)
+        if promoted is not None:
+            out.append(f"{s.domain} · {s.name} → template "
+                       f"({s.reliability} over {s.runs} runs)")
+    return out
+
+
+def demote_drifted(min_runs: int = _REVIEW_MIN_RUNS,
+                   floor: float = _REVIEW_FLOOR) -> list[str]:
+    """METIS hook (inverse of promote_ready): demote a graduated template that
+    has stopped working — its own measured reliability is below the floor over
+    enough runs — so the operator stops auto-running a dead recipe. Returns
+    report lines."""
+    out: list[str] = []
+    for p in browser.list_profiles():
+        for name, t in list((p.templates or {}).items()):
+            runs = int(t.get("runs", 0))
+            succ = int(t.get("successes", 0))
+            if runs >= min_runs and (succ / runs if runs else 0.0) < floor:
+                if browser.demote_template(p.domain, name):
+                    out.append(f"{p.domain}/{name} ({succ}/{runs})")
+    return out
+
+
 def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
                     floor: float = _REVIEW_FLOOR) -> str:
-    """METIS hook: prune site profiles that fail consistently (enough runs, low
-    reliability) so the operator stops trusting drifted recipes. Returns a
-    short report."""
+    """METIS hook: prune site profiles that fail consistently, graduate learned
+    skills that have proven reliable into templates, and demote graduated
+    templates that have since drifted. Returns a short report."""
     profiles = browser._load_profiles()
     keep, pruned = [], []
     for p in profiles:
@@ -331,8 +577,19 @@ def review_profiles(min_runs: int = _REVIEW_MIN_RUNS,
             keep.append(p)
     if pruned:
         browser._store_profiles(keep)
-        return "Pruned flaky site profiles: " + "; ".join(pruned)
-    return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
+    demoted = demote_drifted(min_runs, floor)
+    graduated = promote_ready()
+    parts = []
+    if pruned:
+        parts.append("Pruned flaky site profiles: " + "; ".join(pruned))
+    if demoted:
+        parts.append("Demoted drifted templates: " + "; ".join(demoted))
+    if graduated:
+        parts.append("Graduated proven skills to templates: "
+                     + "; ".join(graduated))
+    if not parts:
+        return f"Reviewed {len(profiles)} site profile(s); all within tolerance."
+    return " ".join(parts)
 
 
 def propose_profile(domain: str, rationale: str, *, login_url: str = "",

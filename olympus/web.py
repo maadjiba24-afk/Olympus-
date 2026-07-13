@@ -63,6 +63,48 @@ def _memory_view(user: str) -> dict:
             "insights": outcomes.insights(user)}
 
 
+def _agenda_view(user: str) -> dict:
+    """The agenda panel: the user's scheduled tasks (always available, run by
+    the heartbeat) plus their upcoming calendar events (only when a Google
+    account is connected — read-only, no side effect). Calendar reads resolve
+    the token from the memory user, so scope it to this principal for the read.
+    """
+    from . import scheduler
+    import time as _time
+    now = _time.time()
+    jobs = []
+    for j in scheduler.jobs():
+        if j.user not in (user, "shared"):
+            continue                      # only this user's (and shared) tasks
+        if getattr(j, "kind", "interval") == "on_exit":
+            when = f"when {j.label or 'pid ' + str(j.watch_pid)} exits"
+            due_in = None
+        else:
+            when = f"every {scheduler._human_interval(j.interval)}"
+            due_in = max(0, int(j.interval - (now - j.last_run)))
+        jobs.append({"name": j.name, "when": when, "prompt": j.prompt,
+                     "enabled": j.enabled, "kind": getattr(j, "kind",
+                                                            "interval"),
+                     "deliver_to": j.deliver_to, "due_in": due_in})
+    events, connected = None, False
+    try:
+        from . import calendar as gcal, google_oauth, memory
+        if gcal.configured() and google_oauth.connected(user):
+            connected = True
+            memory.set_user(user)
+            events = gcal.upcoming()
+    except Exception:
+        events = None
+    from . import todos as _todos
+    open_items = _todos.listing(user, include_done=False)
+    due_ids = {it["id"] for it in _todos.due_items(user, now)}
+    todo_view = [{"id": it["id"], "text": it["text"], "kind": it["kind"],
+                  "due": it.get("due"), "overdue": it["id"] in due_ids}
+                 for it in open_items]
+    return {"tasks": jobs, "events": events, "calendar_connected": connected,
+            "todos": todo_view}
+
+
 def _actions_view(user: str) -> list[dict]:
     """Pending actions (awaiting approval) plus recently executed reversible
     ones (so the UI can offer undo)."""
@@ -110,6 +152,13 @@ class _Session:
                    for m in pool.members) + (user,)
         if self.bot is None or fp != self.fingerprint:
             self.fingerprint = fp
+            # ask_user on the web is async (request/response), so a specialist
+            # can't block for a live answer — install a surface-and-proceed
+            # provider that streams the question to the UI, then proceeds. The
+            # orchestrator captures the provider at construction, so install it
+            # first.
+            from . import interaction
+            interaction.set_provider(interaction.reporting_provider(self.report))
             self.bot = orchestrator.Olympus(
                 report=self.report,
                 pool=pool,
@@ -425,6 +474,73 @@ PAGE = """<!doctype html>
   #memcount { color: #0e1116; background: #7bbf7b; border-radius: 10px;
               padding: 0 7px; font-size: 12px; font-weight: bold; display: none; }
   #memcount.show { display: inline; }
+  #documents { display: none; border-bottom: 1px solid #2a2f3a;
+               background: #11151d; max-height: 60vh; overflow-y: auto;
+               padding: 12px 20px; }
+  #documents.open { display: block; }
+  .docwrap { max-width: 860px; margin: 0 auto; }
+  .docitem { display: flex; gap: 10px; align-items: baseline;
+             justify-content: space-between; border-bottom: 1px solid #20242e;
+             padding: 6px 0; cursor: pointer; }
+  .docitem:hover .dt { color: #d9b44a; }
+  .docitem .dt { color: #c8cdd6; flex: 1; }
+  .docitem .dm { color: #6b7280; font-size: 12px; }
+  #doctitle { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+  #docbody { width: 100%; box-sizing: border-box; min-height: 40vh;
+             font-family: ui-monospace, monospace; font-size: 13px; }
+  #gallery { display: none; border-bottom: 1px solid #2a2f3a;
+             background: #11151d; max-height: 60vh; overflow-y: auto;
+             padding: 12px 20px; }
+  #gallery.open { display: block; }
+  .galgrid { max-width: 860px; margin: 0 auto; display: grid;
+             grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+             gap: 12px; }
+  .galcard { border: 1px solid #20242e; border-radius: 6px; overflow: hidden;
+             background: #0d1017; }
+  .galcard img { width: 100%; height: 130px; object-fit: cover; display: block;
+                 cursor: pointer; }
+  .galcard .gm { padding: 5px 7px; font-size: 11px; color: #6b7280;
+                 display: flex; justify-content: space-between; gap: 6px; }
+  .galcard .gm b { color: #c8cdd6; font-weight: normal; overflow: hidden;
+                   text-overflow: ellipsis; white-space: nowrap; }
+  #agenda { display: none; border-bottom: 1px solid #2a2f3a;
+            background: #11151d; max-height: 60vh; overflow-y: auto;
+            padding: 12px 20px; }
+  #agenda.open { display: block; }
+  .agwrap { max-width: 860px; margin: 0 auto; }
+  .agwrap h4 { margin: 12px 0 6px; color: #d9b44a; font-size: 13px;
+               font-weight: 600; }
+  .agrow { display: flex; gap: 10px; align-items: baseline;
+           border-bottom: 1px solid #20242e; padding: 6px 0; }
+  .agrow .at { color: #c8cdd6; flex: 1; }
+  .agrow .aw { color: #6b7280; font-size: 12px; white-space: nowrap; }
+  .agrow.off .at { color: #6b7280; text-decoration: line-through; }
+  .agrow .ap { color: #8b93a0; font-size: 12px; display: block;
+               margin-top: 2px; }
+  #compare { display: none; border-bottom: 1px solid #2a2f3a;
+             background: #11151d; max-height: 70vh; overflow-y: auto;
+             padding: 12px 20px; }
+  #compare.open { display: block; }
+  .cmpwrap { max-width: 860px; margin: 0 auto; }
+  .cmpbar { display: flex; gap: 8px; margin-bottom: 10px; }
+  #cmpprompt { flex: 1; box-sizing: border-box; }
+  .cmpcard { border: 1px solid #20242e; border-radius: 6px; margin-bottom: 10px;
+             background: #0d1017; }
+  .cmpcard .ch { display: flex; justify-content: space-between;
+                 align-items: center; padding: 7px 10px;
+                 border-bottom: 1px solid #20242e; }
+  .cmpcard .ch b { color: #d9b44a; }
+  .cmpcard .ch .who { color: #6b7280; font-size: 12px; }
+  .cmpcard .cb { padding: 10px; white-space: pre-wrap; color: #c8cdd6;
+                 font-size: 13px; }
+  .cmpcard.picked { border-color: #4a7a3f; }
+  .cmpcard.picked .ch b::after { content: '  ✓ your pick'; color: #7bbf6a;
+                                 font-size: 12px; }
+  #cmptally { color: #6b7280; font-size: 12px; margin-top: 6px; }
+  .cmpsnippet { background: #0d1017; border: 1px solid #20242e; border-radius: 6px;
+                padding: 8px 10px; font-family: ui-monospace, monospace;
+                font-size: 12px; color: #c8cdd6; white-space: pre-wrap;
+                word-break: break-all; overflow-x: auto; }
   .mem { max-width: 860px; margin: 0 auto 8px; display: flex; gap: 10px;
          align-items: baseline; justify-content: space-between;
          border-bottom: 1px solid #20242e; padding-bottom: 6px; }
@@ -493,6 +609,10 @@ PAGE = """<!doctype html>
     <span id="actcount"></span></button>
   <button id="membtn" title="What Olympus remembers about you">🧠 memory
     <span id="memcount"></span></button>
+  <button id="docbtn" title="Your documents workspace">📄 docs</button>
+  <button id="galbtn" title="Images generated into the workspace">🖼 gallery</button>
+  <button id="agbtn" title="Your scheduled tasks and upcoming calendar">📅 agenda</button>
+  <button id="cmpbtn" title="Blind compare across your configured models">⚖ compare</button>
   <button id="gear" title="Bring your own model & key">⚙ model</button>
   <button id="reportbtn" title="Report a problem to the operator">📣 report</button>
 </header>
@@ -507,6 +627,10 @@ PAGE = """<!doctype html>
 </div>
 <div id="actions"><div id="budget"></div><div id="cards"></div></div>
 <div id="memory"></div>
+<div id="documents"></div>
+<div id="gallery"></div>
+<div id="agenda"></div>
+<div id="compare"></div>
 <div id="panel">
   <p class="hint" style="margin-top:0"><b>Bring your own model &amp; key.</b>
   1) pick a provider · 2) type the model name · 3) paste your API key from that
@@ -933,6 +1057,376 @@ async function memact(payload) {
 setInterval(renderMemory, 8000);
 renderMemory();
 
+// --- documents workspace ---
+const docsEl = document.getElementById('documents');
+const docBtn = document.getElementById('docbtn');
+let docOpenName = null;
+docBtn.onclick = () => {
+  docsEl.classList.toggle('open');
+  if (docsEl.classList.contains('open')) renderDocuments();
+};
+
+async function renderDocuments(editing) {
+  const wrap = document.createElement('div'); wrap.className = 'docwrap';
+  if (editing !== undefined) { docsEl.innerHTML = ''; docsEl.appendChild(docEditor(editing)); return; }
+  const bar = document.createElement('div');
+  bar.style = 'display:flex;justify-content:space-between;margin-bottom:8px';
+  const h = document.createElement('b'); h.textContent = 'Your documents';
+  const nw = document.createElement('button'); nw.className = 'ok';
+  nw.textContent = '＋ New'; nw.onclick = () => { docOpenName = null; renderDocuments(''); };
+  bar.append(h, nw); wrap.appendChild(bar);
+  let d = {documents: []};
+  try {
+    d = await (await fetch('/api/documents?session=' + encodeURIComponent(session),
+      {headers: hdrs()})).json();
+  } catch (e) {}
+  if (!d.documents || !d.documents.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'No documents yet. Click ＋ New, or ask the assistant to draft one.';
+    wrap.appendChild(p);
+  }
+  (d.documents || []).forEach(doc => {
+    const row = document.createElement('div'); row.className = 'docitem';
+    const t = document.createElement('span'); t.className = 'dt'; t.textContent = doc.name;
+    const m = document.createElement('span'); m.className = 'dm';
+    m.textContent = doc.chars + ' chars';
+    row.append(t, m);
+    row.onclick = () => openDoc(doc.name);
+    wrap.appendChild(row);
+  });
+  docsEl.innerHTML = ''; docsEl.appendChild(wrap);
+}
+
+function docEditor(content) {
+  const wrap = document.createElement('div'); wrap.className = 'docwrap';
+  const title = document.createElement('input'); title.id = 'doctitle';
+  title.placeholder = 'Document name'; title.value = docOpenName || '';
+  const body = document.createElement('textarea'); body.id = 'docbody';
+  body.value = content || '';
+  const bar = document.createElement('div');
+  bar.style = 'display:flex;gap:8px;margin-top:6px';
+  const save = document.createElement('button'); save.className = 'ok';
+  save.textContent = 'Save'; save.onclick = saveDoc;
+  const back = document.createElement('button'); back.className = 'no';
+  back.textContent = 'Back'; back.onclick = () => renderDocuments();
+  bar.append(save, back);
+  if (docOpenName) {
+    const del = document.createElement('button'); del.className = 'no';
+    del.textContent = 'Delete'; del.onclick = deleteDoc;
+    bar.appendChild(del);
+  }
+  wrap.append(title, body, bar);
+  return wrap;
+}
+
+async function openDoc(name) {
+  docOpenName = name;
+  let content = '';
+  try {
+    const d = await (await fetch('/api/documents?name=' + encodeURIComponent(name) +
+      '&session=' + encodeURIComponent(session), {headers: hdrs()})).json();
+    content = d.content || '';
+  } catch (e) {}
+  renderDocuments(content);
+}
+
+async function docPost(payload) {
+  return fetch('/api/documents', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))});
+}
+async function saveDoc() {
+  const name = document.getElementById('doctitle').value.trim();
+  const content = document.getElementById('docbody').value;
+  if (!name) { alert('Give the document a name.'); return; }
+  const r = await docPost({op: 'save', name: name, content: content});
+  if (r.ok) { docOpenName = null; renderDocuments(); } else { alert('Save failed.'); }
+}
+async function deleteDoc() {
+  if (!docOpenName || !confirm('Delete "' + docOpenName + '"?')) return;
+  await docPost({op: 'delete', name: docOpenName});
+  docOpenName = null; renderDocuments();
+}
+
+// --- gallery (workspace images) ---
+const galEl = document.getElementById('gallery');
+const galBtn = document.getElementById('galbtn');
+galBtn.onclick = () => {
+  galEl.classList.toggle('open');
+  if (galEl.classList.contains('open')) renderGallery();
+};
+function imgSrc(name) {
+  return '/api/gallery/image?name=' + encodeURIComponent(name) +
+    '&session=' + encodeURIComponent(session);
+}
+async function renderGallery() {
+  galEl.innerHTML = '';
+  let d = {images: []};
+  try {
+    d = await (await fetch('/api/gallery?session=' + encodeURIComponent(session),
+      {headers: hdrs()})).json();
+  } catch (e) {}
+  if (!d.images || !d.images.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'No images yet. Ask the assistant to generate one and it will appear here.';
+    galEl.appendChild(p); return;
+  }
+  const grid = document.createElement('div'); grid.className = 'galgrid';
+  d.images.forEach(im => {
+    const card = document.createElement('div'); card.className = 'galcard';
+    const img = document.createElement('img');
+    img.loading = 'lazy'; img.src = imgSrc(im.name); img.alt = im.name;
+    img.onclick = () => window.open(imgSrc(im.name), '_blank');
+    const meta = document.createElement('div'); meta.className = 'gm';
+    const nm = document.createElement('b'); nm.textContent = im.name;
+    nm.title = im.name;
+    const sz = document.createElement('span');
+    sz.textContent = Math.max(1, Math.round(im.bytes / 1024)) + 'KB';
+    meta.append(nm, sz);
+    const actions = document.createElement('div'); actions.className = 'gm';
+    const edit = document.createElement('a'); edit.textContent = 'Edit';
+    edit.style.cursor = 'pointer'; edit.style.color = '#d9b44a';
+    edit.onclick = () => editImage(im.name);
+    const del = document.createElement('a'); del.textContent = 'Delete';
+    del.style.cursor = 'pointer'; del.style.color = '#8b93a0';
+    del.onclick = () => galPost({op: 'delete', name: im.name});
+    actions.append(edit, del);
+    card.append(img, meta, actions); grid.appendChild(card);
+  });
+  galEl.appendChild(grid);
+}
+async function galPost(payload) {
+  const r = await (await fetch('/api/gallery', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))})).json();
+  if (r.message && !r.ok) alert(r.message);
+  renderGallery();
+}
+function editImage(name) {
+  const prompt = window.prompt('Describe the edit for "' + name + '":');
+  if (!prompt) return;
+  galPost({op: 'edit', name: name, prompt: prompt});
+}
+
+// --- agenda (scheduled tasks + upcoming calendar) ---
+const agEl = document.getElementById('agenda');
+const agBtn = document.getElementById('agbtn');
+agBtn.onclick = () => {
+  agEl.classList.toggle('open');
+  if (agEl.classList.contains('open')) renderAgenda();
+};
+function fmtDue(secs) {
+  if (secs == null) return '';
+  if (secs < 60) return 'due now';
+  if (secs < 3600) return 'in ' + Math.round(secs / 60) + 'm';
+  if (secs < 86400) return 'in ' + Math.round(secs / 3600) + 'h';
+  return 'in ' + Math.round(secs / 86400) + 'd';
+}
+function agRow(title, when, sub, off) {
+  const row = document.createElement('div');
+  row.className = 'agrow' + (off ? ' off' : '');
+  const t = document.createElement('div'); t.className = 'at';
+  const b = document.createElement('b'); b.textContent = title; b.style.fontWeight = 'normal';
+  t.appendChild(b);
+  if (sub) { const s = document.createElement('span'); s.className = 'ap'; s.textContent = sub; t.appendChild(s); }
+  const w = document.createElement('span'); w.className = 'aw'; w.textContent = when;
+  row.append(t, w); return row;
+}
+async function renderAgenda() {
+  agEl.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'agwrap';
+  let d = {tasks: [], events: null, calendar_connected: false, todos: []};
+  try {
+    d = await (await fetch('/api/agenda?session=' + encodeURIComponent(session),
+      {headers: hdrs()})).json();
+  } catch (e) {}
+  // --- your list (notes/todos/reminders) ---
+  const lh = document.createElement('h4'); lh.textContent = 'Your list';
+  wrap.appendChild(lh);
+  const addbar = document.createElement('div'); addbar.className = 'cmpbar';
+  const ti = document.createElement('input'); ti.id = 'todoinput';
+  ti.placeholder = 'Add a todo, note, or reminder…';
+  const di = document.createElement('input'); di.id = 'tododue'; di.type = 'text';
+  di.placeholder = 'due (optional)'; di.style.maxWidth = '150px';
+  const ab = document.createElement('button'); ab.className = 'ok'; ab.textContent = 'Add';
+  ab.onclick = () => addTodo(ti.value, di.value);
+  ti.onkeydown = (e) => { if (e.key === 'Enter') addTodo(ti.value, di.value); };
+  addbar.append(ti, di, ab); wrap.appendChild(addbar);
+  if (!d.todos || !d.todos.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'Nothing on your list yet.';
+    wrap.appendChild(p);
+  } else {
+    d.todos.forEach(it => {
+      const row = document.createElement('div'); row.className = 'agrow';
+      const t = document.createElement('div'); t.className = 'at';
+      if (it.kind === 'todo') {
+        const cb = document.createElement('input'); cb.type = 'checkbox';
+        cb.style.marginRight = '8px'; cb.onchange = () => completeTodo(it.id);
+        t.appendChild(cb);
+      }
+      const b = document.createElement('span'); b.textContent = it.text;
+      if (it.kind === 'note') b.style.fontStyle = 'italic';
+      t.appendChild(b);
+      const w = document.createElement('span'); w.className = 'aw';
+      if (it.due != null) {
+        w.textContent = '⏰ ' + new Date(it.due * 1000).toLocaleString();
+        if (it.overdue) w.style.color = '#e0884a';
+      }
+      const del = document.createElement('span'); del.className = 'aw';
+      del.textContent = '✕'; del.style.cursor = 'pointer'; del.style.marginLeft = '8px';
+      del.onclick = () => deleteTodo(it.id);
+      row.append(t, w, del); wrap.appendChild(row);
+    });
+  }
+  const th = document.createElement('h4'); th.textContent = 'Scheduled tasks';
+  wrap.appendChild(th);
+  if (!d.tasks || !d.tasks.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'No scheduled tasks. Add one with `olympus schedule add`, or ask the assistant.';
+    wrap.appendChild(p);
+  } else {
+    d.tasks.forEach(j => {
+      const to = j.deliver_to ? '  →' + j.deliver_to : '';
+      const when = (j.kind === 'on_exit' ? j.when : j.when + (j.enabled ? '  (' + fmtDue(j.due_in) + ')' : '')) + to;
+      wrap.appendChild(agRow(j.name, when, j.prompt, !j.enabled));
+    });
+  }
+  const eh = document.createElement('h4'); eh.textContent = 'Upcoming calendar';
+  wrap.appendChild(eh);
+  if (!d.calendar_connected) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'Connect a Google account to see your upcoming events here.';
+    wrap.appendChild(p);
+  } else if (!d.events || !d.events.length) {
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = 'No events in the next two weeks.';
+    wrap.appendChild(p);
+  } else {
+    d.events.forEach(e => {
+      const when = e.all_day ? e.start : new Date(e.start).toLocaleString();
+      const sub = e.attendees && e.attendees.length ? 'with ' + e.attendees.join(', ') : '';
+      wrap.appendChild(agRow(e.summary, when, sub, false));
+    });
+  }
+  agEl.appendChild(wrap);
+}
+async function todoPost(payload) {
+  await fetch('/api/todos', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))});
+  renderAgenda();
+}
+function addTodo(text, due) {
+  text = (text || '').trim(); if (!text) return;
+  const kind = /^note:/i.test(text) ? 'note' : 'todo';
+  if (kind === 'note') text = text.replace(/^note:\\s*/i, '');
+  todoPost({op: 'add', text: text, kind: kind, due: (due || '').trim()});
+}
+function completeTodo(id) { todoPost({op: 'complete', id: id, done: true}); }
+function deleteTodo(id) { todoPost({op: 'delete', id: id}); }
+
+// --- compare (blind multi-model) ---
+const cmpEl = document.getElementById('compare');
+const cmpBtn = document.getElementById('cmpbtn');
+let cmpId = null, cmpRevealed = false;
+cmpBtn.onclick = () => {
+  cmpEl.classList.toggle('open');
+  if (cmpEl.classList.contains('open')) renderCompare();
+};
+async function renderCompare() {
+  cmpEl.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'cmpwrap';
+  let info = {models: [], tally: {}};
+  try {
+    info = await (await fetch('/api/compare?session=' + encodeURIComponent(session),
+      {headers: hdrs()})).json();
+  } catch (e) {}
+  const solo = info.models.length < 2;
+  const bar = document.createElement('div'); bar.className = 'cmpbar';
+  const inp = document.createElement('input'); inp.id = 'cmpprompt';
+  inp.placeholder = solo
+    ? 'Add a second model to compare — see below'
+    : 'Ask the same thing of ' + info.models.length + ' models, blind…';
+  inp.disabled = solo;
+  const go = document.createElement('button'); go.className = 'ok';
+  go.textContent = 'Compare'; go.disabled = solo;
+  go.onclick = () => runCompare(inp.value);
+  inp.onkeydown = (e) => { if (e.key === 'Enter') runCompare(inp.value); };
+  bar.append(inp, go); wrap.appendChild(bar);
+  if (solo) {
+    const only = info.models.length === 1 ? 'Only ' + info.models[0] + ' is configured. ' : '';
+    const hint = document.createElement('div'); hint.className = 'cmphint';
+    const p = document.createElement('p'); p.className = 'sys';
+    p.textContent = only + 'Blind compare needs two. A second Anthropic model reuses your key and egress — add this env var and reopen:';
+    const pre = document.createElement('pre'); pre.className = 'cmpsnippet';
+    pre.textContent = info.snippet || '';
+    const copy = document.createElement('button'); copy.className = 'ok';
+    copy.textContent = 'Copy'; copy.style.marginTop = '6px';
+    copy.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(pre.textContent); copy.textContent = 'Copied'; };
+    hint.append(p, pre, copy); wrap.appendChild(hint);
+  }
+  const results = document.createElement('div'); results.id = 'cmpresults';
+  wrap.appendChild(results);
+  const tally = document.createElement('div'); tally.id = 'cmptally';
+  tally.textContent = tallyText(info.tally);
+  wrap.appendChild(tally);
+  cmpEl.appendChild(wrap);
+}
+function tallyText(t) {
+  const keys = Object.keys(t || {});
+  if (!keys.length) return 'No blind picks yet.';
+  return 'Your blind picks: ' + keys.sort((a, b) => t[b] - t[a])
+    .map(k => k + ' ' + t[k]).join(', ');
+}
+async function runCompare(prompt) {
+  prompt = (prompt || '').trim();
+  if (!prompt) return;
+  const results = document.getElementById('cmpresults');
+  results.innerHTML = '<p class="sys">Running across your models…</p>';
+  cmpId = null; cmpRevealed = false;
+  let d = {};
+  try {
+    d = await (await fetch('/api/compare', {method: 'POST', headers: hdrs(),
+      body: JSON.stringify({session: session, op: 'run', prompt: prompt})})).json();
+  } catch (e) { results.innerHTML = '<p class="sys">Compare failed.</p>'; return; }
+  if (d.error) { results.innerHTML = '<p class="sys">' + d.error + '</p>'; return; }
+  cmpId = d.id;
+  results.innerHTML = '';
+  d.answers.forEach(a => results.appendChild(cmpCard(a)));
+}
+function cmpCard(a) {
+  const card = document.createElement('div'); card.className = 'cmpcard';
+  card.dataset.label = a.label;
+  const head = document.createElement('div'); head.className = 'ch';
+  const b = document.createElement('b'); b.textContent = 'Answer ' + a.label;
+  const right = document.createElement('span');
+  const who = document.createElement('span'); who.className = 'who';
+  const pick = document.createElement('button'); pick.className = 'ok';
+  pick.textContent = 'Pick this'; pick.onclick = () => revealCompare(a.label);
+  right.appendChild(pick); right.appendChild(who);
+  head.append(b, right);
+  const body = document.createElement('div'); body.className = 'cb';
+  body.textContent = a.text;
+  card.append(head, body); return card;
+}
+async function revealCompare(choice) {
+  if (!cmpId) return;
+  let d = {};
+  try {
+    d = await (await fetch('/api/compare', {method: 'POST', headers: hdrs(),
+      body: JSON.stringify({session: session, op: 'reveal', id: cmpId,
+                            choice: choice || ''})})).json();
+  } catch (e) { return; }
+  if (d.error) return;
+  cmpRevealed = true;
+  document.querySelectorAll('.cmpcard').forEach(card => {
+    const label = card.dataset.label;
+    card.querySelector('.who').textContent = d.mapping[label] || '';
+    card.querySelectorAll('.ch button').forEach(btn => btn.remove());
+    if (d.choice && label === d.choice) card.classList.add('picked');
+  });
+  const tally = document.getElementById('cmptally');
+  if (tally) tally.textContent = tallyText(d.tally);
+}
+
 const connectBtn = document.getElementById('connect');
 connectBtn.onclick = () => window.open(
   '/oauth/google/start?session=' + encodeURIComponent(session),
@@ -1211,6 +1705,42 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/actions":
             self._json({"actions": _actions_view(user),
                         "budget": usage.budget_status()})
+        elif url.path == "/api/documents":
+            from . import documents
+            name = params.get("name", [None])[0]
+            if name:                              # read one document
+                body = documents.read(user, name)
+                if body is None:
+                    self._json({"error": "not found"}, 404)
+                else:
+                    self._json({"name": name, "content": body})
+            else:                                 # list documents
+                self._json({"documents": documents.listing(user)})
+        elif url.path == "/api/gallery":
+            from . import gallery
+            self._json({"images": gallery.list_images()})
+        elif url.path == "/api/gallery/image":
+            from . import gallery
+            got = gallery.read_image(params.get("name", [""])[0])
+            if got is None:
+                self._json({"error": "not found"}, 404)
+            else:
+                raw, ctype = got
+                self._send(200, raw, ctype,
+                           extra_headers={"Cache-Control": "no-store"})
+        elif url.path == "/api/agenda":
+            self._json(_agenda_view(user))
+        elif url.path == "/api/health":
+            from . import health
+            self._json(health.report())
+        elif url.path == "/api/compare":
+            from . import compare
+            models = [compare.model_label(m)
+                      for m in compare.available_models()]
+            out = {"models": models, "tally": compare.tally(user)}
+            if len(models) < 2:              # tell the UI how to enable it
+                out["snippet"] = compare._SNIPPET
+            self._json(out)
         elif url.path == "/api/memory":
             self._json(_memory_view(user))
         elif url.path == "/api/connected":
@@ -1275,8 +1805,10 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_v1_chat()
             return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
-                        "/api/memory", "/api/register", "/api/login",
-                        "/api/logout", "/api/report", "/api/admin/act"):
+                        "/api/memory", "/api/documents", "/api/compare",
+                        "/api/todos", "/api/gallery", "/api/register",
+                        "/api/login", "/api/logout", "/api/report",
+                        "/api/admin/act"):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
@@ -1377,6 +1909,91 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "message": msg,
                         "actions": _actions_view(user),
                         "budget": usage.budget_status()})
+            return
+
+        if path == "/api/documents":
+            # The user editing their OWN document in the UI is a direct action
+            # (they clicked Save) — saved immediately, not staged. The agent's
+            # write_document tool is what routes through the approval spine.
+            from . import documents
+            op = str(payload.get("op", "save"))
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                self._json({"error": "a document name is required"}, 400)
+                return
+            try:
+                if op == "save":
+                    documents.save(user, name, str(payload.get("content", "")))
+                elif op == "delete":
+                    documents.delete(user, name)
+                else:
+                    self._json({"error": "unknown op"}, 400)
+                    return
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
+                return
+            self._json({"ok": True, "documents": documents.listing(user)})
+            return
+
+        if path == "/api/compare":
+            from . import compare
+            op = str(payload.get("op", "run"))
+            if op == "run":
+                prompt = str(payload.get("prompt", "")).strip()
+                if not prompt:
+                    self._json({"error": "a prompt is required"}, 400)
+                    return
+                self._json(compare.run(user, prompt))
+            elif op == "reveal":
+                out = compare.reveal(user, str(payload.get("id", "")),
+                                     str(payload.get("choice", "")))
+                if out is None:
+                    self._json({"error": "comparison not found"}, 404)
+                else:
+                    self._json(out)
+            else:
+                self._json({"error": "unknown op"}, 400)
+            return
+
+        if path == "/api/gallery":
+            from . import gallery
+            op = str(payload.get("op", ""))
+            if op == "delete":
+                ok = gallery.delete_image(str(payload.get("name", "")))
+                self._json({"ok": ok, "images": gallery.list_images()})
+            elif op == "edit":
+                from . import media
+                msg = media.edit_image(str(payload.get("prompt", "")),
+                                       str(payload.get("name", "")))
+                self._json({"ok": msg.startswith("Edited"), "message": msg,
+                            "images": gallery.list_images()})
+            else:
+                self._json({"error": "unknown op"}, 400)
+            return
+
+        if path == "/api/todos":
+            from . import todos
+            op = str(payload.get("op", "add"))
+            try:
+                if op == "add":
+                    todos.add(user, str(payload.get("text", "")),
+                              kind=str(payload.get("kind", "todo")),
+                              due=payload.get("due") or None)
+                elif op == "complete":
+                    todos.complete(user, str(payload.get("id", "")),
+                                   bool(payload.get("done", True)))
+                elif op == "delete":
+                    todos.delete(user, str(payload.get("id", "")))
+                elif op == "clear_done":
+                    todos.clear_done(user)
+                else:
+                    self._json({"error": "unknown op"}, 400)
+                    return
+            except ValueError as err:
+                self._json({"error": str(err)}, 400)
+                return
+            self._json({"ok": True,
+                        "todos": todos.listing(user, include_done=True)})
             return
 
         if path == "/api/memory":
@@ -1565,21 +2182,26 @@ class Handler(BaseHTTPRequestHandler):
             return (False, 401,
                     "missing or invalid API key — pass a configured "
                     "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
-        # No keys configured: loopback-only, and never an open relay.
-        if not self._peer_is_loopback():
-            return (False, 403,
-                    "the OpenAI-compatible API is loopback-only until "
-                    "OLYMPUS_API_KEYS is configured (no open relay).")
+        # No keys configured: loopback-only, and never an open relay. The
+        # peer/header decision funnels through the module-level `_v1_allowed`
+        # predicate — the SAME function the boundary tests assert — so the
+        # production gate and the test can't drift. Granular status/messages and
+        # the bind check are layered on top of that single source of truth.
+        peer = (self.client_address[0] if self.client_address else "") or ""
+        if not _v1_allowed(peer, self.headers):
+            if not _is_loopback(peer):
+                return (False, 403,
+                        "the OpenAI-compatible API is loopback-only until "
+                        "OLYMPUS_API_KEYS is configured (no open relay).")
+            return (False, 401,
+                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
+                    "present, so this request is being relayed from off-box and "
+                    "needs an API key (no open relay behind a proxy).")
         if not self._bound_to_loopback():
             return (False, 401,
                     "set OLYMPUS_API_KEYS: the server is bound to a non-loopback "
                     "address, so the OpenAI-compatible API needs an API key "
                     "(safety is not inferred from the connection).")
-        if _forwarding_headers_present(self.headers):
-            return (False, 401,
-                    "set OLYMPUS_API_KEYS: a reverse-proxy forwarding header is "
-                    "present, so this request is being relayed from off-box and "
-                    "needs an API key (no open relay behind a proxy).")
         return True, 200, ""
 
     def _v1_error(self, code: int, message: str) -> None:

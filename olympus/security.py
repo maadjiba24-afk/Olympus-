@@ -33,6 +33,18 @@ ACTION_TOOLS = frozenset({
     # an action: capability separation strips it from any run that also ingests
     # untrusted page content (an injected page can't reach your logged-in tabs).
     "browser_act",
+    # Observing the interactive map of a *credentialed* tab is the perception
+    # half of the same actuator loop — bounded structure, not prose, and kept
+    # out of any prose-ingesting run so an injected page can't map your tabs.
+    "browser_observe",
+    # Listing/switching the credentialed browser's tabs reveals and redirects a
+    # logged-in session; uploading a local file to a site is data egress. All
+    # three are credentialed actuators, kept out of any prose-ingesting run.
+    "browser_tabs", "browser_switch_tab", "browser_upload",
+    # Reading/writing a domain's session cookies IS handling credentials — kept
+    # out of any prose-ingesting run so an injected page can't harvest or plant
+    # a session (cookies live only in the encrypted vault).
+    "browser_save_auth", "browser_restore_auth",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.
@@ -45,12 +57,24 @@ ACTION_TOOLS = frozenset({
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
+                             "triage_inbox",
                              "browse_page",
+                             # A vision model's read of an image is external
+                             # content — text-in-image injection is injection.
+                             "analyze_image",
                              # The governed CDP harness loads real web pages.
                              "browser_open", "browser_read",
+                             # A vision description of the page's pixels is
+                             # external content too (text-in-image injection).
+                             "browser_screenshot",
                              # A transcript of arbitrary audio is external
                              # content too — spoken injection is still injection.
-                             "transcribe_audio"})
+                             "transcribe_audio",
+                             # Deep Research reads attacker-controlled pages and
+                             # folds them into its report; treat the report as
+                             # untrusted (and keep action tools out of any run
+                             # that can invoke it).
+                             "trigger_research"})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"
@@ -339,18 +363,65 @@ def _ip_is_public(ip: "ipaddress._BaseAddress") -> bool:
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 
-def url_block_reason(url: str) -> str | None:
+def resolve_pinned_ip(host: str, port: int) -> str:
+    """Resolve `host`, validate EVERY address it resolves to, and return one
+    validated IP for the caller to connect to. Raises ValueError with a human
+    reason when the host must not be fetched.
+
+    Connecting to the returned IP (rather than re-resolving the hostname) is
+    the DNS-rebinding defense: an attacker who flips the record between
+    validation and connect gets no second resolution to poison. The pinned
+    fetch path in tools.py calls this from the socket-connect hook, so the
+    address that was validated is byte-for-byte the address dialed.
+    """
+    if not host:
+        raise ValueError("URL has no host")
+    if host.lower() in _BLOCKED_HOSTNAMES:
+        raise ValueError(f"refusing to fetch an internal host ({host})")
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise ValueError(f"could not resolve host: {host}")
+    except (UnicodeError, ValueError):
+        raise ValueError(f"invalid host: {host}")
+    if not infos:
+        raise ValueError(f"could not resolve host: {host}")
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise ValueError(f"unparseable address for host: {host}")
+        if not _ip_is_public(ip):
+            raise ValueError(f"refusing to fetch a non-public address ({ip})")
+    # Under sovereign mode the same guard also enforces the egress allowlist:
+    # a public host that is not explicitly allowlisted may not receive our data.
+    if not egress_allowed(host):
+        raise ValueError(
+            f"sovereign mode: egress to '{host}' is not on the allowlist "
+            "(OLYMPUS_EGRESS_ALLOWLIST)")
+    return str(infos[0][4][0])
+
+
+def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
     """Return a human reason if `url` must NOT be fetched, else None.
 
     SSRF defense for any tool that fetches a model- or user-supplied URL. We
-    refuse non-http(s) schemes and any host that resolves to a non-public
-    address — so neither a literal internal IP nor a public hostname pointed at
-    one (e.g. the cloud metadata service) can be reached.
+    refuse non-http(s) schemes, internal hostnames by name, and — when
+    `resolve` is True — any host that resolves to a non-public address, so
+    neither a literal internal IP nor a public hostname pointed at one (e.g. the
+    cloud metadata service) can be reached.
 
-    Note: this validates at resolve time; it does not pin the socket to the
-    validated IP, so a DNS-rebinding attacker who flips the record between this
-    check and the actual connection is not fully defeated. It does stop the
-    common cases (direct IP, static internal name, metadata endpoints).
+    Pass `resolve=False` when the request egresses through a trusted HTTP(S)
+    proxy: the client never resolves or connects to the target itself (the proxy
+    does, and enforces its own egress policy), and the target legitimately
+    resolves to the proxy's loopback address locally — so a resolve-time IP
+    check would wrongly refuse every fetch. The name-level checks (scheme,
+    internal-hostname blocklist, sovereign allowlist) still apply.
+
+    With `resolve=True`, the pinned opener in tools.py additionally connects to
+    the exact IP validated by `resolve_pinned_ip` at socket-connect time,
+    closing the DNS-rebinding window. Callers that hand the URL to an agent they
+    don't control the sockets of (the CDP browser) rely on this name check only.
     """
     try:
         parsed = urlparse(url)
@@ -363,25 +434,14 @@ def url_block_reason(url: str) -> str | None:
         return "URL has no host"
     if host.lower() in _BLOCKED_HOSTNAMES:
         return f"refusing to fetch an internal host ({host})"
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return f"could not resolve host: {host}"
-    except (UnicodeError, ValueError):
-        return f"invalid host: {host}"
-    if not infos:
-        return f"could not resolve host: {host}"
-    for info in infos:
+    if resolve:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
         try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return f"unparseable address for host: {host}"
-        if not _ip_is_public(ip):
-            return f"refusing to fetch a non-public address ({ip})"
-    # Under sovereign mode the same guard also enforces the egress allowlist:
-    # a public host that is not explicitly allowlisted may not receive our data.
-    if not egress_allowed(host):
+            resolve_pinned_ip(host, port)
+        except ValueError as err:
+            return str(err)
+    elif not egress_allowed(host):
+        # Proxy path: no resolve, but sovereign mode still gates by name.
         return (f"sovereign mode: egress to '{host}' is not on the allowlist "
                 "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None

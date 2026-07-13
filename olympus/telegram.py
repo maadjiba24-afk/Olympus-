@@ -4,13 +4,18 @@ Setup:
   1. Create a bot with @BotFather, copy the token.
   2. export TELEGRAM_BOT_TOKEN=123456:ABC...
   3. python -m olympus telegram
+  4. Run `olympus pair telegram` on the machine, then send the code to the
+     bot as `/pair <code>` — DMs are untrusted by default.
 
 Optional:
-  TELEGRAM_ALLOWED_CHAT_IDS=12345,67890   restrict who may talk to the bot
-  TELEGRAM_NOTIFY_CHAT_ID=12345           heartbeat pushes reports here
+  TELEGRAM_DM_POLICY=pairing|allowlist|open   who may talk (default: pairing)
+  TELEGRAM_ALLOWED_CHAT_IDS=12345,67890       always-allowed chat ids
+  TELEGRAM_NOTIFY_CHAT_ID=12345               heartbeat pushes reports here
+  TELEGRAM_PROGRESS=0                         disable live progress updates
 
-Commands: /start /scan /audit /watch <url> /queue <url> — anything else goes
-through the full Zeus → Athena → Aletheia pipeline.
+Command routing is shared with every other chat platform (gateway.reply_for);
+this module only handles transport: long-polling, pairing, voice notes,
+reply quoting, and streaming progress edits.
 """
 
 from __future__ import annotations
@@ -24,28 +29,21 @@ import traceback
 import urllib.error
 import urllib.request
 
-from . import memory, orchestrator
+from . import orchestrator, pairing
 
 CHUNK = 4000  # Telegram message hard limit is 4096 chars
+PROGRESS_EVERY = 6  # seconds between progress-message edits
 
-HELP = (
-    "⚡ OLYMPUS — your council of AI specialists.\n\n"
-    "Just ask anything: finance, marketing, code, security, social media, "
-    "coaching, scheduling, opportunities. Every answer is fact-checked by "
-    "the hallucination controller before you see it.\n\n"
-    "Commands:\n"
-    "/scan — scan the web for opportunities & world events now\n"
-    "/watch <youtube-url> — watch a video and learn from it\n"
-    "/queue <youtube-url> — queue a video for the autonomous loop\n"
-    "/audit — Olympus audits and upgrades itself\n"
-    "/good or /bad [comment] — rate the last answer (Olympus learns from it)\n"
-    "/lang <language> — reply in your language (e.g. /lang Spanish, /lang auto)\n"
-    "/contribute on|off — share anonymized insights to improve Olympus for all\n"
+PAIR_HINT = (
+    "🔒 This Olympus instance is private.\n"
+    "If it's yours: run `olympus pair telegram` on the machine it lives on, "
+    "then send me /pair <code>."
 )
 
 
 def _token() -> str:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    from . import secretref
+    token = secretref.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN (get one from @BotFather).")
     return token
@@ -61,10 +59,20 @@ def _call(token: str, method: str, **params) -> dict:
         return json.loads(resp.read())
 
 
-def _send(token: str, chat_id: int | str, text: str) -> None:
+def _send(token: str, chat_id: int | str, text: str,
+          reply_to: int | None = None) -> None:
+    """Send `text`, chunked to the API limit. Only the first chunk quotes the
+    triggering message so the answer stays visually attached to its question
+    in busy chats without turning every chunk into a quote."""
     text = text.strip() or "(empty reply)"
+    first = True
     for i in range(0, len(text), CHUNK):
-        _call(token, "sendMessage", chat_id=chat_id, text=text[i : i + CHUNK])
+        params: dict = {"chat_id": chat_id, "text": text[i: i + CHUNK]}
+        if first and reply_to:
+            params["reply_to_message_id"] = reply_to
+            params["allow_sending_without_reply"] = True
+        _call(token, "sendMessage", **params)
+        first = False
 
 
 def notify(text: str) -> bool:
@@ -72,7 +80,8 @@ def notify(text: str) -> bool:
 
     Best-effort: returns False instead of raising when unconfigured/offline.
     """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    from . import secretref
+    token = secretref.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
     if not token or not chat_id:
         return False
@@ -119,86 +128,160 @@ def _voice_text(token: str, message: dict) -> str | None:
     return f"[voice note] {transcript}"
 
 
-def _allowed(chat_id: int) -> bool:
+# --- access control ---------------------------------------------------------
+
+def _policy() -> str:
+    p = os.environ.get("TELEGRAM_DM_POLICY", "pairing").strip().lower()
+    return p if p in ("pairing", "allowlist", "open") else "pairing"
+
+
+def _env_allowed_ids() -> set[str]:
     raw = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
-    if not raw:
-        return True  # open to everyone unless restricted
-    return str(chat_id) in {x.strip() for x in raw.split(",")}
+    ids = {x.strip() for x in raw.split(",") if x.strip()} if raw else set()
+    owner = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID", "").strip()
+    if owner:
+        ids.add(owner)
+    return ids
 
 
-def _handle(token: str, bots: dict[int, orchestrator.Olympus],
-            chat_id: int, text: str) -> None:
-    if not _allowed(chat_id):
-        _send(token, chat_id, "This Olympus instance is private.")
-        return
+def _allowed(chat_id: int) -> bool:
+    """Untrusted by default: a chat may talk only when explicitly allowed by
+    env, paired with a one-time code, or the policy was deliberately opened."""
+    policy = _policy()
+    if policy == "open":
+        return True
+    if str(chat_id) in _env_allowed_ids():
+        return True
+    if policy == "pairing":
+        return pairing.is_paired("telegram", chat_id)
+    return False   # allowlist policy and not on the list
 
+
+_DENIED_AT: dict[int, float] = {}
+_DENY_REPLY_EVERY = 3600
+
+
+def _deny(token: str, chat_id: int) -> None:
+    """Tell a stranger how pairing works — once an hour, not per message, so
+    an unpaired scraper can't turn the bot into a reply machine."""
+    now = time.time()
+    if now - _DENIED_AT.get(chat_id, 0) >= _DENY_REPLY_EVERY:
+        _DENIED_AT[chat_id] = now
+        try:
+            _send(token, chat_id, PAIR_HINT)
+        except Exception:
+            pass
+
+
+# --- live progress ----------------------------------------------------------
+
+class _Progress:
+    """A placeholder message that shows Olympus is working, edited in place
+    with elapsed time, then replaced by the final answer. Best-effort: any
+    API failure degrades to the plain send-at-the-end behavior."""
+
+    def __init__(self, token: str, chat_id: int, reply_to: int | None):
+        self.token, self.chat_id, self.reply_to = token, chat_id, reply_to
+        self.message_id: int | None = None
+        self._stop = threading.Event()
+        self._started = time.time()
+
+    def start(self) -> None:
+        if os.environ.get("TELEGRAM_PROGRESS", "1").strip().lower() in (
+                "0", "false", "off", "no"):
+            return
+        try:
+            params: dict = {"chat_id": self.chat_id, "text": "⏳ Working…"}
+            if self.reply_to:
+                params["reply_to_message_id"] = self.reply_to
+                params["allow_sending_without_reply"] = True
+            out = _call(self.token, "sendMessage", **params)
+            self.message_id = (out.get("result") or {}).get("message_id")
+        except Exception:
+            self.message_id = None
+            return
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(PROGRESS_EVERY):
+            if self.message_id is None:
+                return
+            elapsed = int(time.time() - self._started)
+            try:
+                _call(self.token, "editMessageText", chat_id=self.chat_id,
+                      message_id=self.message_id,
+                      text=f"⏳ Working — {elapsed}s. Use /steer <note> to nudge me.")
+            except Exception:
+                return   # message deleted / rate-limited: stop editing quietly
+
+    def finish(self, text: str) -> None:
+        """Replace the placeholder with the answer (first chunk in place, the
+        rest as follow-ups); fall back to plain sends without a placeholder."""
+        self._stop.set()
+        text = (text or "").strip() or "(empty reply)"
+        if self.message_id is None:
+            _send(self.token, self.chat_id, text, reply_to=self.reply_to)
+            return
+        head, tail = text[:CHUNK], text[CHUNK:]
+        try:
+            _call(self.token, "editMessageText", chat_id=self.chat_id,
+                  message_id=self.message_id, text=head)
+        except Exception:
+            _send(self.token, self.chat_id, head, reply_to=self.reply_to)
+        if tail:
+            _send(self.token, self.chat_id, tail)
+
+    def fail(self, text: str) -> None:
+        self.finish(text)
+
+
+# --- message handling --------------------------------------------------------
+
+def _handle(token: str, bots: dict[str, orchestrator.Olympus],
+            chat_id: int, text: str, message_id: int | None = None) -> None:
     cmd, _, arg = text.strip().partition(" ")
     cmd = cmd.lower()
 
-    if cmd in ("/start", "/help"):
-        _send(token, chat_id, HELP)
-        return
-    if cmd == "/scan":
-        _send(token, chat_id, "🌐 Argus is scanning the world — give me a few minutes...")
-        _send(token, chat_id, orchestrator.opportunity_scan())
-        return
-    if cmd == "/audit":
-        _send(token, chat_id, "🔧 Prometheus is auditing Olympus...")
-        _send(token, chat_id, orchestrator.evolution_audit())
-        return
-    if cmd == "/watch":
-        if not arg:
-            _send(token, chat_id, "Usage: /watch <youtube-url>")
-            return
-        _send(token, chat_id, "🎥 Mnemosyne is watching the video...")
-        _send(token, chat_id, orchestrator.watch_and_learn(arg))
-        return
-    if cmd == "/queue":
-        if not arg:
-            _send(token, chat_id, "Usage: /queue <youtube-url>")
-            return
-        memory.watchlist_add(arg)
-        _send(token, chat_id, "Queued — the heartbeat will watch it on its next pass.")
+    if cmd == "/pair":
+        if pairing.redeem("telegram", arg, chat_id):
+            _send(token, chat_id,
+                  "✓ Paired. This chat can now talk to Olympus — /help to start.",
+                  reply_to=message_id)
+        else:
+            _send(token, chat_id,
+                  "That code didn't match (codes expire after a few minutes). "
+                  "Run `olympus pair telegram` again.", reply_to=message_id)
         return
 
-    # Per-chat identity: private memory namespace + history that survives
-    # restarts (conversation persisted to disk under the chat id).
-    bot = bots.setdefault(chat_id, orchestrator.Olympus(
-        user=f"tg-{chat_id}", conversation_id=f"tg-{chat_id}"))
+    if not _allowed(chat_id):
+        _deny(token, chat_id)
+        return
 
-    if cmd == "/undo":
-        try:
-            n = int(arg) if arg.strip() else 1
-        except ValueError:
-            _send(token, chat_id, "Usage: /undo [N]")
-            return
-        _send(token, chat_id, bot.undo(n))
-        return
-    if cmd in ("/good", "/bad"):
-        _send(token, chat_id,
-              bot.feedback("up" if cmd == "/good" else "down", arg))
-        return
-    if cmd == "/lang":
-        if not arg:
-            _send(token, chat_id, "Usage: /lang <language>  (e.g. /lang French, "
-                                  "/lang auto)")
-            return
-        _send(token, chat_id, bot.set_language(arg))
-        return
-    if cmd == "/contribute":
-        on = arg.strip().lower() in ("on", "yes", "true", "1", "enable")
-        _send(token, chat_id, bot.set_contribute(on))
+    uid = f"tg-{chat_id}"
+    from . import gateway
+
+    # Slash commands answer fast — no placeholder theater for them.
+    if cmd.startswith("/"):
+        for part in gateway.reply_for(bots, str(chat_id), text,
+                                      prefix="tg", uid=uid):
+            _send(token, chat_id, part, reply_to=message_id)
         return
 
     _call(token, "sendChatAction", chat_id=chat_id, action="typing")
+    progress = _Progress(token, chat_id, message_id)
+    progress.start()
     # Journal the in-flight request so a gateway restart resumes it instead
     # of losing it silently.
-    from . import gateway
-    gateway.inflight_mark(f"tg-{chat_id}", chat_id, text)
+    gateway.inflight_mark(uid, chat_id, text)
     try:
-        _send(token, chat_id, bot.ask(text))
+        parts = gateway.reply_for(bots, str(chat_id), text,
+                                  prefix="tg", uid=uid)
+        progress.finish("\n".join(parts) if parts else "")
+    except Exception:
+        progress.fail("Something went wrong — try again.")
+        raise
     finally:
-        gateway.inflight_clear(f"tg-{chat_id}")
+        gateway.inflight_clear(uid)
 
 
 class _ChatWorker(threading.Thread):
@@ -208,13 +291,14 @@ class _ChatWorker(threading.Thread):
     def __init__(self, token: str, bots: dict, chat_id: int):
         super().__init__(daemon=True)
         self.token, self.bots, self.chat_id = token, bots, chat_id
-        self.q: queue.Queue[str] = queue.Queue()
+        self.q: queue.Queue = queue.Queue()
 
     def run(self) -> None:
         while True:
-            text = self.q.get()
+            item = self.q.get()
+            text, message_id = item if isinstance(item, tuple) else (item, None)
             try:
-                _handle(self.token, self.bots, self.chat_id, text)
+                _handle(self.token, self.bots, self.chat_id, text, message_id)
             except Exception:
                 traceback.print_exc()
                 try:
@@ -228,14 +312,17 @@ def run_bot() -> None:
     token = _token()
     me = _call(token, "getMe")["result"]
     print(f"⚡ Olympus is live on Telegram as @{me['username']}  (Ctrl-C to stop)")
+    if _policy() == "pairing":
+        print("   DM policy: pairing (untrusted by default). "
+              "Run `olympus pair telegram` to let a chat in.")
 
-    bots: dict[int, orchestrator.Olympus] = {}
+    from . import gateway
+    bots: dict[str, orchestrator.Olympus] = {}
     workers: dict[int, _ChatWorker] = {}
 
     # Session auto-resume: re-run whatever a previous gateway process was
     # working on when it died (at most one retry per message).
-    from . import gateway as _gw
-    for entry in _gw.inflight_take("tg-"):
+    for entry in gateway.inflight_take("tg-"):
         try:
             chat_id = int(entry["key"])
         except (TypeError, ValueError):
@@ -250,10 +337,16 @@ def run_bot() -> None:
         if worker is None:
             worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)
             worker.start()
-        worker.q.put(entry["text"])
+        worker.q.put((entry["text"], None))
 
     offset = 0
+    last_sweep = time.time()
     while True:
+        # Periodically distill-and-clear idle sessions so a long-lived gateway
+        # doesn't carry unbounded per-user history.
+        if time.time() - last_sweep >= 900:
+            gateway.reset_idle_sessions(bots)
+            last_sweep = time.time()
         try:
             updates = _call(token, "getUpdates", offset=offset, timeout=50)
         except (urllib.error.URLError, TimeoutError, OSError):
@@ -271,11 +364,15 @@ def run_bot() -> None:
             if not text or "id" not in chat:
                 continue
             chat_id = chat["id"]
+            message_id = message.get("message_id")
             # /steer is answered here, on the polling thread, so the note can
             # reach a pipeline already running on this chat's serial worker.
             # Keyed exactly like the bot's conversation_id (raw chat id — group
             # ids are negative, which safe_id would mangle).
             if text.split(" ", 1)[0].lower() == "/steer":
+                if not _allowed(chat_id):
+                    _deny(token, chat_id)
+                    continue
                 from . import steering
                 note = text.partition(" ")[2].strip()
                 if not note:
@@ -290,4 +387,4 @@ def run_bot() -> None:
             if worker is None:
                 worker = workers[chat_id] = _ChatWorker(token, bots, chat_id)
                 worker.start()
-            worker.q.put(text)
+            worker.q.put((text, message_id))
