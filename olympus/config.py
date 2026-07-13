@@ -664,6 +664,8 @@ HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
 WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
+FEATURE_EVOLUTION_EVERY = int(       # feature health review + safe auto-tune
+    os.environ.get("OLYMPUS_FEATURE_EVOLUTION_EVERY", str(24 * 3600)))
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
 # Nightly dreaming: consolidate session memory into wiki concept pages

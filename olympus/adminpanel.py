@@ -271,6 +271,11 @@ def _config() -> dict:
             "settings": opconfig.status()}
 
 
+def _evolution() -> dict:
+    from . import evolve
+    return evolve.summary()
+
+
 def _errors() -> list[dict]:
     from . import errors
     recent = errors.recent(10)
@@ -307,6 +312,7 @@ def snapshot() -> dict:
         "schedules": _section(_schedules),
         "connectors": _section(_connectors),
         "config": _section(_config),
+        "evolution": _section(_evolution),
         "security": _section(_security),
         "health": _section(_dashboard),
         "errors": _section(_errors),

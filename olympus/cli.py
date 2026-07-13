@@ -351,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
+    p_evolve = sub.add_parser("evolve", help="feature self-evolution: health "
+                                             "board, or run the review now")
+    p_evolve.add_argument("action", nargs="?", default="status",
+                          choices=["status", "review"])
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1188,6 +1192,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "curate":
         from . import curator
         print(curator.curate())
+    elif args.command == "evolve":
+        from . import evolve
+        if args.action == "review":
+            print(evolve.review())
+        else:
+            import json as _json
+            print(_json.dumps(evolve.summary(), indent=2))
     elif args.command == "mcp-serve":
         from . import mcp_server
         try:
