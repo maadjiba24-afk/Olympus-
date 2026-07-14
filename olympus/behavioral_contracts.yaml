@@ -64,3 +64,19 @@ contracts:
     invariants: []
     governance:
       - rewrite_verified
+
+  payment_mandate:
+    operation: payment.mandate
+    recovery: block
+    description: >-
+      An AP2 payment mandate before it could back a payment: contained within
+      its intent, unexpired, replay-free, validly signed, and
+      trusted-constructed.
+    preconditions:
+      - mandate_intent_contained
+      - mandate_not_expired
+      - mandate_fresh_nonce
+    invariants: []
+    governance:
+      - mandate_signature_valid
+      - mandate_trusted_construction

@@ -214,6 +214,38 @@ def _rewrite_verified(ctx: dict) -> tuple[bool, str]:
                    + (f": {claims}" if claims else ""))
 
 
+@predicate("mandate_signature_valid")
+def _mandate_signature_valid(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_signature_valid")),
+            "" if ctx.get("mandate_signature_valid") else "invalid signature")
+
+
+@predicate("mandate_not_expired")
+def _mandate_not_expired(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_not_expired")),
+            "" if ctx.get("mandate_not_expired") else "mandate expired")
+
+
+@predicate("mandate_fresh_nonce")
+def _mandate_fresh_nonce(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_fresh_nonce")),
+            "" if ctx.get("mandate_fresh_nonce") else "nonce replay")
+
+
+@predicate("mandate_intent_contained")
+def _mandate_intent_contained(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_intent_contained")),
+            "" if ctx.get("mandate_intent_contained")
+            else "cart exceeds its intent mandate")
+
+
+@predicate("mandate_trusted_construction")
+def _mandate_trusted_construction(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_trusted_construction")),
+            "" if ctx.get("mandate_trusted_construction")
+            else "mandate not trusted-constructed (possible injection)")
+
+
 @predicate("no_action_tool_in_ingesting_run")
 def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     """Capability separation: a run that ingests untrusted external content must
@@ -282,6 +314,18 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
                           "rewrite_preserves_trust"],
         "invariants": [],
         "governance": ["rewrite_verified"],
+    },
+    "payment_mandate": {
+        "operation": "payment.mandate",
+        "recovery": "block",
+        "description": "An AP2 payment mandate before it could back a payment: "
+                       "contained within its intent, unexpired, replay-free, "
+                       "validly signed, and trusted-constructed.",
+        "preconditions": ["mandate_intent_contained", "mandate_not_expired",
+                          "mandate_fresh_nonce"],
+        "invariants": [],
+        "governance": ["mandate_signature_valid",
+                       "mandate_trusted_construction"],
     },
 }
 

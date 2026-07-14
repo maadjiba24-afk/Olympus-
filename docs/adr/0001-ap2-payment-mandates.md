@@ -1,6 +1,6 @@
 # ADR 0001 — AP2-style payment mandates
 
-- **Status:** Proposed (awaiting operator approval before implementation)
+- **Status:** Accepted — implemented (mandate creation + verification only; no rail)
 - **Date:** 2026-07-14
 - **Deciders:** Olympus maintainers
 - **Related:** `docs/AP2_THREAT_MODEL.md`, `docs/THREAT_MODEL.md`,
@@ -8,9 +8,9 @@
   Agent Behavioral Contracts (`olympus/behavioral_contracts.py`),
   the Ed25519 root of trust (`olympus/witness.py`).
 
-> This is the **precondition artifact** for Component 5 of the 2026-landscape
-> build loop. Per the loop scope, no mandate code is written until this ADR and
-> the accompanying threat model are approved.
+> This was the **precondition artifact** for Component 5 of the 2026-landscape
+> build loop. It was approved by the operator, and the decision below is now
+> implemented in `olympus/mandate.py` (creation + verification only — no rail).
 
 ## Context
 

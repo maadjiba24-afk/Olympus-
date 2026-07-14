@@ -288,6 +288,36 @@ def sign(data: bytes) -> str:
     return signing_key().sign(data).hex()
 
 
+# --- domain-separated subkeys --------------------------------------------
+# A labelled key derived from the SAME custody seed as the root, but distinct
+# from it (and from every other label), so a purpose can sign with a key that is
+# not the release/decision-log key. Leaking one subkey never yields another, and
+# subkeys inherit the seed's custody + sovereign-mode protections.
+
+def _subkey_seed_bytes(label: str) -> bytes:
+    seed = _configured_seed() or _DEFAULT_SEED
+    return hashlib.sha256(f"{seed}|subkey|{label}".encode("utf-8")).digest()
+
+
+def subsigning_key(label: str) -> "ed25519.Ed25519PrivateKey":
+    _require_crypto()
+    if not label:
+        raise WitnessError("a subkey label is required")
+    return ed25519.Ed25519PrivateKey.from_private_bytes(_subkey_seed_bytes(label))
+
+
+def sub_public_key_hex(label: str) -> str:
+    return subsigning_key(label).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def sign_with(label: str, data: bytes) -> str:
+    """Sign `data` with the domain-separated subkey for `label`. Inherits the
+    sovereign-mode fail-closed of `sign`."""
+    check_sovereign_seed()
+    return subsigning_key(label).sign(data).hex()
+
+
 def verify_signature(public_key_hex: str, data: bytes, signature_hex: str) -> bool:
     _require_crypto()
     try:
