@@ -12,7 +12,11 @@ from olympus import builtin_actions  # noqa: F401
 # --- YAML ↔ embedded fallback stay in sync -------------------------------
 
 def test_yaml_matches_embedded_fallback():
-    import yaml
+    # PyYAML is an OPTIONAL parser (ABC falls back to the embedded dict without
+    # it — and the canonical CI/prod install has no yaml), so this drift guard
+    # only runs where a parser is present. The embedded dict is authoritative at
+    # runtime; this proves the human-readable YAML mirror hasn't diverged.
+    yaml = pytest.importorskip("yaml")
     data = yaml.safe_load(abc._yaml_path().read_text(encoding="utf-8"))
     assert data["contracts"] == abc._DEFAULT_CONTRACTS
 
