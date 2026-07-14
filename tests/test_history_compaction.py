@@ -9,7 +9,10 @@ from olympus import orchestrator, config, backend, memory
 def small_budget(monkeypatch, tmp_path):
     # tiny budget so tests don't need huge strings; clean memory dir. Setting
     # the explicit-override flag makes history_token_budget() honor the absolute
-    # value instead of the model-context fraction.
+    # value instead of the model-context fraction. These tests cover the LEGACY
+    # monolithic compaction path (the ACE delta path is covered in test_ace* );
+    # pin it off so complete_text is the summarizer under test.
+    monkeypatch.setenv("OLYMPUS_ACE", "off")
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(config, "HISTORY_BUDGET_IS_EXPLICIT", True)
     monkeypatch.setattr(config, "HISTORY_TOKEN_BUDGET", 500)   # ~2000 chars

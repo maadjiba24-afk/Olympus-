@@ -795,39 +795,82 @@ class Olympus:
         self._compress_history()
 
     def _compress_history(self) -> None:
-        """Fold older turns into a single running 'conversation state' block,
-        keeping only the most recent turns verbatim. The block carries facts,
-        decisions, preferences, and open threads forward — and because the old
-        slice already includes any prior state block, summaries fold
-        incrementally rather than re-growing."""
+        """Fold older turns into a running 'conversation state' block, keeping
+        only the most recent turns verbatim. Under ACE (the default) the block
+        is an evolving *playbook* updated by incremental delta — existing
+        durable facts are preserved and pinned, never re-summarized away — which
+        avoids the context-collapse / brevity-bias of the legacy monolithic
+        rewrite (kept behind `OLYMPUS_ACE=off` as a fallback)."""
         keep_n = config.HISTORY_KEEP_TURNS
         old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
         # Pre-compaction memory flush: whatever durable facts live only in the
         # turns being folded away are extracted into typed memory FIRST, so
-        # compaction can never silently lose them (the prose summary below is
-        # for conversational continuity, not durability).
+        # compaction can never silently lose them (the state block below is for
+        # conversational continuity, not durability).
         try:
             recall.flush_slice(self.user, as_text, self.settings)
         except Exception:
             pass
-        try:
-            summary = backend.complete_text(
-                self.settings,
-                "Update the durable conversation state from this history — "
-                "facts, decisions, user preferences, and open threads only. "
-                "Be concise; this replaces the raw turns.",
-                [{"role": "user", "content": as_text}], effort="low")
-        except Exception:
-            self.history = keep  # fall back to truncation on any failure
+
+        state = self._ace_compress(as_text) if config.ace_enabled() \
+            else self._legacy_compress(as_text)
+        if state is None:
+            self.history = keep         # fall back to truncation on any failure
             return
         self.history = [
             {"role": "user",
              "content": "[Conversation state — durable context from earlier "
-                        "turns]\n" + summary},
+                        "turns]\n" + state},
             {"role": "assistant", "content": "Understood — continuing with that context."},
         ] + keep
+
+    def _ace_compress(self, slice_text: str) -> str | None:
+        """Evolve the conversation playbook by delta and render it. Returns the
+        rendered (untrusted-enveloped) state block, or None on failure so the
+        caller falls back to a verbatim tail."""
+        from . import ace
+        try:
+            pb = ace.load(self.conversation_id) if self.conversation_id \
+                else ace.Playbook()
+            before = pb.stats()
+            pb = ace.evolve(pb, slice_text, settings=self.settings)
+            if self.conversation_id:
+                ace.save(self.conversation_id, pb)
+            self._log_ace(before, pb.stats())
+            return ace.render(pb)
+        except Exception as err:
+            from . import errors, evolve
+            errors.capture("orchestrator.ace_compress", err)
+            evolve.record("ace", evolve.DEGRADED, "compaction fell back")
+            return None
+
+    def _log_ace(self, before: dict, after: dict) -> None:
+        """Record a healthy compaction with its delta counters (self-evolution
+        telemetry). `before`/`after` are playbook stats around the merge."""
+        try:
+            from . import evolve
+            added = max(0, after["bullets"] - before["bullets"])
+            evolve.record("ace", evolve.OK,
+                          f"v{after['version']} bullets={after['bullets']} "
+                          f"pinned={after['pinned']} added={added} "
+                          f"helpful={after['helpful']} harmful={after['harmful']}")
+        except Exception:
+            pass
+
+    def _legacy_compress(self, slice_text: str) -> str | None:
+        """The pre-ACE monolithic path: re-summarize the slice into one block.
+        Retained as the `OLYMPUS_ACE=off` fallback. Returns None on failure."""
+        try:
+            return backend.complete_text(
+                self.settings,
+                "Update the durable conversation state from this history — "
+                "facts, decisions, user preferences, and open threads only. "
+                "Be concise; this replaces the raw turns.",
+                [{"role": "user", "content": slice_text}], effort="low")
+        except Exception:
+            return None
 
     def ask(self, user_message: str) -> str:
         error = self.settings.validate()

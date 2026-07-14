@@ -8,6 +8,9 @@ from olympus import backend, config, orchestrator, recall
 
 @pytest.fixture(autouse=True)
 def small_budget(monkeypatch, tmp_path):
+    # These assert the legacy monolithic state block from the stubbed
+    # complete_text; the pre-compaction flush runs identically under both paths.
+    monkeypatch.setenv("OLYMPUS_ACE", "off")
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(config, "HISTORY_BUDGET_IS_EXPLICIT", True)
     monkeypatch.setattr(config, "HISTORY_TOKEN_BUDGET", 500)

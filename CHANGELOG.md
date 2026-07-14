@@ -15,6 +15,44 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — ACE delta-context engine (evolving playbook replaces monolithic compaction)
+
+Conversation compaction stops re-summarizing the whole history from scratch and
+instead evolves a durable **playbook** by incremental *delta* — the pattern from
+*Agentic Context Engineering* (ACE, arXiv 2510.04618). This kills the two decay
+modes of lossy rewrites: **context collapse** (a summary of a summary of a
+summary, eroding turn over turn) and **brevity bias** (the summarizer quietly
+dropping whatever it deems least important).
+
+- **New `olympus/ace.py`** implements the three ACE roles. *Generator* proposes
+  candidate bullets from the slice of turns being folded away (the only
+  model-backed step; routed through the frozen `backend.complete_json`, so it
+  replays deterministically, and pluggable for tests). *Reflector* scores
+  existing bullets against the new slice (helpful++ / harmful++). *Curator*
+  deterministically merges the delta — sanitize, dedup, pin-preserving prune,
+  bounded size — in pure Python.
+- **Durable facts are pinned and never lost.** Bullets in the `facts`/`decisions`
+  sections auto-pin; pinning is sticky and prune-proof, so the non-pinned size
+  cap and the harmful-vote prune can never evict a pinned fact. Pinned facts
+  dedup by exact normalized-text identity (never fuzzy-merged), so two distinct
+  facts that differ only by a number or a short word are never conflated. A
+  50+ turn replay test proves zero loss of pinned facts across repeated
+  compaction under prune pressure and a process reload.
+- **`orchestrator._compress_history` runs delta-only by default.** It loads the
+  per-conversation playbook, evolves it, persists it (`memory/playbooks/`), and
+  renders it as the conversation-state block. The legacy monolithic summarizer
+  is retained behind `OLYMPUS_ACE=off` as a kill switch and as the automatic
+  fallback if the Generator fails.
+- **Playbook content enters prompts only as DATA.** The rendered block leaves
+  `ace.py` exclusively through `security.wrap_untrusted(source="playbook")`, and
+  every added bullet is first run through `security.sanitize_for_memory`, so an
+  injection retrieved from a web tool cannot smuggle an imperative into the
+  durable state block.
+- **Self-evolution aware.** The non-pinned size cap is a registered `evolve`
+  tunable (`ace.max_bullets`, hard ceiling 60, tuner may only narrow), and each
+  compaction records its delta counters (version, bullets, pinned, added,
+  helpful/harmful) to feature-evolution telemetry.
+
 ### Added — Browser/operator absorbed into feature self-evolution (tighten-only)
 
 The operator and earned-autonomy line becomes a first-class citizen of

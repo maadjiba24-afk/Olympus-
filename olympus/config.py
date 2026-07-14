@@ -549,6 +549,15 @@ HISTORY_CONTEXT_FRACTION = float(
     os.environ.get("OLYMPUS_HISTORY_CONTEXT_FRACTION", "0.35"))
 HISTORY_KEEP_TURNS = int(os.environ.get("OLYMPUS_HISTORY_KEEP_TURNS", "8"))
 
+
+def ace_enabled() -> bool:
+    """Whether conversation compaction uses the ACE delta-context engine
+    (evolving playbook, delta-only) instead of the legacy monolithic
+    re-summarize path. On by default; `OLYMPUS_ACE=off` restores the legacy
+    path as a kill switch. Read live so replay restores the recorded setting."""
+    return os.environ.get("OLYMPUS_ACE", "on").strip().lower() not in (
+        "0", "off", "false", "no")
+
 # Approximate context-window size (tokens) by model-name substring — enough to
 # scale the history budget per model. Not authoritative; a rough, defensible map.
 _CONTEXT_WINDOW: dict[str, int] = {
