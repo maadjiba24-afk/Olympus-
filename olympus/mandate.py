@@ -30,8 +30,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import dataclass, asdict
 
 from . import witness
 

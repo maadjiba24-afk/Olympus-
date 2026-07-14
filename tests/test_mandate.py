@@ -202,6 +202,18 @@ def test_from_dict_rejects_junk():
         mandate.SignedMandate.from_dict({"nope": 1})
 
 
+def test_cart_verification_requires_intent():
+    im = _intent()
+    signed = mandate.sign(_cart(im))
+    r = mandate.verify(signed, intent=None, now=1000.0)   # no intent supplied
+    assert not r.ok and any("requires its intent" in x for x in r.reasons)
+
+
+def test_verify_rejects_non_signed_mandate():
+    r = mandate.verify("not a mandate", now=1000.0)       # type: ignore[arg-type]
+    assert not r.ok
+
+
 # --- subkey separation ----------------------------------------------------
 
 def test_mandate_key_is_separate_from_root():

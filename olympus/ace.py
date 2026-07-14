@@ -407,10 +407,12 @@ def save(conversation_id: str, pb: Playbook) -> None:
 
 
 def _bullet_cap() -> int:
-    """The non-pinned size cap, tunable DOWN from the hard ceiling only."""
+    """The non-pinned size cap, tunable DOWN from the hard ceiling only. On any
+    problem reading the tunable (unregistered, bad value, store error) fall back
+    to the hard ceiling — fail-safe to the widest *bounded* cap, never unbounded."""
     try:
         from . import evolve as _evolve
         val = int(_evolve.current("ace", "max_bullets"))
-    except Exception:
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
         return _MAX_BULLETS
     return max(1, min(_MAX_BULLETS, val))
