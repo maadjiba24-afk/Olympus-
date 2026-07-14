@@ -350,11 +350,19 @@ def refine_user(user: str, *, settings=None,
             summary["clean"] = False        # a broken verifier is not "clean"
             continue
         supported = bool(verdict.get("supported"))
+        # Poisoned-feedback defense: a rewrite is model output over (possibly
+        # untrusted-derived) memory — defang any injection-shaped imperative
+        # BEFORE it can become a stored memory, exactly as the write path does
+        # (recall._run_extractor). Aletheia is the semantic gate; this is the
+        # lexical one, and both run before anything is committed.
+        from . import security
+        clean_rewrite = security.sanitize_for_memory(
+            rewrite.strip())[:usermem._MAX_CONTENT]
         p = Proposal(
             id=uuid.uuid4().hex[:12], user=user, type=grp[0].get("type", "project"),
             source_ids=[m["id"] for m in grp],
             source_contents=[m.get("content", "") for m in grp],
-            rewrite=rewrite.strip()[:usermem._MAX_CONTENT],
+            rewrite=clean_rewrite,
             provenance=_merged_provenance(grp),
             sensitivity=_rank_sensitivity(grp),
             verified=supported,

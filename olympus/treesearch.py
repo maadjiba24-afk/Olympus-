@@ -25,7 +25,7 @@ from __future__ import annotations
 import heapq
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 # --- effect classes -------------------------------------------------------
 READ_ONLY = "read_only"

@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Phase 2 hardening of the 2026-landscape components
+
+A hardening pass over ACE, ABC, sleep-time, tree search, and AP2 mandates —
+each checklist item proven by a test or a quoted tool result.
+
+- **Poisoned-feedback defense (headline).** Malicious "execution feedback" can no
+  longer survive into durable state un-neutralized. ACE already sanitized added
+  bullets and rendered them only inside the untrusted envelope; **sleep-time now
+  also runs `security.sanitize_for_memory` on a rewrite before it can become a
+  memory** (on both the proposal and auto-apply paths) — a lexical gate in front
+  of the Aletheia semantic gate. New tests prove an injection echoed by the
+  Generator is defanged at rest and, for ACE, only ever leaves the engine
+  enveloped.
+- **Explicit failure handling.** `ace._bullet_cap` now catches the specific
+  read/parse errors and fails safe to the hard ceiling (never unbounded) instead
+  of a broad swallow. No bare `except`, no silent catch in any of the five
+  modules.
+- **Dead code removed.** Cleared unused imports flagged by pyflakes in
+  `behavioral_contracts.py`, `treesearch.py`, and `mandate.py`; the five modules
+  are pyflakes-clean.
+- **Adversarial coverage confirmed.** Mandate-spoofing (unsigned / wrong-key /
+  tampered-field), tree-search runaway (node cap) and budget-exhaustion (token
+  cap), and ABC contract-violation paths all have passing tests; input-validation
+  boundaries (invalid user, cart-without-intent, non-mandate input) are covered.
+
 ### Added — AP2-style payment mandates (creation + verification only; no rail)
 
 A verifiable-authorization primitive for agent-initiated commerce (Google AP2):
