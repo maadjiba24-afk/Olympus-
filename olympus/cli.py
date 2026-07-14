@@ -355,9 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
                                              "board, run the review, or reset "
                                              "auto-tuned params to defaults")
     p_evolve.add_argument("action", nargs="?", default="status",
-                          choices=["status", "review", "reset"])
+                          choices=["status", "review", "reset", "log"])
     p_evolve.add_argument("feature", nargs="?", default=None,
-                          help="feature to reset (default: all)")
+                          help="feature to reset/filter (default: all)")
     p_sleep = sub.add_parser("sleeptime",
                              help="idle-time memory refinement: status, run a "
                                   "cycle, list/apply/revert reversible rewrites")
@@ -1209,6 +1209,10 @@ def main(argv: list[str] | None = None) -> int:
             print(evolve.review())
         elif args.action == "reset":
             print(evolve.reset(args.feature))
+        elif args.action == "log":
+            import json as _json
+            for e in evolve.events(args.feature):
+                print(_json.dumps(e, sort_keys=True))
         else:
             import json as _json
             print(_json.dumps(evolve.summary(), indent=2))
@@ -1223,7 +1227,12 @@ def main(argv: list[str] | None = None) -> int:
                         else "Nothing to refine."))
         elif args.action == "proposals":
             user = args.ident or "cli"
-            print(_json.dumps(sleeptime.proposals(user), indent=2))
+            props = sleeptime.proposals(user)
+            if not props:
+                print("No proposals.")
+            for p in props:
+                print(sleeptime.render_diff(p))
+                print()
         elif args.action == "revert":
             if not args.ident:
                 print("Usage: olympus sleeptime revert <snapshot-id> "

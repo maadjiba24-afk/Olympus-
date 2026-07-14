@@ -857,7 +857,9 @@ class Olympus:
 
     def _log_ace(self, before: dict, after: dict) -> None:
         """Record a healthy compaction with its delta counters (self-evolution
-        telemetry). `before`/`after` are playbook stats around the merge."""
+        telemetry). `before`/`after` are playbook stats around the merge. The
+        counters also go to the STRUCTURED evolution log (evolve.log_event) so
+        the delta behaviour is queryable, not just skimmable."""
         try:
             from . import evolve
             added = max(0, after["bullets"] - before["bullets"])
@@ -865,6 +867,11 @@ class Olympus:
                           f"v{after['version']} bullets={after['bullets']} "
                           f"pinned={after['pinned']} added={added} "
                           f"helpful={after['helpful']} harmful={after['harmful']}")
+            evolve.log_event("ace", "compaction", {
+                "version": after["version"], "bullets": after["bullets"],
+                "pinned": after["pinned"], "added": added,
+                "pruned": max(0, before["bullets"] + added - after["bullets"]),
+                "helpful": after["helpful"], "harmful": after["harmful"]})
         except Exception:
             pass
 

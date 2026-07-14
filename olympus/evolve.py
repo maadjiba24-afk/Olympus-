@@ -166,6 +166,54 @@ def _now() -> float:
     return time.time()
 
 
+# --- structured event log (Phase 3 evolution governance) --------------------
+# Machine-readable counterpart to record()'s human string: each event is a flat
+# dict of named fields (delta counters, rewrite metrics, …), so the evolution
+# layer's behaviour can be queried and audited, not just skimmed. Same bounded
+# store substrate; never raises into the caller.
+
+_EVENTS_KEY = "events"
+_MAX_EVENTS = 1000
+
+
+def log_event(feature: str, kind: str, fields: dict | None = None) -> None:
+    """Append one structured evolution event ({ts, feature, kind, **fields}).
+    `fields` values should be scalars (numbers/strings/bools); anything else is
+    stringified. Best-effort: a telemetry failure never breaks the caller."""
+    try:
+        flat = {}
+        for k, v in (fields or {}).items():
+            flat[str(k)[:40]] = (v if isinstance(v, (int, float, bool))
+                                 else str(v)[:200])
+        with _LOCK:
+            blob = store.backend().get(_NS, _EVENTS_KEY)
+            events = json.loads(blob) if blob else []
+            if not isinstance(events, list):
+                events = []
+            events.append({"ts": _now(), "feature": str(feature)[:40],
+                           "kind": str(kind)[:40], **flat})
+            store.backend().put(_NS, _EVENTS_KEY,
+                                json.dumps(events[-_MAX_EVENTS:]).encode())
+    except Exception:
+        pass
+
+
+def events(feature: str | None = None, limit: int = 100) -> list[dict]:
+    """Recent structured events, newest last, optionally filtered by feature."""
+    try:
+        blob = store.backend().get(_NS, _EVENTS_KEY)
+        all_events = json.loads(blob) if blob else []
+    except (ValueError, json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(all_events, list):
+        return []
+    if feature:
+        all_events = [e for e in all_events
+                      if isinstance(e, dict) and e.get("feature") == feature]
+    limit = max(1, min(int(limit), _MAX_EVENTS))
+    return all_events[-limit:]
+
+
 def health(feature: str | None = None) -> dict:
     """Per-feature health: sample count, success/degraded/fail rates, and the
     most recent failure detail. With no feature, returns every feature."""

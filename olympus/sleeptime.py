@@ -385,6 +385,25 @@ def refine_user(user: str, *, settings=None,
     return summary
 
 
+def render_diff(proposal: dict) -> str:
+    """A proposal as a unified diff — the sources it would supersede on the left,
+    the consolidated rewrite on the right. This is the operator-facing form of a
+    destructive change: reviewed as a diff, applied only through the gates."""
+    import difflib
+    if not isinstance(proposal, dict):
+        return ""
+    before = [str(s) for s in (proposal.get("source_contents") or [])]
+    after = [str(proposal.get("rewrite", ""))]
+    lines = difflib.unified_diff(
+        before, after,
+        fromfile=f"memories/{','.join(proposal.get('source_ids') or [])}",
+        tofile=f"proposal/{proposal.get('id', '?')}", lineterm="")
+    header = (f"# proposal {proposal.get('id', '?')} "
+              f"[{'verified' if proposal.get('verified') else 'UNVERIFIED'}"
+              f"{', applied' if proposal.get('applied') else ''}]")
+    return "\n".join([header, *lines])
+
+
 def revert(user: str, snapshot_id: str) -> bool:
     """Undo a committed rewrite: reactivate the source memories from the snapshot
     and tombstone the memory the rewrite produced. Returns False if the snapshot
@@ -429,6 +448,13 @@ def run(settings=None) -> list[str]:
     evolve.record("sleeptime", evolve.OK if clean else evolve.DEGRADED,
                   f"proposed={total['proposed']} committed={total['committed']} "
                   f"rejected={total['rejected']} clean_cycles={st['clean_cycles']}")
+    # Structured memory-rewrite metrics (Phase 3 evolution governance): the
+    # cycle's behaviour lands in the queryable evolution log, not only a string.
+    evolve.log_event("sleeptime", "cycle", {
+        "proposed": total["proposed"], "committed": total["committed"],
+        "rejected": total["rejected"], "clean": clean,
+        "clean_cycles": st["clean_cycles"], "graduated": graduated(),
+        "autoapply": config.sleeptime_autoapply()})
     if not (total["proposed"] or total["committed"] or total["rejected"]):
         return []
     mode = "auto-apply" if (graduated() and config.sleeptime_autoapply()) \

@@ -15,6 +15,30 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Phase 3 evolution governance (structured logs, diffs, gate inventory)
+
+ACE and the sleep-time loop are the self-evolution layer, so their behaviour is
+now governed the way the loop spec demands: observable, propose-first, and
+gated.
+
+- **Structured evolution log.** `evolve.log_event(feature, kind, fields)` +
+  `evolve.events(feature, limit)` — a bounded, machine-readable event log on the
+  same store substrate as feature telemetry. ACE compaction now emits its delta
+  counters (version, bullets, pinned, added, pruned, helpful, harmful) and each
+  sleep-time cycle emits its rewrite metrics (proposed, committed, rejected,
+  clean, clean_cycles, graduated, autoapply) as structured events, queryable via
+  **`olympus evolve log [feature]`** (JSONL output).
+- **Destructive changes are proposed as diffs.** `sleeptime.render_diff` renders
+  a proposal as a unified diff — the source memories it would supersede against
+  the consolidated rewrite, flagged verified/UNVERIFIED — and
+  `olympus sleeptime proposals` now prints diffs instead of raw JSON.
+- **Nothing auto-applies; the gates are inventoried.** New governance tests pin
+  the invariants in one place: an ungraduated loop never commits even with
+  `OLYMPUS_SLEEPTIME_AUTOAPPLY=1`; a graduated loop still needs the explicit
+  opt-in; payment mandates can never auto-run (`_min_level_to_auto` = 99); tree
+  search only PREPARES actions; every security-relevant tunable is registered
+  tighten-only; ACE pinned facts survive prune pressure.
+
 ### Security — Phase 2 hardening of the 2026-landscape components
 
 A hardening pass over ACE, ABC, sleep-time, tree search, and AP2 mandates —
