@@ -59,6 +59,32 @@ _ESTABLISHED_AFTER = 20
 _COOLDOWN_SECS = 3600            # 1h to settle after any surprise
 _DAILY_AUTO_CEILING = 25         # max earned auto-runs per domain per day
 
+
+def _tuned(name: str, default: float) -> float:
+    """The current value of a tighten-only earned-autonomy knob, as self-tuned by
+    feature evolution (`evolve.py`, feature 'operator'). Defaults to the constant
+    when evolution is unavailable. The reviewer can only ever move these toward
+    MORE caution (higher bar / longer cooldown / lower ceiling); a human widens
+    them back with `evolve reset`. So reading the live value can only tighten the
+    gate, never loosen it below these defaults."""
+    try:
+        from . import evolve
+        return evolve.current("operator", name)
+    except Exception:
+        return default
+
+
+def establish_after() -> int:
+    return int(_tuned("establish_after", _ESTABLISHED_AFTER))
+
+
+def cooldown_secs() -> float:
+    return float(_tuned("cooldown_secs", _COOLDOWN_SECS))
+
+
+def daily_ceiling() -> int:
+    return int(_tuned("daily_ceiling", _DAILY_AUTO_CEILING))
+
 _PREF_KEY = "earned_autonomy"
 
 # Every governed operator action type shares this prefix; each is domain-scoped,
@@ -123,7 +149,7 @@ def streak(user: str, domain: str) -> int:
 
 def tier(user: str, domain: str) -> int:
     s = streak(user, domain)
-    if s >= _ESTABLISHED_AFTER:
+    if s >= establish_after():
         return ESTABLISHED
     if s >= _TRUSTED_AFTER:
         return TRUSTED
@@ -155,7 +181,7 @@ def cooling_off(user: str, domain: str, *, now: float | None = None) -> float:
             last = max(last, getattr(a, "created_at", 0.0) or 0.0)
     if not last:
         return 0.0
-    remaining = _COOLDOWN_SECS - (now - last)
+    remaining = cooldown_secs() - (now - last)
     return remaining if remaining > 0 else 0.0
 
 
@@ -197,7 +223,7 @@ def effective_autonomy(user: str, domain: str, *,
         return base
     # …and even a proven site can't fire an unbounded number of unattended
     # actions in one day — past the ceiling it falls back to asking.
-    if auto_runs_today(user, domain, now=now) >= _DAILY_AUTO_CEILING:
+    if auto_runs_today(user, domain, now=now) >= daily_ceiling():
         return base
     t = tier(user, domain)
     if t >= ESTABLISHED:
@@ -230,6 +256,12 @@ def report(user: str) -> str:
     recently snapped it back to probation."""
     header = ("Earned autonomy: ON" if enabled(user) else
               "Earned autonomy: off (your global autonomy level governs every site)")
+    # Live thresholds — self-tightened by feature evolution when the operator
+    # degrades. Surface the tightening so the widening the envelope is visible.
+    est_bar, ceiling = establish_after(), daily_ceiling()
+    if est_bar > _ESTABLISHED_AFTER or ceiling < _DAILY_AUTO_CEILING:
+        header += (f"\n  (auto-tightened: established at {est_bar} clean runs, "
+                   f"ceiling {ceiling}/day — widen with `evolve reset operator`)")
     graded = [(tier(user, d), streak(user, d), d) for d in domains(user)]
     if not graded:
         return header + "\n  No governed site history yet."
@@ -239,13 +271,13 @@ def report(user: str) -> str:
         if t == ESTABLISHED:
             toward = ""
         else:
-            nxt_streak = _ESTABLISHED_AFTER if t == TRUSTED else _TRUSTED_AFTER
+            nxt_streak = est_bar if t == TRUSTED else _TRUSTED_AFTER
             toward = f" — {nxt_streak - s} more clean run(s) to {_TIER_NAMES[t + 1]}"
         cool = cooling_off(user, d)
         if cool > 0:
             toward += f" — cooling off {int(cool // 60)}m after a surprise"
         used = auto_runs_today(user, d)
-        if used >= _DAILY_AUTO_CEILING:
+        if used >= ceiling:
             toward += " — daily auto-run ceiling reached (asking until tomorrow)"
         lines.append(f"  • {d}: {_TIER_NAMES[t]} (clean streak {s}){toward}")
     return "\n".join(lines)

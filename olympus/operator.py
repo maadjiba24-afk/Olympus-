@@ -299,6 +299,18 @@ def preview(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def _record_health(outcome: str, detail: str = "") -> None:
+    """Feed the operator's execution outcome into feature self-evolution
+    (`evolve.py`). When the operator degrades, the review auto-tightens the
+    earned-autonomy envelope (tighten-only tunables) — so a failing actuator
+    narrows its own freedom. Best-effort; never raises into the caller."""
+    try:
+        from . import evolve
+        evolve.record("operator", outcome, detail)
+    except Exception:
+        pass
+
+
 def execute(payload: dict) -> dict:
     domain = payload.get("domain", "")
     name = payload.get("template", "")
@@ -332,6 +344,7 @@ def execute(payload: dict) -> dict:
         if cp["type"] != "none":
             browser.mark_profile_outcome(domain, False)
             browser.mark_template_outcome(domain, name, False)
+            _record_health("fail", f"checkpoint:{cp['type']}")
             raise RuntimeError(
                 f"A human-verification checkpoint ({cp['type']}) is blocking "
                 f"'{name}' on {domain}. I never solve these — clear it in the "
@@ -352,10 +365,12 @@ def execute(payload: dict) -> dict:
             except browser.TemplateStepError:
                 browser.mark_profile_outcome(domain, False)
                 browser.mark_template_outcome(domain, name, False)
+                _record_health("fail", "heal-retry-failed")
                 raise RuntimeError(f"{err}. {heal['note']}") from err
         else:
             browser.mark_profile_outcome(domain, False)
             browser.mark_template_outcome(domain, name, False)
+            _record_health("fail", "drift-no-heal")
             raise RuntimeError(f"{err}. {heal['note']}") from err
     ok = True
     if tmpl.get("success_selector"):
@@ -364,10 +379,15 @@ def execute(payload: dict) -> dict:
     browser.mark_profile_outcome(domain, ok)
     browser.mark_template_outcome(domain, name, ok)
     if not ok:
+        _record_health("fail", "success-marker-missing")
         raise RuntimeError("template ran but the success marker never appeared")
     if healed_note:
+        # It worked, but via a guessed/healed selector — a degraded success.
         result["healed"] = True
         result["note"] = healed_note.strip()
+        _record_health("degraded", "self-healed")
+    else:
+        _record_health("ok")
     return result
 
 

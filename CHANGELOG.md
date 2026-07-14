@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Browser/operator absorbed into feature self-evolution (tighten-only)
+
+The operator and earned-autonomy line becomes a first-class citizen of
+`evolve.py`'s measure→auto-tune loop — self-monitoring *and* self-correcting
+toward caution, with no way to self-escalate.
+
+- **`operator.execute` now records OK / DEGRADED / FAIL** to feature evolution
+  (feature `operator`): a clean run is OK, a self-healed run is DEGRADED, and a
+  checkpoint hand-off / drift / missing-success-marker is FAIL (with detail). The
+  operator's execution health now appears on the `evolve` health board.
+- **Earned-autonomy policy knobs are now self-tuning — but TIGHTEN-ONLY.** Three
+  security-relevant tunables (`operator.establish_after`, `operator.cooldown_secs`,
+  `operator.daily_ceiling`) auto-adjust when the operator degrades: the trust bar
+  rises, the post-surprise cooldown lengthens, and the daily auto-run ceiling
+  drops — so a failing actuator *narrows its own freedom* with no human in the
+  loop. `trust.py` reads the live values, so a once-established site can be
+  demoted automatically until it re-earns trust.
+- **The tighten-only guarantee is structural.** A new `Tunable.tighten_only` flag,
+  validated at registration (the default must sit at the loose bound, `on_fail`
+  pointing at the tight bound), plus a defensive clamp in `review()`, make it
+  impossible for the reviewer to ever *loosen* a security knob — auto-tightening a
+  trust gate is safe (worst case: ask a human more often), auto-loosening never
+  is. Only a human widens it back, via **`olympus evolve reset [feature]`**
+  (new `evolve` action; restores tuned params to defaults, telemetry preserved).
+
 ### Added — Earned per-domain autonomy (moat, self-evolving)
 
 Freedom without a blanket blank cheque: Olympus stops asking permission for

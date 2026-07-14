@@ -175,6 +175,29 @@ def test_earned_autonomy_never_lifts_an_irreversible_template(monkeypatch):
     assert action.risk_class == actions.IRREVERSIBLE
 
 
+def test_operate_feeds_feature_evolution(monkeypatch):
+    from olympus import evolve
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    tools._browser_operate("shop.com", "buy")
+    assert evolve.health("operator")["operator"]["ok_rate"] == 1.0    # OK recorded
+
+
+def test_checkpoint_records_operator_failure(monkeypatch):
+    from olympus import evolve
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        checkpoint={"type": "captcha", "detail": "recaptcha"}))
+    operator.run(memory.current_user(), "shop.com", "buy", {})
+    h = evolve.health("operator")["operator"]
+    assert h["fail_rate"] == 1.0 and "checkpoint:captcha" in h["last_failure"]
+
+
 # --- Phase 3: always-on jobs through the heartbeat ------------------------
 
 def test_run_due_is_noop_when_operator_disabled(monkeypatch):

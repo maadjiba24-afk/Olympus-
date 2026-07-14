@@ -181,6 +181,36 @@ def test_daily_ceiling_falls_back_to_asking():
     assert trust.effective_autonomy(u, "site.com", now=next_day) == actions.L4_STANDING
 
 
+# --- absorption: operator degradation self-tightens the envelope ---------
+
+def test_operator_degradation_tightens_trust_knobs_and_can_demote():
+    from olympus import evolve
+    u = "ut"
+    trust.set_enabled(u, True)
+    # A site earns established trust at the default bar (20 clean runs).
+    for i in range(20):
+        _run(u, "proven.com", actions.EXECUTED, ts=100 + i)
+    assert trust.tier(u, "proven.com") == trust.ESTABLISHED
+    assert trust.effective_autonomy(u, "proven.com") == actions.L4_STANDING
+    # The operator starts failing across sites → feature evolution tightens the
+    # earned-autonomy knobs (higher bar, longer cooldown, lower ceiling).
+    for _ in range(10):
+        evolve.record("operator", evolve.FAIL, "drift-no-heal")
+    evolve.review()
+    assert trust.establish_after() > 20
+    assert trust.cooldown_secs() > 3600
+    assert trust.daily_ceiling() < 25
+    # The raised bar demotes the once-established site until it earns more —
+    # a failing actuator narrows its own freedom, no human in the loop. The
+    # effective level drops below L4, so a notable operator template that used to
+    # auto-run now falls back to approval.
+    assert trust.tier(u, "proven.com") == trust.TRUSTED
+    assert trust.effective_autonomy(u, "proven.com") < actions.L4_STANDING
+    # A human widens it back; the site is established again.
+    evolve.reset("operator")
+    assert trust.tier(u, "proven.com") == trust.ESTABLISHED
+
+
 # --- surfaces ------------------------------------------------------------
 
 def test_report_and_earned_hint():

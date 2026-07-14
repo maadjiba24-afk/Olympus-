@@ -131,3 +131,62 @@ def test_moa_reads_tuned_reference_count(monkeypatch):
     # Force the tuned value to its floor and confirm _members honours it.
     evolve._set_param("moa", "reference_count", 2)
     assert len(moa._members()) == 2
+
+
+# --- tighten-only security knobs (earned-autonomy policy) ---------------------
+
+def test_tighten_only_registration_rejects_a_loose_default():
+    # default must sit at the LOOSE bound so the value can only move tighter.
+    with pytest.raises(ValueError):
+        evolve.register_tunable(evolve.Tunable(
+            "x", "y", lo=5, hi=25, default=5, on_fail="decrease",
+            tighten_only=True))          # loose bound is hi(25), not lo(5)
+    with pytest.raises(ValueError):
+        evolve.register_tunable(evolve.Tunable(
+            "x", "z", lo=20, hi=100, default=100, on_fail="increase",
+            tighten_only=True))          # loose bound is lo(20), not hi(100)
+
+
+def test_operator_knobs_tighten_on_degradation_and_never_loosen():
+    for _ in range(3):
+        evolve.record("operator", evolve.OK)
+    for _ in range(7):
+        evolve.record("operator", evolve.FAIL, "checkpoint:captcha")
+    # defaults before any review
+    assert evolve.current("operator", "establish_after") == 20
+    assert evolve.current("operator", "daily_ceiling") == 25
+    evolve.review()
+    est = evolve.current("operator", "establish_after")
+    cool = evolve.current("operator", "cooldown_secs")
+    ceil = evolve.current("operator", "daily_ceiling")
+    assert est > 20 and cool > 3600 and ceil < 25          # tightened
+    # now the operator recovers — a healthy feature is NEVER loosened back
+    for _ in range(40):
+        evolve.record("operator", evolve.OK)
+    evolve.review()
+    assert evolve.current("operator", "establish_after") == est
+    assert evolve.current("operator", "cooldown_secs") == cool
+    assert evolve.current("operator", "daily_ceiling") == ceil
+
+
+def test_operator_knobs_stay_within_guardrails_under_sustained_failure():
+    for _ in range(60):
+        evolve.record("operator", evolve.FAIL)
+        evolve.review()
+    assert 20 <= evolve.current("operator", "establish_after") <= 100
+    assert 3600 <= evolve.current("operator", "cooldown_secs") <= 86400
+    assert 5 <= evolve.current("operator", "daily_ceiling") <= 25
+
+
+def test_reset_widens_tightened_knobs_back_to_defaults():
+    for _ in range(10):
+        evolve.record("operator", evolve.FAIL)
+    evolve.review()
+    assert evolve.current("operator", "daily_ceiling") < 25
+    out = evolve.reset("operator")
+    assert "operator.daily_ceiling" in out
+    assert evolve.current("operator", "establish_after") == 20
+    assert evolve.current("operator", "cooldown_secs") == 3600
+    assert evolve.current("operator", "daily_ceiling") == 25
+    # telemetry is preserved (only tuned params are cleared)
+    assert evolve.health("operator")["operator"]["samples"] == 10
