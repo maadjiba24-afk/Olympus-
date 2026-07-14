@@ -442,14 +442,21 @@ class Olympus:
                 spec = SPECIALISTS[key]
                 result = contracts.check(output, spec.contract,
                                          tool_calls=tool_calls)
+                # Express acceptance as a behavioral contract (specialist.output):
+                # the output-contract result is the invariant clause, evaluated
+                # under ABC so the violation carries a formal Recovery=reject and
+                # lands in the same audit/telemetry as every other contract.
+                from . import behavioral_contracts as _abc
+                abc_v = _abc.check("specialist.output",
+                                   {"contract_result": result})
                 tr.decision(
                     "contract",
                     {"name": spec.name, "role": "specialist", "key": key},
                     {"violations": list(result.violations)},
                     status="ok" if result.ok else "violation",
                     inputs=task)
-                if not result.ok:
-                    reasons = "; ".join(result.violations)
+                if not result.ok or not abc_v.ok:
+                    reasons = "; ".join(result.violations or abc_v.reasons)
                     self.report(
                         f"⛔ {spec.name}'s output failed its contract ({reasons}).")
                     # Fail closed, but degrade gracefully: return the SAME typed
@@ -568,6 +575,8 @@ class Olympus:
         # and restores the env. meta is NOT part of the diffed decision path.
         tr.meta["contracts_enabled"] = config.contracts_enabled()
         tr.meta["egress_guard_enabled"] = config.egress_guard_enabled()
+        from . import behavioral_contracts as _abc
+        tr.meta["abc_enabled"] = _abc.enabled()
         # In-run compaction settings affect the message stream, so record them
         # for deterministic replay (like the two toggles above).
         tr.meta["inrun_compact"] = config.inrun_compact()
@@ -1192,6 +1201,11 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_egress = os.environ.get("OLYMPUS_EGRESS_GUARD")
     rec_egress = bool((original.get("meta") or {}).get("egress_guard_enabled"))
     os.environ["OLYMPUS_EGRESS_GUARD"] = "1" if rec_egress else "0"
+    # ABC enforcement gates the specialist.output `contract` decision, so a run
+    # recorded with it on, replayed with it off, would drop records and diverge.
+    prev_abc = os.environ.get("OLYMPUS_ABC")
+    rec_abc = bool((original.get("meta") or {}).get("abc_enabled", True))
+    os.environ["OLYMPUS_ABC"] = "on" if rec_abc else "off"
     # In-run compaction settings — same reasoning: reproduce the recorded
     # message stream so request hashes match.
     _meta = original.get("meta") or {}
@@ -1235,6 +1249,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_EGRESS_GUARD", None)
         else:
             os.environ["OLYMPUS_EGRESS_GUARD"] = prev_egress
+        if prev_abc is None:
+            os.environ.pop("OLYMPUS_ABC", None)
+        else:
+            os.environ["OLYMPUS_ABC"] = prev_abc
         for k, v in prev_inrun.items():
             if v is None:
                 os.environ.pop(k, None)

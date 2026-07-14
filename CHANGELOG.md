@@ -15,6 +15,41 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Agent Behavioral Contracts (runtime Design-by-Contract governance)
+
+Governance rules that were scattered across the action spine, the autonomy dial,
+capability separation, and Aletheia verification are now expressed as formal,
+declarative **behavioral contracts** — `C = (Preconditions, Invariants,
+Governance, Recovery)` — and enforced at runtime. Native implementation; no
+AgentAssert or any new hard dependency.
+
+- **New `olympus/behavioral_contracts.py`** + **`behavioral_contracts.yaml`.**
+  Contracts are authored in YAML and loaded at runtime with `yaml.safe_load`
+  when PyYAML is importable (as `sandbox.py` already does); an embedded mirror of
+  the same defaults is the fallback when it is not, so the guarantees never
+  vanish for want of a parser (a drift test pins the two equal). A contract that
+  names an unknown predicate or recovery **fails to load** — a governance rule
+  never passes vacuously.
+- **Every existing invariant is a contract.** `action_execution` (approval spine
+  + autonomy dial), `specialist_output` (output contract + Aletheia
+  verification), and `tool_loadout` (capability separation) ship as defaults,
+  each with pure, individually-tested predicates.
+- **Violations block and trigger Recovery.** `enforce()` raises
+  `ContractViolation` carrying the failing clause and a recovery directive —
+  `BLOCK` (fail closed), `HOLD` (revert to awaiting-approval), `REJECT` (drop the
+  output), or `DEGRADE` (record + allow). The `action_execution` contract is
+  wired at `actions._execute`, the single execution chokepoint: any path that
+  reaches it with an irreversible/financial action that never earned a *genuine*
+  human approval (a real `approved_at`, not a flipped flag) is blocked and the
+  action is **held** for the human — defense in depth behind the imperative
+  spine. `specialist_output` is wired at the orchestrator's output-acceptance
+  point.
+- **Fail-open on engine error, fail-closed on violation.** A bug inside a
+  predicate degrades to "ok" (the primary spine remains the real guard); only an
+  evaluated contract violation blocks. `OLYMPUS_ABC=off` is the kill switch, and
+  the enforcement mode is recorded into the run trace so replay reproduces it.
+  ABC status appears on the operator admin panel.
+
 ### Added — ACE delta-context engine (evolving playbook replaces monolithic compaction)
 
 Conversation compaction stops re-summarizing the whole history from scratch and

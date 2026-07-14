@@ -1,0 +1,53 @@
+# Agent Behavioral Contracts — the default, always-on governance contracts.
+#
+# Each contract is C = (Preconditions, Invariants, Governance, Recovery):
+#   preconditions  must hold BEFORE the operation runs
+#   invariants     must hold ABOUT the operation
+#   governance     the autonomy/approval policy binding
+#   recovery       what to do on violation: block | hold | reject | degrade
+#
+# Clause entries are names of predicates registered in behavioral_contracts.py.
+# A contract that names an unknown predicate fails to load (never passes
+# vacuously). Operators may add or override contracts by placing a file with the
+# same shape at MEMORY_DIR/behavioral_contracts.yaml.
+#
+# NOTE: keep this file in exact sync with _DEFAULT_CONTRACTS in
+# behavioral_contracts.py — test_abc pins them equal.
+
+contracts:
+  action_execution:
+    operation: action.execute
+    recovery: hold
+    description: >-
+      Any world-affecting action, at the single execution chokepoint, wrapping
+      the approval spine + autonomy dial.
+    preconditions:
+      - scope_granted
+      - approval_present_if_irreversible
+    invariants:
+      - risk_class_known
+    governance:
+      - autonomy_sufficient
+      - within_autonomy_cap
+
+  specialist_output:
+    operation: specialist.output
+    recovery: reject
+    description: >-
+      A specialist's final output before the orchestrator accepts it — output
+      contract + Aletheia verification.
+    preconditions: []
+    invariants:
+      - output_contract_satisfied
+    governance:
+      - aletheia_verified
+
+  tool_loadout:
+    operation: run.loadout
+    recovery: block
+    description: >-
+      Capability separation: an ingesting run carries no action tools.
+    preconditions:
+      - no_action_tool_in_ingesting_run
+    invariants: []
+    governance: []
