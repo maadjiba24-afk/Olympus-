@@ -106,6 +106,9 @@ for _t in (
             note="widen the work cadence for goals that keep failing to close"),
     Tunable("curator", "prune_per_run", lo=1, hi=3, default=3, on_fail="decrease",
             note="prune more cautiously if prunes keep getting reverted"),
+    Tunable("ace", "max_bullets", lo=20, hi=60, default=60, on_fail="decrease",
+            note="shrink the delta-context playbook when compaction degrades "
+                 "(pinned facts are exempt from the cap)"),
     # Earned-autonomy policy knobs (trust.py). SECURITY-relevant, so tighten_only:
     # when the operator degrades, the earned-autonomy envelope auto-narrows
     # (higher bar to earn trust, longer settle after a surprise, fewer unattended

@@ -358,6 +358,14 @@ def build_parser() -> argparse.ArgumentParser:
                           choices=["status", "review", "reset"])
     p_evolve.add_argument("feature", nargs="?", default=None,
                           help="feature to reset (default: all)")
+    p_sleep = sub.add_parser("sleeptime",
+                             help="idle-time memory refinement: status, run a "
+                                  "cycle, list/apply/revert reversible rewrites")
+    p_sleep.add_argument("action", nargs="?", default="status",
+                         choices=["status", "run", "proposals", "apply",
+                                  "revert"])
+    p_sleep.add_argument("ident", nargs="?", default=None,
+                         help="user (proposals) or snapshot id (revert)")
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1204,6 +1212,36 @@ def main(argv: list[str] | None = None) -> int:
         else:
             import json as _json
             print(_json.dumps(evolve.summary(), indent=2))
+    elif args.command == "sleeptime":
+        from . import sleeptime, config as _cfg
+        import json as _json
+        if args.action == "run":
+            lines = sleeptime.run()
+            print("\n".join(lines) if lines
+                  else ("Sleep-time is disabled (set OLYMPUS_SLEEPTIME=1)."
+                        if not _cfg.sleeptime_enabled()
+                        else "Nothing to refine."))
+        elif args.action == "proposals":
+            user = args.ident or "cli"
+            print(_json.dumps(sleeptime.proposals(user), indent=2))
+        elif args.action == "revert":
+            if not args.ident:
+                print("Usage: olympus sleeptime revert <snapshot-id> "
+                      "(see `sleeptime status`).")
+            else:
+                user = "cli"
+                ok = sleeptime.revert(user, args.ident)
+                print("Reverted." if ok else "No such snapshot.")
+        elif args.action == "apply":
+            print("Auto-apply is governed: enable a graduated loop with "
+                  "OLYMPUS_SLEEPTIME_AUTOAPPLY=1; manual apply of a single "
+                  "proposal is intentionally not exposed.")
+        else:
+            st = sleeptime.state()
+            st["graduated"] = sleeptime.graduated()
+            st["enabled"] = _cfg.sleeptime_enabled()
+            st["autoapply"] = _cfg.sleeptime_autoapply()
+            print(_json.dumps(st, indent=2))
     elif args.command == "mcp-serve":
         from . import mcp_server
         try:

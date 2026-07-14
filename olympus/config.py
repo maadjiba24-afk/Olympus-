@@ -549,6 +549,15 @@ HISTORY_CONTEXT_FRACTION = float(
     os.environ.get("OLYMPUS_HISTORY_CONTEXT_FRACTION", "0.35"))
 HISTORY_KEEP_TURNS = int(os.environ.get("OLYMPUS_HISTORY_KEEP_TURNS", "8"))
 
+
+def ace_enabled() -> bool:
+    """Whether conversation compaction uses the ACE delta-context engine
+    (evolving playbook, delta-only) instead of the legacy monolithic
+    re-summarize path. On by default; `OLYMPUS_ACE=off` restores the legacy
+    path as a kill switch. Read live so replay restores the recorded setting."""
+    return os.environ.get("OLYMPUS_ACE", "on").strip().lower() not in (
+        "0", "off", "false", "no")
+
 # Approximate context-window size (tokens) by model-name substring — enough to
 # scale the history budget per model. Not authoritative; a rough, defensible map.
 _CONTEXT_WINDOW: dict[str, int] = {
@@ -672,6 +681,26 @@ DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
 # (0 disables).
 DREAM_EVERY = int(os.environ.get("OLYMPUS_DREAM_EVERY", str(86400)))
 TRAIN_EVERY = int(os.environ.get("OLYMPUS_TRAIN_EVERY", str(3 * 86400)))
+
+# Sleep-time memory refinement (Letta-style idle consolidation). OFF by default;
+# even when enabled it runs SUPERVISED (proposes reversible rewrites, commits
+# nothing) until it has logged SLEEPTIME_GRADUATION clean cycles, and auto-apply
+# additionally requires OLYMPUS_SLEEPTIME_AUTOAPPLY. Cadence in seconds.
+SLEEPTIME_EVERY = int(os.environ.get("OLYMPUS_SLEEPTIME_EVERY", str(6 * 3600)))
+SLEEPTIME_GRADUATION = int(os.environ.get("OLYMPUS_SLEEPTIME_GRADUATION", "10"))
+
+
+def sleeptime_enabled() -> bool:
+    """Whether the idle memory-refinement loop runs at all (default OFF)."""
+    return os.environ.get("OLYMPUS_SLEEPTIME", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def sleeptime_autoapply() -> bool:
+    """Whether a GRADUATED loop may auto-commit Aletheia-passed rewrites. Even
+    True is inert until the loop has graduated (10 clean supervised cycles)."""
+    return os.environ.get("OLYMPUS_SLEEPTIME_AUTOAPPLY", "").strip().lower() in (
+        "1", "on", "true", "yes")
 # Prometheus trains the weakest specialists on a cadence (0 disables)
 
 # Benchmark judge model (kept different from the model being tuned, so

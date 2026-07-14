@@ -374,6 +374,22 @@ def _execute(action: Action) -> Action:
             f"with `olympus limit {action.type} <n>` (0 = unlimited).")
         _save(action); _audit(action, "blocked_rate_limit")
         return action
+    # Agent Behavioral Contract: a formal, declarative re-check of the approval
+    # spine + autonomy dial at the single execution chokepoint. Defense in depth
+    # — if any code path reaches _execute with an irreversible action that never
+    # earned a real approval, the contract blocks it and triggers Recovery
+    # (revert to awaiting-approval), independent of the imperative checks above.
+    from . import behavioral_contracts as _abc
+    try:
+        _abc.enforce("action.execute", _abc.action_context(action, at))
+    except _abc.ContractViolation as viol:
+        # Recovery: HOLD → back to PREPARED (await the human); anything else →
+        # fail closed. Either way the action does NOT run.
+        action.status = PREPARED if viol.recovery == _abc.HOLD else FAILED
+        action.error = f"blocked by behavioral contract: {'; '.join(viol.reasons)}"
+        action.approved_at = None
+        _save(action); _audit(action, "blocked_contract")
+        return action
     try:
         action.result = at.execute(action.payload) or {}
         action.status = EXECUTED

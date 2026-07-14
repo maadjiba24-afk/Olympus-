@@ -46,4 +46,4 @@ olympus = "olympus.cli:main"
 include = ["olympus*"]
 
 [tool.setuptools.package-data]
-olympus = ["prompts/*.md", "*.json", "witness_pubkey.txt"]
+olympus = ["prompts/*.md", "*.json", "*.yaml", "witness_pubkey.txt"]

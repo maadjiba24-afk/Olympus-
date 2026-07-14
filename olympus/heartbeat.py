@@ -131,6 +131,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Dreaming failed:\n" + traceback.format_exc())
         state["dreaming"] = now
 
+    if config.sleeptime_enabled() and _due(state, "sleeptime",
+                                            config.SLEEPTIME_EVERY, now):
+        try:
+            from . import sleeptime
+            log += sleeptime.run()
+        except Exception:
+            log.append("Sleep-time memory failed:\n" + traceback.format_exc())
+        state["sleeptime"] = now
+
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
         try:

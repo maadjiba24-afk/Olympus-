@@ -15,6 +15,169 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — AP2-style payment mandates (creation + verification only; no rail)
+
+A verifiable-authorization primitive for agent-initiated commerce (Google AP2):
+a **signed, constraint-bound, tamper-evident record that a human authorized a
+specific, bounded financial action** — replacing the status-quo "approved: true"
+flag with something a third party could verify. Preceded by an ADR + threat
+model (`docs/adr/0001-ap2-payment-mandates.md`, `docs/AP2_THREAT_MODEL.md`),
+approved before any code.
+
+- **New `olympus/mandate.py`.** `IntentMandate` (user-authorized constraints:
+  amount cap + currency, merchant allowlist, item, expiry, nonce) and
+  `CartMandate` (the concrete cart), with `create_intent` / `create_cart` /
+  `sign` / `verify` and a pure `contained()` intent-containment check.
+- **No live rail, no new dependency.** No payment rail, card/VC issuance, or
+  PSP/merchant network calls exist in this phase — a mandate authorizes nothing
+  to move money. Signing reuses the Ed25519 root of trust via a new
+  **domain-separated subkey** (`witness.sign_with`/`sub_public_key_hex`, label
+  `mandate/v1`) — a key distinct from the release/decision-log key, same custody
+  and sovereign-mode fail-closed.
+- **Mapped to the autonomy dial.** A payment mandate is `FINANCIAL_LEGAL` risk →
+  `actions._min_level_to_auto` = 99 → it can **never** auto-execute at any
+  autonomy level (`mandate.can_auto_execute()` is structurally `False`). The
+  mandate is the artifact the human produces at the approval step, not a bypass.
+- **Governed by ABC.** The new `payment.mandate` contract (preconditions:
+  intent-containment, non-expiry, fresh nonce; governance: valid signature,
+  trusted construction; recovery `block`) refuses a spoofed, tampered, replayed,
+  expired, over-cap, or injection-constructed mandate via `enforce_commit`.
+- **Adversarial tests.** Spoofing (unsigned / wrong-key / tampered-field),
+  construction-injection (untrusted intent unsignable, over-cap / wrong-merchant
+  cart rejected), replay (nonce reuse + expiry), and escalation (never
+  auto-runs) — all covered.
+
+### Added — Best-first tree search (a governed runtime planner)
+
+A runtime planner that explores, scores, and backtracks over candidate action
+sequences — inference-time tree search (arXiv 2407.01476), complementary to the
+existing DAG orchestration and layerable onto the governed browser harness —
+with safety built into the engine rather than bolted on.
+
+- **New `olympus/treesearch.py`.** Generic best-first search over a duck-typed
+  `Problem` (expand / apply / evaluate / is_goal). The clock is injectable so
+  tests are deterministic with no real waiting.
+- **Exploration touches only READ-ONLY or REVERSIBLE steps.** The engine never
+  calls `apply()` for a side-effectful step — it cannot mutate the world while
+  planning (proven by a Problem whose `apply` raises if ever handed one).
+- **Side-effectful steps halt for approval.** Each is withheld on
+  `pending_approval` and can be handed to the approval spine via `to_approvals`,
+  which PREPARES actions (never executes). A plan that can only advance through a
+  side-effectful action ends `halted_for_approval`.
+- **Hard caps bound every search** — nodes, tokens, wall-clock, and depth
+  (`SearchCaps`, env-configurable via `OLYMPUS_TREESEARCH_MAX_*`), clamped to
+  strictly-positive minimums so a zero/negative cap can't disable a guard.
+  Whichever trips first stops the search and returns the best node so far.
+- **Fail-closed classification.** `classify_browser` maps perception verbs to
+  read-only and navigation to reversible; any unknown verb (or a classifier that
+  errors) is treated as side-effectful and withheld. Per-search outcome recorded
+  to feature-evolution telemetry.
+
+### Added — Sleep-time memory refinement (idle-time consolidation, earns its autonomy)
+
+A Letta-style **idle-time** loop that reviews a user's typed memory during
+downtime and proposes refinements (consolidating near-duplicate memories), so
+future recall is cleaner without a live turn paying for it — with every safety
+property made structural.
+
+- **New `olympus/sleeptime.py`.** Selection (which memories to consolidate) is
+  pure and deterministic; the two model-backed steps — generate the consolidated
+  memory, and verify it — are pluggable (tests run with no network), mirroring
+  `ace.py`.
+- **Reversible + versioned.** A rewrite never destroys its sources: they are
+  `supersede()`d (kept as history) and an **append-only snapshot** of their
+  pre-state is written. `olympus sleeptime revert <snapshot>` restores the
+  originals exactly and tombstones the rewrite.
+- **Aletheia-gated.** A consolidation is verified before it can commit — it may
+  assert nothing its sources don't support. An unverified rewrite is never
+  committed and **resets the trust streak**.
+- **Provenance/trust preserving.** A consolidated memory inherits the **union**
+  of its sources' provenance and their **strongest** sensitivity — it can never
+  launder a high-sensitivity fact into a normal one, nor drop provenance.
+- **Governed by ABC.** Every commit passes the new `memory.rewrite` behavioral
+  contract (preconditions `rewrite_preserves_provenance` +
+  `rewrite_preserves_trust`, governance `rewrite_verified`, recovery `block`), so
+  the three properties above are enforced at the contract layer too.
+- **Off by default; earns autonomy.** `OLYMPUS_SLEEPTIME` is off. Even enabled,
+  the loop runs **supervised** — proposing reversible diffs, committing nothing —
+  until it logs `SLEEPTIME_GRADUATION` (10) clean cycles; auto-apply additionally
+  requires `OLYMPUS_SLEEPTIME_AUTOAPPLY`. Wired into the heartbeat/hibernation
+  cadence (only wakes when enabled) and surfaced via `olympus sleeptime` +
+  the admin panel; per-cycle metrics recorded to feature-evolution telemetry.
+
+### Added — Agent Behavioral Contracts (runtime Design-by-Contract governance)
+
+Governance rules that were scattered across the action spine, the autonomy dial,
+capability separation, and Aletheia verification are now expressed as formal,
+declarative **behavioral contracts** — `C = (Preconditions, Invariants,
+Governance, Recovery)` — and enforced at runtime. Native implementation; no
+AgentAssert or any new hard dependency.
+
+- **New `olympus/behavioral_contracts.py`** + **`behavioral_contracts.yaml`.**
+  Contracts are authored in YAML and loaded at runtime with `yaml.safe_load`
+  when PyYAML is importable (as `sandbox.py` already does); an embedded mirror of
+  the same defaults is the fallback when it is not, so the guarantees never
+  vanish for want of a parser (a drift test pins the two equal). A contract that
+  names an unknown predicate or recovery **fails to load** — a governance rule
+  never passes vacuously.
+- **Every existing invariant is a contract.** `action_execution` (approval spine
+  + autonomy dial), `specialist_output` (output contract + Aletheia
+  verification), and `tool_loadout` (capability separation) ship as defaults,
+  each with pure, individually-tested predicates.
+- **Violations block and trigger Recovery.** `enforce()` raises
+  `ContractViolation` carrying the failing clause and a recovery directive —
+  `BLOCK` (fail closed), `HOLD` (revert to awaiting-approval), `REJECT` (drop the
+  output), or `DEGRADE` (record + allow). The `action_execution` contract is
+  wired at `actions._execute`, the single execution chokepoint: any path that
+  reaches it with an irreversible/financial action that never earned a *genuine*
+  human approval (a real `approved_at`, not a flipped flag) is blocked and the
+  action is **held** for the human — defense in depth behind the imperative
+  spine. `specialist_output` is wired at the orchestrator's output-acceptance
+  point.
+- **Fail-open on engine error, fail-closed on violation.** A bug inside a
+  predicate degrades to "ok" (the primary spine remains the real guard); only an
+  evaluated contract violation blocks. `OLYMPUS_ABC=off` is the kill switch, and
+  the enforcement mode is recorded into the run trace so replay reproduces it.
+  ABC status appears on the operator admin panel.
+
+### Added — ACE delta-context engine (evolving playbook replaces monolithic compaction)
+
+Conversation compaction stops re-summarizing the whole history from scratch and
+instead evolves a durable **playbook** by incremental *delta* — the pattern from
+*Agentic Context Engineering* (ACE, arXiv 2510.04618). This kills the two decay
+modes of lossy rewrites: **context collapse** (a summary of a summary of a
+summary, eroding turn over turn) and **brevity bias** (the summarizer quietly
+dropping whatever it deems least important).
+
+- **New `olympus/ace.py`** implements the three ACE roles. *Generator* proposes
+  candidate bullets from the slice of turns being folded away (the only
+  model-backed step; routed through the frozen `backend.complete_json`, so it
+  replays deterministically, and pluggable for tests). *Reflector* scores
+  existing bullets against the new slice (helpful++ / harmful++). *Curator*
+  deterministically merges the delta — sanitize, dedup, pin-preserving prune,
+  bounded size — in pure Python.
+- **Durable facts are pinned and never lost.** Bullets in the `facts`/`decisions`
+  sections auto-pin; pinning is sticky and prune-proof, so the non-pinned size
+  cap and the harmful-vote prune can never evict a pinned fact. Pinned facts
+  dedup by exact normalized-text identity (never fuzzy-merged), so two distinct
+  facts that differ only by a number or a short word are never conflated. A
+  50+ turn replay test proves zero loss of pinned facts across repeated
+  compaction under prune pressure and a process reload.
+- **`orchestrator._compress_history` runs delta-only by default.** It loads the
+  per-conversation playbook, evolves it, persists it (`memory/playbooks/`), and
+  renders it as the conversation-state block. The legacy monolithic summarizer
+  is retained behind `OLYMPUS_ACE=off` as a kill switch and as the automatic
+  fallback if the Generator fails.
+- **Playbook content enters prompts only as DATA.** The rendered block leaves
+  `ace.py` exclusively through `security.wrap_untrusted(source="playbook")`, and
+  every added bullet is first run through `security.sanitize_for_memory`, so an
+  injection retrieved from a web tool cannot smuggle an imperative into the
+  durable state block.
+- **Self-evolution aware.** The non-pinned size cap is a registered `evolve`
+  tunable (`ace.max_bullets`, hard ceiling 60, tuner may only narrow), and each
+  compaction records its delta counters (version, bullets, pinned, added,
+  helpful/harmful) to feature-evolution telemetry.
+
 ### Added — Browser/operator absorbed into feature self-evolution (tighten-only)
 
 The operator and earned-autonomy line becomes a first-class citizen of

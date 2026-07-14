@@ -39,6 +39,8 @@ def _cadences() -> dict[str, int]:
         "feature_evolution": config.FEATURE_EVOLUTION_EVERY,
         "replay_gate": config.REPLAY_GATE_EVERY,
         "backup": config.BACKUP_EVERY,
+        # Only wake for sleep-time refinement when the feature is enabled.
+        "sleeptime": config.SLEEPTIME_EVERY if config.sleeptime_enabled() else 0,
     }
     return {k: v for k, v in items.items() if v}
 
