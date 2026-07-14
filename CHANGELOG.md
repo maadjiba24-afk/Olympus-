@@ -15,6 +15,32 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Best-first tree search (a governed runtime planner)
+
+A runtime planner that explores, scores, and backtracks over candidate action
+sequences — inference-time tree search (arXiv 2407.01476), complementary to the
+existing DAG orchestration and layerable onto the governed browser harness —
+with safety built into the engine rather than bolted on.
+
+- **New `olympus/treesearch.py`.** Generic best-first search over a duck-typed
+  `Problem` (expand / apply / evaluate / is_goal). The clock is injectable so
+  tests are deterministic with no real waiting.
+- **Exploration touches only READ-ONLY or REVERSIBLE steps.** The engine never
+  calls `apply()` for a side-effectful step — it cannot mutate the world while
+  planning (proven by a Problem whose `apply` raises if ever handed one).
+- **Side-effectful steps halt for approval.** Each is withheld on
+  `pending_approval` and can be handed to the approval spine via `to_approvals`,
+  which PREPARES actions (never executes). A plan that can only advance through a
+  side-effectful action ends `halted_for_approval`.
+- **Hard caps bound every search** — nodes, tokens, wall-clock, and depth
+  (`SearchCaps`, env-configurable via `OLYMPUS_TREESEARCH_MAX_*`), clamped to
+  strictly-positive minimums so a zero/negative cap can't disable a guard.
+  Whichever trips first stops the search and returns the best node so far.
+- **Fail-closed classification.** `classify_browser` maps perception verbs to
+  read-only and navigation to reversible; any unknown verb (or a classifier that
+  errors) is treated as side-effectful and withheld. Per-search outcome recorded
+  to feature-evolution telemetry.
+
 ### Added — Sleep-time memory refinement (idle-time consolidation, earns its autonomy)
 
 A Letta-style **idle-time** loop that reviews a user's typed memory during
