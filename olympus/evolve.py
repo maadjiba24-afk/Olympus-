@@ -64,12 +64,36 @@ class Tunable:
     # e.g. MoA reference count → down (fewer, more reliable members) on failure.
     on_fail: str                # "increase" | "decrease"
     note: str = ""
+    # A SECURITY-relevant knob that may auto-move ONLY toward its safe (more
+    # conservative) extreme, never back. The reviewer only ever steps a param in
+    # its `on_fail` direction on degradation and never reverses on health, so
+    # this holds by construction as long as `default` sits at the LOOSE bound and
+    # `on_fail` points at the TIGHT bound — which register_tunable enforces.
+    # Auto-tightening a security knob is safe (its worst case is "ask a human
+    # more often", the safe default); auto-loosening one never is. Only a human
+    # widens a tightened knob, via `reset()`.
+    tighten_only: bool = False
 
 
 _TUNABLES: dict[str, Tunable] = {}
 
 
 def register_tunable(t: Tunable) -> None:
+    if t.lo > t.hi or not (t.lo <= t.default <= t.hi):
+        raise ValueError(f"tunable {t.feature}.{t.name}: default/range invalid")
+    if t.on_fail not in ("increase", "decrease"):
+        raise ValueError(f"tunable {t.feature}.{t.name}: bad on_fail {t.on_fail!r}")
+    if t.tighten_only:
+        # The loose bound is the end `on_fail` moves AWAY from. Pinning `default`
+        # there means the [lo, hi] clamp can never let the value drift looser
+        # than default — the tighten-only guarantee is structural, not a matter
+        # of the reviewer behaving.
+        loose_bound = t.lo if t.on_fail == "increase" else t.hi
+        if t.default != loose_bound:
+            raise ValueError(
+                f"tighten_only tunable {t.feature}.{t.name}: default "
+                f"({t.default}) must equal the loose bound ({loose_bound}) so it "
+                "can only ever move toward the safe extreme")
     _TUNABLES[f"{t.feature}.{t.name}"] = t
 
 
@@ -82,6 +106,22 @@ for _t in (
             note="widen the work cadence for goals that keep failing to close"),
     Tunable("curator", "prune_per_run", lo=1, hi=3, default=3, on_fail="decrease",
             note="prune more cautiously if prunes keep getting reverted"),
+    # Earned-autonomy policy knobs (trust.py). SECURITY-relevant, so tighten_only:
+    # when the operator degrades, the earned-autonomy envelope auto-narrows
+    # (higher bar to earn trust, longer settle after a surprise, fewer unattended
+    # runs/day) and never auto-widens. A human widens it back with `evolve reset`.
+    Tunable("operator", "establish_after", lo=20, hi=100, default=20,
+            on_fail="increase", tighten_only=True,
+            note="require more clean runs to fully trust a site when the "
+                 "operator is failing"),
+    Tunable("operator", "cooldown_secs", lo=3600, hi=86400, default=3600,
+            on_fail="increase", tighten_only=True,
+            note="lengthen the post-surprise settle window when the operator "
+                 "is failing"),
+    Tunable("operator", "daily_ceiling", lo=5, hi=25, default=25,
+            on_fail="decrease", tighten_only=True,
+            note="cap unattended earned auto-runs/day tighter when the operator "
+                 "is failing"),
 ):
     register_tunable(_t)
 
@@ -209,6 +249,14 @@ def review() -> str:
                     step = max((t.hi - t.lo) / 6.0, 1e-9)
                     nxt = cur + step if t.on_fail == "increase" else cur - step
                     nxt = round(max(t.lo, min(t.hi, nxt)), 3)
+                    # Defense in depth for a security knob: a tighten_only param
+                    # may never step toward its loose end, whatever the arithmetic
+                    # above produced. (on_fail already points at the tight end, so
+                    # this only ever fires if that invariant is later broken.)
+                    if t.tighten_only:
+                        looser = nxt < cur if t.on_fail == "increase" else nxt > cur
+                        if looser:
+                            continue
                     if nxt != cur:
                         _set_param(feature, t.name, nxt)
                         tuned.append(f"{feature}.{t.name} {cur}→{nxt}")
@@ -230,6 +278,34 @@ def review() -> str:
     except Exception:
         pass
     return text
+
+
+def reset(feature: str | None = None) -> str:
+    """Restore auto-tuned parameters to their defaults — the human lever that
+    *widens* a knob the reviewer has tightened (the reviewer itself only ever
+    tightens a security-relevant `tighten_only` param, never loosens it). With a
+    feature, resets just that feature's params; with none, resets all. Telemetry
+    history is left intact. Returns a short status."""
+    with _LOCK:
+        data = _load()
+        cleared: list[str] = []
+        for feat_name, feat in data.items():
+            if feature and feat_name != feature:
+                continue
+            params = (feat or {}).get("params") or {}
+            for name in list(params):
+                cleared.append(f"{feat_name}.{name}")
+            if params:
+                feat["params"] = {}
+                feat.setdefault("tunes", []).append(
+                    {"ts": _now(), "name": "*reset*", "value": None})
+                feat["tunes"] = feat["tunes"][-100:]
+        if cleared:
+            _save(data)
+    if not cleared:
+        return (f"No auto-tuned parameters to reset"
+                f"{f' for {feature}' if feature else ''}.")
+    return ("Reset to defaults (widened back): " + ", ".join(sorted(cleared)))
 
 
 def summary() -> dict:

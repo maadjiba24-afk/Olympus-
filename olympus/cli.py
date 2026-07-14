@@ -352,9 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
     p_evolve = sub.add_parser("evolve", help="feature self-evolution: health "
-                                             "board, or run the review now")
+                                             "board, run the review, or reset "
+                                             "auto-tuned params to defaults")
     p_evolve.add_argument("action", nargs="?", default="status",
-                          choices=["status", "review"])
+                          choices=["status", "review", "reset"])
+    p_evolve.add_argument("feature", nargs="?", default=None,
+                          help="feature to reset (default: all)")
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1196,6 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
         from . import evolve
         if args.action == "review":
             print(evolve.review())
+        elif args.action == "reset":
+            print(evolve.reset(args.feature))
         else:
             import json as _json
             print(_json.dumps(evolve.summary(), indent=2))

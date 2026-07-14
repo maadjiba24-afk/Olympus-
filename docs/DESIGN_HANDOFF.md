@@ -103,3 +103,27 @@ a human cleared a checkpoint is what makes unattended autonomy safe: every
 autonomous action is capability-separated, gated, and written to the
 tamper-evident decision log — so freedom is earned by accountability, not by
 removing the human.
+
+### Self-tightening: earned autonomy absorbed into feature evolution
+
+Earned autonomy is not only self-evolving per-domain (the streak); its *policy*
+is absorbed into `evolve.py`'s feature loop — and absorbed **asymmetrically**,
+the same shape as the moat itself.
+
+`operator.execute` records OK / DEGRADED / FAIL to feature evolution (feature
+`operator`). When the operator degrades, the periodic review auto-tunes three
+security-relevant knobs — `establish_after` (higher bar to earn trust),
+`cooldown_secs` (longer settle after a surprise), `daily_ceiling` (fewer
+unattended runs/day) — **only ever toward more caution.** `trust.py` reads the
+live values, so a failing actuator narrows its own freedom with no human in the
+loop, and a once-established site can be demoted until it re-earns trust.
+
+The tighten-only guarantee is structural, not a matter of the reviewer behaving:
+a `Tunable.tighten_only` flag is validated at registration (the default must sit
+at the loose bound, with `on_fail` pointing at the tight bound), and a defensive
+clamp in `review()` refuses any loosening step. Auto-*tightening* a trust gate is
+safe — its worst case is "ask a human more often", the safe default —
+auto-*loosening* one never is, so only a human widens it back
+(`olympus evolve reset operator`). This is the same principle as the handoff and
+the earned-autonomy invariants: the machine may move toward caution on its own;
+it may move toward freedom only with a human's hand.
