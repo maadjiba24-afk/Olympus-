@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 101,
+    "count": 102,
     "names": [
       "actions",
       "add-mcp",
@@ -123,6 +123,7 @@
       "skills",
       "skills-starter",
       "slack",
+      "sleeptime",
       "soul",
       "status",
       "telegram",

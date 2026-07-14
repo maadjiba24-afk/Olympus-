@@ -51,3 +51,16 @@ contracts:
       - no_action_tool_in_ingesting_run
     invariants: []
     governance: []
+
+  memory_rewrite:
+    operation: memory.rewrite
+    recovery: block
+    description: >-
+      A sleep-time memory rewrite before commit: preserves provenance and trust
+      labels, and is Aletheia-verified.
+    preconditions:
+      - rewrite_preserves_provenance
+      - rewrite_preserves_trust
+    invariants: []
+    governance:
+      - rewrite_verified

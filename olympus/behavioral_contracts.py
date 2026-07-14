@@ -170,6 +170,50 @@ def _aletheia_verified(ctx: dict) -> tuple[bool, str]:
     return True, ""
 
 
+_SENSITIVITY_RANK = {"normal": 0, "high": 1}
+
+
+@predicate("rewrite_preserves_provenance")
+def _rewrite_preserves_provenance(ctx: dict) -> tuple[bool, str]:
+    """A sleep-time memory rewrite must carry forward the union of its sources'
+    provenance — a consolidation may add provenance, never launder it away."""
+    src = set(ctx.get("source_provenance") or [])
+    new = set(ctx.get("new_provenance") or [])
+    missing = src - new
+    if missing:
+        return False, f"rewrite drops source provenance: {sorted(missing)}"
+    return True, ""
+
+
+@predicate("rewrite_preserves_trust")
+def _rewrite_preserves_trust(ctx: dict) -> tuple[bool, str]:
+    """A rewrite must not downgrade sensitivity or change the memory type — it
+    keeps the original trust labels."""
+    src_rank = max((_SENSITIVITY_RANK.get(s, 0)
+                    for s in (ctx.get("source_sensitivities") or [])),
+                   default=0)
+    new_rank = _SENSITIVITY_RANK.get(ctx.get("new_sensitivity", "normal"), 0)
+    if new_rank < src_rank:
+        return False, "rewrite downgrades memory sensitivity"
+    st, nt = ctx.get("source_type"), ctx.get("new_type")
+    if st is not None and nt is not None and st != nt:
+        return False, f"rewrite changes memory type {st!r}→{nt!r}"
+    return True, ""
+
+
+@predicate("rewrite_verified")
+def _rewrite_verified(ctx: dict) -> tuple[bool, str]:
+    """The rewrite passed Aletheia: it asserts nothing unsupported by its
+    sources. A missing verdict is treated as UNverified (fail closed) — unlike
+    aletheia_verified on the output path, a memory commit must be affirmatively
+    checked."""
+    if ctx.get("verify_supported") is True:
+        return True, ""
+    claims = ctx.get("unsupported_claims") or []
+    return False, ("rewrite not verified by Aletheia"
+                   + (f": {claims}" if claims else ""))
+
+
 @predicate("no_action_tool_in_ingesting_run")
 def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     """Capability separation: a run that ingests untrusted external content must
@@ -228,6 +272,16 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "preconditions": ["no_action_tool_in_ingesting_run"],
         "invariants": [],
         "governance": [],
+    },
+    "memory_rewrite": {
+        "operation": "memory.rewrite",
+        "recovery": "block",
+        "description": "A sleep-time memory rewrite before commit: preserves "
+                       "provenance and trust labels, and is Aletheia-verified.",
+        "preconditions": ["rewrite_preserves_provenance",
+                          "rewrite_preserves_trust"],
+        "invariants": [],
+        "governance": ["rewrite_verified"],
     },
 }
 

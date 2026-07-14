@@ -15,6 +15,38 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Sleep-time memory refinement (idle-time consolidation, earns its autonomy)
+
+A Letta-style **idle-time** loop that reviews a user's typed memory during
+downtime and proposes refinements (consolidating near-duplicate memories), so
+future recall is cleaner without a live turn paying for it — with every safety
+property made structural.
+
+- **New `olympus/sleeptime.py`.** Selection (which memories to consolidate) is
+  pure and deterministic; the two model-backed steps — generate the consolidated
+  memory, and verify it — are pluggable (tests run with no network), mirroring
+  `ace.py`.
+- **Reversible + versioned.** A rewrite never destroys its sources: they are
+  `supersede()`d (kept as history) and an **append-only snapshot** of their
+  pre-state is written. `olympus sleeptime revert <snapshot>` restores the
+  originals exactly and tombstones the rewrite.
+- **Aletheia-gated.** A consolidation is verified before it can commit — it may
+  assert nothing its sources don't support. An unverified rewrite is never
+  committed and **resets the trust streak**.
+- **Provenance/trust preserving.** A consolidated memory inherits the **union**
+  of its sources' provenance and their **strongest** sensitivity — it can never
+  launder a high-sensitivity fact into a normal one, nor drop provenance.
+- **Governed by ABC.** Every commit passes the new `memory.rewrite` behavioral
+  contract (preconditions `rewrite_preserves_provenance` +
+  `rewrite_preserves_trust`, governance `rewrite_verified`, recovery `block`), so
+  the three properties above are enforced at the contract layer too.
+- **Off by default; earns autonomy.** `OLYMPUS_SLEEPTIME` is off. Even enabled,
+  the loop runs **supervised** — proposing reversible diffs, committing nothing —
+  until it logs `SLEEPTIME_GRADUATION` (10) clean cycles; auto-apply additionally
+  requires `OLYMPUS_SLEEPTIME_AUTOAPPLY`. Wired into the heartbeat/hibernation
+  cadence (only wakes when enabled) and surfaced via `olympus sleeptime` +
+  the admin panel; per-cycle metrics recorded to feature-evolution telemetry.
+
 ### Added — Agent Behavioral Contracts (runtime Design-by-Contract governance)
 
 Governance rules that were scattered across the action spine, the autonomy dial,

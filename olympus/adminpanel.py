@@ -76,6 +76,7 @@ def _flags() -> dict:
         "egress_guard": config.egress_guard_enabled(),
         "contracts": config.contracts_enabled(),
         "behavioral_contracts": _abc_enabled(),
+        "sleeptime": config.sleeptime_enabled(),
         "require_byok": config.require_byok(),
         "require_login": _require_login(),
         "prompt_cache_ttl": config.prompt_cache_ttl(),
