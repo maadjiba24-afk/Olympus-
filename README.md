@@ -162,8 +162,9 @@ from that registry):
   3. Prometheus reads recurring corrections + Olympus's own source and rewrites
      agent prompts. For benchmarked specialists it uses `gate_prompt`, which
      applies a rewrite only if a before/after benchmark shows no regression and
-     rolls it back automatically otherwise (raw `update_prompt` — auto-backup,
-     measure-by-hand — remains for un-benchmarked agents), and files
+     rolls it back automatically otherwise (`update_prompt` now routes through
+     the same gate — there is no unmeasured prompt-write path; an un-benchmarked
+     agent is refused until coverage is added), and files
      `propose_upgrade` notes for changes that need code.
 - **Evolves with you** — beyond the shared loops above, Olympus adapts to *each
   person*: every few exchanges it distills your own history (facts, 👍/👎,

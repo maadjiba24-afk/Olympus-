@@ -319,11 +319,11 @@ GATE_PROMPT = {
     "description": (
         "Safely upgrade an agent prompt: applies the change ONLY if a before/"
         "after benchmark shows it does not regress that specialist's score, and "
-        "rolls it back automatically if it does. This is the enforced path — "
-        "prefer it over update_prompt so 'measured, with rollback' is guaranteed "
-        "by code, not by remembering to measure. Requires benchmark coverage for "
-        "the agent (user-facing specialists); use generate_benchmark first if a "
-        "domain is thinly covered."
+        "rolls it back automatically if it does. This is the enforced path "
+        "(update_prompt now routes through it too, so 'measured, with rollback' "
+        "is guaranteed by code). Requires benchmark coverage for the agent "
+        "(user-facing specialists); use generate_benchmark first if a domain is "
+        "thinly covered."
     ),
     "input_schema": {
         "type": "object",
@@ -342,12 +342,12 @@ GATE_PROMPT = {
 UPDATE_PROMPT = {
     "name": "update_prompt",
     "description": (
-        "Rewrite the system prompt of an Olympus agent. A raw primitive: it "
-        "writes the new prompt and auto-backs-up the old one, but does NOT "
-        "measure the change — YOU must run_benchmark before/after and "
-        "restore_prompt on a regression. For a self-enforcing upgrade of a "
-        "benchmarked specialist, prefer gate_prompt, which does that for you. "
-        "Only use it when the new prompt is strictly better."
+        "Rewrite the system prompt of an Olympus agent, SAFELY. This is now "
+        "benchmark-gated (M0.4): it applies the change only if a before/after "
+        "benchmark shows no regression for that specialist, and auto-rolls-back "
+        "otherwise — identical to gate_prompt. If the agent has no benchmark "
+        "coverage the change is refused; run generate_benchmark first. There is "
+        "no unmeasured prompt-write path."
     ),
     "input_schema": {
         "type": "object",
@@ -680,7 +680,11 @@ def _read_source_file(path: str) -> str:
     return target.read_text(encoding="utf-8", errors="replace")[:40_000]
 
 
-def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
+def _apply_prompt(agent: str, new_prompt: str, reason: str) -> str:
+    """RAW prompt writer — the low-level apply+backup primitive. NOT a tool and
+    NOT public: the only caller is `orchestrator.gate_prompt`, which measures a
+    before/after benchmark around it and rolls back via `_restore_prompt` on any
+    regression. There is no ungated public path to this function (M0.4)."""
     stem = Path(agent).stem  # tolerate 'argus.md' or 'prompts/argus'
     path = config.PROMPTS_DIR / f"{stem}.md"
     if not path.is_file():
@@ -696,6 +700,18 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
                 f"{old}\n<!-- update reason: {flat_reason} -->")
     path.write_text(new_prompt.strip() + "\n", encoding="utf-8")
     return f"Prompt '{stem}' updated. Previous version backed up to memory/prompt_backups."
+
+
+def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
+    """Public prompt-update tool — ROUTES through the benchmark gate (M0.4).
+
+    There is no ungated write path: this measures a before/after benchmark and
+    rolls back on regression (via `gate_prompt`). If the agent has no benchmark
+    coverage the change is REFUSED (generate a benchmark first) rather than
+    written blind. The raw writer `_apply_prompt` is internal to that flow.
+    """
+    from . import orchestrator  # local import to avoid a module-load cycle
+    return orchestrator.gate_prompt(agent, new_prompt, reason)
 
 
 def _restore_prompt(agent: str) -> str:
