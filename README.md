@@ -19,7 +19,11 @@ what's actually built.
 **Headless-first and lightweight.** Olympus installs with three pure-Python
 dependencies and runs anywhere Python does — a server, a droplet, WSL, a CI job,
 an SSH session — with no bundled browser or media stack and no OAuth dance to
-get started (the optional operator harness can attach your own Chrome). Web access is server-side (with a client-side fallback),
+get started (the optional operator harness can attach your own Chrome). Optional
+backends (Postgres store, the browser CDP transport, sandbox config) are lazily
+imported and declared as extras — install only what you use, e.g.
+`pip install olympus-council[all]`; the three deps above are the whole required
+footprint. Web access is server-side (with a client-side fallback),
 the sandbox is confined and approval-gated, and every command is screened by a
 [security gate](docs/THREAT_MODEL.md) before it can run. What you get for that
 small footprint is a *verified* council (every answer fact-checked before you

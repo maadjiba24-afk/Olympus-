@@ -34,6 +34,17 @@ dependencies = [
     "cryptography>=41.0.0",
 ]
 
+# Optional backends. Each is imported LAZILY and guarded (the code degrades or
+# skips cleanly when it is absent), so none is part of the required footprint —
+# the three deps above are the whole required install. They are declared here so
+# the dependency surface is fully truthful: nothing the code imports is
+# undeclared. Install what you use, e.g. `pip install olympus-council[all]`.
+[project.optional-dependencies]
+postgres = ["psycopg>=3.1"]        # olympus/store.py — Postgres store backend
+browser = ["websockets>=12.0"]     # olympus/browser.py — CDP-over-WebSocket transport
+sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsing
+all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0"]
+
 [project.urls]
 Homepage = "https://github.com/maadjiba24-afk/Olympus-"
 Repository = "https://github.com/maadjiba24-afk/Olympus-"

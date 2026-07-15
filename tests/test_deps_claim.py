@@ -33,3 +33,26 @@ def _readme_dep_count() -> int:
 
 def test_readme_runtime_dep_count_matches_pyproject():
     assert _readme_dep_count() == _declared_dep_count()
+
+
+def _declared_optional_packages() -> set[str]:
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = data["project"].get("optional-dependencies", {})
+    out: set[str] = set()
+    for group in extras.values():
+        for spec in group:
+            name = re.split(r"[<>=!~ \[]", spec, 1)[0].strip().lower()
+            if name:
+                out.add(name)
+    return out
+
+
+def test_soft_dependencies_are_declared_as_optional_extras():
+    # Every third-party package the code imports LAZILY (a soft dependency) must
+    # be declared as an optional extra, so nothing the code imports is
+    # undeclared — the dependency surface stays fully truthful (M0.5).
+    declared = _declared_optional_packages()
+    for soft in ("psycopg", "websockets", "pyyaml"):
+        assert soft in declared, (
+            f"{soft!r} is imported in olympus/ but is not declared in "
+            "[project.optional-dependencies]")
