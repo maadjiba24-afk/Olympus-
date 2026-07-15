@@ -122,7 +122,17 @@ def note_title(text: str) -> str:
 
 
 def save(category: str, title: str, content: str) -> Path:
-    """Save into the current user's namespace (or shared for system work)."""
+    """Save into the current user's namespace (or shared for system work).
+
+    Sanitization is enforced HERE, at the sink: every title and body written to
+    durable memory is defanged (`security.sanitize_for_memory`) regardless of
+    whether the caller remembered to. This closes the bypass where a new writer
+    path forgets to sanitize — there is only one door into memory, and it is
+    guarded. The pass is idempotent, so callers that already sanitize are safe.
+    """
+    from . import security
+    title = security.sanitize_for_memory(title)
+    content = security.sanitize_for_memory(content)
     d = _dir(category, current_user())
     path = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(title)}.md"
     path.write_text(render_note(title, content), encoding="utf-8")
