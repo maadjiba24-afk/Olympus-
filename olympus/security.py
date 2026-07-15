@@ -158,17 +158,26 @@ _INJECTION_MARKERS = re.compile(
 )
 
 
+_REDACT_PREFIX = "[redacted suspected injection] "
+
+
 def sanitize_for_memory(text: str) -> str:
     """Defang injection-shaped lines before content becomes a lesson/skill.
 
     Conservative: we annotate suspicious lines rather than delete content, so a
     human/Aletheia can still see what happened, but the imperative loses its
     standing as a clean instruction in future recall.
+
+    IDEMPOTENT: a line already carrying the redaction prefix is left untouched,
+    so `sanitize(sanitize(x)) == sanitize(x)`. This lets the memory sink apply it
+    unconditionally even when a caller already sanitized — no double-redaction.
     """
     out = []
     for line in text.splitlines():
-        if _INJECTION_MARKERS.search(line):
-            out.append("[redacted suspected injection] " + line[:200])
+        if line.startswith(_REDACT_PREFIX):
+            out.append(line)                       # already defanged — idempotent
+        elif _INJECTION_MARKERS.search(line):
+            out.append(_REDACT_PREFIX + line[:200])
         else:
             out.append(line)
     return "\n".join(out)

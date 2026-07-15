@@ -436,7 +436,7 @@ def _file_proposal(domain: str, title: str, body: str) -> None:
     """Record a human-reviewable operator proposal in memory (never auto-applied)."""
     user = memory.current_user()
     memory.set_user(user)
-    memory.save("upgrades", title, security.sanitize_for_memory(body))
+    memory.save("upgrades", title, body)           # sink sanitizes (M0.2)
 
 
 def register_operator_actions() -> None:
@@ -674,7 +674,6 @@ def propose_profile(domain: str, rationale: str, *, login_url: str = "",
             f"password_selector: {password_selector}\n"
             f"submit_selector: {submit_selector}\n"
             f"success_selector: {success_selector}\n")
-    memory.save("upgrades", f"site profile proposal: {domain}",
-                security.sanitize_for_memory(body))
+    memory.save("upgrades", f"site profile proposal: {domain}", body)  # sink sanitizes (M0.2)
     return (f"Filed a site-profile proposal for {domain} "
             "(memory/operator_proposals) for human review.")

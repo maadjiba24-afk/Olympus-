@@ -1738,7 +1738,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "cache_fact": lambda claim, verdict, source="": facts.record(claim, verdict, source),
     # content is sanitized so injection-shaped text can't poison future recall
     "save_lesson": lambda title, content: str(
-        memory.save("lessons", title, security.sanitize_for_memory(content))),
+        memory.save("lessons", title, content)),      # sink sanitizes (M0.2)
     "watch_youtube": _watch_youtube,
     "read_inbox": lambda query="in:inbox", max_results=10: _read_inbox(query, max_results),
     "read_email": lambda message_id: _read_email(message_id),
