@@ -570,18 +570,24 @@ def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     from . import trace
     run = trace.load_run(run_id)
     if not run:
-        return {"ok": False, "found": False, "signed": False,
+        return {"ok": False, "found": False, "signed": False, "attested": False,
                 "problems": [f"no recorded run '{run_id}'"]}
     sig = run.get("log_signature")
     if not sig:
-        return {"ok": False, "found": True, "signed": False,
+        return {"ok": False, "found": True, "signed": False, "attested": False,
                 "problems": ["run has no decision-log signature "
                              "(recorded before signing, or crypto unavailable)"]}
     decisions = run.get("decisions", [])
     if verify_log(decisions, sig, pin=pin):
-        return {"ok": True, "found": True, "signed": True, "problems": []}
+        # `ok` means the signature is valid and matches the expected key, so
+        # integrity holds. `attested` is stricter: authenticity. The PUBLIC
+        # default seed is forgeable by anyone, so a default-seed signature —
+        # even one that self-verifies — is UNATTESTED. Fail closed: attested is
+        # True only when a real (non-default) key signed the run.
+        return {"ok": True, "found": True, "signed": True,
+                "attested": not log_signed_by_default(run), "problems": []}
     if not _HAVE_CRYPTO:
-        return {"ok": False, "found": True, "signed": True,
+        return {"ok": False, "found": True, "signed": True, "attested": False,
                 "problems": ["cannot verify the decision-log signature — the "
                              "cryptography backend is unavailable on this host."]}
     # Distinguish a tampered log from a valid-but-untrusted signer for the report.
@@ -594,4 +600,5 @@ def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     else:
         problem = ("decision-log signed by an UNTRUSTED key (does not match the "
                    "pinned public key).")
-    return {"ok": False, "found": True, "signed": True, "problems": [problem]}
+    return {"ok": False, "found": True, "signed": True, "attested": False,
+            "problems": [problem]}
