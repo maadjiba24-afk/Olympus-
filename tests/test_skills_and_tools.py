@@ -21,7 +21,7 @@ def test_prompt_update_and_restore(tmp_path, monkeypatch):
     config.PROMPTS_DIR.mkdir()
     (config.PROMPTS_DIR / "argus.md").write_text("# Argus\n\nOriginal mind.\n")
 
-    tools._update_prompt("argus", "# Argus\n\nNew mind.", "testing")
+    tools._apply_prompt("argus", "# Argus\n\nNew mind.", "testing")
     assert "New mind" in (config.PROMPTS_DIR / "argus.md").read_text()
 
     msg = tools._restore_prompt("argus")
@@ -41,9 +41,9 @@ def test_restore_prompt_walks_back_the_chain(tmp_path, monkeypatch):
 
     # Distinct backup filenames require distinct second-resolution timestamps.
     import time as _t
-    tools._update_prompt("argus", "# Argus\n\nv1", "to v1")
+    tools._apply_prompt("argus", "# Argus\n\nv1", "to v1")
     _t.sleep(1.05)
-    tools._update_prompt("argus", "# Argus\n\nv2", "to v2")
+    tools._apply_prompt("argus", "# Argus\n\nv2", "to v2")
     assert "v2" in p.read_text()
 
     tools._restore_prompt("argus")            # v2 -> v1

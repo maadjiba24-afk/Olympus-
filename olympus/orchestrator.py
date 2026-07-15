@@ -1487,14 +1487,15 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
                 settings: config.Settings | None = None) -> str:
     """Apply a prompt change ONLY if a before/after benchmark shows it does not
     regress the affected specialist's score; otherwise roll it back. This is the
-    code-enforced counterpart to `update_prompt` — it makes the "measured, with
-    rollback" guarantee real instead of trusting the caller to measure by hand.
+    single, code-enforced prompt-write path (M0.4): the public `update_prompt`
+    tool routes here, and the raw writer `tools._apply_prompt` is reachable only
+    from inside this function — there is no ungated way to write a prompt.
 
     A prompt is an *upgrade* of an existing agent (unlike a new skill, which must
     justify itself), so the bar is non-regression: keep on after >= before,
     revert on any drop. When the agent has no benchmark coverage the guarantee
-    cannot be honored, so the change is NOT applied — the caller is told to
-    generate a benchmark or use update_prompt manually.
+    cannot be honored, so the change is REFUSED (fail closed) — the caller must
+    generate coverage first; there is no unmeasured escape hatch.
     """
     from pathlib import Path
 
@@ -1511,15 +1512,15 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
     if not bench_ids:
         return (f"Cannot benchmark-gate '{stem}': no benchmark items cover it "
                 f"(only user-facing specialists are scored). Generate coverage "
-                f"with generate_benchmark first, or use update_prompt + "
-                f"run_benchmark manually and accept it is unmeasured.")
+                f"with generate_benchmark first — a prompt change cannot be "
+                f"applied unmeasured (M0.4: no ungated prompt-write path).")
 
     try:
         before = evals.run(settings, only=bench_ids)["avg"]
     except Exception as err:
         return f"Cannot gate '{stem}': baseline benchmark failed ({err})."
 
-    apply_msg = tools._update_prompt(stem, new_prompt, reason)  # backs up old
+    apply_msg = tools._apply_prompt(stem, new_prompt, reason)   # raw writer (backs up old)
     if apply_msg.startswith("Error"):
         return apply_msg
 
@@ -1554,7 +1555,8 @@ def evolution_audit(settings: config.Settings | None = None) -> str:
         "2. Review recent memory (recall_memory: corrections, upgrades, lessons).\n"
         "3. Find what is missing inside the system — capabilities, specialists, "
         "weak prompts, recurring mistakes.\n"
-        "4. Apply safe improvements directly with update_prompt.\n"
+        "4. Apply prompt improvements with update_prompt (benchmark-gated: it "
+        "measures before/after and auto-rolls-back a regression).\n"
         "5. File everything that needs code changes with propose_upgrade.\n"
         "Finish with an audit report: what you checked, what you changed, what "
         "you proposed."
