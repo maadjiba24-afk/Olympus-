@@ -206,3 +206,31 @@ olympus sign --dev          # writes a dev-marked manifest
 olympus verify --allow-dev  # accepts it for local use
 ```
 This proves your files haven't drifted; it does **not** prove who signed them.
+
+## Trust-root invariants (Milestone 0.1)
+
+The signing *mechanism* above is the whole of it — there is no second trust
+root. Milestone 0.1 pins its guarantees as a re-runnable regression suite
+(`tests/test_m0_trust_root.py`) and closes one gap: default-seed signatures are
+now **unattested at the programmatic layer**, not only in the CLI display.
+
+- **Attestation is a first-class result.** `witness.verify_run()` returns an
+  `attested` boolean alongside `ok`. `ok` means *integrity* (the signature is
+  self-consistent and matches the expected key); `attested` means *authenticity*
+  (a real, non-default key signed it). A run signed by the public default seed
+  reports `ok: true, attested: false` — it self-verifies but anyone could have
+  forged it, so it is never treated as authentic. Fail-closed: `attested` is
+  true only when a configured secret key signed the run.
+- **Provisioning is an operator action, by design.** A secret seed is never
+  committed to the repo (that would defeat it). Provision one at deploy:
+  `olympus keygen --out /etc/olympus/signing_seed` (writes `0600`), then set
+  `OLYMPUS_SIGNING_SEED_FILE=/etc/olympus/signing_seed`. Until then the instance
+  runs on the public default seed — `posture() == "dev"`, every signature
+  `attested: false`. Custody location and rotation are documented in the
+  sections above (file `0600`, one of env **or** file never both, rotate by
+  overlapping pins).
+- **Verified by test:** `is_default_seed()` flips false and `posture()` becomes
+  `production` under a configured seed; default-seed runs are `attested: false`
+  even when correctly verified against the default key; broken custody
+  (world-readable / empty seed file) fails closed with no silent downgrade; a
+  release manifest refuses to sign under the default seed.
