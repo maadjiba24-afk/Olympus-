@@ -67,7 +67,9 @@ def test_post_tool_can_rewrite_result(monkeypatch):
         return result + " [checked]"
 
     res = agent._tool_result(_block())
-    assert res["content"] == "raw result [checked]"
+    # 'my_tool' is unclassified, so its output is now enveloped (M0.3 fail-closed);
+    # the post_tool hook still rewrote the result inside that envelope.
+    assert "raw result [checked]" in res["content"]
 
 
 def test_broken_hook_is_contained(monkeypatch):
@@ -82,7 +84,7 @@ def test_broken_hook_is_contained(monkeypatch):
         raise RuntimeError("plugin bug")
 
     res = agent._tool_result(_block())
-    assert res["content"] == "fine"          # the run survived both failures
+    assert "fine" in res["content"]          # the run survived both failures (enveloped, M0.3)
 
 
 def test_observe_hooks_fire_in_order():
