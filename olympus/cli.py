@@ -371,6 +371,11 @@ def build_parser() -> argparse.ArgumentParser:
                                   "revert"])
     p_sleep.add_argument("ident", nargs="?", default=None,
                          help="user (proposals) or snapshot id (revert)")
+    sub.add_parser(
+        "sleeptime-supervise",
+        help="run ONE supervised reflection cycle (apply hard-off), print the "
+             "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
+             "the executable form of the 10-clean-cycle graduation rule")
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1242,6 +1247,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             import json as _json
             print(_json.dumps(evolve.summary(), indent=2))
+    elif args.command == "sleeptime-supervise":
+        from . import memory as _mem, supervise
+        report = supervise.run_supervised_cycle()
+        rendered = supervise.render_report(report)
+        print(rendered)
+        _mem.save("reports", "sleeptime supervision cycle", rendered)
+        return 0 if report["grade"] == "CLEAN" else 1
     elif args.command == "sleeptime":
         from . import sleeptime, config as _cfg
         import json as _json
