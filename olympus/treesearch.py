@@ -130,6 +130,26 @@ def _effect_of(step: Any, classify: Callable[[Any], str] | None) -> str:
     return eff if eff in (READ_ONLY, REVERSIBLE, SIDE_EFFECTFUL) else SIDE_EFFECTFUL
 
 
+def effect_of(step: Any, classify: Callable[[Any], str] | None = None) -> str:
+    """Public: the effect class of a step (fail-closed to side_effectful)."""
+    return _effect_of(step, classify)
+
+
+def _notify(observer: Any, event: str, info: dict) -> None:
+    """Fire an optional observer hook (`branch` / `prune`) — never let an
+    observation error break the search (the search is the source of truth)."""
+    if observer is None:
+        return
+    fn = getattr(observer, event, None)
+    if fn is None:
+        return
+    try:
+        fn(info)
+    except Exception as err:
+        from . import errors
+        errors.capture(f"treesearch.observer.{event}", err)
+
+
 def _safe_eval(problem: Any, state: Any) -> float:
     try:
         return float(problem.evaluate(state))
@@ -141,14 +161,21 @@ def _safe_eval(problem: Any, state: Any) -> float:
 
 def search(problem: Any, initial: Any, caps: SearchCaps | None = None, *,
            clock: Callable[[], float] | None = None,
-           classify: Callable[[Any], str] | None = None) -> SearchResult:
+           classify: Callable[[Any], str] | None = None,
+           observer: Any = None) -> SearchResult:
     """Best-first search from `initial`. `problem` provides expand(state) →
     steps, apply(state, step) → state (called ONLY for safe steps), evaluate(
     state) → float (higher is better), is_goal(state) → bool.
 
     Returns the best node found plus any side-effectful steps that were withheld
     for approval. Never raises for a misbehaving problem — expand/evaluate/apply
-    failures are captured and that branch is skipped."""
+    failures are captured and that branch is skipped.
+
+    `observer` (optional) records the exploration as it happens: `.branch(info)`
+    fires for every generated child (an uncommitted checkpoint branch) and every
+    withheld side-effectful step; `.prune(info)` fires when a branch is discarded
+    (depth cap, apply failure, or a resource cap trimming the frontier). This is
+    what lets a caller keep a signed ledger record of pruned branches."""
     caps = caps or SearchCaps()
     clock = clock or time.monotonic
     if not _has_problem_api(problem):
@@ -190,6 +217,8 @@ def search(problem: Any, initial: Any, caps: SearchCaps | None = None, *,
             break
         if node.depth >= caps.max_depth:
             status = DEPTH_CAP if status == EXHAUSTED else status
+            _notify(observer, "prune", {
+                "path": [_step_dict(s) for s in node.path], "reason": DEPTH_CAP})
             continue
 
         try:
@@ -204,26 +233,41 @@ def search(problem: Any, initial: Any, caps: SearchCaps | None = None, *,
             stats["generated"] += 1
             stats["tokens"] += max(0, int(getattr(step, "cost_tokens", 0) or 0))
             effect = _effect_of(step, classify)
+            base = [_step_dict(s) for s in node.path]
             if effect not in SAFE:
                 # HALT: withhold the side-effectful step for the approval gate;
                 # NEVER apply it during exploration.
                 pending.append({
-                    "path": [_step_dict(s) for s in node.path],
-                    "step": _step_dict(step), "effect": effect,
+                    "path": base, "step": _step_dict(step), "effect": effect,
                     "reason": "side-effectful step requires approval"})
                 stats["pending"] += 1
+                _notify(observer, "branch", {
+                    "path": base, "step": _step_dict(step), "effect": effect,
+                    "explored": False, "reason": "withheld for approval"})
                 continue
             try:
                 child_state = problem.apply(node.state, step)
             except Exception as err:
                 from . import errors
                 errors.capture("treesearch.apply", err)
+                _notify(observer, "prune", {
+                    "path": base, "step": _step_dict(step),
+                    "reason": "apply failed"})
                 continue
             counter += 1
             child = _Node(child_state, node.path + (step,),
                           _safe_eval(problem, child_state), node.depth + 1)
             heapq.heappush(frontier, (-child.score, counter, child))
+            _notify(observer, "branch", {
+                "path": base, "step": _step_dict(step), "effect": effect,
+                "explored": True, "score": child.score})
 
+    if status in (NODE_CAP, TOKEN_CAP, TIME_CAP):
+        # A resource cap tripped mid-search: every unexpanded frontier node is a
+        # pruned branch — record each so the audit trail shows what was cut.
+        for _, _, n in frontier:
+            _notify(observer, "prune", {
+                "path": [_step_dict(s) for s in n.path], "reason": status})
     if status == EXHAUSTED and pending:
         status = HALTED       # safe exploration is done but a gate blocks further
     return _result(status, best, pending, stats, start, clock)
