@@ -225,6 +225,27 @@ def _rewrite_verified(ctx: dict) -> tuple[bool, str]:
                    + (f": {claims}" if claims else ""))
 
 
+@predicate("rewrite_confident")
+def _rewrite_confident(ctx: dict) -> tuple[bool, str]:
+    """Aletheia BLOCK-MODE: when it is active (`block_mode_active`), a memory
+    rewrite whose verified confidence is below the threshold is refused — the
+    low-confidence consolidation is rejected and quarantined instead of committed.
+    Before block-mode is active (pre-graduation), this clause is INERT — Aletheia
+    only annotates, exactly as today — so the guardrail turns on only once the
+    loop has earned auto-apply."""
+    if not ctx.get("block_mode_active"):
+        return True, ""
+    try:
+        conf = float(ctx.get("rewrite_confidence", 1.0))
+        thr = float(ctx.get("confidence_threshold", 0.0))
+    except (TypeError, ValueError):
+        return False, "rewrite confidence unreadable (block-mode fail-closed)"
+    if conf < thr:
+        return (False, f"rewrite confidence {conf:.2f} below block-mode "
+                       f"threshold {thr:.2f}")
+    return True, ""
+
+
 @predicate("mandate_signature_valid")
 def _mandate_signature_valid(ctx: dict) -> tuple[bool, str]:
     return (bool(ctx.get("mandate_signature_valid")),
@@ -394,7 +415,7 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "preconditions": ["rewrite_preserves_provenance",
                           "rewrite_preserves_trust"],
         "invariants": [],
-        "governance": ["rewrite_verified"],
+        "governance": ["rewrite_verified", "rewrite_confident"],
     },
     "payment_mandate": {
         "operation": "payment.mandate",

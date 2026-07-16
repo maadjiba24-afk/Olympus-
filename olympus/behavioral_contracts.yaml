@@ -64,6 +64,7 @@ contracts:
     invariants: []
     governance:
       - rewrite_verified
+      - rewrite_confident
 
   payment_mandate:
     operation: payment.mandate

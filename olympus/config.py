@@ -688,6 +688,11 @@ TRAIN_EVERY = int(os.environ.get("OLYMPUS_TRAIN_EVERY", str(3 * 86400)))
 # additionally requires OLYMPUS_SLEEPTIME_AUTOAPPLY. Cadence in seconds.
 SLEEPTIME_EVERY = int(os.environ.get("OLYMPUS_SLEEPTIME_EVERY", str(6 * 3600)))
 SLEEPTIME_GRADUATION = int(os.environ.get("OLYMPUS_SLEEPTIME_GRADUATION", "10"))
+# Aletheia block-mode: once the loop has GRADUATED, a consolidation rewrite whose
+# verified confidence is below this floor is REJECTED and quarantined rather than
+# committed (before graduation the block is inert — annotate-only). 0.0 disables.
+SLEEPTIME_CONFIDENCE_MIN = float(
+    os.environ.get("OLYMPUS_SLEEPTIME_CONFIDENCE_MIN", "0.5"))
 
 
 def sleeptime_enabled() -> bool:
