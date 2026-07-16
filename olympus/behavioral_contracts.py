@@ -257,6 +257,38 @@ def _mandate_trusted_construction(ctx: dict) -> tuple[bool, str]:
             else "mandate not trusted-constructed (possible injection)")
 
 
+@predicate("grant_signature_valid")
+def _grant_signature_valid(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("grant_signature_valid")),
+            "" if ctx.get("grant_signature_valid")
+            else "invalid or foreign grant signature")
+
+
+@predicate("grant_not_expired")
+def _grant_not_expired(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("grant_not_expired")),
+            "" if ctx.get("grant_not_expired") else "capability token expired")
+
+
+@predicate("grant_not_revoked")
+def _grant_not_revoked(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("grant_not_revoked")),
+            "" if ctx.get("grant_not_revoked") else "capability token revoked")
+
+
+@predicate("grant_fresh_nonce")
+def _grant_fresh_nonce(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("grant_fresh_nonce")),
+            "" if ctx.get("grant_fresh_nonce") else "capability nonce replay")
+
+
+@predicate("grant_scope_within_bound")
+def _grant_scope_within_bound(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("grant_scope_within_bound")),
+            "" if ctx.get("grant_scope_within_bound")
+            else "requested scope or risk exceeds the token's bound (escalation)")
+
+
 @predicate("command_not_denied")
 def _command_not_denied(ctx: dict) -> tuple[bool, str]:
     """A shell command must not be DENY-classified by the security gate — the
@@ -375,6 +407,18 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "invariants": [],
         "governance": ["mandate_signature_valid",
                        "mandate_trusted_construction"],
+    },
+    "capability_grant": {
+        "operation": "capability.exercise",
+        "recovery": "block",
+        "description": "A signed capability token before its grant is exercised: "
+                       "validly signed by our own capability subkey, unexpired, "
+                       "unrevoked, replay-free, and the requested scope/risk is "
+                       "within the token's bound — any escalation is refused.",
+        "preconditions": ["grant_not_expired", "grant_not_revoked",
+                          "grant_fresh_nonce", "grant_scope_within_bound"],
+        "invariants": [],
+        "governance": ["grant_signature_valid"],
     },
     "shell_command": {
         "operation": "command.run",

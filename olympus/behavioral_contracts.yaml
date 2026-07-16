@@ -81,6 +81,23 @@ contracts:
       - mandate_signature_valid
       - mandate_trusted_construction
 
+  capability_grant:
+    operation: capability.exercise
+    recovery: block
+    description: >-
+      A signed capability token before its grant is exercised: validly signed by
+      our own capability subkey, unexpired, unrevoked, replay-free, and the
+      requested scope/risk is within the token's bound — any escalation is
+      refused.
+    preconditions:
+      - grant_not_expired
+      - grant_not_revoked
+      - grant_fresh_nonce
+      - grant_scope_within_bound
+    invariants: []
+    governance:
+      - grant_signature_valid
+
   shell_command:
     operation: command.run
     recovery: block
