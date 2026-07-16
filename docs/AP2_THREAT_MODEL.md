@@ -127,3 +127,117 @@ memory, or model prompts; existing outbound secret-exfiltration scanning applies
   rejected.
 - **Replay:** a re-submitted or expired mandate fails verification.
 - **Escalation:** no autonomy level auto-executes a `FINANCIAL_LEGAL` mandate.
+
+---
+
+# Milestone-4 addendum — user co-signature, capability binding, transaction scope
+
+Companion to [ADR 0002](adr/0002-ap2-mandate-cosignature.md). The base model
+above covers a **single-signature** mandate. Milestone 4 makes the mandate a
+**two-party, capability-bound, scope-explicit** authorization. That adds a user
+key, a token binding, and an explicit scope — each a new surface. Still **no live
+rail**; a defeated control's blast radius remains an *internal record*, not a
+payment. This addendum is a **precondition**: no code until it is approved, and
+the Phase-2 tests it names must pass before "done".
+
+## New assets
+
+- **The user co-signing key** — a second Ed25519 key (`mandate-user/v1`),
+  distinct from the system mandate key and the release/witness key. Compromise =
+  the attacker can forge the *user's half* of any authorization.
+- **The capability token** — the M1.2 grant (`jti`, scopes, risk ceiling) a
+  mandate is bound to. Its revocation is the mandate's kill switch.
+
+## New trust boundaries
+
+- The **user co-signature** must originate from the trusted user channel/device.
+  This loop keeps the user key vault-local — an explicit, documented **trust
+  assumption**: a compromised vault forges both signatures. On-device user-key
+  custody (where the private key never reaches the agent host) is the real fix
+  and is future work.
+- Key separation is now load-bearing across **three** keys (system mandate, user
+  co-sign, release/witness); a leak of one must not be a leak of another.
+
+## New threats and controls
+
+### T7 — Forged or absent user co-signature
+
+*A compromised or injection-steered agent that can reach the system signing
+subkey mints a mandate with only the system signature (or a forged user half),
+laundering an action the user never co-signed.*
+
+Controls:
+- **C7.1 Dual-signature required.** `verify(..., require_cosignature=True)` fails
+  closed unless BOTH the system signature and the user co-signature validate over
+  the *same canonical payload*, each against its own expected subkey.
+- **C7.2 Co-signature binds the transaction.** The user co-signature is over the
+  mandate's canonical transaction hash, so it cannot be lifted from one mandate
+  and replayed onto another (different amount/merchant/cart) — a changed field
+  invalidates it (extends C4/T4 to the second signature).
+- **C7.3 Key separation + custody.** The user key is distinct from the system and
+  release keys; all stay in the vault, never in a prompt, log, trace, or egress.
+- **C7.4 ABC enforcement.** The `payment.mandate` contract gains a governance
+  predicate for a valid user co-signature (recovery `block`), so a
+  single-signed mandate can't be committed even if a caller forgets the flag.
+
+### T8 — Capability / mandate scope mismatch (authority beyond the grant)
+
+*A mandate is exercised for a scope or risk above the capability token it claims
+to act under — e.g. a token granting "≤ $50 at merchant A" backs a "$500 at
+merchant B" mandate.*
+
+Controls:
+- **C8.1 Scope containment against the token.** `verify()` checks the mandate's
+  `TransactionScope` is **within** the bound token's granted scopes and risk
+  ceiling, reusing `identity.verify_grant` (forged/expired/revoked/replayed/
+  scope-escalating tokens are already all rejected there).
+- **C8.2 Revocation is the kill switch.** A revoked capability token makes every
+  mandate bound to it unverifiable — authority can be withdrawn after signing,
+  which the single-signature design could not do.
+- **C8.3 Binding is inside the signed payload.** The `jti` the mandate is bound to
+  is part of the canonical payload, so it can't be swapped post-signature (C1.1/
+  C7.2).
+
+### T9 — Co-signature construction injection (display vs. sign mismatch)
+
+*Injection makes the human co-sign a benign-looking summary while the signed
+payload authorizes a different transaction (a "what you see is not what you
+sign" attack).*
+
+Controls:
+- **C9.1 Sign what is shown.** The human-visible summary (C2.4) is rendered from
+  the **same canonical payload** that is hashed and co-signed — there is no
+  separate "display" copy to diverge from the "signed" copy.
+- **C9.2 Trusted-only scope.** As with T2, the `TransactionScope` (cap, currency,
+  merchant, action class) may originate **only** from the trusted user channel;
+  a scope tracing to wrapped/untrusted content is refused before it can be shown
+  or co-signed.
+- **C9.3 Capability separation.** Co-signature construction does not co-mingle
+  untrusted ingestion with either signing capability.
+
+## Residual risk (honest limits — additions)
+
+- **Vault-local user key.** Keeping the user key in the same vault as the system
+  key means a **single vault compromise forges both signatures** — the two-party
+  property degrades to one-party under that (pre-existing) trust-anchor failure.
+  This is a deliberate, documented limitation of this loop; on-device custody is
+  the mitigation and is out of scope here. The blast radius stays an internal
+  record because there is no rail.
+- The social-engineering limit from the base model is unchanged: C9.1 guarantees
+  the human co-signs exactly what is displayed, but not that the human read it.
+
+## Phase-2 adversarial tests (must pass before "done")
+
+In addition to the base-model tests above:
+- **Missing/forged co-signature:** a system-only mandate, and a mandate with a
+  wrong-key or tampered user co-signature, each fail `verify(require_cosignature=
+  True)` and are blocked by the `payment.mandate` contract.
+- **Co-signature transaction-binding:** a valid user co-signature lifted onto a
+  mandate with any changed field (amount, merchant, cart, `jti`) fails.
+- **Capability containment:** a mandate whose scope or risk exceeds its bound
+  token is rejected; a mandate under a revoked/expired token is rejected.
+- **Display/sign parity:** the human-visible summary is derived from the exact
+  co-signed payload (no divergent display copy).
+- **Escalation (unchanged):** no autonomy level auto-executes a
+  `FINANCIAL_LEGAL` co-signed mandate; the co-signature is the approval artifact,
+  not a bypass.
