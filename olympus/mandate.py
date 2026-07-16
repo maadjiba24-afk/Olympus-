@@ -34,7 +34,11 @@ from dataclasses import dataclass, asdict
 
 from . import witness
 
-_LABEL = "mandate/v1"
+_LABEL = "mandate/v1"                # the SYSTEM signature subkey
+_USER_LABEL = "mandate-user/v1"      # the USER co-signature subkey (distinct key)
+# The capability scope a payment mandate is exercised under (M1.2 grants). A
+# bound token must grant this scope up to the FINANCIAL_LEGAL risk ceiling.
+PAYMENT_SCOPE = "payment.charge"
 _MAX_ITEM = 200
 _MAX_MERCHANTS = 50
 _MAX_ITEMS = 50
@@ -78,18 +82,31 @@ class CartMandate:
     items: tuple[str, ...]
     nonce: str
     created_at: float
+    capability_jti: str = ""       # the M1.2 capability token this is bound to
 
     def payload(self) -> dict:
-        return {"kind": "cart", **{k: (list(v) if isinstance(v, tuple) else v)
-                                   for k, v in asdict(self).items()}}
+        d = {"kind": "cart", **{k: (list(v) if isinstance(v, tuple) else v)
+                                for k, v in asdict(self).items()}}
+        if not self.capability_jti:
+            # Omit the binding key entirely when unbound, so an unbound cart's
+            # canonical payload (and signature) is byte-identical to before —
+            # capability binding is purely additive and backward compatible.
+            d.pop("capability_jti", None)
+        return d
 
 
 @dataclass(frozen=True)
 class SignedMandate:
     kind: str                  # "intent" | "cart"
     payload: dict
-    public_key: str
-    signature: str
+    public_key: str            # SYSTEM signing subkey
+    signature: str             # SYSTEM signature over the canonical payload
+    user_public_key: str = ""  # USER co-signing subkey (empty ⇒ single-signed)
+    user_signature: str = ""   # USER co-signature over the SAME canonical payload
+
+    @property
+    def cosigned(self) -> bool:
+        return bool(self.user_signature)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -100,7 +117,9 @@ class SignedMandate:
             raise MandateError("not a signed mandate")
         return cls(kind=str(d.get("kind", "")), payload=dict(d["payload"]),
                    public_key=str(d.get("public_key", "")),
-                   signature=str(d.get("signature", "")))
+                   signature=str(d.get("signature", "")),
+                   user_public_key=str(d.get("user_public_key", "")),
+                   user_signature=str(d.get("user_signature", "")))
 
 
 @dataclass(frozen=True)
@@ -163,9 +182,11 @@ def create_intent(user: str, *, amount_cap: int, currency: str,
 
 def create_cart(intent: IntentMandate, *, amount: int, currency: str,
                 merchant: str, items: list[str], nonce: str | None = None,
-                now: float | None = None) -> CartMandate:
+                capability_jti: str = "", now: float | None = None) -> CartMandate:
     """Build a CartMandate referencing an IntentMandate. Structural validation
-    only; CONTAINMENT within the intent is checked at verify()/sign() time."""
+    only; CONTAINMENT within the intent is checked at verify()/sign() time.
+    `capability_jti` (optional) binds the cart to a M1.2 capability token, so its
+    authority can be checked against — and revoked via — that grant."""
     now = time.time() if now is None else now
     if not isinstance(intent, IntentMandate):
         raise MandateError("an IntentMandate is required")
@@ -181,7 +202,7 @@ def create_cart(intent: IntentMandate, *, amount: int, currency: str,
         amount=amount, currency=str(currency).upper(),
         merchant=str(merchant or "").strip().lower(),
         items=tuple(i[:_MAX_ITEM] for i in its), nonce=nonce or _nonce(),
-        created_at=now)
+        created_at=now, capability_jti=str(capability_jti or ""))
 
 
 # --- containment (pure) ---------------------------------------------------
@@ -237,12 +258,94 @@ def signature_ok(signed: SignedMandate) -> bool:
                                     signed.signature)
 
 
+# --- user co-signature (dual-signature, M4) ------------------------------
+
+def co_sign(signed: SignedMandate) -> SignedMandate:
+    """Add the USER co-signature over the SAME canonical payload the system
+    signed. The result carries both signatures; only a dual-signed mandate is
+    exercisable when `require_cosignature=True`. (In production the user key
+    lives on the user's device; this loop keeps it vault-local — a documented
+    trust assumption, see ADR 0002.)"""
+    if not isinstance(signed, SignedMandate):
+        raise MandateError("not a signed mandate")
+    sig = witness.sign_with(_USER_LABEL, _canonical(signed.payload))
+    return SignedMandate(
+        kind=signed.kind, payload=signed.payload, public_key=signed.public_key,
+        signature=signed.signature,
+        user_public_key=witness.sub_public_key_hex(_USER_LABEL),
+        user_signature=sig)
+
+
+def user_signature_ok(signed: SignedMandate) -> bool:
+    """The USER co-signature validates over the payload against our own user
+    co-signing subkey (fail closed; no unknown-key acceptance). A changed field
+    invalidates it exactly as it does the system signature — so a co-signature
+    cannot be lifted onto a different transaction."""
+    if not signed.user_signature:
+        return False
+    try:
+        expected = witness.sub_public_key_hex(_USER_LABEL)
+    except witness.WitnessError:
+        return False
+    if (signed.user_public_key or "").lower() != expected.lower():
+        return False
+    return witness.verify_signature(expected, _canonical(signed.payload),
+                                    signed.user_signature)
+
+
+# --- capability-token binding (M1.2 grants, M4) --------------------------
+
+def capability_ok(signed: SignedMandate, capability, *,
+                  now: float | None = None,
+                  seen_nonces: set[str] | None = None,
+                  revoked: set[str] | None = None) -> bool:
+    """The mandate's transaction scope is within the capability token it is bound
+    to: the token's `jti` matches the payload binding, and `identity.verify_grant`
+    accepts it for the PAYMENT scope at FINANCIAL_LEGAL risk (so a forged,
+    expired, revoked, or scope-escalating token is refused). A capability grant is
+    a REUSABLE, revocable, expiry-bounded authority — it may back more than one
+    mandate in its lifetime; per-transaction single-use is the MANDATE nonce's
+    job, so this check does not consume the grant's nonce (`seen_nonces` is only
+    consulted if a caller opts in)."""
+    jti = str(signed.payload.get("capability_jti", ""))
+    if not jti or not isinstance(capability, dict):
+        return False
+    if str((capability.get("payload") or {}).get("jti", "")) != jti:
+        return False        # the presented token is not the one bound
+    from . import identity
+    v = identity.verify_grant(capability, requested_scope=PAYMENT_SCOPE,
+                              requested_risk=FINANCIAL_LEGAL, now=now,
+                              seen_nonces=seen_nonces, revoked=revoked)
+    return bool(v.ok)
+
+
+# --- human-legible transaction scope -------------------------------------
+
+def transaction_scope(signed: SignedMandate) -> dict:
+    """The bounded authorization in plain terms — rendered from the EXACT signed
+    payload, so the human-visible summary can never diverge from what is
+    co-signed (display/sign parity; construction-injection defense)."""
+    p = signed.payload
+    if signed.kind == "cart":
+        return {"action": "payment", "amount": p.get("amount"),
+                "currency": p.get("currency"), "merchant": p.get("merchant"),
+                "items": list(p.get("items") or []),
+                "capability_jti": p.get("capability_jti", ""),
+                "risk_class": FINANCIAL_LEGAL, "auto_executable": False}
+    return {"action": "intent", "amount_cap": p.get("amount_cap"),
+            "currency": p.get("currency"), "merchants": list(p.get("merchants") or []),
+            "item": p.get("item"), "expires_at": p.get("expires_at"),
+            "risk_class": FINANCIAL_LEGAL, "auto_executable": False}
+
+
 def verify(signed: SignedMandate, *, intent: IntentMandate | None = None,
-           now: float | None = None,
+           now: float | None = None, require_cosignature: bool = False,
            seen_nonces: set[str] | None = None) -> VerifyResult:
     """Full verification. Always: valid signature, not expired, fresh nonce. For
     a cart: an `intent` must be supplied and the cart must be contained within
-    it. `seen_nonces` (if given) is consulted for replay AND updated on success."""
+    it. With `require_cosignature=True` the USER co-signature must also validate
+    (a system-only mandate is refused, fail closed). `seen_nonces` (if given) is
+    consulted for replay AND updated on success."""
     now = time.time() if now is None else now
     reasons: list[str] = []
     if not isinstance(signed, SignedMandate):
@@ -250,6 +353,8 @@ def verify(signed: SignedMandate, *, intent: IntentMandate | None = None,
 
     if not signature_ok(signed):
         reasons.append("invalid signature")
+    if require_cosignature and not user_signature_ok(signed):
+        reasons.append("missing or invalid user co-signature")
 
     payload = signed.payload
     nonce = str(payload.get("nonce", ""))
@@ -287,7 +392,8 @@ def _cart_from_payload(payload: dict) -> CartMandate:
         merchant=str(payload.get("merchant", "")),
         items=tuple(str(i) for i in (payload.get("items") or [])),
         nonce=str(payload.get("nonce", "")),
-        created_at=float(payload.get("created_at", 0) or 0))
+        created_at=float(payload.get("created_at", 0) or 0),
+        capability_jti=str(payload.get("capability_jti", "")))
 
 
 # --- autonomy-dial mapping + ABC governance ------------------------------
@@ -304,25 +410,39 @@ def can_auto_execute() -> bool:
 
 
 def enforce_commit(signed_cart: SignedMandate, intent: IntentMandate, *,
+                   capability=None, require_cosignature: bool = True,
                    now: float | None = None,
-                   seen_nonces: set[str] | None = None):
+                   seen_nonces: set[str] | None = None,
+                   revoked: set[str] | None = None):
     """Gate a cart mandate through the `payment.mandate` ABC contract before it
     could ever back a payment. Builds the verification context and raises
     `behavioral_contracts.ContractViolation` (recovery=block) on any failure.
-    Returns the VerifyResult on success."""
+
+    Milestone 4 makes the gate two-party and capability-bound: it requires a
+    valid USER co-signature and — when the cart is capability-bound — that its
+    scope is within the presented token. Returns the VerifyResult on success."""
     from . import behavioral_contracts as abc
-    res = verify(signed_cart, intent=intent, now=now, seen_nonces=None)
+    res = verify(signed_cart, intent=intent, now=now,
+                 require_cosignature=require_cosignature, seen_nonces=None)
     fresh = True
     nonce = str(signed_cart.payload.get("nonce", ""))
     if seen_nonces is not None:
         fresh = bool(nonce) and nonce not in seen_nonces
+    bound_jti = str(signed_cart.payload.get("capability_jti", ""))
+    # An unbound cart passes the capability clause vacuously (binding is opt-in);
+    # a bound cart must present the matching, in-bound token.
+    cap_ok = (True if not bound_jti
+              else capability_ok(signed_cart, capability, now=now,
+                                 seen_nonces=None, revoked=revoked))
     ctx = {
         "mandate_signature_valid": signature_ok(signed_cart),
+        "mandate_cosignature_valid": user_signature_ok(signed_cart),
         "mandate_not_expired": "expired" not in " ".join(res.reasons),
         "mandate_fresh_nonce": fresh,
         "mandate_intent_contained": contained(
             _cart_from_payload(signed_cart.payload), intent, now=now).ok,
         "mandate_trusted_construction": bool(intent.trusted),
+        "mandate_capability_within_bound": cap_ok,
     }
     abc.enforce("payment.mandate", ctx)
     if seen_nonces is not None and nonce:

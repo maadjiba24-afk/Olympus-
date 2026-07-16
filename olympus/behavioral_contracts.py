@@ -320,6 +320,20 @@ def _grant_scope_within_bound(ctx: dict) -> tuple[bool, str]:
             else "requested scope or risk exceeds the token's bound (escalation)")
 
 
+@predicate("mandate_cosignature_valid")
+def _mandate_cosignature_valid(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_cosignature_valid")),
+            "" if ctx.get("mandate_cosignature_valid")
+            else "missing or invalid user co-signature")
+
+
+@predicate("mandate_capability_within_bound")
+def _mandate_capability_within_bound(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("mandate_capability_within_bound")),
+            "" if ctx.get("mandate_capability_within_bound")
+            else "mandate scope exceeds (or lacks) its capability token")
+
+
 @predicate("command_not_denied")
 def _command_not_denied(ctx: dict) -> tuple[bool, str]:
     """A shell command must not be DENY-classified by the security gate — the
@@ -437,7 +451,9 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
                           "mandate_fresh_nonce"],
         "invariants": [],
         "governance": ["mandate_signature_valid",
-                       "mandate_trusted_construction"],
+                       "mandate_trusted_construction",
+                       "mandate_cosignature_valid",
+                       "mandate_capability_within_bound"],
     },
     "capability_grant": {
         "operation": "capability.exercise",
