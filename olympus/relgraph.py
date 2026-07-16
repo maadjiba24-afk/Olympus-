@@ -87,9 +87,16 @@ def add_node(user: str, label: str, kind: str = OTHER) -> dict | None:
 
 def add_edge(user: str, src_label: str, rel: str, dst_label: str,
              confidence: float = 0.7, src_kind: str = OTHER,
-             dst_kind: str = OTHER) -> dict | None:
+             dst_kind: str = OTHER, valid_from: float | None = None,
+             valid_to: float | None = None) -> dict | None:
     """Connect two entities by a relation (creating the nodes as needed).
-    De-duplicates on (src, rel, dst)."""
+
+    A relation may carry a VALIDITY INTERVAL — `valid_from`/`valid_to` (semantic
+    times, e.g. an employment span), each `None` for open-ended. De-duplication
+    is on (src, rel, dst, valid_from): the SAME relation over a different span is
+    a distinct temporal fact (so 'worked at Acme 2019-2021' and '…2023-' coexist),
+    while an exact re-add still dedups. Existing time-less edges (valid_from None)
+    keep their old identity and behaviour."""
     rel = (rel or "").strip().lower().replace(" ", "_")
     if not rel:
         return None
@@ -99,16 +106,60 @@ def add_edge(user: str, src_label: str, rel: str, dst_label: str,
         return None
     if src["id"] == dst["id"]:
         return None
+    vf = None if valid_from is None else float(valid_from)
+    vt = None if valid_to is None else float(valid_to)
     with _LOCK:
         edges = _load(_EDGES, user)
         for e in edges:
-            if e["src"] == src["id"] and e["dst"] == dst["id"] and e["rel"] == rel:
+            if (e["src"] == src["id"] and e["dst"] == dst["id"]
+                    and e["rel"] == rel and e.get("valid_from") == vf):
                 return dict(e)
         edge = {"id": uuid.uuid4().hex[:12], "src": src["id"], "dst": dst["id"],
-                "rel": rel, "confidence": round(float(confidence), 3)}
+                "rel": rel, "confidence": round(float(confidence), 3),
+                "valid_from": vf, "valid_to": vt}
         edges.append(edge)
         _save(_EDGES, user, edges)
     return dict(edge)
+
+
+def _valid_at(edge: dict, at: float | None) -> bool:
+    """Whether `edge`'s validity interval contains time `at`. `at=None` means
+    'no temporal filter' (every edge matches); an open bound (`None`) is
+    unbounded on that side. Half-open [valid_from, valid_to)."""
+    if at is None:
+        return True
+    vf, vt = edge.get("valid_from"), edge.get("valid_to")
+    if vf is not None and at < vf:
+        return False
+    if vt is not None and at >= vt:
+        return False
+    return True
+
+
+def close_relation(user: str, src_label: str, rel: str, dst_label: str,
+                   valid_to: float) -> bool:
+    """Close the still-open (valid_to is None) interval of a relation — e.g.
+    'left Acme at T'. Returns True if an open edge was closed. Supersession
+    without deletion: the historical fact remains queryable 'as of' earlier T."""
+    rel = (rel or "").strip().lower().replace(" ", "_")
+    with _LOCK:
+        ns_ = _load(_NODES, user)
+        s = next((n for n in ns_ if n["label"].lower()
+                  == _clean_label(src_label).lower()), None)
+        d = next((n for n in ns_ if n["label"].lower()
+                  == _clean_label(dst_label).lower()), None)
+        if not s or not d:
+            return False
+        edges = _load(_EDGES, user)
+        closed = False
+        for e in edges:
+            if (e["src"] == s["id"] and e["dst"] == d["id"] and e["rel"] == rel
+                    and e.get("valid_to") is None):
+                e["valid_to"] = float(valid_to)
+                closed = True
+        if closed:
+            _save(_EDGES, user, edges)
+    return closed
 
 
 def nodes(user: str) -> list:
@@ -155,12 +206,16 @@ def find_entities(user: str, text: str) -> list[dict]:
     return out
 
 
-def neighbors(user: str, node_id: str) -> list[tuple[str, dict]]:
+def neighbors(user: str, node_id: str,
+              as_of: float | None = None) -> list[tuple[str, dict]]:
     """One hop in BOTH directions: returns (phrase, node) for each connection,
-    so 'who works at Acme' reaches people via incoming works_at edges."""
+    so 'who works at Acme' reaches people via incoming works_at edges. With
+    `as_of=T`, only relations VALID AT time T are returned ('true at T')."""
     ns_, es = _load(_NODES, user), _load(_EDGES, user)
     out = []
     for e in es:
+        if not _valid_at(e, as_of):
+            continue
         if e["src"] == node_id:
             other = _node_by_id(ns_, e["dst"])
             if other:
@@ -171,6 +226,17 @@ def neighbors(user: str, node_id: str) -> list[tuple[str, dict]]:
                 out.append((f"{other['label']} {e['rel'].replace('_', ' ')} this",
                             other))
     return out
+
+
+def relations_at(user: str, label: str, at: float | None = None) -> list[dict]:
+    """Every edge touching an entity that was VALID at time `at` — the 'true at
+    T' temporal query. `at=None` returns all edges regardless of interval."""
+    ents = find_entities(user, label)
+    if not ents:
+        return []
+    nid = ents[0]["id"]
+    return [dict(e) for e in _load(_EDGES, user)
+            if (e["src"] == nid or e["dst"] == nid) and _valid_at(e, at)]
 
 
 def describe(user: str, label: str) -> str:
@@ -231,10 +297,14 @@ def ingest(user: str, relationships: list[dict]) -> int:
             rel = str(r.get("relation", "")).strip()
             if not (subj and obj and rel):
                 continue
+            vf = r.get("valid_from")
+            vt = r.get("valid_to")
             if add_edge(user, subj, rel, obj,
                         confidence=float(r.get("confidence", 0.7)),
                         src_kind=r.get("subject_kind", OTHER),
-                        dst_kind=r.get("object_kind", OTHER)):
+                        dst_kind=r.get("object_kind", OTHER),
+                        valid_from=None if vf is None else float(vf),
+                        valid_to=None if vt is None else float(vt)):
                 added += 1
         except (ValueError, TypeError):
             continue

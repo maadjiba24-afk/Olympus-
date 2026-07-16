@@ -44,6 +44,7 @@ _WORD = re.compile(r"[a-z0-9]+")
 _STATE_NS = "sleeptime"
 _SNAP_NS = "sleeptime.snapshots"
 _PROP_NS = "sleeptime.proposals"
+_QUAR_NS = "sleeptime.quarantine"       # rewrites rejected by Aletheia block-mode
 
 # bounds (hard caps)
 _MIN_GROUP_OVERLAP = 0.34       # Jaccard ≥ this ⇒ same-topic, consolidatable
@@ -124,8 +125,12 @@ _VERIFY_SCHEMA = {
     "properties": {
         "supported": {"type": "boolean"},
         "unsupported_claims": {"type": "array", "items": {"type": "string"}},
+        # A numeric self-assessed confidence in [0,1] — what feeds Aletheia
+        # block-mode: a graduated loop refuses to auto-commit a below-floor
+        # rewrite. Without this, the guardrail would be inert in production.
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
     },
-    "required": ["supported"],
+    "required": ["supported", "confidence"],
     "additionalProperties": False,
 }
 
@@ -134,7 +139,10 @@ _VERIFY_SYSTEM = (
     "and a proposed CONSOLIDATED memory. Decide whether the consolidation "
     "asserts anything NOT supported by the sources. Return supported=false and "
     "list the unsupported claims if it introduces, exaggerates, or alters any "
-    "fact; supported=true only if every claim traces to the sources."
+    "fact; supported=true only if every claim traces to the sources. Also return "
+    "confidence in [0,1]: how sure you are the consolidation is faithful and "
+    "safe to commit unattended (use a LOW value when the sources are ambiguous, "
+    "conflicting, or thin — an honest low score is better than a false high one)."
 )
 
 
@@ -183,12 +191,13 @@ class Proposal:
     unsupported: list[str] = field(default_factory=list)
     applied: bool = False
     created_at: float = 0.0
+    confidence: float = 1.0             # Aletheia's numeric confidence in the rewrite
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in (
             "id", "user", "type", "source_ids", "source_contents", "rewrite",
             "provenance", "sensitivity", "verified", "unsupported", "applied",
-            "created_at")}
+            "created_at", "confidence")}
 
 
 def _load(ns: str, key: str) -> Any:
@@ -220,6 +229,13 @@ def graduated() -> bool:
     return state()["clean_cycles"] >= config.SLEEPTIME_GRADUATION
 
 
+def block_mode_active() -> bool:
+    """Whether Aletheia BLOCK-MODE is live: it activates only once the loop has
+    GRADUATED (10 clean supervised cycles) and a confidence floor is configured.
+    Before that it is inert — Aletheia annotates but never rejects a rewrite."""
+    return graduated() and config.SLEEPTIME_CONFIDENCE_MIN > 0.0
+
+
 def _record_cycle(clean: bool, proposed: int, committed: int) -> dict:
     st = state()
     st["runs"] += 1
@@ -242,6 +258,35 @@ def _add_proposal(p: Proposal) -> None:
     cur = _load(_PROP_NS, key) or []
     cur.append(p.to_dict())
     _save(_PROP_NS, key, cur[-_MAX_PROPOSALS_PER_RUN * 5:])
+
+
+def _quarantine(user: str, p: Proposal, reason: str) -> None:
+    """Hold a rewrite the memory.rewrite contract refused (e.g. Aletheia
+    block-mode's confidence floor) for operator review — persisted in the
+    quarantine namespace AND as a witness-signed delta-substrate record, so the
+    near-miss is tamper-evident. Best-effort: never breaks the commit path."""
+    try:
+        key = memory.safe_id(user)
+        entry = {**p.to_dict(), "reason": reason}
+        cur = _load(_QUAR_NS, key) or []
+        cur.append(entry)
+        _save(_QUAR_NS, key, cur[-_MAX_SNAPSHOTS:])
+        from . import deltas
+        deltas.record_snapshot(
+            f"quarantine:{key}", kind="quarantine",
+            state={"proposal": p.to_dict(), "reason": reason},
+            provenance=deltas.Provenance(
+                source="sleeptime", trust="user",
+                detail=f"block-mode rejected rewrite {p.id} "
+                       f"(sensitivity={p.sensitivity})"))
+    except Exception as err:
+        from . import errors
+        errors.capture("sleeptime.quarantine", err)
+
+
+def quarantined(user: str) -> list[dict]:
+    """Rewrites rejected by the memory.rewrite contract, held for review."""
+    return _load(_QUAR_NS, memory.safe_id(user)) or []
 
 
 def _snapshot(user: str, sources: list[dict], rewrite_id: str | None) -> str:
@@ -281,10 +326,18 @@ def _commit(user: str, sources: list[dict], p: Proposal) -> str | None:
         "source_type": p.type, "new_type": p.type,
         "verify_supported": p.verified,
         "unsupported_claims": p.unsupported,
+        # Aletheia block-mode: reject a below-confidence rewrite once graduated.
+        "block_mode_active": block_mode_active(),
+        "rewrite_confidence": p.confidence,
+        "confidence_threshold": config.SLEEPTIME_CONFIDENCE_MIN,
     }
     try:
         abc.enforce("memory.rewrite", ctx)
-    except abc.ContractViolation:
+    except abc.ContractViolation as violation:
+        # A blocked rewrite is not silently dropped: quarantine it (signed,
+        # inspectable) so an operator can review the near-miss. The existing
+        # memories are left untouched — consolidation is the only rewriter.
+        _quarantine(user, p, str(violation))
         return None
     sid = _snapshot(user, sources, None)
     new = usermem.add_memory(
@@ -350,6 +403,13 @@ def refine_user(user: str, *, settings=None,
             summary["clean"] = False        # a broken verifier is not "clean"
             continue
         supported = bool(verdict.get("supported"))
+        # Aletheia's numeric confidence in the rewrite — from the verdict if it
+        # gives one, else derived from the support verdict (a supported rewrite
+        # with no explicit score is treated as confident).
+        try:
+            confidence = float(verdict["confidence"])
+        except (KeyError, TypeError, ValueError):
+            confidence = 1.0 if supported else 0.0
         # Poisoned-feedback defense: a rewrite is model output over (possibly
         # untrusted-derived) memory — defang any injection-shaped imperative
         # BEFORE it can become a stored memory, exactly as the write path does
@@ -367,7 +427,7 @@ def refine_user(user: str, *, settings=None,
             sensitivity=_rank_sensitivity(grp),
             verified=supported,
             unsupported=list(verdict.get("unsupported_claims") or []),
-            created_at=time.time())
+            created_at=time.time(), confidence=confidence)
         if not supported:
             summary["rejected"] += 1
             summary["clean"] = False        # Aletheia rejection breaks the streak
