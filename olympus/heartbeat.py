@@ -133,11 +133,14 @@ def tick(state: dict, now: float | None = None) -> list[str]:
 
     if config.sleeptime_enabled() and _due(state, "sleeptime",
                                             config.SLEEPTIME_EVERY, now):
+        # The unified sleep-time reflection cycle: BOTH targets (memory
+        # consolidation + prompt reflection) under budget caps and the
+        # reflection.cycle Plane-1 contract (Plane 3.4).
         try:
-            from . import sleeptime
-            log += sleeptime.run()
+            from . import reflection
+            log += reflection.sleep_cycle().get("log", [])
         except Exception:
-            log.append("Sleep-time memory failed:\n" + traceback.format_exc())
+            log.append("Sleep-time reflection failed:\n" + traceback.format_exc())
         state["sleeptime"] = now
 
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):

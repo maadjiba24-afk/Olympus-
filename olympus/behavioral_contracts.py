@@ -225,6 +225,16 @@ def _rewrite_verified(ctx: dict) -> tuple[bool, str]:
                    + (f": {claims}" if claims else ""))
 
 
+@predicate("reflection_within_budget")
+def _reflection_within_budget(ctx: dict) -> tuple[bool, str]:
+    """The idle-time reflection cycle may only run while inside the daily budget.
+    Unattended self-improvement makes many model calls — exactly where a runaway
+    bill happens — so a cycle is HELD (deferred) once the budget is reached."""
+    if ctx.get("reflection_budget_ok", True):
+        return True, ""
+    return False, "daily budget reached — reflection cycle deferred"
+
+
 @predicate("rewrite_confident")
 def _rewrite_confident(ctx: dict) -> tuple[bool, str]:
     """Aletheia BLOCK-MODE: when it is active (`block_mode_active`), a memory
@@ -460,6 +470,17 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
                        "host under sovereign mode) are a declared invariant.",
         "preconditions": [],
         "invariants": ["url_not_blocked"],
+        "governance": [],
+    },
+    "reflection_cycle": {
+        "operation": "reflection.cycle",
+        "recovery": "hold",
+        "description": "The idle-time sleep-time reflection cycle (prompt + "
+                       "memory targets): held (deferred, not run) once the daily "
+                       "budget is reached, so unattended self-improvement can "
+                       "never run up the bill.",
+        "preconditions": ["reflection_within_budget"],
+        "invariants": [],
         "governance": [],
     },
 }
