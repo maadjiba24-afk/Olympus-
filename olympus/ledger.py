@@ -222,7 +222,12 @@ class Ledger:
                 f.write(json.dumps(node, ensure_ascii=False) + "\n")
                 f.flush()
             self._nodes.append(node)
-            return node
+        # Anchor the new head OUT of the host's write domain so truncation is
+        # detectable (no-op when anchoring is off; fail-LOUD when on).
+        from . import anchor
+        anchor.publish_head("checkpoint", self.run_id, node["seq"],
+                            node["node_hash"])
+        return node
 
 
 def open_run(run_id: str) -> Ledger:
@@ -371,7 +376,9 @@ def record_speculation(run_id: str, kind: str, info) -> dict:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             f.flush()
-        return rec
+    from . import anchor
+    anchor.publish_head("speculation", run_id, rec["seq"], rec["record_hash"])
+    return rec
 
 
 def speculation_records(run_id: str) -> list[dict]:

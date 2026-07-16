@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 102,
+    "count": 103,
     "names": [
       "actions",
       "add-mcp",
@@ -136,6 +136,7 @@
       "upgrade",
       "usage",
       "verify",
+      "verify-anchor",
       "version",
       "watch",
       "web",
