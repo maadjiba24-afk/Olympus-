@@ -847,6 +847,7 @@ class Olympus:
             pb = ace.evolve(pb, slice_text, settings=self.settings)
             if self.conversation_id:
                 ace.save(self.conversation_id, pb)
+                self._snapshot_playbook(pb, before)
             self._log_ace(before, pb.stats())
             return ace.render(pb)
         except Exception as err:
@@ -854,6 +855,28 @@ class Olympus:
             errors.capture("orchestrator.ace_compress", err)
             evolve.record("ace", evolve.DEGRADED, "compaction fell back")
             return None
+
+    def _snapshot_playbook(self, pb, before: dict) -> None:
+        """Append a signed, provenance-carrying snapshot of the evolved playbook
+        to the delta substrate (Plane 3.1). Append-only and tamper-evident, so
+        the learned-state history can't be silently rewritten. Skipped under
+        replay (a snapshot is a side output, never part of the decision path) and
+        best-effort — a snapshot failure never breaks compaction."""
+        try:
+            from . import deltas, replaystore, trace
+            if replaystore.replaying():
+                return
+            tr = trace.current()
+            prov = deltas.Provenance(
+                source="ace", run_id=(tr.id if tr else ""),
+                trust="conversation", detail="playbook compaction")
+            deltas.record_snapshot(
+                f"playbook:{self.conversation_id}", kind="playbook",
+                state=pb.to_dict(), delta={"before": before, "after": pb.stats()},
+                provenance=prov)
+        except Exception as err:
+            from . import errors
+            errors.capture("orchestrator.snapshot_playbook", err)
 
     def _log_ace(self, before: dict, after: dict) -> None:
         """Record a healthy compaction with its delta counters (self-evolution
