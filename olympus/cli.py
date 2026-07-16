@@ -249,6 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
                           help="FAIL (exit non-zero) if the artifact was signed "
                                "under the public default seed, regardless of "
                                "internal validity (the inverse of --allow-dev)")
+    sub.add_parser(
+        "verify-anchor",
+        help="compare every locally signed log head (checkpoints, speculation, "
+             "delta snapshots) against the external anchor sink and report "
+             "divergence — detects truncation an append-only log can't self-detect")
     sub.add_parser("witness-pubkey", aliases=["pubkey"],
                    help="print the Ed25519 public key for the "
                                           "current signing seed (to pin it)")
@@ -1011,6 +1016,27 @@ def main(argv: list[str] | None = None) -> int:
               "  # or add it to olympus/witness_pubkey.txt (one key per line).\n"
               "  # systemd LoadCredential / Docker-secrets recipes: "
               "docs/SIGNING.md")
+    elif args.command == "verify-anchor":
+        from . import anchor
+        rep = anchor.verify_anchor()
+        if not rep["enabled"]:
+            print("[verify-anchor] anchoring is OFF — set OLYMPUS_ANCHOR "
+                  "(git|dir) plus its sink path to enable external head "
+                  "anchoring. Without it, truncation of an append-only log "
+                  "is not externally detectable.")
+            return 1
+        for p in rep["problems"]:
+            print(f"[verify-anchor] problem: {p}")
+        for d in rep["divergences"]:
+            print(f"[verify-anchor] DIVERGENCE {d['kind']} at {d['target']}: "
+                  f"{d['detail']}")
+        if rep["ok"]:
+            print(f"[verify-anchor] PASS — {rep['checked']} anchored head(s) "
+                  "all match their local logs.")
+            return 0
+        print(f"[verify-anchor] FAIL — {len(rep['divergences'])} divergence(s) "
+              f"across {rep['checked']} anchored head(s).")
+        return 1
     elif args.command == "verify":
         from pathlib import Path
         from . import witness

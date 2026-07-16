@@ -223,7 +223,11 @@ def record_snapshot(target_id: str, *, kind: str, state,
         tmp.write_text("".join(json.dumps(s, ensure_ascii=False) + "\n"
                                for s in kept), encoding="utf-8")
         tmp.replace(path)
-        return snap
+    # Anchor the new head OUT of the host's write domain so truncation is
+    # detectable (no-op when anchoring is off; fail-LOUD when on).
+    from . import anchor
+    anchor.publish_head("delta", target_id, snap["seq"], snap["snapshot_hash"])
+    return snap
 
 
 def snapshots(target_id: str) -> list[dict]:
