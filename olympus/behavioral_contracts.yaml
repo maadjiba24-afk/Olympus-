@@ -80,3 +80,27 @@ contracts:
     governance:
       - mandate_signature_valid
       - mandate_trusted_construction
+
+  shell_command:
+    operation: command.run
+    recovery: block
+    description: >-
+      A shell command at the run chokepoint: the cmdguard hard-stops (fork bomb,
+      disk wipe, poweroff, chmod 000 /, ...) are a declared invariant — a
+      DENY-classified command is refused even if a human or policy approved it.
+    preconditions: []
+    invariants:
+      - command_not_denied
+    governance: []
+
+  network_egress:
+    operation: net.fetch
+    recovery: block
+    description: >-
+      An outbound network fetch: the SSRF/egress hard-stops (loopback,
+      link-local, cloud metadata, non-allowlisted host under sovereign mode) are
+      a declared invariant.
+    preconditions: []
+    invariants:
+      - url_not_blocked
+    governance: []
