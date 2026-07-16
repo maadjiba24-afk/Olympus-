@@ -46,6 +46,17 @@ RECOVERIES = (BLOCK, HOLD, REJECT, DEGRADE)
 # The clause kinds, in evaluation order.
 CLAUSES = ("preconditions", "invariants", "governance")
 
+# --- signed contract artifacts (M1.1) -------------------------------------
+# A contract set can be sealed into a witness-signed artifact. Any tamper with a
+# sealed artifact breaks its signature, and it is then REFUSED (never applied) —
+# a forged governance file cannot take effect. Fuses with the M0.1 trust root.
+SEAL_SCHEMA = "olympus-contract-seal/1"
+
+
+class ContractSealError(Exception):
+    """A sealed contract artifact failed to verify — tampered, unsigned, wrong
+    key, or malformed. Fail closed: the artifact is refused, never applied."""
+
 
 class ContractViolation(Exception):
     """Raised by `enforce()` when a contract's recovery is blocking. Carries the
@@ -246,6 +257,44 @@ def _mandate_trusted_construction(ctx: dict) -> tuple[bool, str]:
             else "mandate not trusted-constructed (possible injection)")
 
 
+@predicate("command_not_denied")
+def _command_not_denied(ctx: dict) -> tuple[bool, str]:
+    """A shell command must not be DENY-classified by the security gate — the
+    hard-stops from TRUTH_STATE §C-12 (fork bomb, mkfs/dd disk-wipe, poweroff,
+    chmod 000 /, overwrite /etc, ...). This binds the declarative contract to the
+    existing enforcer (cmdguard) rather than re-implementing the rules. An absent
+    command is permissive (nothing to run)."""
+    cmd = ctx.get("command")
+    if not cmd:
+        return True, ""
+    from . import cmdguard
+    v = cmdguard.scan(str(cmd))
+    if v.blocked_by:
+        return False, f"command refused by the security gate: {v.reason}"
+    return True, ""
+
+
+@predicate("url_not_blocked")
+def _url_not_blocked(ctx: dict) -> tuple[bool, str]:
+    """An outbound URL must clear the SSRF/egress gate (loopback, link-local,
+    cloud-metadata, non-allowlisted host under sovereign mode). Binds the
+    existing enforcer (security.url_block_reason). Absent URL is permissive.
+    `resolve` defaults to True (the full SSRF check, matching the real
+    navigation gate): for an IP LITERAL this validates the address with no DNS,
+    so metadata/loopback/link-local/private literals are blocked
+    deterministically; a caller egressing through a trusted proxy may pass
+    resolve=False for the name-only check."""
+    url = ctx.get("url")
+    if not url:
+        return True, ""
+    from . import security
+    reason = security.url_block_reason(str(url),
+                                       resolve=bool(ctx.get("resolve", True)))
+    if reason:
+        return False, f"egress refused: {reason}"
+    return True, ""
+
+
 @predicate("no_action_tool_in_ingesting_run")
 def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     """Capability separation: a run that ingests untrusted external content must
@@ -327,6 +376,27 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "governance": ["mandate_signature_valid",
                        "mandate_trusted_construction"],
     },
+    "shell_command": {
+        "operation": "command.run",
+        "recovery": "block",
+        "description": "A shell command at the run chokepoint: the cmdguard "
+                       "hard-stops (fork bomb, disk wipe, poweroff, chmod 000 "
+                       "/, ...) are a declared invariant — a DENY-classified "
+                       "command is refused even if a human or policy approved it.",
+        "preconditions": [],
+        "invariants": ["command_not_denied"],
+        "governance": [],
+    },
+    "network_egress": {
+        "operation": "net.fetch",
+        "recovery": "block",
+        "description": "An outbound network fetch: the SSRF/egress hard-stops "
+                       "(loopback, link-local, cloud metadata, non-allowlisted "
+                       "host under sovereign mode) are a declared invariant.",
+        "preconditions": [],
+        "invariants": ["url_not_blocked"],
+        "governance": [],
+    },
 }
 
 
@@ -375,20 +445,126 @@ def _raw_defaults() -> dict[str, Any]:
     return data.get("contracts", {}) if isinstance(data, dict) else {}
 
 
-def _operator_overrides() -> dict[str, Any]:
-    """Operator-authored contracts from MEMORY_DIR/behavioral_contracts.yaml —
-    additive/override. Ignored (never fatal) if absent, unparsable, or PyYAML is
-    missing."""
-    from . import config
-    path = config.MEMORY_DIR / "behavioral_contracts.yaml"
-    if not path.exists():
-        return {}
+# --- signed contract artifacts: seal / open / tighten-only ----------------
+
+def seal(contracts: dict, *, pin: str | None = None) -> dict:
+    """Produce a witness-signed contract artifact over `contracts`. The signature
+    covers the canonical JSON of {schema, contracts}, so any later edit to a
+    contract breaks it. `pin` is unused here (kept for symmetry); verification
+    binds trust."""
+    from . import witness
+    body = {"schema": SEAL_SCHEMA, "contracts": contracts}
+    payload = witness.canonical_json(body)
+    return {**body, "integrity": {
+        "publicKey": witness.public_key_hex(),
+        "signature": witness.sign(payload),
+        "seedDerivation": witness.SEED_DERIVATION,
+    }}
+
+
+def open_sealed(artifact: dict, *, pin: str | None = None) -> dict:
+    """Verify a sealed contract artifact and return its `contracts`. FAIL CLOSED:
+    raises `ContractSealError` on a missing/blank integrity block, a bad
+    signature (tamper), or a signer that does not match `pin`. Never returns a
+    partially-trusted result — an artifact either verifies whole or is refused."""
+    from . import witness
+    if not isinstance(artifact, dict):
+        raise ContractSealError("artifact is not an object")
+    integ = artifact.get("integrity")
+    if not isinstance(integ, dict) or not integ.get("signature") \
+            or not integ.get("publicKey"):
+        raise ContractSealError("artifact is unsigned (no integrity block)")
+    contracts = artifact.get("contracts")
+    if not isinstance(contracts, dict):
+        raise ContractSealError("artifact carries no contracts")
+    body = {"schema": artifact.get("schema", SEAL_SCHEMA), "contracts": contracts}
+    payload = witness.canonical_json(body)
+    pub = str(integ.get("publicKey"))
+    if not witness.verify_signature(pub, payload, str(integ.get("signature"))):
+        raise ContractSealError("signature INVALID — the artifact was tampered "
+                                "or signed by a different key")
+    if pin is not None and pub.lower() != pin.strip().lower():
+        raise ContractSealError("signed by an untrusted key (does not match pin)")
+    return contracts
+
+
+def sealed_is_attested(artifact: dict) -> bool:
+    """True when the sealed artifact was signed by a real (non-default) key.
+    A default-seed seal verifies (integrity) but is UNATTESTED (M0.1)."""
+    from . import witness
     try:
-        import yaml
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (ImportError, OSError, ValueError):
-        return {}
-    return data.get("contracts", {}) if isinstance(data, dict) else {}
+        pub = str((artifact.get("integrity") or {}).get("publicKey", "")).lower()
+        return bool(pub) and pub != witness.default_public_key_hex().lower()
+    except Exception:
+        return False
+
+
+_RECOVERY_RANK = {DEGRADE: 0, REJECT: 1, HOLD: 2, BLOCK: 3}   # stricter = higher
+
+
+def tighten_only_ok(base: dict, override: dict) -> tuple[bool, str]:
+    """An operator override may ADD contracts or make an existing built-in
+    STRICTER, but never weaken one: it may not lower a built-in contract's
+    recovery severity, nor drop any clause item the built-in declares. Returns
+    (ok, reason). Brand-new contracts (not in `base`) are always allowed."""
+    for name, ov in override.items():
+        if name not in base or not isinstance(ov, dict):
+            continue                          # additive — a new contract is fine
+        b = base[name]
+        if _RECOVERY_RANK.get(str(ov.get("recovery", DEGRADE)), 0) < \
+                _RECOVERY_RANK.get(str(b.get("recovery", DEGRADE)), 0):
+            return False, (f"override weakens recovery of built-in {name!r} "
+                           f"({b.get('recovery')}→{ov.get('recovery')})")
+        for kind in CLAUSES:
+            dropped = set(b.get(kind, []) or []) - set(ov.get(kind, []) or [])
+            if dropped:
+                return False, (f"override drops {kind} {sorted(dropped)} from "
+                               f"built-in {name!r}")
+    return True, ""
+
+
+def _operator_overrides() -> dict[str, Any]:
+    """Operator-authored contracts — additive/override, both sources FAIL CLOSED:
+
+    * A SIGNED artifact `MEMORY_DIR/behavioral_contracts.sealed.json` is verified
+      with `open_sealed`; a tampered / unsigned / wrong-key artifact is REFUSED
+      (logged, not applied), so a forged governance file can never take effect.
+      The signed artifact takes precedence when present.
+    * Otherwise a legacy unsigned YAML (`behavioral_contracts.yaml`) for local
+      authoring.
+
+    Either way the override is subject to TIGHTEN-ONLY: it may add contracts or
+    make a built-in stricter, never weaken a hard-stop. A loosening override is
+    refused (logged, not applied)."""
+    from . import config
+    overrides: dict[str, Any] = {}
+    sealed = config.MEMORY_DIR / "behavioral_contracts.sealed.json"
+    if sealed.exists():
+        import json
+        try:
+            overrides = open_sealed(json.loads(sealed.read_text(encoding="utf-8")))
+        except (ContractSealError, ValueError, OSError, TypeError) as err:
+            from . import errors
+            errors.capture("behavioral_contracts.sealed_refused", err)
+            return {}                          # fail closed: refuse a bad seal
+    else:
+        path = config.MEMORY_DIR / "behavioral_contracts.yaml"
+        if path.exists():
+            try:
+                import yaml
+                data = yaml.safe_load(path.read_text(encoding="utf-8"))
+                overrides = (data.get("contracts", {})
+                             if isinstance(data, dict) else {})
+            except (ImportError, OSError, ValueError):
+                return {}
+    if overrides:
+        ok, reason = tighten_only_ok(_raw_defaults(), overrides)
+        if not ok:
+            from . import errors
+            errors.capture("behavioral_contracts.override_loosens",
+                           RuntimeError(reason))
+            return {}                          # fail closed: refuse a loosening override
+    return overrides
 
 
 def load() -> dict[str, Contract]:
