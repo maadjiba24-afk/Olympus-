@@ -1572,6 +1572,19 @@ def evolution_audit(settings: config.Settings | None = None) -> str:
     memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
+
+    # Plane 3.2: mine recent FAILURE traces and run the gated reflection pipeline
+    # FIRST — Prometheus is the proposal source, the pipeline owns apply (gate +
+    # auto-rollback + signed snapshot). Best-effort: a reflection error never
+    # blocks the broader audit below.
+    reflection = ""
+    try:
+        from . import reflect
+        reflection = reflect.reflect(settings)
+    except Exception as err:
+        from . import errors
+        errors.capture("orchestrator.reflect", err)
+
     task = (
         "Run a full self-audit of Olympus now:\n"
         "1. list_source_files and read the parts that matter.\n"
@@ -1585,5 +1598,7 @@ def evolution_audit(settings: config.Settings | None = None) -> str:
         "you proposed."
     )
     report = SPECIALISTS["prometheus"].run(task, settings=settings)
+    if reflection:
+        report = f"{reflection}\n\n{report}"
     memory.save("reports", "Evolution audit", report)
     return report
