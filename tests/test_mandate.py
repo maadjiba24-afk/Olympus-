@@ -151,7 +151,7 @@ def test_financial_legal_never_auto_runs_in_actions():
 def test_enforce_commit_passes_for_valid_cart():
     im = _intent()
     cm = _cart(im)
-    signed = mandate.sign(cm)
+    signed = mandate.co_sign(mandate.sign(cm))   # M4: co-signature now required
     seen: set[str] = set()
     res = mandate.enforce_commit(signed, im, now=1000.0, seen_nonces=seen)
     assert res.ok

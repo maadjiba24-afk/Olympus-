@@ -81,6 +81,8 @@ contracts:
     governance:
       - mandate_signature_valid
       - mandate_trusted_construction
+      - mandate_cosignature_valid
+      - mandate_capability_within_bound
 
   capability_grant:
     operation: capability.exercise

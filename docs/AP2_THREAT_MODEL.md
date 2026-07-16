@@ -187,10 +187,15 @@ to act under — e.g. a token granting "≤ $50 at merchant A" backs a "$500 at
 merchant B" mandate.*
 
 Controls:
-- **C8.1 Scope containment against the token.** `verify()` checks the mandate's
-  `TransactionScope` is **within** the bound token's granted scopes and risk
-  ceiling, reusing `identity.verify_grant` (forged/expired/revoked/replayed/
-  scope-escalating tokens are already all rejected there).
+- **C8.1 Scope containment against the token.** The commit gate
+  (`enforce_commit` → the `payment.mandate` contract's
+  `mandate_capability_within_bound` governance clause, recovery `block`) checks
+  the mandate's `TransactionScope` is **within** the bound token's granted
+  scopes and risk ceiling, reusing `identity.verify_grant`
+  (forged/expired/revoked/scope-escalating tokens are all rejected there). Bare
+  `verify()` checks signatures/expiry/nonce/containment; capability containment
+  is enforced at the commit gate, which is the only path that can back a
+  payment — so there is no gate that omits it.
 - **C8.2 Revocation is the kill switch.** A revoked capability token makes every
   mandate bound to it unverifiable — authority can be withdrawn after signing,
   which the single-signature design could not do.
