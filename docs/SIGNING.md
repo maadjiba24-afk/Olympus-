@@ -188,6 +188,38 @@ while you switch.
    always be verified by checking against that retired key explicitly; nothing
    about rotation invalidates already-signed history.
 
+## Compromise response (suspected or confirmed seed exposure)
+
+Planned rotation (above) uses an overlap window. A **compromise is different:
+there is no overlap window** — the attacker holds a key your verifiers still
+trust, and every minute of overlap is forgeable history.
+
+1. **Revoke the pin first, immediately.** Remove the compromised public key
+   from every pin set — `olympus/witness_pubkey.txt`, `OLYMPUS_PINNED_PUBKEY`,
+   and any `OLYMPUS_LOG_PIN` — *before* anything else. From that moment,
+   artifacts signed by the stolen key stop verifying anywhere the pin is used.
+2. **Generate the replacement on a clean machine** — not the possibly-
+   compromised host: `olympus keygen --out <new path>` (0600; prints only the
+   public key). Do not reuse the old path until the host is cleared.
+3. **Close the leak channel before installing.** Determine how the seed
+   escaped — env var via `/proc`/`docker inspect`/crash dump, a
+   world-readable file, a backup, shell history, a CI secret — and fix that
+   channel first, or the new seed follows the old one out.
+4. **Install and pin the new key** (`OLYMPUS_SIGNING_SEED_FILE=<new path>`,
+   append the new public key to the pin set), then **re-sign** the current
+   release (`olympus sign`) and any artifact that must remain trusted.
+5. **Bound the forgery window.** Everything signed by the compromised key
+   after the earliest plausible exposure time is SUSPECT — its signature
+   proves nothing. Use out-of-band records to separate before from after: the
+   external anchor sink (`olympus verify-anchor` divergences during the
+   window are evidence), CI logs of legitimate signings, and release
+   timestamps. When in doubt, treat it as forged.
+6. **Record it, permanently.** Append the compromised public key to the
+   retired-key record with its date range, marked **COMPROMISED — never
+   re-trust**. Unlike an ordinarily-retired key, a compromised key must never
+   be used to re-verify "historical" artifacts from inside the forgery
+   window.
+
 ## Rules
 
 - **Never** publish a release under the default seed (`--dev` manifests are for
