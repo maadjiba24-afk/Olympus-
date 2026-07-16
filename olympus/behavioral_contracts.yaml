@@ -122,3 +122,15 @@ contracts:
     invariants:
       - url_not_blocked
     governance: []
+
+  reflection_cycle:
+    operation: reflection.cycle
+    recovery: hold
+    description: >-
+      The idle-time sleep-time reflection cycle (prompt + memory targets): held
+      (deferred, not run) once the daily budget is reached, so unattended
+      self-improvement can never run up the bill.
+    preconditions:
+      - reflection_within_budget
+    invariants: []
+    governance: []
