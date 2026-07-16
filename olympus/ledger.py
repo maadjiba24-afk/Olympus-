@@ -98,13 +98,17 @@ _ALLOWED_ID = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
-def _path(run_id: str):
+def _safe_id(run_id: str) -> str:
     rid = str(run_id)
     # Reject (never silently mangle) a run_id that isn't a clean filename — a
     # path separator or traversal segment must not reach the filesystem.
     if not rid or rid in (".", "..") or any(c not in _ALLOWED_ID for c in rid):
         raise LedgerError(f"invalid run_id {run_id!r}")
-    return config.MEMORY_DIR / "ledger" / f"{rid}.jsonl"
+    return rid
+
+
+def _path(run_id: str):
+    return config.MEMORY_DIR / "ledger" / f"{_safe_id(run_id)}.jsonl"
 
 
 def _lock_for(run_id: str) -> threading.Lock:
@@ -308,3 +312,109 @@ def drive(run_id: str, plan, executor, *, stop_before: int | None = None):
         state = executor(state, plan[i], i)
         led.append(plan[i], state)
     return state
+
+
+# --- speculation records (Plane 2.2 audit trail) ---------------------------
+#
+# Exploration (tree search) forks the committed chain into UNCOMMITTED branches.
+# Those branches never enter the linear chain, but the fact that a branch was
+# explored — and that a branch was pruned, and why — is part of the run's
+# tamper-evident record. Each such record is content-addressed and signed under
+# its own subkey, kept in a per-run side log so it can never be confused with a
+# committed checkpoint.
+
+SPEC_SCHEMA = "olympus-speculation/1"
+SPEC_LABEL = "speculation/v1"       # witness subkey (distinct from checkpoints)
+
+
+def _spec_path(run_id: str):
+    return config.MEMORY_DIR / "ledger" / f"{_safe_id(run_id)}.spec.jsonl"
+
+
+def _read_spec(run_id: str) -> list[dict]:
+    path = _spec_path(run_id)
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out
+
+
+def _spec_core(run_id: str, seq: int, kind: str, info) -> dict:
+    return {"schema": SPEC_SCHEMA, "run_id": run_id, "seq": int(seq),
+            "kind": str(kind), "info": info}
+
+
+def record_speculation(run_id: str, kind: str, info) -> dict:
+    """Append a signed, content-addressed speculation record (`kind` is
+    'branch' | 'prune' | 'halt'). These audit UNCOMMITTED exploration and never
+    enter the committed chain. Serialized per run so seqs can't collide."""
+    if kind not in ("branch", "prune", "halt"):
+        raise LedgerError(f"unknown speculation kind {kind!r}")
+    with _lock_for(run_id + ".spec"):
+        seq = len(_read_spec(run_id))
+        core = _spec_core(run_id, seq, kind, info)
+        rec_hash = _content_hash(core)
+        rec = dict(core)
+        rec["record_hash"] = rec_hash
+        try:
+            rec["publicKey"] = witness.sub_public_key_hex(SPEC_LABEL)
+            rec["signature"] = witness.sign_with(SPEC_LABEL,
+                                                 rec_hash.encode("utf-8"))
+        except witness.WitnessError:
+            rec["publicKey"] = ""
+            rec["signature"] = ""
+        path = _spec_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+        return rec
+
+
+def speculation_records(run_id: str) -> list[dict]:
+    return _read_spec(run_id)
+
+
+def _spec_record_ok(rec: dict) -> bool:
+    if not isinstance(rec, dict) or rec.get("schema") != SPEC_SCHEMA:
+        return False
+    core = _spec_core(rec.get("run_id"), rec.get("seq", -1),
+                      rec.get("kind"), rec.get("info"))
+    if _content_hash(core) != rec.get("record_hash"):
+        return False
+    try:
+        expected = witness.sub_public_key_hex(SPEC_LABEL)
+    except witness.WitnessError:
+        return False
+    if str(rec.get("publicKey", "")).lower() != expected.lower():
+        return False
+    return witness.verify_signature(expected, str(rec["record_hash"]).encode("utf-8"),
+                                    str(rec.get("signature", "")))
+
+
+def verify_speculation(run_id: str) -> dict:
+    """Verify a run's speculation side log: every record content-addressed,
+    contiguous seq from 0, and signed under the speculation key. Fail closed."""
+    recs = _read_spec(run_id)
+    out = {"ok": False, "found": bool(recs), "count": len(recs),
+           "verified": 0, "attested": False, "problems": []}
+    verified = 0
+    for i, rec in enumerate(recs):
+        if rec.get("seq") != i:
+            out["problems"].append(f"seq {rec.get('seq')!r} out of order at {i}")
+            break
+        if not _spec_record_ok(rec):
+            out["problems"].append(f"invalid speculation record at {i}")
+            break
+        verified = i + 1
+    out["verified"] = verified
+    out["ok"] = bool(recs) and verified == len(recs) and not out["problems"]
+    if out["ok"]:
+        try:
+            out["attested"] = witness.available() and not witness.is_default_seed()
+        except Exception:
+            out["attested"] = False
+    return out
