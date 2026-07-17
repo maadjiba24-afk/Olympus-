@@ -372,6 +372,80 @@ def _url_not_blocked(ctx: dict) -> tuple[bool, str]:
     return True, ""
 
 
+@predicate("memory_content_sanitized")
+def _memory_content_sanitized(ctx: dict) -> tuple[bool, str]:
+    """A durable memory being COMMITTED must not carry a live injection-shaped
+    imperative — binds the existing sanitizer (security.looks_like_injection) at
+    the write chokepoint, so an un-sanitized candidate can never auto-commit."""
+    content = ctx.get("content")
+    if not content:
+        return True, ""
+    from . import security
+    if security.looks_like_injection(str(content)):
+        return False, "memory content contains an un-neutralized injection marker"
+    return True, ""
+
+
+@predicate("memory_not_sensitive_autocommit")
+def _memory_not_sensitive_autocommit(ctx: dict) -> tuple[bool, str]:
+    """A high-sensitivity memory is never auto-committed — it must be HELD for the
+    user's approval. This is the formal statement of recall._gate's policy."""
+    if str(ctx.get("sensitivity", "normal")) == "high":
+        return False, "high-sensitivity memory must be held, not auto-committed"
+    return True, ""
+
+
+@predicate("skill_scan_clean")
+def _skill_scan_clean(ctx: dict) -> tuple[bool, str]:
+    """An imported skill must have passed the security scan (injection markers,
+    embedded credentials). `scan_reason` carries the enforcer's verdict — a
+    non-empty reason means the import is refused, fail closed."""
+    reason = ctx.get("scan_reason")
+    if reason:
+        return False, f"skill import refused: {reason}"
+    return True, ""
+
+
+@predicate("goal_evidence_present")
+def _goal_evidence_present(ctx: dict) -> tuple[bool, str]:
+    """A standing goal may be marked DONE only against concrete evidence at the
+    confidence floor — 'I did it' is not evidence (goals.py doctrine). When the
+    verdict claims done, evidence must be present and confidence sufficient."""
+    if not ctx.get("done"):
+        return True, ""                 # not closing → nothing to assert
+    evidence = str(ctx.get("evidence", "")).strip()
+    conf = float(ctx.get("confidence", 0) or 0)
+    floor = float(ctx.get("floor", 0) or 0)
+    if not evidence:
+        return False, "goal marked done with no concrete evidence"
+    if conf < floor:
+        return False, f"goal completion confidence {conf} below floor {floor}"
+    return True, ""
+
+
+@predicate("scaffold_target_evolvable")
+def _scaffold_target_evolvable(ctx: dict) -> tuple[bool, str]:
+    """A scaffold-evolution proposal may target only a non-security, allowlisted
+    module — never a security guard. Fail closed."""
+    return (bool(ctx.get("target_evolvable")),
+            "" if ctx.get("target_evolvable")
+            else "target module is security-critical or not allowlisted")
+
+
+@predicate("scaffold_compiles")
+def _scaffold_compiles(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("candidate_compiles")),
+            "" if ctx.get("candidate_compiles")
+            else "candidate does not compile")
+
+
+@predicate("scaffold_benchmark_passed")
+def _scaffold_benchmark_passed(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("benchmark_passed")),
+            "" if ctx.get("benchmark_passed")
+            else "candidate failed the benchmark gate")
+
+
 @predicate("no_action_tool_in_ingesting_run")
 def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     """Capability separation: a run that ingests untrusted external content must
@@ -497,6 +571,48 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
                        "never run up the bill.",
         "preconditions": ["reflection_within_budget"],
         "invariants": [],
+        "governance": [],
+    },
+    "memory_commit": {
+        "operation": "memory.commit",
+        "recovery": "hold",
+        "description": "A durable memory being auto-committed to the store: its "
+                       "content is injection-sanitized and it is not "
+                       "high-sensitivity (those are held for the user). Recovery "
+                       "HOLDs the candidate for approval instead of committing.",
+        "preconditions": ["memory_not_sensitive_autocommit"],
+        "invariants": ["memory_content_sanitized"],
+        "governance": [],
+    },
+    "skill_import": {
+        "operation": "skill.import",
+        "recovery": "block",
+        "description": "A skill imported into the library: it passed the security "
+                       "scan (injection markers, embedded credentials) — refused, "
+                       "not sanitized, on a hit.",
+        "preconditions": ["skill_scan_clean"],
+        "invariants": [],
+        "governance": [],
+    },
+    "goal_completion": {
+        "operation": "goal.complete",
+        "recovery": "block",
+        "description": "A standing goal marked done: only against concrete "
+                       "evidence at the confidence floor — an assertion of "
+                       "completion without evidence is refused.",
+        "preconditions": [],
+        "invariants": ["goal_evidence_present"],
+        "governance": [],
+    },
+    "scaffold_propose": {
+        "operation": "scaffold.propose",
+        "recovery": "block",
+        "description": "A propose-only scaffold-evolution candidate before it is "
+                       "archived as a proposal: targets a non-security, "
+                       "allowlisted module, compiles, and passed the benchmark. "
+                       "There is no auto-apply path.",
+        "preconditions": ["scaffold_target_evolvable"],
+        "invariants": ["scaffold_compiles", "scaffold_benchmark_passed"],
         "governance": [],
     },
 }

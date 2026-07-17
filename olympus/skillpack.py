@@ -120,6 +120,14 @@ def import_file(path: str, *, provisional: bool = False) -> str:
         return f"Error: no SKILL.md found at {path}"
     parsed = parse_skill_md(p.read_text(encoding="utf-8", errors="replace"))
     reason = scan_reason(parsed)
+    # Behavioral contract at the import chokepoint (defense in depth): a skill
+    # that fails the security scan is refused — formalizing the check below.
+    from . import behavioral_contracts as _abc
+    try:
+        _abc.enforce("skill.import", {"scan_reason": reason})
+    except _abc.ContractViolation as viol:
+        return (f"Error: refused to import '{parsed.get('name') or p.name}' — "
+                f"{'; '.join(viol.reasons)}.")
     if reason:
         return (f"Error: refused to import '{parsed.get('name') or p.name}' — "
                 f"{reason}.")

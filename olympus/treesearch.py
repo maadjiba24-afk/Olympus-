@@ -87,7 +87,8 @@ class SearchCaps:
             except (TypeError, ValueError):
                 return default
         return cls(
-            max_nodes=_int("OLYMPUS_TREESEARCH_MAX_NODES", 50),
+            max_nodes=_int("OLYMPUS_TREESEARCH_MAX_NODES",
+                           _tuned_node_default()),
             max_tokens=_int("OLYMPUS_TREESEARCH_MAX_TOKENS", 100_000),
             max_seconds=_flt("OLYMPUS_TREESEARCH_MAX_SECONDS", 30.0),
             max_depth=_int("OLYMPUS_TREESEARCH_MAX_DEPTH", 12))
@@ -118,6 +119,17 @@ class _Node:
     path: tuple = field(compare=False, default=())
     score: float = field(compare=False, default=0.0)
     depth: int = field(compare=False, default=0)
+
+
+def _tuned_node_default() -> int:
+    """The self-tuned default node cap (narrowed within [10,100] by the evolve
+    reviewer when searches degrade). Falls back to 50 on any read error. This is
+    a resource bound only — the side-effect halt and per-call clamp are unaffected."""
+    try:
+        from . import evolve
+        return int(evolve.current("treesearch", "max_nodes"))
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
+        return 50
 
 
 def _effect_of(step: Any, classify: Callable[[Any], str] | None) -> str:

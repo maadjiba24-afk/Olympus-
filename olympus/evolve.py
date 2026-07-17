@@ -109,6 +109,24 @@ for _t in (
     Tunable("ace", "max_bullets", lo=20, hi=60, default=60, on_fail="decrease",
             note="shrink the delta-context playbook when compaction degrades "
                  "(pinned facts are exempt from the cap)"),
+    # Integration-depth components (D1-D8). All non-security resource knobs —
+    # they bound cost/breadth, never a safety gate (the side-effect halt, egress
+    # guard, allowlists, and signing stay hard constants outside the tuner).
+    Tunable("treesearch", "max_nodes", lo=10, hi=100, default=50,
+            on_fail="decrease",
+            note="explore fewer nodes when searches keep degrading"),
+    Tunable("dytopo", "max_out_degree", lo=1, hi=3, default=2,
+            on_fail="decrease",
+            note="sparser collaboration graph when routing degrades"),
+    Tunable("emem", "max_fragments", lo=4, hi=12, default=12,
+            on_fail="decrease",
+            note="reconstruct fewer episode fragments when it degrades"),
+    Tunable("liveeval", "sample_size", lo=10, hi=50, default=20,
+            on_fail="increase",
+            note="sample more recent runs when the quality signal is noisy"),
+    Tunable("scaffold_evolve", "max_archive", lo=50, hi=200, default=200,
+            on_fail="decrease",
+            note="keep a smaller variant archive when proposals keep failing"),
     # Earned-autonomy policy knobs (trust.py). SECURITY-relevant, so tighten_only:
     # when the operator degrades, the earned-autonomy envelope auto-narrows
     # (higher bar to earn trust, longer settle after a surprise, fewer unattended

@@ -280,7 +280,21 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
     for stored in goals:
         if stored.id == g.id:
             stored.checks += 1
-            if verdict["done"] and verdict["confidence"] >= CONFIDENCE_FLOOR:
+            # Behavioral contract at the completion chokepoint (defense in
+            # depth): a goal may close ONLY against concrete evidence at the
+            # confidence floor — an evidence-free "done" is refused.
+            from . import behavioral_contracts as _abc
+            close_ok = True
+            try:
+                _abc.enforce("goal.complete",
+                             {"done": bool(verdict["done"]),
+                              "evidence": verdict.get("evidence", ""),
+                              "confidence": verdict.get("confidence", 0),
+                              "floor": CONFIDENCE_FLOOR})
+            except _abc.ContractViolation:
+                close_ok = False
+            if (close_ok and verdict["done"]
+                    and verdict["confidence"] >= CONFIDENCE_FLOOR):
                 stored.status = "done"
                 stored.evidence = verdict["evidence"][:2000]
                 _save(goals)
