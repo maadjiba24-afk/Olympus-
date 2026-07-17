@@ -184,6 +184,16 @@ def _capture(err: Exception) -> None:
     errors.capture("emem.gather", err)
 
 
+def _tuned_max_fragments() -> int:
+    """Self-tuned fragment cap (narrowed within [4,12] by the evolve reviewer
+    when reconstruction degrades). Falls back to the hard default on read error."""
+    try:
+        from . import evolve
+        return int(evolve.current("emem", "max_fragments"))
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
+        return _MAX_FRAGMENTS
+
+
 def context_block(user: str, query: str, *, now: float | None = None) -> str:
     """The alongside variant of `recall.context_block`: reconstruct an episode
     for this turn and return it as an enveloped block. '' when disabled, when the
@@ -193,8 +203,16 @@ def context_block(user: str, query: str, *, now: float | None = None) -> str:
     import time
     now = time.time() if now is None else now
     try:
-        episode = reconstruct(query, gather(user, query), now=now)
+        episode = reconstruct(query, gather(user, query), now=now,
+                              max_fragments=_tuned_max_fragments())
     except Exception as err:
         _capture(err)
         return ""
+    try:
+        from . import evolve
+        evolve.log_event("emem", "reconstruct",
+                         {"fragments": len(episode.fragments),
+                          "external": episode.has_external()})
+    except Exception:
+        pass
     return episode.render()

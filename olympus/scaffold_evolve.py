@@ -181,11 +181,22 @@ def propose(module: str, generate: GenerateFn, *,
 
 # --- archive (append-only, bounded) ---------------------------------------
 
+def _archive_cap() -> int:
+    """Self-tuned archive size (narrowed within [50,200] by the evolve reviewer
+    when proposals keep failing). Falls back to the hard ceiling on read error."""
+    try:
+        from . import evolve
+        return max(1, min(_MAX_ARCHIVE, int(evolve.current("scaffold_evolve",
+                                                           "max_archive"))))
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
+        return _MAX_ARCHIVE
+
+
 def _archive(cand: Candidate) -> None:
     cur = archive()
     cur.append(cand.to_dict())
     store.backend().put(_ARCHIVE_NS, _ARCHIVE_KEY,
-                        json.dumps(cur[-_MAX_ARCHIVE:]).encode("utf-8"))
+                        json.dumps(cur[-_archive_cap():]).encode("utf-8"))
     try:
         from . import evolve
         evolve.log_event("scaffold_evolve", "proposal", {

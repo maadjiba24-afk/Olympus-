@@ -15,6 +15,32 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
+
+The eight new components (webplan, AP2 flow, extended ABC surface,
+scaffold_evolve, dytopo, emem, a2a, liveeval) are hardened and made
+self-evolving within guardrails.
+
+- **Self-evolution.** Five new non-security `evolve` tunables, each with a hard
+  `[lo,hi]` clamp: `treesearch.max_nodes` [10,100], `dytopo.max_out_degree`
+  [1,3], `emem.max_fragments` [4,12], `liveeval.sample_size` [10,50],
+  `scaffold_evolve.max_archive` [50,200]. Each feature reads its tunable at the
+  I/O boundary via `evolve.current(...)` (fail-safe fallback to the default) and
+  records OK/DEGRADED outcomes + structured `log_event` telemetry. **No
+  security-relevant knob is tunable** — the side-effect halt, egress guard,
+  allowlist/denylist, signing, and approval gates stay hard constants outside the
+  tuner; a drift test asserts the D-component tunables are never `tighten_only`.
+- **Hardening.** The five new modules are pyflakes-clean with no bare `except`,
+  silent catch (only best-effort telemetry is swallowed), TODO, or debug print.
+  Adversarial tests added at every external boundary: A2A oversize-reply capping
+  + malformed peer reply/card, scaffold refusal of every security module,
+  tree-search runaway (node cap) + webplan never-applies-a-side-effect,
+  dytopo dense-input-stays-sparse, and liveeval malformed/huge-trace tolerance.
+- **Poisoned-feedback gate.** A poisoned emem fragment (injection text) is kept
+  verbatim but leaves the module **only inside the untrusted envelope** — never a
+  clean instruction; and a liveeval regression signal is proven to carry only
+  numeric aggregates + run ids, never injection-laden trace content.
+
 ### Added — Live-trace online evaluation (`liveeval`)
 
 Sampled quality scoring of recent runs, so a regression surfaces on its own

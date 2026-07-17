@@ -171,8 +171,31 @@ class RouteResult:
                 "sparse": self.topology.is_sparse()}
 
 
-def route(descriptors, *, max_out_degree: int = 2, max_rounds: int = 3,
+def _tuned_out_degree() -> int:
+    """Self-tuned default out-degree (narrowed within [1,3] by the evolve
+    reviewer when routing degrades). Falls back to 2 on any read error."""
+    try:
+        from . import evolve
+        return int(evolve.current("dytopo", "max_out_degree"))
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
+        return 2
+
+
+def route(descriptors, *, max_out_degree: int | None = None, max_rounds: int = 3,
           threshold: float = _DEFAULT_THRESHOLD) -> RouteResult:
-    """Induce the topology and its consultation rounds in one call."""
-    topo = induce(descriptors, max_out_degree=max_out_degree, threshold=threshold)
-    return RouteResult(topology=topo, rounds=rounds(topo, max_rounds=max_rounds))
+    """Induce the topology and its consultation rounds in one call. When
+    `max_out_degree` is None it takes the self-tuned default."""
+    k = _tuned_out_degree() if max_out_degree is None else max_out_degree
+    topo = induce(descriptors, max_out_degree=k, threshold=threshold)
+    res = RouteResult(topology=topo, rounds=rounds(topo, max_rounds=max_rounds))
+    try:
+        from . import evolve
+        evolve.log_event("dytopo", "route", {
+            "nodes": len(topo.nodes), "edges": len(topo.edges),
+            "rounds": len(res.rounds), "sparse": topo.is_sparse()})
+        evolve.record("dytopo",
+                      evolve.OK if topo.is_sparse() else evolve.DEGRADED,
+                      f"nodes={len(topo.nodes)} edges={len(topo.edges)}")
+    except Exception:
+        pass
+    return res

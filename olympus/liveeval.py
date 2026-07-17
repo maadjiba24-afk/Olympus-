@@ -203,12 +203,23 @@ def recent_runs(limit: int = _DEFAULT_SAMPLE) -> list:
 
 # --- run entry (telemetry + surfacing) ------------------------------------
 
-def run(sample: int = _DEFAULT_SAMPLE) -> list[str]:
+def _tuned_sample() -> int:
+    """Self-tuned sample size (widened within [10,50] by the evolve reviewer when
+    the signal is noisy). Falls back to the default on read error."""
+    try:
+        from . import evolve
+        return int(evolve.current("liveeval", "sample_size"))
+    except (KeyError, ValueError, TypeError, ImportError, OSError):
+        return _DEFAULT_SAMPLE
+
+
+def run(sample: int | None = None) -> list[str]:
     """Heartbeat entry: sample recent runs, score them, record the regression
     signal to evolve telemetry + the structured log. No-op unless enabled;
     returns human log lines (empty when nothing to report)."""
     if not enabled():
         return []
+    sample = _tuned_sample() if sample is None else sample
     try:
         report = evaluate(recent_runs(sample), sample=sample)
     except Exception as err:
