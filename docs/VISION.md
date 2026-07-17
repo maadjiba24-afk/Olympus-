@@ -529,3 +529,55 @@ we've built — pattern by pattern:
     memory with confidence + provenance; `--user` for gateway users.
 37. **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons/notes/
     reports as dated markdown for GUI curation (Obsidian-compatible = just files).
+
+---
+
+## Screens 50–54 — Memory internals (frozen snapshot, memory tool, write hardening, seed)
+
+### What Hermes did
+- **Frozen-snapshot pattern (their labeled footgun)**: memory files render into
+  the system prompt at session start with `cache_control`; mid-session
+  `memory(action=add)` hits disk immediately but the prompt does NOT update —
+  writes appear next session. "Performance over freshness" (preserves the
+  prefix cache).
+- **The memory tool**: three actions — `add`, `replace`, `remove` — **no read**
+  (memory is always in context); §-separated entries; replace/remove match by
+  substring (`old_text`); live % cap indicator in the header.
+- **Telegram transparency**: memory ops surface inline as they happen
+  (`+memory:`, `~memory:`, `-memory:` lines), plus self-maintenance narrated
+  ("cleaned up one duplicate … to make room").
+- **Why-it-works hardening**: cap-as-feature (add-overflow returns current
+  entries + error → forces consolidation); trained save/skip policy (no
+  memory-manager agent); **dedup is a no-op success** ("no duplicate added" —
+  prevents retry-spam); **injection scanning before write** — prompt-injection
+  patterns, credential exfiltration (SSH/API keys), invisible Unicode.
+  "Closes the persistent-injection vector."
+- **Seed USER.md yourself**: recommended skeleton — ## Role, ## Communication
+  preferences, ## Current focus, ## Things to never do.
+
+### Where Olympus stands
+| Hermes mechanism | Olympus |
+|---|---|
+| Frozen snapshot (stale until next session) | **✓ no footgun — freshness-first**: memory context blocks are recomputed per turn, so a gated fact is visible on the NEXT TURN, not the next session. Different trade-off taken deliberately. |
+| add/replace/remove tool, substring matching | ~ different philosophy: extraction is **automatic + gated** (no trained-policy burden on the model); agents add via save_lesson; **removal stays user-gated** (/journey rm, memory forget) — chat-driven substring erasure is itself an injection vector (a hostile page could talk the agent into deleting the memory of a prior warning) |
+| Dedup as no-op success | ✓ parity — recall gating returns duplicate → reinforces the existing fact |
+| Cap-as-feature / forced consolidation | ✓ equivalent by different means: confidence decay + retrieval token budget (default 800 — same number) keep working memory bounded without a hard write-cap |
+| **Injection scan before write** | **△ partial gap**: sanitize_for_memory defangs injection-marker lines, but does NOT strip invisible/zero-width Unicode or scrub credential patterns (our _KEYISH/_URL_CRED regexes guard only the shared contribution pool) |
+| Visible +memory/~memory lines in chat | **△ gap**: our extraction is background and silent; the user never sees what was learned until /journey |
+| Seed USER.md skeleton | ✓ mostly soul.md + profile; template lacks Role / Current focus sections |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| Injection scan before memory write | **ADOPT — close the same vector fully** | Extend sanitize_for_memory: strip zero-width/bidi Unicode, redact credential-shaped strings (reuse _KEYISH/_URL_CRED/_EMAIL patterns) before ANY lesson/skill/fact write. Their "closes the persistent-injection vector" claim should be at least as true here. |
+| Visible memory activity | **ADOPT** | Progress-mode-aware "🧠 remembered: <fact> (conf 0.8)" line when the background extractor gates a fact in (all/verbose modes) — memory becomes observable in the moment, not just in /journey. |
+| Seed-yourself skeleton | **ADOPT — tiny** | Add ## Role and ## Current focus sections to the soul.md scaffold; mention seeding in the wizard's closing hints. |
+| Frozen snapshot | **DIFFERENTIATE (documented)** | Keep freshness-first per-turn blocks; our static prompt prefix still caches — we give up less than Hermes assumes. |
+| Chat-driven replace/remove | **DIFFERENTIATE** | Removal stays user-gated. An agent that can erase its own memories from a chat message is an erasure vector, not a feature. |
+
+### Build backlog additions (batched, NOT building yet)
+38. **Memory-write hardening**: invisible-Unicode stripping + credential-pattern
+    redaction in sanitize_for_memory (applies to lessons, skills, facts).
+39. **Visible memory activity**: 🧠 progress lines when facts are gated in
+    (progress-mode aware).
+40. **Soul scaffold enrichment**: Role / Current focus sections + wizard hint.
