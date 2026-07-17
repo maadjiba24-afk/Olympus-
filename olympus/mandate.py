@@ -260,36 +260,117 @@ def signature_ok(signed: SignedMandate) -> bool:
 
 # --- user co-signature (dual-signature, M4) ------------------------------
 
-def co_sign(signed: SignedMandate) -> SignedMandate:
+# --- user co-signer custody (on-device / external key holder) -------------
+#
+# The user co-signature closes the gap where a compromised SYSTEM key alone
+# could mint a "valid" mandate. But if the user key lives in the SAME vault as
+# the system key, one vault compromise forges both halves (ADR 0002's residual).
+# The fix is custody: the user's PRIVATE key need not be reachable by the agent.
+#
+#   * A pluggable SIGNER produces the co-signature. The default is vault-local
+#     (backward compatible), but `command_signer` delegates to an external
+#     process/device (HSM, phone, hardware token) that holds the key and returns
+#     only a signature — the agent never sees the private key.
+#   * An out-of-band PIN (OLYMPUS_MANDATE_USER_PUBKEY) binds verification to the
+#     expected user public key(s). With a pin set, a co-signature minted under
+#     ANY other key — including a vault-forged one — is refused. So a vault
+#     compromise no longer forges the user half unless the attacker ALSO holds
+#     the pinned user key.
+
+# A signer: canonical bytes -> (public_key_hex, signature_hex).
+_user_signer = None
+
+
+def _default_user_signer(canonical: bytes) -> tuple[str, str]:
+    """Vault-local co-signer (the backward-compatible default)."""
+    return (witness.sub_public_key_hex(_USER_LABEL),
+            witness.sign_with(_USER_LABEL, canonical))
+
+
+def register_user_signer(fn) -> None:
+    """Install the user co-signer — an external/on-device key holder. `fn`
+    takes the canonical payload bytes and returns (public_key_hex, signature_hex);
+    the agent host never handles the private key."""
+    global _user_signer
+    _user_signer = fn
+
+
+def reset_user_signer() -> None:
+    global _user_signer
+    _user_signer = None
+
+
+def command_signer(cmd: list[str]):
+    """A co-signer that shells out to an EXTERNAL device/holder: `cmd` receives
+    the canonical payload on stdin and must print JSON {public_key, signature}
+    (hex). The private key stays on that device — this host only relays bytes."""
+    def sign(canonical: bytes) -> tuple[str, str]:
+        import subprocess
+        try:
+            proc = subprocess.run(cmd, input=canonical, capture_output=True,
+                                  timeout=30)
+        except (OSError, subprocess.SubprocessError) as err:
+            raise MandateError(f"external co-signer failed to run: {err}") from err
+        if proc.returncode != 0:
+            raise MandateError(
+                f"external co-signer exited {proc.returncode}: "
+                f"{proc.stderr.decode('utf-8', 'replace')[:200]}")
+        try:
+            out = json.loads(proc.stdout.decode("utf-8"))
+            return str(out["public_key"]), str(out["signature"])
+        except (ValueError, KeyError, TypeError) as err:
+            raise MandateError(
+                f"external co-signer returned malformed output: {err}") from err
+    return sign
+
+
+def user_pinned_pubkeys() -> list[str]:
+    """The out-of-band pinned user co-signing key(s) (OLYMPUS_MANDATE_USER_PUBKEY,
+    comma-separated), lowercased. Empty ⇒ no pin (vault-local default trust)."""
+    import os
+    raw = (os.environ.get("OLYMPUS_MANDATE_USER_PUBKEY") or "").strip()
+    return [k.strip().lower() for k in raw.split(",") if k.strip()]
+
+
+def co_sign(signed: SignedMandate, *, signer=None) -> SignedMandate:
     """Add the USER co-signature over the SAME canonical payload the system
-    signed. The result carries both signatures; only a dual-signed mandate is
-    exercisable when `require_cosignature=True`. (In production the user key
-    lives on the user's device; this loop keeps it vault-local — a documented
-    trust assumption, see ADR 0002.)"""
+    signed. `signer` (or the registered one, or the vault default) holds the
+    user key — in an on-device deployment it is an external process and the
+    private key never reaches this host (see ADR 0002, "On-device user-key
+    custody")."""
     if not isinstance(signed, SignedMandate):
         raise MandateError("not a signed mandate")
-    sig = witness.sign_with(_USER_LABEL, _canonical(signed.payload))
+    sign = signer or _user_signer or _default_user_signer
+    pubkey, sig = sign(_canonical(signed.payload))
     return SignedMandate(
         kind=signed.kind, payload=signed.payload, public_key=signed.public_key,
         signature=signed.signature,
-        user_public_key=witness.sub_public_key_hex(_USER_LABEL),
-        user_signature=sig)
+        user_public_key=str(pubkey), user_signature=str(sig))
 
 
 def user_signature_ok(signed: SignedMandate) -> bool:
-    """The USER co-signature validates over the payload against our own user
-    co-signing subkey (fail closed; no unknown-key acceptance). A changed field
-    invalidates it exactly as it does the system signature — so a co-signature
-    cannot be lifted onto a different transaction."""
+    """The USER co-signature validates over the payload, and its key is TRUSTED:
+    if a pin is configured (OLYMPUS_MANDATE_USER_PUBKEY) the co-signing key must
+    be one of the pinned keys — so a vault-forged co-signature under any other
+    key is refused; with no pin, the vault-local user subkey is accepted
+    (backward compatible). Any field edit invalidates the signature, so a
+    co-signature can't be lifted onto a different transaction."""
     if not signed.user_signature:
         return False
-    try:
-        expected = witness.sub_public_key_hex(_USER_LABEL)
-    except witness.WitnessError:
+    pubkey = (signed.user_public_key or "").lower()
+    if not pubkey:
         return False
-    if (signed.user_public_key or "").lower() != expected.lower():
-        return False
-    return witness.verify_signature(expected, _canonical(signed.payload),
+    pins = user_pinned_pubkeys()
+    if pins:
+        if pubkey not in pins:
+            return False                # not the out-of-band-expected user key
+    else:
+        try:
+            if pubkey != witness.sub_public_key_hex(_USER_LABEL).lower():
+                return False            # default trust: only the vault subkey
+        except witness.WitnessError:
+            return False
+    return witness.verify_signature(pubkey, _canonical(signed.payload),
                                     signed.user_signature)
 
 
