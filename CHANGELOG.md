@@ -15,6 +15,25 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Tree search as a live browser planner (`webplan`)
+
+Best-first tree search stops being a library the code *could* call and becomes a
+live planner over the governed browser harness. New `olympus/webplan.py` plans a
+read-only path from a starting page toward a goal — navigating (a reversible GET
++ back) and perceiving, scoring each page, backtracking — and **never** auto-taks
+a side-effectful step (click/type/submit): those are withheld and handed to the
+approval spine via `treesearch.to_approvals`.
+
+- Pure, injected core (`explore(start, navigate=, perceive=, score=)`) so it is
+  fully testable with fakes; `plan_with_browser` adapts a live `browser.Browser`
+  using only read-only verbs (`open`, `read`, `_eval` for title/same-origin
+  links). It never clicks or types.
+- Bounded by `treesearch.SearchCaps` (nodes / tokens / wall-clock / depth), so a
+  runaway crawl is structurally impossible; a dead link drops that branch.
+- Tests prove it finds the goal page read-only, withholds every side-effectful
+  step for approval, and — via a fake Browser mirroring the real API — that the
+  planner never invokes `click`.
+
 ### Added — Phase 3 evolution governance (structured logs, diffs, gate inventory)
 
 ACE and the sleep-time loop are the self-evolution layer, so their behaviour is
