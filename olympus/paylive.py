@@ -158,8 +158,8 @@ def _live_daily_spent(recs: list, day: str) -> int:
 # --- the live executor -------------------------------------------------------
 
 def execute_live(signed_cart, intent, *, capability=None,
-                 processor: payrail.Processor, user: str, nonce: str,
-                 now: float | None = None,
+                 processor: payrail.Processor, user: str | None = None,
+                 nonce: str, now: float | None = None,
                  revoked=None) -> "payrail.ChargeResult":
     """The one live-charge path, normally reached via `payrail.charge`. Fail
     closed at every step; every attempt — including a refused one — is a
@@ -174,6 +174,19 @@ def execute_live(signed_cart, intent, *, capability=None,
     could matter. Nothing in this repository can make this function move money.
     """
     now = time.time() if now is None else now
+
+    # 0a. Ledger namespace = the MANDATE's authorizing user, never the
+    # caller's choice (idempotency and daily caps must not be namespaceable).
+    mandate_user = str(getattr(signed_cart, "payload", {}).get("user", ""))
+    if not mandate_user:
+        raise payrail.PaymentError(
+            "mandate has no user to key the payment ledger on")
+    if user is None:
+        user = mandate_user
+    elif user != mandate_user:
+        raise payrail.PaymentError(
+            f"caller user {user!r} does not match the mandate's authorizing "
+            f"user {mandate_user!r}")
 
     # 0. Audit first, fail closed: for real money, an attempt that cannot be
     # signed into the ledger is refused outright (critical=True propagates).

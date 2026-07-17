@@ -341,7 +341,14 @@ def co_sign(signed: SignedMandate, *, signer=None) -> SignedMandate:
     if not isinstance(signed, SignedMandate):
         raise MandateError("not a signed mandate")
     sign = signer or _user_signer or _default_user_signer
-    pubkey, sig = sign(_canonical(signed.payload))
+    canonical = _canonical(signed.payload)
+    pubkey, sig = sign(canonical)
+    # Verify what the signer returned BEFORE trusting it — a broken or hostile
+    # external co-signer fails loudly here, attributably, not as a confusing
+    # verification failure later.
+    if not witness.verify_signature(str(pubkey), canonical, str(sig)):
+        raise MandateError(
+            "user co-signer returned an invalid signature for this payload")
     return SignedMandate(
         kind=signed.kind, payload=signed.payload, public_key=signed.public_key,
         signature=signed.signature,
@@ -393,6 +400,11 @@ def capability_ok(signed: SignedMandate, capability, *,
         return False
     if str((capability.get("payload") or {}).get("jti", "")) != jti:
         return False        # the presented token is not the one bound
+    # The token must have been granted to the SAME user the mandate authorizes —
+    # a capability issued to one subject can never back another user's payment.
+    if str((capability.get("payload") or {}).get("subject", "")) != \
+            str(signed.payload.get("user", "")):
+        return False
     from . import identity
     v = identity.verify_grant(capability, requested_scope=PAYMENT_SCOPE,
                               requested_risk=FINANCIAL_LEGAL, now=now,
@@ -419,13 +431,16 @@ def transaction_scope(signed: SignedMandate) -> dict:
             "risk_class": FINANCIAL_LEGAL, "auto_executable": False}
 
 
-def verify(signed: SignedMandate, *, intent: IntentMandate | None = None,
+def verify(signed: SignedMandate, *,
+           intent: "IntentMandate | SignedMandate | None" = None,
            now: float | None = None, require_cosignature: bool = False,
            seen_nonces: set[str] | None = None) -> VerifyResult:
     """Full verification. Always: valid signature, not expired, fresh nonce. For
-    a cart: an `intent` must be supplied and the cart must be contained within
-    it. With `require_cosignature=True` the USER co-signature must also validate
-    (a system-only mandate is refused, fail closed). `seen_nonces` (if given) is
+    a cart: an `intent` must be supplied — either a plain IntentMandate or a
+    SIGNED intent (whose signature is then verified, binding the containment
+    terms cryptographically) — and the cart must be contained within it. With
+    `require_cosignature=True` the USER co-signature must also validate (a
+    system-only mandate is refused, fail closed). `seen_nonces` (if given) is
     consulted for replay AND updated on success."""
     now = time.time() if now is None else now
     reasons: list[str] = []
@@ -451,11 +466,12 @@ def verify(signed: SignedMandate, *, intent: IntentMandate | None = None,
         if not bool(payload.get("trusted")):
             reasons.append("intent not trusted-constructed")
     elif signed.kind == "cart":
-        if intent is None:
-            reasons.append("cart verification requires its intent")
+        im, err = resolve_intent(intent)
+        if im is None:
+            reasons.append(err)
         else:
             c = _cart_from_payload(payload)
-            reasons.extend(contained(c, intent, now=now).reasons)
+            reasons.extend(contained(c, im, now=now).reasons)
     else:
         reasons.append(f"unknown mandate kind {signed.kind!r}")
 
@@ -477,6 +493,35 @@ def _cart_from_payload(payload: dict) -> CartMandate:
         capability_jti=str(payload.get("capability_jti", "")))
 
 
+def _intent_from_payload(payload: dict) -> IntentMandate:
+    return IntentMandate(
+        id=str(payload.get("id", "")), user=str(payload.get("user", "")),
+        amount_cap=int(payload.get("amount_cap", 0) or 0),
+        currency=str(payload.get("currency", "")),
+        merchants=tuple(str(m) for m in (payload.get("merchants") or [])),
+        item=str(payload.get("item", "")), nonce=str(payload.get("nonce", "")),
+        expires_at=float(payload.get("expires_at", 0) or 0),
+        trusted=bool(payload.get("trusted")),
+        created_at=float(payload.get("created_at", 0) or 0))
+
+
+def resolve_intent(intent) -> tuple[IntentMandate | None, str]:
+    """Accept the intent as either a plain `IntentMandate` (backward compatible
+    — the caller vouches for it) or a **SignedMandate of kind 'intent'**, whose
+    signature is verified here so the containment TERMS (cap, merchants,
+    expiry, trusted flag) are cryptographically bound, not a caller-constructed
+    object. Returns (intent, "") or (None, reason)."""
+    if isinstance(intent, IntentMandate):
+        return intent, ""
+    if isinstance(intent, SignedMandate):
+        if intent.kind != "intent":
+            return None, "signed intent has the wrong kind"
+        if not signature_ok(intent):
+            return None, "intent signature invalid"
+        return _intent_from_payload(intent.payload), ""
+    return None, "cart verification requires its intent"
+
+
 # --- autonomy-dial mapping + ABC governance ------------------------------
 
 def risk_class() -> str:
@@ -490,7 +535,8 @@ def can_auto_execute() -> bool:
     return False
 
 
-def enforce_commit(signed_cart: SignedMandate, intent: IntentMandate, *,
+def enforce_commit(signed_cart: SignedMandate,
+                   intent: "IntentMandate | SignedMandate", *,
                    capability=None, require_cosignature: bool = True,
                    now: float | None = None,
                    seen_nonces: set[str] | None = None,
@@ -499,11 +545,21 @@ def enforce_commit(signed_cart: SignedMandate, intent: IntentMandate, *,
     could ever back a payment. Builds the verification context and raises
     `behavioral_contracts.ContractViolation` (recovery=block) on any failure.
 
-    Milestone 4 makes the gate two-party and capability-bound: it requires a
-    valid USER co-signature and — when the cart is capability-bound — that its
-    scope is within the presented token. Returns the VerifyResult on success."""
+    The gate is two-party and capability-bound: it requires a valid USER
+    co-signature and — when the cart is capability-bound — that its scope is
+    within the presented token (which must be granted to the SAME user).
+    `intent` may be the plain IntentMandate or the SIGNED intent; a signed one
+    has its signature verified, so the containment terms are cryptographically
+    bound rather than caller-vouched. NOTE: `require_cosignature=False` only
+    relaxes the `verify()` reason list — the contract's governance clause
+    demands a valid co-signature regardless, so this gate can NEVER be waived
+    into accepting a system-only mandate. Returns the VerifyResult on success."""
     from . import behavioral_contracts as abc
-    res = verify(signed_cart, intent=intent, now=now,
+    now = time.time() if now is None else now
+    im, err = resolve_intent(intent)
+    if im is None:
+        raise MandateError(f"invalid intent for commit: {err}")
+    res = verify(signed_cart, intent=im, now=now,
                  require_cosignature=require_cosignature, seen_nonces=None)
     fresh = True
     nonce = str(signed_cart.payload.get("nonce", ""))
@@ -518,11 +574,14 @@ def enforce_commit(signed_cart: SignedMandate, intent: IntentMandate, *,
     ctx = {
         "mandate_signature_valid": signature_ok(signed_cart),
         "mandate_cosignature_valid": user_signature_ok(signed_cart),
-        "mandate_not_expired": "expired" not in " ".join(res.reasons),
+        # Computed directly from the (resolved) intent's expiry — never by
+        # string-matching reason text, which a merchant named e.g.
+        # "expired-shop" could false-trip.
+        "mandate_not_expired": now < float(im.expires_at),
         "mandate_fresh_nonce": fresh,
         "mandate_intent_contained": contained(
-            _cart_from_payload(signed_cart.payload), intent, now=now).ok,
-        "mandate_trusted_construction": bool(intent.trusted),
+            _cart_from_payload(signed_cart.payload), im, now=now).ok,
+        "mandate_trusted_construction": bool(im.trusted),
         "mandate_capability_within_bound": cap_ok,
     }
     abc.enforce("payment.mandate", ctx)

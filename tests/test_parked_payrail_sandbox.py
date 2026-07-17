@@ -27,8 +27,8 @@ def _isolate(tmp_path, monkeypatch):
     mandate.reset_user_signer()
 
 
-def _intent(cap=15000):
-    return mandate.create_intent("alice", amount_cap=cap, currency="USD",
+def _intent(cap=15000, user="alice"):
+    return mandate.create_intent(user, amount_cap=cap, currency="USD",
                                  merchants=["acme"], item="widgets",
                                  trusted=True, now=1000.0)
 
@@ -99,7 +99,7 @@ def test_over_per_transaction_cap_is_blocked(monkeypatch):
 @_signing
 def test_daily_cap_is_enforced(monkeypatch):
     monkeypatch.setenv("OLYMPUS_PAYMENT_MAX_DAILY", "12000")
-    im = _intent(cap=100000)
+    im = _intent(cap=100000, user="bob")
     r1 = payrail.charge(_mandate(im, amount=8000), im, user="bob", now=1000.0)
     assert r1.ok
     r2 = payrail.charge(_mandate(im, amount=8000), im, user="bob", now=1000.0)
@@ -116,7 +116,7 @@ def test_env_can_only_lower_the_hard_ceiling(monkeypatch):
 
 @_signing
 def test_retry_same_mandate_is_idempotent():
-    im = _intent()
+    im = _intent(user="carol")
     m = _mandate(im, amount=10000)
     r1 = payrail.charge(m, im, user="carol", now=1000.0)
     r2 = payrail.charge(m, im, user="carol", now=1000.0)      # retry, same nonce
@@ -183,7 +183,7 @@ def test_source_has_no_real_money_network_call():
 
 @_signing
 def test_duplicate_attempt_is_recorded():
-    im = _intent()
+    im = _intent(user="erin")
     m = _mandate(im, amount=10000)
     payrail.charge(m, im, user="erin", now=1000.0)
     payrail.charge(m, im, user="erin", now=1000.0)          # duplicate
@@ -193,7 +193,7 @@ def test_duplicate_attempt_is_recorded():
 
 @_signing
 def test_tampered_payment_ledger_fails_closed(monkeypatch):
-    im = _intent()
+    im = _intent(user="frank")
     payrail.charge(_mandate(im, amount=10000), im, user="frank", now=1000.0)
     # Forge the ledger: bump a recorded amount (as an attacker with FS access).
     import json
@@ -212,7 +212,7 @@ def test_tampered_payment_ledger_fails_closed(monkeypatch):
 @_signing
 def test_blocked_and_refused_attempts_are_recorded(monkeypatch):
     monkeypatch.setenv("OLYMPUS_PAYMENT_MAX_TX", "1")
-    im = _intent(cap=100000)
+    im = _intent(cap=100000, user="dave")
     payrail.charge(_mandate(im, amount=10000), im, user="dave", now=1000.0)  # blocked
     recs = payrail.attempts("dave")
     assert recs and recs[-1]["state"]["event"] == "blocked"

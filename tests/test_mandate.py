@@ -221,3 +221,57 @@ def test_mandate_key_is_separate_from_root():
     # and stable
     assert witness.sub_public_key_hex("mandate/v1") == \
         witness.sub_public_key_hex("mandate/v1")
+
+
+# --- H1 hardening: capability subject binding, signed intent, co-sign verify -
+
+def test_capability_bound_to_a_different_user_is_refused():
+    """A capability granted to one subject cannot back another user's mandate,
+    even if the jti matches and the token is otherwise valid."""
+    from olympus import identity
+    im = _intent()                                   # user "u"
+    tok = identity.grant("someone-else", scopes=[mandate.PAYMENT_SCOPE],
+                         risk_ceiling=mandate.FINANCIAL_LEGAL, ttl=3600.0)
+    cm = mandate.create_cart(im, amount=12000, currency="USD", merchant="acme",
+                             items=["Shoe X"], capability_jti=tok["payload"]["jti"],
+                             now=1000.0)
+    signed = mandate.co_sign(mandate.sign(cm))
+    assert mandate.capability_ok(signed, tok, now=1000.0) is False
+
+
+def test_capability_bound_to_same_user_is_accepted():
+    from olympus import identity
+    im = _intent()                                   # user "u"
+    tok = identity.grant("u", scopes=[mandate.PAYMENT_SCOPE],
+                         risk_ceiling=mandate.FINANCIAL_LEGAL, ttl=3600.0)
+    cm = mandate.create_cart(im, amount=12000, currency="USD", merchant="acme",
+                             items=["Shoe X"], capability_jti=tok["payload"]["jti"],
+                             now=1000.0)
+    signed = mandate.co_sign(mandate.sign(cm))
+    assert mandate.capability_ok(signed, tok, now=1000.0) is True
+
+
+def test_signed_intent_is_verified_for_containment():
+    """A cart can be verified against a SIGNED intent; a forged/edited signed
+    intent (tampered cap) is rejected rather than trusted."""
+    im = _intent(cap=15000)
+    signed_intent = mandate.sign(im)
+    cm = mandate.co_sign(mandate.sign(_cart(im, amount=12000)))
+    assert mandate.verify(cm, intent=signed_intent, now=1000.0,
+                          require_cosignature=True).ok
+    # Tamper the signed intent's cap upward — signature no longer valid.
+    forged = mandate.SignedMandate.from_dict({
+        **signed_intent.to_dict(),
+        "payload": {**signed_intent.payload, "amount_cap": 1}})
+    r = mandate.verify(cm, intent=forged, now=1000.0)
+    assert not r.ok and "intent signature invalid" in r.reasons
+
+
+def test_co_sign_rejects_a_bad_external_signer():
+    """co_sign verifies the signer's output before trusting it — a signer that
+    returns a garbage signature fails loudly, attributably."""
+    im = _intent()
+    signed = mandate.sign(_cart(im))
+    bad = lambda canonical: ("00" * 32, "de" * 32)   # valid-looking hex, wrong sig
+    with pytest.raises(mandate.MandateError):
+        mandate.co_sign(signed, signer=bad)

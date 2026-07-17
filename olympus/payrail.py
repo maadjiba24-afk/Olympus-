@@ -180,14 +180,21 @@ def _record(user: str, event: str, payload: dict, *, critical: bool = False) -> 
 
 def charge(signed_cart: "mandate.SignedMandate", intent: "mandate.IntentMandate",
            *, capability=None, processor: Processor | None = None,
-           user: str = "shared", require_cosignature: bool = True,
+           user: str | None = None, require_cosignature: bool = True,
            now: float | None = None, revoked=None) -> ChargeResult:
     """Attempt a charge for a fully-verified mandate — SANDBOX by default.
 
     Order: idempotency check → LIVE guard (fail closed) → mandate gate
     (`enforce_commit`, raises on any defect) → hard caps → processor → signed
     ledger record. Returns a ChargeResult; a blocked/refused attempt is recorded
-    too, so nothing about a payment attempt is silent."""
+    too, so nothing about a payment attempt is silent.
+
+    The payment ledger — the source of truth for idempotency and the daily
+    tally — is keyed by the MANDATE's authorizing user, never by a
+    caller-chosen name: a mismatched `user` argument is refused outright, so
+    the same mandate can never be replayed under a second namespace and daily
+    spend can never be split across namespaces. Omit `user` to use the
+    mandate's user."""
     now = time.time() if now is None else now
     processor = processor or SandboxProcessor()
     mode = "live" if getattr(processor, "live", False) else "sandbox"
@@ -196,6 +203,17 @@ def charge(signed_cart: "mandate.SignedMandate", intent: "mandate.IntentMandate"
         signed_cart, mandate.SignedMandate) else ""
     if not key:
         raise PaymentError("mandate has no nonce to key idempotency on")
+    mandate_user = str(signed_cart.payload.get("user", ""))
+    if not mandate_user:
+        raise PaymentError("mandate has no user to key the payment ledger on")
+    if user is None:
+        user = mandate_user
+    elif user != mandate_user:
+        raise PaymentError(
+            f"caller user {user!r} does not match the mandate's authorizing "
+            f"user {mandate_user!r} — the payment ledger is keyed by the "
+            "mandate user (idempotency and daily caps cannot be namespaced "
+            "away)")
 
     # Source of truth = the SIGNED payment ledger. Fail closed on a tampered one.
     recs = _verified_records(user)
