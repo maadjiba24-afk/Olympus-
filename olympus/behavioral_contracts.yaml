@@ -185,3 +185,20 @@ contracts:
       - scaffold_compiles
       - scaffold_benchmark_passed
     governance: []
+
+  computer_use:
+    operation: computer.use
+    recovery: block
+    description: >-
+      An OS-level computer-use actuation (screenshot / mouse / keyboard /
+      launch): the capability must be enabled and an actuator installed, a
+      launched command must not be cmdguard-DENY, and typed text must carry no
+      exfiltrated secret — else the actuation is refused, fail closed.
+    preconditions:
+      - computer_use_enabled
+      - computer_actuator_ready
+    invariants:
+      - command_not_denied
+      - no_secret_typed
+    governance:
+      - computer_action_approved
