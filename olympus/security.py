@@ -112,13 +112,37 @@ _INJECTION_MARKERS = re.compile(
 )
 
 
+# Invisible / direction-control characters: zero-width spaces and joiners,
+# bidi overrides and isolates, soft hyphen, BOM. Legit prose never needs them;
+# inside memory they are an evasion vector (a zero-width char in the middle of
+# "ignore previous instructions" defeats a regex scan) and a display attack
+# (bidi overrides make text render differently than it compares).
+_INVISIBLE_RE = re.compile(
+    "[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]")
+
+# Credential-shaped content that must never persist into lessons/skills/facts:
+# a poisoned page that gets an agent to "remember" a key turns memory into an
+# exfiltration channel readable in every future session.
+_PRIVKEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
+                     r"\.[A-Za-z0-9_-]{10,}\b")
+
+
 def sanitize_for_memory(text: str) -> str:
     """Defang injection-shaped lines before content becomes a lesson/skill.
 
-    Conservative: we annotate suspicious lines rather than delete content, so a
-    human/Aletheia can still see what happened, but the imperative loses its
-    standing as a clean instruction in future recall.
+    Order matters: invisible characters are stripped FIRST so they can't split
+    an injection phrase past the marker scan; then credential-shaped strings
+    are redacted (memory must never become an exfiltration channel); then
+    suspicious imperative lines are annotated. Conservative throughout — we
+    annotate/redact rather than delete, so a human/Aletheia can still see what
+    happened, but the content loses its standing in future recall.
     """
+    text = _INVISIBLE_RE.sub("", text or "")
+    text = _PRIVKEY_RE.sub("[redacted private key]", text)
+    text = _JWT_RE.sub("[redacted token]", text)
+    text = _KEYISH.sub("[redacted key]", text)
+    text = _URL_CRED.sub("https://[redacted-credentials]@", text)
     out = []
     for line in text.splitlines():
         if _INJECTION_MARKERS.search(line):

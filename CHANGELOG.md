@@ -43,6 +43,22 @@ carries a migration note here.
   (telegram/discord/slack/signal/email/webhook) with its configured status and
   lets you set up several in one pass.
 
+### Security — teardown-loop hardening
+
+- **Memory-write hardening** — `sanitize_for_memory` now strips invisible/
+  bidi Unicode BEFORE the injection scan (closing the zero-width-split
+  evasion) and redacts credential-shaped content (API keys, private-key
+  blocks, JWTs, creds-in-URLs) so memory can never become an exfiltration
+  channel.
+- **Command-gate reinforcements** — wrapper-proof raw rule catches
+  `bash -c "rm -rf /"` (payload hidden inside quotes), plus `find / -delete`
+  and `shred` against block devices. Documented fail-closed trade-off: raw
+  rules see inside quotes, so *printing* a catastrophic command is denied too.
+- **Search-index maintenance** — the index opens in WAL mode; the heartbeat
+  maintenance sweep prunes orphaned conversations (file deleted) and, only if
+  `OLYMPUS_SEARCH_RETAIN_DAYS` > 0, aged ones — then VACUUMs. Conversation
+  files are never touched; the index stays rebuildable via `reindex()`.
+
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
 > through `0.24.0` sections below were prepared and dated but **never tagged or
