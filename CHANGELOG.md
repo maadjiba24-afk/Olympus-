@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — A2A agent card + governed task client (`a2a`)
+
+Agent-to-agent interoperability, built over what Olympus already exposes, with no
+DID/verifiable-credential stack and no new dependency.
+
+- **Agent card.** `a2a.card()` builds an A2A-style discovery document
+  (`/.well-known/agent.json`-shaped) from the live capabilities manifest —
+  identity, protocol, capability counts, specialist skills, endpoints. Pure.
+  Printable via **`olympus a2a card`**.
+- **Inbound task mapping.** `parse_task` normalizes an A2A task envelope
+  (message/parts or `{input}`) into a `Task`; `to_internal_request` wraps the
+  peer's message in the **untrusted-data envelope** before it can reach the
+  council — capability separation at the boundary. `task_response` builds the
+  result envelope.
+- **Governed outbound client.** `call_agent(url, message)` and `fetch_card(url)`
+  are opt-in (`OLYMPUS_A2A`, off by default) and every outbound URL passes the
+  existing SSRF/egress guard first (loopback, link-local, cloud-metadata,
+  sovereign allowlist all refused). A peer's reply is returned **wrapped as
+  untrusted** — a remote agent's output is never trusted as instructions. The
+  fetcher is injectable (stdlib `urllib` by default) so the core is testable
+  without a network, and responses are size-capped.
+- Tests (13): card from manifest + live, inbound parse/validation, peer message
+  and reply both enveloped, outbound disabled-by-default, SSRF-blocked, HTTP-error
+  tolerant.
+
 ### Added — E-mem episodic memory reconstruction (`emem`)
 
 An on-demand, **non-destructive** alternative to lossy summarization (arXiv

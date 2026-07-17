@@ -40,8 +40,9 @@
     ]
   },
   "commands": {
-    "count": 105,
+    "count": 106,
     "names": [
+      "a2a",
       "actions",
       "add-mcp",
       "agenda",
