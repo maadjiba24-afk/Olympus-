@@ -113,6 +113,31 @@ Live payments, card/VC issuance, on-device user-key custody, merchant/PSP networ
 calls, refunds/chargebacks, multi-party settlement, and any autonomy level at
 which a payment could run without an explicit human co-signature.
 
+## On-device user-key custody (parked-item hardening, implemented)
+
+ADR 0002 as first shipped kept the user co-signing key **vault-local** — a
+documented residual: one vault compromise forges both signatures. That residual
+is now closed by *custody*, not by a new signature:
+
+- **Pluggable co-signer.** `mandate.co_sign(signed, signer=...)` /
+  `mandate.register_user_signer(fn)` delegate co-signing to an external key
+  holder. `mandate.command_signer([...])` shells the canonical payload to an
+  external process/device (HSM, phone, hardware token) that holds the key and
+  returns only `{public_key, signature}` — **the agent host never handles the
+  user private key.** The vault-local signer remains the default (backward
+  compatible) for solo/dev use.
+- **Out-of-band pin.** `OLYMPUS_MANDATE_USER_PUBKEY` (comma-separated) binds
+  verification to the expected user public key(s). With a pin set,
+  `user_signature_ok` refuses a co-signature minted under **any** other key —
+  including one forged by a compromised vault under the `mandate-user/v1`
+  subkey. So a vault compromise no longer forges the user half unless the
+  attacker **also** holds the pinned, externally-custodied user key.
+
+This turns the "two-party" property from an assumption into an enforced control
+whenever an operator configures external custody + a pin. It introduces **no**
+payment rail and changes **no** autonomy path — a mandate still never
+auto-executes.
+
 ## Precondition / HALT
 
 Per the milestone rule, **implementation does not begin until this ADR and the
