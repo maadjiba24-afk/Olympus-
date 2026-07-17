@@ -1,4 +1,4 @@
-# ADR 0002 — AP2 mandate user-facing flow (no rail)
+# ADR 0004 — AP2 mandate user-facing flow (no rail)
 
 - **Status:** Accepted — implemented (action-spine flow; still no live rail)
 - **Date:** 2026-07-17

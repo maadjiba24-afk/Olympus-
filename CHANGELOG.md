@@ -190,7 +190,7 @@ at its wired chokepoint.
 ### Added — AP2 mandate user-facing flow (`authorize_payment`, no rail)
 
 The mandate primitives (ADR 0001) gain a real authorization flow on the action
-spine (ADR 0002) — still with **no live payment rail; no money moves.**
+spine (ADR 0004) — still with **no live payment rail; no money moves.**
 
 - **New `authorize_payment` action** (`FINANCIAL_LEGAL`, scope
   `payment.authorize`). Because it is `FINANCIAL_LEGAL`, `_min_level_to_auto` = 99

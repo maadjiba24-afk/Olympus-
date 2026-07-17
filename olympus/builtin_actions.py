@@ -214,7 +214,7 @@ def _edit_file_execute(p: dict) -> dict:
         bool(p.get("replace_all")))
 
 
-# --- AP2 payment-mandate authorization (ADR 0002) — NO live rail ----------
+# --- AP2 payment-mandate authorization (ADR 0004) — NO live rail ----------
 
 def _fmt_money(minor, currency: str) -> str:
     try:

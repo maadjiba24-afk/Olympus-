@@ -1,6 +1,6 @@
 """Append-only record of issued AP2 payment mandates + consumed nonces.
 
-This is the persistence behind the user-facing mandate flow (ADR 0002). It
+This is the persistence behind the user-facing mandate flow (ADR 0004). It
 stores the signed, verified authorization artifacts and the set of nonces that
 have been consumed, so a mandate can never be recorded twice (replay defense).
 It records authorizations only — **no money moves here**.
