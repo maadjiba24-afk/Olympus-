@@ -249,6 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
                           help="FAIL (exit non-zero) if the artifact was signed "
                                "under the public default seed, regardless of "
                                "internal validity (the inverse of --allow-dev)")
+    p_otel = sub.add_parser(
+        "otel-export",
+        help="export a recorded run's decision-log STRUCTURE (no content) to the "
+             "configured OTLP endpoint (OLYMPUS_OTLP_ENDPOINT) — one trace per "
+             "run, one span per decision")
+    p_otel.add_argument("run", metavar="RUN_ID",
+                        help="the recorded run id to export")
     sub.add_parser(
         "verify-anchor",
         help="compare every locally signed log head (checkpoints, speculation, "
@@ -1038,6 +1045,22 @@ def main(argv: list[str] | None = None) -> int:
               "  # or add it to olympus/witness_pubkey.txt (one key per line).\n"
               "  # systemd LoadCredential / Docker-secrets recipes: "
               "docs/SIGNING.md")
+    elif args.command == "otel-export":
+        from . import otel, trace
+        if not otel.enabled():
+            print("[otel-export] OTLP is off — set OLYMPUS_OTLP_ENDPOINT "
+                  "(e.g. http://localhost:4318) to a collector's OTLP/HTTP "
+                  "receiver first.")
+            return 1
+        run = trace.load_run(args.run)
+        if not run:
+            print(f"[otel-export] no recorded run {args.run!r}.")
+            return 1
+        ok = otel.export_run(run)
+        print(f"[otel-export] {'exported' if ok else 'FAILED to export'} run "
+              f"{args.run} ({len(run.get('decisions') or [])} decision span(s)) "
+              f"to {otel.endpoint()}.")
+        return 0 if ok else 1
     elif args.command == "verify-anchor":
         from . import anchor
         rep = anchor.verify_anchor()
