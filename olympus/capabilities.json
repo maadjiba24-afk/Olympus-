@@ -40,7 +40,7 @@
     ]
   },
   "commands": {
-    "count": 104,
+    "count": 105,
     "names": [
       "actions",
       "add-mcp",
@@ -110,6 +110,7 @@
       "restrict",
       "revoke",
       "routing-stats",
+      "scaffold-evolve",
       "scan",
       "schedule",
       "scores",

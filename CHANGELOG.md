@@ -15,6 +15,34 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Governed scaffold evolution (propose-only; ADR 0003)
+
+Adopts the Darwin Gödel Machine idea (measured, archived, benchmark-gated
+self-improvement of code) with the dangerous part removed. **There is no code
+path that writes to Olympus's own source tree, and no `apply()` function** — the
+running agent never modifies itself.
+
+- **New `olympus/scaffold_evolve.py`.** `propose(module, generate, benchmark=)`
+  generates a candidate patch, benchmarks it in isolation (must at least
+  `compile()`; a pluggable benchmark may run more, written only to a throwaway
+  temp path), archives the variant, and returns it. It never touches the real
+  module (proven by a test that the source is byte-identical after a propose).
+- **Non-security modules only, fail-closed.** A curated `_EVOLVABLE` allowlist
+  plus an independent `_SECURITY_MODULES` denylist; `propose` on a security
+  module (`security`, `cmdguard`, `actions`, `behavioral_contracts`, `mandate`,
+  `witness`, `vault`, `egress`, …) raises. Unknown ⇒ not evolvable.
+- **Governed by ABC.** The new `scaffold.propose` contract (target evolvable +
+  candidate compiles + benchmark passed) decides whether a candidate is a
+  *surfaceable* proposal; a failing candidate is archived as a failed variant but
+  never surfaced.
+- **Surfaced as diffs; nothing auto-applies; off by default.**
+  `olympus scaffold-evolve proposals` renders each valid proposal as a unified
+  diff for a human to apply by hand; `OLYMPUS_SCAFFOLD_EVOLVE` gates whether the
+  engine runs at all. Every proposal also lands in the structured evolution log.
+- Tests (17) are the safety proof: security modules unreachable, no apply
+  path exists, the real tree is never modified, failing/empty/non-compiling
+  candidates are excluded, and the contract blocks each bad input.
+
 ### Added — Extended ABC contract surface (memory commit, skill import, goal completion)
 
 Three more governance chokepoints become formal Agent Behavioral Contracts,

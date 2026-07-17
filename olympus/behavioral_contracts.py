@@ -423,6 +423,29 @@ def _goal_evidence_present(ctx: dict) -> tuple[bool, str]:
     return True, ""
 
 
+@predicate("scaffold_target_evolvable")
+def _scaffold_target_evolvable(ctx: dict) -> tuple[bool, str]:
+    """A scaffold-evolution proposal may target only a non-security, allowlisted
+    module — never a security guard. Fail closed."""
+    return (bool(ctx.get("target_evolvable")),
+            "" if ctx.get("target_evolvable")
+            else "target module is security-critical or not allowlisted")
+
+
+@predicate("scaffold_compiles")
+def _scaffold_compiles(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("candidate_compiles")),
+            "" if ctx.get("candidate_compiles")
+            else "candidate does not compile")
+
+
+@predicate("scaffold_benchmark_passed")
+def _scaffold_benchmark_passed(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("benchmark_passed")),
+            "" if ctx.get("benchmark_passed")
+            else "candidate failed the benchmark gate")
+
+
 @predicate("no_action_tool_in_ingesting_run")
 def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     """Capability separation: a run that ingests untrusted external content must
@@ -579,6 +602,17 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
                        "completion without evidence is refused.",
         "preconditions": [],
         "invariants": ["goal_evidence_present"],
+        "governance": [],
+    },
+    "scaffold_propose": {
+        "operation": "scaffold.propose",
+        "recovery": "block",
+        "description": "A propose-only scaffold-evolution candidate before it is "
+                       "archived as a proposal: targets a non-security, "
+                       "allowlisted module, compiles, and passed the benchmark. "
+                       "There is no auto-apply path.",
+        "preconditions": ["scaffold_target_evolvable"],
+        "invariants": ["scaffold_compiles", "scaffold_benchmark_passed"],
         "governance": [],
     },
 }

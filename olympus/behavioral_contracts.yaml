@@ -171,3 +171,17 @@ contracts:
     invariants:
       - goal_evidence_present
     governance: []
+
+  scaffold_propose:
+    operation: scaffold.propose
+    recovery: block
+    description: >-
+      A propose-only scaffold-evolution candidate before it is archived as a
+      proposal: targets a non-security, allowlisted module, compiles, and passed
+      the benchmark. There is no auto-apply path.
+    preconditions:
+      - scaffold_target_evolvable
+    invariants:
+      - scaffold_compiles
+      - scaffold_benchmark_passed
+    governance: []

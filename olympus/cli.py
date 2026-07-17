@@ -376,6 +376,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    p_scaf = sub.add_parser("scaffold-evolve",
+                            help="propose-only scaffold evolution: status, or "
+                                 "list archived proposals as diffs (never "
+                                 "auto-applies)")
+    p_scaf.add_argument("action", nargs="?", default="status",
+                        choices=["status", "proposals"])
+    p_scaf.add_argument("module", nargs="?", default=None,
+                        help="filter proposals by module")
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1289,6 +1297,23 @@ def main(argv: list[str] | None = None) -> int:
             st["enabled"] = _cfg.sleeptime_enabled()
             st["autoapply"] = _cfg.sleeptime_autoapply()
             print(_json.dumps(st, indent=2))
+    elif args.command == "scaffold-evolve":
+        from . import scaffold_evolve as _se
+        import json as _json
+        if args.action == "proposals":
+            props = _se.proposals(args.module, valid_only=True)
+            if not props:
+                print("No surfaceable proposals.")
+            for p in props:
+                print(_se.render_diff(p))
+                print()
+        else:
+            print(_json.dumps({
+                "enabled": _se.enabled(),
+                "archived": len(_se.archive()),
+                "surfaceable": len(_se.proposals(valid_only=True)),
+                "note": "propose-only; nothing auto-applies (ADR 0003)"},
+                indent=2))
     elif args.command == "mcp-serve":
         from . import mcp_server
         try:
