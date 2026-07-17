@@ -46,7 +46,7 @@
     ]
   },
   "commands": {
-    "count": 108,
+    "count": 109,
     "names": [
       "a2a",
       "actions",
@@ -118,6 +118,7 @@
       "restore",
       "restrict",
       "revoke",
+      "rl-scaffold",
       "routing-stats",
       "scaffold-evolve",
       "scan",

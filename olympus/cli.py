@@ -383,6 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    p_rl = sub.add_parser(
+        "rl-scaffold",
+        help="OFFLINE preference-data + reward-model scaffold from the logged "
+             "human-labeled outcomes — read-only dataset report; --fit fits the "
+             "transparent linear reward model (gated on real data), --export "
+             "signs it. NOT a live training loop; changes no behavior.")
+    p_rl.add_argument("--fit", action="store_true",
+                      help="fit the offline reward model (needs OLYMPUS_RL_SCAFFOLD)")
+    p_rl.add_argument("--export", action="store_true",
+                      help="record a witness-signed export (needs OLYMPUS_RL_SCAFFOLD)")
     sub.add_parser("liveeval", help="sampled online quality-eval of recent runs "
                                     "(rule-based scorers; opt-in, read-only)")
     p_a2a = sub.add_parser("a2a", help="agent-to-agent interop: print this "
@@ -1294,6 +1304,20 @@ def main(argv: list[str] | None = None) -> int:
         print(rendered)
         _mem.save("reports", "sleeptime supervision cycle", rendered)
         return 0 if report["grade"] == "CLEAN" else 1
+    elif args.command == "rl-scaffold":
+        from . import rlscaffold
+        try:
+            if args.export:
+                report = rlscaffold.export(fit=True)
+            else:
+                report = rlscaffold.collect_report(fit=args.fit)
+        except rlscaffold.RLScaffoldError as err:
+            print(err)
+            return 1
+        print(rlscaffold.render_report(report))
+        if args.export:
+            print(f"\nsigned export: {report.get('snapshot_hash', '')[:16]}")
+        return 0
     elif args.command == "sleeptime":
         from . import sleeptime, config as _cfg
         import json as _json
