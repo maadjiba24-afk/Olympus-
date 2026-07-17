@@ -488,3 +488,44 @@ we've built — pattern by pattern:
 34. ✅ Model picker type-to-filter when the discovered list is large (>20).
 35. ✅ Gateway step: one checklist showing all six channels with
     configured/not-configured status; several in one pass.
+
+---
+
+## Screens 45–49 — Memory module (the four layers, MEMORY.md/USER.md, real file)
+
+### What Hermes did
+- **Four stacking layers**: L1 built-in markdown (`MEMORY.md` + `USER.md`,
+  plain files, always load), L2 **FTS5 session search**, L3 external provider
+  plugin (Honcho/Mem0 — "semantic + identity modeling"), L4 **Obsidian vault
+  as a skill** (filesystem KB the agent writes, the user curates in a GUI).
+  "These aren't alternatives. They stack."
+- **Two files with explicit caps**: MEMORY.md (projects/environment/decisions/
+  lessons, cap 2,200 chars ≈ **800 tokens**, `memory_char_limit`); USER.md
+  (role/preferences/communication style, cap ≈ 500 tokens). Tagline: "Plain
+  text. Editable. Auditable. Portable."
+- A real MEMORY.md: §-separated prose notes (paper-summary priorities, current
+  project, environment pins, workflow prefs, eval metrics) — readable, but
+  no provenance, no confidence, no gating: whatever got written is truth.
+
+### Where Olympus stands — layer by layer (our strongest ground)
+| Hermes layer | Olympus |
+|---|---|
+| L1 two markdown files | ✓✓ richer engine: gated durable memory (confidence + decay + approve/reject), profile card, companion model, playbooks, relgraph — and the identity half is split correctly: **soul.md** (how to behave, owner-authored) vs learned facts (gated). **△ gap: not as transparent** — no one-glance plain-text projection of "what Olympus believes about me" |
+| Token caps | ✓ exact parity — MEMORY_RETRIEVAL_BUDGET_TOKENS defaults to **800**, same number Hermes chose; ours is configurable |
+| L2 FTS5 session search | ✓✓ identical tech, shipped (search.py + search_sessions) |
+| L3 external provider (Honcho/Mem0) | **DIFFERENTIATE** — semantic recall (embeddings fallback) + identity modeling (companion) are native and local; no memory-SaaS dependency, nothing personal leaves the machine |
+| L4 Obsidian vault | **△ small real idea** — a plain-markdown KB dir the user curates in any GUI is cheap and genuinely useful |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| "Plain text. Editable. Auditable. Portable." transparency | **ADOPT the transparency, keep the governance** | `olympus memory card` — render everything believed about you as one markdown page: profile, durable facts **with confidence + provenance**, companion summary, active playbooks. Hermes shows you a file; we show you a file *with receipts*. Edits still flow through approve/forget (auditable), never raw file writes (ungated memory = injectable memory). |
+| Obsidian vault (L4) | **ADAPT — small** | `OLYMPUS_VAULT_DIR`: mirror lessons/notes/reports as dated plain-markdown files into a directory the user opens in Obsidian/any editor. Write-through mirror, not a second source of truth — the gated store stays canonical. |
+| External memory provider (L3) | **SKIP** | Native semantic + companion covers it with zero SaaS surface. |
+| No-provenance prose notes (their real MEMORY.md) | **counter-example** | Validates our gating: their file happily stores anything as fact. Note in VISION only. |
+
+### Build backlog additions (batched, NOT building yet)
+36. **`olympus memory card`** — one-page markdown projection of all per-user
+    memory with confidence + provenance; `--user` for gateway users.
+37. **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons/notes/
+    reports as dated markdown for GUI curation (Obsidian-compatible = just files).
