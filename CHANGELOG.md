@@ -15,6 +15,32 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — E-mem episodic memory reconstruction (`emem`)
+
+An on-demand, **non-destructive** alternative to lossy summarization (arXiv
+2601.21714), added *alongside* the existing retrieval + compaction paths (not in
+place of them). Given a query, E-mem gathers the raw fragments related to it —
+event-log entries, typed memories with their provenance, and conversation
+snippets from the FTS5 index — and reconstructs a **chronologically-ordered,
+provenance-tagged episode**. Fragments are selected and time-ordered, never
+summarized or rewritten, so the reconstruction stays faithful and attributable.
+
+- **New `olympus/emem.py`.** The reconstruction core (`reconstruct(query,
+  fragments, now=)`) is pure and deterministic — relevance-score, budget-select,
+  then assemble in time order — with `now` injected so it is replay-safe and
+  testable without I/O. A thin best-effort `gather` reads the existing
+  `usermem` + `search` substrate.
+- **Non-destructive + attributable** — fragment text is byte-identical to the
+  source (proven by test); `Episode.provenance()` attributes every fragment to
+  its origin.
+- **Enveloped** — `Episode.render()` leaves the module only through
+  `security.wrap_untrusted(source="episodic-memory")`, since a reconstruction may
+  include conversation snippets that originated from tools/web.
+- **Opt-in** — `OLYMPUS_EMEM` off by default; `context_block` is a no-op unless
+  enabled. Bounded by fragment-count and char-budget caps.
+- Tests (14): relevance floor, chronological ordering, verbatim (non-destructive)
+  text, determinism, provenance, envelope, and the caps.
+
 ### Added — DyTopo dynamic topology routing (`dytopo`)
 
 An optional, runtime-induced collaboration graph for the specialist council
