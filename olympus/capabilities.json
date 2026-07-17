@@ -1,7 +1,8 @@
 {
   "actions": {
-    "count": 16,
+    "count": 17,
     "names": [
+      "authorize_payment",
       "browser_operate",
       "browser_operate_financial",
       "browser_operate_irreversible",

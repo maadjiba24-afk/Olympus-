@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — AP2 mandate user-facing flow (`authorize_payment`, no rail)
+
+The mandate primitives (ADR 0001) gain a real authorization flow on the action
+spine (ADR 0002) — still with **no live payment rail; no money moves.**
+
+- **New `authorize_payment` action** (`FINANCIAL_LEGAL`, scope
+  `payment.authorize`). Because it is `FINANCIAL_LEGAL`, `_min_level_to_auto` = 99
+  — it can **never** auto-run at any autonomy level; it is always prepared and
+  waits for explicit human approval. The preview is a plain-language summary of
+  the exact bounded authorization (amount, cap, allowed merchants, item, expiry)
+  and states outright that it moves no money.
+- **The approval IS the signing event.** On approval, `execute` builds the
+  intent + cart, applies the system signature AND the **user co-signature**
+  (`mandate.co_sign`), runs `mandate.enforce_commit` — the `payment.mandate` ABC
+  contract (intent-containment, non-expiry, fresh nonce, valid signature, user
+  co-signature, capability-within-bound; recovery `block`) — and only then
+  records the verified mandate. A spoofed / over-cap / wrong-merchant / expired /
+  replayed / un-co-signed mandate fails the action closed and records nothing.
+- **New `olympus/mandate_store.py`** — an append-only, bounded per-user record of
+  issued mandates plus the set of consumed nonces (replay defense); every record
+  carries `moved_money: false`.
+- Tests (9): never auto-runs even at L4; approval signs + verifies + records with
+  no money moved; over-cap and wrong-merchant carts fail closed and record
+  nothing; the store is append-only, replay-safe, and corrupt-blob tolerant.
+
 ### Added — Tree search as a live browser planner (`webplan`)
 
 Best-first tree search stops being a library the code *could* call and becomes a
