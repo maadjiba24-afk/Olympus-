@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Live-trace online evaluation (`liveeval`)
+
+Sampled quality scoring of recent runs, so a regression surfaces on its own
+instead of after a complaint. Live-eval reads a bounded sample of recent signed
+decision logs (`trace.py`) and scores each with cheap rule-based scorers.
+
+- **New `olympus/liveeval.py`.** Pure scorers over a run dict — no contract
+  violation, no errored decision, verified (a review decision that passed; direct
+  answers pass vacuously), within latency, within cost. `score_run` / `evaluate`
+  are deterministic; sampling is a fixed stride (the most recent N, capped). An
+  LLM-judge scorer is pluggable and off unless supplied; a scorer that raises is
+  skipped, never fatal.
+- **Regression signal.** `run()` records the pass-rate to feature-evolution
+  telemetry (OK ≥ 0.9, else DEGRADED) and the structured evolution log; a drop
+  is visible on the `evolve` board and the admin panel (`report()`).
+- **Opt-in, bounded, read-only.** `OLYMPUS_LIVE_EVAL` off by default; wired into
+  the heartbeat + hibernation cadence (only wakes when enabled) and surfaced via
+  **`olympus liveeval`**. It reads traces, never modifies them; the sample size
+  is hard-capped and only a week of daily trace files is scanned.
+- Tests (15): each scorer, aggregation, deterministic/bounded/most-recent
+  sampling, corrupt-line-tolerant reader, disabled-by-default, and the regression
+  report.
+
 ### Added — A2A agent card + governed task client (`a2a`)
 
 Agent-to-agent interoperability, built over what Olympus already exposes, with no

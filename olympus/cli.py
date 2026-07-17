@@ -376,6 +376,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    sub.add_parser("liveeval", help="sampled online quality-eval of recent runs "
+                                    "(rule-based scorers; opt-in, read-only)")
     p_a2a = sub.add_parser("a2a", help="agent-to-agent interop: print this "
                                        "instance's A2A agent card, or call "
                                        "another agent (egress-gated, opt-in)")
@@ -1304,6 +1306,10 @@ def main(argv: list[str] | None = None) -> int:
             st["enabled"] = _cfg.sleeptime_enabled()
             st["autoapply"] = _cfg.sleeptime_autoapply()
             print(_json.dumps(st, indent=2))
+    elif args.command == "liveeval":
+        from . import liveeval
+        import json as _json
+        print(_json.dumps(liveeval.report(), indent=2))
     elif args.command == "a2a":
         from . import a2a
         import json as _json

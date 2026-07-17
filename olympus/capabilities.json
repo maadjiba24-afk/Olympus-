@@ -40,7 +40,7 @@
     ]
   },
   "commands": {
-    "count": 106,
+    "count": 107,
     "names": [
       "a2a",
       "actions",
@@ -90,6 +90,7 @@
       "learn",
       "learned",
       "limit",
+      "liveeval",
       "mcp-serve",
       "memory",
       "moa",

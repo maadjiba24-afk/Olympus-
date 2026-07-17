@@ -143,6 +143,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Sleep-time reflection failed:\n" + traceback.format_exc())
         state["sleeptime"] = now
 
+    if config.live_eval_enabled() and _due(state, "live_eval",
+                                           config.LIVE_EVAL_EVERY, now):
+        try:
+            from . import liveeval
+            log += liveeval.run()
+        except Exception:
+            log.append("Live-eval failed:\n" + traceback.format_exc())
+        state["live_eval"] = now
+
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
         try:
