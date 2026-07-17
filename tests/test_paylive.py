@@ -50,8 +50,8 @@ class _FakeLiveAdapter(paylive.LiveAdapter):
         return self.records[charge_id]
 
 
-def _intent(cap=15000):
-    return mandate.create_intent("alice", amount_cap=cap, currency="USD",
+def _intent(cap=15000, user="alice"):
+    return mandate.create_intent(user, amount_cap=cap, currency="USD",
                                  merchants=["acme"], item="widgets",
                                  trusted=True, now=1000.0)
 
@@ -159,8 +159,8 @@ def test_live_attempt_is_recorded_before_anything(monkeypatch):
     _cutover(monkeypatch, m)
     smuggled = _FakeLiveAdapter()
     with pytest.raises(payrail.PaymentLiveError):
-        payrail.charge(m, im, processor=smuggled, user="aud", now=1000.0)
-    events = [s["state"]["event"] for s in payrail.attempts("aud")]
+        payrail.charge(m, im, processor=smuggled, user="alice", now=1000.0)
+    events = [s["state"]["event"] for s in payrail.attempts("alice")]
     assert "live-attempt" in events and "refused" in events
 
 
@@ -204,7 +204,7 @@ def test_live_caps_are_lower_and_fail_closed(monkeypatch):
 
 @_signing
 def test_live_daily_cap_tallies_only_live_charges(monkeypatch):
-    im = _intent(cap=100000)
+    im = _intent(cap=100000, user="bob")
     m1 = _mandate(im, amount=9000)
     adapter = _cutover(monkeypatch, m1)
     assert payrail.charge(m1, im, processor=adapter, user="bob", now=1000.0).ok
@@ -224,7 +224,7 @@ def test_env_can_only_lower_live_ceilings(monkeypatch):
 
 @_signing
 def test_live_charges_are_idempotent(monkeypatch):
-    im = _intent()
+    im = _intent(user="carol")
     m = _mandate(im, amount=5000)
     adapter = _cutover(monkeypatch, m)
     r1 = payrail.charge(m, im, processor=adapter, user="carol", now=1000.0)
@@ -236,7 +236,7 @@ def test_live_charges_are_idempotent(monkeypatch):
 
 @_signing
 def test_adapter_error_is_refused_and_recorded(monkeypatch):
-    im = _intent()
+    im = _intent(user="dave")
     m = _mandate(im, amount=5000)
     adapter = _cutover(monkeypatch, m)
     adapter.charge = lambda **kw: (_ for _ in ()).throw(RuntimeError("wire down"))
@@ -283,7 +283,7 @@ def test_reconcile_unavailable_when_inert():
 
 @_signing
 def test_reconcile_matches_ledger_to_adapter(monkeypatch):
-    im = _intent()
+    im = _intent(user="erin")
     m = _mandate(im, amount=5000)
     adapter = _cutover(monkeypatch, m)
     payrail.charge(m, im, processor=adapter, user="erin", now=1000.0)
@@ -317,7 +317,7 @@ def test_direct_execute_live_cannot_double_charge(monkeypatch):
     """execute_live trusts nothing from its caller: even a DIRECT call that
     bypasses payrail.charge re-derives the signed ledger and dedupes the
     nonce — a replayed mandate returns the prior charge, never a second one."""
-    im = _intent()
+    im = _intent(user="gina")
     m = _mandate(im, amount=5000)
     adapter = _cutover(monkeypatch, m)
     r1 = payrail.charge(m, im, processor=adapter, user="gina", now=1000.0)
@@ -331,7 +331,7 @@ def test_direct_execute_live_cannot_double_charge(monkeypatch):
 @_signing
 def test_reconcile_refuses_a_tampered_ledger(monkeypatch):
     import json
-    im = _intent()
+    im = _intent(user="hank")
     m = _mandate(im, amount=5000)
     adapter = _cutover(monkeypatch, m)
     payrail.charge(m, im, processor=adapter, user="hank", now=1000.0)
@@ -346,7 +346,31 @@ def test_reconcile_refuses_a_tampered_ledger(monkeypatch):
 @_signing
 def test_sandbox_path_is_unchanged(monkeypatch):
     # The delegation must not disturb the sandbox rail.
-    im = _intent()
+    im = _intent(user="fred")
     m = _mandate(im, amount=5000)
     res = payrail.charge(m, im, user="fred", now=1000.0)
     assert res.ok and res.mode == "sandbox" and res.charge_id.startswith("sbx_")
+
+
+# --- H1 hardening: ledger namespace is bound to the mandate user -------------
+
+@_signing
+def test_ledger_namespace_bound_to_mandate_user_live(monkeypatch):
+    # A caller cannot key the LIVE ledger under a name other than the mandate's
+    # authorizing user — so idempotency and daily caps can't be namespaced away.
+    im = _intent(user="ivy")
+    m = _mandate(im, amount=5000)
+    adapter = _cutover(monkeypatch, m)
+    with pytest.raises(payrail.PaymentError):
+        payrail.charge(m, im, processor=adapter, user="not-ivy", now=1000.0)
+    assert adapter.calls == []
+
+
+@_signing
+def test_ledger_namespace_defaults_to_mandate_user(monkeypatch):
+    # Omitting `user` keys the ledger by the mandate user (not "shared").
+    im = _intent(user="jo")
+    m = _mandate(im, amount=5000)
+    adapter = _cutover(monkeypatch, m)
+    res = payrail.charge(m, im, processor=adapter, now=1000.0)
+    assert res.ok and payrail.attempts("jo") and not payrail.attempts("shared")
