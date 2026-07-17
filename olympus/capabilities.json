@@ -1,6 +1,6 @@
 {
   "actions": {
-    "count": 17,
+    "count": 23,
     "names": [
       "authorize_payment",
       "browser_operate",
@@ -8,6 +8,12 @@
       "browser_operate_irreversible",
       "calendar_create",
       "call_webhook",
+      "computer_click",
+      "computer_key",
+      "computer_launch",
+      "computer_move",
+      "computer_screenshot",
+      "computer_type",
       "edit_file",
       "email_egress_held",
       "gmail_archive",

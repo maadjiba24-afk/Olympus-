@@ -459,6 +459,46 @@ def _no_action_tool_in_ingesting_run(ctx: dict) -> tuple[bool, str]:
     return True, ""
 
 
+@predicate("computer_use_enabled")
+def _computer_use_enabled(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("computer_use_enabled")),
+            "" if ctx.get("computer_use_enabled")
+            else "computer use is disabled (OLYMPUS_COMPUTER_USE unset)")
+
+
+@predicate("computer_actuator_ready")
+def _computer_actuator_ready(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("computer_actuator_ready")),
+            "" if ctx.get("computer_actuator_ready")
+            else "no computer-use actuator installed (OS control disabled)")
+
+
+@predicate("computer_action_approved")
+def _computer_action_approved(ctx: dict) -> tuple[bool, str]:
+    """OS computer use is irreversible — it must carry human-approval evidence
+    at the actuation chokepoint, not merely by caller convention. Only the
+    approval-spine executor (post-approval) sets this. Fail closed."""
+    return (bool(ctx.get("computer_action_approved")),
+            "" if ctx.get("computer_action_approved")
+            else "computer-use actuation without an approval (human-in-the-loop "
+                 "required for irreversible OS control)")
+
+
+@predicate("no_secret_typed")
+def _no_secret_typed(ctx: dict) -> tuple[bool, str]:
+    """Refuse to TYPE a held secret at the OS level — a computer-use `type`
+    action must not exfiltrate a credential onto the screen/keyboard buffer.
+    Absent text is permissive."""
+    text = ctx.get("typed_text")
+    if not text:
+        return True, ""
+    from . import security
+    reason = security.secret_exfil_reason(str(text))
+    if reason:
+        return False, f"refusing to type a secret: {reason}"
+    return True, ""
+
+
 # --- contract model -------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -614,6 +654,18 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "preconditions": ["scaffold_target_evolvable"],
         "invariants": ["scaffold_compiles", "scaffold_benchmark_passed"],
         "governance": [],
+    },
+    "computer_use": {
+        "operation": "computer.use",
+        "recovery": "block",
+        "description": "An OS-level computer-use actuation (screenshot / mouse / "
+                       "keyboard / launch): the capability must be enabled and an "
+                       "actuator installed, a launched command must not be "
+                       "cmdguard-DENY, and typed text must carry no exfiltrated "
+                       "secret — else the actuation is refused, fail closed.",
+        "preconditions": ["computer_use_enabled", "computer_actuator_ready"],
+        "invariants": ["command_not_denied", "no_secret_typed"],
+        "governance": ["computer_action_approved"],
     },
 }
 
