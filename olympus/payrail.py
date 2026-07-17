@@ -19,10 +19,11 @@ What this DOES:
 
 What this DELIBERATELY does NOT do:
   * move real money. The default processor is a deterministic FAKE (no network).
-  * implement any LIVE processor. `charge()` fails closed on any processor
-    marked live unless `OLYMPUS_PAYMENT_LIVE` is set — and no live processor
-    exists in this module. Wiring real money is a separate, human-gated step
-    (see the HALT on the milestone). The agent never sets `OLYMPUS_PAYMENT_LIVE`.
+  * ship a working LIVE processor. The live branch of `charge()` delegates to
+    `paylive.execute_live` — a fully-built path that ships INERT: it fails
+    closed unless an operator BOTH sets `OLYMPUS_PAYMENT_LIVE` and registers a
+    real adapter, and neither exists in this repository (see ADR 0003). The
+    agent never sets `OLYMPUS_PAYMENT_LIVE` and never registers an adapter.
 """
 
 from __future__ import annotations
@@ -214,18 +215,15 @@ def charge(signed_cart: "mandate.SignedMandate", intent: "mandate.IntentMandate"
                             amount=int(prior.get("amount", 0) or 0),
                             currency=str(prior.get("currency", "")), mode=mode)
 
-    # 2. LIVE guard — fail closed. This module has no live processor; a live
-    # attempt is refused whether or not the operator flag is set (no live path
-    # exists here — that is the post-HALT step).
+    # 2. LIVE branch — delegates to the gated live executor (`paylive`), which
+    # ships INERT: with no operator flag and no registered adapter (this
+    # repository contains neither) it raises PaymentLiveError before anything
+    # else could matter. Sandbox — the default — continues below.
     if mode == "live":
-        _record(user, "refused-live", {"nonce": key})
-        if not live_enabled():
-            raise PaymentLiveError(
-                "live payments are disabled (OLYMPUS_PAYMENT_LIVE unset) — "
-                "sandbox-only build")
-        raise PaymentLiveError(
-            "no live payment processor is implemented in this build — live "
-            "money is a separate, human-gated step (see ADR / milestone HALT)")
+        from . import paylive
+        return paylive.execute_live(
+            signed_cart, intent, capability=capability, processor=processor,
+            user=user, nonce=key, now=now, revoked=revoked)
 
     # 3. Mandate gate — raises on any defect (signature, co-signature,
     # capability, containment, freshness).

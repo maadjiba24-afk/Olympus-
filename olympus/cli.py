@@ -383,6 +383,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    p_paylive = sub.add_parser(
+        "pay-live",
+        help="LIVE payment cutover status: which human acts are still missing "
+             "(operator flag, registered adapter, pinned user key) and the "
+             "live caps — the go-live checklist derived from the code gates. "
+             "Read-only; --reconcile audits signed live charges against the "
+             "adapter. This build ships INERT (no adapter, switch off).")
+    p_paylive.add_argument("--reconcile", metavar="USER", default=None,
+                           help="reconcile a user's signed live charges "
+                                "against the adapter's records")
     p_rl = sub.add_parser(
         "rl-scaffold",
         help="OFFLINE preference-data + reward-model scaffold from the logged "
@@ -1304,6 +1314,15 @@ def main(argv: list[str] | None = None) -> int:
         print(rendered)
         _mem.save("reports", "sleeptime supervision cycle", rendered)
         return 0 if report["grade"] == "CLEAN" else 1
+    elif args.command == "pay-live":
+        from . import paylive
+        import json as _json
+        if args.reconcile:
+            print(_json.dumps(paylive.reconcile(args.reconcile), indent=2))
+            return 0
+        st = paylive.cutover_status()
+        print(_json.dumps(st, indent=2))
+        return 0 if st["ready"] else 1
     elif args.command == "rl-scaffold":
         from . import rlscaffold
         try:

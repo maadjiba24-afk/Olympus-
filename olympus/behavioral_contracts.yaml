@@ -202,3 +202,21 @@ contracts:
       - no_secret_typed
     governance:
       - computer_action_approved
+
+  payment_live:
+    operation: payment.live
+    recovery: block
+    description: >-
+      A LIVE (real-money) charge at the last gate before the adapter: the
+      operator flag is on, a registered live adapter is installed, the user
+      co-signing key is pinned out-of-band, co-signature enforcement was not
+      waived, and the amount is within the live caps — else refused, fail
+      closed. This build ships inert: no adapter exists in the repository.
+    preconditions:
+      - payment_live_enabled
+      - payment_live_adapter_ready
+      - payment_user_key_pinned
+    invariants:
+      - payment_live_within_caps
+    governance:
+      - payment_live_cosign_enforced
