@@ -77,6 +77,7 @@ def _flags() -> dict:
         "contracts": config.contracts_enabled(),
         "behavioral_contracts": _abc_enabled(),
         "sleeptime": config.sleeptime_enabled(),
+        "live_eval": config.live_eval_enabled(),
         "require_byok": config.require_byok(),
         "require_login": _require_login(),
         "prompt_cache_ttl": config.prompt_cache_ttl(),

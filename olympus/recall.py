@@ -177,6 +177,19 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
                                      "provenance": [event_id]})
         return "held_conflict"
 
+    # Behavioral contract at the commit chokepoint (defense in depth): a
+    # high-sensitivity or un-sanitized candidate is HELD for approval, never
+    # auto-committed — formalizing the policy the checks above already apply.
+    from . import behavioral_contracts as _abc
+    try:
+        _abc.enforce("memory.commit",
+                     {"sensitivity": cand.get("sensitivity", "normal"),
+                      "content": cand.get("content", "")})
+    except _abc.ContractViolation:
+        usermem.add_candidate(user, {**cand, "reason": "held_by_contract",
+                                     "provenance": [event_id]})
+        return "held_sensitive"
+
     mem = usermem.add_memory(user, type=cand["type"], content=cand["content"],
                              confidence=cand["confidence"], key=cand.get("key"),
                              importance=cand.get("importance", 0.5),

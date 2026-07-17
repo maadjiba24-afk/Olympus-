@@ -1,7 +1,8 @@
 {
   "actions": {
-    "count": 16,
+    "count": 17,
     "names": [
+      "authorize_payment",
       "browser_operate",
       "browser_operate_financial",
       "browser_operate_irreversible",
@@ -39,8 +40,9 @@
     ]
   },
   "commands": {
-    "count": 105,
+    "count": 108,
     "names": [
+      "a2a",
       "actions",
       "add-mcp",
       "agenda",
@@ -88,6 +90,7 @@
       "learn",
       "learned",
       "limit",
+      "liveeval",
       "mcp-serve",
       "memory",
       "moa",
@@ -110,6 +113,7 @@
       "restrict",
       "revoke",
       "routing-stats",
+      "scaffold-evolve",
       "scan",
       "schedule",
       "scores",

@@ -15,6 +15,222 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
+
+The eight new components (webplan, AP2 flow, extended ABC surface,
+scaffold_evolve, dytopo, emem, a2a, liveeval) are hardened and made
+self-evolving within guardrails.
+
+- **Self-evolution.** Five new non-security `evolve` tunables, each with a hard
+  `[lo,hi]` clamp: `treesearch.max_nodes` [10,100], `dytopo.max_out_degree`
+  [1,3], `emem.max_fragments` [4,12], `liveeval.sample_size` [10,50],
+  `scaffold_evolve.max_archive` [50,200]. Each feature reads its tunable at the
+  I/O boundary via `evolve.current(...)` (fail-safe fallback to the default) and
+  records OK/DEGRADED outcomes + structured `log_event` telemetry. **No
+  security-relevant knob is tunable** — the side-effect halt, egress guard,
+  allowlist/denylist, signing, and approval gates stay hard constants outside the
+  tuner; a drift test asserts the D-component tunables are never `tighten_only`.
+- **Hardening.** The five new modules are pyflakes-clean with no bare `except`,
+  silent catch (only best-effort telemetry is swallowed), TODO, or debug print.
+  Adversarial tests added at every external boundary: A2A oversize-reply capping
+  + malformed peer reply/card, scaffold refusal of every security module,
+  tree-search runaway (node cap) + webplan never-applies-a-side-effect,
+  dytopo dense-input-stays-sparse, and liveeval malformed/huge-trace tolerance.
+- **Poisoned-feedback gate.** A poisoned emem fragment (injection text) is kept
+  verbatim but leaves the module **only inside the untrusted envelope** — never a
+  clean instruction; and a liveeval regression signal is proven to carry only
+  numeric aggregates + run ids, never injection-laden trace content.
+
+### Added — Live-trace online evaluation (`liveeval`)
+
+Sampled quality scoring of recent runs, so a regression surfaces on its own
+instead of after a complaint. Live-eval reads a bounded sample of recent signed
+decision logs (`trace.py`) and scores each with cheap rule-based scorers.
+
+- **New `olympus/liveeval.py`.** Pure scorers over a run dict — no contract
+  violation, no errored decision, verified (a review decision that passed; direct
+  answers pass vacuously), within latency, within cost. `score_run` / `evaluate`
+  are deterministic; sampling is a fixed stride (the most recent N, capped). An
+  LLM-judge scorer is pluggable and off unless supplied; a scorer that raises is
+  skipped, never fatal.
+- **Regression signal.** `run()` records the pass-rate to feature-evolution
+  telemetry (OK ≥ 0.9, else DEGRADED) and the structured evolution log; a drop
+  is visible on the `evolve` board and the admin panel (`report()`).
+- **Opt-in, bounded, read-only.** `OLYMPUS_LIVE_EVAL` off by default; wired into
+  the heartbeat + hibernation cadence (only wakes when enabled) and surfaced via
+  **`olympus liveeval`**. It reads traces, never modifies them; the sample size
+  is hard-capped and only a week of daily trace files is scanned.
+- Tests (15): each scorer, aggregation, deterministic/bounded/most-recent
+  sampling, corrupt-line-tolerant reader, disabled-by-default, and the regression
+  report.
+
+### Added — A2A agent card + governed task client (`a2a`)
+
+Agent-to-agent interoperability, built over what Olympus already exposes, with no
+DID/verifiable-credential stack and no new dependency.
+
+- **Agent card.** `a2a.card()` builds an A2A-style discovery document
+  (`/.well-known/agent.json`-shaped) from the live capabilities manifest —
+  identity, protocol, capability counts, specialist skills, endpoints. Pure.
+  Printable via **`olympus a2a card`**.
+- **Inbound task mapping.** `parse_task` normalizes an A2A task envelope
+  (message/parts or `{input}`) into a `Task`; `to_internal_request` wraps the
+  peer's message in the **untrusted-data envelope** before it can reach the
+  council — capability separation at the boundary. `task_response` builds the
+  result envelope.
+- **Governed outbound client.** `call_agent(url, message)` and `fetch_card(url)`
+  are opt-in (`OLYMPUS_A2A`, off by default) and every outbound URL passes the
+  existing SSRF/egress guard first (loopback, link-local, cloud-metadata,
+  sovereign allowlist all refused). A peer's reply is returned **wrapped as
+  untrusted** — a remote agent's output is never trusted as instructions. The
+  fetcher is injectable (stdlib `urllib` by default) so the core is testable
+  without a network, and responses are size-capped.
+- Tests (13): card from manifest + live, inbound parse/validation, peer message
+  and reply both enveloped, outbound disabled-by-default, SSRF-blocked, HTTP-error
+  tolerant.
+
+### Added — E-mem episodic memory reconstruction (`emem`)
+
+An on-demand, **non-destructive** alternative to lossy summarization (arXiv
+2601.21714), added *alongside* the existing retrieval + compaction paths (not in
+place of them). Given a query, E-mem gathers the raw fragments related to it —
+event-log entries, typed memories with their provenance, and conversation
+snippets from the FTS5 index — and reconstructs a **chronologically-ordered,
+provenance-tagged episode**. Fragments are selected and time-ordered, never
+summarized or rewritten, so the reconstruction stays faithful and attributable.
+
+- **New `olympus/emem.py`.** The reconstruction core (`reconstruct(query,
+  fragments, now=)`) is pure and deterministic — relevance-score, budget-select,
+  then assemble in time order — with `now` injected so it is replay-safe and
+  testable without I/O. A thin best-effort `gather` reads the existing
+  `usermem` + `search` substrate.
+- **Non-destructive + attributable** — fragment text is byte-identical to the
+  source (proven by test); `Episode.provenance()` attributes every fragment to
+  its origin.
+- **Enveloped** — `Episode.render()` leaves the module only through
+  `security.wrap_untrusted(source="episodic-memory")`, since a reconstruction may
+  include conversation snippets that originated from tools/web.
+- **Opt-in** — `OLYMPUS_EMEM` off by default; `context_block` is a no-op unless
+  enabled. Bounded by fragment-count and char-budget caps.
+- Tests (14): relevance floor, chronological ordering, verbatim (non-destructive)
+  text, determinism, provenance, envelope, and the caps.
+
+### Added — DyTopo dynamic topology routing (`dytopo`)
+
+An optional, runtime-induced collaboration graph for the specialist council
+(arXiv 2602.06039). Each specialist emits a natural-language `query` (what it
+needs) and `offer` (what it provides); `dytopo.induce` matches those descriptors
+to wire a **sparse directed graph** — so the specialists that genuinely have
+something for each other are connected for a bounded number of consultation
+rounds, instead of a fixed or all-to-all shape.
+
+- **New `olympus/dytopo.py`** — the pure core: descriptor matching → graph →
+  rounds. Deterministic (token-overlap similarity, stable tie-breaks — no
+  embeddings, clock, or rng), so the same descriptors always induce the same
+  topology (replay-safe).
+- **Bounded by construction** — hard caps on nodes, out-degree, total edges, and
+  rounds; a self-edge is never created and the induced graph is provably sparse.
+- **Opt-in** — `OLYMPUS_DYTOPO` is off by default; the fixed
+  Zeus→Athena→specialists→Aletheia pipeline stands unless an operator turns it
+  on. The existing per-specialist governance is unchanged (this only decides who
+  consults whom).
+- Tests (13): edges reflect query→offer matches, induction is order-independent
+  (deterministic), out-degree / node / edge / round caps hold, and threshold
+  filters weak edges.
+
+### Added — Governed scaffold evolution (propose-only; ADR 0003)
+
+Adopts the Darwin Gödel Machine idea (measured, archived, benchmark-gated
+self-improvement of code) with the dangerous part removed. **There is no code
+path that writes to Olympus's own source tree, and no `apply()` function** — the
+running agent never modifies itself.
+
+- **New `olympus/scaffold_evolve.py`.** `propose(module, generate, benchmark=)`
+  generates a candidate patch, benchmarks it in isolation (must at least
+  `compile()`; a pluggable benchmark may run more, written only to a throwaway
+  temp path), archives the variant, and returns it. It never touches the real
+  module (proven by a test that the source is byte-identical after a propose).
+- **Non-security modules only, fail-closed.** A curated `_EVOLVABLE` allowlist
+  plus an independent `_SECURITY_MODULES` denylist; `propose` on a security
+  module (`security`, `cmdguard`, `actions`, `behavioral_contracts`, `mandate`,
+  `witness`, `vault`, `egress`, …) raises. Unknown ⇒ not evolvable.
+- **Governed by ABC.** The new `scaffold.propose` contract (target evolvable +
+  candidate compiles + benchmark passed) decides whether a candidate is a
+  *surfaceable* proposal; a failing candidate is archived as a failed variant but
+  never surfaced.
+- **Surfaced as diffs; nothing auto-applies; off by default.**
+  `olympus scaffold-evolve proposals` renders each valid proposal as a unified
+  diff for a human to apply by hand; `OLYMPUS_SCAFFOLD_EVOLVE` gates whether the
+  engine runs at all. Every proposal also lands in the structured evolution log.
+- Tests (17) are the safety proof: security modules unreachable, no apply
+  path exists, the real tree is never modified, failing/empty/non-compiling
+  candidates are excluded, and the contract blocks each bad input.
+
+### Added — Extended ABC contract surface (memory commit, skill import, goal completion)
+
+Three more governance chokepoints become formal Agent Behavioral Contracts,
+binding each declarative rule to the existing enforcer as defense in depth.
+
+- **`memory.commit`** (recovery `hold`) — a durable memory auto-commit
+  (`recall._gate`) must be injection-sanitized (`memory_content_sanitized`) and
+  not high-sensitivity (`memory_not_sensitive_autocommit`); a violation **holds**
+  the candidate for the user instead of committing it.
+- **`skill.import`** (recovery `block`) — an imported skill must pass the
+  security scan (`skill_scan_clean`); `skillpack.import_file` now refuses through
+  the contract.
+- **`goal.complete`** (recovery `block`) — a standing goal may be marked done
+  only against concrete evidence at the confidence floor (`goal_evidence_present`);
+  an evidence-free "done" is refused at `goals.judge`.
+
+Predicates bind to the real enforcers (`security.looks_like_injection`, the skill
+scan, the goals evidence doctrine), the YAML mirror and embedded fallback stay in
+sync (drift-tested), and block-path tests prove each contract refuses a bad input
+at its wired chokepoint.
+
+### Added — AP2 mandate user-facing flow (`authorize_payment`, no rail)
+
+The mandate primitives (ADR 0001) gain a real authorization flow on the action
+spine (ADR 0004) — still with **no live payment rail; no money moves.**
+
+- **New `authorize_payment` action** (`FINANCIAL_LEGAL`, scope
+  `payment.authorize`). Because it is `FINANCIAL_LEGAL`, `_min_level_to_auto` = 99
+  — it can **never** auto-run at any autonomy level; it is always prepared and
+  waits for explicit human approval. The preview is a plain-language summary of
+  the exact bounded authorization (amount, cap, allowed merchants, item, expiry)
+  and states outright that it moves no money.
+- **The approval IS the signing event.** On approval, `execute` builds the
+  intent + cart, applies the system signature AND the **user co-signature**
+  (`mandate.co_sign`), runs `mandate.enforce_commit` — the `payment.mandate` ABC
+  contract (intent-containment, non-expiry, fresh nonce, valid signature, user
+  co-signature, capability-within-bound; recovery `block`) — and only then
+  records the verified mandate. A spoofed / over-cap / wrong-merchant / expired /
+  replayed / un-co-signed mandate fails the action closed and records nothing.
+- **New `olympus/mandate_store.py`** — an append-only, bounded per-user record of
+  issued mandates plus the set of consumed nonces (replay defense); every record
+  carries `moved_money: false`.
+- Tests (9): never auto-runs even at L4; approval signs + verifies + records with
+  no money moved; over-cap and wrong-merchant carts fail closed and record
+  nothing; the store is append-only, replay-safe, and corrupt-blob tolerant.
+
+### Added — Tree search as a live browser planner (`webplan`)
+
+Best-first tree search stops being a library the code *could* call and becomes a
+live planner over the governed browser harness. New `olympus/webplan.py` plans a
+read-only path from a starting page toward a goal — navigating (a reversible GET
++ back) and perceiving, scoring each page, backtracking — and **never** auto-taks
+a side-effectful step (click/type/submit): those are withheld and handed to the
+approval spine via `treesearch.to_approvals`.
+
+- Pure, injected core (`explore(start, navigate=, perceive=, score=)`) so it is
+  fully testable with fakes; `plan_with_browser` adapts a live `browser.Browser`
+  using only read-only verbs (`open`, `read`, `_eval` for title/same-origin
+  links). It never clicks or types.
+- Bounded by `treesearch.SearchCaps` (nodes / tokens / wall-clock / depth), so a
+  runaway crawl is structurally impossible; a dead link drops that branch.
+- Tests prove it finds the goal page read-only, withholds every side-effectful
+  step for approval, and — via a fake Browser mirroring the real API — that the
+  planner never invokes `click`.
+
 ### Added — Phase 3 evolution governance (structured logs, diffs, gate inventory)
 
 ACE and the sleep-time loop are the self-evolution layer, so their behaviour is

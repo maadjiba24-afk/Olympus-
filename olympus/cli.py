@@ -383,6 +383,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    sub.add_parser("liveeval", help="sampled online quality-eval of recent runs "
+                                    "(rule-based scorers; opt-in, read-only)")
+    p_a2a = sub.add_parser("a2a", help="agent-to-agent interop: print this "
+                                       "instance's A2A agent card, or call "
+                                       "another agent (egress-gated, opt-in)")
+    p_a2a.add_argument("action", nargs="?", default="card",
+                       choices=["card", "call"])
+    p_a2a.add_argument("url", nargs="?", default=None, help="peer task URL (call)")
+    p_a2a.add_argument("message", nargs="?", default=None, help="message (call)")
+    p_scaf = sub.add_parser("scaffold-evolve",
+                            help="propose-only scaffold evolution: status, or "
+                                 "list archived proposals as diffs (never "
+                                 "auto-applies)")
+    p_scaf.add_argument("action", nargs="?", default="status",
+                        choices=["status", "proposals"])
+    p_scaf.add_argument("module", nargs="?", default=None,
+                        help="filter proposals by module")
     sub.add_parser("mcp-serve", help="expose Olympus as an MCP server on "
                                      "stdio (for Claude Desktop, IDEs, ...)")
     p_skim = sub.add_parser("skill-import", help="import agentskills.io SKILL.md "
@@ -1312,6 +1329,40 @@ def main(argv: list[str] | None = None) -> int:
             st["enabled"] = _cfg.sleeptime_enabled()
             st["autoapply"] = _cfg.sleeptime_autoapply()
             print(_json.dumps(st, indent=2))
+    elif args.command == "liveeval":
+        from . import liveeval
+        import json as _json
+        print(_json.dumps(liveeval.report(), indent=2))
+    elif args.command == "a2a":
+        from . import a2a
+        import json as _json
+        if args.action == "call":
+            if not args.url or not args.message:
+                print("Usage: olympus a2a call <peer-task-url> <message>")
+            else:
+                try:
+                    print(a2a.call_agent(args.url, args.message))
+                except a2a.A2AError as err:
+                    print(f"Refused: {err}")
+        else:
+            print(_json.dumps(a2a.card(), indent=2))
+    elif args.command == "scaffold-evolve":
+        from . import scaffold_evolve as _se
+        import json as _json
+        if args.action == "proposals":
+            props = _se.proposals(args.module, valid_only=True)
+            if not props:
+                print("No surfaceable proposals.")
+            for p in props:
+                print(_se.render_diff(p))
+                print()
+        else:
+            print(_json.dumps({
+                "enabled": _se.enabled(),
+                "archived": len(_se.archive()),
+                "surfaceable": len(_se.proposals(valid_only=True)),
+                "note": "propose-only; nothing auto-applies (ADR 0003)"},
+                indent=2))
     elif args.command == "mcp-serve":
         from . import mcp_server
         try:

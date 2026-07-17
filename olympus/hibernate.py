@@ -41,6 +41,7 @@ def _cadences() -> dict[str, int]:
         "backup": config.BACKUP_EVERY,
         # Only wake for sleep-time refinement when the feature is enabled.
         "sleeptime": config.SLEEPTIME_EVERY if config.sleeptime_enabled() else 0,
+        "live_eval": config.LIVE_EVAL_EVERY if config.live_eval_enabled() else 0,
     }
     return {k: v for k, v in items.items() if v}
 

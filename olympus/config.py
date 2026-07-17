@@ -701,6 +701,16 @@ def sleeptime_enabled() -> bool:
         "1", "on", "true", "yes")
 
 
+# Live-trace online eval: sampled quality scoring of recent runs on a cadence.
+LIVE_EVAL_EVERY = int(os.environ.get("OLYMPUS_LIVE_EVAL_EVERY", str(6 * 3600)))
+
+
+def live_eval_enabled() -> bool:
+    """Whether sampled online evaluation of recent runs runs at all (default OFF)."""
+    return os.environ.get("OLYMPUS_LIVE_EVAL", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
 def sleeptime_autoapply() -> bool:
     """Whether a GRADUATED loop may auto-commit Aletheia-passed rewrites. Even
     True is inert until the loop has graduated (10 clean supervised cycles)."""
