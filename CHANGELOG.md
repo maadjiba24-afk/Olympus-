@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Extended ABC contract surface (memory commit, skill import, goal completion)
+
+Three more governance chokepoints become formal Agent Behavioral Contracts,
+binding each declarative rule to the existing enforcer as defense in depth.
+
+- **`memory.commit`** (recovery `hold`) — a durable memory auto-commit
+  (`recall._gate`) must be injection-sanitized (`memory_content_sanitized`) and
+  not high-sensitivity (`memory_not_sensitive_autocommit`); a violation **holds**
+  the candidate for the user instead of committing it.
+- **`skill.import`** (recovery `block`) — an imported skill must pass the
+  security scan (`skill_scan_clean`); `skillpack.import_file` now refuses through
+  the contract.
+- **`goal.complete`** (recovery `block`) — a standing goal may be marked done
+  only against concrete evidence at the confidence floor (`goal_evidence_present`);
+  an evidence-free "done" is refused at `goals.judge`.
+
+Predicates bind to the real enforcers (`security.looks_like_injection`, the skill
+scan, the goals evidence doctrine), the YAML mirror and embedded fallback stay in
+sync (drift-tested), and block-path tests prove each contract refuses a bad input
+at its wired chokepoint.
+
 ### Added — AP2 mandate user-facing flow (`authorize_payment`, no rail)
 
 The mandate primitives (ADR 0001) gain a real authorization flow on the action

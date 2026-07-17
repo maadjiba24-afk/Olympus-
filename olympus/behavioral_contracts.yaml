@@ -136,3 +136,38 @@ contracts:
       - reflection_within_budget
     invariants: []
     governance: []
+
+  memory_commit:
+    operation: memory.commit
+    recovery: hold
+    description: >-
+      A durable memory being auto-committed to the store: its content is
+      injection-sanitized and it is not high-sensitivity (those are held for the
+      user). Recovery HOLDs the candidate for approval instead of committing.
+    preconditions:
+      - memory_not_sensitive_autocommit
+    invariants:
+      - memory_content_sanitized
+    governance: []
+
+  skill_import:
+    operation: skill.import
+    recovery: block
+    description: >-
+      A skill imported into the library: it passed the security scan (injection
+      markers, embedded credentials) — refused, not sanitized, on a hit.
+    preconditions:
+      - skill_scan_clean
+    invariants: []
+    governance: []
+
+  goal_completion:
+    operation: goal.complete
+    recovery: block
+    description: >-
+      A standing goal marked done: only against concrete evidence at the
+      confidence floor — an assertion of completion without evidence is refused.
+    preconditions: []
+    invariants:
+      - goal_evidence_present
+    governance: []
