@@ -581,3 +581,42 @@ we've built — pattern by pattern:
 39. **Visible memory activity**: 🧠 progress lines when facts are gated in
     (progress-mode aware).
 40. **Soul scaffold enrichment**: Role / Current focus sections + wizard hint.
+
+---
+
+## Screens 55–59 — L2 session search in depth + L3 provider plugins intro
+
+### What Hermes did
+- **state.db** (SQLite, FTS5, **WAL mode**) indexes every CLI + gateway session.
+- `session_search` = full-text + **Gemini Flash summarization** of the hits
+  (compress inside the tool before returning). The agent calls it
+  **autonomously** when it suspects a prior conversation is relevant.
+- v0.11.0: state.db **auto-prunes + VACUUMs at startup** — "no more cron-prune".
+- Live demo: "What were the top 10 name suggestions for the luxury bag and
+  watch app we were discussing?" → cross-session recall from Telegram.
+- **L1 vs L2 framing**: curated (~1,300 tokens, instant, fixed cost) vs
+  archived (unlimited, search+summarize, on-demand cost). "Use both."
+- L3 intro: 8 memory-provider backends, one active at a time, built-in stays on.
+
+### Where Olympus stands
+| Hermes mechanism | Olympus |
+|---|---|
+| FTS5 index of every CLI+gateway session | ✓ identical — search.py indexes on every save_conversation; gateways included |
+| Autonomous invocation | ✓ search_sessions is in BASE_TOOLS — every specialist carries it |
+| L1/L2 stacking, curated vs archived | ✓ same architecture (gated memory + FTS archive) |
+| LLM summarization of hits inside the tool | **△ small gap** — we return raw rendered turns; long hit-sets spend the caller's context |
+| WAL mode + auto-prune + VACUUM | **△ real operational gap** — our index is never pruned or vacuumed; RETAIN_DAYS covers traces/usage only, so conversations + index grow unbounded on a long-lived droplet |
+| 8 pluggable memory providers (L3) | **SKIP** — native semantic + companion (recorded at screens 45–49) |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| Index maintenance (prune + VACUUM, WAL) | **ADOPT — droplet hygiene** | Fold into the existing heartbeat maintenance sweep (not startup — a long-lived server rarely restarts): prune index entries for conversations idle past a retention window, VACUUM after pruning, open the DB in WAL mode. Zero new surface; one sweep extension. |
+| Distill long hit-sets inside search_sessions | **ADOPT — small** | When rendered hits exceed a budget, distill them with the pool's fastest model before returning (budget-aware, falls back to truncation keyless). Same council quality, less context spent. |
+| L1-vs-L2 "use both" framing | **NOTE** | Already our architecture; steal the one-line framing for docs: "gated memory is what's curated; session search is what's archived." |
+
+### Build backlog additions (batched, NOT building yet)
+41. **Search-index maintenance** — WAL mode; heartbeat sweep prunes idle
+    conversations from the index per retention window, then VACUUMs.
+42. **Hit-set distillation** — search_sessions compresses oversized results via
+    the pool's fastest model (graceful keyless fallback).
