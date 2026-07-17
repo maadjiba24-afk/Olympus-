@@ -620,3 +620,43 @@ we've built — pattern by pattern:
     conversations from the index per retention window, then VACUUMs.
 42. **Hit-set distillation** — search_sessions compresses oversized results via
     the pool's fastest model (graceful keyless fallback).
+
+---
+
+## Screens 60–63 — L3 provider plugins in depth (landscape + Honcho)
+
+### What Hermes did
+- Plugin ABC (v0.7.0): third-party memory backends register via the loader.
+  **One active at a time; switching does NOT migrate data.** Built-in markdown
+  always loads — providers augment. When active: inject context, prefetch each
+  turn, sync after each response, add provider tools. `hermes memory
+  setup|status|off`.
+- The landscape: 8 providers (Mem0 54k★ cloud/paid, Supermemory, Hindsight,
+  ByteRover, **Honcho**, OpenViking, Holographic, RetainDB $20/mo…).
+- **Honcho** (the demo provider): "**dialectic reasoning** — agent derives
+  conclusions about you after each conversation. Builds a running model of
+  preferences, goals, communication style." workspace→peers→sessions→messages;
+  4 tools; knobs: recallMode (hybrid/context/tools), writeFrequency
+  (async/turn/session), dialecticReasoningLevel (minimal→max). Cloud paid or
+  self-host free.
+
+### The verdict — a validation batch (zero new items)
+Honcho's headline capability — derive conclusions after each conversation and
+build a running model of the user's preferences, goals, and communication
+style — **is companion.py**. Olympus ships natively, on-device, benchmark-
+checkpointed, what Hermes reaches for a third-party service (cloud-paid or
+self-hosted AGPL) to provide:
+
+| Honcho | Olympus built-in |
+|---|---|
+| Dialectic conclusions after each conversation | companion.note_interaction → maybe_evolve distills the private working model at checkpoints |
+| Running model of preferences/goals/style | companion model_block, injected into Zeus every turn |
+| writeFrequency async | ours is already async (background thread, never delays a reply) |
+| recallMode hybrid | ours: lexical + semantic-fallback retrieval, budgeted |
+| Cloud account or self-hosted server | a Python module; nothing leaves the machine |
+
+The stack-position risks they must disclaim — "switching does NOT migrate
+data," provider outages, a second billing relationship for your own memories —
+don't exist here. **Positioning line for README/docs: "The memory provider
+Hermes plugs in is the one Olympus ships."** No backlog additions; the
+differentiate stance from screens 45–49 is confirmed at full depth.
