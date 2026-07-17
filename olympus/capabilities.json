@@ -46,7 +46,7 @@
     ]
   },
   "commands": {
-    "count": 109,
+    "count": 110,
     "names": [
       "a2a",
       "actions",
@@ -107,6 +107,7 @@
       "otel-export",
       "outcomes",
       "pair",
+      "pay-live",
       "playbook",
       "profile",
       "pubkey",

@@ -499,6 +499,50 @@ def _no_secret_typed(ctx: dict) -> tuple[bool, str]:
     return True, ""
 
 
+@predicate("payment_live_enabled")
+def _payment_live_enabled(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("payment_live_enabled")),
+            "" if ctx.get("payment_live_enabled")
+            else "live payments are disabled (OLYMPUS_PAYMENT_LIVE unset — "
+                 "only an operator sets it)")
+
+
+@predicate("payment_live_adapter_ready")
+def _payment_live_adapter_ready(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("payment_live_adapter_ready")),
+            "" if ctx.get("payment_live_adapter_ready")
+            else "no live payment adapter registered (inert build — the "
+                 "default adapter refuses everything)")
+
+
+@predicate("payment_user_key_pinned")
+def _payment_user_key_pinned(ctx: dict) -> tuple[bool, str]:
+    """Real money requires ON-DEVICE user-key custody: the co-signing key must
+    be pinned out-of-band (OLYMPUS_MANDATE_USER_PUBKEY). Vault-local default
+    trust is refused for a live charge. Fail closed."""
+    return (bool(ctx.get("payment_user_key_pinned")),
+            "" if ctx.get("payment_user_key_pinned")
+            else "user co-signing key is not pinned out-of-band — live money "
+                 "requires on-device key custody, not vault-local trust")
+
+
+@predicate("payment_live_within_caps")
+def _payment_live_within_caps(ctx: dict) -> tuple[bool, str]:
+    return (bool(ctx.get("payment_live_within_caps")),
+            "" if ctx.get("payment_live_within_caps")
+            else "amount exceeds a live payment cap")
+
+
+@predicate("payment_live_cosign_enforced")
+def _payment_live_cosign_enforced(ctx: dict) -> tuple[bool, str]:
+    """The live flow must NEVER waive user co-signature enforcement — the
+    sandbox `require_cosignature=False` convenience does not exist on the live
+    path. Fail closed."""
+    return (bool(ctx.get("payment_live_cosign_enforced")),
+            "" if ctx.get("payment_live_cosign_enforced")
+            else "live flow attempted without forced co-signature enforcement")
+
+
 # --- contract model -------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -666,6 +710,21 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "preconditions": ["computer_use_enabled", "computer_actuator_ready"],
         "invariants": ["command_not_denied", "no_secret_typed"],
         "governance": ["computer_action_approved"],
+    },
+    "payment_live": {
+        "operation": "payment.live",
+        "recovery": "block",
+        "description": "A LIVE (real-money) charge at the last gate before the "
+                       "adapter: the operator flag is on, a registered live "
+                       "adapter is installed, the user co-signing key is pinned "
+                       "out-of-band, co-signature enforcement was not waived, "
+                       "and the amount is within the live caps — else refused, "
+                       "fail closed. This build ships inert: no adapter exists "
+                       "in the repository.",
+        "preconditions": ["payment_live_enabled", "payment_live_adapter_ready",
+                          "payment_user_key_pinned"],
+        "invariants": ["payment_live_within_caps"],
+        "governance": ["payment_live_cosign_enforced"],
     },
 }
 
