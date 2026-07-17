@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — DyTopo dynamic topology routing (`dytopo`)
+
+An optional, runtime-induced collaboration graph for the specialist council
+(arXiv 2602.06039). Each specialist emits a natural-language `query` (what it
+needs) and `offer` (what it provides); `dytopo.induce` matches those descriptors
+to wire a **sparse directed graph** — so the specialists that genuinely have
+something for each other are connected for a bounded number of consultation
+rounds, instead of a fixed or all-to-all shape.
+
+- **New `olympus/dytopo.py`** — the pure core: descriptor matching → graph →
+  rounds. Deterministic (token-overlap similarity, stable tie-breaks — no
+  embeddings, clock, or rng), so the same descriptors always induce the same
+  topology (replay-safe).
+- **Bounded by construction** — hard caps on nodes, out-degree, total edges, and
+  rounds; a self-edge is never created and the induced graph is provably sparse.
+- **Opt-in** — `OLYMPUS_DYTOPO` is off by default; the fixed
+  Zeus→Athena→specialists→Aletheia pipeline stands unless an operator turns it
+  on. The existing per-specialist governance is unchanged (this only decides who
+  consults whom).
+- Tests (13): edges reflect query→offer matches, induction is order-independent
+  (deterministic), out-degree / node / edge / round caps hold, and threshold
+  filters weak edges.
+
 ### Added — Governed scaffold evolution (propose-only; ADR 0003)
 
 Adopts the Darwin Gödel Machine idea (measured, archived, benchmark-gated
