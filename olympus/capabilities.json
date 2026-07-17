@@ -39,7 +39,7 @@
     ]
   },
   "commands": {
-    "count": 104,
+    "count": 105,
     "names": [
       "actions",
       "add-mcp",
@@ -95,6 +95,7 @@
       "next-wake",
       "notes",
       "operator",
+      "otel-export",
       "outcomes",
       "pair",
       "playbook",
