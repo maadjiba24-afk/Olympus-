@@ -81,6 +81,20 @@ carries a migration note here.
   condensed by the pool's fastest model (citations kept); keyless installs fall
   back to truncation.
 
+### Security — teardown-loop hardening (iteration 3)
+
+- **Webhook rate limiting** — the inbound webhook gateway now enforces a
+  per-IP sliding-window limit (`OLYMPUS_WEBHOOK_RATE_LIMIT`, default 20/min;
+  0 disables). A public entry point that runs the full council on the
+  operator's key can no longer be turned into a key-burn DoS.
+- **Rotation state thread-safety** — credential-rotation state (cursor,
+  exhausted set, per-key stats) is now guarded by a lock, so concurrent
+  gateway worker threads can't race the cursor into skipping or re-hitting a
+  key.
+- **Bounded background-thread registry** — `/bg` finished threads are compacted
+  from the registry on each launch, so a long terminal session can't leak
+  Thread objects.
+
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
 > through `0.24.0` sections below were prepared and dated but **never tagged or

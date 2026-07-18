@@ -27,6 +27,11 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _key_cursor: dict[str, int] = {}
 _key_stats: dict[str, dict[str, int]] = {}   # base -> {"<masked>": success_count}
 _exhausted: dict[str, set[str]] = {}         # base -> {masked keys seen exhausted}
+# Rotation state is read/written from concurrent gateway worker threads
+# (Telegram, Discord, web, …). A lock keeps cursor advances and the exhausted
+# set from racing — without it two threads can skip or re-hit the same key.
+import threading as _threading
+_ROT_LOCK = _threading.RLock()
 
 # Status codes / body markers that mean "this key is spent — try another".
 _QUOTA_CODES = frozenset({402, 429})
@@ -42,8 +47,9 @@ def _is_quota_error(code: int, detail: str) -> bool:
 
 
 def _record_key_use(base: str, masked: str) -> None:
-    _key_stats.setdefault(base, {})
-    _key_stats[base][masked] = _key_stats[base].get(masked, 0) + 1
+    with _ROT_LOCK:
+        _key_stats.setdefault(base, {})
+        _key_stats[base][masked] = _key_stats[base].get(masked, 0) + 1
 
 
 def rotation_report(settings: config.Settings) -> str:
@@ -82,7 +88,8 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     # through the same retry logic.
     key_ring: list[str | None] = keys or [None]
     n = len(key_ring)
-    start = _key_cursor.get(base, 0) if keys else 0
+    with _ROT_LOCK:
+        start = _key_cursor.get(base, 0) if keys else 0
 
     last_err: Exception | None = None
     # Try each key in turn; each key gets the full transient-error backoff loop.
@@ -105,7 +112,8 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
                              int(u.get("prompt_tokens", 0)),
                              int(u.get("completion_tokens", 0)))
                 if keys:
-                    _key_cursor[base] = idx        # remember the healthy key
+                    with _ROT_LOCK:
+                        _key_cursor[base] = idx    # remember the healthy key
                     _record_key_use(base, masked)
                 return data
             except urllib.error.HTTPError as err:
@@ -114,7 +122,8 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
                 # to the next key immediately instead of burning backoff on a
                 # key that's already spent.
                 if keys and n > 1 and _is_quota_error(err.code, detail):
-                    _exhausted.setdefault(base, set()).add(masked)
+                    with _ROT_LOCK:
+                        _exhausted.setdefault(base, set()).add(masked)
                     last_err = RuntimeError(f"HTTP {err.code} (key {masked}): "
                                             f"{detail}")
                     break                          # advance to the next key

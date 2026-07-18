@@ -301,6 +301,9 @@ def start_background_task(bot, task: str) -> str:
               f"olympus ▸ {answer}\n")
 
     t = threading.Thread(target=work, daemon=True, name=f"bg-{n}")
+    # Keep only live threads (+ this one) so a long session can't leak finished
+    # Thread objects into an ever-growing list.
+    _BG_THREADS[:] = [x for x in _BG_THREADS if x.is_alive()]
     _BG_THREADS.append(t)
     t.start()
     return (f"Running in the background as #{n} — keep chatting; "

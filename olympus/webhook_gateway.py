@@ -15,11 +15,44 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from . import gateway
 
 _MAX_BODY = 100_000
+
+# Per-caller sliding-window rate limit. A webhook is a public entry point that
+# runs the FULL council on the operator's key — without a limit, a leaked (or
+# unset) secret is a key-burn DoS. Keyed by client IP; window is 60s.
+_HITS: dict[str, deque] = {}
+_HITS_LOCK = threading.Lock()
+
+
+def _rate_limit() -> int:
+    try:
+        return int(os.environ.get("OLYMPUS_WEBHOOK_RATE_LIMIT", "20"))
+    except ValueError:
+        return 20
+
+
+def _rate_limited(key: str, limit: int | None = None) -> bool:
+    limit = _rate_limit() if limit is None else limit
+    if limit <= 0:
+        return False
+    now = time.time()
+    with _HITS_LOCK:
+        if len(_HITS) > 5000:            # bound the limiter's own memory
+            _HITS.clear()
+        hits = _HITS.setdefault(key, deque())
+        while hits and now - hits[0] > 60:
+            hits.popleft()
+        if len(hits) >= limit:
+            return True
+        hits.append(now)
+    return False
 
 
 def _secret_ok(supplied: str) -> bool:
@@ -58,6 +91,10 @@ def _make_handler(bots: dict):
                         or self.path.partition("secret=")[2])
             if not _secret_ok(supplied):
                 return self._send(401, {"error": "unauthorized"})
+            client = self.client_address[0] if self.client_address else "?"
+            if _rate_limited(client):
+                return self._send(429, {"error": "rate limit exceeded — "
+                                        "slow down"})
             try:
                 length = min(int(self.headers.get("Content-Length", 0)), _MAX_BODY)
                 payload = json.loads(self.rfile.read(length) or b"{}")
