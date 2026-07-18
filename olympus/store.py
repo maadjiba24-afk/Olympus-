@@ -42,12 +42,17 @@ class FileStore:
         return d
 
     def put(self, ns: str, key: str, value: bytes) -> None:
+        # Atomic publish: a reader in the other process must see the old or
+        # the new value, never a truncated blob — consumers map a torn read
+        # to "empty" and would silently rebuild from defaults (ADR 0005).
         path = self._dir(ns) / _safe(key)
-        path.write_bytes(value)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(value)
         try:
-            os.chmod(path, 0o600)
+            os.chmod(tmp, 0o600)
         except OSError:
             pass
+        os.replace(tmp, path)
 
     def get(self, ns: str, key: str) -> bytes | None:
         path = self._dir(ns) / _safe(key)

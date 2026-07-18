@@ -138,6 +138,37 @@ rework on a 1-member pool retries the SAME model at the top effort tier
 ("same-model, more-compute" escalation), so escalation exists on the default
 single-key deployment.
 
+## Amendment (post-implementation adversarial review of decision b)
+
+A 22-agent adversarial review of the Phase 2 diff confirmed 18 findings; all
+were fixed in the same phase except one design that was **rejected and
+reverted**:
+
+- **Per-worker scratch re-rooting is REJECTED.** Making `sandbox.workdir()`
+  context-sensitive (workspace/agents/<specialist>) broke a critical
+  invariant: the approval spine prepares/previews a held file action on the
+  specialist worker thread (scratch set) but executes it from the web/CLI
+  approval handler (no scratch) — an approved action ran in a different root
+  than the user previewed. It also broke inter-specialist file handoff,
+  gallery visibility of generated images, and pre-existing workspaces.
+  Concurrent same-path writes by two specialists are ACCEPTED as a residual;
+  the safe design — pinning ONE root into the prepared action so preview and
+  execution share it — is future work on the actions spine.
+- **Lock-scope hygiene:** an in-process mutex must never be held across a
+  flock wait (a wedged peer process would freeze every thread queueing on
+  the mutex — found on the usage ledger's reply path). Rule: take the flock
+  first or split the scopes; hot best-effort paths (evolve telemetry) use a
+  bounded `timeout=` acquire and drop the write instead of hanging.
+- **Reentrancy identity:** the depth table keys on the SANITIZED lock name —
+  raw-name keying self-deadlocks when two spellings map to one lock file.
+- **Atomic publish everywhere a reader maps torn→empty:** goals.json,
+  scheduler jobs, FileStore.put, prefs, the watchlist rewrite, and note
+  bodies (published via `os.link` after a full tmp write) — plus proclock
+  coverage extended to evolve's telemetry/tunables blob, scheduler's jobs
+  file, prefs, and the conversation counter, and the goals completion write
+  re-checks `status == "active"` under the lock so a concurrent drop/close
+  is never overwritten by a stale verdict.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

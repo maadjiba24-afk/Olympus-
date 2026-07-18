@@ -83,10 +83,16 @@ def _load() -> list[Goal]:
 
 
 def _save(goals: list[Goal]) -> None:
+    # Atomic publish (tmp + os.replace): readers run WITHOUT the mutex, and
+    # _load maps a torn/truncated file to [] — a plain write_text here would
+    # let a cross-process reader see "no goals" mid-write, and a crash
+    # mid-save would wipe every goal (ADR 0005).
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps([asdict(g) for g in goals], indent=2),
-                 encoding="utf-8")
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps([asdict(g) for g in goals], indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def goals_every() -> int:
@@ -288,25 +294,33 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
 
     fresh = get(g.id) or g
     verdict = judge(fresh, judge_fn=judge_fn)
+    # Behavioral contract at the completion chokepoint (defense in depth): a
+    # goal may close ONLY against concrete evidence at the confidence floor.
+    # Evaluated BEFORE the cross-process lock — enforce() can reach
+    # errors.capture (a network alert) on an engine error, and network I/O
+    # must never run while holding the goals flock (ADR 0005).
+    from . import behavioral_contracts as _abc
+    close_ok = True
+    try:
+        _abc.enforce("goal.complete",
+                     {"done": bool(verdict["done"]),
+                      "evidence": verdict.get("evidence", ""),
+                      "confidence": verdict.get("confidence", 0),
+                      "floor": CONFIDENCE_FLOOR})
+    except _abc.ContractViolation:
+        close_ok = False
     with _mutex():
         goals = _load()
         for stored in goals:
             if stored.id != g.id:
                 continue
+            if stored.status != "active":
+                # The other process closed/dropped this goal between our
+                # judgment and this write — never overwrite its decision
+                # with a stale verdict.
+                return (f"Goal {g.id} became {stored.status} mid-cycle — "
+                        "leaving it untouched.")
             stored.checks += 1
-            # Behavioral contract at the completion chokepoint (defense in
-            # depth): a goal may close ONLY against concrete evidence at the
-            # confidence floor — an evidence-free "done" is refused.
-            from . import behavioral_contracts as _abc
-            close_ok = True
-            try:
-                _abc.enforce("goal.complete",
-                             {"done": bool(verdict["done"]),
-                              "evidence": verdict.get("evidence", ""),
-                              "confidence": verdict.get("confidence", 0),
-                              "floor": CONFIDENCE_FLOOR})
-            except _abc.ContractViolation:
-                close_ok = False
             if (close_ok and verdict["done"]
                     and verdict["confidence"] >= CONFIDENCE_FLOOR):
                 stored.status = "done"

@@ -36,9 +36,19 @@ def get(user: str, key: str, default=None):
 
 
 def set(user: str, key: str, value) -> None:
-    data = load(user)
-    if value is None:
-        data.pop(key, None)
-    else:
-        data[key] = value
-    _path(user).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Cross-process RMW under proclock + atomic replace (ADR 0005): the
+    # shared-scope file carries daily_budget — a lost update or torn read
+    # here silently deletes the budget guard's persisted cap.
+    import os
+
+    from . import proclock
+    with proclock.lock(f"prefs-{user}"):
+        data = load(user)
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+        path = _path(user)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)

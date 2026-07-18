@@ -40,7 +40,6 @@ transports over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
 
 from __future__ import annotations
 
-import contextvars
 import os
 import re
 import shlex
@@ -68,35 +67,20 @@ def workdir() -> Path:
     commands. Note: it bounds the file-path tools and where a command begins,
     not what a local shell command can reach (see the module docstring).
 
-    When a per-worker scratch is active (set by the orchestrator around each
-    specialist run, ADR 0005), the root is `<workspace>/agents/<specialist>` —
-    concurrent specialists can no longer clobber each other's files, while the
-    same specialist keeps its files across runs. `OLYMPUS_WORKER_SCRATCH=off`
-    restores the single shared root."""
+    Deliberately ONE shared root, never context-sensitive. A per-worker
+    re-rooting (workspace/agents/<specialist>) was built and adversarially
+    reviewed for ADR 0005 and REJECTED on evidence: the approval spine
+    prepares/previews a file action on the worker thread but executes it from
+    the web/CLI approval handler, so a context-dependent root makes approved
+    actions run somewhere other than where they were previewed — plus it
+    breaks inter-specialist file handoff, the gallery, and pre-existing
+    workspaces. Concurrent same-path writes by two specialists remain
+    possible and are accepted; the safe design (threading one pinned root
+    through prepare→approve) is future work."""
     d = Path(os.environ.get("OLYMPUS_EXEC_WORKDIR",
                             str(config.MEMORY_DIR / "workspace")))
-    scratch = _SCRATCH.get()
-    if scratch and os.environ.get(
-            "OLYMPUS_WORKER_SCRATCH", "on").strip().lower() not in (
-            "0", "off", "false", "no"):
-        d = d / "agents" / scratch
     d.mkdir(parents=True, exist_ok=True)
     return d.resolve()
-
-
-_SCRATCH: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
-    "olympus_sandbox_scratch", default=None)
-
-
-def set_scratch(specialist: str):
-    """Confine this worker thread's file tools to a per-specialist subroot.
-    Returns a token for `reset_scratch`."""
-    safe = re.sub(r"[^a-z0-9_-]", "-", (specialist or "").lower())[:40]
-    return _SCRATCH.set(safe or None)
-
-
-def reset_scratch(token) -> None:
-    _SCRATCH.reset(token)
 
 
 def _confine(path: str) -> Path:

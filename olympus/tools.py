@@ -719,10 +719,13 @@ def _restore_prompt(agent: str) -> str:
     path = config.PROMPTS_DIR / f"{stem}.md"
     if not path.is_file():
         return f"Error: unknown agent prompt '{stem}'."
+    bdir = config.MEMORY_DIR / "prompt_backups"
+    # Both name shapes: "...-<stem>.md" and the collision-suffixed
+    # "...-<stem>-<n>.md" that memory.save can produce (ADR 0005).
     backups = sorted(
-        (config.MEMORY_DIR / "prompt_backups").glob(f"*-{stem}.md"),
+        set(bdir.glob(f"*-{stem}.md")) | set(bdir.glob(f"*-{stem}-[0-9]*.md")),
         reverse=True,
-    ) if (config.MEMORY_DIR / "prompt_backups").exists() else []
+    ) if bdir.exists() else []
     if not backups:
         return f"Error: no backups exist for '{stem}'."
     newest = backups[0]

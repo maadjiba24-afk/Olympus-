@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import re
 import threading
+import time
 
 from . import config
 
@@ -49,19 +50,29 @@ def _lock_path(name: str):
 
 
 @contextlib.contextmanager
-def lock(name: str):
+def lock(name: str, timeout: float | None = None):
     """`with proclock.lock("usage-ledger"):` — exclusive across processes and
-    threads on this machine; reentrant within a thread."""
+    threads on this machine; reentrant within a thread.
+
+    `timeout` bounds the wait (LOCK_NB polling) and raises TimeoutError on
+    expiry — use it on best-effort paths (telemetry) where losing one write
+    under contention beats letting a wedged peer process hang a reply."""
     global _WARNED
+    # The depth table MUST key on the sanitized name — the same identity the
+    # lock file uses. Keyed on the raw name, two spellings that sanitize to
+    # one path ("usage ledger" / "usage-ledger") would take independent depth
+    # entries but flock the same file, and a nested acquisition would
+    # self-deadlock on the thread's own lock.
+    key = _safe(name)
     depths = getattr(_LOCAL, "depths", None)
     if depths is None:
         depths = _LOCAL.depths = {}
-    if depths.get(name):               # reentrant re-entry: no second flock
-        depths[name] += 1
+    if depths.get(key):                # reentrant re-entry: no second flock
+        depths[key] += 1
         try:
             yield
         finally:
-            depths[name] -= 1
+            depths[key] -= 1
         return
     if fcntl is None:                  # pragma: no cover - non-POSIX
         if not _WARNED:
@@ -70,20 +81,33 @@ def lock(name: str):
             errors.capture("proclock", OSError(
                 "fcntl unavailable — cross-process locking degraded to "
                 "single-process (see ADR 0005)"), context=name)
-        depths[name] = 1
+        depths[key] = 1
         try:
             yield
         finally:
-            depths[name] = 0
+            depths[key] = 0
         return
     fh = open(_lock_path(name), "a+b")
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        depths[name] = 1
+        if timeout is None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(),
+                                fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"proclock '{name}' not acquired in {timeout}s")
+                    time.sleep(0.02)
+        depths[key] = 1
         try:
             yield
         finally:
-            depths[name] = 0
+            depths[key] = 0
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     finally:
         fh.close()

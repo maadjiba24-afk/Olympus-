@@ -32,10 +32,23 @@ carries a migration note here.
 - `FileStore.put` last-writer-wins is documented as the accepted KV contract;
   cross-process RMW callers must hold `proclock` (the Postgres upsert is a
   blind overwrite, not a CAS — see ADR 0005).
-- Per-worker sandbox scratch: each pipeline specialist's file tools confine to
-  `workspace/agents/<specialist>` so concurrent workers can't clobber each
-  other, while a specialist keeps its own files across runs.
-  `OLYMPUS_WORKER_SCRATCH=off` restores the shared root.
+- A 22-agent adversarial review of this phase confirmed 18 findings — all
+  fixed in-phase: lock scopes split so no in-process mutex is ever held
+  across a flock wait (a wedged peer could have frozen every reply);
+  proclock gained a bounded-`timeout` acquire for hot best-effort paths and
+  sanitized-name reentrancy identity; atomic publish added everywhere a
+  torn read decodes as empty (goals, scheduler jobs, FileStore.put, prefs,
+  watchlist, note bodies via `os.link`); proclock coverage extended to
+  evolve's telemetry/tunables blob (whose torn read could have reset
+  tighten-only security knobs), the scheduler, prefs, and the conversation
+  counter; the goals completion write re-checks active status under the
+  lock; prompt-backup restore matches collision-suffixed filenames.
+- Per-worker sandbox scratch re-rooting was built, adversarially reviewed,
+  and REJECTED: a context-sensitive workdir made approved file actions
+  execute in a different root than they were previewed in, and broke
+  file handoff, the gallery, and pre-existing workspaces. `workdir()` stays
+  one shared, context-free root; the residual concurrent same-path write is
+  documented as accepted in ADR 0005.
 
 ### Added — Aletheia is ENFORCING on the interactive path (ADR 0005, Phase 1)
 

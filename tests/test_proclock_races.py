@@ -200,39 +200,113 @@ def test_note_filename_keeps_datestamp_prefix():
     assert digits == time.strftime("%Y%m%d")   # date-parsing readers unbroken
 
 
-# --- per-worker sandbox scratch -------------------------------------------
+# --- workdir stays context-free (per-worker re-rooting was REJECTED) ------
 
-def test_worker_scratch_isolates_specialist_roots(monkeypatch):
-    monkeypatch.delenv("OLYMPUS_WORKER_SCRATCH", raising=False)
-    t1 = sandbox.set_scratch("hephaestus")
-    try:
-        d1 = sandbox.workdir()
-    finally:
-        sandbox.reset_scratch(t1)
-    t2 = sandbox.set_scratch("hermes")
-    try:
-        d2 = sandbox.workdir()
-    finally:
-        sandbox.reset_scratch(t2)
-    assert d1 != d2
-    assert d1.name == "hephaestus" and d1.parent.name == "agents"
-    assert sandbox.workdir().name == "workspace"   # no scratch → shared root
+def test_workdir_is_one_shared_context_free_root():
+    """ADR 0005: a context-sensitive workdir made approved file actions
+    execute in a different root than they were previewed in (the approval
+    handler runs on another thread/process). The root must be identical from
+    any thread with no ambient state."""
+    roots = []
 
+    def probe():
+        roots.append(sandbox.workdir())
 
-def test_worker_scratch_kill_switch(monkeypatch):
-    monkeypatch.setenv("OLYMPUS_WORKER_SCRATCH", "off")
-    token = sandbox.set_scratch("hephaestus")
-    try:
-        assert sandbox.workdir().name == "workspace"
-    finally:
-        sandbox.reset_scratch(token)
+    ts = [threading.Thread(target=probe, daemon=True) for _ in range(3)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(timeout=10)
+    assert len(set(roots)) == 1
+    assert roots[0] == sandbox.workdir()
+    assert not hasattr(sandbox, "set_scratch")     # the rejected API is gone
 
 
-def test_worker_scratch_still_confined(monkeypatch):
-    monkeypatch.delenv("OLYMPUS_WORKER_SCRATCH", raising=False)
-    token = sandbox.set_scratch("hermes")
-    try:
-        with pytest.raises(ValueError):
-            sandbox._confine("../../../etc/passwd")
-    finally:
-        sandbox.reset_scratch(token)
+# --- review-driven hardening ----------------------------------------------
+
+def test_lock_timeout_raises_instead_of_hanging():
+    """A bounded acquire must raise TimeoutError while another THREAD holds
+    the flock (distinct file descriptions contend even in one process)."""
+    if proclock.fcntl is None:
+        pytest.skip("flock requires POSIX")
+    holding = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with proclock.lock("timeout-test"):
+            holding.set()
+            release.wait(timeout=10)
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert holding.wait(timeout=5)
+    with pytest.raises(TimeoutError):
+        with proclock.lock("timeout-test", timeout=0.2):
+            pass
+    release.set()
+    t.join(timeout=5)
+
+
+def test_colliding_sanitized_names_are_one_reentrant_lock():
+    """'usage ledger' and 'usage-ledger' sanitize to the same lock file; the
+    depth table must treat them as ONE lock or nesting self-deadlocks."""
+    done = []
+
+    def work():
+        with proclock.lock("usage ledger"):
+            with proclock.lock("usage-ledger"):    # same file → must re-enter
+                done.append(True)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    assert done == [True], "nested colliding names deadlocked"
+
+
+def test_goals_save_is_atomic(tmp_path, monkeypatch):
+    """Readers run without the mutex and map a torn file to [] — the save
+    must publish via os.replace so no reader ever sees a partial file."""
+    from olympus import goals
+    goals.add("shared", "atomic-save probe", "file stays parseable")
+    calls = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    goals.note_progress(goals.active("shared")[0].id, "note")
+    assert any("goals" in dst for _, dst in calls)
+
+
+def test_filestore_put_is_atomic(monkeypatch):
+    from olympus import store
+    calls = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append(str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    store.backend().put("atomic-test", "k", b"value")
+    assert store.backend().get("atomic-test", "k") == b"value"
+    assert calls, "FileStore.put no longer publishes atomically"
+
+
+def test_memory_save_never_exposes_partial_notes(monkeypatch):
+    """The note body must be fully written BEFORE the .md name appears
+    (publish via os.link), so a concurrent glob never reads half a note."""
+    memory.set_user("shared")
+    seen = []
+    real_link = os.link
+
+    def spy(src, dst):
+        seen.append(Path(src).read_text(encoding="utf-8"))
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", spy)
+    p = memory.save("reports", "publish check", "the whole body")
+    assert seen and "the whole body" in seen[0]    # complete at publish time
+    assert "the whole body" in p.read_text(encoding="utf-8")

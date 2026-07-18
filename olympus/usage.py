@@ -116,24 +116,27 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
     from . import proclock
     with _TOTALS_LOCK:
         _bump_session(user, in_tokens, out_tokens, cost)
-        # The ledger read-modify-write must also hold the CROSS-PROCESS lock:
-        # the heartbeat process and the web process share this file, and
-        # os.replace only prevents torn files, not lost updates (ADR 0005).
-        with proclock.lock("usage-ledger"):
-            ledger = {}
-            if path.exists():
-                try:
-                    ledger = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    ledger = {}
-            for key in ("__all__", f"user:{user}", f"model:{model}"):
-                row = ledger.setdefault(
-                    key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
-                row["calls"] += 1
-                row["in"] += in_tokens
-                row["out"] += out_tokens
-                row["cost"] = round(row["cost"] + cost, 6)
-            _atomic_write_json(path, ledger)
+    # The ledger read-modify-write holds ONLY the cross-process lock — never
+    # nested inside _TOTALS_LOCK. Holding the in-process mutex across an
+    # unbounded flock wait would couple session_totals()/today_spend() (the
+    # per-reply hot path) to the OTHER process's liveness: a wedged heartbeat
+    # holding the flock would freeze every reply here. The session bump and
+    # the ledger write need no mutual atomicity (ADR 0005).
+    with proclock.lock("usage-ledger"):
+        ledger = {}
+        if path.exists():
+            try:
+                ledger = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                ledger = {}
+        for key in ("__all__", f"user:{user}", f"model:{model}"):
+            row = ledger.setdefault(
+                key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+            row["calls"] += 1
+            row["in"] += in_tokens
+            row["out"] += out_tokens
+            row["cost"] = round(row["cost"] + cost, 6)
+        _atomic_write_json(path, ledger)
 
 
 # --- the budget guard (protects the user's own API bill) -----------------

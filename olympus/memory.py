@@ -144,16 +144,28 @@ def save(category: str, title: str, content: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     base = f"{stamp}-{os.getpid()}-{_slug(title)}"
     body = render_note(title, content)
-    for n in range(1000):
-        path = d / (f"{base}.md" if n == 0 else f"{base}-{n}.md")
+    # Write the body FULLY to a private tmp file, then publish it under the
+    # unique name with os.link — atomic and exclusive (EEXIST on collision),
+    # so a reader can never glob a half-written note and a crash mid-write
+    # leaves only an invisible tmp, never a corrupt note.
+    tmp = d / f".tmp-{os.getpid()}-{threading.get_ident()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        for n in range(1000):
+            path = d / (f"{base}.md" if n == 0 else f"{base}-{n}.md")
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                continue
+            return path
+        raise OSError(f"could not allocate a unique note file for '{base}'")
+    finally:
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        return path
-    raise OSError(f"could not allocate a unique note file for '{base}'")
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _search_dirs() -> list[Path]:
@@ -302,8 +314,12 @@ def watchlist_pop() -> str | None:
         if not lines:
             return None
         url, rest = lines[0], lines[1:]
-        path.write_text("\n".join(rest) + ("\n" if rest else ""),
-                        encoding="utf-8")
+        # Atomic rewrite: a crash mid-write_text would drop every remaining
+        # queued URL; with os.replace the queue is always old-or-new.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text("\n".join(rest) + ("\n" if rest else ""),
+                       encoding="utf-8")
+        os.replace(tmp, path)
         return url
 
 
@@ -621,10 +637,13 @@ def bump_conversation_count() -> int:
 
     Kept in its own file (not heartbeat_state.json) so concurrent web/Telegram
     increments can't clobber the heartbeat's last-run timestamps, and vice
-    versa. Guarded by a process-wide lock for read-modify-write safety."""
+    versa. Guarded by the CROSS-process lock (ADR 0005): a threading.Lock
+    only serialized one process's increments while the heartbeat and web
+    processes both bump this counter."""
+    from . import proclock
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "conversation_count.txt"
-    with _STATE_LOCK:
+    with proclock.lock("conversation-count"):
         try:
             n = int(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
