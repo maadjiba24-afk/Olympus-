@@ -27,7 +27,14 @@ def _safe(s: str) -> str:
 
 
 class FileStore:
-    """Default backend: bytes under MEMORY_DIR/store/<ns>/<key>."""
+    """Default backend: bytes under MEMORY_DIR/store/<ns>/<key>.
+
+    Concurrency contract (ADR 0005): a blind `put` is DEFINED as
+    replace-whole-value — last writer wins, which is correct KV semantics and
+    is deliberately not versioned. Callers doing read-modify-write on a key
+    that more than one process touches must hold `proclock.lock(<name>)`
+    around the read+put cycle; the lock is the serialization point, not the
+    store."""
 
     def _dir(self, ns: str) -> Path:
         d = config.MEMORY_DIR / "store" / _safe(ns)

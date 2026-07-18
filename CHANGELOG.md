@@ -15,6 +15,28 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Cross-process safety on shared mutable state (ADR 0005, Phase 2)
+
+- New `olympus/proclock.py`: `fcntl.flock` lockfile wrapper — cross-process
+  AND cross-thread exclusive, reentrant per thread, POSIX-only with a
+  documented degraded fallback. The heartbeat process and the web process no
+  longer race each other's read-modify-writes.
+- Usage ledger RMW (`usage.record`) now holds the cross-process lock —
+  `os.replace` prevented torn files but not lost updates; a two-real-process
+  race test asserts exact totals.
+- `memory.save` filenames are collision-proof (pid + `O_EXCL` create):
+  concurrent same-title writers each keep their note; the 14-digit timestamp
+  prefix is unchanged so date-parsing readers keep working.
+- `watchlist_add`/`watchlist_pop` and every mutating goals load-modify-save
+  cycle now serialize under the cross-process lock.
+- `FileStore.put` last-writer-wins is documented as the accepted KV contract;
+  cross-process RMW callers must hold `proclock` (the Postgres upsert is a
+  blind overwrite, not a CAS — see ADR 0005).
+- Per-worker sandbox scratch: each pipeline specialist's file tools confine to
+  `workspace/agents/<specialist>` so concurrent workers can't clobber each
+  other, while a specialist keeps its own files across runs.
+  `OLYMPUS_WORKER_SCRATCH=off` restores the shared root.
+
 ### Added — Aletheia is ENFORCING on the interactive path (ADR 0005, Phase 1)
 
 - `_verify` now emits a structured verdict — `{status: pass|warn|reject,

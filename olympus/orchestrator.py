@@ -554,8 +554,12 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
-        from . import interaction
+        from . import interaction, sandbox
         ask_prev = interaction.set_provider(self._ask_provider)
+        # Per-worker file scratch (ADR 0005): concurrent specialists get
+        # disjoint file roots (workspace/agents/<key>) so parallel workers
+        # can't clobber each other's writes.
+        scratch_token = sandbox.set_scratch(key)
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
@@ -601,6 +605,7 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            sandbox.reset_scratch(scratch_token)
             interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 

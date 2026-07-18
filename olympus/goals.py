@@ -98,20 +98,28 @@ def goals_every() -> int:
 
 # --- lifecycle -------------------------------------------------------------
 
+def _mutex():
+    """Cross-process lock for every goals load-modify-save cycle (ADR 0005):
+    the heartbeat process and the web process both mutate the same file."""
+    from . import proclock
+    return proclock.lock("goals")
+
+
 def add(user: str, text: str, contract: str = "") -> str:
     text = (text or "").strip()[:1000]          # bound: goal text can't bloat
     contract = (contract or "").strip()[:1000]
     if not text:
         return "Usage: goal add <what should stay true / get done>"
-    goals = _load()
-    if sum(g.status == "active" for g in goals) >= MAX_ACTIVE:
-        return (f"There are already {MAX_ACTIVE} active goals — finish or "
-                "drop one first (`goal list`, `goal drop <id>`).")
-    g = Goal(id=uuid.uuid4().hex[:8], user=user, text=text,
-             contract=contract or DEFAULT_CONTRACT,
-             created=time.time())
-    goals.append(g)
-    _save(goals)
+    with _mutex():
+        goals = _load()
+        if sum(g.status == "active" for g in goals) >= MAX_ACTIVE:
+            return (f"There are already {MAX_ACTIVE} active goals — finish or "
+                    "drop one first (`goal list`, `goal drop <id>`).")
+        g = Goal(id=uuid.uuid4().hex[:8], user=user, text=text,
+                 contract=contract or DEFAULT_CONTRACT,
+                 created=time.time())
+        goals.append(g)
+        _save(goals)
     return (f"Goal {g.id} set: {g.text}\nDone means: {g.contract}\n"
             f"The heartbeat works active goals every "
             f"{max(goals_every(), 1) // 3600}h and closes them only on "
@@ -128,13 +136,15 @@ def active(user: str | None = None) -> list[Goal]:
 
 
 def note_progress(goal_id: str, note: str) -> None:
-    goals = _load()
-    for g in goals:
-        if g.id == goal_id:
-            g.progress.append({"ts": time.time(), "note": str(note)[:2000]})
-            g.progress = g.progress[-MAX_PROGRESS:]
-            g.last_worked = time.time()
-    _save(goals)
+    with _mutex():
+        goals = _load()
+        for g in goals:
+            if g.id == goal_id:
+                g.progress.append({"ts": time.time(),
+                                   "note": str(note)[:2000]})
+                g.progress = g.progress[-MAX_PROGRESS:]
+                g.last_worked = time.time()
+        _save(goals)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -156,31 +166,33 @@ def wait_on(goal_id: str, pid: int) -> str:
     heartbeat skips it until the process exits, then resumes with a progress
     note — so a goal that spawned a long build/backtest doesn't burn cycles
     re-checking before there's anything new to judge."""
-    goals = _load()
-    for g in goals:
-        if g.id == goal_id:
-            if g.status != "active":
-                return f"Goal {goal_id} is {g.status} — nothing to wait on."
-            if not _pid_alive(pid):
-                return f"Process {pid} isn't running — goal left as-is."
-            g.wait_pid = int(pid)
-            g.progress.append({"ts": time.time(),
-                               "note": f"[waiting on process {pid}]"})
-            _save(goals)
-            return (f"Goal {g.id} is parked on process {pid}; work cycles "
-                    "resume when it exits.")
+    with _mutex():
+        goals = _load()
+        for g in goals:
+            if g.id == goal_id:
+                if g.status != "active":
+                    return f"Goal {goal_id} is {g.status} — nothing to wait on."
+                if not _pid_alive(pid):
+                    return f"Process {pid} isn't running — goal left as-is."
+                g.wait_pid = int(pid)
+                g.progress.append({"ts": time.time(),
+                                   "note": f"[waiting on process {pid}]"})
+                _save(goals)
+                return (f"Goal {g.id} is parked on process {pid}; work cycles "
+                        "resume when it exits.")
     return f"No goal with id '{goal_id}'."
 
 
 def set_status(goal_id: str, status: str, evidence: str = "") -> str:
-    goals = _load()
-    for g in goals:
-        if g.id == goal_id:
-            g.status = status
-            if evidence:
-                g.evidence = str(evidence)[:2000]
-            _save(goals)
-            return f"Goal {g.id} is now {status}: {g.text}"
+    with _mutex():
+        goals = _load()
+        for g in goals:
+            if g.id == goal_id:
+                g.status = status
+                if evidence:
+                    g.evidence = str(evidence)[:2000]
+                _save(goals)
+                return f"Goal {g.id} is now {status}: {g.text}"
     return f"No goal with id '{goal_id}'."
 
 
@@ -276,9 +288,11 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
 
     fresh = get(g.id) or g
     verdict = judge(fresh, judge_fn=judge_fn)
-    goals = _load()
-    for stored in goals:
-        if stored.id == g.id:
+    with _mutex():
+        goals = _load()
+        for stored in goals:
+            if stored.id != g.id:
+                continue
             stored.checks += 1
             # Behavioral contract at the completion chokepoint (defense in
             # depth): a goal may close ONLY against concrete evidence at the
@@ -367,11 +381,12 @@ def run_due(now: float | None = None,
             if _pid_alive(g.wait_pid):
                 continue           # parked on a still-running process
             note_progress(g.id, f"[process {g.wait_pid} finished — resuming]")
-            goals = _load()
-            for stored in goals:
-                if stored.id == g.id:
-                    stored.wait_pid = 0
-            _save(goals)
+            with _mutex():
+                goals = _load()
+                for stored in goals:
+                    if stored.id == g.id:
+                        stored.wait_pid = 0
+                _save(goals)
             g = get(g.id) or g
             out.append(work_one(g, runner=runner, judge_fn=judge_fn))
             continue

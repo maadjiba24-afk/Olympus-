@@ -113,22 +113,27 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
     user = memory.current_user()
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    from . import proclock
     with _TOTALS_LOCK:
         _bump_session(user, in_tokens, out_tokens, cost)
-        ledger = {}
-        if path.exists():
-            try:
-                ledger = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                ledger = {}
-        for key in ("__all__", f"user:{user}", f"model:{model}"):
-            row = ledger.setdefault(
-                key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
-            row["calls"] += 1
-            row["in"] += in_tokens
-            row["out"] += out_tokens
-            row["cost"] = round(row["cost"] + cost, 6)
-        _atomic_write_json(path, ledger)
+        # The ledger read-modify-write must also hold the CROSS-PROCESS lock:
+        # the heartbeat process and the web process share this file, and
+        # os.replace only prevents torn files, not lost updates (ADR 0005).
+        with proclock.lock("usage-ledger"):
+            ledger = {}
+            if path.exists():
+                try:
+                    ledger = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    ledger = {}
+            for key in ("__all__", f"user:{user}", f"model:{model}"):
+                row = ledger.setdefault(
+                    key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+                row["calls"] += 1
+                row["in"] += in_tokens
+                row["out"] += out_tokens
+                row["cost"] = round(row["cost"] + cost, 6)
+            _atomic_write_json(path, ledger)
 
 
 # --- the budget guard (protects the user's own API bill) -----------------

@@ -21,6 +21,7 @@ import io
 import json
 import re
 import tarfile
+import os
 import threading
 import time
 from pathlib import Path
@@ -134,9 +135,25 @@ def save(category: str, title: str, content: str) -> Path:
     title = security.sanitize_for_memory(title)
     content = security.sanitize_for_memory(content)
     d = _dir(category, current_user())
-    path = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(title)}.md"
-    path.write_text(render_note(title, content), encoding="utf-8")
-    return path
+    # Unique, collision-proof filename (ADR 0005): the old second-granularity
+    # name let two concurrent writers of the same title silently overwrite
+    # each other. pid + O_EXCL create (atomic across processes) guarantees
+    # every save lands in its own file; the timestamp prefix is unchanged so
+    # date-parsing readers (first 14 digits) and name-sorted listings keep
+    # working.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{os.getpid()}-{_slug(title)}"
+    body = render_note(title, content)
+    for n in range(1000):
+        path = d / (f"{base}.md" if n == 0 else f"{base}-{n}.md")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+    raise OSError(f"could not allocate a unique note file for '{base}'")
 
 
 def _search_dirs() -> list[Path]:
@@ -265,20 +282,29 @@ def _watchlist_path() -> Path:
 
 
 def watchlist_add(url: str) -> None:
-    with _watchlist_path().open("a", encoding="utf-8") as f:
-        f.write(url.strip() + "\n")
+    from . import proclock
+    with proclock.lock("watchlist"):
+        with _watchlist_path().open("a", encoding="utf-8") as f:
+            f.write(url.strip() + "\n")
 
 
 def watchlist_pop() -> str | None:
-    path = _watchlist_path()
-    if not path.exists():
-        return None
-    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if not lines:
-        return None
-    url, rest = lines[0], lines[1:]
-    path.write_text("\n".join(rest) + ("\n" if rest else ""), encoding="utf-8")
-    return url
+    # Read-modify-write under the cross-process lock (ADR 0005): the heartbeat
+    # and web processes both pop; unlocked, a concurrent add or pop could be
+    # silently dropped by this rewrite.
+    from . import proclock
+    with proclock.lock("watchlist"):
+        path = _watchlist_path()
+        if not path.exists():
+            return None
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        if not lines:
+            return None
+        url, rest = lines[0], lines[1:]
+        path.write_text("\n".join(rest) + ("\n" if rest else ""),
+                        encoding="utf-8")
+        return url
 
 
 def sweep_dated_files(retain_days: int) -> int:
