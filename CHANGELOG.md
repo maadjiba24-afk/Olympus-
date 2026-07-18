@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aletheia is ENFORCING on the interactive path (ADR 0005, Phase 1)
+
+- `_verify` now emits a structured verdict — `{status: pass|warn|reject,
+  unsupported_claims[], confidence}` — parsed from a mandatory machine-readable
+  `VERDICT:` line (missing/malformed = infrastructure failure, handled
+  visibly, never silently).
+- New `answer.verify` behavioral contract evaluated AFTER verification and
+  BEFORE synthesis, feeding the real verdict to the previously dormant
+  `aletheia_verified` predicate (which was never given a `verify_verdict` in
+  production and ran a stage too early).
+- Policy: an affirmative `reject` forces exactly one rework of the council;
+  a second reject ships the reply hard-downgraded behind a structural
+  `⚠️ UNVERIFIED` banner (prepended after synthesis on both the blocking and
+  streaming paths, so the composing model can never drop it), with the
+  unsupported claims listed and the event recorded in the signed decision log.
+- Verify-stage infrastructure errors now degrade visibly (banner + logged
+  decision) instead of silently falling through to raw findings.
+
 ### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
 
 The eight new components (webplan, AP2 flow, extended ABC surface,
