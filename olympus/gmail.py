@@ -182,9 +182,21 @@ def parse_address(from_header: str) -> str:
     return parseaddr(from_header or "")[1].lower()
 
 
+def _authenticated(m: dict) -> bool:
+    """Whether Gmail's own SPF/DKIM/DMARC evaluation vouches for the sender.
+
+    The From: header is trivially spoofable; Authentication-Results is Gmail's
+    verdict on whether the message really came from the domain it claims. The
+    email gateway requires this when a sender allowlist is in force — an
+    allowlist that trusts a spoofable header is not an allowlist."""
+    results = _header(m, "Authentication-Results").lower()
+    return "dmarc=pass" in results or ("spf=pass" in results
+                                       and "dkim=pass" in results)
+
+
 def list_unread(max_results: int = 10) -> list[dict]:
     """Structured list of unread inbox messages, for the email gateway.
-    Each dict: {id, from, sender, subject, body}. Best-effort per message."""
+    Each dict: {id, from, sender, subject, body, authenticated}."""
     q = urllib.parse.urlencode({"q": "in:inbox is:unread",
                                 "maxResults": max_results})
     listing = _request("GET", f"/messages?{q}")
@@ -201,6 +213,7 @@ def list_unread(max_results: int = 10) -> list[dict]:
             "sender": parse_address(frm),
             "subject": _header(m, "Subject"),
             "body": _plain_body(m)[:4000],
+            "authenticated": _authenticated(m),
         })
     return out
 

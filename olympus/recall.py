@@ -186,9 +186,13 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
 
 
 def extract(user: str, user_msg: str, reply: str,
-            settings: config.Settings) -> dict:
+            settings: config.Settings, report=None) -> dict:
     """Run the extractor over one turn and apply the write policy. Best-effort:
-    never raises into the caller. Returns a small summary of actions taken."""
+    never raises into the caller. Returns a small summary of actions taken.
+
+    `report(line)` (optional) surfaces memory activity in the moment —
+    "🧠 remembered: …" — so learning is observable in-chat, not only after the
+    fact via /journey. Best-effort; a broken reporter never breaks extraction."""
     summary: dict[str, int] = {}
     # Expected control-flow — quietly do nothing (not errors):
     if not config.MEMORY_ENABLED:
@@ -219,6 +223,15 @@ def extract(user: str, user_msg: str, reply: str,
             cand["content"] = content
             action = _gate(user, cand, eid)
             summary[action] = summary.get(action, 0) + 1
+            if report is not None and action in ("committed", "superseded",
+                                                 "reinforced"):
+                verb = {"committed": "remembered", "superseded": "updated",
+                        "reinforced": "reinforced"}[action]
+                try:
+                    report(f"🧠 {verb}: {content[:80]}"
+                           f" (conf {float(cand.get('confidence', 0)):.2f})")
+                except Exception:
+                    pass
         rels = relgraph.ingest(user, out.get("relationships") or [])
         if rels:
             summary["relationships"] = rels

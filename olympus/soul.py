@@ -24,6 +24,12 @@ This file is your personal directive to Olympus. Whatever you write here is
 woven into how Zeus (the voice you talk to) thinks and replies. Delete the
 examples and make it yours.
 
+## Role
+- (e.g. Indie founder building an AI product; also run a YouTube channel.)
+
+## Current focus
+- (e.g. Shipping v2 this month; researching pricing.)
+
 ## Voice & tone
 - (e.g. Direct and warm. Skip preamble. No corporate filler.)
 

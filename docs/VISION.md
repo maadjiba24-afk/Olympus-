@@ -660,3 +660,27 @@ data," provider outages, a second billing relationship for your own memories —
 don't exist here. **Positioning line for README/docs: "The memory provider
 Hermes plugs in is the one Olympus ships."** No backlog additions; the
 differentiate stance from screens 45–49 is confirmed at full depth.
+
+
+---
+
+## Teardown loop — iterations 1–2 (all 42 items now built)
+
+The self-directed hardening loop (analyze → tear down → harden) closed out the
+entire round-2 backlog and found four NEW weaknesses no screen showed us:
+
+1. **Zero-width injection evasion** — a zero-width char inside "ignore previous
+   instructions" defeated our own memory-write scan. Fixed: invisible/bidi
+   Unicode stripped before the marker regex; credentials (keys, private-key
+   blocks, JWTs) redacted at write time. (#38+)
+2. **Command-gate bypasses** — `bash -c "rm -rf /"`, `find / -delete`, `shred`
+   on block devices all slipped the gate. Closed, wrapper-proof, fail-closed
+   trade-off documented.
+3. **Unbounded search index** — never pruned or vacuumed on a long-lived server.
+   Fixed in the heartbeat sweep; WAL mode on. (#41)
+4. **Spoofable email allowlist** — OLYMPUS_EMAIL_ALLOW trusted the From: header.
+   Fixed: allowlist mode now also requires Gmail's DMARC/SPF+DKIM verdict.
+
+Built in the same loop: memory card (#36), vault mirror (#37), visible memory
+activity (#39), soul Role/Focus scaffold (#40), hit-set distillation (#42).
+**Backlog: 42 of 42.**

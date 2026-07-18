@@ -155,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
                        "file memory out (migrate/export/import/delete)")
     p_mem.add_argument(
         "action", nargs="?", default="list",
-        choices=["list", "candidates", "approve", "reject", "forget", "search",
+        choices=["card", "list", "candidates", "approve", "reject", "forget", "search",
                  "migrate", "export", "import", "delete"])
     p_mem.add_argument("arg", nargs="*",
                        help="id (approve/reject/forget), query (search), or "
@@ -566,6 +566,9 @@ def main(argv: list[str] | None = None) -> int:
             removed = memory.delete_memory(target, category=args.category,
                                            note_id=args.note_id)
             print(f"Deleted {len(removed)} file(s).")
+        elif args.action == "card":
+            from . import usermem as _um
+            print(_um.render_card(args.user or user))
         elif args.action == "list":
             mems = usermem.active_memories(user)
             if not mems:

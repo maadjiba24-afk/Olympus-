@@ -58,6 +58,28 @@ carries a migration note here.
   maintenance sweep prunes orphaned conversations (file deleted) and, only if
   `OLYMPUS_SEARCH_RETAIN_DAYS` > 0, aged ones — then VACUUMs. Conversation
   files are never touched; the index stays rebuildable via `reindex()`.
+- **Email spoof-guard** — when `OLYMPUS_EMAIL_ALLOW` is set, the email gateway
+  also requires Gmail's own DMARC/SPF+DKIM pass verdict
+  (`Authentication-Results`); a From: header alone no longer satisfies the
+  allowlist. Absent verdict = fail closed. Without an allowlist, behavior is
+  unchanged (identity isn't load-bearing).
+
+### Added — memory transparency & reach
+
+- **`olympus memory card`** — one markdown page of everything believed about a
+  user, every fact with live (decayed) confidence, type, age, and id; held
+  candidates listed separately. A projection of the gated store — never an
+  editable file.
+- **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons, reports, and
+  corrections as dated markdown for curation in Obsidian/any editor. A mirror,
+  not a second source of truth; a broken vault path never breaks a save.
+- **Visible memory activity** — "🧠 remembered/updated/reinforced: …" progress
+  lines as the background extractor gates facts in (all/verbose progress modes).
+- **Soul scaffold** now seeds ## Role and ## Current focus; the wizard's
+  closing hints point at `olympus soul edit`.
+- **Search hit-set distillation** — oversized session-search results are
+  condensed by the pool's fastest model (citations kept); keyless installs fall
+  back to truncation.
 
 > **Release-state note.** As of this writing the latest *published* release is
 > **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`

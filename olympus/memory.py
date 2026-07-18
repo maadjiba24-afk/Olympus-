@@ -19,6 +19,7 @@ import contextvars
 import hashlib
 import io
 import json
+import os
 import re
 import tarfile
 import threading
@@ -126,7 +127,29 @@ def save(category: str, title: str, content: str) -> Path:
     d = _dir(category, current_user())
     path = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(title)}.md"
     path.write_text(render_note(title, content), encoding="utf-8")
+    _mirror_to_vault(category, path)
     return path
+
+
+# Categories worth reading in a knowledge GUI (Obsidian is just a folder).
+_VAULT_CATEGORIES = frozenset({"lessons", "reports", "corrections"})
+
+
+def _mirror_to_vault(category: str, path: Path) -> None:
+    """Write-through mirror into OLYMPUS_VAULT_DIR — a plain-markdown knowledge
+    base the user curates in any editor/GUI. A MIRROR, not a second source of
+    truth: the gated store stays canonical; deleting/editing vault files never
+    affects Olympus. Best-effort — a broken vault path must never break a save."""
+    vault = os.environ.get("OLYMPUS_VAULT_DIR", "").strip()
+    if not vault or category not in _VAULT_CATEGORIES:
+        return
+    try:
+        out = Path(vault).expanduser() / category
+        out.mkdir(parents=True, exist_ok=True)
+        (out / path.name).write_text(path.read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _search_dirs() -> list[Path]:

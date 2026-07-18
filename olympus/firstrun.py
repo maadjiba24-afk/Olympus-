@@ -596,6 +596,8 @@ def wizard() -> bool:
     print(f"  ✓ Saved to {CONFIG_ENV} (owner-only).")
     print(f"  ✓ Pool: {len(members)} provider(s) composed into one brain.")
     print("  ✓ You're set — type `olympus` to chat. `olympus models` shows the pool.")
+    print("  Tip: `olympus soul edit` — seed your role, focus, and voice; it "
+          "shapes every reply.")
     print()
     # End on the same readiness picture `olympus doctor` shows.
     try:

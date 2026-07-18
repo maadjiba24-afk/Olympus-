@@ -660,6 +660,7 @@ class Olympus:
                 target=recall.extract,
                 args=(self.user, user_message, reply,
                       self.pool.for_role("reasoning")),
+                kwargs={"report": self.report},
                 daemon=True).start()
             # Per-user adaptive evolution: count this exchange and, at every
             # checkpoint, re-distill this user's private working model in the
