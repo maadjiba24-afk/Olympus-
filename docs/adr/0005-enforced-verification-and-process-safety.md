@@ -288,6 +288,30 @@ Gate hardening, each with a pinning test:
   nesting — yields either a coerced valid verdict or None (the visible
   degraded path). Never a crash, never a silent pass of an invalid status.
 
+## Amendment 6 (hardening addendum — Phase 2)
+
+- **Bounded lock acquisition by default.** flock cannot go stale (the
+  kernel releases it when the holder dies — proven by a kill -9 test: the
+  survivor acquires promptly and atomically-published state is old-or-new,
+  never torn). The only unbounded wait is a live-but-wedged holder, so
+  `proclock.lock` now defaults to a 60 s timeout (`timeout=None` is the
+  explicit block-forever opt-in). Caller audit: the heartbeat catches per
+  job; a tool call surfaces the TimeoutError honestly; the three reply-path
+  callers handle it explicitly — `usage.record` skips the ledger write and
+  captures (one lost increment under a wedged peer beats a broken reply),
+  `bump_conversation_count` returns 0 (skips the audit trigger),
+  `watchlist_pop` returns None (the entry stays queued).
+- **The signed audit trail is multiprocess-safe.** `trace.flush` appends to
+  a SHARED daily file and the heartbeat's goal cycles run the full pipeline
+  — two processes' large-record appends could interleave and corrupt both
+  lines, which readers silently skip (a signed run would vanish). Appends
+  now serialize under `proclock.lock("traces", timeout=30)`; a wedged peer
+  diverts the record to a uniquely-named `overflow-<id>.jsonl` (still found
+  by `load_run`/`find_record`, which glob `*.jsonl`) — the audit record is
+  never lost and a reply never stalls on the lock. Integrity is pinned by a
+  two-process concurrent-flush test (every line parseable, every run
+  present) and an overflow test.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

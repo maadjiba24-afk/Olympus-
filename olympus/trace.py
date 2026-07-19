@@ -162,8 +162,25 @@ class Trace:
                 record["log_signature"] = witness.sign_log(self.decisions)
         except Exception:
             pass
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        # The daily file is shared BETWEEN PROCESSES (the heartbeat's goal
+        # cycles run the full pipeline and flush here too), and a large
+        # record's append can span multiple write syscalls — two concurrent
+        # appends could interleave and corrupt BOTH lines, which readers
+        # silently skip: a signed audit record would vanish. Serialize
+        # cross-process; on a wedged peer (bounded wait) divert to a
+        # uniquely-named overflow file instead — load_run/find_record glob
+        # *.jsonl, so the record is still discoverable. The audit trail is
+        # never lost and a reply never stalls on the lock (ADR 0005 am. 6).
+        line = json.dumps(record) + "\n"
+        try:
+            from . import proclock
+            with proclock.lock("traces", timeout=30.0):
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line)
+        except TimeoutError:
+            alt = path.with_name(f"overflow-{self.id}.jsonl")
+            with alt.open("a", encoding="utf-8") as f:
+                f.write(line)
         # Opt-in OTLP export of the run's STRUCTURE (no content) — best-effort,
         # off unless OLYMPUS_OTLP_ENDPOINT is set, skipped under replay.
         try:

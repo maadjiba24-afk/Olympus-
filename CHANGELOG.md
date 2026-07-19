@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Lock and audit-trail hardening (ADR 0005, amendment 6)
+
+- `proclock.lock` acquisition is bounded by default (60 s; `timeout=None`
+  is the explicit block-forever opt-in) — a wedged peer process becomes a
+  visible TimeoutError, never a silent hang. The reply-path callers handle
+  it explicitly (ledger write skipped + captured, audit trigger skipped,
+  watchlist entry stays queued); a kill -9 test proves flock's kernel
+  release + prompt recovery with consistent state.
+- The signed decision log's shared daily file is now multiprocess-safe:
+  appends serialize cross-process, and a wedged lock diverts the record to
+  a unique overflow file instead of dropping it — pinned by a two-process
+  concurrent-flush integrity test.
+
 ### Changed — Verification gate hardening (ADR 0005, amendment 5)
 
 - **Structural output contracts are ON by default** (`OLYMPUS_CONTRACTS=off`

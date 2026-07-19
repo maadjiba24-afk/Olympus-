@@ -49,14 +49,26 @@ def _lock_path(name: str):
     return d / f"{_safe(name)}.lock"
 
 
+# Default acquisition bound (ADR 0005 amendment 6). flock cannot go stale —
+# the kernel releases it when the holder dies, even on kill -9 — so the only
+# unbounded wait is a LIVE-but-wedged holder (SIGSTOP, D-state). A bounded
+# default turns that pathology into a visible TimeoutError instead of a
+# silent hang; every caller either handles it explicitly (usage ledger,
+# conversation counter, watchlist pop, trace overflow) or surfaces it
+# honestly (the heartbeat catches per job; a tool call errors visibly).
+DEFAULT_TIMEOUT = 60.0
+
+
 @contextlib.contextmanager
-def lock(name: str, timeout: float | None = None):
+def lock(name: str, timeout: float | None = DEFAULT_TIMEOUT):
     """`with proclock.lock("usage-ledger"):` — exclusive across processes and
     threads on this machine; reentrant within a thread.
 
     `timeout` bounds the wait (LOCK_NB polling) and raises TimeoutError on
-    expiry — use it on best-effort paths (telemetry) where losing one write
-    under contention beats letting a wedged peer process hang a reply."""
+    expiry; the default is DEFAULT_TIMEOUT so no caller can hang forever on
+    a wedged peer. Pass `timeout=None` to block indefinitely (explicit
+    opt-in), or a small value on best-effort paths where losing one write
+    under contention beats waiting."""
     global _WARNED
     # The depth table MUST key on the sanitized name — the same identity the
     # lock file uses. Keyed on the raw name, two spellings that sanitize to
