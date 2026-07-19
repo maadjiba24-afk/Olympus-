@@ -183,6 +183,57 @@ def test_unknown_action_rejected(monkeypatch):
                             actuator=_FakeActuator(), approved=True)
 
 
+@_signing
+def test_key_action_secret_is_refused(monkeypatch):
+    # H2: a `key` action can enter text too — a secret keyed one field at a time
+    # must be refused just like a typed one.
+    monkeypatch.setenv("OLYMPUS_COMPUTER_USE", "1")
+    from olympus import security
+    monkeypatch.setattr(security, "secret_exfil_reason",
+                        lambda text, user=None: "matches a held API key"
+                        if "sk-secret" in str(text) else None)
+    with pytest.raises(abc.ContractViolation):
+        computeruse.perform("computer_key", {"keys": "sk-secret-abc"},
+                            actuator=_FakeActuator(), approved=True)
+
+
+@_signing
+def test_key_audit_redacts_non_keyname_content(monkeypatch):
+    # A legit key chord is kept for forensics; anything else is length-only.
+    monkeypatch.setenv("OLYMPUS_COMPUTER_USE", "1")
+    for i, (keys, user) in enumerate([
+            ("ctrl+c", "k1"), ("cmd+shift+4", "kc"), ("F5", "kf"),
+            ("Return", "kr"), ("a", "ka")]):
+        computeruse.perform("computer_key", {"keys": keys}, user=user,
+                            actuator=_FakeActuator(), approved=True)
+        assert computeruse.audit(user)[-1]["state"].get("keys") == keys
+    # A pasted blob AND a short alphanumeric secret (which a permissive regex
+    # would wrongly keep) are BOTH stored by length only, never verbatim.
+    for keys, user in [("hunter2-swordfish-longsecret", "k2"),
+                       ("sk12AB34cd56EF78", "k3")]:      # 16-char alnum secret
+        computeruse.perform("computer_key", {"keys": keys}, user=user,
+                            actuator=_FakeActuator(), approved=True)
+        st = computeruse.audit(user)[-1]["state"]
+        assert "keys" not in st and st["keys_len"] == len(keys)
+        assert keys not in str(st)
+
+
+@_signing
+def test_attempt_audit_failure_fails_closed(monkeypatch):
+    # H2: if the pre-actuation 'attempt' record can't be signed, the actuation
+    # is REFUSED before it touches the OS — the audit never fails open.
+    monkeypatch.setenv("OLYMPUS_COMPUTER_USE", "1")
+    act = _FakeActuator()
+
+    def _boom(*a, **k):
+        raise RuntimeError("ledger write failed")
+    monkeypatch.setattr(deltas, "record_snapshot", _boom)
+    with pytest.raises(computeruse.ComputerUseError):
+        computeruse.perform("computer_click", {"x": 1, "y": 2},
+                            actuator=act, approved=True)
+    assert act.calls == []                 # never actuated — failed closed
+
+
 def test_no_gui_dependency_imported():
     import inspect
     src = inspect.getsource(computeruse)

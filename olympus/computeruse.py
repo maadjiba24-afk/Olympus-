@@ -35,6 +35,37 @@ from . import actions, deltas
 
 SCOPE = "computer.use"
 
+# A legitimate `key` payload is a key NAME or a chord of them (Return, Tab,
+# Escape, ctrl+c, cmd+shift+4, F5, ...). Only such values are kept verbatim in
+# the signed, externally-anchored audit; anything else (a pasted blob, a
+# secret) is recorded by length only. A permissive char-class regex is NOT
+# enough — a short alphanumeric secret matches one — so we require every
+# '+'-separated part to be a KNOWN key token (a modifier, a named key, or a
+# single character).
+_KEY_MODIFIERS = frozenset({
+    "ctrl", "control", "alt", "option", "opt", "shift", "cmd", "command",
+    "meta", "super", "win", "windows", "fn"})
+_KEY_NAMES = frozenset({
+    "return", "enter", "tab", "escape", "esc", "space", "spacebar",
+    "backspace", "delete", "del", "home", "end", "pageup", "pagedown",
+    "up", "down", "left", "right", "insert", "capslock", "numlock",
+    "printscreen", "pause", "break", "menu", "plus", "minus",
+}) | frozenset(f"f{i}" for i in range(1, 25))
+
+
+def _is_key_token(tok: str) -> bool:
+    t = tok.strip().lower()
+    return len(tok) == 1 or t in _KEY_MODIFIERS or t in _KEY_NAMES
+
+
+def _looks_like_keyspec(keys: str) -> bool:
+    """True only for a genuine key name / chord — every '+'-joined part is a
+    known key token. A pasted secret (even a short alphanumeric one) is not."""
+    if not keys or len(keys) > 32:
+        return False
+    parts = keys.split("+")
+    return all(_is_key_token(p) for p in parts if p != "") and any(parts)
+
 # Action name → whether it is a world-changing actuation. ALL are IRREVERSIBLE
 # risk — including `screenshot`, which can capture on-screen secrets — so NO
 # computer-use action can ever auto-execute (irreversible ⇒ autonomy level 99);
@@ -115,8 +146,12 @@ def _ctx(name: str, payload: dict, *, actuator: Actuator, approved: bool) -> dic
         "computer_action_approved": bool(approved),
         # A launched command is a shell command — it must clear cmdguard.
         "command": payload.get("command") if name == "computer_launch" else None,
-        # Typed text must carry no exfiltrated secret.
-        "typed_text": payload.get("text") if name == "computer_type" else None,
+        # Text entered at the OS level must carry no exfiltrated secret — this
+        # covers BOTH `type` (bulk text) and `key` (keystrokes can be abused to
+        # enter a secret one field at a time).
+        "typed_text": (payload.get("text") if name == "computer_type"
+                       else payload.get("keys") if name == "computer_key"
+                       else None),
     }
 
 
@@ -136,7 +171,13 @@ def _summary(name: str, payload: dict) -> dict:
         return {"action": name, "x": payload.get("x"), "y": payload.get("y"),
                 "button": payload.get("button", "left")}
     if name == "computer_key":
-        return {"action": name, "keys": str(payload.get("keys", ""))[:80]}
+        keys = str(payload.get("keys", ""))
+        # A real key-name/chord is kept for forensics; anything else (a pasted
+        # blob) is recorded by length only, never verbatim.
+        out = {"action": name, "keys_len": len(keys)}
+        if _looks_like_keyspec(keys):
+            out["keys"] = keys
+        return out
     return {"action": name}
 
 
@@ -173,9 +214,15 @@ def perform(name: str, payload: dict, *, user: str = "shared",
         raise ComputerUseError(f"unknown computer-use action {name!r}")
     actuator = actuator if actuator is not None else _actuator
 
-    # Record the INTENT first, so a signed trace exists even if what follows
-    # fails to record — for OS control the audit must never fail open.
-    _record(user, name, payload, event="attempt")
+    # Record the INTENT first, and FAIL CLOSED if it can't be signed: for OS
+    # control the audit must never fail open, so an unrecordable actuation is
+    # refused before it can touch the OS (the payrail 'charged' pattern).
+    try:
+        _record(user, name, payload, event="attempt", critical=True)
+    except Exception as err:
+        raise ComputerUseError(
+            f"refusing to actuate {name!r}: the attempt could not be recorded "
+            f"to the signed audit ({err})") from err
 
     if not enabled():
         _record(user, name, payload, event="blocked", reason="disabled")
@@ -201,7 +248,11 @@ def perform(name: str, payload: dict, *, user: str = "shared",
 
 
 def _record(user: str, name: str, payload: dict, *, event: str,
-            reason: str = "") -> str:
+            reason: str = "", critical: bool = False) -> str:
+    """Append a witness-signed record of one computer-use event. `critical=True`
+    (the pre-actuation 'attempt') PROPAGATES a write failure so an actuation
+    that cannot be audited is refused; the post-hoc events (blocked / refused /
+    performed) are best-effort but still loud (never silent)."""
     try:
         snap = deltas.record_snapshot(
             f"computeruse:{user}", kind="computer-use",
@@ -210,6 +261,8 @@ def _record(user: str, name: str, payload: dict, *, event: str,
                                          detail=f"{name}:{event}"))
         return snap["snapshot_hash"]
     except Exception as err:
+        if critical:
+            raise
         # Audit-write failure on OS control is loud, never silent.
         from . import errors
         errors.capture("computeruse.record",
