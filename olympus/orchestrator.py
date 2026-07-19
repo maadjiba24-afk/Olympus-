@@ -573,16 +573,30 @@ class Olympus:
         try:
             try:
                 # Scored effort with the specialist's own tier as the FLOOR
-                # (ADR 0005): hard signals — a long task, a wide loadout, a
-                # verification-bound run, and above all a rework — raise the
-                # tier; nothing ever lowers it below the specialist's floor.
-                # Deterministic proxies only (no I/O, no model calls).
+                # (ADR 0005): hard signals — a risky loadout, a long task, a
+                # wide EXTRA-tool loadout, a verification-bound run, and above
+                # all a rework — raise the tier; nothing ever lowers it below
+                # the specialist's floor. Deterministic proxies only (no I/O,
+                # no model calls): risk comes from the static action registry
+                # — a specialist holding an irreversible/financial action tool
+                # always thinks at the top tier.
+                from . import actions as actions_mod
+                from . import builtin_actions  # noqa: F401 — populates registry
                 spec = SPECIALISTS[key]
+                registry = actions_mod.registered()
+                risk = actions_mod.TRIVIAL
+                for name in spec.extra_tools:
+                    at = registry.get(name)
+                    if at and at.risk_class in (actions_mod.IRREVERSIBLE,
+                                                actions_mod.FINANCIAL_LEGAL):
+                        risk = at.risk_class
+                        break
                 effort = effortscore.at_least(
                     spec.effort,
                     effortscore.score(
+                        risk_class=risk,
                         prompt_chars=len(task),
-                        tool_count=len(tools.BASE_TOOLS) + len(spec.extra_tools),
+                        tool_count=len(spec.extra_tools),
                         retry_index=retry_index,
                         needs_verification=needs_verification))
                 output, tool_calls = spec.run_counted(
@@ -863,10 +877,14 @@ class Olympus:
                     self.report(f"🎓 {SPECIALISTS[k].name}'s rework escalates "
                                 f"to the teacher model ({t.model}).")
                     tr.event("teacher.escalated", specialist=k, model=t.model)
-                else:
+                elif SPECIALISTS[k].effort != "high":
                     # No stronger pool member (single-model pool or already
                     # strongest): the rework still escalates — SAME model at
                     # the top effort tier, via retry_index below (ADR 0005).
+                    # Only traced when the bump genuinely changes the call:
+                    # a specialist already floored at high gains nothing, and
+                    # logging an escalation that changes no parameter would
+                    # mislead anyone reading the trace.
                     tr.event("teacher.effort_escalated", specialist=k)
             with tr.span("rework_dispatch"):
                 redone = dict(self._dispatch(redo, tr, overrides=escalated,

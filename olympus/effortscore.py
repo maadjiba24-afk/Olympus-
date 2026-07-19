@@ -24,8 +24,12 @@ from . import actions
 
 TIERS = ("low", "medium", "high")
 
-LONG_PROMPT_CHARS = 2000     # a brief this long carries real breadth
-MANY_TOOLS = 12              # a loadout this wide implies a complex task
+LONG_PROMPT_CHARS = 2000        # a brief this long carries real breadth
+VERY_LONG_PROMPT_CHARS = 8000   # ... and this long can demand depth alone
+# Counts the specialist's EXTRA tools only — the 7 BASE tools are shared by
+# everyone, so including them made the signal fire for most of the roster
+# and structurally defeated the cost dial (adversarial review, ADR 0005).
+MANY_TOOLS = 10
 
 
 def _idx(effort: str) -> int:
@@ -50,6 +54,8 @@ def score(risk_class: str = actions.TRIVIAL, prompt_chars: int = 0,
         bumps += 1
     if prompt_chars > LONG_PROMPT_CHARS:
         bumps += 1
+    if prompt_chars > VERY_LONG_PROMPT_CHARS:
+        bumps += 1                # a second bump: length alone can reach high
     if tool_count > MANY_TOOLS:
         bumps += 1
     return TIERS[min(bumps, len(TIERS) - 1)]

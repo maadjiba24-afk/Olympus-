@@ -30,6 +30,13 @@ def test_each_hard_signal_raises_one_tier():
         prompt_chars=effortscore.LONG_PROMPT_CHARS + 1) == "high"
 
 
+def test_very_long_prompt_alone_reaches_high():
+    # Kills the review's "routing effort is provably constant" finding: with
+    # only prompt length as signal, the top tier must be reachable.
+    assert effortscore.score(
+        prompt_chars=effortscore.VERY_LONG_PROMPT_CHARS + 1) == "high"
+
+
 def test_signals_clamp_at_high():
     assert effortscore.score(
         needs_verification=True,
@@ -126,6 +133,38 @@ def test_retry_dispatch_escalates_effort(monkeypatch):
     finally:
         tr.flush()
     assert efforts == ["high"]
+
+
+def test_risky_action_loadout_forces_high(monkeypatch):
+    """A specialist holding an irreversible action tool always thinks at the
+    top tier — the risk_class input is genuinely wired from the action
+    registry, not a dead parameter."""
+    efforts = []
+    spec = dataclasses.replace(SPECIALISTS["hermes"], effort="low",
+                               extra_tools=("send_email",))
+
+    def fake_run_counted(task, settings=None, effort=None):
+        efforts.append(effort)
+        return "output", 0
+
+    object.__setattr__(spec, "run_counted", fake_run_counted)
+    monkeypatch.setitem(SPECIALISTS, "hermes", spec)
+    bot = orchestrator.Olympus(user="effort-test")
+    _run_one(bot, "trivial task")          # tiny prompt, no other signals
+    assert efforts == ["high"]             # risk alone forces the top tier
+
+
+def test_production_floors_make_the_dial_real():
+    """The adversarial review proved an all-'high' roster makes the scorer a
+    production no-op. At least one shipped specialist must sit below 'high'
+    (cheap path exists), and the deep ones must still floor at 'high'."""
+    floors = {k: s.effort for k, s in SPECIALISTS.items()}
+    assert any(e != "high" for e in floors.values()), floors
+    assert floors["iris"] == "medium"
+    assert floors["mnemosyne"] == "medium"
+    assert floors["chiron"] == "medium"
+    assert floors["hephaestus"] == "high"    # deep work keeps its floor
+    assert floors["aegis"] == "high"
 
 
 def test_single_pool_rework_escalates_same_model_higher_effort(monkeypatch):

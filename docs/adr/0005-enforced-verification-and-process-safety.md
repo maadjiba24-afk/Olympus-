@@ -169,6 +169,36 @@ reverted**:
   re-checks `status == "active"` under the lock so a concurrent drop/close
   is never overwritten by a stale verdict.
 
+## Amendment 2 (post-implementation adversarial review of decision c)
+
+A 10-agent adversarial review of the Phase 3 diff confirmed 5 distinct
+findings; resolutions:
+
+- **Replay recordings are version-bound (ACCEPTED).** `effort` is part of
+  the hashed replay request, so a pre-Phase-3 recording whose plan step now
+  scores differently raises `ReplayDivergence` instead of replaying. This is
+  the re-executable-replay design working as intended — any
+  behavior-changing release (including Phase 1's prompt changes) invalidates
+  old recordings, and the divergence is the tripwire, not a bug. Recordings
+  verify the code that produced them.
+- **The scorer must be reachable, not cosmetic.** Three findings showed the
+  wiring was a production no-op: routing effort was provably constant, every
+  shipped specialist floored at "high" (so the floor semantics and the
+  single-pool escalation changed no real call), and counting the 7 shared
+  BASE tools put most of the roster near the tool threshold. Fixed by: a
+  second prompt-length tier (VERY_LONG → "high" reachable from length
+  alone), counting only EXTRA tools (threshold 10), and lowering three
+  genuinely light specialists (iris, mnemosyne, chiron) to a "medium" floor
+  — the cheap path now exists in production, backstopped by the enforcing
+  answer.verify gate, Athena review, and the retry→high rule.
+- **risk_class is wired, not declared.** A specialist whose extra tools
+  include an IRREVERSIBLE/FINANCIAL_LEGAL action (from the static action
+  registry) always scores "high" — deterministic, no I/O.
+- **Escalation is only traced when real.** `teacher.effort_escalated` is
+  emitted solely when the retry bump actually changes the call parameters
+  (floor below "high"); an event describing a no-op would mislead trace
+  readers.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

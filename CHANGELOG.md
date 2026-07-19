@@ -28,9 +28,19 @@ carries a migration note here.
 - A rework runs at the top tier (`retry_index >= 1` → high) on BOTH rework
   paths (Athena quality retry and the Aletheia answer.verify forced rework).
   On a single-model pool — where `teacher_for` has no stronger member to
-  swap in — this same-model-more-compute bump IS the escalation, so
-  "thinks harder on hard calls" now exists on the default single-key
-  deployment (traced as `teacher.effort_escalated`).
+  swap in — this same-model-more-compute bump IS the escalation, traced as
+  `teacher.effort_escalated` only when it genuinely changes the call.
+- A 10-agent adversarial review then made the dial REAL rather than
+  cosmetic: a second prompt-length tier makes "high" reachable from length
+  alone (routing included); the tool signal counts only a specialist's
+  EXTRA tools (the 7 shared BASE tools had put most of the roster at the
+  threshold); `risk_class` is genuinely wired — a specialist holding an
+  irreversible/financial action tool always thinks at the top tier; and
+  three light specialists (Iris, Mnemosyne, Chiron) now floor at "medium",
+  so a cheap path exists in production — backstopped by the enforcing
+  answer.verify gate, Athena review, and the retry→high rule. Accepted:
+  replay recordings are version-bound — a behavior-changing release
+  invalidates old recordings by design (the divergence is the tripwire).
 
 ### Added — Cross-process safety on shared mutable state (ADR 0005, Phase 2)
 
