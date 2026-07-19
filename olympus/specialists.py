@@ -204,11 +204,18 @@ SPECIALISTS: dict[str, Specialist] = {
             # Social copy should stay tight — guard against a wall-of-text reply.
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_chars=8000),
+            # Light floor (ADR 0005): social copy runs cheap by default; hard
+            # signals (verification, breadth, a rework) raise it, and the
+            # enforcing Aletheia gate + Athena review backstop quality.
+            effort="medium",
         ),
         Specialist(
             key="chiron", name="Chiron", title="Coaching Specialist",
             description="Personal coaching: goals, habits, productivity, "
                         "motivation, career growth, accountability.",
+            # Light floor (ADR 0005): conversational coaching; the scorer
+            # raises it on hard signals.
+            effort="medium",
         ),
         Specialist(
             key="chronos", name="Chronos", title="Scheduling Manager",
@@ -255,6 +262,9 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Watches YouTube videos via transcript, understands and "
                         "summarizes them, and stores durable lessons in memory.",
             extra_tools=("watch_youtube", "create_skill"),
+            # Light floor (ADR 0005): transcript summarization; the scorer
+            # raises it on hard signals.
+            effort="medium",
         ),
         Specialist(
             key="metis", name="Metis", title="Learning Synthesizer",

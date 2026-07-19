@@ -507,12 +507,14 @@ def schedule(user: str, name: str, domain: str, template: str,
              interval_secs: int, params: dict | None = None) -> dict:
     """Create/replace a standing operator job. Stored only; it runs on the
     heartbeat, still through the spine (so approval/scope/budget all apply)."""
+    from . import proclock
     job = {"name": name, "user": user, "domain": domain, "template": template,
            "params": params or {}, "interval": max(300, int(interval_secs)),
            "last_run": 0.0, "enabled": True}
-    jobs = [j for j in _load_jobs() if j.get("name") != name]
-    jobs.append(job)
-    _save_jobs(jobs)
+    with proclock.lock("operator-jobs"):
+        jobs = [j for j in _load_jobs() if j.get("name") != name]
+        jobs.append(job)
+        _save_jobs(jobs)
     return job
 
 
@@ -521,22 +523,32 @@ def run_due(now: float | None = None) -> list[str]:
     user (env switch OR that user's opt-in) via _gate, and goes through the
     spine: it auto-executes only within granted scope+autonomy+budget, otherwise
     it's left pending for approval. Returns human-readable log lines."""
+    from . import proclock
     now = now or time.time()
-    jobs = _load_jobs()
-    if not jobs:
-        return []
+    # Mark the due jobs UNDER the cross-process lock BEFORE running them —
+    # the old shape loaded, ran every (potentially slow, spine-gated) job,
+    # then blind-saved the stale list, silently deleting any job scheduled
+    # from the chat process mid-run (ADR 0005 second-ring sweep).
+    due: list[dict] = []
+    with proclock.lock("operator-jobs"):
+        jobs = _load_jobs()
+        if not jobs:
+            return []
+        for j in jobs:
+            if not j.get("enabled", True):
+                continue
+            if not enabled(j.get("user", "")):
+                continue
+            if now - float(j.get("last_run", 0.0)) < int(j.get("interval",
+                                                             300)):
+                continue
+            j["last_run"] = now
+            due.append(j)
+        if due:
+            _save_jobs(jobs)
     out: list[str] = []
-    changed = False
-    for j in jobs:
-        if not j.get("enabled", True):
-            continue
+    for j in due:
         ju = j.get("user", "")
-        if not enabled(ju):              # operator off for this user → silent no-op
-            continue
-        if now - float(j.get("last_run", 0.0)) < int(j.get("interval", 300)):
-            continue
-        j["last_run"] = now
-        changed = True
         if not authorized(ju, j.get("domain", "")):
             out.append(f"job '{j.get('name')}' skipped: "
                        f"'{j.get('domain')}' isn't authorized")
@@ -553,8 +565,6 @@ def run_due(now: float | None = None) -> list[str]:
             out.append(f"job '{j['name']}' failed: {action.error}")
         else:
             out.append(f"job '{j['name']}' awaiting approval (id {action.id})")
-    if changed:
-        _save_jobs(jobs)
     return out
 
 

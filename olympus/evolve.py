@@ -34,7 +34,20 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from . import store
+from . import proclock, store
+
+# Cross-process guard for the telemetry/tunables blob (ADR 0005): both the
+# heartbeat process and the web process write it, and a lost update or a torn
+# read would silently rebuild the dataset — including the tighten_only
+# security tunables — from defaults. Bounded wait: these are best-effort
+# telemetry paths, so losing one write under contention beats letting a
+# wedged peer process hang a reply. Always acquired BEFORE _LOCK so the
+# in-process mutex is never held across a flock wait.
+_PROC_TIMEOUT = 2.0
+
+
+def _guard():
+    return proclock.lock("evolve", timeout=_PROC_TIMEOUT)
 
 _NS = "evolve"
 _KEY = "telemetry"
@@ -169,7 +182,7 @@ def record(feature: str, outcome: str, detail: str = "") -> None:
     if outcome not in (OK, FAIL, DEGRADED):
         return
     try:
-        with _LOCK:
+        with _guard(), _LOCK:
             data = _load()
             feat = data.setdefault(feature, {"events": [], "tunes": []})
             feat["events"].append({"ts": _now(), "o": outcome,
@@ -203,7 +216,7 @@ def log_event(feature: str, kind: str, fields: dict | None = None) -> None:
         for k, v in (fields or {}).items():
             flat[str(k)[:40]] = (v if isinstance(v, (int, float, bool))
                                  else str(v)[:200])
-        with _LOCK:
+        with _guard(), _LOCK:
             blob = store.backend().get(_NS, _EVENTS_KEY)
             events = json.loads(blob) if blob else []
             if not isinstance(events, list):
@@ -274,13 +287,14 @@ def current(feature: str, name: str) -> float:
 
 
 def _set_param(feature: str, name: str, value: float) -> None:
-    data = _load()
-    feat = data.setdefault(feature, {"events": [], "tunes": []})
-    feat.setdefault("params", {})[name] = value
-    feat.setdefault("tunes", []).append({"ts": _now(), "name": name,
-                                         "value": value})
-    feat["tunes"] = feat["tunes"][-100:]
-    _save(data)
+    with _guard(), _LOCK:
+        data = _load()
+        feat = data.setdefault(feature, {"events": [], "tunes": []})
+        feat.setdefault("params", {})[name] = value
+        feat.setdefault("tunes", []).append({"ts": _now(), "name": name,
+                                             "value": value})
+        feat["tunes"] = feat["tunes"][-100:]
+        _save(data)
 
 
 # --- the periodic review (run by the heartbeat) ----------------------------
@@ -312,23 +326,25 @@ def review() -> str:
         # else surface a suggestion (never touch a non-registered setting).
         params = [t for k, t in _TUNABLES.items() if t.feature == feature]
         if params:
-            with _LOCK:
-                for t in params:
-                    cur = current(feature, t.name)
-                    step = max((t.hi - t.lo) / 6.0, 1e-9)
-                    nxt = cur + step if t.on_fail == "increase" else cur - step
-                    nxt = round(max(t.lo, min(t.hi, nxt)), 3)
-                    # Defense in depth for a security knob: a tighten_only param
-                    # may never step toward its loose end, whatever the arithmetic
-                    # above produced. (on_fail already points at the tight end, so
-                    # this only ever fires if that invariant is later broken.)
-                    if t.tighten_only:
-                        looser = nxt < cur if t.on_fail == "increase" else nxt > cur
-                        if looser:
-                            continue
-                    if nxt != cur:
-                        _set_param(feature, t.name, nxt)
-                        tuned.append(f"{feature}.{t.name} {cur}→{nxt}")
+            # No outer _LOCK here: _set_param acquires _guard()+_LOCK itself,
+            # and threading.Lock is not reentrant — holding it around the
+            # loop would self-deadlock (found by the ADR 0005 race tests).
+            for t in params:
+                cur = current(feature, t.name)
+                step = max((t.hi - t.lo) / 6.0, 1e-9)
+                nxt = cur + step if t.on_fail == "increase" else cur - step
+                nxt = round(max(t.lo, min(t.hi, nxt)), 3)
+                # Defense in depth for a security knob: a tighten_only param
+                # may never step toward its loose end, whatever the arithmetic
+                # above produced. (on_fail already points at the tight end, so
+                # this only ever fires if that invariant is later broken.)
+                if t.tighten_only:
+                    looser = nxt < cur if t.on_fail == "increase" else nxt > cur
+                    if looser:
+                        continue
+                if nxt != cur:
+                    _set_param(feature, t.name, nxt)
+                    tuned.append(f"{feature}.{t.name} {cur}→{nxt}")
         else:
             suggestions.append(
                 f"{feature} is degraded ({int(ok_rate*100)}% ok) but has no "
@@ -355,7 +371,7 @@ def reset(feature: str | None = None) -> str:
     tightens a security-relevant `tighten_only` param, never loosens it). With a
     feature, resets just that feature's params; with none, resets all. Telemetry
     history is left intact. Returns a short status."""
-    with _LOCK:
+    with _guard(), _LOCK:
         data = _load()
         cleared: list[str] = []
         for feat_name, feat in data.items():

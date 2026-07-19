@@ -113,8 +113,16 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
     user = memory.current_user()
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    from . import proclock
     with _TOTALS_LOCK:
         _bump_session(user, in_tokens, out_tokens, cost)
+    # The ledger read-modify-write holds ONLY the cross-process lock — never
+    # nested inside _TOTALS_LOCK. Holding the in-process mutex across an
+    # unbounded flock wait would couple session_totals()/today_spend() (the
+    # per-reply hot path) to the OTHER process's liveness: a wedged heartbeat
+    # holding the flock would freeze every reply here. The session bump and
+    # the ledger write need no mutual atomicity (ADR 0005).
+    with proclock.lock("usage-ledger"):
         ledger = {}
         if path.exists():
             try:
@@ -139,8 +147,12 @@ def today_spend() -> float:
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     if not path.exists():
         return 0.0
-    # Read under the same lock as record() so the budget guard never races a
-    # write; the atomic write already prevents torn reads, this pairs with it.
+    # Deliberately lock-free with respect to record()'s cross-process flock:
+    # correctness rests entirely on the atomic tmp+os.replace publish (a
+    # reader sees the old or the new ledger, never a torn one). Taking the
+    # flock here would couple every budget check to the other process's
+    # liveness for no consistency gain. _TOTALS_LOCK only serializes against
+    # in-process session-total updates.
     with _TOTALS_LOCK:
         try:
             ledger = json.loads(path.read_text(encoding="utf-8"))
