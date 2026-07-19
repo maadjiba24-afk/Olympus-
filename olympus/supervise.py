@@ -36,16 +36,23 @@ def _grade(summary_by_user: dict, mined_count: int, errors: list[str]
     """CLEAN unless anything in the cycle needed a human: an Aletheia rejection,
     an unverified or below-floor-confidence proposal, or a harness error. Every
     DIRTY reason is quoted so the operator sees exactly what went wrong."""
+    # DIRTY reasons are signed into the scoreboard and externally anchored, and
+    # some of their text is UNTRUSTED (proposal claims + cycle errors derive
+    # from mined failure traces / memory content). Defang it before it enters
+    # the record — the same discipline the mined `samples` already follow, so
+    # an injection payload can't ride into the signed/anchored evidence.
+    def _clean(text) -> str:
+        return security.sanitize_for_memory(str(text))[:_MAX_SAMPLE]
+
     reasons: list[str] = []
     floor = config.SLEEPTIME_CONFIDENCE_MIN
     for user, s in summary_by_user.items():
         if s.get("error"):
-            reasons.append(f"user {user!r}: cycle error — {s['error']}")
+            reasons.append(f"user {user!r}: cycle error — {_clean(s['error'])}")
             continue
         for p in s.get("cycle_proposals", []):
             if not p.get("verified"):
-                claims = "; ".join(str(c)[:_MAX_SAMPLE]
-                                   for c in (p.get("unsupported") or []))
+                claims = "; ".join(_clean(c) for c in (p.get("unsupported") or []))
                 reasons.append(
                     f"user {user!r}: Aletheia REJECTED proposal {p.get('id')}"
                     + (f" — unsupported claims: {claims}" if claims else ""))
@@ -54,7 +61,7 @@ def _grade(summary_by_user: dict, mined_count: int, errors: list[str]
                     f"user {user!r}: proposal {p.get('id')} confidence "
                     f"{p.get('confidence')} below the {floor} floor "
                     "(block-mode would have refused it)")
-    reasons.extend(errors)
+    reasons.extend(_clean(e) for e in errors)
     return ("CLEAN" if not reasons else "DIRTY"), reasons
 
 

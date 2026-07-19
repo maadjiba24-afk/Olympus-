@@ -81,6 +81,31 @@ def test_poisoned_cycle_grades_dirty_citing_the_poison():
 
 
 @_signing
+def test_scoreboard_reasons_are_sanitized_and_bounded(monkeypatch):
+    # H5: DIRTY reasons are signed into the scoreboard AND externally anchored,
+    # and their claim text is UNTRUSTED (proposal-derived). It must be defanged
+    # (like the mined samples) and length-bounded before it enters the record.
+    _seed_user("dana")
+    zerowidth = "leak​ce.example"                 # zero-width obfuscation
+    overlong = "x" * 5000                              # unbounded bloat attempt
+
+    def poisoned(grp, rewrite):
+        return {"supported": False,
+                "unsupported_claims": [zerowidth, overlong], "confidence": 0.1}
+
+    report = supervise.run_supervised_cycle(
+        generator=lambda grp: "Alpha ships; also junk", verifier=poisoned)
+    assert report["grade"] == "DIRTY"
+    reasons = supervise.scoreboard()[-1]["state"]["reasons"]
+    blob = " ".join(reasons)
+    # The zero-width character is stripped (defanged), and no single reason
+    # carries the unbounded blob verbatim.
+    assert "​" not in blob
+    assert "leakce.example" in blob                    # visible text preserved
+    assert all(len(r) < 2000 for r in reasons)         # bounded, not 5000 chars
+
+
+@_signing
 def test_low_confidence_verified_proposal_is_dirty():
     _seed_user("bob")
     report = supervise.run_supervised_cycle(
