@@ -47,7 +47,9 @@ def test_clarify_with_no_questions_falls_through(monkeypatch):
                         lambda *a, **k: [{"id": "s0", "specialist": "plutus",
                                           "task": "t", "depends_on": []}])
     monkeypatch.setattr(bot, "_dispatch_dag", lambda *a, **k: [("plutus", "ok")])
-    monkeypatch.setattr(bot, "_verify", lambda *a, **k: "verified")
+    monkeypatch.setattr(bot, "_verify", lambda *a, **k: (
+        "verified", {"status": "pass", "unsupported_claims": [],
+                     "confidence": 1.0}))
     monkeypatch.setattr(bot, "_review",
                         lambda *a, **k: {"verdict": "approve", "feedback": "",
                                          "retry_specialists": []})
