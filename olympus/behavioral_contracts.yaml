@@ -54,6 +54,18 @@ contracts:
     governance:
       - aletheia_verified
 
+  answer_synthesis:
+    operation: answer.synthesis
+    recovery: degrade
+    description: >-
+      The composed answer against the verified findings — the synthesis
+      faithfulness verdict must not be a rejection (ADR 0005 amendment 4; the
+      orchestrator implements recompose-once-then-banner).
+    preconditions: []
+    invariants: []
+    governance:
+      - aletheia_verified
+
   tool_loadout:
     operation: run.loadout
     recovery: block

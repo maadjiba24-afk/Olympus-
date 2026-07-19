@@ -97,6 +97,18 @@ carries a migration note here.
   from the registry on each launch, so a long terminal session can't leak
   Thread objects.
 
+### Added — Synthesis faithfulness check (ADR 0005, amendment 4)
+
+- The composed answer is now verified too — the last unverified hop on the
+  interactive path. A no-tools faithfulness check compares Zeus's reply
+  against the already-verified findings via the new `answer.synthesis`
+  contract: unfaithful → exactly one recompose with the unsupported
+  additions named; still unfaithful → a structural `⚠️ UNVERIFIED
+  ADDITIONS` banner. Streaming replies (whose tokens can't be retracted)
+  get a trailing correction note instead. Checker infrastructure failures
+  are traced but never bannered — the findings themselves were verified.
+  Skipped in fast mode; `OLYMPUS_SYNTH_CHECK=off` kill switch.
+
 ### Fixed — Second-ring cross-process safety (ADR 0005, amendment 3)
 
 - The acceptance re-audit swept the tree for the heartbeat-vs-web RMW class

@@ -231,6 +231,36 @@ docrag, compare, capabilities snapshots), the per-process (not global)
 concurrent-call cap, and any cross-machine story beyond the Postgres
 backend.
 
+## Amendment 4 (synthesis faithfulness — the last unverified hop)
+
+The acceptance audit noted that Aletheia verifies specialist findings
+BEFORE synthesis: nothing checked what Zeus composed, so a synthesis-stage
+hallucination passed through. Closed with a stage-4.5 check:
+
+- **What it checks**: faithfulness, not world facts. The findings were
+  already fact-checked; the residual risk is the composer ADDING claims
+  beyond them (or contradicting them). One no-tools JSON call on the
+  verify-role model — `{faithful, unsupported_additions[], confidence}` —
+  fed through the `answer.synthesis` contract (same `aletheia_verified`
+  predicate).
+- **Blocking path**: unfaithful → exactly one recompose with the additions
+  named; still unfaithful → structural `⚠️ UNVERIFIED ADDITIONS` banner.
+- **Streaming path**: delivered tokens can't be retracted, so an unfaithful
+  composition gets a trailing correction note listing the unsupported
+  claims — the check still runs and is recorded either way.
+- **Checker infrastructure failure**: traced and operator-reported but NOT
+  user-bannered — the findings themselves were verified, so a missing
+  double-check is not unverified content (unlike the primary verify stage,
+  where absence of verification IS the banner condition).
+- **Scope**: runs only when the primary verification ran and the answer is
+  not already downgraded; skipped in fast mode; `OLYMPUS_SYNTH_CHECK=off`
+  kill switch. Cost: one medium-effort JSON call per delegated verified
+  turn.
+
+Remaining accepted edges after this: Zeus's direct replies and clarify
+turns are still unverified (they make no factual delegation), and the
+router's `needs_verification=False` opt-out still bypasses the whole chain.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

@@ -131,6 +131,43 @@ def _banner_rejected(claims: list[str]) -> str:
             "rework did not resolve them:\n" + lines)
 
 
+def _banner_synth(additions: list[str]) -> str:
+    lines = "\n".join(f"- {c}" for c in additions[:10]) or "- (unspecified)"
+    return ("⚠️ UNVERIFIED ADDITIONS — the composed answer includes claims "
+            "not supported by the verified findings, and a recompose did not "
+            "resolve them:\n" + lines)
+
+
+SYNTH_CHECK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "faithful": {
+            "type": "boolean",
+            "description": "True if the reply stays within the verified "
+                           "findings (glue/formatting/hedges are fine)",
+        },
+        "unsupported_additions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Consequential factual claims present in the "
+                           "reply but absent from (or contradicting) the "
+                           "verified findings",
+        },
+        "confidence": {"type": "number"},
+    },
+    "required": ["faithful", "unsupported_additions", "confidence"],
+    "additionalProperties": False,
+}
+
+_SYNTH_CHECK_SYSTEM = (
+    "You are Olympus's synthesis faithfulness checker. The specialist "
+    "findings you are given were ALREADY fact-checked; your only job is to "
+    "detect claims the composed reply ADDS beyond them or contradicts. "
+    "Conversational glue, formatting, restatement, hedging, and reasonable "
+    "summarization are all faithful. Flag only consequential factual "
+    "additions or contradictions.")
+
+
 def _parse_verdict(text: str) -> tuple[str, dict | None]:
     """Split Aletheia's reply into (content, structured verdict).
 
@@ -509,6 +546,125 @@ class Olympus:
         banner = getattr(self, "_unverified_banner", None)
         return f"{banner}\n\n{reply}" if banner else reply
 
+    # -- stage 4.5: synthesis faithfulness (ADR 0005 amendment 4) ----------
+
+    def _check_synthesis(self, user_message: str, verified: str,
+                         reply: str) -> dict | None:
+        """Does the composed reply stay within the verified findings? One
+        no-tools JSON call — the world facts were already checked upstream;
+        the residual risk is the composer ADDING claims. Returns None on
+        checker infrastructure failure (the caller logs it)."""
+        prompt = (
+            f"The user asked:\n{user_message}\n\n"
+            f"Verified findings (already fact-checked):\n{verified}\n\n"
+            f"Composed reply to check:\n{reply}\n\n"
+            "Is the reply faithful to the verified findings?")
+        data = backend.complete_json(
+            self.pool.for_role("verify"), _SYNTH_CHECK_SYSTEM,
+            [{"role": "user", "content": prompt}], SYNTH_CHECK_SCHEMA,
+            effort=effortscore.at_least(
+                "medium", effortscore.score(prompt_chars=len(reply))))
+        additions = data.get("unsupported_additions")
+        additions = ([str(c)[:300] for c in additions[:20]]
+                     if isinstance(additions, list) else [])
+        return {"faithful": bool(data.get("faithful", True)),
+                "unsupported_additions": additions}
+
+    def _judge_synthesis(self, verdict: dict, tr: "trace_mod.Trace") -> bool:
+        """Feed the faithfulness verdict through the answer.synthesis
+        behavioral contract (same aletheia_verified predicate as the
+        answer.verify chokepoint) and record the decision."""
+        from . import behavioral_contracts as _abc
+        status = "pass" if verdict["faithful"] else "reject"
+        v = _abc.check("answer.synthesis", {"verify_verdict": status})
+        tr.decision(
+            "synthesis_check", {"name": "aletheia", "role": "verifier"},
+            {"verdict": verdict, "contract_ok": v.ok},
+            status="ok" if v.ok else "violation")
+        return v.ok
+
+    def _maybe_check_synthesis(self, user_message: str, brief: str,
+                               reply: str, tr: "trace_mod.Trace") -> str:
+        """Blocking-path policy: unfaithful → exactly one recompose with the
+        additions named; still unfaithful → UNVERIFIED ADDITIONS banner.
+        Checker infrastructure failure is traced and reported but does NOT
+        banner the user — the findings themselves were already verified, so
+        a missing double-check is not unverified content (ADR 0005 am. 4)."""
+        verified = getattr(self, "_synth_check_source", None)
+        if (not verified or not config.synth_check_enabled()
+                or config.fast_mode()):
+            return reply
+        try:
+            verdict = self._check_synthesis(user_message, verified, reply)
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
+        except Exception as err:
+            tr.event("synth_check.failed", error=str(err)[:200])
+            self.report("⚠️ Synthesis faithfulness check could not run.")
+            return reply
+        if self._judge_synthesis(verdict, tr):
+            return reply
+        additions = verdict["unsupported_additions"]
+        listed = "\n".join(f"- {c}" for c in additions) or "- (unspecified)"
+        self.report("⛔ The composed answer added unsupported claims — "
+                    "recomposing once.")
+        tr.event("synthesis.rework", reason="unfaithful")
+        try:
+            with tr.span("resynthesize"):
+                reply2 = self._synthesize(
+                    user_message, brief,
+                    verified + "\n\n## Faithfulness correction\n"
+                    "Your previous draft added these unsupported claims — "
+                    "remove or explicitly qualify them:\n" + listed)
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:
+            tr.event("resynthesize.failed", error=str(err)[:200])
+            self._unverified_banner = _banner_synth(additions)
+            tr.event("answer.unverified", reason="synth_unfaithful")
+            return reply
+        try:
+            verdict2 = self._check_synthesis(user_message, verified, reply2)
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:
+            tr.event("synth_check.failed", error=str(err)[:200])
+            return reply2               # recomposed against the corrections
+        if self._judge_synthesis(verdict2, tr):
+            return reply2
+        self._unverified_banner = _banner_synth(
+            verdict2["unsupported_additions"] or additions)
+        tr.event("answer.unverified", reason="synth_unfaithful")
+        self.report("⚠️ Recompose still unfaithful — shipping with an "
+                    "UNVERIFIED ADDITIONS banner.")
+        return reply2
+
+    def _synth_stream_note(self, user_message: str, joined: str,
+                           tr: "trace_mod.Trace") -> str | None:
+        """Streaming-path policy: delivered tokens can't be retracted, so an
+        unfaithful composition gets a trailing correction note instead of a
+        recompose (bounded, honest — the check still runs and is recorded)."""
+        verified = getattr(self, "_synth_check_source", None)
+        if (not verified or not config.synth_check_enabled()
+                or config.fast_mode()):
+            return None
+        try:
+            verdict = self._check_synthesis(user_message, verified, joined)
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:
+            tr.event("synth_check.failed", error=str(err)[:200])
+            self.report("⚠️ Synthesis faithfulness check could not run.")
+            return None
+        if self._judge_synthesis(verdict, tr):
+            return None
+        tr.event("answer.unverified", reason="synth_unfaithful")
+        listed = "\n".join(f"- {c}"
+                           for c in verdict["unsupported_additions"][:10]) \
+            or "- (unspecified)"
+        return ("\n\n---\n⚠️ Correction: the reply above includes claims "
+                "not supported by the verified findings:\n" + listed)
+
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
@@ -750,6 +906,7 @@ class Olympus:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
         self._unverified_banner = None  # set by the answer.verify chokepoint
+        self._synth_check_source = None  # verified findings for stage 4.5
         replaystore.set_run(tr.id)      # scope frozen run-state to this run
         # Record the enforcement mode as run metadata so a replay can reproduce
         # it: a run recorded with contracts ON, replayed with them OFF, would
@@ -929,6 +1086,12 @@ class Olympus:
         # during replay (keeps replay a pure, side-effect-free verification).
         self._record_routing_outcome(tr, user_message, assignments, review)
 
+        # Arm the stage-4.5 faithfulness check (ADR 0005 amendment 4) only
+        # when verification actually ran and the answer isn't already
+        # downgraded — a bannered reply needs no second banner.
+        if route.get("needs_verification", True) and \
+                not self._unverified_banner:
+            self._synth_check_source = verified
         return "delegate", brief, verified
 
     def _record_routing_outcome(self, tr, user_message, assignments, review) -> None:
@@ -1171,6 +1334,8 @@ class Olympus:
                                 "returning the verified findings.")
                     reply = (result or "").strip() or (
                         f"[Could not complete the request: {str(err)[:200]}]")
+                reply = self._maybe_check_synthesis(user_message, brief,
+                                                    reply, tr)
                 reply = self._apply_unverified_banner(reply)
         finally:
             steering.reset(steer_token)
@@ -1259,6 +1424,10 @@ class Olympus:
                 if not "".join(chunks).strip():
                     yield fallback
                 chunks = [fallback]
+            note = self._synth_stream_note(user_message, "".join(chunks), tr)
+            if note:                    # trailing correction — see stage 4.5
+                chunks.append(note)
+                yield note
             self._finish(user_message, "".join(chunks))
         finally:
             steering.reset(steer_token)

@@ -808,6 +808,15 @@ def fast_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def synth_check_enabled() -> bool:
+    """Faithfulness check of the composed answer against the verified
+    findings (ADR 0005 amendment 4): the synthesis stage was the last
+    unverified hop on the interactive path. On by default; skipped in fast
+    mode; OLYMPUS_SYNTH_CHECK=off disables."""
+    return os.environ.get("OLYMPUS_SYNTH_CHECK", "on").strip().lower() not in (
+        "0", "off", "false", "no")
+
+
 def routing_synthetic() -> bool:
     """Mark routing-outcome telemetry from THIS process as synthetic/self-
     generated (OLYMPUS_ROUTING_SYNTHETIC=1) so it never counts toward the
