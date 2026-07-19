@@ -1352,6 +1352,32 @@ class Olympus:
         except Exception:
             return None
 
+    def _compute_reply(self, user_message: str, tr: "trace_mod.Trace") -> str:
+        """The expensive half of ask(): the verified council pipeline plus
+        synthesis, faithfulness check, and the unverified banner. Returns the
+        final reply. Extracted so the ask checkpoint can treat it as one
+        resumable stage (see `run_checkpointed`)."""
+        mode, brief, result = self._pipeline(user_message, tr)
+        if mode in ("direct", "clarify"):
+            return result
+        self.report("⚡ Zeus composes the final answer...")
+        try:
+            with tr.span("synthesize"):
+                reply = self._synthesize(user_message, brief, result)
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:
+            # The final compose failed (e.g. a provider error). Don't crash —
+            # fall back to the already-verified findings so the user still gets
+            # the work the council did.
+            tr.event("synthesize.failed", error=str(err)[:200])
+            self.report(f"⚠️ Final compose failed ({str(err)[:80]}); "
+                        "returning the verified findings.")
+            reply = (result or "").strip() or (
+                f"[Could not complete the request: {str(err)[:200]}]")
+        reply = self._maybe_check_synthesis(user_message, brief, reply, tr)
+        return self._apply_unverified_banner(reply)
+
     def ask(self, user_message: str) -> str:
         error = self.settings.validate()
         if error:
@@ -1374,28 +1400,18 @@ class Olympus:
             self.conversation_id or f"user-{self.user}")
         connectors.emit("run_start", self.user, user_message)
         try:
-            mode, brief, result = self._pipeline(user_message, tr)
-            if mode in ("direct", "clarify"):
-                reply = result
+            if config.ask_checkpoint_enabled():
+                # Checkpoint the expensive council stage to the run's ledger, so
+                # a process killed after the answer was computed (but before
+                # side effects finished) can be resumed via `resume_ask(tr.id)`
+                # without recomputing the whole verified council. Default OFF, so
+                # this branch is inert unless an operator opts in.
+                state = run_checkpointed(tr.id, [
+                    ("council",
+                     lambda _prev: {"reply": self._compute_reply(user_message, tr)})])
+                reply = state["reply"]
             else:
-                self.report("⚡ Zeus composes the final answer...")
-                try:
-                    with tr.span("synthesize"):
-                        reply = self._synthesize(user_message, brief, result)
-                except replaystore.ReplayDivergence:
-                    raise
-                except Exception as err:
-                    # The final compose failed (e.g. a provider error). Don't
-                    # crash — fall back to the already-verified findings so the
-                    # user still gets the work the council did.
-                    tr.event("synthesize.failed", error=str(err)[:200])
-                    self.report(f"⚠️ Final compose failed ({str(err)[:80]}); "
-                                "returning the verified findings.")
-                    reply = (result or "").strip() or (
-                        f"[Could not complete the request: {str(err)[:200]}]")
-                reply = self._maybe_check_synthesis(user_message, brief,
-                                                    reply, tr)
-                reply = self._apply_unverified_banner(reply)
+                reply = self._compute_reply(user_message, tr)
         finally:
             steering.reset(steer_token)
             tr.flush()
@@ -1692,6 +1708,41 @@ def note_conversation(report: Reporter = _silent) -> None:
     report("🔧 Conversation threshold reached — Prometheus will self-audit "
            "in the background.")
     threading.Thread(target=_auto_audit, args=(report,), daemon=True).start()
+
+
+def run_checkpointed(run_id: str, stages: list) -> dict:
+    """Drive an ordered list of ``(name, fn)`` stages through the run's
+    checkpoint ledger (`ledger.drive`): commit each stage's returned state, and
+    on a re-run with the SAME ``run_id`` SKIP the stages already committed — so a
+    process killed mid-run resumes from its last checkpoint instead of redoing
+    completed work. ``fn(prev_state) -> new_state`` (JSON-serialisable state);
+    a resumed stage's committed output stands in for a re-run, so it must be the
+    kind of work whose recorded result is authoritative. Returns the final
+    committed state. This is the bridge that threads the M2.1 checkpoint/resume
+    primitive into the live orchestrator ask-path (see `Olympus.ask`)."""
+    from . import ledger
+    plan = [{"stage": name} for name, _ in stages]
+    fns = [fn for _, fn in stages]
+
+    def _exec(prev, _step, i):
+        return fns[i](prev)
+
+    return ledger.drive(run_id, plan, _exec)
+
+
+def resume_ask(run_id: str):
+    """Recover a checkpointed ask (see `config.ask_checkpoint_enabled`): if its
+    expensive council stage committed to the ledger before the process died,
+    return the committed answer WITHOUT recomputing the council. Returns the
+    reply string, or None if the run has no resumable committed answer."""
+    from . import ledger
+    try:
+        state = ledger.open_run(run_id).state()
+    except Exception:
+        return None
+    if isinstance(state, dict) and isinstance(state.get("reply"), str):
+        return state["reply"]
+    return None
 
 
 def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
