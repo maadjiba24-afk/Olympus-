@@ -19,7 +19,7 @@ an SBOM.
 The lock is generated with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip compile requirements.txt --generate-hashes --output-file requirements.lock
+uv pip compile requirements.txt --generate-hashes --universal --python-version 3.10 --output-file requirements.lock
 ```
 
 Re-run this whenever `requirements.txt` changes, then commit the updated lock.
