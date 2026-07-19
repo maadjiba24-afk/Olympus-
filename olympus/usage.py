@@ -147,8 +147,12 @@ def today_spend() -> float:
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     if not path.exists():
         return 0.0
-    # Read under the same lock as record() so the budget guard never races a
-    # write; the atomic write already prevents torn reads, this pairs with it.
+    # Deliberately lock-free with respect to record()'s cross-process flock:
+    # correctness rests entirely on the atomic tmp+os.replace publish (a
+    # reader sees the old or the new ledger, never a torn one). Taking the
+    # flock here would couple every budget check to the other process's
+    # liveness for no consistency gain. _TOTALS_LOCK only serializes against
+    # in-process session-total updates.
     with _TOTALS_LOCK:
         try:
             ledger = json.loads(path.read_text(encoding="utf-8"))

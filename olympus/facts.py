@@ -72,17 +72,26 @@ def record(claim: str, verdict: str, source: str = "") -> str:
         "ts": int(time.time()),
     }
     path = _path()
-    with _LOCK:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-        key = str(path)
-        n = _line_counts.get(key)
-        n = (n + 1) if n is not None else _count_lines(path)
-        # Compact when the append-only log grows past 2x the cap.
-        if n > MAX_FACTS * 2:
-            _trim(path)
-            n = _count_lines(path)
-        _line_counts[key] = n
+    # Cross-process guard (ADR 0005): the heartbeat and web pipelines both
+    # cache facts, and a _trim compaction in one process (read → tmp →
+    # replace) silently drops an append that lands in the other during its
+    # window. Bounded wait — this is a cache on the verify agent's tool
+    # path, so dropping one write under contention beats hanging it.
+    from . import proclock
+    try:
+        with proclock.lock("facts", timeout=2.0), _LOCK:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+            key = str(path)
+            n = _line_counts.get(key)
+            n = (n + 1) if n is not None else _count_lines(path)
+            # Compact when the append-only log grows past 2x the cap.
+            if n > MAX_FACTS * 2:
+                _trim(path)
+                n = _count_lines(path)
+            _line_counts[key] = n
+    except TimeoutError:
+        return "Fact cache busy — not cached this time."
     return "Fact cached."
 
 

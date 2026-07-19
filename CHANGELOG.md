@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Second-ring cross-process safety (ADR 0005, amendment 3)
+
+- The acceptance re-audit swept the tree for the heartbeat-vs-web RMW class
+  and found six more shared files; all are now locked and/or atomic:
+  agent beats (`run_due` marks due beats under the lock BEFORE the
+  minutes-long LLM phase — an add from the chat process mid-run is no
+  longer silently deleted), operator jobs (same mark-first restructure),
+  todos, the verified-facts cache (append+trim serialized cross-process
+  with a bounded wait on the verify agent's tool path), heartbeat state,
+  saved conversations, and the conversation-counter reset. Each carries a
+  two-process or lock-contention race test.
+
 ### Added — Deterministic difficulty pre-scorer (ADR 0005, Phase 3)
 
 - New `olympus/effortscore.py`: a pure, deterministic scorer — (risk class,

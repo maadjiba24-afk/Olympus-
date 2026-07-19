@@ -295,6 +295,113 @@ def test_filestore_put_is_atomic(monkeypatch):
     assert calls, "FileStore.put no longer publishes atomically"
 
 
+# --- second-ring sweep (ADR 0005 amendment 3) ------------------------------
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_agentbeat_add_during_run_due_survives(tmp_path):
+    """THE worst second-ring offender: run_due used to load the beat list,
+    spend minutes running LLM beats, then blind-save the stale list — a beat
+    added from the chat process mid-run was silently deleted. Now the due
+    beats are marked+saved under the lock BEFORE running, so an add during
+    the (unlocked) run window must survive."""
+    from olympus import agentbeat
+    past = time.time() - 3600
+    agentbeat.add("shared", 60, "existing beat", now=past)   # due immediately
+
+    added_during_run = {}
+
+    def slow_runner(beat):
+        # While the beat "runs" (no lock held), another PROCESS adds a beat.
+        env = dict(os.environ)
+        env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+        subprocess.run(
+            [sys.executable, "-c",
+             "from olympus import agentbeat; "
+             "agentbeat.add('shared', 60, 'added mid-run')"],
+            env=env, cwd=str(Path(__file__).parent.parent),
+            check=True, timeout=60)
+        added_during_run["done"] = True
+        return agentbeat.QUIET_TOKEN
+
+    log = agentbeat.run_due(runner=slow_runner)
+    assert added_during_run.get("done") and log
+    prompts = [b.prompt for b in agentbeat._load()]
+    assert "added mid-run" in prompts        # NOT silently deleted
+    assert "existing beat" in prompts
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_operator_schedule_from_two_processes_keeps_both(tmp_path):
+    from olympus import operator
+    _run_workers(tmp_path, _GATE + """
+    import os
+    from olympus import operator
+    operator.schedule("shared", f"job-{os.getpid()}", "example.com",
+                      "check", 600)
+    """)
+    names = {j["name"] for j in operator._load_jobs()}
+    assert len([n for n in names if n.startswith("job-")]) == 2
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_facts_record_waits_for_peer_instead_of_losing(tmp_path):
+    """A fact recorded while another process holds the facts lock (the trim
+    window) must WAIT and land — not vanish."""
+    from olympus import facts
+    holding = threading.Event()
+
+    def holder():
+        with proclock.lock("facts"):
+            holding.set()
+            time.sleep(0.5)              # inside the bounded 2s wait
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert holding.wait(timeout=5)
+    env = dict(os.environ)
+    env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    subprocess.run(
+        [sys.executable, "-c",
+         "from olympus import facts; "
+         "print(facts.record('the sky is blue', 'verified'))"],
+        env=env, cwd=str(Path(__file__).parent.parent),
+        check=True, timeout=60)
+    t.join(timeout=5)
+    assert "the sky is blue" in (config.MEMORY_DIR /
+                                 "verified_facts.jsonl").read_text()
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_todos_concurrent_adds_all_survive(tmp_path):
+    from olympus import todos
+    n = 20
+    _run_workers(tmp_path, _GATE + f"""
+    import os
+    from olympus import todos
+    for i in range({n}):
+        todos.add("shared", f"item %d-%d" % (os.getpid(), i))
+    """)
+    assert len(todos._load("shared")) == 2 * n
+
+
+def test_heartbeat_state_save_is_atomic(monkeypatch):
+    calls = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append(str(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    memory.save_state({"x": 1})
+    assert any("heartbeat_state" in c for c in calls)
+    assert memory.load_state() == {"x": 1}
+
+
 def test_memory_save_never_exposes_partial_notes(monkeypatch):
     """The note body must be fully written BEFORE the .md name appears
     (publish via os.link), so a concurrent glob never reads half a note."""

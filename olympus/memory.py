@@ -275,9 +275,12 @@ def load_conversation(conversation_id: str) -> list[dict]:
 
 
 def save_conversation(conversation_id: str, history: list[dict]) -> None:
-    _conversation_path(conversation_id).write_text(
-        json.dumps(history, indent=1), encoding="utf-8"
-    )
+    # Atomic publish: load_conversation maps a torn file to [], so a crash
+    # mid-write would drop the whole history (ADR 0005).
+    p = _conversation_path(conversation_id)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
+    os.replace(tmp, p)
     # Keep the cross-session search index fresh (best-effort; never block a save).
     try:
         from . import search
@@ -629,7 +632,13 @@ def save_state(state: dict) -> None:
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "heartbeat_state.json"
     with _STATE_LOCK:
-        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        # Atomic publish: readers in OTHER processes (admin panel, digest,
+        # hibernate) map a torn file to {} — "never ran" — and a crash
+        # mid-write would reset every cadence timestamp (ADR 0005). Only the
+        # heartbeat writes, so the thread lock suffices for exclusion.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def bump_conversation_count() -> int:
@@ -654,7 +663,10 @@ def bump_conversation_count() -> int:
 
 
 def reset_conversation_count() -> None:
+    # Same cross-process lock as bump_conversation_count: a reset under only
+    # the thread lock could interleave with the other process's bump.
+    from . import proclock
     path = config.MEMORY_DIR / "conversation_count.txt"
-    with _STATE_LOCK:
+    with proclock.lock("conversation-count"):
         path.write_text("0", encoding="utf-8")
 

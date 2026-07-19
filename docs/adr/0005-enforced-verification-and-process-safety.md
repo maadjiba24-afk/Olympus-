@@ -199,6 +199,38 @@ findings; resolutions:
   (floor below "high"); an event describing a no-op would mislead trace
   readers.
 
+## Amendment 3 (second-ring sweep after the acceptance re-audit)
+
+The acceptance re-audit swept the whole tree for the cross-process RMW class
+and found a second ring of shared files the first pass never named; all are
+now under the same regime:
+
+- **agentbeat `heartbeats.json`** (worst offender): `run_due` used to load
+  the list, spend minutes running LLM beats, then blind-save the stale list
+  — silently deleting any beat added from the chat process mid-run. Now the
+  due beats are marked+saved under `proclock.lock("agentbeat")` BEFORE
+  running, and the long LLM phase holds no lock; add/remove serialize and
+  the save is atomic.
+- **operator `operator_jobs.json`**: same mark-first restructure for
+  `run_due` (`proclock.lock("operator-jobs")`), `schedule` serialized.
+- **todos**: per-user lock + atomic save around every load-modify-save.
+- **facts `verified_facts.jsonl`**: append+trim under
+  `proclock.lock("facts", timeout=2.0)` — a `_trim` compaction in one
+  process can no longer drop an append landing in the other; bounded wait
+  because this sits on the verify agent's tool path (a dropped cache write
+  under contention beats a hang, and the caller is told).
+- **heartbeat state / conversations / conversation-counter reset**: atomic
+  publishes (readers map torn files to empty state), and the counter reset
+  now takes the same cross-process lock as the bump.
+- `usage.today_spend`'s comment now states the true invariant: reads are
+  deliberately flock-free; correctness rests on the atomic replace.
+
+Still deliberately out of scope: the remaining plain-write per-user JSON
+state with low cross-process exposure (ace playbook, companion, connectors,
+docrag, compare, capabilities snapshots), the per-process (not global)
+concurrent-call cap, and any cross-machine story beyond the Postgres
+backend.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

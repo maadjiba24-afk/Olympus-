@@ -17,6 +17,7 @@ context — cheap enough to run often, which is what makes it a heartbeat.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -66,8 +67,21 @@ def _load() -> list[Beat]:
 
 
 def _save(beats: list[Beat]) -> None:
-    _path().write_text(json.dumps([asdict(b) for b in beats], indent=2),
-                       encoding="utf-8")
+    # Atomic publish: _load maps a torn file to [], so a cross-process reader
+    # mid-write would see "no beats" (ADR 0005).
+    p = _path()
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps([asdict(b) for b in beats], indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _mutex():
+    """Cross-process lock for beat load-modify-save cycles (ADR 0005): the
+    gateway/chat process adds and removes beats while the heartbeat process
+    marks them run."""
+    from . import proclock
+    return proclock.lock("agentbeat")
 
 
 def add(user: str, every: str | int, prompt: str,
@@ -77,19 +91,21 @@ def add(user: str, every: str | int, prompt: str,
     beat = Beat(id=uuid.uuid4().hex[:8], user=user, every=secs,
                 prompt=prompt.strip(), deliver_to=deliver_to,
                 created=now, last_run=now)   # first wake one cadence from now
-    beats = _load()
-    beats.append(beat)
-    _save(beats)
+    with _mutex():
+        beats = _load()
+        beats.append(beat)
+        _save(beats)
     return beat
 
 
 def remove(user: str, beat_id: str) -> bool:
-    beats = _load()
-    kept = [b for b in beats if not (b.id == beat_id and b.user == user)]
-    if len(kept) == len(beats):
-        return False
-    _save(kept)
-    return True
+    with _mutex():
+        beats = _load()
+        kept = [b for b in beats if not (b.id == beat_id and b.user == user)]
+        if len(kept) == len(beats):
+            return False
+        _save(kept)
+        return True
 
 
 def for_user(user: str) -> list[Beat]:
@@ -177,14 +193,23 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     """Wake every due beat once; returns log lines. Failures mark the beat as
     run (so a broken beat can't spin every tick) and report the error."""
     now = now if now is not None else time.time()
-    beats = _load()
+    # Mark the due beats as run UNDER the lock, BEFORE running them, then run
+    # the (minutes-long) LLM beats with no lock held. The old shape loaded the
+    # list, ran every beat, then blind-saved the stale list at the end — a
+    # beat added from the chat process mid-run was silently deleted
+    # (ADR 0005 second-ring sweep). Marking first also preserves the
+    # broken-beat guarantee: a crash mid-run can't respin every tick.
+    due: list[Beat] = []
+    with _mutex():
+        beats = _load()
+        for beat in beats:
+            if beat.due(now):
+                beat.last_run = now
+                due.append(beat)
+        if due:
+            _save(beats)
     log: list[str] = []
-    dirty = False
-    for beat in beats:
-        if not beat.due(now):
-            continue
-        beat.last_run = now
-        dirty = True
+    for beat in due:
         try:
             reply = (runner or _default_runner)(beat)
         except Exception as err:
@@ -195,8 +220,6 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
             continue
         where = _deliver(beat, reply.strip())
         log.append(f"beat #{beat.id}: delivered to {where}")
-    if dirty:
-        _save(beats)
     return log
 
 
