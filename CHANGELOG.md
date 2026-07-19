@@ -15,6 +15,42 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Budget-aware escalation + total scorer (ADR 0005, amendment 7)
+
+- "Thinks harder" never defeats the spend guard: with <10% of the daily
+  budget remaining, a scored effort raise above the specialist floor is
+  capped back to the floor and traced (`effort.budget_capped`); the run —
+  reworks included — always still happens.
+- The effort scorer is a total function: garbage inputs coerce to harmless
+  defaults (never an exception, always a valid tier), pinned by a seeded
+  property test.
+
+### Changed — Lock and audit-trail hardening (ADR 0005, amendment 6)
+
+- `proclock.lock` acquisition is bounded by default (60 s; `timeout=None`
+  is the explicit block-forever opt-in) — a wedged peer process becomes a
+  visible TimeoutError, never a silent hang. The reply-path callers handle
+  it explicitly (ledger write skipped + captured, audit trigger skipped,
+  watchlist entry stays queued); a kill -9 test proves flock's kernel
+  release + prompt recovery with consistent state.
+- The signed decision log's shared daily file is now multiprocess-safe:
+  appends serialize cross-process, and a wedged lock diverts the record to
+  a unique overflow file instead of dropping it — pinned by a two-process
+  concurrent-flush integrity test.
+
+### Changed — Verification gate hardening (ADR 0005, amendment 5)
+
+- **Structural output contracts are ON by default** (`OLYMPUS_CONTRACTS=off`
+  is the kill switch) — enforcement never ships dormant.
+- The verify stage runs under a wall-clock cap (`OLYMPUS_VERIFY_TIMEOUT`,
+  default 600 s): a hung verifier takes the visible UNVERIFIED path instead
+  of stalling the reply.
+- An errored (as opposed to failed) rework ships degraded immediately — no
+  retry loop on either rework path.
+- Tests pin that fast mode cannot skip the answer.verify gate and that
+  verdict parsing never crashes and never silently passes an invalid
+  status.
+
 ## [0.25.0] — 2026-07-19
 
 ### Added — session & flow ergonomics (Hermes round 2)

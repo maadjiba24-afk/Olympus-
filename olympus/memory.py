@@ -368,8 +368,16 @@ def watchlist_add(url: str) -> None:
 def watchlist_pop() -> str | None:
     # Read-modify-write under the cross-process lock (ADR 0005): the heartbeat
     # and web processes both pop; unlocked, a concurrent add or pop could be
-    # silently dropped by this rewrite.
+    # silently dropped by this rewrite. A lock timeout (wedged peer) returns
+    # None — the entry stays queued for the next tick, nothing is lost.
     from . import proclock
+    try:
+        return _watchlist_pop_locked(proclock)
+    except TimeoutError:
+        return None
+
+
+def _watchlist_pop_locked(proclock) -> str | None:
     with proclock.lock("watchlist"):
         path = _watchlist_path()
         if not path.exists():
@@ -714,6 +722,13 @@ def bump_conversation_count() -> int:
     from . import proclock
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "conversation_count.txt"
+    try:
+        return _bump_conversation_locked(proclock, path)
+    except TimeoutError:
+        return 0                       # wedged peer: skip the audit trigger
+
+
+def _bump_conversation_locked(proclock, path) -> int:
     with proclock.lock("conversation-count"):
         try:
             n = int(path.read_text(encoding="utf-8").strip())

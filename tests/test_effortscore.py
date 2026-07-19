@@ -204,3 +204,95 @@ def test_single_pool_rework_escalates_same_model_higher_effort(monkeypatch):
         tr.flush()
     assert efforts == ["high"]            # same model, more compute
     assert calls["settings"][0] is not None
+
+
+# --- hardening addendum: budget cap + totality -----------------------------
+
+def test_budget_low_caps_the_raise_at_the_floor(monkeypatch):
+    """'Thinks harder' never defeats the spend guard: with low budget
+    headroom, hard signals no longer raise above the specialist floor, and
+    the denial is traced."""
+    from olympus import trace, usage
+    monkeypatch.setattr(usage, "budget_headroom_low", lambda: True)
+    efforts = []
+    _spy_hermes(monkeypatch, efforts, floor="low")
+    bot = orchestrator.Olympus(user="effort-test")
+    memory.set_user("effort-test")
+    tr = trace.Trace("ask", "effort-test")
+    try:
+        bot._run_one("hermes",
+                     "x" * (effortscore.VERY_LONG_PROMPT_CHARS + 1), tr,
+                     needs_verification=True)
+    finally:
+        tr.flush()
+    assert efforts == ["low"]                    # capped at the floor
+    assert any(e.get("event") == "effort.budget_capped" or
+               "effort.budget_capped" in str(e) for e in tr.events)
+
+
+def test_budget_low_never_blocks_the_work_itself(monkeypatch):
+    """A rework still RUNS under a low budget — only the raise is denied."""
+    from olympus import trace, usage
+    monkeypatch.setattr(usage, "budget_headroom_low", lambda: True)
+    efforts = []
+    _spy_hermes(monkeypatch, efforts, floor="low")
+    bot = orchestrator.Olympus(user="effort-test")
+    memory.set_user("effort-test")
+    tr = trace.Trace("ask", "effort-test")
+    try:
+        bot._dispatch([{"specialist": "hermes", "task": "redo"}], tr,
+                      retry_index=1)
+    finally:
+        tr.flush()
+    assert efforts == ["low"]                    # ran — at the floor
+
+
+def test_budget_fine_still_raises(monkeypatch):
+    from olympus import trace, usage
+    monkeypatch.setattr(usage, "budget_headroom_low", lambda: False)
+    efforts = []
+    _spy_hermes(monkeypatch, efforts, floor="low")
+    bot = orchestrator.Olympus(user="effort-test")
+    memory.set_user("effort-test")
+    tr = trace.Trace("ask", "effort-test")
+    try:
+        bot._run_one("hermes",
+                     "x" * (effortscore.VERY_LONG_PROMPT_CHARS + 1), tr,
+                     needs_verification=True)
+    finally:
+        tr.flush()
+    assert efforts == ["high"]
+
+
+def test_budget_headroom_thresholds(monkeypatch):
+    from olympus import usage
+    monkeypatch.setattr(usage, "daily_budget", lambda: 10.0)
+    monkeypatch.setattr(usage, "today_spend", lambda: 9.5)
+    assert usage.budget_headroom_low() is True   # < 10% left
+    monkeypatch.setattr(usage, "today_spend", lambda: 5.0)
+    assert usage.budget_headroom_low() is False
+    monkeypatch.setattr(usage, "daily_budget", lambda: 0.0)
+    assert usage.budget_headroom_low() is False  # no budget set → no cap
+
+
+def test_scorer_is_total_and_deterministic_under_junk():
+    """Property test: randomized garbage inputs (seeded — reproducible)
+    never raise, always yield a valid tier, and are deterministic."""
+    import random
+    rng = random.Random(20260719)
+    junk_pool = [None, -1, -10**9, 10**9, 0, 3.7, float("nan"),
+                 float("inf"), -float("inf"), "", "hello", "12", b"bytes",
+                 [], {}, (1, 2), True, False, object()]
+    for _ in range(300):
+        kwargs = dict(
+            risk_class=rng.choice(junk_pool),
+            prompt_chars=rng.choice(junk_pool),
+            tool_count=rng.choice(junk_pool),
+            retry_index=rng.choice(junk_pool),
+            needs_verification=rng.choice(junk_pool),
+        )
+        first = effortscore.score(**kwargs)
+        assert first in effortscore.TIERS
+        assert effortscore.score(**kwargs) == first    # deterministic
+        assert effortscore.at_least(rng.choice(junk_pool),
+                                    first) in effortscore.TIERS

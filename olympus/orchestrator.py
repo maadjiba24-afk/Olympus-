@@ -441,6 +441,31 @@ class Olympus:
                                 mcp_servers=mcp, effort="high")
         return _parse_verdict(raw)
 
+    def _verify_timed(self, brief: str,
+                      outputs: list[tuple[str, str]]) -> tuple[str, dict | None]:
+        """`_verify` under a wall-clock cap (ADR 0005 hardening): a hung
+        verifier must route to the visible infra-error path, never stall the
+        reply forever. The worker runs under a copied context so the replay/
+        trace/user contextvars survive the thread hop; on timeout the
+        orphaned worker finishes in the background and is discarded, and the
+        TimeoutError takes the caller's existing infra-error branch."""
+        timeout = config.verify_timeout()
+        if not timeout:
+            return self._verify(brief, outputs)
+        import contextvars
+        from concurrent.futures import TimeoutError as _FutTimeout
+        ctx = contextvars.copy_context()
+        ex = ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = ex.submit(ctx.run, self._verify, brief, outputs)
+            try:
+                return fut.result(timeout=timeout)
+            except _FutTimeout:
+                raise TimeoutError(
+                    f"verify stage exceeded {timeout:.0f}s") from None
+        finally:
+            ex.shutdown(wait=False)
+
     # -- stage 3.5: Athena quality review -----------------------------------
 
     def _review(self, brief: str, verified: str) -> dict[str, Any]:
@@ -510,11 +535,24 @@ class Olympus:
                               "with evidence from your tools.")}
                     for k, _ in outputs]
             with tr.span("verify_rework"):
-                redone = dict(self._dispatch(redo, tr, retry_index=1))
+                try:
+                    redone = dict(self._dispatch(redo, tr, retry_index=1))
+                except replaystore.ReplayDivergence:
+                    raise               # never mask a replay divergence
+                except Exception as err:
+                    # A rework that ERRORS (infrastructure, not a failed
+                    # verification) ships degraded IMMEDIATELY — no retry
+                    # loop, no second dispatch (ADR 0005 hardening).
+                    tr.event("verify_rework.failed", error=str(err)[:200])
+                    self._unverified_banner = _banner_rejected(claims)
+                    tr.event("answer.unverified", reason="rework_error")
+                    self.report("⚠️ Rework errored — shipping degraded with "
+                                "an UNVERIFIED banner.")
+                    return verified
             outputs2 = [(k, redone.get(k, v)) for k, v in outputs]
             try:
                 with tr.span("reverify_enforced"):
-                    verified2, verdict2 = self._verify(brief, outputs2)
+                    verified2, verdict2 = self._verify_timed(brief, outputs2)
             except replaystore.ReplayDivergence:
                 raise                   # never mask a replay divergence
             except Exception as err:
@@ -755,6 +793,15 @@ class Olympus:
                         tool_count=len(spec.extra_tools),
                         retry_index=retry_index,
                         needs_verification=needs_verification))
+                if effort != spec.effort and usage.budget_headroom_low():
+                    # "Thinks harder" never defeats the spend guard: with
+                    # <10% of the daily budget left, a scored RAISE above
+                    # the specialist's floor is capped back to the floor.
+                    # The run (rework included) still happens — the cap
+                    # denies extra compute, never the work (ADR 0005 am. 7).
+                    tr.event("effort.budget_capped", specialist=key,
+                             denied=effort, floor=spec.effort)
+                    effort = spec.effort
                 output, tool_calls = spec.run_counted(
                     task,
                     settings=settings_override or self.pool.for_specialist(key),
@@ -975,7 +1022,7 @@ class Olympus:
             self.report("🔍 Aletheia verifies the findings...")
             try:
                 with tr.span("verify"):
-                    verified, verdict = self._verify(brief, outputs)
+                    verified, verdict = self._verify_timed(brief, outputs)
             except replaystore.ReplayDivergence:
                 raise                   # never mask a replay divergence
             except Exception as err:
@@ -1044,8 +1091,20 @@ class Olympus:
                     # mislead anyone reading the trace.
                     tr.event("teacher.effort_escalated", specialist=k)
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo, tr, overrides=escalated,
-                                             retry_index=1))
+                try:
+                    redone = dict(self._dispatch(redo, tr,
+                                                 overrides=escalated,
+                                                 retry_index=1))
+                except replaystore.ReplayDivergence:
+                    raise               # never mask a replay divergence
+                except Exception as err:
+                    # An errored quality rework keeps the first-pass outputs
+                    # and proceeds — degraded immediately, no retry loop
+                    # (ADR 0005 hardening).
+                    tr.event("rework_dispatch.failed", error=str(err)[:200])
+                    self.report("⚠️ Rework dispatch errored — keeping the "
+                                "first-pass outputs.")
+                    redone = {}
             # The teacher's fix becomes homework: distill a provisional,
             # benchmark-gated skill for the student model, in the background.
             for k, t in escalated.items():
@@ -1058,7 +1117,7 @@ class Olympus:
             self.report("🔍 Aletheia re-verifies the rework...")
             try:
                 with tr.span("reverify"):
-                    verified, verdict = self._verify(brief, outputs)
+                    verified, verdict = self._verify_timed(brief, outputs)
                 verify_error = verdict is None
                 if verify_error:
                     tr.event("reverify.verdict_missing")

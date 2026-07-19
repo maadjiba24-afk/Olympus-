@@ -32,30 +32,44 @@ VERY_LONG_PROMPT_CHARS = 8000   # ... and this long can demand depth alone
 MANY_TOOLS = 10
 
 
-def _idx(effort: str) -> int:
+def _idx(effort) -> int:
     return TIERS.index(effort) if effort in TIERS else 0
 
 
-def at_least(minimum: str, effort: str) -> str:
+def _nat(value) -> int:
+    """Coerce anything to a non-negative int — the scorer is a TOTAL
+    function (ADR 0005 amendment 7): garbage in (None, strings, negatives,
+    NaN) degrades to 0, never an exception."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return n if n > 0 else 0
+
+
+def at_least(minimum, effort) -> str:
     """The higher of two tiers — the floor semantics (unknown → 'low')."""
     return TIERS[max(_idx(minimum), _idx(effort))]
 
 
-def score(risk_class: str = actions.TRIVIAL, prompt_chars: int = 0,
-          tool_count: int = 0, retry_index: int = 0,
-          needs_verification: bool = False) -> str:
-    """Effort tier for one run. Monotonic: a hard signal can only raise."""
-    if retry_index >= 1:
+def score(risk_class=actions.TRIVIAL, prompt_chars=0,
+          tool_count=0, retry_index=0,
+          needs_verification=False) -> str:
+    """Effort tier for one run. Monotonic (a hard signal can only raise),
+    deterministic, and TOTAL — any input degrades to its harmless default
+    rather than raising."""
+    if _nat(retry_index) >= 1:
         return "high"            # the cheap attempt already failed
     if risk_class in (actions.IRREVERSIBLE, actions.FINANCIAL_LEGAL):
         return "high"            # consequence demands depth, not speed
     bumps = 0
-    if needs_verification:
+    if bool(needs_verification):
         bumps += 1
+    prompt_chars = _nat(prompt_chars)
     if prompt_chars > LONG_PROMPT_CHARS:
         bumps += 1
     if prompt_chars > VERY_LONG_PROMPT_CHARS:
         bumps += 1                # a second bump: length alone can reach high
-    if tool_count > MANY_TOOLS:
+    if _nat(tool_count) > MANY_TOOLS:
         bumps += 1
     return TIERS[min(bumps, len(TIERS) - 1)]

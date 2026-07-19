@@ -261,6 +261,72 @@ Remaining accepted edges after this: Zeus's direct replies and clarify
 turns are still unverified (they make no factual delegation), and the
 router's `needs_verification=False` opt-out still bypasses the whole chain.
 
+## Amendment 5 (hardening addendum — Phase 1)
+
+Standing rule adopted: **no dormant code ships** — every enforcement
+mechanism is ON by default (kill switches allowed, default-off forbidden).
+That is how the vacuous-true bug happened, and structural output contracts
+were the last default-off enforcement: `contracts_enabled()` now defaults
+ON (`OLYMPUS_CONTRACTS=off` is the kill switch; the shipped contracts
+encode already-true output invariants, so enabling changes no happy-path
+behavior).
+
+Gate hardening, each with a pinning test:
+
+- **Un-bypassable**: fast mode skips the Athena review only — never the
+  answer.verify chokepoint. Proven by test.
+- **Verify wall-clock cap**: the verify stage runs under
+  `OLYMPUS_VERIFY_TIMEOUT` (default 600 s, always on; `0` disables). A hung
+  verifier routes to the existing visible infra-error path instead of
+  stalling the reply; the orphaned worker is discarded.
+- **Errored rework ships degraded immediately**: an EXCEPTION during either
+  rework dispatch (as opposed to a failed verification) never retries — the
+  Aletheia-forced rework banners and ships the first verified text; the
+  Athena quality rework keeps the first-pass outputs and proceeds.
+- **Verdict parsing is total**: schema-validated status enum, coerced claim
+  lists, clamped confidence; any garbage — wrong types, nulls, pathological
+  nesting — yields either a coerced valid verdict or None (the visible
+  degraded path). Never a crash, never a silent pass of an invalid status.
+
+## Amendment 6 (hardening addendum — Phase 2)
+
+- **Bounded lock acquisition by default.** flock cannot go stale (the
+  kernel releases it when the holder dies — proven by a kill -9 test: the
+  survivor acquires promptly and atomically-published state is old-or-new,
+  never torn). The only unbounded wait is a live-but-wedged holder, so
+  `proclock.lock` now defaults to a 60 s timeout (`timeout=None` is the
+  explicit block-forever opt-in). Caller audit: the heartbeat catches per
+  job; a tool call surfaces the TimeoutError honestly; the three reply-path
+  callers handle it explicitly — `usage.record` skips the ledger write and
+  captures (one lost increment under a wedged peer beats a broken reply),
+  `bump_conversation_count` returns 0 (skips the audit trigger),
+  `watchlist_pop` returns None (the entry stays queued).
+- **The signed audit trail is multiprocess-safe.** `trace.flush` appends to
+  a SHARED daily file and the heartbeat's goal cycles run the full pipeline
+  — two processes' large-record appends could interleave and corrupt both
+  lines, which readers silently skip (a signed run would vanish). Appends
+  now serialize under `proclock.lock("traces", timeout=30)`; a wedged peer
+  diverts the record to a uniquely-named `overflow-<id>.jsonl` (still found
+  by `load_run`/`find_record`, which glob `*.jsonl`) — the audit record is
+  never lost and a reply never stalls on the lock. Integrity is pinned by a
+  two-process concurrent-flush test (every line parseable, every run
+  present) and an overflow test.
+
+## Amendment 7 (hardening addendum — Phase 3)
+
+- **The spend guard outranks the difficulty dial.** When a daily budget is
+  set and less than 10% of it remains (`usage.budget_headroom_low`,
+  deterministic, error-tolerant), a scored RAISE above the specialist's
+  floor is capped back to the floor and the denial is traced
+  (`effort.budget_capped`). The run itself — reworks included — always
+  still happens: the cap denies extra compute, never the work. With no
+  budget set (the default), nothing changes.
+- **The scorer is a total function.** `score`/`at_least` coerce any input
+  (None, strings, negatives, NaN/inf, arbitrary objects) to harmless
+  defaults — never an exception, always a valid tier, always
+  deterministic. Pinned by a seeded 300-case property test over randomized
+  junk inputs.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the
