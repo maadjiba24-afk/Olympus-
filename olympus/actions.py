@@ -87,6 +87,7 @@ class ActionType:
     execute: Callable[[dict], dict]              # performs it; returns result
     undo: Callable[[dict], str] | None = None    # reverses it from the result
     description: str = ""
+    pins_root: bool = False                      # capture workdir() at prepare
 
     @property
     def reversible(self) -> bool:
@@ -287,6 +288,17 @@ def prepare(user: str, type_name: str, payload: dict,
     at = _REGISTRY.get(type_name)
     if at is None:
         raise ValueError(f"unknown action type: {type_name}")
+    # Pin the workspace root NOW, on whatever thread prepares/previews this
+    # action, so execution (which may run later from a different context — the
+    # web/CLI approval handler) confines the file operation to the SAME root the
+    # user previewed (ADR 0005: one pinned root through prepare→approve). The
+    # key is `_`-prefixed, so `edit()` treats it as internal and non-editable.
+    if at.pins_root and "_pinned_root" not in payload:
+        try:
+            from . import sandbox
+            payload = {**payload, "_pinned_root": str(sandbox.workdir())}
+        except Exception:
+            pass                       # never block preparing an action on this
     try:
         preview = at.preview(payload)
     except Exception as err:

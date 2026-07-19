@@ -182,41 +182,48 @@ browser-harness / operator / graded-autonomy workstreams.
 
 Nothing here is an unbuilt *product feature*; the codebase is feature-complete
 against its own roadmap (all 42 VISION backlog items + M0–M4 + parked-1…6 merged).
-The remainder is deliberate deferral, operational drift, and one wiring caveat.
+The five items this doc first listed as deferred/drift were then taken up in a
+2026-07-19 hardening pass (PR #163); their status is below.
 
-### Deliberately deferred (documented non-goals / future work — need a decision to build)
-- **Egress-gateway phases B–D** — Phase A shipped (`OLYMPUS_EGRESS_GUARD`, off by
-  default); B (contribution-pool guard), C (broadcast + external-sink enforcement),
-  D (remaining action executors) are designed-not-built
-  (`docs/DESIGN_BOUNDARY_LAYER.md:379-404`). Each is independently shippable.
-- **One pinned action root** — per-worker scratch re-rooting was built,
-  adversarially reviewed, and **rejected**; the safe "pin one root into the
-  prepared action" design is future actions-spine work
-  (`docs/adr/0005:154-156`, `DEFERRED.md` item 8). Concurrent same-path writes are
-  an accepted residual.
+### Resolved by the 2026-07-19 hardening pass
+- **Egress-gateway phases B–D — DONE.** B routes the contribution pool through
+  `guard(..., POOLED)` (`contrib._pool_redact`); C guards the broadcast + external
+  sinks (`gateway.notify_all`, `agentbeat._deliver`, `tools._propose_upgrade`'s
+  GitHub issue); D consciously scopes the host/workspace sinks OUT (governed by
+  the actions spine) — documented in `docs/DESIGN_BOUNDARY_LAYER.md`. The gateway
+  now spans every network egress path. Still off by default (`OLYMPUS_EGRESS_GUARD`).
+  Tests: `test_egress.py`, `test_contrib.py`.
+- **One pinned action root — DONE.** `actions.prepare()` pins
+  `_pinned_root = sandbox.workdir()` (internal, non-user-editable) for the
+  workspace-rooted action types; the executors confine to it via
+  `sandbox._effective_root` (tamper-safe: a bogus pin fails back to `workdir()`).
+  An approved file/command action now runs under the exact root it was previewed
+  under, unblocking safe per-worker roots. Tests: `test_pinned_root.py`.
+- **CI Python 3.10–3.13 matrix — DONE.** The `test` job runs the full range from
+  the one *universal* hash lock; `test_ci_matrix.py` guards against drift.
+- **`ledger.drive()` checkpoint/resume wired into the ask-path — DONE.** `ask()`
+  checkpoints the expensive council stage to the run's ledger via
+  `run_checkpointed` (gated `OLYMPUS_ASK_CHECKPOINT`, default OFF, forced off under
+  replay); `resume_ask(run_id)` recovers a committed answer without recomputing
+  the council. The July-15 "no checkpoint exists" gap is now closed end-to-end.
+  Tests: `test_ask_checkpoint.py` (+ `test_m2_ledger.py`).
+- **Doc/status drift fixed:** `contracts.py` + `DESIGN_OUTPUT_CONTRACTS.md`
+  ("off by default" → **on**, ADR 0005); ADR 0002 header ("HALTED before any code"
+  → scoped to live-rail integration; the co-signature custody primitives shipped).
+
+### Still deliberately deferred (conscious non-goals — a decision, not an oversight)
 - **Live payment rail** — explicitly out of scope across ADR 0001/0002/0004; the
-  full live-cutover path exists but ships INERT (`DisabledLiveAdapter`, requires
-  `OLYMPUS_PAYMENT_LIVE` + a registered adapter that the repo does not contain).
+  full live-cutover path exists but ships **INERT** and stays that way by design.
+  The 2026-07-19 pass *hardened the inertness* (`paylive.is_inert()`, a loud
+  WARNING when a real adapter is installed, and a repo-wide structural test that
+  no module can call `register_live_adapter` or write `OLYMPUS_PAYMENT_LIVE`) — it
+  did **not** wire a rail. Going live still requires the two out-of-band operator
+  acts. Tests: `test_payment_inertness.py`, `test_paylive.py`.
 - **`DEFERRED.md`** enumerates 10 consciously-accepted limitations (LLM-judge skill
   admission, no semantic dedup at skill-write, prompt-index keyword-not-embedding,
   Athena one-shot fail-open, effort-tier no-op on some backends, per-process
-  concurrency cap, proclock degraded on non-POSIX, …).
-
-### Operational drift (small, safe to close)
-- **drift-2 (was M0-5): CI tests only Python 3.12** though the package claims
-  3.10–3.13. A version matrix needs per-version hash-locked requirements (the
-  `test`/`browser-smoke` jobs use `--require-hashes -r requirements.lock`, which is
-  3.12-ABI-specific), so it is a small project, not a one-line change.
-- **Doc/status drift fixed in this pass:** `contracts.py` + `DESIGN_OUTPUT_CONTRACTS.md`
-  said "off by default" though `OLYMPUS_CONTRACTS` defaults **on** (ADR 0005) — now
-  corrected; ADR 0002's "HALTED before any code" header was stale (the co-signature
-  custody primitives shipped) — status now scoped to live-rail integration only.
-
-### Wiring caveat (not a gap, worth tracking)
-- **`ledger.py` checkpoint/resume is a tested primitive but the live interactive
-  orchestrator ask-path is not yet shown driving through `ledger.drive()`** — the
-  July-15 "no checkpoint exists" gap is resolved at the module level; end-to-end
-  wiring into the production loop is the remaining integration question.
+  concurrency cap, proclock degraded on non-POSIX, …). Item 8 (same-name workspace
+  clobber) is partially resolved by the pinned root above.
 
 ### Built but gated OFF by design (NOT "remaining" — operator opt-in)
 Live payments, OS computer-use, scaffold self-evolution, browser operator, egress

@@ -154,6 +154,16 @@ reverted**:
   Concurrent same-path writes by two specialists are ACCEPTED as a residual;
   the safe design — pinning ONE root into the prepared action so preview and
   execution share it — is future work on the actions spine.
+  **Update (2026-07-19): the pinned-root design is now implemented.**
+  `actions.prepare()` stamps `_pinned_root = sandbox.workdir()` (an internal,
+  non-user-editable payload key) for the workspace-rooted action types
+  (`run_command`, `write_file`, `edit_file`); the executors thread it through
+  `sandbox._effective_root`, which honors the pin only when it resolves to a
+  real, non-system directory (a tampered pin fails safe to the live `workdir()`,
+  and the target still has to confine under the root). Net: an approved file
+  action executes under the exact root it was previewed under, regardless of the
+  context that runs it — closing the preview≠execution hazard and unblocking safe
+  per-worker roots. Tests: `tests/test_pinned_root.py`.
 - **Lock-scope hygiene:** an in-process mutex must never be held across a
   flock wait (a wedged peer process would freeze every thread queueing on
   the mutex — found on the usage ledger's reply path). Rule: take the flock

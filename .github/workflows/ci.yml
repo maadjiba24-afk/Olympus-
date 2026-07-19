@@ -7,12 +7,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      # One version failing must not cancel the others — we want the full
+      # compatibility picture across the supported range on every run.
+      fail-fast: false
+      matrix:
+        # The full range pyproject declares (requires-python >=3.10, classifiers
+        # 3.10–3.13). tests/test_ci_matrix.py fails if this drifts from pyproject.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    name: test (py${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       # Install the exact, hash-pinned dependency set (supply-chain integrity).
+      # requirements.lock is a UNIVERSAL hash lock — `uv pip compile
+      # --generate-hashes` records every distribution's hash (all platform/ABI
+      # wheels + sdist), so `--require-hashes` is satisfied on each matrix Python
+      # from the SAME lock; no per-version lock files, no unpinned installs.
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
       - run: pip install pytest

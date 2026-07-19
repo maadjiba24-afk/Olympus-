@@ -82,8 +82,24 @@ def test_write_file_checks_json_toml(tmp_path, monkeypatch):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
     assert sandbox.write_file("a.json", '{"k": 1}')["check"] == "verified: valid JSON"
     assert "FAILED" in sandbox.write_file("b.json", "{nope")["check"]
-    assert sandbox.write_file("c.toml", 'k = 1')["check"] == "verified: valid TOML"
-    assert "FAILED" in sandbox.write_file("d.toml", "= broken")["check"]
+    # TOML checking uses stdlib tomllib (3.11+) or the tomli backport; like the
+    # YAML branch it degrades gracefully when neither parser is present (3.10
+    # without tomli), rather than reporting a false failure.
+    try:
+        import tomllib  # noqa: F401
+        _have_toml = True
+    except ModuleNotFoundError:
+        try:
+            import tomli  # noqa: F401
+            _have_toml = True
+        except ModuleNotFoundError:
+            _have_toml = False
+    if _have_toml:
+        assert sandbox.write_file("c.toml", 'k = 1')["check"] == "verified: valid TOML"
+        assert "FAILED" in sandbox.write_file("d.toml", "= broken")["check"]
+    else:
+        assert (sandbox.write_file("c.toml", 'k = 1')["check"]
+                == "verified: written (toml parser unavailable)")
 
 
 def test_write_file_plain_text_is_verified_written(tmp_path, monkeypatch):
