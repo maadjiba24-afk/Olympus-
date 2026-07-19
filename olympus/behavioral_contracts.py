@@ -486,9 +486,9 @@ def _computer_action_approved(ctx: dict) -> tuple[bool, str]:
 
 @predicate("no_secret_typed")
 def _no_secret_typed(ctx: dict) -> tuple[bool, str]:
-    """Refuse to TYPE a held secret at the OS level — a computer-use `type`
-    action must not exfiltrate a credential onto the screen/keyboard buffer.
-    Absent text is permissive."""
+    """Refuse to enter a held secret at the OS level — a computer-use `type`
+    (bulk text) or `key` (keystrokes) action must not exfiltrate a credential
+    onto the screen/keyboard buffer. Absent text is permissive."""
     text = ctx.get("typed_text")
     if not text:
         return True, ""
