@@ -42,6 +42,12 @@ COMMANDS: dict[str, str] = {
     "/contribute": "share anonymized insights: /contribute on|off",
     "/growth": "see how Olympus has adapted to you over time",
     "/reset": "start fresh — distill this chat into durable state, then clear it",
+    "/new": "switch to a fresh session (old one stays resumable): /new [name]",
+    "/bg": "run a task in the background while you keep chatting: /bg <task>",
+    "/btw": "ephemeral side question — leaves no trace in this session: /btw <q>",
+    "/model": "swap the primary model mid-session: /model <name>",
+    "/fast": "toggle fast mode for this session: /fast on|off",
+    "/sessions": "list past sessions (resume with `olympus sessions`)",
     "/progress": "set how much live progress to show: off|stages|all|verbose",
     "/doctor": "check readiness (provider, sandbox, security, capabilities)",
     "/learned": "see what Olympus learned/did on its own while you were away",
@@ -224,7 +230,84 @@ def dispatch_command(bot, raw: str):
     if name == "/learned":
         from . import digest
         return (True, digest.learned_recently(), False)
+    if name == "/btw":
+        if not arg:
+            return (True, "Usage: /btw <question> — answered without touching "
+                    "this session's history or memory", False)
+        return (True, bot.ask_ephemeral(arg), False)
+    if name == "/bg":
+        if not arg:
+            return (True, "Usage: /bg <task> — runs in the background; the "
+                    "answer announces itself here when ready", False)
+        return (True, start_background_task(bot, arg), False)
+    if name == "/model":
+        return (True, bot.set_model(arg), False)
+    if name == "/fast":
+        import os
+        from . import config
+        choice = arg.strip().lower()
+        if choice not in ("on", "off"):
+            state = "on" if config.fast_mode() else "off"
+            return (True, f"Fast mode is {state}. Toggle with: /fast on|off",
+                    False)
+        os.environ["OLYMPUS_FAST"] = "1" if choice == "on" else "0"
+        return (True, f"Fast mode {choice} — light stages "
+                + ("run on the pool's quickest model; the optional review "
+                   "stage is skipped." if choice == "on"
+                   else "run on the strongest model again."), False)
+    if name == "/sessions":
+        from . import memory
+        sessions = memory.list_conversations(prefix="cli")[:10]
+        if not sessions:
+            return (True, "No saved sessions yet.", False)
+        lines = ["Recent sessions (resume: exit, then `olympus sessions`):"]
+        for s in sessions:
+            lines.append(f"  {s['id']}  ({s['turns']} turn(s)) — {s['preview']}")
+        return (True, "\n".join(lines), False)
     return (False, None, False)
+
+
+# --- /bg: one-shot background tasks ----------------------------------------
+
+_BG_THREADS: list = []      # kept for tests / clean shutdown introspection
+_BG_COUNTER = {"n": 0}
+
+
+def start_background_task(bot, task: str) -> str:
+    """Run `task` through the full verified pipeline on a background thread.
+    The chat stays live; when the answer is ready it announces itself and is
+    saved to reports (so it survives even if the terminal scrolls past)."""
+    import threading
+    from . import memory, orchestrator
+    _BG_COUNTER["n"] += 1
+    n = _BG_COUNTER["n"]
+    user = getattr(bot, "user", "cli")
+    pool = getattr(bot, "pool", None)
+
+    def work() -> None:
+        try:
+            # A separate Olympus so the background run never races the live
+            # session's history; same user, so memory context still applies.
+            worker = orchestrator.Olympus(user=user, pool=pool)
+            answer = worker.ask(task)
+        except Exception as err:
+            answer = f"[background task failed: {str(err)[:200]}]"
+        try:
+            memory.set_user(user)
+            memory.save("reports", f"Background task #{n}: {task[:60]}", answer)
+        except Exception:
+            pass
+        print(f"\n  🔔 [bg #{n} done] {task[:60]}\n"
+              f"olympus ▸ {answer}\n")
+
+    t = threading.Thread(target=work, daemon=True, name=f"bg-{n}")
+    # Keep only live threads (+ this one) so a long session can't leak finished
+    # Thread objects into an ever-growing list.
+    _BG_THREADS[:] = [x for x in _BG_THREADS if x.is_alive()]
+    _BG_THREADS.append(t)
+    t.start()
+    return (f"Running in the background as #{n} — keep chatting; "
+            "I'll announce the answer here (it also lands in reports).")
 
 
 MAX_REF_CHARS = 20_000       # per injected reference, keeps prompts bounded
@@ -419,12 +502,14 @@ def status_line(model: str, secs: float, *, fast: bool = False,
     return "  " + " · ".join(parts)
 
 
-def run(pool=None) -> None:
+def run(pool=None, conversation_id: str = "cli-default") -> None:
     import time
     from . import config, interaction, orchestrator, usage
     pool = pool or config.ModelPool.from_env()
     _install_readline()
     print(welcome_banner(pool))
+    if conversation_id != "cli-default":
+        print(f"\n  [session: {conversation_id}]")
     print()
 
     def report(m: str) -> None:
@@ -436,7 +521,7 @@ def run(pool=None) -> None:
     # Installed before the Olympus is built so it captures the provider.
     interaction.set_provider(interaction.cli_provider())
     bot = orchestrator.Olympus(report=report,
-                               user="cli", conversation_id="cli-default",
+                               user="cli", conversation_id=conversation_id,
                                pool=pool)
 
     def read_line(prompt):
@@ -463,6 +548,20 @@ def run(pool=None) -> None:
                 print("  (empty — nothing sent)")
                 continue
             print(f"\nyou ▸ {text[:200]}{'…' if len(text) > 200 else ''}")
+        if text.split()[0].lower() == "/new":
+            # Switch to a fresh session (handled here, not in dispatch_command,
+            # because it swaps the loop's bot). The old session stays on disk —
+            # resume it any time with `olympus sessions`.
+            arg = text.partition(" ")[2].strip()
+            from . import memory as _memory
+            name = _memory.safe_id(arg) if arg else time.strftime("%Y%m%d-%H%M%S")
+            conversation_id = f"cli-{name}"
+            bot = orchestrator.Olympus(report=report, user="cli",
+                                       conversation_id=conversation_id,
+                                       pool=pool)
+            print(f"\nolympus ▸ Fresh session: {conversation_id} "
+                  "(the old one is saved — `olympus sessions` to go back).\n")
+            continue
         handled, output, should_exit = dispatch_command(bot, text)
         if should_exit:
             break
@@ -494,13 +593,14 @@ def run(pool=None) -> None:
             except Exception:
                 spend = None
             try:
-                budget = config.history_token_budget(pool.primary().model)
+                budget = config.history_token_budget(bot.pool.primary().model)
                 used = orchestrator.Olympus._estimate_tokens(bot.history)
                 ctx_frac = used / budget if budget else None
             except Exception:
                 ctx_frac = None
+            live = bot.pool.primary()   # bot.pool so /model swaps show up
             print("\n" + status_line(
-                f"{pool.primary().provider}/{pool.primary().model or 'default'}",
+                f"{live.provider}/{live.model or 'default'}",
                 secs, fast=config.fast_mode(), spend=spend,
                 ctx_frac=ctx_frac) + "\n")
         except Exception as err:

@@ -4,11 +4,12 @@ Three layers are proven here:
 
 * Pure unit — `contracts.check` in isolation (no orchestrator, no I/O): every
   check, its boundaries, and that None/no-op/absent-count cost nothing.
-* Integration — with OLYMPUS_CONTRACTS unset a violating output is returned
-  UNCHANGED (the distribution-safety guarantee); with it set, a violation
+* Integration — contracts are ON BY DEFAULT (ADR 0005 hardening: enforcement
+  never ships dormant; OLYMPUS_CONTRACTS=off is the kill switch): a violation
   degrades to the typed "treat this part as missing" placeholder, the rest of
   the pipeline still completes, and a signed `contract` decision is recorded
-  (status="violation" on fail, "ok" on pass).
+  (status="violation" on fail, "ok" on pass). With the kill switch set, a
+  violating output is returned unchanged.
 * Replay — adding `contract` records keeps the decision path byte-identical
   under replay (diff_decisions == []), proving the new record type didn't break
   the re-executable log.
@@ -127,10 +128,13 @@ def _with_contract(monkeypatch, key, contract):
     monkeypatch.setitem(SPECIALISTS, key, new)
 
 
-def test_disabled_by_default_returns_violating_output_unchanged(monkeypatch):
-    """OLYMPUS_CONTRACTS unset → a violating output is returned VERBATIM and no
-    contract decision is recorded. This is the distribution-safety guarantee."""
+def test_enabled_by_default_and_kill_switch_disables(monkeypatch):
+    """Contracts enforce with OLYMPUS_CONTRACTS unset (ADR 0005 hardening:
+    enforcement never ships dormant); OLYMPUS_CONTRACTS=off restores the
+    pass-through behavior."""
     monkeypatch.delenv("OLYMPUS_CONTRACTS", raising=False)
+    assert config.contracts_enabled() is True         # ON by default
+    monkeypatch.setenv("OLYMPUS_CONTRACTS", "off")
     assert config.contracts_enabled() is False
     _stub_run_counted(monkeypatch)
     _with_contract(monkeypatch, "plutus", OutputContract(max_chars=3))
@@ -140,7 +144,7 @@ def test_disabled_by_default_returns_violating_output_unchanged(monkeypatch):
     steps = [{"id": "a", "specialist": "plutus", "task": "go", "depends_on": []}]
     out = dict(bot._dispatch_dag(steps, tr))
 
-    assert out["plutus"] == "output[plutus]"          # UNCHANGED, not clamped
+    assert out["plutus"] == "output[plutus]"          # kill switch: unchanged
     assert [d for d in tr.decisions if d["decision_type"] == "contract"] == []
 
 
@@ -159,12 +163,14 @@ def test_enabled_violation_degrades_and_pipeline_completes(monkeypatch):
         "mode": "delegate", "direct_reply": None,
         "specialists": ["plutus", "peitho"], "brief": "do it",
         "needs_verification": True})
-    monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
+    monkeypatch.setattr(bot, "_plan", lambda brief, keys, **kw: [
         {"id": "a", "specialist": "plutus", "task": "t1", "depends_on": []},
         {"id": "b", "specialist": "peitho", "task": "t2", "depends_on": []}])
-    # Verify just echoes the bundle so we can inspect what survived.
-    monkeypatch.setattr(bot, "_verify", lambda brief, outputs:
-                        "\n\n".join(f"### {k}\n{v}" for k, v in outputs))
+    # Verify just echoes the bundle (with a passing verdict) so we can
+    # inspect what survived.
+    monkeypatch.setattr(bot, "_verify", lambda brief, outputs: (
+        "\n\n".join(f"### {k}\n{v}" for k, v in outputs),
+        {"status": "pass", "unsupported_claims": [], "confidence": 1.0}))
 
     tr = trace.Trace("t")
     mode, brief, verified = bot._pipeline("a real message", tr)

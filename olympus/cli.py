@@ -14,9 +14,16 @@ _DEV_LABEL = ("DEV / UNVERIFIED — signed by the public default key; proves the
               "signer.")
 
 
-def _chat() -> None:
+def _chat(conversation_id: str = "cli-default") -> None:
     from . import tui
-    tui.run()
+    tui.run(conversation_id=conversation_id)
+
+
+def _last_session_id() -> str:
+    """The most recently used terminal session (for `olympus -c`)."""
+    from . import memory
+    sessions = memory.list_conversations(prefix="cli")
+    return sessions[0]["id"] if sessions else "cli-default"
 
 
 def _verify_run_combined(run_id: str, require_production: bool) -> int:
@@ -101,9 +108,17 @@ def build_parser() -> argparse.ArgumentParser:
         prog="olympus",
         description="OLYMPUS — self-improving multi-agent AI system",
     )
+    parser.add_argument("-c", "--continue", dest="continue_last",
+                        action="store_true",
+                        help="continue the most recent chat session")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("chat", help="interactive conversation (default)")
+    p_chat = sub.add_parser("chat", help="interactive conversation (default)")
+    p_chat.add_argument("--session", help="named session id to open/resume")
+    p_sess = sub.add_parser(
+        "sessions", help="list past chat sessions and resume one")
+    p_sess.add_argument("id", nargs="?",
+                        help="session id to resume (no arg = pick from a list)")
     p_setup = sub.add_parser(
         "setup", help="choose your AI provider & save your API key; or edit one "
                       "section: setup <model|terminal|gateway|tools>")
@@ -140,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
                        "file memory out (migrate/export/import/delete)")
     p_mem.add_argument(
         "action", nargs="?", default="list",
-        choices=["list", "candidates", "approve", "reject", "forget", "search",
+        choices=["card", "list", "candidates", "approve", "reject", "forget", "search",
                  "migrate", "export", "import", "delete"])
     p_mem.add_argument("arg", nargs="*",
                        help="id (approve/reject/forget), query (search), or "
@@ -790,6 +805,9 @@ def main(argv: list[str] | None = None) -> int:
             removed = memory.delete_memory(target, category=args.category,
                                            note_id=args.note_id)
             print(f"Deleted {len(removed)} file(s).")
+        elif args.action == "card":
+            from . import usermem as _um
+            print(_um.render_card(args.user or user))
         elif args.action == "list":
             mems = usermem.active_memories(user)
             if not mems:
@@ -1233,7 +1251,36 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command in (None, "chat"):
         if not firstrun.ensure_ready():
             return 1
-        _chat()
+        cid = getattr(args, "session", None) or (
+            _last_session_id() if getattr(args, "continue_last", False)
+            else "cli-default")
+        _chat(cid)
+    elif args.command == "sessions":
+        from . import memory
+        if args.id:
+            if not firstrun.ensure_ready():
+                return 1
+            _chat(args.id)
+            return 0
+        sessions = memory.list_conversations(prefix="cli")[:15]
+        if not sessions:
+            print("No saved sessions yet — `olympus` starts one.")
+            return 0
+        import datetime as _dt
+        print("Recent sessions:")
+        for i, s in enumerate(sessions, 1):
+            when = _dt.datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
+            print(f"  {i:2}) {s['id']}  ({when}, {s['turns']} turn(s))")
+            print(f"      {s['preview']}")
+        try:
+            raw = input("Resume which? (number, blank to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if raw.isdigit() and 1 <= int(raw) <= len(sessions):
+            if not firstrun.ensure_ready():
+                return 1
+            _chat(sessions[int(raw) - 1]["id"])
     elif args.command == "ask":
         if not firstrun.ensure_ready():
             return 1

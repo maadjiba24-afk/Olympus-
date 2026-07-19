@@ -16,6 +16,7 @@ which is exactly the surface the learning loop expects to be curated.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from pathlib import Path
 
@@ -39,12 +40,23 @@ def _note_entries(user: str) -> list[dict]:
             dirs.append(memory._dir(cat, user))
         for d in dirs:
             for p in d.glob("*.md"):
-                try:                       # filenames: YYYYMMDD-HHMMSS-slug.md
+                # filenames: YYYYMMDD-HHMMSS[-pid]-slug.md (the pid segment
+                # was added by ADR 0005's collision-proof memory.save; old
+                # notes don't have it — tolerate both)
+                try:
                     ts = time.mktime(time.strptime(p.name[:15],
                                                    "%Y%m%d-%H%M%S"))
                 except ValueError:
                     ts = p.stat().st_mtime
-                title = p.stem[16:].replace("-", " ") or p.stem
+                try:                     # the real title lives in the note
+                    title = memory.note_title(
+                        p.read_text(encoding="utf-8"))
+                except OSError:
+                    title = ""
+                if not title:            # fallback: derive from the stem
+                    m = re.match(r"\d{8}-\d{6}-(?:\d+-)?(.*)", p.stem)
+                    title = (m.group(1) if m else p.stem).replace("-", " ") \
+                        or p.stem
                 out.append({"ref": _ref(p), "ts": ts, "kind": cat,
                             "title": title, "path": p})
     return out

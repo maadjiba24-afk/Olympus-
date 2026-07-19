@@ -62,7 +62,12 @@ def teacher_for(pool: config.ModelPool, key: str) -> config.Settings | None:
     """The pool member a failed `key` rework should escalate to: the highest
     capability score for the specialist's role, and only if that genuinely
     outranks what the specialist already runs on (equal strength = no point
-    paying for a re-roll on a sibling model)."""
+    paying for a re-roll on a sibling model).
+
+    Returning None is NOT a dead end: the orchestrator's rework dispatch runs
+    with retry_index=1, which the effort scorer maps to the top tier — so a
+    single-model pool escalates same-model-more-compute instead of not at
+    all (ADR 0005)."""
     if not enabled() or len(pool.members) < 2:
         return None
     role = config.specialist_role(key)

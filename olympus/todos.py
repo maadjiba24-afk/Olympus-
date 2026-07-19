@@ -58,9 +58,22 @@ def _load(user: str) -> list[dict]:
 
 
 def _save(user: str, items: list[dict]) -> None:
+    import os
     if len(items) > _MAX_ITEMS:                 # keep the most recent
         items = sorted(items, key=lambda d: d.get("created", 0))[-_MAX_ITEMS:]
-    _path(user).write_text(json.dumps(items, indent=2), encoding="utf-8")
+    # Atomic publish: _load maps a torn file to [] (ADR 0005).
+    p = _path(user)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _mutex(user: str):
+    """Cross-process lock for todo load-modify-save cycles (ADR 0005): the
+    web process, specialist tools in any pipeline process (including the
+    heartbeat's goal cycles), and the CLI all mutate the same file."""
+    from . import proclock
+    return proclock.lock(f"todos-{user}")
 
 
 def _parse_due(due: str | float | None) -> float | None:
@@ -90,40 +103,44 @@ def add(user: str, text: str, *, kind: str = "todo",
     kind = "note" if kind == "note" else "todo"
     item = {"id": uuid.uuid4().hex[:12], "text": text, "kind": kind,
             "done": False, "due": _parse_due(due), "created": now}
-    items = _load(user)
-    items.append(item)
-    _save(user, items)
+    with _mutex(user):
+        items = _load(user)
+        items.append(item)
+        _save(user, items)
     return item
 
 
 def complete(user: str, item_id: str, done: bool = True) -> bool:
-    items = _load(user)
-    found = False
-    for it in items:
-        if it["id"] == item_id:
-            it["done"] = bool(done)
-            found = True
-    if found:
-        _save(user, items)
-    return found
+    with _mutex(user):
+        items = _load(user)
+        found = False
+        for it in items:
+            if it["id"] == item_id:
+                it["done"] = bool(done)
+                found = True
+        if found:
+            _save(user, items)
+        return found
 
 
 def delete(user: str, item_id: str) -> bool:
-    items = _load(user)
-    kept = [it for it in items if it["id"] != item_id]
-    if len(kept) == len(items):
-        return False
-    _save(user, kept)
-    return True
+    with _mutex(user):
+        items = _load(user)
+        kept = [it for it in items if it["id"] != item_id]
+        if len(kept) == len(items):
+            return False
+        _save(user, kept)
+        return True
 
 
 def clear_done(user: str) -> int:
-    items = _load(user)
-    kept = [it for it in items if not it.get("done")]
-    removed = len(items) - len(kept)
-    if removed:
-        _save(user, kept)
-    return removed
+    with _mutex(user):
+        items = _load(user)
+        kept = [it for it in items if not it.get("done")]
+        removed = len(items) - len(kept)
+        if removed:
+            _save(user, kept)
+        return removed
 
 
 def listing(user: str, *, include_done: bool = True) -> list[dict]:

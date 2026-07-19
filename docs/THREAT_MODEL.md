@@ -162,3 +162,13 @@ the Action spine, which enforces deny-first:
 
 This is proven in `tests/test_threat_model.py` (an ungranted action is blocked)
 and `tests/test_gmail.py` (the full prepare → approve → execute / undo path).
+
+**No "/yolo".** Some assistants ship a one-keystroke toggle that disables
+dangerous-command approvals entirely. Olympus deliberately has no equivalent:
+relaxing autonomy is *governed* (per-scope grants on the spine, plus the
+`OLYMPUS_EXEC_SECURITY` modes), and the command security gate's DENY tier
+(`rm -rf /`, `mkfs`, fork bombs, raw-disk writes, host power-off) stays
+enforced **even when approvals are granted** — the gate sits inside
+`sandbox.run()`, below every approval path. Catastrophic commands are refused,
+not confirmed. Proven in `tests/test_cmdguard.py`
+(`test_sandbox_refuses_a_denied_command`).

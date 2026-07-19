@@ -15,6 +15,228 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Budget-aware escalation + total scorer (ADR 0005, amendment 7)
+
+- "Thinks harder" never defeats the spend guard: with <10% of the daily
+  budget remaining, a scored effort raise above the specialist floor is
+  capped back to the floor and traced (`effort.budget_capped`); the run —
+  reworks included — always still happens.
+- The effort scorer is a total function: garbage inputs coerce to harmless
+  defaults (never an exception, always a valid tier), pinned by a seeded
+  property test.
+
+### Changed — Lock and audit-trail hardening (ADR 0005, amendment 6)
+
+- `proclock.lock` acquisition is bounded by default (60 s; `timeout=None`
+  is the explicit block-forever opt-in) — a wedged peer process becomes a
+  visible TimeoutError, never a silent hang. The reply-path callers handle
+  it explicitly (ledger write skipped + captured, audit trigger skipped,
+  watchlist entry stays queued); a kill -9 test proves flock's kernel
+  release + prompt recovery with consistent state.
+- The signed decision log's shared daily file is now multiprocess-safe:
+  appends serialize cross-process, and a wedged lock diverts the record to
+  a unique overflow file instead of dropping it — pinned by a two-process
+  concurrent-flush integrity test.
+
+### Changed — Verification gate hardening (ADR 0005, amendment 5)
+
+- **Structural output contracts are ON by default** (`OLYMPUS_CONTRACTS=off`
+  is the kill switch) — enforcement never ships dormant.
+- The verify stage runs under a wall-clock cap (`OLYMPUS_VERIFY_TIMEOUT`,
+  default 600 s): a hung verifier takes the visible UNVERIFIED path instead
+  of stalling the reply.
+- An errored (as opposed to failed) rework ships degraded immediately — no
+  retry loop on either rework path.
+- Tests pin that fast mode cannot skip the answer.verify gate and that
+  verdict parsing never crashes and never silently passes an invalid
+  status.
+
+## [0.25.0] — 2026-07-19
+
+### Added — session & flow ergonomics (Hermes round 2)
+
+- **Named sessions + browse/resume** — `olympus sessions` (list newest-first
+  with a distilled-state preview line, pick to resume), `olympus -c` (continue
+  the last session), `olympus chat --session <id>`, and `/new [name]` in chat
+  (the old session stays resumable).
+- **`/bg <task>`** — run a one-shot task through the full verified pipeline in
+  the background while you keep chatting; the answer announces itself in-chat
+  and is saved to reports.
+- **`/btw <question>`** — an ephemeral side question: answered with the current
+  context visible but leaving NO trace (no history, no memory extraction, no
+  companion count).
+- **`/model <name>` and `/fast on|off`** — swap the pool's primary model or
+  toggle fast mode mid-session; `/model` keeps the provider/key/endpoint so a
+  credential can never silently migrate hosts.
+- **Delta-setup** — on a configured install, `olympus setup` offers "Fix what's
+  missing", driven by `olympus doctor`'s ✗/⚠ gaps, and ends on the doctor
+  summary (find → fix → confirm).
+- **"Where stuff lives"** — doctor now prints the key paths (config, soul,
+  memory, sessions, workspace) labeled editable vs managed.
+- THREAT_MODEL: documented the no-/yolo stance — DENY-tier commands stay
+  blocked even when approvals are granted.
+- **Model picker type-to-filter** — aggregator-scale discovered lists (>20
+  models) get a substring filter before the numbered pick.
+- **Gateway checklist** — the wizard's messaging step now shows every channel
+  (telegram/discord/slack/signal/email/webhook) with its configured status and
+  lets you set up several in one pass.
+
+### Security — teardown-loop hardening
+
+- **Memory-write hardening** — `sanitize_for_memory` now strips invisible/
+  bidi Unicode BEFORE the injection scan (closing the zero-width-split
+  evasion) and redacts credential-shaped content (API keys, private-key
+  blocks, JWTs, creds-in-URLs) so memory can never become an exfiltration
+  channel.
+- **Command-gate reinforcements** — wrapper-proof raw rule catches
+  `bash -c "rm -rf /"` (payload hidden inside quotes), plus `find / -delete`
+  and `shred` against block devices. Documented fail-closed trade-off: raw
+  rules see inside quotes, so *printing* a catastrophic command is denied too.
+- **Search-index maintenance** — the index opens in WAL mode; the heartbeat
+  maintenance sweep prunes orphaned conversations (file deleted) and, only if
+  `OLYMPUS_SEARCH_RETAIN_DAYS` > 0, aged ones — then VACUUMs. Conversation
+  files are never touched; the index stays rebuildable via `reindex()`.
+- **Email spoof-guard** — when `OLYMPUS_EMAIL_ALLOW` is set, the email gateway
+  also requires Gmail's own DMARC/SPF+DKIM pass verdict
+  (`Authentication-Results`); a From: header alone no longer satisfies the
+  allowlist. Absent verdict = fail closed. Without an allowlist, behavior is
+  unchanged (identity isn't load-bearing).
+
+### Added — memory transparency & reach
+
+- **`olympus memory card`** — one markdown page of everything believed about a
+  user, every fact with live (decayed) confidence, type, age, and id; held
+  candidates listed separately. A projection of the gated store — never an
+  editable file.
+- **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons, reports, and
+  corrections as dated markdown for curation in Obsidian/any editor. A mirror,
+  not a second source of truth; a broken vault path never breaks a save.
+- **Visible memory activity** — "🧠 remembered/updated/reinforced: …" progress
+  lines as the background extractor gates facts in (all/verbose progress modes).
+- **Soul scaffold** now seeds ## Role and ## Current focus; the wizard's
+  closing hints point at `olympus soul edit`.
+- **Search hit-set distillation** — oversized session-search results are
+  condensed by the pool's fastest model (citations kept); keyless installs fall
+  back to truncation.
+
+### Security — teardown-loop hardening (iteration 3)
+
+- **Webhook rate limiting** — the inbound webhook gateway now enforces a
+  per-IP sliding-window limit (`OLYMPUS_WEBHOOK_RATE_LIMIT`, default 20/min;
+  0 disables). A public entry point that runs the full council on the
+  operator's key can no longer be turned into a key-burn DoS.
+- **Rotation state thread-safety** — credential-rotation state (cursor,
+  exhausted set, per-key stats) is now guarded by a lock, so concurrent
+  gateway worker threads can't race the cursor into skipping or re-hitting a
+  key.
+- **Bounded background-thread registry** — `/bg` finished threads are compacted
+  from the registry on each launch, so a long terminal session can't leak
+  Thread objects.
+
+### Added — Synthesis faithfulness check (ADR 0005, amendment 4)
+
+- The composed answer is now verified too — the last unverified hop on the
+  interactive path. A no-tools faithfulness check compares Zeus's reply
+  against the already-verified findings via the new `answer.synthesis`
+  contract: unfaithful → exactly one recompose with the unsupported
+  additions named; still unfaithful → a structural `⚠️ UNVERIFIED
+  ADDITIONS` banner. Streaming replies (whose tokens can't be retracted)
+  get a trailing correction note instead. Checker infrastructure failures
+  are traced but never bannered — the findings themselves were verified.
+  Skipped in fast mode; `OLYMPUS_SYNTH_CHECK=off` kill switch.
+
+### Fixed — Second-ring cross-process safety (ADR 0005, amendment 3)
+
+- The acceptance re-audit swept the tree for the heartbeat-vs-web RMW class
+  and found six more shared files; all are now locked and/or atomic:
+  agent beats (`run_due` marks due beats under the lock BEFORE the
+  minutes-long LLM phase — an add from the chat process mid-run is no
+  longer silently deleted), operator jobs (same mark-first restructure),
+  todos, the verified-facts cache (append+trim serialized cross-process
+  with a bounded wait on the verify agent's tool path), heartbeat state,
+  saved conversations, and the conversation-counter reset. Each carries a
+  two-process or lock-contention race test.
+
+### Added — Deterministic difficulty pre-scorer (ADR 0005, Phase 3)
+
+- New `olympus/effortscore.py`: a pure, deterministic scorer — (risk class,
+  prompt length, tool count, retry index, needs_verification) → effort tier,
+  zero model calls, zero I/O. Thresholds are plain constants, deliberately
+  not evolve-tunable.
+- The static `effort=` literals in routing, planning, synthesis, and every
+  specialist run are replaced with scored values; the per-specialist
+  `effort` field is now a FLOOR the scorer can raise but never lower below
+  ("high" remains synthesis's floor).
+- A rework runs at the top tier (`retry_index >= 1` → high) on BOTH rework
+  paths (Athena quality retry and the Aletheia answer.verify forced rework).
+  On a single-model pool — where `teacher_for` has no stronger member to
+  swap in — this same-model-more-compute bump IS the escalation, traced as
+  `teacher.effort_escalated` only when it genuinely changes the call.
+- A 10-agent adversarial review then made the dial REAL rather than
+  cosmetic: a second prompt-length tier makes "high" reachable from length
+  alone (routing included); the tool signal counts only a specialist's
+  EXTRA tools (the 7 shared BASE tools had put most of the roster at the
+  threshold); `risk_class` is genuinely wired — a specialist holding an
+  irreversible/financial action tool always thinks at the top tier; and
+  three light specialists (Iris, Mnemosyne, Chiron) now floor at "medium",
+  so a cheap path exists in production — backstopped by the enforcing
+  answer.verify gate, Athena review, and the retry→high rule. Accepted:
+  replay recordings are version-bound — a behavior-changing release
+  invalidates old recordings by design (the divergence is the tripwire).
+
+### Added — Cross-process safety on shared mutable state (ADR 0005, Phase 2)
+
+- New `olympus/proclock.py`: `fcntl.flock` lockfile wrapper — cross-process
+  AND cross-thread exclusive, reentrant per thread, POSIX-only with a
+  documented degraded fallback. The heartbeat process and the web process no
+  longer race each other's read-modify-writes.
+- Usage ledger RMW (`usage.record`) now holds the cross-process lock —
+  `os.replace` prevented torn files but not lost updates; a two-real-process
+  race test asserts exact totals.
+- `memory.save` filenames are collision-proof (pid + `O_EXCL` create):
+  concurrent same-title writers each keep their note; the 14-digit timestamp
+  prefix is unchanged so date-parsing readers keep working.
+- `watchlist_add`/`watchlist_pop` and every mutating goals load-modify-save
+  cycle now serialize under the cross-process lock.
+- `FileStore.put` last-writer-wins is documented as the accepted KV contract;
+  cross-process RMW callers must hold `proclock` (the Postgres upsert is a
+  blind overwrite, not a CAS — see ADR 0005).
+- A 22-agent adversarial review of this phase confirmed 18 findings — all
+  fixed in-phase: lock scopes split so no in-process mutex is ever held
+  across a flock wait (a wedged peer could have frozen every reply);
+  proclock gained a bounded-`timeout` acquire for hot best-effort paths and
+  sanitized-name reentrancy identity; atomic publish added everywhere a
+  torn read decodes as empty (goals, scheduler jobs, FileStore.put, prefs,
+  watchlist, note bodies via `os.link`); proclock coverage extended to
+  evolve's telemetry/tunables blob (whose torn read could have reset
+  tighten-only security knobs), the scheduler, prefs, and the conversation
+  counter; the goals completion write re-checks active status under the
+  lock; prompt-backup restore matches collision-suffixed filenames.
+- Per-worker sandbox scratch re-rooting was built, adversarially reviewed,
+  and REJECTED: a context-sensitive workdir made approved file actions
+  execute in a different root than they were previewed in, and broke
+  file handoff, the gallery, and pre-existing workspaces. `workdir()` stays
+  one shared, context-free root; the residual concurrent same-path write is
+  documented as accepted in ADR 0005.
+
+### Added — Aletheia is ENFORCING on the interactive path (ADR 0005, Phase 1)
+
+- `_verify` now emits a structured verdict — `{status: pass|warn|reject,
+  unsupported_claims[], confidence}` — parsed from a mandatory machine-readable
+  `VERDICT:` line (missing/malformed = infrastructure failure, handled
+  visibly, never silently).
+- New `answer.verify` behavioral contract evaluated AFTER verification and
+  BEFORE synthesis, feeding the real verdict to the previously dormant
+  `aletheia_verified` predicate (which was never given a `verify_verdict` in
+  production and ran a stage too early).
+- Policy: an affirmative `reject` forces exactly one rework of the council;
+  a second reject ships the reply hard-downgraded behind a structural
+  `⚠️ UNVERIFIED` banner (prepended after synthesis on both the blocking and
+  streaming paths, so the composing model can never drop it), with the
+  unsupported claims listed and the event recorded in the signed decision log.
+- Verify-stage infrastructure errors now degrade visibly (banner + logged
+  decision) instead of silently falling through to raw findings.
+
 ### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
 
 The eight new components (webplan, AP2 flow, extended ABC surface,
@@ -1131,15 +1353,6 @@ analysis for the full feature comparison.
   the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
   delivery use the pinned opener. (Adapted from Odysseus fix #704; the
   case-insensitive sensitive-file deny-list mirrors their #5097.)
-
-> **Release-state note.** As of this writing the latest *published* release is
-> **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
-> through `0.24.0` sections below were prepared and dated but **never tagged or
-> published** — so they are not releases yet, and everything from `0.22.0`
-> down to this note is effectively unreleased pending a tagging decision (see
-> RELEASING.md). The dated headers are kept for review; re-date and tag them
-> when a release is actually cut. `pyproject.toml` currently reads `0.24.0` as
-> the in-development version, not a shipped one.
 
 ## [0.24.0] — 2026-07-03
 

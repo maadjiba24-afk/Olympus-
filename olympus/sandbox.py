@@ -65,7 +65,18 @@ def backend() -> str:
 def workdir() -> Path:
     """The root the file tools confine paths to, and the starting `cwd` for
     commands. Note: it bounds the file-path tools and where a command begins,
-    not what a local shell command can reach (see the module docstring)."""
+    not what a local shell command can reach (see the module docstring).
+
+    Deliberately ONE shared root, never context-sensitive. A per-worker
+    re-rooting (workspace/agents/<specialist>) was built and adversarially
+    reviewed for ADR 0005 and REJECTED on evidence: the approval spine
+    prepares/previews a file action on the worker thread but executes it from
+    the web/CLI approval handler, so a context-dependent root makes approved
+    actions run somewhere other than where they were previewed — plus it
+    breaks inter-specialist file handoff, the gallery, and pre-existing
+    workspaces. Concurrent same-path writes by two specialists remain
+    possible and are accepted; the safe design (threading one pinned root
+    through prepare→approve) is future work."""
     d = Path(os.environ.get("OLYMPUS_EXEC_WORKDIR",
                             str(config.MEMORY_DIR / "workspace")))
     d.mkdir(parents=True, exist_ok=True)

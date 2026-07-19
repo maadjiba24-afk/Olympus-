@@ -719,10 +719,13 @@ def _restore_prompt(agent: str) -> str:
     path = config.PROMPTS_DIR / f"{stem}.md"
     if not path.is_file():
         return f"Error: unknown agent prompt '{stem}'."
+    bdir = config.MEMORY_DIR / "prompt_backups"
+    # Both name shapes: "...-<stem>.md" and the collision-suffixed
+    # "...-<stem>-<n>.md" that memory.save can produce (ADR 0005).
     backups = sorted(
-        (config.MEMORY_DIR / "prompt_backups").glob(f"*-{stem}.md"),
+        set(bdir.glob(f"*-{stem}.md")) | set(bdir.glob(f"*-{stem}-[0-9]*.md")),
         reverse=True,
-    ) if (config.MEMORY_DIR / "prompt_backups").exists() else []
+    ) if bdir.exists() else []
     if not backups:
         return f"Error: no backups exist for '{stem}'."
     newest = backups[0]
@@ -3325,12 +3328,37 @@ def _media():
     return media
 
 
+_SEARCH_DISTILL_THRESHOLD = 1800     # chars of rendered hits before distilling
+# (Hit.render caps each hit at ~220 chars and limit=10, so ~2,200 max — a
+# threshold above that would never fire.)
+
+
 def _search_sessions(query: str) -> str:
     from . import search
     hits = search.search(query, limit=10)
     if not hits:
         return f"No past conversation turns match '{query}'."
-    return "\n".join(h.render() for h in hits)
+    rendered = "\n".join(h.render() for h in hits)
+    if len(rendered) <= _SEARCH_DISTILL_THRESHOLD:
+        return rendered
+    # A big hit-set spends the CALLER's context. Distill it with the pool's
+    # fastest model before returning; on any failure (no key, provider down)
+    # fall back to plain truncation — search must never break on a frill.
+    try:
+        from . import backend
+        fast = config.ModelPool.from_env().fastest()
+        summary = backend.complete_text(
+            fast,
+            "Condense these conversation-search hits, KEEPING every concrete "
+            "fact, decision, number, and name, with their [conversation#turn] "
+            "citations. Drop only redundancy.",
+            [{"role": "user", "content": f"Query: {query}\n\n{rendered[:12000]}"}],
+            effort="low").strip()
+        if summary:
+            return (f"[distilled from {len(hits)} matching turns]\n{summary}")
+    except Exception:
+        pass
+    return rendered[:_SEARCH_DISTILL_THRESHOLD] + "\n…[truncated]"
 
 
 def _schedule_task(name: str, interval: str, prompt: str,

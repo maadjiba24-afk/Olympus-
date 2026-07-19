@@ -19,6 +19,7 @@ import contextvars
 import hashlib
 import io
 import json
+import os
 import re
 import tarfile
 import threading
@@ -134,9 +135,59 @@ def save(category: str, title: str, content: str) -> Path:
     title = security.sanitize_for_memory(title)
     content = security.sanitize_for_memory(content)
     d = _dir(category, current_user())
-    path = d / f"{time.strftime('%Y%m%d-%H%M%S')}-{_slug(title)}.md"
-    path.write_text(render_note(title, content), encoding="utf-8")
-    return path
+    # Unique, collision-proof filename (ADR 0005): the old second-granularity
+    # name let two concurrent writers of the same title silently overwrite
+    # each other. pid + O_EXCL create (atomic across processes) guarantees
+    # every save lands in its own file; the timestamp prefix is unchanged so
+    # date-parsing readers (first 14 digits) and name-sorted listings keep
+    # working.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    base = f"{stamp}-{os.getpid()}-{_slug(title)}"
+    body = render_note(title, content)
+    # Write the body FULLY to a private tmp file, then publish it under the
+    # unique name with os.link — atomic and exclusive (EEXIST on collision),
+    # so a reader can never glob a half-written note and a crash mid-write
+    # leaves only an invisible tmp, never a corrupt note.
+    tmp = d / f".tmp-{os.getpid()}-{threading.get_ident()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        for n in range(1000):
+            path = d / (f"{base}.md" if n == 0 else f"{base}-{n}.md")
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                continue
+            _mirror_to_vault(category, path)
+            return path
+        raise OSError(f"could not allocate a unique note file for '{base}'")
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+# Categories worth reading in a knowledge GUI (Obsidian is just a folder).
+_VAULT_CATEGORIES = frozenset({"lessons", "reports", "corrections"})
+
+
+def _mirror_to_vault(category: str, path: Path) -> None:
+    """Write-through mirror into OLYMPUS_VAULT_DIR — a plain-markdown knowledge
+    base the user curates in any editor/GUI. A MIRROR, not a second source of
+    truth: the gated store stays canonical; deleting/editing vault files never
+    affects Olympus. Best-effort — a broken vault path must never break a save."""
+    vault = os.environ.get("OLYMPUS_VAULT_DIR", "").strip()
+    if not vault or category not in _VAULT_CATEGORIES:
+        return
+    try:
+        out = Path(vault).expanduser() / category
+        out.mkdir(parents=True, exist_ok=True)
+        (out / path.name).write_text(path.read_text(encoding="utf-8"),
+                                     encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _search_dirs() -> list[Path]:
@@ -246,15 +297,58 @@ def load_conversation(conversation_id: str) -> list[dict]:
 
 
 def save_conversation(conversation_id: str, history: list[dict]) -> None:
-    _conversation_path(conversation_id).write_text(
-        json.dumps(history, indent=1), encoding="utf-8"
-    )
+    # Atomic publish: load_conversation maps a torn file to [], so a crash
+    # mid-write would drop the whole history (ADR 0005).
+    p = _conversation_path(conversation_id)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
+    os.replace(tmp, p)
     # Keep the cross-session search index fresh (best-effort; never block a save).
     try:
         from . import search
         search.index_conversation(safe_id(conversation_id), history)
     except Exception:
         pass
+
+
+def _conversation_preview(history: list[dict]) -> str:
+    """One line that identifies a session at a glance. Prefer the distilled
+    state block (what the conversation is durably ABOUT) over the literal
+    first message; fall back to the first user turn."""
+    for m in history:
+        content = str(m.get("content", ""))
+        if content.startswith("[Conversation state"):
+            body = content.partition("\n")[2].strip() or content
+            return " ".join(body.split())[:100]
+    for m in history:
+        if m.get("role") == "user":
+            return " ".join(str(m.get("content", "")).split())[:100]
+    return "(empty)"
+
+
+def list_conversations(prefix: str = "") -> list[dict]:
+    """Saved conversations, newest first: {id, mtime, turns, preview}.
+    `prefix` filters by id prefix (e.g. 'cli' for terminal sessions)."""
+    d = config.MEMORY_DIR / "conversations"
+    if not d.exists():
+        return []
+    out: list[dict] = []
+    for path in d.glob("*.json"):
+        cid = path.stem
+        if prefix and not cid.startswith(prefix):
+            continue
+        try:
+            history = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        out.append({
+            "id": cid,
+            "mtime": path.stat().st_mtime,
+            "turns": sum(1 for m in history if m.get("role") == "user"),
+            "preview": _conversation_preview(history),
+        })
+    out.sort(key=lambda s: s["mtime"], reverse=True)
+    return out
 
 
 # --- YouTube watch queue ------------------------------------------------
@@ -265,20 +359,41 @@ def _watchlist_path() -> Path:
 
 
 def watchlist_add(url: str) -> None:
-    with _watchlist_path().open("a", encoding="utf-8") as f:
-        f.write(url.strip() + "\n")
+    from . import proclock
+    with proclock.lock("watchlist"):
+        with _watchlist_path().open("a", encoding="utf-8") as f:
+            f.write(url.strip() + "\n")
 
 
 def watchlist_pop() -> str | None:
-    path = _watchlist_path()
-    if not path.exists():
+    # Read-modify-write under the cross-process lock (ADR 0005): the heartbeat
+    # and web processes both pop; unlocked, a concurrent add or pop could be
+    # silently dropped by this rewrite. A lock timeout (wedged peer) returns
+    # None — the entry stays queued for the next tick, nothing is lost.
+    from . import proclock
+    try:
+        return _watchlist_pop_locked(proclock)
+    except TimeoutError:
         return None
-    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if not lines:
-        return None
-    url, rest = lines[0], lines[1:]
-    path.write_text("\n".join(rest) + ("\n" if rest else ""), encoding="utf-8")
-    return url
+
+
+def _watchlist_pop_locked(proclock) -> str | None:
+    with proclock.lock("watchlist"):
+        path = _watchlist_path()
+        if not path.exists():
+            return None
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        if not lines:
+            return None
+        url, rest = lines[0], lines[1:]
+        # Atomic rewrite: a crash mid-write_text would drop every remaining
+        # queued URL; with os.replace the queue is always old-or-new.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text("\n".join(rest) + ("\n" if rest else ""),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+        return url
 
 
 def sweep_dated_files(retain_days: int) -> int:
@@ -587,7 +702,13 @@ def save_state(state: dict) -> None:
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "heartbeat_state.json"
     with _STATE_LOCK:
-        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        # Atomic publish: readers in OTHER processes (admin panel, digest,
+        # hibernate) map a torn file to {} — "never ran" — and a crash
+        # mid-write would reset every cadence timestamp (ADR 0005). Only the
+        # heartbeat writes, so the thread lock suffices for exclusion.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def bump_conversation_count() -> int:
@@ -595,10 +716,20 @@ def bump_conversation_count() -> int:
 
     Kept in its own file (not heartbeat_state.json) so concurrent web/Telegram
     increments can't clobber the heartbeat's last-run timestamps, and vice
-    versa. Guarded by a process-wide lock for read-modify-write safety."""
+    versa. Guarded by the CROSS-process lock (ADR 0005): a threading.Lock
+    only serialized one process's increments while the heartbeat and web
+    processes both bump this counter."""
+    from . import proclock
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     path = config.MEMORY_DIR / "conversation_count.txt"
-    with _STATE_LOCK:
+    try:
+        return _bump_conversation_locked(proclock, path)
+    except TimeoutError:
+        return 0                       # wedged peer: skip the audit trigger
+
+
+def _bump_conversation_locked(proclock, path) -> int:
+    with proclock.lock("conversation-count"):
         try:
             n = int(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
@@ -609,7 +740,10 @@ def bump_conversation_count() -> int:
 
 
 def reset_conversation_count() -> None:
+    # Same cross-process lock as bump_conversation_count: a reset under only
+    # the thread lock could interleave with the other process's bump.
+    from . import proclock
     path = config.MEMORY_DIR / "conversation_count.txt"
-    with _STATE_LOCK:
+    with proclock.lock("conversation-count"):
         path.write_text("0", encoding="utf-8")
 

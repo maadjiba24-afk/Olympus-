@@ -580,6 +580,28 @@ _DEFAULT_CONTRACTS: dict[str, Any] = {
         "invariants": ["output_contract_satisfied"],
         "governance": ["aletheia_verified"],
     },
+    "answer_verify": {
+        "operation": "answer.verify",
+        "recovery": "degrade",
+        "description": "The council's verified answer before synthesis — the "
+                       "structured Aletheia verdict must not be a rejection "
+                       "(ADR 0005; the orchestrator implements "
+                       "rework-once-then-banner on violation).",
+        "preconditions": [],
+        "invariants": [],
+        "governance": ["aletheia_verified"],
+    },
+    "answer_synthesis": {
+        "operation": "answer.synthesis",
+        "recovery": "degrade",
+        "description": "The composed answer against the verified findings — "
+                       "the synthesis faithfulness verdict must not be a "
+                       "rejection (ADR 0005 amendment 4; the orchestrator "
+                       "implements recompose-once-then-banner).",
+        "preconditions": [],
+        "invariants": [],
+        "governance": ["aletheia_verified"],
+    },
     "tool_loadout": {
         "operation": "run.loadout",
         "recovery": "block",

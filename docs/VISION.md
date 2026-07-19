@@ -405,3 +405,282 @@ The positioning thesis held: every item was **adopt-and-surpass**, not clone —
 the security gate fails *closed* where Hermes falls back to patterns; pricing is
 *acted on* (routing) not just shown; the wizard defaults to *free/no-setup*; and
 the whole thing stays headless, dependency-light, and verified.
+
+---
+
+# Round 2 — watching resumes (baseline: 0.24.0 + main's operator wave)
+
+Everything below is judged against the *merged* tree: the 27-item build above
+PLUS main's parallel adoptions (/learn, /journey, /moa, /steer, /undo, goals,
+admin panel, browser harness, voice notes). Round-2 rule: only *genuinely new*
+capability makes the backlog.
+
+## Screens 35–39 — Top-10 CLI, Top-10 slash, file layout, delta-setup
+
+### What Hermes did
+- **"Top 10 CLI — muscle memory"**: `hermes` (TUI), `hermes -c` (continue last
+  session), `status`, `model`, `insights` (tokens/cost/activity),
+  **`sessions browse` (curses picker to resume)**, `skills browse`
+  (discover+install), `config show`, `doctor`, `update`.
+- **"Top 10 slash"**: `/new`, **`/model <name>` (swap model mid-session)**,
+  **`/fast` (priority routing toggle)**, **`/bg <prompt>` (background task,
+  keep chatting)**, **`/btw <question>` (ephemeral side question)**,
+  **`/queue <prompt>` (next-turn queue)**, `/compress` (manual compaction),
+  `/skills`, **`/yolo` (toggle dangerous-command approvals)**, `/help`.
+- **"Where stuff lives"**: everything under `~/.hermes/` — `config.yaml` +
+  `.env` + `memories/` (MEMORY.md, USER.md) marked *editable*; `sessions/`,
+  `skills/`, `logs/`, `cron/` marked hands-off.
+- **`hermes setup` re-run menu**: **"Quick Setup — configure missing items
+  only"** (a delta-setup), Full (reconfigure everything), then per-section
+  entries — all in one radio menu, ESC cancels.
+
+### Where Olympus already matches (round-2 strictness)
+`status`+`doctor`+`insights` (status/usage/dashboard/doctor), `model`
+(setup model), `config show`, `update` (upgrade), `/new`-ish (`/reset`, and
+ours distills first), `/compress` trigger condition (auto, model-fraction),
+`/skills` (skills CLI + read_skill), `/help`, skills discover/install
+(skill-import, agentskills.io, starter pack). `/steer` and `/undo` (from
+main) cover mid-run nudging and history repair Hermes doesn't list.
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| **`sessions browse` + `-c` continue** | **ADOPT — real gap** | Our CLI is single-session (`cli-default`). Add named sessions: `olympus sessions` (list/resume picker over saved conversations, newest first, first-line preview), `olympus -c` (continue last), `/new [name]` in chat. We already persist every conversation by id — this is surfacing, not new storage. Olympus twist: the picker shows each session's distilled state line (from /reset-style distillation), not just its first message. |
+| **`/bg <prompt>` background task** | **ADOPT — real gap** | Run a one-shot task through the full pipeline in a background thread while chat stays live; result is announced in-chat when done (and lands in reports). We already have every piece (threads, scheduler one-shots, reports) — compose them. Verified as always: background answers still pass Aletheia. |
+| **`/btw <question>` ephemeral side question** | **ADOPT — cheap + clever** | Answer OUTSIDE the session: no history append, no memory extraction, no companion count. One flag through ask() — prevents "what's the capital of X" from polluting a work session's distilled state. |
+| **`/model <name>` mid-session swap + `/fast` toggle** | **ADOPT** | In-chat `/model` re-points the pool primary (validating the name against the provider's model list) and `/fast on\|off` flips fast mode for the session. State-confirmation line shows the new assignment. No restart, no wizard. |
+| **`/queue <prompt>` next-turn queue** | **SKIP (covered)** | `/steer` already reaches the *running* task; queuing the next turn is what a terminal input buffer does anyway. No real gap. |
+| **`/yolo`** | **DIFFERENTIATE — validates our gate** | One keystroke to disable dangerous-command approvals is the anti-pattern our cmdguard exists to prevent. Olympus's equivalent is *governed*: per-scope autonomy grants on the action spine + OLYMPUS_EXEC_SECURITY modes, and DENY-level commands stay blocked **even with approvals off**. Document the contrast; build nothing. |
+| **"Where stuff lives" transparency** | **ADAPT — small** | Add a `paths` block to `olympus doctor`/`config show`: config.env, soul.md, memory dir, workspace, sessions — with the same editable/hands-off labeling. One print block; big orientation win for new users. |
+| **Delta-setup ("configure missing items only")** | **ADOPT — better Quick** | Their re-run Quick only prompts for what's *missing*. Ours re-asks. Wire doctor's readiness gaps into setup: `olympus setup` on a configured install offers "Fix what's missing (N items)" driven by the ✗/⚠ list — doctor finds it, setup fixes it, doctor confirms it. Closes the loop our two commands already imply. |
+| `insights` (tokens/cost/activity) | **SKIP (covered)** | status + usage report + dashboard + admin panel already cover it. |
+
+### Build backlog additions (Round 2, batched — NOT building yet)
+28. **Named sessions + browse/resume** — `olympus sessions` picker, `olympus -c`,
+    `/new [name]`; picker lines show each session's distilled-state summary.
+29. **`/bg`** — one-shot background task through the full verified pipeline;
+    announces completion in-chat; result saved to reports.
+30. **`/btw`** — ephemeral side question: no history, no memory writes.
+31. **In-chat `/model <name>` + `/fast on|off`** — live pool re-point with
+    validation + state-confirmation line.
+32. **Delta-setup** — `olympus setup` offers "fix what's missing" from doctor's
+    gap list on a configured install.
+33. **`paths` transparency block** in doctor/config show (editable vs
+    hands-off labeling). (Also: document the /yolo contrast in THREAT_MODEL —
+    DENY survives autonomy grants by design.)
+
+---
+
+## Screens 40–44 — setup re-run detail (provider zoo, reauth, model search, backends, platform multi-select)
+
+Re-visits of the setup surface, now in re-run form. Round-2 check against what
+we've built — pattern by pattern:
+
+| Hermes screen | Olympus status |
+|---|---|
+| 32-provider picker | ✓ pattern done (catalog + trade-off labels + custom endpoint); breadth is a **deliberate skip** — our `custom` OpenAI-compatible entry covers the tail without per-vendor code |
+| "Use existing credentials / Reauthenticate / Cancel" | ✓ equivalent done for keys: env-scan ("Found X_API_KEY — use it?"), keep-current pool line, delta-setup; OAuth reauth N/A (subscription auth reuses the `claude` CLI login) |
+| Model picker with **/ search** | ✓ auto-discovery + numbered pick done; **△ small gap: no type-to-filter** — matters only for OpenRouter-scale lists (300+) |
+| Terminal backends (local/docker/modal/ssh/daytona/singularity) + Keep current | ✓ local/docker + keep-current done; the rest are thin transports over the same run() contract — **deliberate skip** until someone needs one |
+| Platform **multi-select checklist with "(not configured)" status** | ✓ single-pick configure done (telegram/discord/slack/signal/email/webhook); **△ small gap: multi-select + configured-status labels** in one screen; 26-platform breadth = deliberate skip |
+
+### Remaining micro-items — BUILT
+34. ✅ Model picker type-to-filter when the discovered list is large (>20).
+35. ✅ Gateway step: one checklist showing all six channels with
+    configured/not-configured status; several in one pass.
+
+---
+
+## Screens 45–49 — Memory module (the four layers, MEMORY.md/USER.md, real file)
+
+### What Hermes did
+- **Four stacking layers**: L1 built-in markdown (`MEMORY.md` + `USER.md`,
+  plain files, always load), L2 **FTS5 session search**, L3 external provider
+  plugin (Honcho/Mem0 — "semantic + identity modeling"), L4 **Obsidian vault
+  as a skill** (filesystem KB the agent writes, the user curates in a GUI).
+  "These aren't alternatives. They stack."
+- **Two files with explicit caps**: MEMORY.md (projects/environment/decisions/
+  lessons, cap 2,200 chars ≈ **800 tokens**, `memory_char_limit`); USER.md
+  (role/preferences/communication style, cap ≈ 500 tokens). Tagline: "Plain
+  text. Editable. Auditable. Portable."
+- A real MEMORY.md: §-separated prose notes (paper-summary priorities, current
+  project, environment pins, workflow prefs, eval metrics) — readable, but
+  no provenance, no confidence, no gating: whatever got written is truth.
+
+### Where Olympus stands — layer by layer (our strongest ground)
+| Hermes layer | Olympus |
+|---|---|
+| L1 two markdown files | ✓✓ richer engine: gated durable memory (confidence + decay + approve/reject), profile card, companion model, playbooks, relgraph — and the identity half is split correctly: **soul.md** (how to behave, owner-authored) vs learned facts (gated). **△ gap: not as transparent** — no one-glance plain-text projection of "what Olympus believes about me" |
+| Token caps | ✓ exact parity — MEMORY_RETRIEVAL_BUDGET_TOKENS defaults to **800**, same number Hermes chose; ours is configurable |
+| L2 FTS5 session search | ✓✓ identical tech, shipped (search.py + search_sessions) |
+| L3 external provider (Honcho/Mem0) | **DIFFERENTIATE** — semantic recall (embeddings fallback) + identity modeling (companion) are native and local; no memory-SaaS dependency, nothing personal leaves the machine |
+| L4 Obsidian vault | **△ small real idea** — a plain-markdown KB dir the user curates in any GUI is cheap and genuinely useful |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| "Plain text. Editable. Auditable. Portable." transparency | **ADOPT the transparency, keep the governance** | `olympus memory card` — render everything believed about you as one markdown page: profile, durable facts **with confidence + provenance**, companion summary, active playbooks. Hermes shows you a file; we show you a file *with receipts*. Edits still flow through approve/forget (auditable), never raw file writes (ungated memory = injectable memory). |
+| Obsidian vault (L4) | **ADAPT — small** | `OLYMPUS_VAULT_DIR`: mirror lessons/notes/reports as dated plain-markdown files into a directory the user opens in Obsidian/any editor. Write-through mirror, not a second source of truth — the gated store stays canonical. |
+| External memory provider (L3) | **SKIP** | Native semantic + companion covers it with zero SaaS surface. |
+| No-provenance prose notes (their real MEMORY.md) | **counter-example** | Validates our gating: their file happily stores anything as fact. Note in VISION only. |
+
+### Build backlog additions (batched, NOT building yet)
+36. **`olympus memory card`** — one-page markdown projection of all per-user
+    memory with confidence + provenance; `--user` for gateway users.
+37. **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons/notes/
+    reports as dated markdown for GUI curation (Obsidian-compatible = just files).
+
+---
+
+## Screens 50–54 — Memory internals (frozen snapshot, memory tool, write hardening, seed)
+
+### What Hermes did
+- **Frozen-snapshot pattern (their labeled footgun)**: memory files render into
+  the system prompt at session start with `cache_control`; mid-session
+  `memory(action=add)` hits disk immediately but the prompt does NOT update —
+  writes appear next session. "Performance over freshness" (preserves the
+  prefix cache).
+- **The memory tool**: three actions — `add`, `replace`, `remove` — **no read**
+  (memory is always in context); §-separated entries; replace/remove match by
+  substring (`old_text`); live % cap indicator in the header.
+- **Telegram transparency**: memory ops surface inline as they happen
+  (`+memory:`, `~memory:`, `-memory:` lines), plus self-maintenance narrated
+  ("cleaned up one duplicate … to make room").
+- **Why-it-works hardening**: cap-as-feature (add-overflow returns current
+  entries + error → forces consolidation); trained save/skip policy (no
+  memory-manager agent); **dedup is a no-op success** ("no duplicate added" —
+  prevents retry-spam); **injection scanning before write** — prompt-injection
+  patterns, credential exfiltration (SSH/API keys), invisible Unicode.
+  "Closes the persistent-injection vector."
+- **Seed USER.md yourself**: recommended skeleton — ## Role, ## Communication
+  preferences, ## Current focus, ## Things to never do.
+
+### Where Olympus stands
+| Hermes mechanism | Olympus |
+|---|---|
+| Frozen snapshot (stale until next session) | **✓ no footgun — freshness-first**: memory context blocks are recomputed per turn, so a gated fact is visible on the NEXT TURN, not the next session. Different trade-off taken deliberately. |
+| add/replace/remove tool, substring matching | ~ different philosophy: extraction is **automatic + gated** (no trained-policy burden on the model); agents add via save_lesson; **removal stays user-gated** (/journey rm, memory forget) — chat-driven substring erasure is itself an injection vector (a hostile page could talk the agent into deleting the memory of a prior warning) |
+| Dedup as no-op success | ✓ parity — recall gating returns duplicate → reinforces the existing fact |
+| Cap-as-feature / forced consolidation | ✓ equivalent by different means: confidence decay + retrieval token budget (default 800 — same number) keep working memory bounded without a hard write-cap |
+| **Injection scan before write** | **△ partial gap**: sanitize_for_memory defangs injection-marker lines, but does NOT strip invisible/zero-width Unicode or scrub credential patterns (our _KEYISH/_URL_CRED regexes guard only the shared contribution pool) |
+| Visible +memory/~memory lines in chat | **△ gap**: our extraction is background and silent; the user never sees what was learned until /journey |
+| Seed USER.md skeleton | ✓ mostly soul.md + profile; template lacks Role / Current focus sections |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| Injection scan before memory write | **ADOPT — close the same vector fully** | Extend sanitize_for_memory: strip zero-width/bidi Unicode, redact credential-shaped strings (reuse _KEYISH/_URL_CRED/_EMAIL patterns) before ANY lesson/skill/fact write. Their "closes the persistent-injection vector" claim should be at least as true here. |
+| Visible memory activity | **ADOPT** | Progress-mode-aware "🧠 remembered: <fact> (conf 0.8)" line when the background extractor gates a fact in (all/verbose modes) — memory becomes observable in the moment, not just in /journey. |
+| Seed-yourself skeleton | **ADOPT — tiny** | Add ## Role and ## Current focus sections to the soul.md scaffold; mention seeding in the wizard's closing hints. |
+| Frozen snapshot | **DIFFERENTIATE (documented)** | Keep freshness-first per-turn blocks; our static prompt prefix still caches — we give up less than Hermes assumes. |
+| Chat-driven replace/remove | **DIFFERENTIATE** | Removal stays user-gated. An agent that can erase its own memories from a chat message is an erasure vector, not a feature. |
+
+### Build backlog additions (batched, NOT building yet)
+38. **Memory-write hardening**: invisible-Unicode stripping + credential-pattern
+    redaction in sanitize_for_memory (applies to lessons, skills, facts).
+39. **Visible memory activity**: 🧠 progress lines when facts are gated in
+    (progress-mode aware).
+40. **Soul scaffold enrichment**: Role / Current focus sections + wizard hint.
+
+---
+
+## Screens 55–59 — L2 session search in depth + L3 provider plugins intro
+
+### What Hermes did
+- **state.db** (SQLite, FTS5, **WAL mode**) indexes every CLI + gateway session.
+- `session_search` = full-text + **Gemini Flash summarization** of the hits
+  (compress inside the tool before returning). The agent calls it
+  **autonomously** when it suspects a prior conversation is relevant.
+- v0.11.0: state.db **auto-prunes + VACUUMs at startup** — "no more cron-prune".
+- Live demo: "What were the top 10 name suggestions for the luxury bag and
+  watch app we were discussing?" → cross-session recall from Telegram.
+- **L1 vs L2 framing**: curated (~1,300 tokens, instant, fixed cost) vs
+  archived (unlimited, search+summarize, on-demand cost). "Use both."
+- L3 intro: 8 memory-provider backends, one active at a time, built-in stays on.
+
+### Where Olympus stands
+| Hermes mechanism | Olympus |
+|---|---|
+| FTS5 index of every CLI+gateway session | ✓ identical — search.py indexes on every save_conversation; gateways included |
+| Autonomous invocation | ✓ search_sessions is in BASE_TOOLS — every specialist carries it |
+| L1/L2 stacking, curated vs archived | ✓ same architecture (gated memory + FTS archive) |
+| LLM summarization of hits inside the tool | **△ small gap** — we return raw rendered turns; long hit-sets spend the caller's context |
+| WAL mode + auto-prune + VACUUM | **△ real operational gap** — our index is never pruned or vacuumed; RETAIN_DAYS covers traces/usage only, so conversations + index grow unbounded on a long-lived droplet |
+| 8 pluggable memory providers (L3) | **SKIP** — native semantic + companion (recorded at screens 45–49) |
+
+### Verdicts + Olympus-native ideas
+| Hermes idea | Verdict | Olympus move |
+|---|---|---|
+| Index maintenance (prune + VACUUM, WAL) | **ADOPT — droplet hygiene** | Fold into the existing heartbeat maintenance sweep (not startup — a long-lived server rarely restarts): prune index entries for conversations idle past a retention window, VACUUM after pruning, open the DB in WAL mode. Zero new surface; one sweep extension. |
+| Distill long hit-sets inside search_sessions | **ADOPT — small** | When rendered hits exceed a budget, distill them with the pool's fastest model before returning (budget-aware, falls back to truncation keyless). Same council quality, less context spent. |
+| L1-vs-L2 "use both" framing | **NOTE** | Already our architecture; steal the one-line framing for docs: "gated memory is what's curated; session search is what's archived." |
+
+### Build backlog additions (batched, NOT building yet)
+41. **Search-index maintenance** — WAL mode; heartbeat sweep prunes idle
+    conversations from the index per retention window, then VACUUMs.
+42. **Hit-set distillation** — search_sessions compresses oversized results via
+    the pool's fastest model (graceful keyless fallback).
+
+---
+
+## Screens 60–63 — L3 provider plugins in depth (landscape + Honcho)
+
+### What Hermes did
+- Plugin ABC (v0.7.0): third-party memory backends register via the loader.
+  **One active at a time; switching does NOT migrate data.** Built-in markdown
+  always loads — providers augment. When active: inject context, prefetch each
+  turn, sync after each response, add provider tools. `hermes memory
+  setup|status|off`.
+- The landscape: 8 providers (Mem0 54k★ cloud/paid, Supermemory, Hindsight,
+  ByteRover, **Honcho**, OpenViking, Holographic, RetainDB $20/mo…).
+- **Honcho** (the demo provider): "**dialectic reasoning** — agent derives
+  conclusions about you after each conversation. Builds a running model of
+  preferences, goals, communication style." workspace→peers→sessions→messages;
+  4 tools; knobs: recallMode (hybrid/context/tools), writeFrequency
+  (async/turn/session), dialecticReasoningLevel (minimal→max). Cloud paid or
+  self-host free.
+
+### The verdict — a validation batch (zero new items)
+Honcho's headline capability — derive conclusions after each conversation and
+build a running model of the user's preferences, goals, and communication
+style — **is companion.py**. Olympus ships natively, on-device, benchmark-
+checkpointed, what Hermes reaches for a third-party service (cloud-paid or
+self-hosted AGPL) to provide:
+
+| Honcho | Olympus built-in |
+|---|---|
+| Dialectic conclusions after each conversation | companion.note_interaction → maybe_evolve distills the private working model at checkpoints |
+| Running model of preferences/goals/style | companion model_block, injected into Zeus every turn |
+| writeFrequency async | ours is already async (background thread, never delays a reply) |
+| recallMode hybrid | ours: lexical + semantic-fallback retrieval, budgeted |
+| Cloud account or self-hosted server | a Python module; nothing leaves the machine |
+
+The stack-position risks they must disclaim — "switching does NOT migrate
+data," provider outages, a second billing relationship for your own memories —
+don't exist here. **Positioning line for README/docs: "The memory provider
+Hermes plugs in is the one Olympus ships."** No backlog additions; the
+differentiate stance from screens 45–49 is confirmed at full depth.
+
+
+---
+
+## Teardown loop — iterations 1–2 (all 42 items now built)
+
+The self-directed hardening loop (analyze → tear down → harden) closed out the
+entire round-2 backlog and found four NEW weaknesses no screen showed us:
+
+1. **Zero-width injection evasion** — a zero-width char inside "ignore previous
+   instructions" defeated our own memory-write scan. Fixed: invisible/bidi
+   Unicode stripped before the marker regex; credentials (keys, private-key
+   blocks, JWTs) redacted at write time. (#38+)
+2. **Command-gate bypasses** — `bash -c "rm -rf /"`, `find / -delete`, `shred`
+   on block devices all slipped the gate. Closed, wrapper-proof, fail-closed
+   trade-off documented.
+3. **Unbounded search index** — never pruned or vacuumed on a long-lived server.
+   Fixed in the heartbeat sweep; WAL mode on. (#41)
+4. **Spoofable email allowlist** — OLYMPUS_EMAIL_ALLOW trusted the From: header.
+   Fixed: allowlist mode now also requires Gmail's DMARC/SPF+DKIM verdict.
+
+Built in the same loop: memory card (#36), vault mirror (#37), visible memory
+activity (#39), soul Role/Focus scaffold (#40), hit-set distillation (#42).
+**Backlog: 42 of 42.**

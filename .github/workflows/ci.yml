@@ -53,3 +53,33 @@ jobs:
         with:
           name: sbom-cyclonedx
           path: sbom.json
+
+  browser-smoke:
+    # The default `test` job runs browserless, so the real-Chromium smoke tests
+    # (tests/test_browser_real.py + tests/test_browser_smoke.py) self-skip there.
+    # This job provisions a real Chromium (Playwright) plus the optional
+    # `websockets` CDP transport and sets the opt-in flags, so the live browser
+    # path is actually exercised end-to-end on every push/PR instead of being
+    # perpetually skipped. It never gates behind a missing browser here — the
+    # binary is installed in this step, so a launch/transport regression fails
+    # the build rather than silently skipping.
+    runs-on: ubuntu-latest
+    env:
+      # _find_chrome() globs chromium-*/chrome-linux/chrome under this path.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/pw-browsers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Same hash-pinned runtime as `test`; the browser tooling below is CI-only
+      # (like build/twine/cyclonedx in the other jobs), not a shipped dependency.
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - run: pip install pytest websockets playwright
+      - run: python -m playwright install --with-deps chromium
+      - name: Run the real-browser smoke tests
+        env:
+          OLYMPUS_BROWSER_REAL: "1"
+          OLYMPUS_BROWSER_SMOKE: "1"
+        run: pytest -q tests/test_browser_real.py tests/test_browser_smoke.py

@@ -74,11 +74,15 @@ def test_single_model_pool_routes_everyone_to_primary():
         assert pool.for_specialist(key) is pool.primary()
 
 
-# --- lever 3: output contracts attached (enforced only when enabled) -------
+# --- lever 3: output contracts attached (enforced by default) --------------
 
-def test_contracts_are_off_by_default(monkeypatch):
+def test_contracts_are_on_by_default(monkeypatch):
+    """ADR 0005 hardening: enforcement never ships dormant. The kill switch
+    still works."""
     monkeypatch.delenv("OLYMPUS_CONTRACTS", raising=False)
-    assert config.contracts_enabled() is False     # default: inert
+    assert config.contracts_enabled() is True      # default: enforcing
+    monkeypatch.setenv("OLYMPUS_CONTRACTS", "off")
+    assert config.contracts_enabled() is False
 
 
 def test_iris_length_contract():

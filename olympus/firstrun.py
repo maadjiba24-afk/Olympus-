@@ -311,13 +311,34 @@ def _picker_entries():
     return entries
 
 
+def _filter_models(models: list[str], query: str) -> list[str]:
+    """Case-insensitive substring filter for large discovered model lists."""
+    q = (query or "").strip().lower()
+    if not q:
+        return models
+    return [m for m in models if q in m.lower()]
+
+
 def _pick_model(prov, api_key: str, base_url: str) -> str:
     """Let the user pick a model — listing the provider's real model IDs when we
-    can fetch them, so they never have to guess the exact name."""
+    can fetch them, so they never have to guess the exact name. Big lists
+    (OpenRouter-scale) get a type-to-filter step before the numbered pick."""
     from . import providers
     models = providers.fetch_models(prov, api_key, base_url)
     if models:
-        models = sorted(models)[:30]
+        models = sorted(models)
+        # Aggregators expose hundreds of models — filter before listing.
+        while len(models) > 20:
+            print(f"  Found {len(models)} models for your key.")
+            query = _ask("  Filter (part of a name, blank to list the first 30)")
+            if not query:
+                models = models[:30]
+                break
+            hits = _filter_models(models, query)
+            if hits:
+                models = hits[:30]
+                break
+            print(f"  Nothing matches '{query}' — try again.")
         print(f"  Found {len(models)} models for your key:")
         labels = models + ["(type a different model name)"]
         idx = _choose("Pick a model", labels, default=1)
@@ -383,20 +404,84 @@ _GATEWAYS = {
               ("SLACK_SIGNING_SECRET", "App signing secret", True)],
     "signal": [("SIGNAL_CLI_REST_URL", "signal-cli REST URL", False),
                ("SIGNAL_NUMBER", "Your registered number (+1…)", False)],
+    "email": [("GMAIL_REFRESH_TOKEN", "Gmail OAuth refresh token "
+               "(connect Gmail via the web UI OAuth flow)", True),
+              ("OLYMPUS_EMAIL_ALLOW", "Only reply to these senders "
+               "(comma-separated; blank = anyone)", False)],
+    "webhook": [("OLYMPUS_WEBHOOK_SECRET", "Shared secret callers must send "
+                 "(blank = open — LAN only!)", True)],
 }
 
 
+def _gateway_configured(name: str, values: dict | None = None) -> bool:
+    """Whether a platform has at least one of its env vars set (saved or env)."""
+    values = values or {}
+    return any(os.environ.get(env) or values.get(env)
+               for env, _desc, _secret in _GATEWAYS[name])
+
+
 def _configure_gateway(values: dict) -> None:
+    """One checklist of every channel with its configured status; pick several
+    numbers to set up in one pass (Hermes-style multi-select, numbered for
+    SSH/WSL robustness)."""
     names = list(_GATEWAYS)
-    idx = _choose("Which platform?", [n.title() for n in names] + ["(none)"], 1)
-    if idx > len(names):
-        return
-    name = names[idx - 1]
-    for env, desc, secret in _GATEWAYS[name]:
-        val = _ask_secret(f"  {env} — {desc}") if secret else _ask(f"  {env} — {desc}")
-        if val:
-            values[env] = val
-    print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
+    print("  Messaging channels:")
+    for i, name in enumerate(names, 1):
+        state = "configured" if _gateway_configured(name, values) \
+            else "not configured"
+        print(f"    {i:2}) [{'x' if state == 'configured' else ' '}] "
+              f"{name.title():9s} ({state})")
+    raw = _ask("  Configure which? (numbers, e.g. 1 3 — blank for none)")
+    picked: list[str] = []
+    for tok in raw.replace(",", " ").split():
+        if tok.isdigit() and 1 <= int(tok) <= len(names):
+            picked.append(names[int(tok) - 1])
+    for name in picked:
+        print(f"  — {name.title()}:")
+        for env, desc, secret in _GATEWAYS[name]:
+            val = (_ask_secret(f"  {env} — {desc}") if secret
+                   else _ask(f"  {env} — {desc}"))
+            if val:
+                values[env] = val
+        print(f"  ✓ {name.title()} configured. Run it with: olympus {name}")
+
+
+def _doctor_gaps() -> list:
+    """The ✗/⚠ readiness items delta-setup can actually fix, mapped to a
+    section: [(check, section)]. Purely informational checks are skipped."""
+    from . import doctor
+    fixable = {"provider": "model", "command gate": "terminal",
+               "media / vision": "tools", "gateways": "gateway"}
+    out = []
+    for c in doctor.run_checks():
+        if c.status in (doctor.FAIL, doctor.WARN) and c.name in fixable:
+            out.append((c, fixable[c.name]))
+    return out
+
+
+def setup_missing() -> bool:
+    """Delta-setup: fix ONLY what `olympus doctor` flags, instead of re-running
+    the whole wizard. Walks each gap, offers the matching section, and ends on
+    the doctor summary so the loop closes: doctor finds it → setup fixes it →
+    doctor confirms it. Returns True if anything was configured."""
+    gaps = _doctor_gaps()
+    if not gaps:
+        print("  ✓ Nothing missing — doctor reports all systems go.")
+        return False
+    changed = False
+    for check, section in gaps:
+        icon = "✗" if check.status == "fail" else "⚠"
+        print(f"\n  {icon} {check.name}: {check.detail}")
+        if _yes(f"Fix this now? (opens the '{section}' setup)",
+                check.status == "fail"):
+            changed = bool(setup_section(section)) or changed
+    try:
+        from . import doctor
+        print()
+        print(doctor.render(with_caps=False))
+    except Exception:
+        pass
+    return changed
 
 
 def _current_pool_line() -> str:
@@ -429,12 +514,33 @@ def wizard() -> bool:
             print(line)
     print()
 
-    # Quick / Full fork — most people want one provider and sane defaults.
-    style = _choose(
-        "Setup style",
-        ["Quick — one provider, recommended defaults (free/no-setup where possible)",
-         "Full — configure the pool, sandbox, security, and messaging"], 1)
-    quick = (style == 1)
+    # On a configured install with readiness gaps, offer the delta first:
+    # fix ONLY what doctor flags, instead of re-answering everything.
+    if rerun:
+        gaps = _doctor_gaps()
+        if gaps:
+            styles = [f"Fix what's missing ({len(gaps)} item(s) doctor flagged)",
+                      "Quick — one provider, recommended defaults",
+                      "Full — reconfigure the pool, sandbox, security, messaging"]
+            pick = _choose("Setup style", styles, 1)
+            if pick == 1:
+                return setup_missing()
+            quick = (pick == 2)
+        else:
+            quick = (_choose(
+                "Setup style",
+                ["Quick — one provider, recommended defaults (free/no-setup "
+                 "where possible)",
+                 "Full — configure the pool, sandbox, security, and messaging"],
+                1) == 1)
+    else:
+        # Quick / Full fork — most people want one provider and sane defaults.
+        quick = (_choose(
+            "Setup style",
+            ["Quick — one provider, recommended defaults (free/no-setup where "
+             "possible)",
+             "Full — configure the pool, sandbox, security, and messaging"],
+            1) == 1)
 
     members = _configure_providers()
     if not members:
@@ -490,6 +596,8 @@ def wizard() -> bool:
     print(f"  ✓ Saved to {CONFIG_ENV} (owner-only).")
     print(f"  ✓ Pool: {len(members)} provider(s) composed into one brain.")
     print("  ✓ You're set — type `olympus` to chat. `olympus models` shows the pool.")
+    print("  Tip: `olympus soul edit` — seed your role, focus, and voice; it "
+          "shapes every reply.")
     print()
     # End on the same readiness picture `olympus doctor` shows.
     try:

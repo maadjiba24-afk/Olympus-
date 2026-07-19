@@ -42,6 +42,7 @@ DEFAULT_PRICE = (1.0, 3.0)
 # Global cap on concurrent model calls across the whole process.
 _SEMAPHORE = threading.BoundedSemaphore(config.MAX_CONCURRENT_CALLS)
 _TOTALS_LOCK = threading.Lock()
+_LEDGER_LOCK_TIMEOUT = 10.0    # reply path: bounded wait, never a hang
 
 
 def slot():
@@ -113,22 +114,37 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
     user = memory.current_user()
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    from . import proclock
     with _TOTALS_LOCK:
         _bump_session(user, in_tokens, out_tokens, cost)
-        ledger = {}
-        if path.exists():
-            try:
-                ledger = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                ledger = {}
-        for key in ("__all__", f"user:{user}", f"model:{model}"):
-            row = ledger.setdefault(
-                key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
-            row["calls"] += 1
-            row["in"] += in_tokens
-            row["out"] += out_tokens
-            row["cost"] = round(row["cost"] + cost, 6)
-        _atomic_write_json(path, ledger)
+    # The ledger read-modify-write holds ONLY the cross-process lock — never
+    # nested inside _TOTALS_LOCK. Holding the in-process mutex across an
+    # unbounded flock wait would couple session_totals()/today_spend() (the
+    # per-reply hot path) to the OTHER process's liveness: a wedged heartbeat
+    # holding the flock would freeze every reply here. The session bump and
+    # the ledger write need no mutual atomicity (ADR 0005). llm calls this
+    # after every model call with NO try/except, so a lock timeout must never
+    # raise into the reply: one lost ledger increment under a wedged peer
+    # beats a broken reply — captured, never silent.
+    try:
+        with proclock.lock("usage-ledger", timeout=_LEDGER_LOCK_TIMEOUT):
+            ledger = {}
+            if path.exists():
+                try:
+                    ledger = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    ledger = {}
+            for key in ("__all__", f"user:{user}", f"model:{model}"):
+                row = ledger.setdefault(
+                    key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+                row["calls"] += 1
+                row["in"] += in_tokens
+                row["out"] += out_tokens
+                row["cost"] = round(row["cost"] + cost, 6)
+            _atomic_write_json(path, ledger)
+    except TimeoutError as err:
+        from . import errors
+        errors.capture("usage.record", err, context="ledger lock wedged")
 
 
 # --- the budget guard (protects the user's own API bill) -----------------
@@ -139,8 +155,12 @@ def today_spend() -> float:
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     if not path.exists():
         return 0.0
-    # Read under the same lock as record() so the budget guard never races a
-    # write; the atomic write already prevents torn reads, this pairs with it.
+    # Deliberately lock-free with respect to record()'s cross-process flock:
+    # correctness rests entirely on the atomic tmp+os.replace publish (a
+    # reader sees the old or the new ledger, never a torn one). Taking the
+    # flock here would couple every budget check to the other process's
+    # liveness for no consistency gain. _TOTALS_LOCK only serializes against
+    # in-process session-total updates.
     with _TOTALS_LOCK:
         try:
             ledger = json.loads(path.read_text(encoding="utf-8"))
@@ -160,6 +180,19 @@ def daily_budget() -> float:
         return max(0.0, float(val))
     except (TypeError, ValueError):
         return 0.0
+
+
+def budget_headroom_low() -> bool:
+    """True when a daily budget is set and less than 10% of it remains.
+
+    The effort scorer consults this before RAISING a run above its
+    specialist's floor (ADR 0005 amendment 7): "thinks harder" must never
+    defeat the spend guard. Total: budget errors read as headroom-fine, and
+    with no budget set (limit 0, the default) there is nothing to protect."""
+    limit = daily_budget()
+    if limit <= 0:
+        return False
+    return (limit - today_spend()) < limit * 0.10
 
 
 def budget_status() -> dict:

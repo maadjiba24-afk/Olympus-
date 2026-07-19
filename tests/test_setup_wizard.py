@@ -137,3 +137,60 @@ def test_env_detected_finds_key(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-detected")
     found = {p.key for p, _k in firstrun._env_detected()}
     assert "deepseek" in found
+
+
+# --- round-2 micro-items: model filter (#34), gateway checklist (#35) --------
+
+def test_filter_models_substring_case_insensitive():
+    models = ["openai/gpt-4o", "anthropic/claude-sonnet-4", "meta/llama-3-70b"]
+    assert firstrun._filter_models(models, "CLAUDE") == [
+        "anthropic/claude-sonnet-4"]
+    assert firstrun._filter_models(models, "") == models
+
+
+def test_pick_model_filters_large_lists(monkeypatch):
+    # 40 discovered models → the wizard asks for a filter before listing.
+    many = [f"vendor/model-{i:02d}" for i in range(38)] + [
+        "anthropic/claude-x", "openai/gpt-9"]
+    monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: many)
+    answers = iter([
+        "claude",   # filter query
+        "1",        # pick the single hit
+    ])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    prov = providers.get("openrouter")
+    assert firstrun._pick_model(prov, "k", "") == "anthropic/claude-x"
+
+
+def test_pick_model_blank_filter_lists_first_30(monkeypatch):
+    many = sorted(f"m-{i:03d}" for i in range(50))
+    monkeypatch.setattr(providers, "fetch_models", lambda *a, **k: many)
+    answers = iter([
+        "",         # blank filter → first 30
+        "2",        # pick #2
+    ])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    assert firstrun._pick_model(providers.get("openrouter"), "k", "") == "m-001"
+
+
+def test_gateway_checklist_status_and_multiselect(monkeypatch, capsys):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")   # telegram: configured
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    values: dict = {}
+    names = list(firstrun._GATEWAYS)
+    tg, wh = names.index("telegram") + 1, names.index("webhook") + 1
+    answers = iter([f"{wh}"])                          # configure webhook only
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "s3cret")
+    firstrun._configure_gateway(values)
+    out = capsys.readouterr().out
+    assert "[x] Telegram" in out and "(configured)" in out
+    assert "(not configured)" in out                   # the untouched ones
+    assert values["OLYMPUS_WEBHOOK_SECRET"] == "s3cret"
+
+
+def test_gateway_checklist_blank_configures_nothing(monkeypatch):
+    values: dict = {}
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    firstrun._configure_gateway(values)
+    assert values == {}

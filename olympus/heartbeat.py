@@ -117,6 +117,11 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                 log.append(f"Maintenance: removed {removed} old trace/usage "
                            f"files, {orphans} orphaned frozen responses, and "
                            f"{tool_res} aged tool results.")
+            from . import search
+            idx = search.maintain()
+            if idx.get("vacuumed"):
+                log.append(f"Search index: pruned {idx['orphans']} orphaned + "
+                           f"{idx['aged']} aged conversation(s); vacuumed.")
         except Exception:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now

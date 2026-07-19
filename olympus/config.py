@@ -808,6 +808,27 @@ def fast_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def verify_timeout() -> float:
+    """Wall-clock cap on the Aletheia verify stage, in seconds. A hung
+    verifier call routes to the visible UNVERIFIED infra-error path instead
+    of stalling the reply forever (ADR 0005 hardening). Always on by
+    default; OLYMPUS_VERIFY_TIMEOUT=0 disables."""
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_VERIFY_TIMEOUT",
+                                             "600")))
+    except ValueError:
+        return 600.0
+
+
+def synth_check_enabled() -> bool:
+    """Faithfulness check of the composed answer against the verified
+    findings (ADR 0005 amendment 4): the synthesis stage was the last
+    unverified hop on the interactive path. On by default; skipped in fast
+    mode; OLYMPUS_SYNTH_CHECK=off disables."""
+    return os.environ.get("OLYMPUS_SYNTH_CHECK", "on").strip().lower() not in (
+        "0", "off", "false", "no")
+
+
 def routing_synthetic() -> bool:
     """Mark routing-outcome telemetry from THIS process as synthetic/self-
     generated (OLYMPUS_ROUTING_SYNTHETIC=1) so it never counts toward the
@@ -934,11 +955,14 @@ def api_keys() -> list[str]:
 
 
 def contracts_enabled() -> bool:
-    """Enforce hard output contracts on specialist outputs (OLYMPUS_CONTRACTS=1).
-    OFF BY DEFAULT: contracts are inert until an operator opts in, so the
-    feature can't surprise a fresh install or a public BYOK instance."""
-    return os.environ.get("OLYMPUS_CONTRACTS", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    """Enforce hard output contracts on specialist outputs. ON BY DEFAULT
+    (ADR 0005 hardening: enforcement mechanisms never ship dormant — the
+    shipped contracts encode already-true output invariants, so enabling
+    changes no happy-path behavior; a violating output degrades to the same
+    typed "treat as missing" marker a crashed specialist produces).
+    OLYMPUS_CONTRACTS=off is the kill switch."""
+    return os.environ.get("OLYMPUS_CONTRACTS", "on").strip().lower() not in (
+        "0", "off", "false", "no")
 
 
 def browser_financial_enabled() -> bool:
