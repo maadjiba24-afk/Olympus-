@@ -249,8 +249,13 @@ def verify_ledger(run_id: str) -> dict:
 
     Returns {ok, found, count, verified, attested, problems}. `verified` is the
     count of leading nodes that verify (the safe resume prefix); `attested` is
-    True only when the chain is signed under a configured (non-dev) seed."""
-    nodes = _read_nodes(run_id)
+    True only when the chain is signed under a configured (non-dev) seed. A
+    corrupt (unparseable) middle record is reported as ok=False, never raised."""
+    try:
+        nodes = _read_nodes(run_id)
+    except LedgerError as err:
+        return {"ok": False, "found": True, "count": 0, "verified": 0,
+                "attested": False, "problems": [str(err)]}
     out = {"ok": False, "found": bool(nodes), "count": len(nodes),
            "verified": 0, "attested": False, "problems": []}
     if not nodes:
@@ -341,9 +346,17 @@ def _read_spec(run_id: str) -> list[dict]:
     if not path.exists():
         return []
     out: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        try:
             out.append(json.loads(line))
+        except (ValueError, UnicodeDecodeError) as err:
+            # Typed error (matches _read_nodes) so verify_speculation reports a
+            # fail-closed verdict instead of leaking a bare JSONDecodeError.
+            raise LedgerError(
+                f"corrupt speculation record at line {i} for run {run_id!r}: "
+                f"{err.__class__.__name__}") from err
     return out
 
 
@@ -404,8 +417,13 @@ def _spec_record_ok(rec: dict) -> bool:
 
 def verify_speculation(run_id: str) -> dict:
     """Verify a run's speculation side log: every record content-addressed,
-    contiguous seq from 0, and signed under the speculation key. Fail closed."""
-    recs = _read_spec(run_id)
+    contiguous seq from 0, and signed under the speculation key. Fail closed —
+    a corrupt (unparseable) record is reported as ok=False, never raised."""
+    try:
+        recs = _read_spec(run_id)
+    except LedgerError as err:
+        return {"ok": False, "found": True, "count": 0, "verified": 0,
+                "attested": False, "problems": [str(err)]}
     out = {"ok": False, "found": bool(recs), "count": len(recs),
            "verified": 0, "attested": False, "problems": []}
     verified = 0
