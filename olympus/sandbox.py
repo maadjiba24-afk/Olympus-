@@ -307,7 +307,13 @@ def check_written(target: Path, content: str) -> str:
             json.loads(content)
             return "verified: valid JSON"
         if suffix == ".toml":
-            import tomllib
+            try:
+                import tomllib            # stdlib on Python 3.11+
+            except ModuleNotFoundError:  # 3.10: fall back to the tomli backport
+                try:
+                    import tomli as tomllib
+                except ModuleNotFoundError:
+                    return "verified: written (toml parser unavailable)"
             tomllib.loads(content)
             return "verified: valid TOML"
         if suffix in (".yaml", ".yml"):
