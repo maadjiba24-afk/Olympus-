@@ -71,33 +71,104 @@ def canonical_json(obj) -> bytes:
 
 # --- the key -------------------------------------------------------------
 
+def _configured_seed() -> str | None:
+    """The operator-configured signing seed, or None when custody is not
+    configured (callers fall back to the PUBLIC default seed, posture 'dev').
+
+    The single acquisition point used by BOTH `_seed_bytes()` and
+    `is_default_seed()`, so posture can never diverge from key derivation.
+    Read fresh on every call — never cached — so posture always reflects the
+    live environment (tests monkeypatch it; injected credentials can rotate).
+
+    Custody sources, strictest first:
+    - `OLYMPUS_SIGNING_SEED_FILE`: read the file (systemd `LoadCredential`,
+      Docker/K8s secrets). A configured-but-broken file is a hard error —
+      never a silent downgrade to the forgeable default seed.
+    - `OLYMPUS_SIGNING_SEED`: the seed itself in the environment.
+    - Both set → error (ambiguous custody; refusing to guess).
+    """
+    env_seed = (os.environ.get("OLYMPUS_SIGNING_SEED") or "").strip()
+    path = (os.environ.get("OLYMPUS_SIGNING_SEED_FILE") or "").strip()
+    if env_seed and path:
+        raise WitnessError(
+            "both OLYMPUS_SIGNING_SEED and OLYMPUS_SIGNING_SEED_FILE are set — "
+            "ambiguous key custody; refusing to guess which key is "
+            "authoritative. Unset one of them.")
+    if path:
+        p = Path(path)
+        # POSIX only: a seed readable by group/other is not custody. Windows
+        # ACLs don't surface through st_mode's group/other bits, so the check
+        # would be meaningless noise there — skipped by design.
+        if os.name == "posix":
+            try:
+                mode = os.stat(p).st_mode & 0o777
+            except OSError as err:
+                raise WitnessError(
+                    f"OLYMPUS_SIGNING_SEED_FILE points at {path!r} but it "
+                    f"cannot be read ({err.__class__.__name__}: {err}) — "
+                    "refusing to fall back to the public default seed."
+                ) from err
+            if mode & 0o077:
+                raise WitnessError(
+                    f"seed file {path!r} has mode {mode:03o} — readable by "
+                    f"group/other. Fix: chmod 600 {path}")
+        try:
+            seed = p.read_text(encoding="utf-8").strip()
+        except OSError as err:
+            raise WitnessError(
+                f"OLYMPUS_SIGNING_SEED_FILE points at {path!r} but it cannot "
+                f"be read ({err.__class__.__name__}: {err}) — refusing to "
+                "fall back to the public default seed.") from err
+        if not seed:
+            raise WitnessError(
+                f"seed file {path!r} is empty (after stripping whitespace) — "
+                "refusing to fall back to the public default seed.")
+        return seed
+    return env_seed or None
+
+
 def _seed_bytes() -> bytes:
-    seed = os.environ.get("OLYMPUS_SIGNING_SEED") or _DEFAULT_SEED
+    seed = _configured_seed() or _DEFAULT_SEED
     return hashlib.sha256(seed.encode("utf-8")).digest()
 
 
 def is_default_seed() -> bool:
     """True when no secret signing seed is configured — i.e. the key is the
     PUBLIC default and anyone could forge a signature. Such manifests are 'dev'
-    only: integrity for local use, never authenticity for a release."""
-    return not (os.environ.get("OLYMPUS_SIGNING_SEED") or "").strip()
+    only: integrity for local use, never authenticity for a release.
+    Raises WitnessError when custody is configured but broken (missing/empty/
+    world-readable seed file, or both env and file set)."""
+    return _configured_seed() is None
 
 
-def pinned_pubkey() -> str | None:
-    """The canonical public key a verifier trusts, if pinned out-of-band:
-    OLYMPUS_PINNED_PUBKEY (hex), else a committed `witness_pubkey.txt`. When set,
-    a manifest must be signed by exactly this key — internal consistency with the
-    local seed is not enough."""
+def pinned_pubkeys() -> list[str]:
+    """Every public key a verifier trusts, pinned out-of-band: the entries of
+    OLYMPUS_PINNED_PUBKEY (comma-separated) first, then ALL non-comment lines
+    of a committed `witness_pubkey.txt` — lowercased, deduped, order kept.
+    More than one pin exists for ROTATION: during the overlap window both the
+    old and the new key verify, so switching seeds is not a flag day. A
+    manifest must be signed by one of these keys — internal consistency with
+    the local seed is never enough."""
+    pins: list[str] = []
     env = (os.environ.get("OLYMPUS_PINNED_PUBKEY") or "").strip()
-    if env:
-        return env.lower()
+    for part in env.split(","):
+        part = part.strip().lower()
+        if part and part not in pins:
+            pins.append(part)
     f = _package_dir() / "witness_pubkey.txt"
     if f.exists():
         for line in f.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                return line.lower()
-    return None
+            line = line.strip().lower()
+            if line and not line.startswith("#") and line not in pins:
+                pins.append(line)
+    return pins
+
+
+def pinned_pubkey() -> str | None:
+    """Back-compat thin wrapper: the FIRST pinned key, or None. New code should
+    use `pinned_pubkeys()` and accept any pinned key (rotation overlap)."""
+    pins = pinned_pubkeys()
+    return pins[0] if pins else None
 
 
 def _require_crypto() -> None:
@@ -122,11 +193,42 @@ def default_public_key_hex() -> str:
     """The public key derived from the PUBLIC default seed. Lets a verifier
     recognize a run/manifest signed by the forgeable default key regardless of
     the seed currently configured."""
+    return pubkey_for_seed(_DEFAULT_SEED)
+
+
+def pubkey_for_seed(seed: str) -> str:
+    """The Ed25519 public key (hex) a given seed derives to — computed from the
+    argument alone, never the configured environment. `olympus keygen` uses it
+    to print the pin for a seed that was just written to disk."""
     _require_crypto()
     sk = ed25519.Ed25519PrivateKey.from_private_bytes(
-        hashlib.sha256(_DEFAULT_SEED.encode("utf-8")).digest())
+        hashlib.sha256(seed.encode("utf-8")).digest())
     return sk.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def write_seed_file(path: Path, *, force: bool = False) -> str:
+    """Generate a fresh 256-bit signing seed and write it to `path`, created
+    0600 via os.open flags (no write-then-chmod race). Refuses to overwrite an
+    existing file unless `force`. Returns the seed so the caller can derive
+    its public key in-process — callers must NEVER print or log it."""
+    import secrets
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if not force:
+            raise WitnessError(
+                f"{path} already exists — refusing to overwrite a signing "
+                "seed (pass --force to replace it; the old key becomes "
+                "unrecoverable).")
+        path.unlink()
+    seed = secrets.token_hex(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, (seed + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    return seed
 
 
 def posture() -> str:
@@ -155,8 +257,65 @@ def available() -> bool:
     return _HAVE_CRYPTO
 
 
+def check_sovereign_seed() -> None:
+    """Sovereign fail-closed for the signing key (shared by the CLI boot check
+    and the sign-time defense below): sovereign posture is the production
+    switch, and a sovereign instance on the PUBLIC default seed would sign
+    every decision log and backup with a key anyone can forge. Raises
+    WitnessError unless the operator explicitly opted in
+    (OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED — labs/CI only, loudly warned).
+    A no-op outside sovereign mode: dev-seed behavior there is unchanged."""
+    if not config.sovereign_mode() or not is_default_seed():
+        return
+    if config.sovereign_allow_dev_seed():
+        import logging
+        logging.getLogger("olympus.witness").warning(
+            "SOVEREIGN MODE IS USING THE PUBLIC DEV SIGNING SEED "
+            "(OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED=1): every signature produced is "
+            "FORGEABLE — acceptable for labs/CI, never for production.")
+        return
+    raise WitnessError(
+        "sovereign mode requires a configured signing seed; the default seed "
+        "is public and forgeable. Fix: run `olympus keygen`, then set "
+        "OLYMPUS_SIGNING_SEED_FILE to the generated file (see docs/SIGNING.md)."
+        " Labs/CI escape hatch: OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED=1.")
+
+
 def sign(data: bytes) -> str:
+    # Defense in depth behind the CLI boot check: catches sovereign mode being
+    # enabled after boot, and entry points that don't pass through cli.main().
+    check_sovereign_seed()
     return signing_key().sign(data).hex()
+
+
+# --- domain-separated subkeys --------------------------------------------
+# A labelled key derived from the SAME custody seed as the root, but distinct
+# from it (and from every other label), so a purpose can sign with a key that is
+# not the release/decision-log key. Leaking one subkey never yields another, and
+# subkeys inherit the seed's custody + sovereign-mode protections.
+
+def _subkey_seed_bytes(label: str) -> bytes:
+    seed = _configured_seed() or _DEFAULT_SEED
+    return hashlib.sha256(f"{seed}|subkey|{label}".encode("utf-8")).digest()
+
+
+def subsigning_key(label: str) -> "ed25519.Ed25519PrivateKey":
+    _require_crypto()
+    if not label:
+        raise WitnessError("a subkey label is required")
+    return ed25519.Ed25519PrivateKey.from_private_bytes(_subkey_seed_bytes(label))
+
+
+def sub_public_key_hex(label: str) -> str:
+    return subsigning_key(label).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
+def sign_with(label: str, data: bytes) -> str:
+    """Sign `data` with the domain-separated subkey for `label`. Inherits the
+    sovereign-mode fail-closed of `sign`."""
+    check_sovereign_seed()
+    return subsigning_key(label).sign(data).hex()
 
 
 def verify_signature(public_key_hex: str, data: bytes, signature_hex: str) -> bool:
@@ -259,9 +418,10 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     signed manifest (injected-file detection).
 
     Trust model (authenticity, not just internal consistency):
-    - A **pinned** key (arg, or `pinned_pubkey()`): the manifest MUST be signed
-      by exactly that key — a manifest re-signed with any other key fails even
-      if its own signature checks out.
+    - **Pinned** key(s) (the `pin` arg, or every key from `pinned_pubkeys()`):
+      the manifest MUST be signed by one of them — a manifest re-signed with
+      any other key fails even if its own signature checks out. Multiple pins
+      exist so key rotation has an overlap window, not a flag day.
     - No pin, **dev** manifest (signed by the public default seed): accepted only
       with `allow_dev=True`, and only as local integrity (never authenticity).
     - No pin, non-dev manifest: rejected — there's no trusted key to check against.
@@ -296,8 +456,13 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     signature_ok = bool(pub) and verify_signature(pub, payload,
                                                   integrity.get("signature", ""))
     is_dev = bool(manifest.get("dev"))
-    pin = (pin if pin is not None else pinned_pubkey())
-    pin = pin.lower() if pin else None
+    # An explicit `pin` argument stays single-key (caller knows exactly which
+    # key it expects); otherwise trust ANY configured pin, so key rotation has
+    # an overlap window instead of a flag day.
+    if pin is not None:
+        pins = [pin.lower()] if pin else []
+    else:
+        pins = pinned_pubkeys()
 
     problems = []
     for p in drifted:
@@ -310,12 +475,12 @@ def verify_manifest(manifest: dict, *, base: Path | None = None,
     pubkey_trusted = False
     if not signature_ok:
         problems.append("manifest signature is INVALID (content was altered).")
-    elif pin:
-        if pub == pin:
+    elif pins:
+        if pub in pins:
             pubkey_trusted = True
         else:
             problems.append("manifest is signed by an UNTRUSTED key "
-                            "(does not match the pinned public key).")
+                            "(does not match any pinned public key).")
     elif is_dev:
         if allow_dev:
             pubkey_trusted = True
@@ -405,18 +570,24 @@ def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     from . import trace
     run = trace.load_run(run_id)
     if not run:
-        return {"ok": False, "found": False, "signed": False,
+        return {"ok": False, "found": False, "signed": False, "attested": False,
                 "problems": [f"no recorded run '{run_id}'"]}
     sig = run.get("log_signature")
     if not sig:
-        return {"ok": False, "found": True, "signed": False,
+        return {"ok": False, "found": True, "signed": False, "attested": False,
                 "problems": ["run has no decision-log signature "
                              "(recorded before signing, or crypto unavailable)"]}
     decisions = run.get("decisions", [])
     if verify_log(decisions, sig, pin=pin):
-        return {"ok": True, "found": True, "signed": True, "problems": []}
+        # `ok` means the signature is valid and matches the expected key, so
+        # integrity holds. `attested` is stricter: authenticity. The PUBLIC
+        # default seed is forgeable by anyone, so a default-seed signature —
+        # even one that self-verifies — is UNATTESTED. Fail closed: attested is
+        # True only when a real (non-default) key signed the run.
+        return {"ok": True, "found": True, "signed": True,
+                "attested": not log_signed_by_default(run), "problems": []}
     if not _HAVE_CRYPTO:
-        return {"ok": False, "found": True, "signed": True,
+        return {"ok": False, "found": True, "signed": True, "attested": False,
                 "problems": ["cannot verify the decision-log signature — the "
                              "cryptography backend is unavailable on this host."]}
     # Distinguish a tampered log from a valid-but-untrusted signer for the report.
@@ -429,4 +600,5 @@ def verify_run(run_id: str, *, pin: str | None = None) -> dict:
     else:
         problem = ("decision-log signed by an UNTRUSTED key (does not match the "
                    "pinned public key).")
-    return {"ok": False, "found": True, "signed": True, "problems": [problem]}
+    return {"ok": False, "found": True, "signed": True, "attested": False,
+            "problems": [problem]}

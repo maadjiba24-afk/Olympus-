@@ -75,6 +75,9 @@ def _flags() -> dict:
         "sovereign_mode": config.sovereign_mode(),
         "egress_guard": config.egress_guard_enabled(),
         "contracts": config.contracts_enabled(),
+        "behavioral_contracts": _abc_enabled(),
+        "sleeptime": config.sleeptime_enabled(),
+        "live_eval": config.live_eval_enabled(),
         "require_byok": config.require_byok(),
         "require_login": _require_login(),
         "prompt_cache_ttl": config.prompt_cache_ttl(),
@@ -88,6 +91,11 @@ def _flags() -> dict:
 def _require_login() -> bool:
     from . import accounts
     return accounts.require_login()
+
+
+def _abc_enabled() -> bool:
+    from . import behavioral_contracts
+    return behavioral_contracts.enabled()
 
 
 def _models() -> dict:
@@ -271,6 +279,11 @@ def _config() -> dict:
             "settings": opconfig.status()}
 
 
+def _evolution() -> dict:
+    from . import evolve
+    return evolve.summary()
+
+
 def _errors() -> list[dict]:
     from . import errors
     recent = errors.recent(10)
@@ -307,6 +320,7 @@ def snapshot() -> dict:
         "schedules": _section(_schedules),
         "connectors": _section(_connectors),
         "config": _section(_config),
+        "evolution": _section(_evolution),
         "security": _section(_security),
         "health": _section(_dashboard),
         "errors": _section(_errors),

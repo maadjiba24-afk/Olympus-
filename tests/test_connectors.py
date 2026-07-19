@@ -52,9 +52,15 @@ def test_data_plugin_output_is_wrapped():
     def feed() -> str:
         return "feed content"
 
+    @connectors.plugin("post_tweet", "Post a tweet", action=True)
+    def tweet() -> str:
+        return "posted"
+
     assert connectors.is_data_plugin("read_feed")
-    assert security.should_wrap("read_feed")
-    assert not security.should_wrap("post_tweet")  # not registered as data
+    assert security.should_wrap("read_feed")              # data plugin → wrapped
+    assert not security.should_wrap("post_tweet")         # action plugin → action result, not wrapped
+    # M0.3 fail-closed: an unclassified/unregistered name wraps by default.
+    assert security.should_wrap("some_unregistered_tool")
 
 
 # --- MCP servers ---------------------------------------------------------

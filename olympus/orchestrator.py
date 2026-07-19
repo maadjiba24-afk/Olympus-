@@ -83,6 +83,16 @@ def _format_clarify(questions: list[str]) -> str:
 Reporter = Callable[[str], None]
 
 
+def _wiki_block(user: str, user_message: str) -> str:
+    """Consolidated concept pages relevant to this message (never fatal —
+    the wiki is an enrichment, not a dependency)."""
+    try:
+        from . import wiki
+        return wiki.context_block(user, user_message)
+    except Exception:
+        return ""
+
+
 def _silent(_: str) -> None:
     pass
 
@@ -125,6 +135,14 @@ class Olympus:
         # on its strongest model). A single Settings becomes a pool of one.
         self.pool = pool or config.ModelPool.of(
             settings or config.Settings.from_env())
+        # A conversation-level model pin (/model opus) narrows the pool to the
+        # pinned member — but only for default env-pool sessions: a caller who
+        # brought explicit settings/pool (BYOK) is never silently switched.
+        if settings is None and pool is None:
+            from . import modelpin
+            pinned = modelpin.resolve(user)
+            if pinned is not None:
+                self.pool = config.ModelPool.of(pinned)
         self.settings = self.pool.primary()
         self.user = memory.safe_id(user)
         self.conversation_id = conversation_id
@@ -132,6 +150,12 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        # Interaction provider for the ask_user tool: interactive surfaces
+        # install one; captured here so worker threads (which don't inherit
+        # thread-locals) can re-install it. None = headless (ask_user returns
+        # a proceed-with-assumption instruction instead of blocking).
+        from . import interaction
+        self._ask_provider = interaction.current()
         connectors.emit("session_start", self.user, self.conversation_id)
 
     def _light(self) -> config.Settings:
@@ -164,6 +188,7 @@ class Olympus:
         mem_ctx = replaystore.frozen_context("route", lambda: (
             profile.card(self.user)
             + recall.context_block(self.user, user_message)
+            + _wiki_block(self.user, user_message)
             + playbooks.context_block(self.user, user_message)
             + relgraph.context_block(self.user, user_message)
             + companion.model_block(self.user)
@@ -344,11 +369,12 @@ class Olympus:
     # -- stage 4: synthesis -------------------------------------------------
 
     def _synthesize(self, user_message: str, brief: str, verified: str) -> str:
-        from . import soul
+        from . import docrag, soul
         system = (agent.load_prompt("zeus") + soul.block()
                   + i18n.directive(self.user)
                   + profile.card(self.user)
                   + recall.context_block(self.user, user_message)
+                  + docrag.context_block(self.user, user_message)
                   + playbooks.context_block(self.user, user_message)
                   + relgraph.context_block(self.user, user_message)
                   + companion.model_block(self.user)
@@ -370,8 +396,11 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
-    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace") -> str:
-        """Run a single specialist with failure isolation, on its best model.
+    def _run_one(self, key: str, task: str, tr: "trace_mod.Trace",
+                 settings_override: config.Settings | None = None) -> str:
+        """Run a single specialist with failure isolation, on its best model
+        (or on `settings_override` when the caller escalates — the teacher
+        path routes a failed rework to the strongest pool member).
 
         This is the single funnel for the main pipeline: both dispatch paths
         (`_dispatch_dag` and the rework `_dispatch`) call it, so the hard output
@@ -392,10 +421,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        from . import interaction
+        ask_prev = interaction.set_provider(self._ask_provider)
         try:
             try:
                 output, tool_calls = SPECIALISTS[key].run_counted(
-                    task, settings=self.pool.for_specialist(key),
+                    task,
+                    settings=settings_override or self.pool.for_specialist(key),
                     effort=SPECIALISTS[key].effort)
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
@@ -410,14 +442,21 @@ class Olympus:
                 spec = SPECIALISTS[key]
                 result = contracts.check(output, spec.contract,
                                          tool_calls=tool_calls)
+                # Express acceptance as a behavioral contract (specialist.output):
+                # the output-contract result is the invariant clause, evaluated
+                # under ABC so the violation carries a formal Recovery=reject and
+                # lands in the same audit/telemetry as every other contract.
+                from . import behavioral_contracts as _abc
+                abc_v = _abc.check("specialist.output",
+                                   {"contract_result": result})
                 tr.decision(
                     "contract",
                     {"name": spec.name, "role": "specialist", "key": key},
                     {"violations": list(result.violations)},
                     status="ok" if result.ok else "violation",
                     inputs=task)
-                if not result.ok:
-                    reasons = "; ".join(result.violations)
+                if not result.ok or not abc_v.ok:
+                    reasons = "; ".join(result.violations or abc_v.reasons)
                     self.report(
                         f"⛔ {spec.name}'s output failed its contract ({reasons}).")
                     # Fail closed, but degrade gracefully: return the SAME typed
@@ -429,11 +468,15 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 
     def _dispatch(self, assignments: list[dict[str, str]],
-                  tr: "trace_mod.Trace") -> list[tuple[str, str]]:
-        """Run flat (independent) assignments in parallel. Used by rework."""
+                  tr: "trace_mod.Trace",
+                  overrides: dict[str, config.Settings] | None = None,
+                  ) -> list[tuple[str, str]]:
+        """Run flat (independent) assignments in parallel. Used by rework.
+        `overrides` maps specialist key → escalated Settings (teacher path)."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
@@ -441,7 +484,9 @@ class Olympus:
         with ThreadPoolExecutor(max_workers=min(4, len(assignments))) as pool:
             results = list(pool.map(
                 lambda item: (item["specialist"],
-                              self._run_one(item["specialist"], item["task"], tr)),
+                              self._run_one(item["specialist"], item["task"], tr,
+                                            (overrides or {}).get(
+                                                item["specialist"]))),
                 assignments))
         # Workers appended their contract/egress decisions in completion order;
         # canonicalize this parallel slice so replay is order-stable.
@@ -530,6 +575,8 @@ class Olympus:
         # and restores the env. meta is NOT part of the diffed decision path.
         tr.meta["contracts_enabled"] = config.contracts_enabled()
         tr.meta["egress_guard_enabled"] = config.egress_guard_enabled()
+        from . import behavioral_contracts as _abc
+        tr.meta["abc_enabled"] = _abc.enabled()
         # In-run compaction settings affect the message stream, so record them
         # for deterministic replay (like the two toggles above).
         tr.meta["inrun_compact"] = config.inrun_compact()
@@ -624,8 +671,28 @@ class Olympus:
                           "the feedback.")}
                 for k in retry_keys
             ]
+            # Teacher escalation: a rework is the pipeline's own signal that
+            # the specialist's usual model wasn't good enough — rerun it on
+            # the strongest pool member for that role, when one exists.
+            from . import teacher as teacher_mod
+            escalated: dict[str, config.Settings] = {}
+            for k in retry_keys:
+                t = teacher_mod.teacher_for(self.pool, k)
+                if t is not None:
+                    escalated[k] = t
+                    self.report(f"🎓 {SPECIALISTS[k].name}'s rework escalates "
+                                f"to the teacher model ({t.model}).")
+                    tr.event("teacher.escalated", specialist=k, model=t.model)
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo, tr))
+                redone = dict(self._dispatch(redo, tr, overrides=escalated))
+            # The teacher's fix becomes homework: distill a provisional,
+            # benchmark-gated skill for the student model, in the background.
+            for k, t in escalated.items():
+                fix = redone.get(k, "")
+                if fix and not fix.startswith("["):     # skip failure markers
+                    teacher_mod.distill_async(
+                        k, by_key.get(k, brief),
+                        review.get("feedback", ""), fix, t)
             outputs = [(k, redone.get(k, v)) for k, v in outputs]
             self.report("🔍 Aletheia re-verifies the rework...")
             try:
@@ -638,7 +705,37 @@ class Olympus:
                 verified = "\n\n".join(
                     f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
 
+        # SPEC-04 Phase A: passive routing-outcome telemetry. Records which
+        # specialist ran on which model and the verify/review verdict as the
+        # outcome signal — it decides nothing. Best-effort and never emitted
+        # during replay (keeps replay a pure, side-effect-free verification).
+        self._record_routing_outcome(tr, user_message, assignments, review)
+
         return "delegate", brief, verified
+
+    def _record_routing_outcome(self, tr, user_message, assignments, review) -> None:
+        """Emit one routing-outcome row per dispatched specialist (Phase A).
+        Fully isolated: any failure is swallowed so telemetry can never break a
+        run, and the model/role are READ from the deterministic selection —
+        nothing about routing is changed."""
+        try:
+            if replaystore.replaying():
+                return
+            from . import routing_outcomes
+            keys = [a["specialist"] for a in assignments
+                    if a.get("specialist") in SPECIALISTS]
+            if not keys:
+                return
+            models = {k: (self.pool.for_specialist(k).model
+                          or config.default_model()) for k in keys}
+            roles = {k: config.specialist_role(k) for k in keys}
+            routing_outcomes.record_run(
+                self.user, tr.id, user_message, keys,
+                models=models, roles=roles,
+                review_verdict=review.get("verdict"),
+                synthetic=config.routing_synthetic())
+        except Exception:
+            pass
 
     def _finish(self, user_message: str, reply: str) -> None:
         self.history.append({"role": "user", "content": user_message})
@@ -708,31 +805,112 @@ class Olympus:
         self._compress_history()
 
     def _compress_history(self) -> None:
-        """Fold older turns into a single running 'conversation state' block,
-        keeping only the most recent turns verbatim. The block carries facts,
-        decisions, preferences, and open threads forward — and because the old
-        slice already includes any prior state block, summaries fold
-        incrementally rather than re-growing."""
+        """Fold older turns into a running 'conversation state' block, keeping
+        only the most recent turns verbatim. Under ACE (the default) the block
+        is an evolving *playbook* updated by incremental delta — existing
+        durable facts are preserved and pinned, never re-summarized away — which
+        avoids the context-collapse / brevity-bias of the legacy monolithic
+        rewrite (kept behind `OLYMPUS_ACE=off` as a fallback)."""
         keep_n = config.HISTORY_KEEP_TURNS
         old, keep = self.history[:-keep_n], self.history[-keep_n:]
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in old)
+        # Pre-compaction memory flush: whatever durable facts live only in the
+        # turns being folded away are extracted into typed memory FIRST, so
+        # compaction can never silently lose them (the state block below is for
+        # conversational continuity, not durability).
         try:
-            summary = backend.complete_text(
-                self.settings,
-                "Update the durable conversation state from this history — "
-                "facts, decisions, user preferences, and open threads only. "
-                "Be concise; this replaces the raw turns.",
-                [{"role": "user", "content": as_text}], effort="low")
+            recall.flush_slice(self.user, as_text, self.settings)
         except Exception:
-            self.history = keep  # fall back to truncation on any failure
+            pass
+
+        state = self._ace_compress(as_text) if config.ace_enabled() \
+            else self._legacy_compress(as_text)
+        if state is None:
+            self.history = keep         # fall back to truncation on any failure
             return
         self.history = [
             {"role": "user",
              "content": "[Conversation state — durable context from earlier "
-                        "turns]\n" + summary},
+                        "turns]\n" + state},
             {"role": "assistant", "content": "Understood — continuing with that context."},
         ] + keep
+
+    def _ace_compress(self, slice_text: str) -> str | None:
+        """Evolve the conversation playbook by delta and render it. Returns the
+        rendered (untrusted-enveloped) state block, or None on failure so the
+        caller falls back to a verbatim tail."""
+        from . import ace
+        try:
+            pb = ace.load(self.conversation_id) if self.conversation_id \
+                else ace.Playbook()
+            before = pb.stats()
+            pb = ace.evolve(pb, slice_text, settings=self.settings)
+            if self.conversation_id:
+                ace.save(self.conversation_id, pb)
+                self._snapshot_playbook(pb, before)
+            self._log_ace(before, pb.stats())
+            return ace.render(pb)
+        except Exception as err:
+            from . import errors, evolve
+            errors.capture("orchestrator.ace_compress", err)
+            evolve.record("ace", evolve.DEGRADED, "compaction fell back")
+            return None
+
+    def _snapshot_playbook(self, pb, before: dict) -> None:
+        """Append a signed, provenance-carrying snapshot of the evolved playbook
+        to the delta substrate (Plane 3.1). Append-only and tamper-evident, so
+        the learned-state history can't be silently rewritten. Skipped under
+        replay (a snapshot is a side output, never part of the decision path) and
+        best-effort — a snapshot failure never breaks compaction."""
+        try:
+            from . import deltas, replaystore, trace
+            if replaystore.replaying():
+                return
+            tr = trace.current()
+            prov = deltas.Provenance(
+                source="ace", run_id=(tr.id if tr else ""),
+                trust="conversation", detail="playbook compaction")
+            deltas.record_snapshot(
+                f"playbook:{self.conversation_id}", kind="playbook",
+                state=pb.to_dict(), delta={"before": before, "after": pb.stats()},
+                provenance=prov)
+        except Exception as err:
+            from . import errors
+            errors.capture("orchestrator.snapshot_playbook", err)
+
+    def _log_ace(self, before: dict, after: dict) -> None:
+        """Record a healthy compaction with its delta counters (self-evolution
+        telemetry). `before`/`after` are playbook stats around the merge. The
+        counters also go to the STRUCTURED evolution log (evolve.log_event) so
+        the delta behaviour is queryable, not just skimmable."""
+        try:
+            from . import evolve
+            added = max(0, after["bullets"] - before["bullets"])
+            evolve.record("ace", evolve.OK,
+                          f"v{after['version']} bullets={after['bullets']} "
+                          f"pinned={after['pinned']} added={added} "
+                          f"helpful={after['helpful']} harmful={after['harmful']}")
+            evolve.log_event("ace", "compaction", {
+                "version": after["version"], "bullets": after["bullets"],
+                "pinned": after["pinned"], "added": added,
+                "pruned": max(0, before["bullets"] + added - after["bullets"]),
+                "helpful": after["helpful"], "harmful": after["harmful"]})
+        except Exception:
+            pass
+
+    def _legacy_compress(self, slice_text: str) -> str | None:
+        """The pre-ACE monolithic path: re-summarize the slice into one block.
+        Retained as the `OLYMPUS_ACE=off` fallback. Returns None on failure."""
+        try:
+            return backend.complete_text(
+                self.settings,
+                "Update the durable conversation state from this history — "
+                "facts, decisions, user preferences, and open threads only. "
+                "Be concise; this replaces the raw turns.",
+                [{"role": "user", "content": slice_text}], effort="low")
+        except Exception:
+            return None
 
     def ask(self, user_message: str) -> str:
         error = self.settings.validate()
@@ -953,6 +1131,12 @@ class Olympus:
             return "Nothing to reset — the conversation is already empty."
         as_text = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:800]}"
                             for m in self.history)
+        # Same pre-clear flush as compaction: durable facts leave the
+        # transcript as typed memory before the turns are dropped.
+        try:
+            recall.flush_slice(self.user, as_text, self.settings)
+        except Exception:
+            pass
         summary = ""
         try:
             summary = backend.complete_text(
@@ -997,6 +1181,13 @@ class Olympus:
             return "Nothing to rate yet."
         user_msg = self.history[-2].get("content", "")
         reply = self.history[-1].get("content", "")
+        # SPEC-04 Phase A: an explicit 👍/👎 is the top-precedence outcome
+        # signal — upgrade this run's routing-outcome rows. Best-effort.
+        try:
+            from . import routing_outcomes
+            routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
+        except Exception:
+            pass
         verdict = "positive" if verdict.lower() in ("up", "good", "positive",
                                                     "+1", "👍") else "negative"
         memory.save(
@@ -1093,6 +1284,11 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_egress = os.environ.get("OLYMPUS_EGRESS_GUARD")
     rec_egress = bool((original.get("meta") or {}).get("egress_guard_enabled"))
     os.environ["OLYMPUS_EGRESS_GUARD"] = "1" if rec_egress else "0"
+    # ABC enforcement gates the specialist.output `contract` decision, so a run
+    # recorded with it on, replayed with it off, would drop records and diverge.
+    prev_abc = os.environ.get("OLYMPUS_ABC")
+    rec_abc = bool((original.get("meta") or {}).get("abc_enabled", True))
+    os.environ["OLYMPUS_ABC"] = "on" if rec_abc else "off"
     # In-run compaction settings — same reasoning: reproduce the recorded
     # message stream so request hashes match.
     _meta = original.get("meta") or {}
@@ -1136,6 +1332,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_EGRESS_GUARD", None)
         else:
             os.environ["OLYMPUS_EGRESS_GUARD"] = prev_egress
+        if prev_abc is None:
+            os.environ.pop("OLYMPUS_ABC", None)
+        else:
+            os.environ["OLYMPUS_ABC"] = prev_abc
         for k, v in prev_inrun.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -1363,14 +1563,15 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
                 settings: config.Settings | None = None) -> str:
     """Apply a prompt change ONLY if a before/after benchmark shows it does not
     regress the affected specialist's score; otherwise roll it back. This is the
-    code-enforced counterpart to `update_prompt` — it makes the "measured, with
-    rollback" guarantee real instead of trusting the caller to measure by hand.
+    single, code-enforced prompt-write path (M0.4): the public `update_prompt`
+    tool routes here, and the raw writer `tools._apply_prompt` is reachable only
+    from inside this function — there is no ungated way to write a prompt.
 
     A prompt is an *upgrade* of an existing agent (unlike a new skill, which must
     justify itself), so the bar is non-regression: keep on after >= before,
     revert on any drop. When the agent has no benchmark coverage the guarantee
-    cannot be honored, so the change is NOT applied — the caller is told to
-    generate a benchmark or use update_prompt manually.
+    cannot be honored, so the change is REFUSED (fail closed) — the caller must
+    generate coverage first; there is no unmeasured escape hatch.
     """
     from pathlib import Path
 
@@ -1387,15 +1588,15 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
     if not bench_ids:
         return (f"Cannot benchmark-gate '{stem}': no benchmark items cover it "
                 f"(only user-facing specialists are scored). Generate coverage "
-                f"with generate_benchmark first, or use update_prompt + "
-                f"run_benchmark manually and accept it is unmeasured.")
+                f"with generate_benchmark first — a prompt change cannot be "
+                f"applied unmeasured (M0.4: no ungated prompt-write path).")
 
     try:
         before = evals.run(settings, only=bench_ids)["avg"]
     except Exception as err:
         return f"Cannot gate '{stem}': baseline benchmark failed ({err})."
 
-    apply_msg = tools._update_prompt(stem, new_prompt, reason)  # backs up old
+    apply_msg = tools._apply_prompt(stem, new_prompt, reason)   # raw writer (backs up old)
     if apply_msg.startswith("Error"):
         return apply_msg
 
@@ -1424,17 +1625,33 @@ def evolution_audit(settings: config.Settings | None = None) -> str:
     memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
+
+    # Plane 3.2: mine recent FAILURE traces and run the gated reflection pipeline
+    # FIRST — Prometheus is the proposal source, the pipeline owns apply (gate +
+    # auto-rollback + signed snapshot). Best-effort: a reflection error never
+    # blocks the broader audit below.
+    reflection = ""
+    try:
+        from . import reflect
+        reflection = reflect.reflect(settings)
+    except Exception as err:
+        from . import errors
+        errors.capture("orchestrator.reflect", err)
+
     task = (
         "Run a full self-audit of Olympus now:\n"
         "1. list_source_files and read the parts that matter.\n"
         "2. Review recent memory (recall_memory: corrections, upgrades, lessons).\n"
         "3. Find what is missing inside the system — capabilities, specialists, "
         "weak prompts, recurring mistakes.\n"
-        "4. Apply safe improvements directly with update_prompt.\n"
+        "4. Apply prompt improvements with update_prompt (benchmark-gated: it "
+        "measures before/after and auto-rolls-back a regression).\n"
         "5. File everything that needs code changes with propose_upgrade.\n"
         "Finish with an audit report: what you checked, what you changed, what "
         "you proposed."
     )
     report = SPECIALISTS["prometheus"].run(task, settings=settings)
+    if reflection:
+        report = f"{reflection}\n\n{report}"
     memory.save("reports", "Evolution audit", report)
     return report

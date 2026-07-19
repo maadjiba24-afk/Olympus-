@@ -28,12 +28,12 @@ def use_active_settings(settings: "Settings"):
 def clear_active_settings(token) -> None:
     _ACTIVE_SETTINGS.reset(token)
 
-# Default model for the Anthropic backend. Opus 4.8 supports adaptive
-# thinking, effort control, and the server-side web_search/web_fetch tools.
+# Olympus assumes NO model: the user chooses one explicitly (OLYMPUS_MODEL,
+# `olympus setup`, or per-request BYOK) — there is no baked-in vendor default.
 # `MODEL` is the import-time snapshot; `default_model()` reads OLYMPUS_MODEL
 # LIVE — use it at call sites, because firstrun.load_env_file() loads the saved
 # config.env AFTER this module is imported, so the snapshot can be stale.
-MODEL = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+MODEL = os.environ.get("OLYMPUS_MODEL", "")
 
 
 def _split_keys(raw: str) -> tuple[str, ...]:
@@ -57,7 +57,22 @@ def mask_key(key: str) -> str:
 
 
 def default_model() -> str:
-    return os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
+    """The user's explicitly chosen model (OLYMPUS_MODEL), or empty. Olympus
+    never assumes a model on the user's behalf."""
+    return os.environ.get("OLYMPUS_MODEL", "")
+
+
+def require_model(settings: "Settings") -> str:
+    """The model a request must run on — the settings' own, else the live
+    OLYMPUS_MODEL. Raises a clear, actionable error instead of letting an
+    empty model reach a provider API as a cryptic 400."""
+    model = settings.model or default_model()
+    if not model:
+        raise ValueError(
+            "No model configured — Olympus doesn't assume one. Set "
+            "OLYMPUS_MODEL (e.g. `olympus config set OLYMPUS_MODEL <id>`) or "
+            "run `olympus setup` to choose your provider and model.")
+    return model
 
 
 @dataclass(frozen=True)
@@ -73,7 +88,7 @@ class Settings:
     """
 
     provider: str = "anthropic"
-    model: str = "claude-opus-4-8"
+    model: str = ""                    # no baked-in model — the user chooses
     api_key: str | None = None
     base_url: str | None = None
     # Extra credentials for the same provider. When the active key hits a rate
@@ -94,15 +109,27 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # Credential envs may hold the secret itself OR a SecretRef
+        # (env:/file:/vault:/keychain:) resolved here, at the choke point.
+        from . import secretref
         provider = os.environ.get("OLYMPUS_PROVIDER", "anthropic").lower()
+        # No provider gets an assumed model — the user chooses via
+        # OLYMPUS_MODEL / `olympus setup` (claude-code delegates to the CLI's
+        # own login default, which is that tool's choice, not ours).
+        model = os.environ.get("OLYMPUS_MODEL", "")
         if provider == "anthropic":
-            model = os.environ.get("OLYMPUS_MODEL", "claude-opus-4-8")
-            key = os.environ.get("ANTHROPIC_API_KEY")
+            key = secretref.getenv("ANTHROPIC_API_KEY") or None
         else:
-            model = os.environ.get("OLYMPUS_MODEL", "")
-            key = (os.environ.get("OLYMPUS_API_KEY")
-                   or os.environ.get("OPENAI_API_KEY"))
-        extra = _split_keys(os.environ.get("OLYMPUS_API_KEYS", ""))
+            key = (secretref.getenv("OLYMPUS_API_KEY")
+                   or secretref.getenv("OPENAI_API_KEY") or None)
+        # Outbound provider-key rotation pool. NOTE: this is deliberately a
+        # DIFFERENT variable from OLYMPUS_API_KEYS — the latter is the inbound
+        # /v1 bearer allowlist (config.api_keys()), and reusing it here would
+        # inject an inbound gate token into the outbound rotation set (i.e. leak
+        # it to the model provider on a rate-limit failover).
+        extra = tuple(secretref.resolve(k) for k in
+                      _split_keys(os.environ.get("OLYMPUS_PROVIDER_KEYS", "")))
+        extra = tuple(k for k in extra if k)
         keys = tuple(k for k in ([key] if key else []) if k) + extra
         return cls(
             provider=provider,
@@ -127,8 +154,9 @@ class Settings:
         # user-supplied host. Treat both the same for credential carry-over.
         endpoint_switch = merged["base_url"] != self.base_url
         if provider_switch and "model" not in clean:
-            merged["model"] = ("claude-opus-4-8"
-                               if merged["provider"] == "anthropic" else "")
+            # A model belongs to its provider — never carry one across a
+            # switch, and never invent one (validate() asks the caller).
+            merged["model"] = ""
         if (provider_switch or endpoint_switch) and "api_key" not in clean:
             # Never carry the inherited key to a different provider or endpoint —
             # that would leak the operator's credential to the new host.
@@ -150,8 +178,18 @@ class Settings:
         if self.provider not in ("anthropic", "openai", "claude-code", "moa"):
             return (f"Unknown provider '{self.provider}' "
                     "(use anthropic, openai, claude-code, or moa).")
+        # Olympus never assumes a model. OpenAI-compatible settings must name
+        # one explicitly (an env OLYMPUS_MODEL belongs to the primary provider
+        # and could be a different vendor's ID). Anthropic settings may fall
+        # back to a live OLYMPUS_MODEL — that's the request path's actual
+        # behavior (require_model) — but with neither, fail clearly.
+        # (claude-code delegates to that CLI's own login default; moa rides
+        # its members' models.)
         if self.provider == "openai" and not self.model:
             return "Set a model for OpenAI-compatible providers (OLYMPUS_MODEL)."
+        if self.provider == "anthropic" and not (self.model or default_model()):
+            return ("No model chosen — Olympus doesn't assume one. Set "
+                    "OLYMPUS_MODEL or run `olympus setup`.")
         return None
 
     def usable(self) -> bool:
@@ -207,6 +245,49 @@ def specialist_role(key: str) -> str:
     except Exception:
         pass
     return SPECIALIST_ROLE.get(key, "reasoning")
+
+
+def specialist_model_overrides() -> dict[str, str]:
+    """Per-council-member model pins from OLYMPUS_SPECIALIST_MODELS, e.g.
+    '{"hephaestus": "deepseek", "aletheia": "opus"}'. Values are matched as
+    case-insensitive substrings of a configured member's provider/model.
+    Malformed input is ignored."""
+    raw = os.environ.get("OLYMPUS_SPECIALIST_MODELS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).strip().lower(): str(v).strip().lower()
+            for k, v in data.items() if str(v).strip()}
+
+
+def role_fallback_overrides() -> dict[str, list[str]]:
+    """Explicit per-role fallback order from OLYMPUS_ROLE_FALLBACKS, e.g.
+    '{"coding": ["openai/gpt-5", "haiku"]}'. Tokens are case-insensitive
+    substrings matched against "provider/model". Malformed input is ignored
+    (capability ordering still applies) rather than breaking calls."""
+    raw = os.environ.get("OLYMPUS_ROLE_FALLBACKS", "").strip()
+    if not raw:
+        return {}
+    import json
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for role, tokens in data.items():
+        if isinstance(tokens, list):
+            cleaned = [str(t).strip().lower() for t in tokens if str(t).strip()]
+            if cleaned:
+                out[str(role).strip().lower()] = cleaned
+    return out
 
 
 def capability_score(model: str, role: str) -> float:
@@ -265,11 +346,16 @@ class ModelPool:
         if raw:
             import json
             try:
+                from . import secretref
                 for d in json.loads(raw):
                     # A member may bring its own rotation pool via "api_keys"
-                    # (list) in addition to the primary "api_key".
-                    pool_keys = tuple(k for k in (d.get("api_keys") or []) if k)
-                    member_key = d.get("api_key")
+                    # (list) in addition to the primary "api_key". Each entry
+                    # may be a SecretRef instead of the key itself.
+                    pool_keys = tuple(
+                        secretref.resolve(k) for k in (d.get("api_keys") or [])
+                        if k)
+                    pool_keys = tuple(k for k in pool_keys if k)
+                    member_key = secretref.resolve(d.get("api_key")) or None
                     keys = tuple(k for k in ([member_key] if member_key else []) if k)
                     keys += tuple(k for k in pool_keys if k not in keys)
                     extra.append(Settings(
@@ -328,8 +414,62 @@ class ModelPool:
         return self._role_map().get(role) or max(
             self.members, key=lambda s: capability_score(s.model, role))
 
+    def role_of(self, member: Settings) -> str:
+        """The pipeline role this member is assigned to (first match), so a
+        failure can be retried on the next-best model *for that kind of work*.
+        Members outside the role map default to reasoning."""
+        fp = (member.provider, member.model, member.api_key, member.base_url)
+        rmap = self._role_map()
+        for role in ("coding", "verify", "reasoning"):
+            s = rmap.get(role)
+            if s and (s.provider, s.model, s.api_key, s.base_url) == fp:
+                return role
+        return "reasoning"
+
+    def fallbacks_for(self, member: Settings,
+                      role: str | None = None) -> list[Settings]:
+        """Ordered alternates to try when `member` fails a call: an explicit
+        OLYMPUS_ROLE_FALLBACKS order wins; otherwise strongest-for-role first,
+        genuine ties toward the cheaper model. The failing member's own role
+        is inferred when not given, so a coding-call failure retries on the
+        next-best *coder*, not whatever happens to sit next in the pool."""
+        def fp(s: Settings) -> tuple:
+            return (s.provider, s.model, s.api_key, s.base_url)
+        others = [m for m in self.members if fp(m) != fp(member)]
+        if not others:
+            return []
+        role = (role or self.role_of(member)).lower()
+        explicit = role_fallback_overrides().get(role)
+        if explicit:
+            def rank(m: Settings) -> tuple:
+                tag = f"{m.provider}/{m.model}".lower()
+                for i, token in enumerate(explicit):
+                    if token in tag:
+                        return (0, i, 0.0)
+                return (1, 0, -capability_score(m.model, role))
+            return sorted(others, key=rank)
+        return sorted(others, key=lambda m: (
+            -capability_score(m.model, role),
+            round(price_per_mtok(m.model), 2)))
+
     def for_specialist(self, key: str) -> Settings:
-        return self.for_role(specialist_role(key))
+        # An explicit per-council-member pin wins over role scoring:
+        # OLYMPUS_SPECIALIST_MODELS='{"hephaestus": "deepseek"}' routes that
+        # specialist to the matching configured member (shorthands fine).
+        token = specialist_model_overrides().get(key)
+        if token:
+            for member in self.members:
+                if token in f"{member.provider}/{member.model}".lower():
+                    return member
+        heuristic = self.for_role(specialist_role(key))
+        # SPEC-04 Phase B: the learned selector may override the keyword
+        # heuristic, but only under full evidence gates (opt-in flag + data gate
+        # + per-cell samples on BOTH candidates; disabled during replay). It
+        # chooses among self.members, which sovereign mode already filtered, and
+        # falls back to the heuristic on anything short of that — so with no
+        # data (or the flag off) this line is a no-op.
+        from . import learned_routing
+        return learned_routing.choose(self.members, key, heuristic) or heuristic
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints
@@ -408,6 +548,15 @@ HISTORY_BUDGET_IS_EXPLICIT = "OLYMPUS_HISTORY_TOKEN_BUDGET" in os.environ
 HISTORY_CONTEXT_FRACTION = float(
     os.environ.get("OLYMPUS_HISTORY_CONTEXT_FRACTION", "0.35"))
 HISTORY_KEEP_TURNS = int(os.environ.get("OLYMPUS_HISTORY_KEEP_TURNS", "8"))
+
+
+def ace_enabled() -> bool:
+    """Whether conversation compaction uses the ACE delta-context engine
+    (evolving playbook, delta-only) instead of the legacy monolithic
+    re-summarize path. On by default; `OLYMPUS_ACE=off` restores the legacy
+    path as a kill switch. Read live so replay restores the recorded setting."""
+    return os.environ.get("OLYMPUS_ACE", "on").strip().lower() not in (
+        "0", "off", "false", "no")
 
 # Approximate context-window size (tokens) by model-name substring — enough to
 # scale the history budget per model. Not authoritative; a rough, defensible map.
@@ -524,9 +673,49 @@ HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
 WATCHLIST_EVERY = 3600               # Mnemosyne checks the YouTube queue hourly
 EVOLUTION_AUDIT_EVERY = 7 * 86400    # Prometheus self-audit weekly
+FEATURE_EVOLUTION_EVERY = int(       # feature health review + safe auto-tune
+    os.environ.get("OLYMPUS_FEATURE_EVOLUTION_EVERY", str(24 * 3600)))
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
+# Nightly dreaming: consolidate session memory into wiki concept pages
+# (0 disables).
+DREAM_EVERY = int(os.environ.get("OLYMPUS_DREAM_EVERY", str(86400)))
 TRAIN_EVERY = int(os.environ.get("OLYMPUS_TRAIN_EVERY", str(3 * 86400)))
+
+# Sleep-time memory refinement (Letta-style idle consolidation). OFF by default;
+# even when enabled it runs SUPERVISED (proposes reversible rewrites, commits
+# nothing) until it has logged SLEEPTIME_GRADUATION clean cycles, and auto-apply
+# additionally requires OLYMPUS_SLEEPTIME_AUTOAPPLY. Cadence in seconds.
+SLEEPTIME_EVERY = int(os.environ.get("OLYMPUS_SLEEPTIME_EVERY", str(6 * 3600)))
+SLEEPTIME_GRADUATION = int(os.environ.get("OLYMPUS_SLEEPTIME_GRADUATION", "10"))
+# Aletheia block-mode: once the loop has GRADUATED, a consolidation rewrite whose
+# verified confidence is below this floor is REJECTED and quarantined rather than
+# committed (before graduation the block is inert — annotate-only). 0.0 disables.
+SLEEPTIME_CONFIDENCE_MIN = float(
+    os.environ.get("OLYMPUS_SLEEPTIME_CONFIDENCE_MIN", "0.5"))
+
+
+def sleeptime_enabled() -> bool:
+    """Whether the idle memory-refinement loop runs at all (default OFF)."""
+    return os.environ.get("OLYMPUS_SLEEPTIME", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+# Live-trace online eval: sampled quality scoring of recent runs on a cadence.
+LIVE_EVAL_EVERY = int(os.environ.get("OLYMPUS_LIVE_EVAL_EVERY", str(6 * 3600)))
+
+
+def live_eval_enabled() -> bool:
+    """Whether sampled online evaluation of recent runs runs at all (default OFF)."""
+    return os.environ.get("OLYMPUS_LIVE_EVAL", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def sleeptime_autoapply() -> bool:
+    """Whether a GRADUATED loop may auto-commit Aletheia-passed rewrites. Even
+    True is inert until the loop has graduated (10 clean supervised cycles)."""
+    return os.environ.get("OLYMPUS_SLEEPTIME_AUTOAPPLY", "").strip().lower() in (
+        "1", "on", "true", "yes")
 # Prometheus trains the weakest specialists on a cadence (0 disables)
 
 # Benchmark judge model (kept different from the model being tuned, so
@@ -619,6 +808,16 @@ def fast_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def routing_synthetic() -> bool:
+    """Mark routing-outcome telemetry from THIS process as synthetic/self-
+    generated (OLYMPUS_ROUTING_SYNTHETIC=1) so it never counts toward the
+    SPEC-04 Phase B data gate. Set it for eval, load-tests, demos, and any
+    self-generated traffic; real adoption leaves it unset. Phase A telemetry
+    only — it changes no routing behavior."""
+    return os.environ.get("OLYMPUS_ROUTING_SYNTHETIC", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 # --- sovereignty: provable zero-egress mode (SPEC-02) --------------------
 # Sovereign mode turns Olympus's *capability* to run fully local into an
 # enforced, fail-closed *guarantee*: remote models are excluded from selection,
@@ -634,6 +833,15 @@ def sovereign_mode() -> bool:
     models are never selected, and a forbidden egress fails closed."""
     return os.environ.get("OLYMPUS_SOVEREIGN", "").strip().lower() in (
         "1", "true", "yes", "on")
+
+
+def sovereign_allow_dev_seed() -> bool:
+    """Labs/CI escape hatch (OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED): let sovereign
+    mode run on the PUBLIC default signing seed. Every artifact signed that way
+    is forgeable, so each use is loudly warned. OFF by default — a sovereign
+    instance without a configured seed refuses to boot / sign instead."""
+    return os.environ.get("OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED",
+                          "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def egress_allowlist() -> list[str]:
@@ -733,6 +941,26 @@ def contracts_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
+def browser_financial_enabled() -> bool:
+    """Allow the operator's financial/legal and irreversible browser templates
+    (OLYMPUS_ENABLE_BROWSER_FINANCIAL=1). OFF BY DEFAULT — fail closed: without
+    the flag those templates refuse at EXECUTION time, even if already prepared
+    or approved, so the highest-risk browser actuators can never run on an
+    instance whose operator hasn't explicitly opted in."""
+    return os.environ.get("OLYMPUS_ENABLE_BROWSER_FINANCIAL",
+                          "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def earned_autonomy_enabled() -> bool:
+    """Global default for earned per-domain autonomy (OLYMPUS_EARNED_AUTONOMY=1).
+    OFF BY DEFAULT. When on, a site that has built a long clean track record may
+    have its safe, REVERSIBLE actions auto-run without a per-action approval; the
+    approval gate on irreversible/financial/legal actions is never affected. This
+    is the instance-wide switch; individual users can also opt in per-user."""
+    return os.environ.get("OLYMPUS_EARNED_AUTONOMY",
+                          "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def egress_guard_enabled() -> bool:
     """Route outbound data through the egress gateway (OLYMPUS_EGRESS_GUARD=1).
     OFF BY DEFAULT — inert until an operator opts in, so it can't surprise a
@@ -761,8 +989,7 @@ def free_chats() -> int:
     except ValueError:
         return 0
 
-# The gate proves *replay determinism*, which is model-independent — so it runs
-# on a cheaper model by default (≈5x less than Opus) to keep the weekly CI /
-# heartbeat tripwire affordable. Override for a full-fidelity run on your main
-# model: OLYMPUS_GATE_MODEL=claude-opus-4-8.
-GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "claude-sonnet-4-6")
+# The gate proves *replay determinism*, which is model-independent — set
+# OLYMPUS_GATE_MODEL to run it on a cheaper model than your main one. Unset,
+# the gate uses your configured model unchanged: Olympus assumes no model.
+GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "")

@@ -32,11 +32,16 @@ def _cadences() -> dict[str, int]:
         "watchlist": config.WATCHLIST_EVERY,
         "maintenance": config.MAINTENANCE_EVERY,
         "daily_learning": config.DAILY_LEARNING_EVERY,
+        "dreaming": config.DREAM_EVERY,
         "train": config.TRAIN_EVERY,
         "evolution_audit": config.EVOLUTION_AUDIT_EVERY,
         "skill_curation": curator.curation_every(),
+        "feature_evolution": config.FEATURE_EVOLUTION_EVERY,
         "replay_gate": config.REPLAY_GATE_EVERY,
         "backup": config.BACKUP_EVERY,
+        # Only wake for sleep-time refinement when the feature is enabled.
+        "sleeptime": config.SLEEPTIME_EVERY if config.sleeptime_enabled() else 0,
+        "live_eval": config.LIVE_EVAL_EVERY if config.live_eval_enabled() else 0,
     }
     return {k: v for k, v in items.items() if v}
 
@@ -58,6 +63,10 @@ def next_due_in(state: dict | None = None, now: float | None = None) -> float:
     goal_wait = goals.next_due_in(now)
     if goal_wait is not None:
         waits.append(goal_wait)
+    from . import agentbeat
+    beat_wait = agentbeat.next_due_in(now)
+    if beat_wait is not None:
+        waits.append(beat_wait)
     return min(waits) if waits else float(config.DAILY_LEARNING_EVERY)
 
 

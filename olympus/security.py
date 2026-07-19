@@ -33,6 +33,36 @@ ACTION_TOOLS = frozenset({
     # an action: capability separation strips it from any run that also ingests
     # untrusted page content (an injected page can't reach your logged-in tabs).
     "browser_act",
+    # Observing the interactive map of a *credentialed* tab is the perception
+    # half of the same actuator loop — bounded structure, not prose, and kept
+    # out of any prose-ingesting run so an injected page can't map your tabs.
+    "browser_observe",
+    # Detecting a human-verification checkpoint perceives a credentialed page
+    # (bounded enum, never a bypass) — same actuator-class gating as observe.
+    "browser_checkpoint",
+    # Listing/reading/ACTING INTO cross-origin frames of a credentialed page is
+    # actuator-class, gated per-origin (governed crossing) and kept out of any
+    # prose-ingesting run.
+    "browser_frames", "browser_frame_observe", "browser_frame_act",
+    # Minting a signed human-cleared attestation is bound to the credentialed
+    # session (re-checks the live page before signing) — operator-only, kept out
+    # of any prose-ingesting run so an injected page can't forge a human-in-loop
+    # proof.
+    "browser_attest_human",
+    # Listing/switching the credentialed browser's tabs reveals and redirects a
+    # logged-in session; uploading a local file to a site is data egress. All
+    # three are credentialed actuators, kept out of any prose-ingesting run.
+    "browser_tabs", "browser_switch_tab", "browser_upload",
+    # Reading/writing a domain's session cookies IS handling credentials — kept
+    # out of any prose-ingesting run so an injected page can't harvest or plant
+    # a session (cookies live only in the encrypted vault).
+    "browser_save_auth", "browser_restore_auth",
+    # Accepting a JS dialog can commit an action on a credentialed page, so the
+    # dialog policy is an actuator, kept out of any prose-ingesting run.
+    "browser_dialog",
+    # Capturing a download clicks a trigger and writes into the workspace — a
+    # credentialed action, kept out of any prose-ingesting run.
+    "browser_download",
     # The operator's vault-backed login is likewise a credentialed actuator.
     "browser_login",
     # ...as is running a credentialed action template.
@@ -45,15 +75,69 @@ ACTION_TOOLS = frozenset({
 # Tools that read untrusted external content.
 INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
+                             "triage_inbox",
                              "browse_page",
                              # A vision model's read of an image is external
                              # content — text-in-image injection is injection.
                              "analyze_image",
                              # The governed CDP harness loads real web pages.
                              "browser_open", "browser_read",
+                             # The accessibility tree is page-supplied semantics
+                             # — untrusted external content, same as read.
+                             "browser_read_ax",
+                             # Console output is page-controlled text — a page
+                             # can write injection into console.log, so treat
+                             # captured console messages as untrusted too.
+                             "browser_console",
+                             # A vision description of the page's pixels is
+                             # external content too (text-in-image injection).
+                             "browser_screenshot",
                              # A transcript of arbitrary audio is external
                              # content too — spoken injection is still injection.
-                             "transcribe_audio"})
+                             "transcribe_audio",
+                             # Deep Research reads attacker-controlled pages and
+                             # folds them into its report; treat the report as
+                             # untrusted (and keep action tools out of any run
+                             # that can invoke it).
+                             "trigger_research"})
+
+# The explicit trust allowlist for the untrusted-content envelope (M0.3).
+# should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
+# a registered connector action plugin). These are first-party builtins whose
+# output is Olympus's own state or an action result, never ingested external
+# content: pure tools, reads of our own memory/skills/source/documents,
+# structured predicates, action confirmations, and the operator's own controls.
+# A NEW builtin tool is NOT auto-trusted — until it is added here it wraps, so a
+# forgotten ingestion tool cannot bypass the envelope. `test_m0_envelope_
+# failclosed.py` binds this set to stay complete + disjoint with INGESTION_TOOLS.
+TRUSTED_TOOLS = frozenset({
+    "add_todo", "ask_user", "browser_act", "browser_attest_human",
+    "browser_checkpoint", "browser_dialog", "browser_download",
+    "browser_exists", "browser_frame_act", "browser_frame_observe",
+    "browser_frames", "browser_learn", "browser_login", "browser_observe",
+    "browser_operate", "browser_pattern", "browser_restore_auth",
+    "browser_save_auth", "browser_save_pdf", "browser_skill_record",
+    "browser_skills", "browser_switch_tab", "browser_tabs",
+    "browser_upload", "cache_fact", "call_webhook", "codegraph_impact",
+    "codegraph_neighbors", "codegraph_path", "complete_todo",
+    "create_skill", "current_time", "edit_file", "edit_image",
+    "gate_prompt", "gate_skills", "generate_benchmark", "generate_image",
+    "glob_files", "grep_files", "list_dir", "list_documents",
+    "list_source_files", "list_todos", "operator_attest_receipt",
+    "operator_attestations", "operator_authorize_site",
+    "operator_forget_site", "operator_history", "operator_remember_login",
+    "operator_review", "operator_schedule", "operator_status",
+    "operator_trust", "operator_verify_receipt", "prepare_action",
+    "propose_playbook", "propose_site_profile", "propose_upgrade",
+    "query_codegraph", "read_document", "read_file", "read_skill",
+    "read_source_file", "recall_fact", "recall_memory", "recent_learning",
+    "refresh_email_style", "restore_prompt", "run_benchmark",
+    "run_code_benchmark", "save_lesson", "schedule_task",
+    "search_documents", "search_sessions", "send_email",
+    "set_advanced_mode", "site_profile_record", "site_profiles",
+    "site_template_record", "spawn_subagent", "text_to_speech",
+    "update_prompt", "verify_code_claim", "write_document",
+})
 
 _ENVELOPE_HEADER = (
     "<untrusted_external_content source=\"{source}\">\n"
@@ -88,11 +172,22 @@ def filter_tools(tool_defs, *, ingests_external: bool):
 
 
 def should_wrap(name: str) -> bool:
-    """Whether a tool's output is untrusted external content to be enveloped."""
-    if name in INGESTION_TOOLS:
-        return True
+    """Whether a tool's output must be enveloped as untrusted external content.
+
+    FAIL-CLOSED (M0.3): the default is to WRAP. Only an explicitly trusted source
+    skips the envelope — a first-party builtin on the `TRUSTED_TOOLS` allowlist,
+    or a registered connector ACTION plugin (whose output is an action result,
+    not ingested content). Everything else wraps: the builtin ingestion tools, a
+    connector DATA plugin, and — the point of the inversion — any tool that isn't
+    classified at all. A new ingesting tool that nobody remembered to register
+    therefore still arrives wrapped, instead of silently bypassing the envelope.
+    """
+    if name in TRUSTED_TOOLS:
+        return False
     from . import connectors  # local import to avoid an import cycle
-    return connectors.is_data_plugin(name)
+    if name in connectors.plugin_action_names():
+        return False                      # registered action plugin: action result, not ingested
+    return True                           # ingestion / data plugin / unclassified → wrap
 
 
 def loadout_ingests_external(tool_defs) -> bool:
@@ -111,6 +206,8 @@ _INJECTION_MARKERS = re.compile(
     r"|send (an )?email to|call (the )?webhook|update (your )?prompt)\b"
 )
 
+
+_REDACT_PREFIX = "[redacted suspected injection] "
 
 # Invisible / direction-control characters: zero-width spaces and joiners,
 # bidi overrides and isolates, soft hyphen, BOM. Legit prose never needs them;
@@ -137,6 +234,10 @@ def sanitize_for_memory(text: str) -> str:
     suspicious imperative lines are annotated. Conservative throughout — we
     annotate/redact rather than delete, so a human/Aletheia can still see what
     happened, but the content loses its standing in future recall.
+
+    IDEMPOTENT: a line already carrying the redaction prefix is left untouched,
+    so `sanitize(sanitize(x)) == sanitize(x)`. This lets the memory sink apply it
+    unconditionally even when a caller already sanitized — no double-redaction.
     """
     text = _INVISIBLE_RE.sub("", text or "")
     text = _PRIVKEY_RE.sub("[redacted private key]", text)
@@ -145,8 +246,10 @@ def sanitize_for_memory(text: str) -> str:
     text = _URL_CRED.sub("https://[redacted-credentials]@", text)
     out = []
     for line in text.splitlines():
-        if _INJECTION_MARKERS.search(line):
-            out.append("[redacted suspected injection] " + line[:200])
+        if line.startswith(_REDACT_PREFIX):
+            out.append(line)                       # already defanged — idempotent
+        elif _INJECTION_MARKERS.search(line):
+            out.append(_REDACT_PREFIX + line[:200])
         else:
             out.append(line)
     return "\n".join(out)
@@ -366,18 +469,65 @@ def _ip_is_public(ip: "ipaddress._BaseAddress") -> bool:
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
 
-def url_block_reason(url: str) -> str | None:
+def resolve_pinned_ip(host: str, port: int) -> str:
+    """Resolve `host`, validate EVERY address it resolves to, and return one
+    validated IP for the caller to connect to. Raises ValueError with a human
+    reason when the host must not be fetched.
+
+    Connecting to the returned IP (rather than re-resolving the hostname) is
+    the DNS-rebinding defense: an attacker who flips the record between
+    validation and connect gets no second resolution to poison. The pinned
+    fetch path in tools.py calls this from the socket-connect hook, so the
+    address that was validated is byte-for-byte the address dialed.
+    """
+    if not host:
+        raise ValueError("URL has no host")
+    if host.lower() in _BLOCKED_HOSTNAMES:
+        raise ValueError(f"refusing to fetch an internal host ({host})")
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise ValueError(f"could not resolve host: {host}")
+    except (UnicodeError, ValueError):
+        raise ValueError(f"invalid host: {host}")
+    if not infos:
+        raise ValueError(f"could not resolve host: {host}")
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise ValueError(f"unparseable address for host: {host}")
+        if not _ip_is_public(ip):
+            raise ValueError(f"refusing to fetch a non-public address ({ip})")
+    # Under sovereign mode the same guard also enforces the egress allowlist:
+    # a public host that is not explicitly allowlisted may not receive our data.
+    if not egress_allowed(host):
+        raise ValueError(
+            f"sovereign mode: egress to '{host}' is not on the allowlist "
+            "(OLYMPUS_EGRESS_ALLOWLIST)")
+    return str(infos[0][4][0])
+
+
+def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
     """Return a human reason if `url` must NOT be fetched, else None.
 
     SSRF defense for any tool that fetches a model- or user-supplied URL. We
-    refuse non-http(s) schemes and any host that resolves to a non-public
-    address — so neither a literal internal IP nor a public hostname pointed at
-    one (e.g. the cloud metadata service) can be reached.
+    refuse non-http(s) schemes, internal hostnames by name, and — when
+    `resolve` is True — any host that resolves to a non-public address, so
+    neither a literal internal IP nor a public hostname pointed at one (e.g. the
+    cloud metadata service) can be reached.
 
-    Note: this validates at resolve time; it does not pin the socket to the
-    validated IP, so a DNS-rebinding attacker who flips the record between this
-    check and the actual connection is not fully defeated. It does stop the
-    common cases (direct IP, static internal name, metadata endpoints).
+    Pass `resolve=False` when the request egresses through a trusted HTTP(S)
+    proxy: the client never resolves or connects to the target itself (the proxy
+    does, and enforces its own egress policy), and the target legitimately
+    resolves to the proxy's loopback address locally — so a resolve-time IP
+    check would wrongly refuse every fetch. The name-level checks (scheme,
+    internal-hostname blocklist, sovereign allowlist) still apply.
+
+    With `resolve=True`, the pinned opener in tools.py additionally connects to
+    the exact IP validated by `resolve_pinned_ip` at socket-connect time,
+    closing the DNS-rebinding window. Callers that hand the URL to an agent they
+    don't control the sockets of (the CDP browser) rely on this name check only.
     """
     try:
         parsed = urlparse(url)
@@ -390,25 +540,50 @@ def url_block_reason(url: str) -> str | None:
         return "URL has no host"
     if host.lower() in _BLOCKED_HOSTNAMES:
         return f"refusing to fetch an internal host ({host})"
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return f"could not resolve host: {host}"
-    except (UnicodeError, ValueError):
-        return f"invalid host: {host}"
-    if not infos:
-        return f"could not resolve host: {host}"
-    for info in infos:
+    if resolve:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
         try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return f"unparseable address for host: {host}"
-        if not _ip_is_public(ip):
-            return f"refusing to fetch a non-public address ({ip})"
-    # Under sovereign mode the same guard also enforces the egress allowlist:
-    # a public host that is not explicitly allowlisted may not receive our data.
-    if not egress_allowed(host):
+            resolve_pinned_ip(host, port)
+        except ValueError as err:
+            return str(err)
+    elif not egress_allowed(host):
+        # Proxy path: no resolve, but sovereign mode still gates by name.
         return (f"sovereign mode: egress to '{host}' is not on the allowlist "
                 "(OLYMPUS_EGRESS_ALLOWLIST)")
     return None
+
+
+# --- sub-resource egress (browser harness) --------------------------------
+# `url_block_reason` gates the top-level NAVIGATION (with full DNS+IP checks).
+# But once a page loads, its OWN sub-resource requests — fetch()/XHR, an <img>
+# beacon, a tracking pixel — are not navigations and never hit that gate. A
+# prompt-injected or hostile page can therefore beacon to an internal/metadata
+# host or exfiltrate to a private IP without the harness seeing it. These
+# CDP wildcard patterns (fed to Network.setBlockedURLs) block sub-resource
+# requests to the known SSRF targets at the network layer, closing that hole.
+#
+# Honest limit: setBlockedURLs matches the URL STRING, so it catches
+# metadata hostnames and IP-LITERAL private/link-local targets, but cannot
+# catch a public hostname that DNS-rebinds to a private IP for a sub-resource
+# (CDP doesn't expose the resolved IP here). The navigation gate still does
+# full resolve-time IP validation for the top-level document; this is
+# defense-in-depth beneath it, not a replacement.
+
+def subresource_block_patterns() -> list[str]:
+    """CDP `Network.setBlockedURLs` patterns blocking sub-resource requests to
+    SSRF/metadata targets. Stable, deterministic; the single source of truth
+    the browser harness applies per session."""
+    pats = [
+        "file://*",                       # never let a page pull local files
+        "*://metadata.google.internal/*", "*://metadata/*",
+        "*://localhost/*", "*://localhost:*/*",
+        "*://127.*",                      # IPv4 loopback
+        "*://169.254.*",                  # link-local incl. cloud metadata IP
+        "*://10.*",                       # RFC1918
+        "*://192.168.*",
+        "*://[::1]*", "*://[::1]:*",       # IPv6 loopback
+        "*://[fd*", "*://[fc*",            # IPv6 ULA (fc00::/7)
+        "*://[fe80*",                     # IPv6 link-local
+    ]
+    pats += [f"*://172.{n}.*" for n in range(16, 32)]   # 172.16.0.0/12
+    return pats

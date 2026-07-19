@@ -55,9 +55,12 @@ def test_from_env_reads_key_pool(monkeypatch):
     monkeypatch.setenv("OLYMPUS_PROVIDER", "openai")
     monkeypatch.setenv("OLYMPUS_MODEL", "m")
     monkeypatch.setenv("OPENAI_API_KEY", "primary")
-    monkeypatch.setenv("OLYMPUS_API_KEYS", "primary, backup1  backup2")
+    monkeypatch.setenv("OLYMPUS_PROVIDER_KEYS", "primary, backup1  backup2")
+    # The inbound /v1 bearer gate var must NOT feed the outbound rotation pool.
+    monkeypatch.setenv("OLYMPUS_API_KEYS", "inbound-bearer-only")
     s = config.Settings.from_env()
     assert s.all_keys() == ("primary", "backup1", "backup2")
+    assert "inbound-bearer-only" not in s.all_keys()
 
 
 def test_mask_key_never_leaks_secret():

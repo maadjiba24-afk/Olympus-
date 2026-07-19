@@ -31,6 +31,83 @@ def test_generate_image_saves_file(monkeypatch, tmp_path):
     assert (tmp_path / "ws" / "cat.png").read_bytes().startswith(b"\x89PNG")
 
 
+def test_edit_image_without_key_is_graceful(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
+    out = media.edit_image("make it blue", "cat.png")
+    assert out.startswith("Error") and "API key" in out
+
+
+def test_edit_image_missing_source_is_graceful(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    out = media.edit_image("make it blue", "nope.png")
+    assert out.startswith("Error") and "no workspace image" in out
+
+
+def test_edit_image_rejects_traversal(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    out = media.edit_image("x", "../secret.png")
+    assert out.startswith("Error") and "outside the workspace" in out
+
+
+def test_edit_image_saves_new_file_leaving_source(monkeypatch, tmp_path):
+    # Patch at the urlopen level (NOT the multipart helper) so the REAL call
+    # path runs end-to-end — this is what catches a _post_multipart signature
+    # collision, which patching the helper by name would mask.
+    import base64
+    import urllib.request
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = ws / "cat.png"
+    src.write_bytes(b"\x89PNG original")
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
+    png = base64.b64encode(b"\x89PNG edited").decode()
+    captured = {}
+
+    class Resp:
+        def __init__(self, body): self._b = body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self._b
+
+    def fake_urlopen(req, timeout=180):
+        captured["url"] = req.full_url
+        captured["ctype"] = req.headers.get("Content-type", "")
+        captured["len"] = len(req.data)
+        return Resp(b'{"data":[{"b64_json":"%s"}]}' % png.encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    out = media.edit_image("make it blue", "cat.png", filename="blue.png")
+    assert "blue.png" in out, out            # NOT an "Error editing image: ..." string
+    assert captured["url"].endswith("/images/edits")
+    assert captured["ctype"].startswith("multipart/form-data; boundary=")
+    assert captured["len"] > len(b"\x89PNG original")   # multipart wrapped the file
+    # source untouched, new file written
+    assert src.read_bytes() == b"\x89PNG original"
+    assert (ws / "blue.png").read_bytes() == b"\x89PNG edited"
+
+
+def test_post_multipart_names_do_not_collide():
+    # Regression for the shadowing bug: the images uploader and the audio
+    # uploader must be distinct callables with their own signatures.
+    import inspect
+    assert media._post_multipart_files is not media._post_multipart
+    files_params = list(inspect.signature(media._post_multipart_files).parameters)
+    audio_params = list(inspect.signature(media._post_multipart).parameters)
+    assert "files" in files_params            # list-of-typed-files variant
+    assert "blob" in audio_params             # single-octet-stream variant
+
+
+def test_edit_image_tool_registered_and_on_specialists():
+    from olympus import tools, specialists
+    assert "edit_image" in tools.EXTRA_TOOLS and "edit_image" in tools.HANDLERS
+    assert "edit_image" in specialists.SPECIALISTS["peitho"].extra_tools
+    assert "edit_image" in specialists.SPECIALISTS["iris"].extra_tools
+
+
 def test_extract_links():
     html = ('<a href="https://a.com/x">A</a> <a href="/rel">rel</a> '
             '<a href="https://a.com/x">dup</a> <a href="https://b.com">B</a>')

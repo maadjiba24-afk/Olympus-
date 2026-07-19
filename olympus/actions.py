@@ -48,9 +48,13 @@ DEFAULT_AUTONOMY = L1_PREPARE
 
 def autonomy_level(user: str) -> int:
     try:
-        return int(prefs.get(user, "autonomy", DEFAULT_AUTONOMY))
+        level = int(prefs.get(user, "autonomy", DEFAULT_AUTONOMY))
     except (TypeError, ValueError):
-        return DEFAULT_AUTONOMY
+        level = DEFAULT_AUTONOMY
+    # A conversation's capability profile caps how autonomous it can be —
+    # a guest chat can never talk itself into standing authority.
+    from . import capprofile
+    return min(level, capprofile.autonomy_cap(user))
 
 
 def set_autonomy(user: str, level: int) -> str:
@@ -325,14 +329,27 @@ def edit(user: str, action_id: str, changes: dict,
     return action
 
 
-def can_auto_execute(action: Action) -> bool:
-    """True if policy allows running this without a per-action approval."""
+def can_auto_execute(action: Action, level: int | None = None) -> bool:
+    """True if policy allows running this without a per-action approval.
+
+    `level` lets a caller supply an effective autonomy level in place of the
+    user's global one — this is how earned per-domain trust (see `trust.py`)
+    widens the safe envelope for a proven site. A caller-supplied level can never
+    exceed the conversation's capability-profile cap, so it can only ever relax
+    the gate for REVERSIBLE actions on a trusted domain, never lift an ingesting
+    run or auto-run an irreversible/financial action (those need level 99).
+    """
     at = _REGISTRY.get(action.type)
     if at is None:
         return False
     if at.scope and at.scope not in granted_scopes(action.user):
         return False
-    return autonomy_level(action.user) >= _min_level_to_auto(action.risk_class)
+    if level is None:
+        lvl = autonomy_level(action.user)
+    else:
+        from . import capprofile
+        lvl = min(int(level), capprofile.autonomy_cap(action.user))
+    return lvl >= _min_level_to_auto(action.risk_class)
 
 
 def _execute(action: Action) -> Action:
@@ -356,6 +373,22 @@ def _execute(action: Action) -> Action:
             f"action(s) today. This guards against a runaway agent; raise it "
             f"with `olympus limit {action.type} <n>` (0 = unlimited).")
         _save(action); _audit(action, "blocked_rate_limit")
+        return action
+    # Agent Behavioral Contract: a formal, declarative re-check of the approval
+    # spine + autonomy dial at the single execution chokepoint. Defense in depth
+    # — if any code path reaches _execute with an irreversible action that never
+    # earned a real approval, the contract blocks it and triggers Recovery
+    # (revert to awaiting-approval), independent of the imperative checks above.
+    from . import behavioral_contracts as _abc
+    try:
+        _abc.enforce("action.execute", _abc.action_context(action, at))
+    except _abc.ContractViolation as viol:
+        # Recovery: HOLD → back to PREPARED (await the human); anything else →
+        # fail closed. Either way the action does NOT run.
+        action.status = PREPARED if viol.recovery == _abc.HOLD else FAILED
+        action.error = f"blocked by behavioral contract: {'; '.join(viol.reasons)}"
+        action.approved_at = None
+        _save(action); _audit(action, "blocked_contract")
         return action
     try:
         action.result = at.execute(action.payload) or {}
@@ -409,9 +442,11 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     return action
 
 
-def auto_or_hold(action: Action) -> Action:
-    """Run automatically if policy allows; otherwise leave it for approval."""
-    if can_auto_execute(action):
+def auto_or_hold(action: Action, level: int | None = None) -> Action:
+    """Run automatically if policy allows; otherwise leave it for approval.
+    `level` optionally supplies an earned per-domain autonomy level (see
+    `can_auto_execute`)."""
+    if can_auto_execute(action, level):
         action.status = APPROVED
         action.approved_at = time.time()
         _save(action); _audit(action, "auto_approved")

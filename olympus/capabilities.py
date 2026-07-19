@@ -51,8 +51,9 @@ def _tools() -> dict:
 
 
 def _actions() -> dict:
-    # Importing builtin_actions registers the built-in ActionTypes on the spine.
-    from . import actions, builtin_actions  # noqa: F401
+    # Importing these registers their ActionTypes on the spine, so the count is
+    # canonical (order-independent of what a test happened to import).
+    from . import actions, builtin_actions, computeruse  # noqa: F401
     reg = actions.registered()
     return {"count": len(reg), "names": sorted(reg)}
 

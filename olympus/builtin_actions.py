@@ -181,11 +181,102 @@ def _write_file_execute(p: dict) -> dict:
     return sandbox.write_file(p.get("path", ""), p.get("content", ""))
 
 
+def _write_document_preview(p: dict) -> str:
+    body = p.get("content", "")
+    return (f"Save document '{p.get('name', '?')}' "
+            f"({len(body.encode('utf-8'))} bytes) to your workspace:\n"
+            f"{body[:500]}")
+
+
+def _write_document_execute(p: dict) -> dict:
+    from . import documents, memory
+    user = p.get("_user") or memory.current_user()
+    return documents.save(user, p.get("name", ""), p.get("content", ""))
+
+
+def _write_document_undo(result: dict) -> str:
+    from . import documents
+    return documents.undo_save(result)
+
+
+def _edit_file_preview(p: dict) -> str:
+    """The approval preview IS the diff — the human sees exactly the hunk that
+    will land, not a description of it."""
+    diff = sandbox.edit_file_diff(
+        p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
+        bool(p.get("replace_all")))
+    return f"Edit file '{p.get('path', '?')}' in the workspace:\n{diff}"
+
+
+def _edit_file_execute(p: dict) -> dict:
+    return sandbox.edit_file(
+        p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
+        bool(p.get("replace_all")))
+
+
+# --- AP2 payment-mandate authorization (ADR 0004) — NO live rail ----------
+
+def _fmt_money(minor, currency: str) -> str:
+    try:
+        return f"{int(minor) / 100:.2f} {str(currency).upper()}"
+    except (TypeError, ValueError):
+        return f"{minor} {currency}"
+
+
+def _authorize_payment_preview(p: dict) -> str:
+    """The plain-language summary the human sees BEFORE signing — the exact
+    bounded authorization (construction-injection backstop, threat-model C2.4)."""
+    items = ", ".join(str(i) for i in (p.get("items") or [])) or "(none)"
+    return (
+        f"Authorize payment of {_fmt_money(p.get('amount'), p.get('currency'))} "
+        f"to '{p.get('merchant', '?')}' for \"{p.get('item', '?')}\".\n"
+        f"  Cap: {_fmt_money(p.get('amount_cap'), p.get('currency'))} · "
+        f"allowed merchants: {', '.join(p.get('merchants') or []) or '(none)'} · "
+        f"expires in {int(p.get('expires_in', 3600)) // 60} min.\n"
+        f"  Items: {items}\n"
+        "  This RECORDS a signed authorization mandate — it does NOT move money "
+        "(no payment rail).")
+
+
+def _authorize_payment_execute(p: dict) -> dict:
+    """The approval IS the signing event. Build + sign the intent and cart, run
+    the payment.mandate ABC contract (raises to FAIL the action on any
+    violation), then record the verified mandate. Moves NO money."""
+    from . import mandate, mandate_store
+    user = p.get("_user", "shared")
+    intent = mandate.create_intent(
+        user, amount_cap=int(p["amount_cap"]), currency=str(p["currency"]),
+        merchants=list(p.get("merchants") or []), item=str(p["item"]),
+        expires_in=float(p.get("expires_in", 3600)), trusted=True)
+    cart = mandate.create_cart(
+        intent, amount=int(p["amount"]), currency=str(p["currency"]),
+        merchant=str(p["merchant"]), items=list(p.get("items") or []))
+    signed_intent = mandate.sign(intent)
+    # The human approval IS the user co-signature (dual-signature, M4): the
+    # system signs, then the approving user co-signs the SAME payload.
+    signed_cart = mandate.co_sign(mandate.sign(cart))
+    # Verify + govern BEFORE recording; a spoofed/over-cap/expired/replayed/
+    # un-co-signed mandate raises ContractViolation → the action fails closed.
+    seen = mandate_store.consumed_nonces(user)
+    mandate.enforce_commit(signed_cart, intent, seen_nonces=seen)
+    rec = mandate_store.record(user, signed_intent, signed_cart)
+    return {"mandate_id": rec["id"], "recorded": True, "moved_money": False,
+            "note": "Authorization recorded; NO payment rail — no money moved."}
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
         preview=_note_preview, execute=_note_execute, undo=_note_undo,
         description="Save a note to the user's notes (reversible)."))
+    # AP2 payment-mandate authorization — FINANCIAL_LEGAL so it can NEVER
+    # auto-run; the human approval signs the mandate. Records only; no rail.
+    actions.register(actions.ActionType(
+        name="authorize_payment", risk_class=actions.FINANCIAL_LEGAL,
+        scope="payment.authorize", preview=_authorize_payment_preview,
+        execute=_authorize_payment_execute,
+        description="Authorize a bounded payment by signing an AP2 mandate "
+                    "(records a verified authorization — moves NO money)."))
     actions.register(actions.ActionType(
         name="send_email", risk_class=actions.IRREVERSIBLE, scope="email",
         preview=_email_preview, execute=_email_execute,
@@ -240,6 +331,21 @@ def register_builtins() -> None:
         preview=_write_file_preview, execute=_write_file_execute,
         undo=sandbox.undo_write,
         description="Create/overwrite a file in the workspace (reversible)."))
+    actions.register(actions.ActionType(
+        name="edit_file", risk_class=actions.NOTABLE, scope="exec",
+        preview=_edit_file_preview, execute=_edit_file_execute,
+        undo=sandbox.undo_write,
+        description="Exact-string edit of a workspace file, previewed as a "
+                    "unified diff (reversible)."))
+    # User documents — the workspace. No scope gate (it's the user's own
+    # content, confined to their document dir), but always human-approved
+    # (staged via prepare_action, never auto-executed) and reversible.
+    actions.register(actions.ActionType(
+        name="write_document", risk_class=actions.NOTABLE, scope="",
+        preview=_write_document_preview, execute=_write_document_execute,
+        undo=_write_document_undo,
+        description="Create or overwrite a document in the user's workspace "
+                    "(reversible)."))
     # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
     from . import operator
     operator.register_operator_actions()

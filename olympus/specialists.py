@@ -71,7 +71,7 @@ class Specialist:
             return True
         return False
 
-    def tool_defs(self, provider: str = "anthropic"):
+    def tool_defs(self, provider: str = "anthropic", task: str | None = None):
         ingests = self._ingests(provider)
         # System specialists keep action capabilities; others lose them in any
         # run that also ingests external content (capability separation).
@@ -87,10 +87,22 @@ class Specialist:
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)
+            # Per-conversation capability profile: the active conversation's
+            # boundary (a chat guest, a restricted group) further scopes what
+            # this run may reach. System specialists stay exempt — they run
+            # Olympus's own maintenance, never a visitor's request.
+            from . import capprofile
+            defs = capprofile.filter_tools(defs)
         if not codegraph.enabled():            # graph off → its tools vanish
             _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
                    "codegraph_path", "verify_code_claim"}
             defs = [d for d in defs if d.get("name") not in _cg]
+        if task is not None:
+            # Per-turn dynamic selection LAST, strictly after every security
+            # filter above: it only drops from the already-filtered loadout,
+            # so relevance can never re-admit a stripped capability.
+            from . import toolselect
+            defs = toolselect.select(task, defs)
         return defs
 
     def mcp_defs(self, provider: str = "anthropic"):
@@ -110,7 +122,16 @@ class Specialist:
         return (agent.load_prompt(self.key)
                 + "\n\n## Skill library (load with read_skill before "
                   "relevant tasks)\n" + skills.index(self.key)
+                + self._extra_context()
                 + _UNTRUSTED_NOTE)
+
+    def _extra_context(self) -> str:
+        """Per-specialist prompt context. Angelos gets the user's email
+        writing-style guide so its drafts match the user's voice."""
+        if self.key == "angelos":
+            from . import emailstyle, memory
+            return emailstyle.context_block(memory.current_user())
+        return ""
 
     def run(self, task: str, settings: config.Settings | None = None,
             effort: str | None = None) -> str:
@@ -129,7 +150,8 @@ class Specialist:
         settings = settings or config.Settings.from_env()
         effort = effort or self.effort
         return backend.run_agent_counted(settings, self.system_prompt(), task,
-                                         self.tool_defs(settings.provider),
+                                         self.tool_defs(settings.provider,
+                                                        task=task),
                                          mcp_servers=self.mcp_defs(settings.provider),
                                          effort=effort)
 
@@ -146,10 +168,13 @@ SPECIALISTS: dict[str, Specialist] = {
         Specialist(
             key="peitho", name="Peitho", title="Marketing Specialist",
             description="Marketing strategy, branding, copywriting, growth, "
-                        "audience research, campaigns, SEO.",
+                        "audience research, campaigns, SEO. Drafts and saves "
+                        "documents to the user's workspace.",
             web=True,
-            extra_tools=("generate_image", "text_to_speech",
-                         "transcribe_audio", "browse_page", "analyze_image"),
+            extra_tools=("generate_image", "edit_image", "text_to_speech",
+                         "transcribe_audio", "browse_page", "analyze_image",
+                         "list_documents", "read_document", "search_documents",
+                         "write_document"),
         ),
         Specialist(
             key="hephaestus", name="Hephaestus", title="Coding Specialist",
@@ -159,7 +184,8 @@ SPECIALISTS: dict[str, Specialist] = {
             web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
-                         "read_file", "list_dir", "prepare_action",
+                         "read_file", "list_dir", "grep_files", "glob_files",
+                         "edit_file", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(
@@ -173,7 +199,8 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Social media content, posting strategy, community "
                         "management, platform best practices, trends.",
             web=True,
-            extra_tools=("generate_image", "browse_page", "analyze_image"),
+            extra_tools=("generate_image", "edit_image", "browse_page",
+                         "analyze_image"),
             # Social copy should stay tight — guard against a wall-of-text reply.
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_chars=8000),
@@ -189,7 +216,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "deadlines, prioritization. Prepares real-world actions "
                         "(emails, webhooks) for the user to approve.",
             extra_tools=("send_email", "call_webhook", "prepare_action",
-                         "propose_playbook", "schedule_task"),
+                         "propose_playbook", "schedule_task",
+                         "list_todos", "add_todo", "complete_todo"),
         ),
         Specialist(
             key="angelos", name="Angelos", title="Inbox & Calendar Manager",
@@ -198,7 +226,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "send/draft/archive/invite actions for the user to "
                         "approve. Reads untrusted mail; never sends on its own.",
             extra_tools=("read_inbox", "read_email", "read_calendar",
-                         "prepare_action"),
+                         "triage_inbox", "prepare_action",
+                         "refresh_email_style"),
         ),
         Specialist(
             key="argus", name="Argus", title="Opportunity Scout",
@@ -213,8 +242,10 @@ SPECIALISTS: dict[str, Specialist] = {
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
             extra_tools=("browse_page", "analyze_image", "browser_open",
-                         "browser_read", "browser_act", "browser_skills",
-                         "browser_skill_record"),
+                         "browser_read", "browser_read_ax", "browser_save_pdf",
+                         "browser_console", "browser_screenshot",
+                         "browser_act", "browser_skills", "browser_skill_record",
+                         "trigger_research"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),
@@ -265,16 +296,30 @@ SPECIALISTS: dict[str, Specialist] = {
                         "open web; credentialed actions are scope/approval gated "
                         "and off by default (OLYMPUS_OPERATOR).",
             # Deliberately non-ingesting (web=False, no data MCP): _ingests() is
-            # False, so it legitimately keeps the actuator (browser_login). It is
-            # NOT given browser_open/browser_read — it never reads open-web prose
-            # as instructions. That is what lets it hold credentials safely while
-            # capability separation still holds across the system.
+            # False, so it legitimately keeps the actuators (browser_login, and
+            # the observe→act harness loop). It is NOT given browser_open/
+            # browser_read — it never reads open-web prose as instructions. That
+            # is what lets it hold credentials and perceive+drive an authorized,
+            # possibly logged-in page safely, while capability separation still
+            # holds across the system (browser_observe/act carry bounded,
+            # label-capped structure, not page prose).
             extra_tools=("browser_exists", "browser_login",
+                         "browser_observe", "browser_checkpoint",
+                         "browser_frames", "browser_frame_observe",
+                         "browser_frame_act",
+                         "browser_attest_human", "operator_attestations",
+                         "operator_trust",
+                         "operator_attest_receipt", "operator_verify_receipt",
+                         "browser_act", "browser_learn", "browser_pattern",
+                         "browser_tabs", "browser_switch_tab", "browser_upload",
+                         "browser_save_auth", "browser_restore_auth",
+                         "browser_dialog", "browser_download",
                          "site_profiles", "site_profile_record",
                          "browser_operate", "site_template_record",
                          "operator_schedule", "operator_authorize_site",
                          "operator_forget_site", "operator_status",
-                         "operator_remember_login", "set_advanced_mode"),
+                         "operator_history", "operator_remember_login",
+                         "set_advanced_mode"),
         ),
     ]
 }

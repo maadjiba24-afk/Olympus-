@@ -15,6 +15,8 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-07-19
+
 ### Added — session & flow ergonomics (Hermes round 2)
 
 - **Named sessions + browse/resume** — `olympus sessions` (list newest-first
@@ -95,14 +97,1122 @@ carries a migration note here.
   from the registry on each launch, so a long terminal session can't leak
   Thread objects.
 
-> **Release-state note.** As of this writing the latest *published* release is
-> **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
-> through `0.24.0` sections below were prepared and dated but **never tagged or
-> published** — so they are not releases yet, and everything from `0.22.0`
-> down to this note is effectively unreleased pending a tagging decision (see
-> RELEASING.md). The dated headers are kept for review; re-date and tag them
-> when a release is actually cut. `pyproject.toml` currently reads `0.24.0` as
-> the in-development version, not a shipped one.
+### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
+
+The eight new components (webplan, AP2 flow, extended ABC surface,
+scaffold_evolve, dytopo, emem, a2a, liveeval) are hardened and made
+self-evolving within guardrails.
+
+- **Self-evolution.** Five new non-security `evolve` tunables, each with a hard
+  `[lo,hi]` clamp: `treesearch.max_nodes` [10,100], `dytopo.max_out_degree`
+  [1,3], `emem.max_fragments` [4,12], `liveeval.sample_size` [10,50],
+  `scaffold_evolve.max_archive` [50,200]. Each feature reads its tunable at the
+  I/O boundary via `evolve.current(...)` (fail-safe fallback to the default) and
+  records OK/DEGRADED outcomes + structured `log_event` telemetry. **No
+  security-relevant knob is tunable** — the side-effect halt, egress guard,
+  allowlist/denylist, signing, and approval gates stay hard constants outside the
+  tuner; a drift test asserts the D-component tunables are never `tighten_only`.
+- **Hardening.** The five new modules are pyflakes-clean with no bare `except`,
+  silent catch (only best-effort telemetry is swallowed), TODO, or debug print.
+  Adversarial tests added at every external boundary: A2A oversize-reply capping
+  + malformed peer reply/card, scaffold refusal of every security module,
+  tree-search runaway (node cap) + webplan never-applies-a-side-effect,
+  dytopo dense-input-stays-sparse, and liveeval malformed/huge-trace tolerance.
+- **Poisoned-feedback gate.** A poisoned emem fragment (injection text) is kept
+  verbatim but leaves the module **only inside the untrusted envelope** — never a
+  clean instruction; and a liveeval regression signal is proven to carry only
+  numeric aggregates + run ids, never injection-laden trace content.
+
+### Added — Live-trace online evaluation (`liveeval`)
+
+Sampled quality scoring of recent runs, so a regression surfaces on its own
+instead of after a complaint. Live-eval reads a bounded sample of recent signed
+decision logs (`trace.py`) and scores each with cheap rule-based scorers.
+
+- **New `olympus/liveeval.py`.** Pure scorers over a run dict — no contract
+  violation, no errored decision, verified (a review decision that passed; direct
+  answers pass vacuously), within latency, within cost. `score_run` / `evaluate`
+  are deterministic; sampling is a fixed stride (the most recent N, capped). An
+  LLM-judge scorer is pluggable and off unless supplied; a scorer that raises is
+  skipped, never fatal.
+- **Regression signal.** `run()` records the pass-rate to feature-evolution
+  telemetry (OK ≥ 0.9, else DEGRADED) and the structured evolution log; a drop
+  is visible on the `evolve` board and the admin panel (`report()`).
+- **Opt-in, bounded, read-only.** `OLYMPUS_LIVE_EVAL` off by default; wired into
+  the heartbeat + hibernation cadence (only wakes when enabled) and surfaced via
+  **`olympus liveeval`**. It reads traces, never modifies them; the sample size
+  is hard-capped and only a week of daily trace files is scanned.
+- Tests (15): each scorer, aggregation, deterministic/bounded/most-recent
+  sampling, corrupt-line-tolerant reader, disabled-by-default, and the regression
+  report.
+
+### Added — A2A agent card + governed task client (`a2a`)
+
+Agent-to-agent interoperability, built over what Olympus already exposes, with no
+DID/verifiable-credential stack and no new dependency.
+
+- **Agent card.** `a2a.card()` builds an A2A-style discovery document
+  (`/.well-known/agent.json`-shaped) from the live capabilities manifest —
+  identity, protocol, capability counts, specialist skills, endpoints. Pure.
+  Printable via **`olympus a2a card`**.
+- **Inbound task mapping.** `parse_task` normalizes an A2A task envelope
+  (message/parts or `{input}`) into a `Task`; `to_internal_request` wraps the
+  peer's message in the **untrusted-data envelope** before it can reach the
+  council — capability separation at the boundary. `task_response` builds the
+  result envelope.
+- **Governed outbound client.** `call_agent(url, message)` and `fetch_card(url)`
+  are opt-in (`OLYMPUS_A2A`, off by default) and every outbound URL passes the
+  existing SSRF/egress guard first (loopback, link-local, cloud-metadata,
+  sovereign allowlist all refused). A peer's reply is returned **wrapped as
+  untrusted** — a remote agent's output is never trusted as instructions. The
+  fetcher is injectable (stdlib `urllib` by default) so the core is testable
+  without a network, and responses are size-capped.
+- Tests (13): card from manifest + live, inbound parse/validation, peer message
+  and reply both enveloped, outbound disabled-by-default, SSRF-blocked, HTTP-error
+  tolerant.
+
+### Added — E-mem episodic memory reconstruction (`emem`)
+
+An on-demand, **non-destructive** alternative to lossy summarization (arXiv
+2601.21714), added *alongside* the existing retrieval + compaction paths (not in
+place of them). Given a query, E-mem gathers the raw fragments related to it —
+event-log entries, typed memories with their provenance, and conversation
+snippets from the FTS5 index — and reconstructs a **chronologically-ordered,
+provenance-tagged episode**. Fragments are selected and time-ordered, never
+summarized or rewritten, so the reconstruction stays faithful and attributable.
+
+- **New `olympus/emem.py`.** The reconstruction core (`reconstruct(query,
+  fragments, now=)`) is pure and deterministic — relevance-score, budget-select,
+  then assemble in time order — with `now` injected so it is replay-safe and
+  testable without I/O. A thin best-effort `gather` reads the existing
+  `usermem` + `search` substrate.
+- **Non-destructive + attributable** — fragment text is byte-identical to the
+  source (proven by test); `Episode.provenance()` attributes every fragment to
+  its origin.
+- **Enveloped** — `Episode.render()` leaves the module only through
+  `security.wrap_untrusted(source="episodic-memory")`, since a reconstruction may
+  include conversation snippets that originated from tools/web.
+- **Opt-in** — `OLYMPUS_EMEM` off by default; `context_block` is a no-op unless
+  enabled. Bounded by fragment-count and char-budget caps.
+- Tests (14): relevance floor, chronological ordering, verbatim (non-destructive)
+  text, determinism, provenance, envelope, and the caps.
+
+### Added — DyTopo dynamic topology routing (`dytopo`)
+
+An optional, runtime-induced collaboration graph for the specialist council
+(arXiv 2602.06039). Each specialist emits a natural-language `query` (what it
+needs) and `offer` (what it provides); `dytopo.induce` matches those descriptors
+to wire a **sparse directed graph** — so the specialists that genuinely have
+something for each other are connected for a bounded number of consultation
+rounds, instead of a fixed or all-to-all shape.
+
+- **New `olympus/dytopo.py`** — the pure core: descriptor matching → graph →
+  rounds. Deterministic (token-overlap similarity, stable tie-breaks — no
+  embeddings, clock, or rng), so the same descriptors always induce the same
+  topology (replay-safe).
+- **Bounded by construction** — hard caps on nodes, out-degree, total edges, and
+  rounds; a self-edge is never created and the induced graph is provably sparse.
+- **Opt-in** — `OLYMPUS_DYTOPO` is off by default; the fixed
+  Zeus→Athena→specialists→Aletheia pipeline stands unless an operator turns it
+  on. The existing per-specialist governance is unchanged (this only decides who
+  consults whom).
+- Tests (13): edges reflect query→offer matches, induction is order-independent
+  (deterministic), out-degree / node / edge / round caps hold, and threshold
+  filters weak edges.
+
+### Added — Governed scaffold evolution (propose-only; ADR 0003)
+
+Adopts the Darwin Gödel Machine idea (measured, archived, benchmark-gated
+self-improvement of code) with the dangerous part removed. **There is no code
+path that writes to Olympus's own source tree, and no `apply()` function** — the
+running agent never modifies itself.
+
+- **New `olympus/scaffold_evolve.py`.** `propose(module, generate, benchmark=)`
+  generates a candidate patch, benchmarks it in isolation (must at least
+  `compile()`; a pluggable benchmark may run more, written only to a throwaway
+  temp path), archives the variant, and returns it. It never touches the real
+  module (proven by a test that the source is byte-identical after a propose).
+- **Non-security modules only, fail-closed.** A curated `_EVOLVABLE` allowlist
+  plus an independent `_SECURITY_MODULES` denylist; `propose` on a security
+  module (`security`, `cmdguard`, `actions`, `behavioral_contracts`, `mandate`,
+  `witness`, `vault`, `egress`, …) raises. Unknown ⇒ not evolvable.
+- **Governed by ABC.** The new `scaffold.propose` contract (target evolvable +
+  candidate compiles + benchmark passed) decides whether a candidate is a
+  *surfaceable* proposal; a failing candidate is archived as a failed variant but
+  never surfaced.
+- **Surfaced as diffs; nothing auto-applies; off by default.**
+  `olympus scaffold-evolve proposals` renders each valid proposal as a unified
+  diff for a human to apply by hand; `OLYMPUS_SCAFFOLD_EVOLVE` gates whether the
+  engine runs at all. Every proposal also lands in the structured evolution log.
+- Tests (17) are the safety proof: security modules unreachable, no apply
+  path exists, the real tree is never modified, failing/empty/non-compiling
+  candidates are excluded, and the contract blocks each bad input.
+
+### Added — Extended ABC contract surface (memory commit, skill import, goal completion)
+
+Three more governance chokepoints become formal Agent Behavioral Contracts,
+binding each declarative rule to the existing enforcer as defense in depth.
+
+- **`memory.commit`** (recovery `hold`) — a durable memory auto-commit
+  (`recall._gate`) must be injection-sanitized (`memory_content_sanitized`) and
+  not high-sensitivity (`memory_not_sensitive_autocommit`); a violation **holds**
+  the candidate for the user instead of committing it.
+- **`skill.import`** (recovery `block`) — an imported skill must pass the
+  security scan (`skill_scan_clean`); `skillpack.import_file` now refuses through
+  the contract.
+- **`goal.complete`** (recovery `block`) — a standing goal may be marked done
+  only against concrete evidence at the confidence floor (`goal_evidence_present`);
+  an evidence-free "done" is refused at `goals.judge`.
+
+Predicates bind to the real enforcers (`security.looks_like_injection`, the skill
+scan, the goals evidence doctrine), the YAML mirror and embedded fallback stay in
+sync (drift-tested), and block-path tests prove each contract refuses a bad input
+at its wired chokepoint.
+
+### Added — AP2 mandate user-facing flow (`authorize_payment`, no rail)
+
+The mandate primitives (ADR 0001) gain a real authorization flow on the action
+spine (ADR 0004) — still with **no live payment rail; no money moves.**
+
+- **New `authorize_payment` action** (`FINANCIAL_LEGAL`, scope
+  `payment.authorize`). Because it is `FINANCIAL_LEGAL`, `_min_level_to_auto` = 99
+  — it can **never** auto-run at any autonomy level; it is always prepared and
+  waits for explicit human approval. The preview is a plain-language summary of
+  the exact bounded authorization (amount, cap, allowed merchants, item, expiry)
+  and states outright that it moves no money.
+- **The approval IS the signing event.** On approval, `execute` builds the
+  intent + cart, applies the system signature AND the **user co-signature**
+  (`mandate.co_sign`), runs `mandate.enforce_commit` — the `payment.mandate` ABC
+  contract (intent-containment, non-expiry, fresh nonce, valid signature, user
+  co-signature, capability-within-bound; recovery `block`) — and only then
+  records the verified mandate. A spoofed / over-cap / wrong-merchant / expired /
+  replayed / un-co-signed mandate fails the action closed and records nothing.
+- **New `olympus/mandate_store.py`** — an append-only, bounded per-user record of
+  issued mandates plus the set of consumed nonces (replay defense); every record
+  carries `moved_money: false`.
+- Tests (9): never auto-runs even at L4; approval signs + verifies + records with
+  no money moved; over-cap and wrong-merchant carts fail closed and record
+  nothing; the store is append-only, replay-safe, and corrupt-blob tolerant.
+
+### Added — Tree search as a live browser planner (`webplan`)
+
+Best-first tree search stops being a library the code *could* call and becomes a
+live planner over the governed browser harness. New `olympus/webplan.py` plans a
+read-only path from a starting page toward a goal — navigating (a reversible GET
++ back) and perceiving, scoring each page, backtracking — and **never** auto-taks
+a side-effectful step (click/type/submit): those are withheld and handed to the
+approval spine via `treesearch.to_approvals`.
+
+- Pure, injected core (`explore(start, navigate=, perceive=, score=)`) so it is
+  fully testable with fakes; `plan_with_browser` adapts a live `browser.Browser`
+  using only read-only verbs (`open`, `read`, `_eval` for title/same-origin
+  links). It never clicks or types.
+- Bounded by `treesearch.SearchCaps` (nodes / tokens / wall-clock / depth), so a
+  runaway crawl is structurally impossible; a dead link drops that branch.
+- Tests prove it finds the goal page read-only, withholds every side-effectful
+  step for approval, and — via a fake Browser mirroring the real API — that the
+  planner never invokes `click`.
+
+### Added — Phase 3 evolution governance (structured logs, diffs, gate inventory)
+
+ACE and the sleep-time loop are the self-evolution layer, so their behaviour is
+now governed the way the loop spec demands: observable, propose-first, and
+gated.
+
+- **Structured evolution log.** `evolve.log_event(feature, kind, fields)` +
+  `evolve.events(feature, limit)` — a bounded, machine-readable event log on the
+  same store substrate as feature telemetry. ACE compaction now emits its delta
+  counters (version, bullets, pinned, added, pruned, helpful, harmful) and each
+  sleep-time cycle emits its rewrite metrics (proposed, committed, rejected,
+  clean, clean_cycles, graduated, autoapply) as structured events, queryable via
+  **`olympus evolve log [feature]`** (JSONL output).
+- **Destructive changes are proposed as diffs.** `sleeptime.render_diff` renders
+  a proposal as a unified diff — the source memories it would supersede against
+  the consolidated rewrite, flagged verified/UNVERIFIED — and
+  `olympus sleeptime proposals` now prints diffs instead of raw JSON.
+- **Nothing auto-applies; the gates are inventoried.** New governance tests pin
+  the invariants in one place: an ungraduated loop never commits even with
+  `OLYMPUS_SLEEPTIME_AUTOAPPLY=1`; a graduated loop still needs the explicit
+  opt-in; payment mandates can never auto-run (`_min_level_to_auto` = 99); tree
+  search only PREPARES actions; every security-relevant tunable is registered
+  tighten-only; ACE pinned facts survive prune pressure.
+
+### Security — Phase 2 hardening of the 2026-landscape components
+
+A hardening pass over ACE, ABC, sleep-time, tree search, and AP2 mandates —
+each checklist item proven by a test or a quoted tool result.
+
+- **Poisoned-feedback defense (headline).** Malicious "execution feedback" can no
+  longer survive into durable state un-neutralized. ACE already sanitized added
+  bullets and rendered them only inside the untrusted envelope; **sleep-time now
+  also runs `security.sanitize_for_memory` on a rewrite before it can become a
+  memory** (on both the proposal and auto-apply paths) — a lexical gate in front
+  of the Aletheia semantic gate. New tests prove an injection echoed by the
+  Generator is defanged at rest and, for ACE, only ever leaves the engine
+  enveloped.
+- **Explicit failure handling.** `ace._bullet_cap` now catches the specific
+  read/parse errors and fails safe to the hard ceiling (never unbounded) instead
+  of a broad swallow. No bare `except`, no silent catch in any of the five
+  modules.
+- **Dead code removed.** Cleared unused imports flagged by pyflakes in
+  `behavioral_contracts.py`, `treesearch.py`, and `mandate.py`; the five modules
+  are pyflakes-clean.
+- **Adversarial coverage confirmed.** Mandate-spoofing (unsigned / wrong-key /
+  tampered-field), tree-search runaway (node cap) and budget-exhaustion (token
+  cap), and ABC contract-violation paths all have passing tests; input-validation
+  boundaries (invalid user, cart-without-intent, non-mandate input) are covered.
+
+### Added — AP2-style payment mandates (creation + verification only; no rail)
+
+A verifiable-authorization primitive for agent-initiated commerce (Google AP2):
+a **signed, constraint-bound, tamper-evident record that a human authorized a
+specific, bounded financial action** — replacing the status-quo "approved: true"
+flag with something a third party could verify. Preceded by an ADR + threat
+model (`docs/adr/0001-ap2-payment-mandates.md`, `docs/AP2_THREAT_MODEL.md`),
+approved before any code.
+
+- **New `olympus/mandate.py`.** `IntentMandate` (user-authorized constraints:
+  amount cap + currency, merchant allowlist, item, expiry, nonce) and
+  `CartMandate` (the concrete cart), with `create_intent` / `create_cart` /
+  `sign` / `verify` and a pure `contained()` intent-containment check.
+- **No live rail, no new dependency.** No payment rail, card/VC issuance, or
+  PSP/merchant network calls exist in this phase — a mandate authorizes nothing
+  to move money. Signing reuses the Ed25519 root of trust via a new
+  **domain-separated subkey** (`witness.sign_with`/`sub_public_key_hex`, label
+  `mandate/v1`) — a key distinct from the release/decision-log key, same custody
+  and sovereign-mode fail-closed.
+- **Mapped to the autonomy dial.** A payment mandate is `FINANCIAL_LEGAL` risk →
+  `actions._min_level_to_auto` = 99 → it can **never** auto-execute at any
+  autonomy level (`mandate.can_auto_execute()` is structurally `False`). The
+  mandate is the artifact the human produces at the approval step, not a bypass.
+- **Governed by ABC.** The new `payment.mandate` contract (preconditions:
+  intent-containment, non-expiry, fresh nonce; governance: valid signature,
+  trusted construction; recovery `block`) refuses a spoofed, tampered, replayed,
+  expired, over-cap, or injection-constructed mandate via `enforce_commit`.
+- **Adversarial tests.** Spoofing (unsigned / wrong-key / tampered-field),
+  construction-injection (untrusted intent unsignable, over-cap / wrong-merchant
+  cart rejected), replay (nonce reuse + expiry), and escalation (never
+  auto-runs) — all covered.
+
+### Added — Best-first tree search (a governed runtime planner)
+
+A runtime planner that explores, scores, and backtracks over candidate action
+sequences — inference-time tree search (arXiv 2407.01476), complementary to the
+existing DAG orchestration and layerable onto the governed browser harness —
+with safety built into the engine rather than bolted on.
+
+- **New `olympus/treesearch.py`.** Generic best-first search over a duck-typed
+  `Problem` (expand / apply / evaluate / is_goal). The clock is injectable so
+  tests are deterministic with no real waiting.
+- **Exploration touches only READ-ONLY or REVERSIBLE steps.** The engine never
+  calls `apply()` for a side-effectful step — it cannot mutate the world while
+  planning (proven by a Problem whose `apply` raises if ever handed one).
+- **Side-effectful steps halt for approval.** Each is withheld on
+  `pending_approval` and can be handed to the approval spine via `to_approvals`,
+  which PREPARES actions (never executes). A plan that can only advance through a
+  side-effectful action ends `halted_for_approval`.
+- **Hard caps bound every search** — nodes, tokens, wall-clock, and depth
+  (`SearchCaps`, env-configurable via `OLYMPUS_TREESEARCH_MAX_*`), clamped to
+  strictly-positive minimums so a zero/negative cap can't disable a guard.
+  Whichever trips first stops the search and returns the best node so far.
+- **Fail-closed classification.** `classify_browser` maps perception verbs to
+  read-only and navigation to reversible; any unknown verb (or a classifier that
+  errors) is treated as side-effectful and withheld. Per-search outcome recorded
+  to feature-evolution telemetry.
+
+### Added — Sleep-time memory refinement (idle-time consolidation, earns its autonomy)
+
+A Letta-style **idle-time** loop that reviews a user's typed memory during
+downtime and proposes refinements (consolidating near-duplicate memories), so
+future recall is cleaner without a live turn paying for it — with every safety
+property made structural.
+
+- **New `olympus/sleeptime.py`.** Selection (which memories to consolidate) is
+  pure and deterministic; the two model-backed steps — generate the consolidated
+  memory, and verify it — are pluggable (tests run with no network), mirroring
+  `ace.py`.
+- **Reversible + versioned.** A rewrite never destroys its sources: they are
+  `supersede()`d (kept as history) and an **append-only snapshot** of their
+  pre-state is written. `olympus sleeptime revert <snapshot>` restores the
+  originals exactly and tombstones the rewrite.
+- **Aletheia-gated.** A consolidation is verified before it can commit — it may
+  assert nothing its sources don't support. An unverified rewrite is never
+  committed and **resets the trust streak**.
+- **Provenance/trust preserving.** A consolidated memory inherits the **union**
+  of its sources' provenance and their **strongest** sensitivity — it can never
+  launder a high-sensitivity fact into a normal one, nor drop provenance.
+- **Governed by ABC.** Every commit passes the new `memory.rewrite` behavioral
+  contract (preconditions `rewrite_preserves_provenance` +
+  `rewrite_preserves_trust`, governance `rewrite_verified`, recovery `block`), so
+  the three properties above are enforced at the contract layer too.
+- **Off by default; earns autonomy.** `OLYMPUS_SLEEPTIME` is off. Even enabled,
+  the loop runs **supervised** — proposing reversible diffs, committing nothing —
+  until it logs `SLEEPTIME_GRADUATION` (10) clean cycles; auto-apply additionally
+  requires `OLYMPUS_SLEEPTIME_AUTOAPPLY`. Wired into the heartbeat/hibernation
+  cadence (only wakes when enabled) and surfaced via `olympus sleeptime` +
+  the admin panel; per-cycle metrics recorded to feature-evolution telemetry.
+
+### Added — Agent Behavioral Contracts (runtime Design-by-Contract governance)
+
+Governance rules that were scattered across the action spine, the autonomy dial,
+capability separation, and Aletheia verification are now expressed as formal,
+declarative **behavioral contracts** — `C = (Preconditions, Invariants,
+Governance, Recovery)` — and enforced at runtime. Native implementation; no
+AgentAssert or any new hard dependency.
+
+- **New `olympus/behavioral_contracts.py`** + **`behavioral_contracts.yaml`.**
+  Contracts are authored in YAML and loaded at runtime with `yaml.safe_load`
+  when PyYAML is importable (as `sandbox.py` already does); an embedded mirror of
+  the same defaults is the fallback when it is not, so the guarantees never
+  vanish for want of a parser (a drift test pins the two equal). A contract that
+  names an unknown predicate or recovery **fails to load** — a governance rule
+  never passes vacuously.
+- **Every existing invariant is a contract.** `action_execution` (approval spine
+  + autonomy dial), `specialist_output` (output contract + Aletheia
+  verification), and `tool_loadout` (capability separation) ship as defaults,
+  each with pure, individually-tested predicates.
+- **Violations block and trigger Recovery.** `enforce()` raises
+  `ContractViolation` carrying the failing clause and a recovery directive —
+  `BLOCK` (fail closed), `HOLD` (revert to awaiting-approval), `REJECT` (drop the
+  output), or `DEGRADE` (record + allow). The `action_execution` contract is
+  wired at `actions._execute`, the single execution chokepoint: any path that
+  reaches it with an irreversible/financial action that never earned a *genuine*
+  human approval (a real `approved_at`, not a flipped flag) is blocked and the
+  action is **held** for the human — defense in depth behind the imperative
+  spine. `specialist_output` is wired at the orchestrator's output-acceptance
+  point.
+- **Fail-open on engine error, fail-closed on violation.** A bug inside a
+  predicate degrades to "ok" (the primary spine remains the real guard); only an
+  evaluated contract violation blocks. `OLYMPUS_ABC=off` is the kill switch, and
+  the enforcement mode is recorded into the run trace so replay reproduces it.
+  ABC status appears on the operator admin panel.
+
+### Added — ACE delta-context engine (evolving playbook replaces monolithic compaction)
+
+Conversation compaction stops re-summarizing the whole history from scratch and
+instead evolves a durable **playbook** by incremental *delta* — the pattern from
+*Agentic Context Engineering* (ACE, arXiv 2510.04618). This kills the two decay
+modes of lossy rewrites: **context collapse** (a summary of a summary of a
+summary, eroding turn over turn) and **brevity bias** (the summarizer quietly
+dropping whatever it deems least important).
+
+- **New `olympus/ace.py`** implements the three ACE roles. *Generator* proposes
+  candidate bullets from the slice of turns being folded away (the only
+  model-backed step; routed through the frozen `backend.complete_json`, so it
+  replays deterministically, and pluggable for tests). *Reflector* scores
+  existing bullets against the new slice (helpful++ / harmful++). *Curator*
+  deterministically merges the delta — sanitize, dedup, pin-preserving prune,
+  bounded size — in pure Python.
+- **Durable facts are pinned and never lost.** Bullets in the `facts`/`decisions`
+  sections auto-pin; pinning is sticky and prune-proof, so the non-pinned size
+  cap and the harmful-vote prune can never evict a pinned fact. Pinned facts
+  dedup by exact normalized-text identity (never fuzzy-merged), so two distinct
+  facts that differ only by a number or a short word are never conflated. A
+  50+ turn replay test proves zero loss of pinned facts across repeated
+  compaction under prune pressure and a process reload.
+- **`orchestrator._compress_history` runs delta-only by default.** It loads the
+  per-conversation playbook, evolves it, persists it (`memory/playbooks/`), and
+  renders it as the conversation-state block. The legacy monolithic summarizer
+  is retained behind `OLYMPUS_ACE=off` as a kill switch and as the automatic
+  fallback if the Generator fails.
+- **Playbook content enters prompts only as DATA.** The rendered block leaves
+  `ace.py` exclusively through `security.wrap_untrusted(source="playbook")`, and
+  every added bullet is first run through `security.sanitize_for_memory`, so an
+  injection retrieved from a web tool cannot smuggle an imperative into the
+  durable state block.
+- **Self-evolution aware.** The non-pinned size cap is a registered `evolve`
+  tunable (`ace.max_bullets`, hard ceiling 60, tuner may only narrow), and each
+  compaction records its delta counters (version, bullets, pinned, added,
+  helpful/harmful) to feature-evolution telemetry.
+
+### Added — Browser/operator absorbed into feature self-evolution (tighten-only)
+
+The operator and earned-autonomy line becomes a first-class citizen of
+`evolve.py`'s measure→auto-tune loop — self-monitoring *and* self-correcting
+toward caution, with no way to self-escalate.
+
+- **`operator.execute` now records OK / DEGRADED / FAIL** to feature evolution
+  (feature `operator`): a clean run is OK, a self-healed run is DEGRADED, and a
+  checkpoint hand-off / drift / missing-success-marker is FAIL (with detail). The
+  operator's execution health now appears on the `evolve` health board.
+- **Earned-autonomy policy knobs are now self-tuning — but TIGHTEN-ONLY.** Three
+  security-relevant tunables (`operator.establish_after`, `operator.cooldown_secs`,
+  `operator.daily_ceiling`) auto-adjust when the operator degrades: the trust bar
+  rises, the post-surprise cooldown lengthens, and the daily auto-run ceiling
+  drops — so a failing actuator *narrows its own freedom* with no human in the
+  loop. `trust.py` reads the live values, so a once-established site can be
+  demoted automatically until it re-earns trust.
+- **The tighten-only guarantee is structural.** A new `Tunable.tighten_only` flag,
+  validated at registration (the default must sit at the loose bound, `on_fail`
+  pointing at the tight bound), plus a defensive clamp in `review()`, make it
+  impossible for the reviewer to ever *loosen* a security knob — auto-tightening a
+  trust gate is safe (worst case: ask a human more often), auto-loosening never
+  is. Only a human widens it back, via **`olympus evolve reset [feature]`**
+  (new `evolve` action; restores tuned params to defaults, telemetry preserved).
+
+### Added — Earned per-domain autonomy (moat, self-evolving)
+
+Freedom without a blanket blank cheque: Olympus stops asking permission for
+safe, reversible actions on a site it has *already proven itself on*, while a
+human stays at the one gate that can't be walked back.
+
+- **`olympus/trust.py`** grades a **domain's** trust from Olympus's own witnessed
+  action history. Trust is **earned slowly** (an unbroken run of clean, governed
+  successes on that exact domain) and **snaps back fast** — a single surprise
+  (a failed run, a reversal/undo, a rejection, or a human-verification checkpoint,
+  all of which land as non-success in the immutable audit log) resets the domain
+  to zero. Tiers: `probation` → `trusted` (5 clean runs) → `established` (20).
+- The score is a **pure function of the append-only audit log** — there is no
+  mutable trust counter for a prompt-injected agent to inflate.
+- Two hard invariants keep it inside the moat: (1) earned trust can only ever
+  widen auto-execution for **reversible** actions — the approval gate on
+  irreversible / financial / legal actions is never touched (min-to-auto stays
+  99); (2) the boost is always **re-capped by the conversation's capability
+  profile**, so an ingesting or guest run can never be lifted by it.
+- Two runaway guards on top of the streak, both of which fall back to asking
+  (never fail an action): a **post-surprise cooling-off window** (a site that
+  just surprised us must settle for an hour before it can re-earn trust, so a
+  compromised session can't fail-then-rapidly-succeed to re-arm unattended
+  auto-run) and a **per-domain daily auto-run ceiling** (a proven site still
+  can't fire an unbounded number of unattended actions in a day). Both are
+  surfaced in the `operator_trust` report.
+- Wired through the spine: `actions.can_auto_execute` / `auto_or_hold` take an
+  optional earned level; `operator.run` computes the domain's effective level.
+- **`operator_trust`** (read-only tool) and `olympus earned-autonomy [on|off]`
+  (CLI) surface and toggle the ladder; the operator review folds in a hint about
+  which proven sites have earned auto-run. OFF by default — opt in per-user or
+  instance-wide with `OLYMPUS_EARNED_AUTONOMY=1`.
+
+### Added — feature self-evolution (`olympus/evolve.py`)
+
+- **Capabilities that measure and improve themselves.** Every instrumented
+  feature (MoA, goals, curator, /learn, browser_open) records success /
+  degraded / failure outcomes; a daily heartbeat review
+  (`OLYMPUS_FEATURE_EVOLUTION_EVERY`, also `olympus evolve review`) computes
+  per-feature health and **auto-tunes only registered, non-security
+  parameters within hard `[lo, hi]` guardrails, reversibly** — MoA narrows
+  its reference-model fan-out when the ensemble is flaky; the goal cadence
+  backs off for goals that keep failing to close; the curator prunes more
+  cautiously when the benchmark keeps reverting its prunes. Anything not
+  safely auto-tunable is *surfaced as a suggestion*, never imposed, and no
+  egress/auth/capability setting is reachable by the reviewer (enforced by
+  test). Health board on the admin panel and `olympus evolve status`.
+
+### Hardening
+
+- Goal text/contract are length-bounded on add; MoA telemetry-drives its own
+  fan-out; the curator's hard prune cap is now an absolute ceiling the tuner
+  can only narrow within.
+
+### Added — browser harness advances (beyond the open-web pattern's ceiling)
+
+- **In-page sub-resource egress enforcement.** The egress gate previously
+  covered only the top-level navigation; a loaded page's own sub-resource
+  requests (`fetch`/XHR, `<img>` beacons, tracking pixels) were ungated.
+  `Network.setBlockedURLs` (from the new `security.subresource_block_patterns`)
+  now blocks sub-resource requests to metadata hosts and IP-literal
+  private/loopback/link-local targets at the network layer, installed before
+  the first navigation. Honest limit documented: string-pattern matching, so
+  the navigation gate's resolve-time IP check still guards the top-level
+  document; this is defense-in-depth beneath it.
+- **Accessibility-tree perception** (`browser_read_ax`). Reads the page's AX
+  tree (role + accessible name per node) — far more resilient to CSS/DOM
+  redesigns than selectors and cheaper than a screenshot. Untrusted,
+  blocked-landing-guarded, node/label capped.
+- **Verifiable capture.** `browser_save_pdf` prints the current page to a PDF
+  in the workspace (durable evidence of a confirmation/receipt for the
+  approval + goal-verification loops; blocked-landing-guarded, path-confined).
+  `browser_console` returns the page's captured console messages (real
+  debugging signal; page-controlled text treated as untrusted).
+
+### Added — Verifiable attestation receipts (moat, outward-facing)
+
+The signed human-attestation becomes a shareable trust artifact.
+
+- **`operator_attest_receipt`** exports a human-cleared attestation as a portable,
+  human-readable **receipt** (facts + signer public key + signature; nothing
+  secret). **`operator_verify_receipt`** verifies a pasted receipt: signature
+  validity, and — with the expected pinned key (`OLYMPUS_ATTEST_PIN`) — whether
+  it was signed by the trusted signer. Tampering any field (domain, kind, time)
+  fails verification.
+- This is the check a **third party** runs, holding the key out of band — so
+  Olympus can *prove to someone else* that a human cleared a specific
+  verification on a specific site at a specific time. First-party crypto tools
+  (read-only; a receipt is crypto-verified, never executed).
+
+### Added — Governed cross-origin frame *acting* + hardening (moat)
+
+Completes the governed crossing with the write half.
+
+- **`browser_frame_act`** — click / type / select / press INSIDE a cross-origin
+  frame (by index), permitted **only if the frame's origin is an authorized
+  operator site** (same default-deny per-origin gate as `browser_frame_observe`).
+  Selector-based verbs only (the form interactions a payment/login frame needs);
+  typed text is never journaled; landed steps ARE journaled (with an "in frame"
+  marker) so a proven cross-frame flow can be learned like any other — the moat
+  self-evolves. Operator-gated, capability-separated.
+- **Hardened:** `list_frames` now lists only frames with a real, loaded
+  `http(s)` origin — an `about:blank` / `chrome-error://` / unloaded sub-frame
+  has no authorizable origin and is skipped, so it can't be mis-authorized or
+  driven. (Note: a fully *loaded* cross-origin frame's content can't be
+  demonstrated in a sandbox whose Private-Network-Access/proxy policy blocks
+  iframe loads; the OOPIF attach + sessionId routing the frame ops ride is
+  verified against real Chromium at the transport level.)
+
+### Added — Governed cross-origin frames (moat)
+
+The second boundary turned into a moat: reach *into* a cross-origin (third-party)
+iframe — but **only under per-origin authorization**, never casually.
+
+- **OOPIF-aware transport.** The event-driven `_RealTransport` now auto-attaches
+  to child frames (`Target.setAutoAttach` flatten) and tracks out-of-process
+  iframes by their CDP `sessionId`; commands route into a child frame session via
+  a new `session_id` on `send`. (Same-origin frames were already reached by the
+  deep walk; this adds the cross-origin ones behind the same-origin boundary.)
+- **Governed crossing** — `browser_frames` lists a page's cross-origin frames
+  with each origin's authorization status; `browser_frame_observe` perceives
+  inside one **only if its origin is an authorized operator site** (default
+  deny), reusing the existing authorization concept — so an injected ad/widget
+  frame is listed but never reached into. Both operator-gated, capability-
+  separated. The same-origin policy is crossed *only* under explicit per-origin
+  authorization, honored as a governed act rather than defeated.
+- Verified against real Chromium: a real cross-site iframe surfaces as an
+  out-of-process session and eval routes into it. Governance (list + per-origin
+  gate + refuse-by-default) covered offline.
+
+### Added — Attested Human Handoff: evolve + honest-automation policy (moat, part 4/4)
+
+The moat compounds and the stance is documented.
+
+- **Need it less over time.** `attest.burden_by_domain()` / `evolution_report()`
+  track how often each site required a human — folded into the operator review
+  cycle, which now surfaces the heaviest sites and prompts saving their sessions
+  (`browser_save_auth`), so a cleared 2FA is reused and the checkpoint rate
+  falls. Clear once, reuse many; every action stays attested.
+- **Honest automation, documented** (`docs/DESIGN_HANDOFF.md`): no CAPTCHA
+  solvers, no anti-bot / fingerprint evasion, no 2FA bypass — refused by design
+  and pinned by test; prefer official APIs, otherwise operate transparently.
+  Olympus is detectable and attested, and treats that as the trust feature.
+
+### Added — Attested Human Handoff: the handoff + operator wiring (moat, part 3/…)
+
+The loop closes: detect → hand off → verify cleared → attest.
+
+- **Operate is checkpoint-aware.** When a template step can't proceed,
+  `operator.execute` now first checks for a human-verification checkpoint; if one
+  is present it reports a **handoff** ("clear it in the browser, then I'll
+  continue and record a signed attestation") instead of mistaking it for
+  template drift — no spurious self-heal proposal, never a solve attempt.
+- **`browser_attest_human`** records the signed attestation *only after
+  re-checking the live page and confirming the checkpoint is gone* — the proof
+  is minted when the check is verifiably cleared, never on the model's say-so.
+  Operator-gated, capability-separated, bound to the credentialed session.
+- **`operator_attestations`** renders the signed audit trail (first-party read),
+  each entry shown with its verify status — proof a human was in the loop for
+  every verification.
+
+### Added — Attested Human Handoff: signed attestations (moat, part 2/…)
+
+The moat core: a cleared human-verification check becomes a **cryptographically
+signed attestation** (`olympus/attest.py`), signed with the same Ed25519
+root-of-trust that signs the decision log (`olympus.witness`).
+
+- `attest(kind, domain)` mints a signed record ("a human cleared a
+  `captcha`/`otp`/`step_up` verification on `domain` at `time`");
+  `verify_attestation` is tamper-evident (forging the domain or kind breaks the
+  signature) and **pin-bindable** (`OLYMPUS_ATTEST_PIN`) so a third-party
+  verifier holding the expected key out-of-band can check it. Fails closed
+  without the crypto backend — an unsigned "proof" is never minted.
+- Attestations persist to an append-only ledger (`attestations.jsonl`);
+  `latest_attestation(domain)` binds a later credentialed action to the
+  human-check that preceded it, and `summary()` renders the audit trail. This is
+  a proof a bypass-first agent structurally cannot produce — having defeated the
+  human, it has nothing to attest.
+
+### Added — Attested Human Handoff: checkpoint detection (moat, part 1/…)
+
+Olympus turns the CAPTCHA/2FA boundary into a moat by refusing to defeat it and
+instead *proving a human cleared it*. The first piece is **detection, not
+defeat**.
+
+- **`browser_checkpoint` / `detect_checkpoint()`** recognizes a human-verification
+  checkpoint on the current authorized page — CAPTCHA (reCAPTCHA / hCaptcha /
+  Cloudflare Turnstile), one-time-code / 2FA inputs, or a "verify it's you"
+  step-up interstitial — by stable markers, and returns **only a type enum**
+  (never page prose, never a solve attempt). Providers are matched by their own
+  frame fingerprints, so a cross-origin challenge frame is *seen* without
+  reaching into it (the origin boundary is honored, not defeated).
+- Governed as **credentialed perception**: operator-gated, domain-authorized,
+  capability-separated (in `ACTION_TOOLS`), refuses a blocked landing. The
+  "never solve/bypass" stance is pinned to code by a test over the detector
+  script. Subsequent parts wire the handoff and the witness-signed attestation.
+
+### Improved — browser harness: transport auto-reconnect
+
+A dropped WebSocket used to wedge the harness. `_RealTransport` now remembers its
+target socket and, on a transport-level failure (a genuine CDP error is *not*
+retried), transparently reconnects once and retries the call — serialized so
+concurrent callers reconnect a single time, and re-arming Page/Network events on
+the fresh connection. Verified against real Chromium (forcibly closing the socket
+mid-session; the next call reconnects to the same tab and the page state is
+intact).
+
+### Improved — browser harness: element- and full-page screenshots
+
+`browser_screenshot` was viewport-only; it now also captures **one element**
+(pass a `selector` — clipped to its bounding box) or the **whole scrollable
+page** (`full_page: true` — `captureBeyondViewport` over the full document
+dimensions). Same INGESTION governance (untrusted pixels, wrapped,
+capability-separated); no new tool. Verified against real Chromium (a 3000 px
+page's full-page capture is larger than the viewport, and a single element's is
+smaller).
+
+### Added — browser harness: download capture
+
+`set_download_dir` only *confined* where downloads land; now the harness can
+actually **capture** one. `browser_download` (session `download()`) points
+downloads at the workspace, optionally clicks a trigger, and waits for a **new,
+complete** file to appear (ignoring Chrome's `.crdownload` temp and requiring a
+stable size), returning its name. The file is untrusted external content, so it's
+read separately via path-confined `read_file`/`analyze_image` — never surfaced as
+page prose. Operator-gated (clicking is an action), workspace-confined, and
+capability-separated. Verified against real Chromium (a download link click lands
+the real file with correct contents in the sandbox).
+
+### Improved — browser harness: true network-idle
+
+`wait_idle` now uses **real** in-flight-request tracking from the CDP event
+stream (the reader thread counts `Network.requestWillBeSent` vs
+`loadingFinished`/`loadingFailed`), so "idle" means **zero open network
+requests** — not a resource-count guess. It waits for genuinely-pending fetches
+(XHR/fetch/beacon) to settle before proceeding, and falls back to the previous
+heuristic only when a transport can't report in-flight counts. Verified against
+real Chromium (a page holding a `fetch` open settles to zero, then proceeds).
+
+### Fixed — browser harness: JS dialogs no longer wedge the harness
+
+A page that pops `alert()`/`confirm()`/`prompt()` on a click used to **hang** the
+harness — the click's CDP call blocked until the dialog was handled, and nothing
+handled it.
+
+- **Event-driven transport.** `_RealTransport` now runs a single background
+  reader thread that demultiplexes the socket: id-matched replies wake their
+  waiting `send()`, while unsolicited CDP **events** are routed to handlers. This
+  is the foundation that also enables true network-idle and resilience.
+- **Auto-handled dialogs.** A `Page.javascriptDialogOpening` event is answered
+  automatically. **Safe default is dismiss** — an irreversible `confirm()` is
+  never auto-accepted; the operator opts into accept (optionally with prompt
+  text) via the new **`browser_dialog`** tool, which is operator-gated and
+  capability-separated. Verified against real Chromium (a `confirm()` click that
+  previously hung now completes, and honors dismiss vs. accept).
+
+### Added — browser harness: cross-site patterns + template demotion
+
+Two evolution mechanisms that make the skill store *converge* over time.
+
+- **Template demotion** (`operator.demote_drifted`, in the review cycle) — the
+  inverse of graduation. Each template now tracks its **own** run/success counts
+  (`mark_template_outcome`, recorded on every `browser_operate`); a graduated
+  template whose measured reliability craters is **demoted** — removed from the
+  profile — so the operator stops auto-running a dead recipe. Promotion is now
+  reversible, not a one-way ratchet.
+- **Cross-site generalization** (`browser_pattern`, `suggest_pattern`) — a proven
+  flow on one site can **seed** another: the tool returns the most reliable
+  learned flow matching a goal (e.g. "login", "checkout") as a **generalized
+  scaffold** — the op sequence and intent hints with **selectors omitted** (those
+  are site-specific and never presented as applying elsewhere). A new site
+  bootstraps from a proven shape instead of from scratch, then adapts and learns
+  it locally. First-party read; no cross-site selector is ever asserted.
+
+### Added — browser harness: gated self-heal retry
+
+Self-healing now *completes* more runs, without ever taking a risky guess.
+
+- When a **reversible (notable)** template step drifts and a confident
+  replacement is found, the operator retries the flow from the failed step with
+  the healed selector — continuing (not repeating) the completed steps — and the
+  run succeeds, marked `healed`. It still files the human-review proposal so the
+  fix can be made permanent.
+- An **irreversible/financial** step is **never** auto-retried on a guessed
+  selector — it stays propose-only, even when a candidate is present. The gate is
+  the template's risk class, so healing can't quietly escalate a risky action.
+
+### Added — browser harness: deterministic waits (`wait_for`)
+
+Instead of racing a fixed sleep on a dynamic page, the harness can wait for a
+specific condition:
+
+- **`wait_for`** — a new `browser_act` verb *and* template op that blocks until a
+  selector **appears** (or **disappears**, with `value='gone'` / `gone: true`),
+  bounded by a timeout, resolving deep (shadow/iframe). A template `wait_for`
+  that times out raises the typed `TemplateStepError`, so it feeds the same
+  self-healing path as any other unresolved step.
+- Verified against real Chromium (an element injected after 400 ms is waited for,
+  not missed).
+
+### Added — browser harness: saved auth state (session persistence)
+
+The operator can now remember a signed-in session and restore it, instead of
+logging in from scratch every run.
+
+- **`browser_save_auth` / `browser_restore_auth`** — capture an authorized
+  domain's cookies (CDP `Storage.getCookies`, filtered to the domain) into the
+  **Fernet-encrypted vault**, and re-inject them (`Network.setCookies`) to
+  restore the session. Cookies are session credentials, so both are credentialed
+  actuators: operator-gated, domain-authorized, stripped from any prose-ingesting
+  run, and never surfaced to the model.
+- **Self-evolving** — a successful `browser_login` now auto-saves the fresh
+  session (best-effort), so the operator's authenticated state persists across
+  runs without extra prompting; `forget_site` drops the saved session too.
+- Verified end-to-end against real Chromium (cookie set → read-back roundtrip)
+  and offline through the vault.
+
+### Improved — browser harness: rooted, unambiguous durable selectors
+
+The durable-selector fallback for a control with no id/name/aria-label used to be
+a bare `tag:nth-of-type(k)`, which can match the k-th sibling *anywhere* on the
+page — so a promoted template or self-heal candidate could point at the wrong
+element. `__olySel` now builds a **rooted path** up to the nearest ancestor with
+an id (e.g. `#box>div:nth-of-type(1)>button:nth-of-type(2)`), so it resolves
+uniquely. Verified against real Chromium (two ambiguous sibling groups resolve to
+exactly the intended node). Directly strengthens template graduation and
+self-healing, which both rely on durable selectors.
+
+### Added — browser harness: richer action verbs
+
+`browser_act` gains three interaction primitives, widening the flows the operator
+can drive:
+
+- **`rightclick`** (a.k.a. `contextmenu`) — opens context menus, by index/selector
+  or x/y.
+- **`drag`** — drag the source element onto a target selector (passed in `value`)
+  via HTML5 drag events with a shared `DataTransfer` — reorderable lists, kanban,
+  sliders.
+- **Modifier chords in `press`** — `Control+a`, `Shift+Tab`, `Meta+c`, etc., parsed
+  into the dispatched `KeyboardEvent`.
+
+All resolve deep (shadow/iframe), stay on the credentialed-actuator side
+(capability-separated), and are verified against real Chromium (right-click and
+Ctrl+A fire genuine DOM events).
+
+### Fixed — browser harness: real-transport upload and multi-tab
+
+Two capabilities that the offline `FakeTransport` accepted but real Chrome
+rejected — now wired correctly and verified against headless Chromium.
+
+- **File upload** — `DOM.setFileInputFiles` operates on a node *handle*, not a
+  selector, so `upload()` now resolves the input to a CDP `objectId`
+  (`_resolve_object_id`, deep — works inside shadow roots / same-origin iframes)
+  and attaches by handle. Confirmed the file actually lands on the input against
+  real Chrome; confinement + operator gating unchanged.
+- **Multi-tab** — `switch_tab()` now genuinely *drives* the tab it switches to:
+  `_RealTransport.reattach()` re-binds the transport to the target tab's
+  WebSocket (resolved via the DevTools HTTP base), so subsequent
+  actions/observations run in the new tab's context — not just `activateTarget`.
+  Confirmed evals run in the switched-to tab against real Chrome.
+
+The real-Chromium smoke test now covers both.
+
+### Added — browser harness: real-Chromium smoke test (ground truth)
+
+`tests/test_browser_real.py` drives an actual headless Chromium over CDP through
+the same `BrowserSession` the offline suite exercises with `FakeTransport` — the
+ground truth the doubles stand in for, catching transport-level gaps (node
+resolution, target attach, live network) the fakes can't. Opt-in and
+self-skipping (`OLYMPUS_BROWSER_REAL=1` + a discoverable Chromium), so default CI
+stays green. Confirms open/observe/act-by-index, **shadow-DOM reach**, fill/select,
+real PNG screenshots, and tab listing against a live browser.
+
+### Added — browser harness: multi-tab, uploads, network-idle waits
+
+Governed plumbing that widens the range of flows the operator can automate.
+
+- **Multi-tab** — `browser_tabs` lists the browser's open page tabs (bounded
+  id/title/url) and `browser_switch_tab` activates one by index. Both are
+  operator-gated credentialed actuators; after a switch, `browser_act`/
+  `browser_observe` re-check the newly-current domain's authorization, so
+  switching can never point the actuator at an unauthorized logged-in tab.
+- **File upload** — `browser_upload` attaches a **workspace-confined** file to a
+  file input on the current authorized page. Uploading a local file is data
+  egress, so it's operator-gated (current domain authorized) and the path can
+  never escape the sandbox (`_confine`).
+- **Downloads confined** — `set_download_dir()` directs any browser download
+  into the workspace, so a site can't drop a file outside the sandbox.
+- **Network-idle wait** — `wait_idle()` (and the new `wait_idle` template op)
+  waits for the page to load *and* its resource count to hold steady for a short
+  quiet window — a dependency-free heuristic for dynamic pages whose content
+  arrives after `readyState=complete`. Bounded and best-effort.
+
+### Added — browser harness: visual perception (screenshot + describe)
+
+For canvas/chart/image-heavy pages that a text map can't capture, the harness can
+now *look* at the page.
+
+- **`browser_screenshot`.** Captures the current page (CDP
+  `Page.captureScreenshot`) and describes it with the vision model
+  (`media.analyze_image_data`, a new in-memory path — no workspace file needed),
+  optionally answering a question about it.
+- **Governed as a reader, not an actuator.** The pixels are untrusted external
+  content (text-in-image is still injection), so `browser_screenshot` is an
+  INGESTION tool: its description is wrapped, and capability separation strips it
+  from any run that also holds an actuator. It refuses a blocked landing (never
+  captures internal content) and caps the decoded image size. Given to the
+  reader (Argus), never the operator.
+
+### Added — browser harness: self-healing templates
+
+When a site is redesigned, a template no longer fails silently — it diagnoses the
+drift and proposes the fix.
+
+- **Drift is detected, not swallowed.** `run_template` now raises a typed
+  `TemplateStepError` when a step can't resolve — including a failed *click*,
+  which previously passed unnoticed.
+- **Re-observe and locate the moved control.** On a step failure during
+  `browser_operate`, the operator re-observes the page and finds the control
+  that most likely *is* the moved one, matching the failed selector's intent
+  (exact slug → substring containment → trigram similarity) against the current
+  elements' labels and durable selectors.
+- **Propose, never self-rewrite.** A candidate becomes a human-reviewed
+  proposal (`site_template_record` to enact) — Olympus never auto-edits a
+  credentialed template, so self-healing can't be turned into an injection
+  primitive. The run still reports an honest FAILED, now with the likely fix
+  attached, and the outcome feeds the reliability score that prunes dead
+  templates.
+
+### Added — browser harness: proven skills auto-graduate into templates
+
+The evolution loop now closes fully: improvise → learn → prove → **formalize**.
+
+- **Structured recipe.** As the harness acts, it captures a structured twin of
+  its journal — `{op, selector, value?}` steps with **durable selectors**
+  (id → `[name]` → `[aria-label]` → nth-of-type path via a new `__olySel`
+  helper), never the typed text. `browser_learn` persists this recipe on the
+  learned skill.
+- **Auto-graduation.** A METIS review pass (`operator.promote_ready`, folded
+  into `operator.review_profiles`) graduates a learned skill into a declarative
+  action template once it has been tried enough times (`_PROMOTE_MIN_RUNS`) and
+  lands reliably enough (`_PROMOTE_RELIABILITY`). The generated template is
+  guarded by an `assert` on its first control so it fails fast if the page
+  drifted, and it rides the existing governed `browser_operate` path — auto-run
+  within scope for notable risk, approval for anything higher. Graduation
+  **formalizes** a proven flow without widening the trust boundary.
+- **Idempotent & bounded.** A skill whose template already exists is skipped;
+  recipes are capped and credential-free by construction.
+
+### Added — browser harness depth: shadow DOM + same-origin iframes
+
+The harness now perceives and acts on controls that modern web apps hide behind
+component boundaries, not just the top-level document.
+
+- **Deep perception & resolution.** `observe()` deep-walks the light DOM plus
+  every **open shadow root** and **same-origin iframe**, stamping controls found
+  anywhere in that tree; a shared `__olyq` deep-query helper backs every
+  `act`/`read`/`exists`/`fill`/template resolution, so an index stamped inside a
+  shadow root or frame still resolves. Most componentized sites that previously
+  showed a near-empty map now expose their real controls.
+- **Boundary honored, not defeated.** Cross-origin frames throw on access and are
+  skipped — Olympus works within the same-origin policy rather than trying to
+  bypass it.
+- **Hardened.** The shadow/iframe recursion is depth-bounded
+  (`_DEEP_MAX_DEPTH`) so a pathological or hostile page can't hang the walk or
+  overflow the stack; observe output stays capped at `_OBSERVE_MAX` with labels
+  capped at `_LABEL_MAX`.
+- **Evolves for free.** Because the perceive→act loop now reaches these controls,
+  `browser_learn` captures shadow/iframe flows into the same reliability-scored
+  skill store — deeper reach, same governance.
+
+### Added — native browser harness (perceive → act, governed)
+
+Olympus grows its **own** browser-agent working style, so no external browser
+harness has to be plugged in. The harness perceives an arbitrary page as an
+indexed map of its interactive elements and acts by index — the browser-use
+working style — but built the Olympus way: capability-separated, operator-gated,
+and wired to evolve.
+
+- **Indexed perception** (`browser.BrowserSession.observe`, `browser_observe`
+  tool) — a single sandboxed `Runtime.evaluate` pass finds the visible,
+  enabled interactive elements (links, buttons, inputs, selects, ARIA
+  roles, `contenteditable`, …), stamps each with `data-olympus-idx`, and
+  returns a numbered map (`[2] button "Sign in"`). The model acts by index
+  instead of guessing CSS selectors.
+- **Richer action set** (`browser.BrowserSession.act`, `browser_act`) — now
+  resolves an element by `index` from the map and supports click, type,
+  scroll, press (keys), select (options), hover, and back, over the same
+  audited CDP ledger.
+- **Governed like an actuator, not a reader.** `browser_observe` maps a
+  possibly logged-in tab, so it is classified in `ACTION_TOOLS`: stripped from
+  any prose-ingesting run (capability separation), gated to an
+  operator-enabled, authorized domain, and its element labels are hard-capped
+  so a map row can't smuggle a paragraph of instructions. The operator
+  (HERMES) holds the full `observe → act` loop; ingesting readers (Argus)
+  hold neither half. Threat-modeled and count-bound in `docs/THREAT_MODEL.md`.
+- **It evolves** (`browser_learn`) — the session keeps a bounded, first-party
+  journal of the act steps that actually landed (never the typed text, so
+  credentials never enter the store). When a task succeeds, HERMES crystallizes
+  that proven flow into a reliability-scored skill with `browser_learn`. From
+  there it rides the existing evolution machinery: future runs reuse it,
+  `mark_outcome` refines its measured score, Metis prunes it if it goes flaky,
+  and Prometheus proposes profile fixes — so the harness gets better on the
+  sites you actually use, without a human writing a selector script.
+
+### Changed — Olympus assumes no model (vendor-neutral by default)
+
+Olympus no longer ships a baked-in default model. Previously an Anthropic
+setup with no `OLYMPUS_MODEL` silently ran `claude-opus-4-8`, and the replay
+gate silently used `claude-sonnet-4-6`; both assumptions are gone. The user
+chooses a model explicitly — `olympus setup` (which lists your key's real
+models), `OLYMPUS_MODEL`, or per-request BYOK — and a missing choice now fails
+fast with an actionable message (`config.require_model`), is flagged by
+`olympus doctor`, and reads as `models: down` in `olympus health`.
+**Migration:** if you relied on the implicit default, set it explicitly once:
+`olympus config set OLYMPUS_MODEL claude-opus-4-8` (or any model you prefer).
+`OLYMPUS_GATE_MODEL` is now purely optional: unset, the replay gate runs on
+your configured model.
+
+### Added — workspace, operator, and gateway (Odysseus/Hermes/OpenClaw study)
+
+A three-phase build extending Olympus toward the archetypes it was closest to.
+
+- **Image editing** (`media.edit_image`, `edit_image` on Peitho/Iris,
+  `olympus gallery edit`, an Edit button in the `🖼 gallery` panel) — AI-edit an
+  existing workspace image by prompt, saving the result as a **new** file (the
+  original is never overwritten). Reads the source path-confined (image types
+  only, size-capped) and writes only to the confined workspace; degrades
+  gracefully without a media key. Uses a dependency-free multipart POST to the
+  images-edit endpoint — no new heavy image library.
+- **Runtime health reporting** (`olympus/health.py`, `olympus health`,
+  `/api/health`) — a live "what's degraded right now" view of the moving parts
+  (models, memory, gateway channels, search, push, connections), each reported
+  **ok / degraded / down**. Distinct from `doctor` (setup readiness): `health`
+  is pollable, `olympus health` exits non-zero when anything is down, and an
+  absent optional piece is *degraded*, not a failure, so a minimal install still
+  reads healthy.
+- **ntfy push channel** (`olympus/ntfy.py`) — a lightweight publish-to-a-topic
+  delivery target for scheduled jobs and proactive alerts, alongside
+  Telegram/Discord/Slack/Signal. Configure with `NTFY_TOPIC` (+ optional
+  `NTFY_SERVER` for self-hosted and `NTFY_TOKEN` for a protected topic); wired
+  into the scheduler (`--to ntfy`), the gateway fan-out, and the heartbeat, and
+  reported by `olympus doctor`. Best-effort — a push failure never breaks the
+  job that produced the result.
+- **MCP server — workspace reads** (`olympus/mcp_server.py`, `olympus mcp-serve`)
+  — the existing MCP server now also exposes three **read-only** workspace tools
+  to any MCP client (Claude Desktop, IDEs, other agents): `olympus_search_documents`,
+  `olympus_list_todos`, and `olympus_recall_memory`, scoped to `OLYMPUS_MCP_USER`
+  (default the shared namespace). No write or actuator ever crosses the boundary.
+- **Email spam triage** (`olympus/spamtriage.py`, `triage_inbox` on Angelos,
+  `olympus triage`) — a read-only heuristic classifier that sorts the inbox into
+  important / promotions / spam / other with a reason for each. No model call
+  (works even where egress is locked down), never deletes or moves anything, and
+  message content stays untrusted (the tool is wrapped like other inbox reads).
+- **Notes / todos / reminders** (`olympus/todos.py`, `olympus todo`, web UI
+  "Your list" in the `📅 agenda` panel) — a small per-user checklist store:
+  notes (kept scraps), todos (tickable), and reminders (todos with a due time).
+  Open items and overdue reminders surface in the agenda; `list_todos` /
+  `add_todo` / `complete_todo` on Chronos are first-party and ungated (the
+  user's own data, no external side effect).
+
+- **Documents workspace** (`olympus/documents.py`, `olympus documents`, web UI
+  `📄 docs` panel) — a per-user Markdown store the assistant can read and, with
+  approval, write. The agent's `write_document` tool stages every save through
+  the approval spine (reversible, never silent); the user editing in the web UI
+  saves directly. `list_documents`/`read_document`/`write_document` on Peitho.
+- **Personal-document RAG** (`olympus/docrag.py`, `search_documents` on Peitho)
+  — retrieval over the user's own documents, grounded into the synthesis
+  prompt. Semantic (cosine over embeddings) when an embeddings endpoint is
+  configured, lexical overlap otherwise; a per-user index re-embeds only the
+  documents whose mtime changed. First-party content (grounded like memory, not
+  wrapped as untrusted).
+- **Gallery** (`olympus/gallery.py`, `olympus gallery`, web UI `🖼 gallery`
+  panel) — surfaces images generated into the confined workspace. Serving is
+  path-confined (traversal refused via `_confine`), image-types only, and
+  size-capped; the panel lazy-loads thumbnails and opens full images in a tab.
+- **Agenda** (`_agenda_view` + `/api/agenda`, `olympus agenda`, web UI
+  `📅 agenda` panel) — one view of the user's scheduled tasks (from the
+  natural-language scheduler, filtered to the principal plus shared jobs) and
+  their upcoming calendar events. Calendar reads are read-only, scoped to the
+  connected Google account, and degrade to "not connected" instead of erroring
+  when no account is linked or egress is blocked.
+- **Blind multi-model compare** (`olympus/compare.py`, `olympus compare`, web UI
+  `⚖ compare` panel) — the same prompt against every configured model with
+  labels shuffled, revealed only after you pick, and picks accumulated into a
+  per-user tally so preference reflects output rather than brand. Each model is
+  called with no cross-member failover (`backend.complete_text_once`), so a
+  failing model shows its own error under its own label instead of being
+  silently answered by another. Needs ≥2 models (via `OLYMPUS_MODELS`).
+- **Hermes operator, made usable** — `olympus operator`
+  (status/enable/authorize/forget/list/history), a built-in site-profile
+  catalog (`olympus/profiles/`), a plain-English review surface in CLI and chat
+  (`operator_status`/`operator_history`), and `docs/OPERATOR_GUIDE.md`. Built on
+  the existing governed operator; no bypass of its gates.
+- **Unified gateway daemon** (`olympus gateway`) — runs every configured chat
+  channel (Telegram/Discord/Slack/Signal/WhatsApp/email/webhook) in one
+  supervised process with auto-restart + backoff and a cross-process health
+  file (`gateway --status`). `docs/GATEWAY.md`.
+
+### Added — capabilities studied from Odysseus
+
+A batch distilled from analyzing the Odysseus self-hosted AI workspace
+(`pewdiepie-archdaemon/odysseus`) and adopting its best agent ideas the
+Olympus-native way — verified, gated, headless-first. See the release-tracking
+analysis for the full feature comparison.
+
+- **Deep Research pipeline** (`olympus/research.py`, `olympus research`) — an
+  IterResearch-style engine: plan sub-questions → iterative search/read/extract
+  loop the model drives → cited markdown report. Pool-aware staging (reasoning
+  plans/synthesizes, general extracts, verify checks the draft against the
+  evidence), a never-laundered verification-notes section, date-grounded
+  queries, low-quality-domain and duplicate-query filtering, and every fetched
+  page wrapped untrusted through the SSRF/rebinding-pinned path. On the
+  Anthropic backend, search/fetch run through Anthropic's **server-side** web
+  tools — so Deep Research reaches the open web even where the host's outbound
+  egress is locked down to a proxy allowlist — falling back to the client-side
+  provider layer for local/non-Anthropic models.
+- **Code-navigation tools for Hephaestus** — `grep_files` (bounded regex
+  search), `glob_files` (pathlib-style `**/`, newest-first), and `read_file`
+  line-range slicing, plus `edit_file`: exact-string editing staged for
+  explicit approval (always-hold — never auto-executes, since it rides on the
+  always-ingesting Hephaestus) whose preview *is* the unified diff. A
+  case-insensitive sensitive-file deny-list (`.env`, keys, `.ssh`/`.aws`, …)
+  guards read/grep/glob/edit.
+- **Per-turn dynamic tool selection** (`olympus/toolselect.py`) — ranks a
+  specialist's loadout against the current task and drops the least-relevant
+  tail of oversized loadouts, saving prompt tokens each round. Runs strictly
+  after every security filter (it can only drop, never re-admit a stripped
+  tool); BASE/server-side/`prepare_action`/`ask_user` are never dropped.
+  `OLYMPUS_TOOL_SELECT_MAX` tunes the cap (set low for small-context models).
+- **Teacher escalation** (`olympus/teacher.py`) — an Athena-ordered rework
+  reruns on the strongest pool member for that role, and the fix is distilled
+  into a provisional, benchmark-gated, specialist-scoped skill so the weaker
+  model learns. No-op with a single-member pool or an already-strongest
+  specialist. `OLYMPUS_TEACHER_ESCALATION=0` disables.
+- **Pluggable web-search providers** (`olympus/websearch.py`) — SearXNG, Brave,
+  Tavily, Serper, and Google PSE behind one seam with DDG as the keyless
+  fallback; ordered try-through, 429 cooldown, and a shared result cache.
+  Endpoints ride the sovereign egress choke. The `web_search` tool and Deep
+  Research both use it.
+- **Skill import from public GitHub URLs** (`skillpack.import_url`) — direct
+  SKILL.md links, GitHub blob links, and whole repo/tree bundles (read in
+  memory, never extracted to disk). Remote imports are always provisional and
+  pass the injection/credential scan before the benchmark gate.
+- **`ask_user` tool** (`olympus/interaction.py`) — specialists can ask a
+  focused multiple-choice question mid-run through a thread-local provider;
+  interactive surfaces prompt the terminal, headless runs proceed with a stated
+  assumption instead of blocking. Available to every specialist and safe under
+  capability separation.
+- **Style-matched email drafting** (`olympus/emailstyle.py`) — Angelos distills
+  the user's writing voice from sent mail (quotes/signatures stripped, bodies
+  wrapped untrusted, guide scrubbed for injection) and drafts replies in it; a
+  `refresh_email_style` tool rebuilds on demand.
+
+### Security
+
+- **DNS-rebinding defense for outbound fetches** — `security.resolve_pinned_ip`
+  validates every resolved address and returns the exact IP to dial;
+  `tools._PinnedHTTP(S)Connection` connect to that pinned IP (HTTPS keeps
+  SNI/cert checks on the hostname), closing the validate-then-reconnect window
+  the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
+  delivery use the pinned opener. (Adapted from Odysseus fix #704; the
+  case-insensitive sensitive-file deny-list mirrors their #5097.)
 
 ## [0.24.0] — 2026-07-03
 

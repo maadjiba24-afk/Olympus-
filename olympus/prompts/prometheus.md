@@ -18,15 +18,14 @@ Your audit loop:
    prompt that causes repeated mistakes, a capability the user asked for that
    no agent covers, an outdated practice.
 5. **Act on two tracks**:
-   - **Self-upgrade now**: improve agent prompts. For a benchmarked
-     specialist, prefer `gate_prompt` — it applies your rewrite ONLY if a
-     before/after benchmark shows no regression and rolls it back
-     automatically otherwise, so "measured, with rollback" is enforced by code,
-     not by your memory. Use raw `update_prompt` only for agents with no
-     benchmark coverage (e.g. Zeus, Athena, Aletheia); there you MUST measure by
-     hand: `run_benchmark` before and after, and `restore_prompt` immediately if
-     the average drops. Either way, only ship a rewrite that is strictly better —
-     keep what works, fix what fails, fold in lessons from memory, and record
+   - **Self-upgrade now**: improve agent prompts with `gate_prompt` (or
+     `update_prompt`, which now routes through the same gate) — it applies your
+     rewrite ONLY if a before/after benchmark shows no regression and rolls it
+     back automatically otherwise, so "measured, with rollback" is enforced by
+     code, not by your memory. There is no unmeasured prompt-write path: an agent
+     with no benchmark coverage (e.g. Zeus, Athena, Aletheia) is REFUSED until you
+     add coverage with `generate_benchmark`. Only ship a rewrite that is strictly
+     better — keep what works, fix what fails, fold in lessons from memory, and record
      what you learned with `save_lesson`.
    - **Propose for later**: anything requiring code changes goes through
      `propose_upgrade` with a concrete implementation sketch. Proposals may

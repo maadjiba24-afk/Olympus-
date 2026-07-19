@@ -117,7 +117,15 @@ def curate(settings: config.Settings | None = None,
     except Exception as err:
         return f"Curator: grading failed ({err}); library untouched."
 
-    prunes = [v for v in verdicts if v["verdict"] == "prune"][:MAX_PRUNE_PER_RUN]
+    # Self-tuned caution: if prunes keep getting reverted by the benchmark
+    # gate (a sign the grader is over-eager), the reviewer lowers this cap.
+    prune_cap = MAX_PRUNE_PER_RUN
+    try:                                # the tuner only NARROWS within the cap
+        from . import evolve
+        prune_cap = min(prune_cap, int(evolve.current("curator", "prune_per_run")))
+    except Exception:
+        pass
+    prunes = [v for v in verdicts if v["verdict"] == "prune"][:max(1, prune_cap)]
     consolidations = [v for v in verdicts if v["verdict"] == "consolidate"]
     by_name = {s["name"]: s for s in library}
 
@@ -169,4 +177,13 @@ def curate(settings: config.Settings | None = None,
         parts.append(f"{len(consolidations)} consolidation(s) queued for Metis")
     report = "Curator — " + " · ".join(parts)
     memory.save("reports", "skill curation", report)
+    # Telemetry: a prune the gate reverted ('kept … regress') is a degraded
+    # run (the grader wanted to remove a skill that actually helps); this
+    # tightens prune_per_run over time.
+    try:
+        from . import evolve
+        reverted = any("regress" in k for k in kept)
+        evolve.record("curator", evolve.DEGRADED if reverted else evolve.OK)
+    except Exception:
+        pass
     return report

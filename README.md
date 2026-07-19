@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->62<!--/cap--> agent tools, and <!--cap:commands-->80<!--/cap-->
+<!--cap:tools-->101<!--/cap--> agent tools, and <!--cap:commands-->111<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -19,7 +19,11 @@ what's actually built.
 **Headless-first and lightweight.** Olympus installs with three pure-Python
 dependencies and runs anywhere Python does — a server, a droplet, WSL, a CI job,
 an SSH session — with no bundled browser or media stack and no OAuth dance to
-get started (the optional operator harness can attach your own Chrome). Web access is server-side (with a client-side fallback),
+get started (the optional operator harness can attach your own Chrome). Optional
+backends (Postgres store, the browser CDP transport, sandbox config) are lazily
+imported and declared as extras — install only what you use, e.g.
+`pip install olympus-council[all]`; the three deps above are the whole required
+footprint. Web access is server-side (with a client-side fallback),
 the sandbox is confined and approval-gated, and every command is screened by a
 [security gate](docs/THREAT_MODEL.md) before it can run. What you get for that
 small footprint is a *verified* council (every answer fact-checked before you
@@ -162,8 +166,9 @@ from that registry):
   3. Prometheus reads recurring corrections + Olympus's own source and rewrites
      agent prompts. For benchmarked specialists it uses `gate_prompt`, which
      applies a rewrite only if a before/after benchmark shows no regression and
-     rolls it back automatically otherwise (raw `update_prompt` — auto-backup,
-     measure-by-hand — remains for un-benchmarked agents), and files
+     rolls it back automatically otherwise (`update_prompt` now routes through
+     the same gate — there is no unmeasured prompt-write path; an un-benchmarked
+     agent is refused until coverage is added), and files
      `propose_upgrade` notes for changes that need code.
 - **Evolves with you** — beyond the shared loops above, Olympus adapts to *each
   person*: every few exchanges it distills your own history (facts, 👍/👎,
@@ -505,11 +510,34 @@ once the run completes; use `/api/status` or a non-streaming request to get it),
 and `/api/status` reports the signing posture. **Honesty about trust:** with no secret
 signing seed configured, runs are signed by a *public default key* — verification
 still passes but is loudly labeled `DEV / UNVERIFIED` (integrity, not
-authenticity), and `olympus verify --run … --require-production` rejects it. Set a
-real `OLYMPUS_SIGNING_SEED` (HSM/KMS recommended) and pin the derived key to make
-it a genuine guarantee. Step-by-step for a skeptical evaluator:
+authenticity), and `olympus verify --run … --require-production` rejects it.
+Generate a real seed with `olympus keygen` (a 0600 seed file for
+`OLYMPUS_SIGNING_SEED_FILE` — systemd/Docker-secrets friendly) and pin the
+derived key to make it a genuine guarantee; in sovereign mode a configured seed
+is *required* — a sovereign instance refuses to boot or sign on the forgeable
+default. Step-by-step for a skeptical evaluator:
 [docs/VERIFY.md](docs/VERIFY.md); key custody and rotation:
 [docs/SIGNING.md](docs/SIGNING.md).
+
+### Learned routing (from real outcomes, evidence-gated)
+
+Model selection defaults to a static keyword heuristic. Olympus **passively
+records** which specialist/model handled which kind of task and whether it
+succeeded (from the verify/review verdict and your 👍/👎), and ships an
+**evidence-gated learned selector** that can prefer the model with the best
+*recorded* success rate. It is **off by default** and triple-gated: it engages
+only with `OLYMPUS_LEARNED_ROUTING=1`, only once the data gate is met from real
+(non-synthetic) usage, and only where a specific (specialist, model) pairing has
+enough samples on **both** candidates — anything less falls back to the
+heuristic, byte-for-byte. Check the live status with:
+
+```bash
+olympus routing-stats     # counts, the data-gate verdict, and the selector's evidence table
+```
+
+What's logged, the outcome-signal precedence, the privacy posture, the Wilson
+lower-bound ranking, and every activation gate are in
+[docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
 
 ### Connectors: MCP servers & custom plugins
 
@@ -767,14 +795,24 @@ Olympus instance feasible without burning your own key.
 1. Message **@BotFather** on Telegram → `/newbot` → copy the token.
 2. `export TELEGRAM_BOT_TOKEN=123456:ABC...`
 3. `python -m olympus telegram`
+4. Pair your chat: run `olympus pair telegram` on the machine, then send the
+   bot `/pair <code>`. DMs are **untrusted by default** — strangers get a
+   polite refusal, not your council.
+
+While Olympus works on a request it shows a live progress message (edited in
+place, `/steer <note>` to nudge mid-run), quotes the message it is answering,
+and if a turn leaves a command held by the approval gate, the bot tells you
+in-chat — reply `/approve <id>` or `/deny <id>` right there.
 
 Optional environment variables:
 
-- `TELEGRAM_ALLOWED_CHAT_IDS=12345,67890` — restrict who can use the bot
-  (open to everyone by default).
+- `TELEGRAM_DM_POLICY=pairing|allowlist|open` — who may talk (default
+  `pairing`; `open` restores the legacy anyone-can-talk behavior).
+- `TELEGRAM_ALLOWED_CHAT_IDS=12345,67890` — always-allowed chat ids.
 - `TELEGRAM_NOTIFY_CHAT_ID=12345` — the heartbeat proactively pushes
   opportunity scans and self-audit reports to this chat, so Olympus reaches
-  *you* instead of waiting to be asked.
+  *you* instead of waiting to be asked (this chat is always allowed).
+- `TELEGRAM_PROGRESS=0` — disable the live progress edits.
 
 ### WhatsApp (official Cloud API)
 

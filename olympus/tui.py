@@ -504,7 +504,7 @@ def status_line(model: str, secs: float, *, fast: bool = False,
 
 def run(pool=None, conversation_id: str = "cli-default") -> None:
     import time
-    from . import config, orchestrator, usage
+    from . import config, interaction, orchestrator, usage
     pool = pool or config.ModelPool.from_env()
     _install_readline()
     print(welcome_banner(pool))
@@ -517,6 +517,9 @@ def run(pool=None, conversation_id: str = "cli-default") -> None:
         if config.progress_allows(m):
             print(f"  {m}")
 
+    # Interactive session → a specialist's ask_user prompts the terminal.
+    # Installed before the Olympus is built so it captures the provider.
+    interaction.set_provider(interaction.cli_provider())
     bot = orchestrator.Olympus(report=report,
                                user="cli", conversation_id=conversation_id,
                                pool=pool)

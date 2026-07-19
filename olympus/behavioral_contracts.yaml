@@ -1,0 +1,222 @@
+# Agent Behavioral Contracts — the default, always-on governance contracts.
+#
+# Each contract is C = (Preconditions, Invariants, Governance, Recovery):
+#   preconditions  must hold BEFORE the operation runs
+#   invariants     must hold ABOUT the operation
+#   governance     the autonomy/approval policy binding
+#   recovery       what to do on violation: block | hold | reject | degrade
+#
+# Clause entries are names of predicates registered in behavioral_contracts.py.
+# A contract that names an unknown predicate fails to load (never passes
+# vacuously). Operators may add or override contracts by placing a file with the
+# same shape at MEMORY_DIR/behavioral_contracts.yaml.
+#
+# NOTE: keep this file in exact sync with _DEFAULT_CONTRACTS in
+# behavioral_contracts.py — test_abc pins them equal.
+
+contracts:
+  action_execution:
+    operation: action.execute
+    recovery: hold
+    description: >-
+      Any world-affecting action, at the single execution chokepoint, wrapping
+      the approval spine + autonomy dial.
+    preconditions:
+      - scope_granted
+      - approval_present_if_irreversible
+    invariants:
+      - risk_class_known
+    governance:
+      - autonomy_sufficient
+      - within_autonomy_cap
+
+  specialist_output:
+    operation: specialist.output
+    recovery: reject
+    description: >-
+      A specialist's final output before the orchestrator accepts it — output
+      contract + Aletheia verification.
+    preconditions: []
+    invariants:
+      - output_contract_satisfied
+    governance:
+      - aletheia_verified
+
+  tool_loadout:
+    operation: run.loadout
+    recovery: block
+    description: >-
+      Capability separation: an ingesting run carries no action tools.
+    preconditions:
+      - no_action_tool_in_ingesting_run
+    invariants: []
+    governance: []
+
+  memory_rewrite:
+    operation: memory.rewrite
+    recovery: block
+    description: >-
+      A sleep-time memory rewrite before commit: preserves provenance and trust
+      labels, and is Aletheia-verified.
+    preconditions:
+      - rewrite_preserves_provenance
+      - rewrite_preserves_trust
+    invariants: []
+    governance:
+      - rewrite_verified
+      - rewrite_confident
+
+  payment_mandate:
+    operation: payment.mandate
+    recovery: block
+    description: >-
+      An AP2 payment mandate before it could back a payment: contained within
+      its intent, unexpired, replay-free, validly signed, and
+      trusted-constructed.
+    preconditions:
+      - mandate_intent_contained
+      - mandate_not_expired
+      - mandate_fresh_nonce
+    invariants: []
+    governance:
+      - mandate_signature_valid
+      - mandate_trusted_construction
+      - mandate_cosignature_valid
+      - mandate_capability_within_bound
+
+  capability_grant:
+    operation: capability.exercise
+    recovery: block
+    description: >-
+      A signed capability token before its grant is exercised: validly signed by
+      our own capability subkey, unexpired, unrevoked, replay-free, and the
+      requested scope/risk is within the token's bound — any escalation is
+      refused.
+    preconditions:
+      - grant_not_expired
+      - grant_not_revoked
+      - grant_fresh_nonce
+      - grant_scope_within_bound
+    invariants: []
+    governance:
+      - grant_signature_valid
+
+  shell_command:
+    operation: command.run
+    recovery: block
+    description: >-
+      A shell command at the run chokepoint: the cmdguard hard-stops (fork bomb,
+      disk wipe, poweroff, chmod 000 /, ...) are a declared invariant — a
+      DENY-classified command is refused even if a human or policy approved it.
+    preconditions: []
+    invariants:
+      - command_not_denied
+    governance: []
+
+  network_egress:
+    operation: net.fetch
+    recovery: block
+    description: >-
+      An outbound network fetch: the SSRF/egress hard-stops (loopback,
+      link-local, cloud metadata, non-allowlisted host under sovereign mode) are
+      a declared invariant.
+    preconditions: []
+    invariants:
+      - url_not_blocked
+    governance: []
+
+  reflection_cycle:
+    operation: reflection.cycle
+    recovery: hold
+    description: >-
+      The idle-time sleep-time reflection cycle (prompt + memory targets): held
+      (deferred, not run) once the daily budget is reached, so unattended
+      self-improvement can never run up the bill.
+    preconditions:
+      - reflection_within_budget
+    invariants: []
+    governance: []
+
+  memory_commit:
+    operation: memory.commit
+    recovery: hold
+    description: >-
+      A durable memory being auto-committed to the store: its content is
+      injection-sanitized and it is not high-sensitivity (those are held for the
+      user). Recovery HOLDs the candidate for approval instead of committing.
+    preconditions:
+      - memory_not_sensitive_autocommit
+    invariants:
+      - memory_content_sanitized
+    governance: []
+
+  skill_import:
+    operation: skill.import
+    recovery: block
+    description: >-
+      A skill imported into the library: it passed the security scan (injection
+      markers, embedded credentials) — refused, not sanitized, on a hit.
+    preconditions:
+      - skill_scan_clean
+    invariants: []
+    governance: []
+
+  goal_completion:
+    operation: goal.complete
+    recovery: block
+    description: >-
+      A standing goal marked done: only against concrete evidence at the
+      confidence floor — an assertion of completion without evidence is refused.
+    preconditions: []
+    invariants:
+      - goal_evidence_present
+    governance: []
+
+  scaffold_propose:
+    operation: scaffold.propose
+    recovery: block
+    description: >-
+      A propose-only scaffold-evolution candidate before it is archived as a
+      proposal: targets a non-security, allowlisted module, compiles, and passed
+      the benchmark. There is no auto-apply path.
+    preconditions:
+      - scaffold_target_evolvable
+    invariants:
+      - scaffold_compiles
+      - scaffold_benchmark_passed
+    governance: []
+
+  computer_use:
+    operation: computer.use
+    recovery: block
+    description: >-
+      An OS-level computer-use actuation (screenshot / mouse / keyboard /
+      launch): the capability must be enabled and an actuator installed, a
+      launched command must not be cmdguard-DENY, and typed text must carry no
+      exfiltrated secret — else the actuation is refused, fail closed.
+    preconditions:
+      - computer_use_enabled
+      - computer_actuator_ready
+    invariants:
+      - command_not_denied
+      - no_secret_typed
+    governance:
+      - computer_action_approved
+
+  payment_live:
+    operation: payment.live
+    recovery: block
+    description: >-
+      A LIVE (real-money) charge at the last gate before the adapter: the
+      operator flag is on, a registered live adapter is installed, the user
+      co-signing key is pinned out-of-band, co-signature enforcement was not
+      waived, and the amount is within the live caps — else refused, fail
+      closed. This build ships inert: no adapter exists in the repository.
+    preconditions:
+      - payment_live_enabled
+      - payment_live_adapter_ready
+      - payment_user_key_pinned
+    invariants:
+      - payment_live_within_caps
+    governance:
+      - payment_live_cosign_enforced

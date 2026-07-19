@@ -34,8 +34,16 @@ def _provider_checks() -> list[Check]:
     pool = config.ModelPool.from_env()
     primary = pool.primary()
     if firstrun.configured():
-        model = primary.model or "(provider default)"
-        out.append(Check("provider", OK, f"{primary.provider} / {model}"))
+        model = primary.model or config.default_model()
+        if primary.provider in ("anthropic", "openai") and not model:
+            out.append(Check("provider", FAIL,
+                             f"{primary.provider}: no model chosen — Olympus "
+                             "doesn't assume one; run `olympus setup` or set "
+                             "OLYMPUS_MODEL"))
+        else:
+            out.append(Check("provider", OK,
+                             f"{primary.provider} / "
+                             f"{model or '(tool login default)'}"))
     else:
         out.append(Check("provider", FAIL,
                          "no key/endpoint — run `olympus setup`"))
@@ -104,10 +112,21 @@ def _optional_checks() -> list[Check]:
         or os.environ.get("DISCORD_PUBLIC_KEY"),
         "slack": os.environ.get("SLACK_BOT_TOKEN"),
         "signal": os.environ.get("SIGNAL_CLI_REST_URL"),
+        "ntfy": os.environ.get("NTFY_TOPIC"),
     }
     live = [n for n, v in gateways.items() if v]
     out.append(Check("gateways", OK if live else WARN,
                      ", ".join(live) if live else "none connected (optional)"))
+    # Web-search providers: DuckDuckGo always works keyless; report any keyed
+    # or self-hosted providers the operator has configured so they're
+    # discoverable (see docs/ODYSSEUS_TRACKING.md §7).
+    from . import websearch
+    providers = websearch.configured()
+    extra = [p for p in providers if p != "ddg"]
+    out.append(Check("web search", OK,
+                     (f"{', '.join(providers)} (order)" if extra
+                      else "DuckDuckGo (keyless; add SearXNG/Brave/Tavily/"
+                           "Serper/PSE for better results)")))
     return out
 
 

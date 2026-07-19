@@ -81,6 +81,10 @@ def test_notable_template_auto_runs_within_scope(monkeypatch):
 
 def test_irreversible_template_always_waits_for_approval(monkeypatch):
     _authorize(monkeypatch)                                # scope + L4 autonomy
+    # This test is about the approval hold, so opt into the (default-off)
+    # high-risk template gate; the default-off behavior itself is covered in
+    # test_operator_hardening.py.
+    monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     _buy_template(risk="irreversible")
     browser.set_transport_factory(
@@ -104,6 +108,94 @@ def test_operate_blocked_without_scope(monkeypatch):
     out = tools._browser_operate("shop.com", "buy")
     # L4 autonomy but no scope → cannot auto-execute → held for approval
     assert "Awaiting your approval" in out
+
+
+def test_operate_hands_off_on_a_human_checkpoint(monkeypatch):
+    # A blocking human-verification checkpoint must be reported as a handoff —
+    # never solved, and never mistaken for template drift (no self-heal proposal).
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")            # asserts #buy, which is absent below
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        checkpoint={"type": "captcha", "detail": "recaptcha"}))
+    user = memory.current_user()
+    action = operator.run(user, "shop.com", "buy", {})
+    assert action.status == actions.FAILED
+    assert "human-verification checkpoint" in (action.error or "").lower()
+    assert "captcha" in (action.error or "").lower()
+
+
+# --- earned per-domain autonomy: a proven site auto-runs safe actions ----
+
+def _seed_clean_runs(user, domain, n):
+    """Write `n` EXECUTED governed runs into the audit trail (earns trust)."""
+    import uuid
+    for i in range(n):
+        actions._save(actions.Action(
+            id=uuid.uuid4().hex[:12], user=memory.safe_id(user),
+            type="browser_operate", title="op", payload={"domain": domain},
+            risk_class=actions.NOTABLE, reversible=True,
+            status=actions.EXECUTED, created_at=100 + i))
+
+
+def test_earned_autonomy_auto_runs_reversible_on_a_proven_site(monkeypatch):
+    from olympus import trust
+    # A cautious user at the DEFAULT autonomy (L1 prepare) — no blanket standing
+    # authority anywhere.
+    _authorize(monkeypatch, autonomy=actions.L1_PREPARE)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    user = memory.current_user()
+    # Without earned autonomy, a notable template holds for approval at L1.
+    held = operator.run(user, "shop.com", "buy", {})
+    assert held.status == actions.PREPARED
+    # Opt in and let the site prove itself over a long clean run…
+    trust.set_enabled(user, True)
+    _seed_clean_runs(user, "shop.com", 20)                 # → established tier
+    ran = operator.run(user, "shop.com", "buy", {})
+    assert ran.status == actions.EXECUTED                  # earned freedom, no ask
+
+
+def test_earned_autonomy_never_lifts_an_irreversible_template(monkeypatch):
+    from olympus import trust
+    _authorize(monkeypatch, autonomy=actions.L1_PREPARE)
+    monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="irreversible")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    user = memory.current_user()
+    trust.set_enabled(user, True)
+    _seed_clean_runs(user, "shop.com", 30)                 # maximally trusted
+    action = operator.run(user, "shop.com", "buy", {})
+    # However trusted the site, an irreversible step still waits for a human.
+    assert action.status == actions.PREPARED
+    assert action.risk_class == actions.IRREVERSIBLE
+
+
+def test_operate_feeds_feature_evolution(monkeypatch):
+    from olympus import evolve
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(
+        lambda: browser.FakeTransport(present=["#buy", "#done"]))
+    tools._browser_operate("shop.com", "buy")
+    assert evolve.health("operator")["operator"]["ok_rate"] == 1.0    # OK recorded
+
+
+def test_checkpoint_records_operator_failure(monkeypatch):
+    from olympus import evolve
+    _authorize(monkeypatch)
+    monkeypatch.setattr(security, "url_block_reason", lambda u: None)
+    _buy_template(risk="notable")
+    browser.set_transport_factory(lambda: browser.FakeTransport(
+        checkpoint={"type": "captcha", "detail": "recaptcha"}))
+    operator.run(memory.current_user(), "shop.com", "buy", {})
+    h = evolve.health("operator")["operator"]
+    assert h["fail_rate"] == 1.0 and "checkpoint:captcha" in h["last_failure"]
 
 
 # --- Phase 3: always-on jobs through the heartbeat ------------------------

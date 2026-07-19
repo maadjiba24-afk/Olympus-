@@ -140,22 +140,34 @@ def _received(msg: dict) -> str:
     return _header(msg, "Date")
 
 
-def list_inbox(query: str = "in:inbox", max_results: int = 10) -> str:
-    """Summarize recent inbox messages (date, sender, subject, snippet)."""
+def messages_meta(query: str = "in:inbox", max_results: int = 10) -> list[dict]:
+    """Structured metadata for recent messages matching `query`:
+    [{id, date, from, subject, snippet}]. Read-only. Used by the inbox summary
+    and by spam triage."""
     q = urllib.parse.urlencode({"q": query, "maxResults": max_results})
     listing = _request("GET", f"/messages?{q}")
     ids = [m["id"] for m in listing.get("messages", [])]
-    if not ids:
-        return "Inbox query returned no messages."
     out = []
     for mid in ids:
         m = _request("GET", f"/messages/{mid}?format=metadata"
                             "&metadataHeaders=From&metadataHeaders=Subject"
                             "&metadataHeaders=Date")
-        out.append(f"[{mid}] {_received(m)} — From: {_header(m, 'From')}\n"
-                   f"  Subject: {_header(m, 'Subject')}\n"
-                   f"  {m.get('snippet', '')[:200]}")
-    return "\n\n".join(out)
+        out.append({"id": mid, "date": _received(m),
+                    "from": _header(m, "From"),
+                    "subject": _header(m, "Subject"),
+                    "snippet": m.get("snippet", "")[:300]})
+    return out
+
+
+def list_inbox(query: str = "in:inbox", max_results: int = 10) -> str:
+    """Summarize recent inbox messages (date, sender, subject, snippet)."""
+    msgs = messages_meta(query, max_results)
+    if not msgs:
+        return "Inbox query returned no messages."
+    return "\n\n".join(
+        f"[{m['id']}] {m['date']} — From: {m['from']}\n"
+        f"  Subject: {m['subject']}\n  {m['snippet'][:200]}"
+        for m in msgs)
 
 
 def _plain_body(m: dict) -> str:
@@ -215,6 +227,29 @@ def list_unread(max_results: int = 10) -> list[dict]:
             "body": _plain_body(m)[:4000],
             "authenticated": _authenticated(m),
         })
+    return out
+
+
+def list_sent_bodies(max_results: int = 12) -> list[str]:
+    """Plain-text bodies of the user's recent SENT mail — the raw material a
+    writing-style profile is distilled from. Best-effort; empty on any error."""
+    q = urllib.parse.urlencode({"q": "in:sent", "maxResults": max_results})
+    try:
+        listing = _request("GET", f"/messages?{q}")
+    except Exception:
+        return []
+    out: list[str] = []
+    for ref in listing.get("messages", []):
+        mid = ref.get("id")
+        if not mid:
+            continue
+        try:
+            m = _request("GET", f"/messages/{mid}?format=full")
+            body = _plain_body(m).strip()
+        except Exception:
+            continue
+        if body:
+            out.append(body[:2000])
     return out
 
 

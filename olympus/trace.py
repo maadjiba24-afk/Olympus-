@@ -164,6 +164,14 @@ class Trace:
             pass
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
+        # Opt-in OTLP export of the run's STRUCTURE (no content) — best-effort,
+        # off unless OLYMPUS_OTLP_ENDPOINT is set, skipped under replay.
+        try:
+            from . import otel
+            if otel.enabled():
+                otel.export_run(record)
+        except Exception:
+            pass
 
 
 # --- reading & comparing recorded runs (used by `olympus replay`/`explain`) --

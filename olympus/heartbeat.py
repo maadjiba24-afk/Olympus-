@@ -27,6 +27,27 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     now = now or time.time()
     log: list[str] = []
 
+    # Upgrade/restart handoff: the previous process journaled what it was in
+    # the middle of. Report it once — each subsystem (gateway inflight,
+    # scheduler interrupted-run resume) re-runs its own work.
+    try:
+        from . import selfupdate
+        handoff = selfupdate.take_handoff()
+        if handoff:
+            pending = handoff.get("pending", {})
+            carried = (len(pending.get("inflight", []))
+                       + len(pending.get("jobs_running", [])))
+            note = (f"⚡ Olympus restarted (was "
+                    f"v{handoff.get('from_version', '?')}).")
+            if carried:
+                note += (f" {carried} in-flight task(s) carried across the "
+                         "restart and will resume.")
+            log.append(note)
+            if carried:
+                gateway.notify_all(note)
+    except Exception:
+        log.append("Handoff check failed:\n" + traceback.format_exc())
+
     # User-defined scheduled tasks (natural-language cron). Checked every tick;
     # each job has its own interval, so this is cheap when nothing is due.
     try:
@@ -43,6 +64,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Operator: " + line)
     except Exception:
         log.append("Operator failed:\n" + traceback.format_exc())
+
+    # Per-agent heartbeats: compact autonomous wake-ups. Each beat has its own
+    # cadence and stays quiet (HB_OK) unless something needs attention.
+    try:
+        from . import agentbeat
+        for line in agentbeat.run_due(now):
+            log.append("Heartbeats: " + line)
+    except Exception:
+        log.append("Heartbeats failed:\n" + traceback.format_exc())
 
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
@@ -96,6 +126,37 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now
 
+    if _due(state, "dreaming", config.DREAM_EVERY, now):
+        try:
+            from . import wiki
+            # Quiet when there was nothing to consolidate — a nightly job
+            # must not turn the heartbeat log into a metronome.
+            log += ["Wiki: " + line for line in wiki.dream_all(now)]
+        except Exception:
+            log.append("Dreaming failed:\n" + traceback.format_exc())
+        state["dreaming"] = now
+
+    if config.sleeptime_enabled() and _due(state, "sleeptime",
+                                            config.SLEEPTIME_EVERY, now):
+        # The unified sleep-time reflection cycle: BOTH targets (memory
+        # consolidation + prompt reflection) under budget caps and the
+        # reflection.cycle Plane-1 contract (Plane 3.4).
+        try:
+            from . import reflection
+            log += reflection.sleep_cycle().get("log", [])
+        except Exception:
+            log.append("Sleep-time reflection failed:\n" + traceback.format_exc())
+        state["sleeptime"] = now
+
+    if config.live_eval_enabled() and _due(state, "live_eval",
+                                           config.LIVE_EVAL_EVERY, now):
+        try:
+            from . import liveeval
+            log += liveeval.run()
+        except Exception:
+            log.append("Live-eval failed:\n" + traceback.format_exc())
+        state["live_eval"] = now
+
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
         try:
@@ -128,6 +189,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         except Exception:
             log.append("Curator failed:\n" + traceback.format_exc())
         state["skill_curation"] = now
+
+    from . import evolve
+    if _due(state, "feature_evolution", config.FEATURE_EVOLUTION_EVERY, now):
+        try:
+            log.append(evolve.review())
+        except Exception:
+            log.append("Feature-evolution review failed:\n"
+                       + traceback.format_exc())
+        state["feature_evolution"] = now
 
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")

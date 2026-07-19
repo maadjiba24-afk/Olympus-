@@ -63,6 +63,49 @@ def _atomic_write_json(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
+# In-process per-user session totals (since process start). The per-day
+# ledger on disk stays the durable record; this powers per-reply and
+# per-session footers without a disk read per turn. Worker threads set their
+# user context (memory.set_user), so parallel specialist calls attribute here.
+_SESSION: dict[str, dict] = {}
+
+
+def _bump_session(user: str, in_tokens: int, out_tokens: int,
+                  cost: float) -> None:
+    row = _SESSION.setdefault(
+        user, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+    row["calls"] += 1
+    row["in"] += in_tokens
+    row["out"] += out_tokens
+    row["cost"] = round(row["cost"] + cost, 6)
+
+
+def session_totals(user: str) -> dict:
+    """This user's model usage since the process started (a copy)."""
+    with _TOTALS_LOCK:
+        return dict(_SESSION.get(memory.safe_id(user),
+                                 {"calls": 0, "in": 0, "out": 0, "cost": 0.0}))
+
+
+def delta(before: dict, after: dict) -> dict:
+    return {k: round(after.get(k, 0) - before.get(k, 0), 6)
+            for k in ("calls", "in", "out", "cost")}
+
+
+def _fmt_tokens(n: float) -> str:
+    n = int(n)
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def footer(reply_delta: dict, user: str) -> str:
+    """One-line cost footer for a chat reply: this reply, this session, today."""
+    session = session_totals(user)
+    return (f"⏱ {_fmt_tokens(reply_delta.get('in', 0))} in / "
+            f"{_fmt_tokens(reply_delta.get('out', 0))} out · "
+            f"~${reply_delta.get('cost', 0.0):.4f} this reply · "
+            f"${session['cost']:.2f} session · ${today_spend():.2f} today")
+
+
 def record(model: str, in_tokens: int, out_tokens: int) -> None:
     """Append usage to the per-day ledger, attributed to the active user."""
     cost = estimate_cost(model, in_tokens, out_tokens)
@@ -71,6 +114,7 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with _TOTALS_LOCK:
+        _bump_session(user, in_tokens, out_tokens, cost)
         ledger = {}
         if path.exists():
             try:

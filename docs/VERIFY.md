@@ -21,9 +21,11 @@ in us required.
 olympus verify --run <RUN_ID>
 ```
 
-A run id is emitted in the `X-Olympus-Run-Id` response header of a
-`/v1/chat/completions` answer, and `/api/status` tells you the signing posture
-of the instance. Example PASS:
+Every `/v1/chat/completions` answer carries two audit headers:
+`X-Olympus-Run-Id` (the run id to verify — non-streaming responses only, since a
+stream's id isn't known until it finishes) and `X-Olympus-Audit`
+(`signed-production` or `signed-dev`, the signing posture of the run). `/api/status`
+reports the same posture for the instance. Example PASS:
 
 ```
 Run e3ea59c9c7ae — verification (production signing posture)

@@ -70,6 +70,7 @@ def test_pool_falls_back_when_none_usable():
 
 def test_from_env_reads_extra_models(monkeypatch):
     monkeypatch.setenv("OLYMPUS_PROVIDER", "anthropic")
+    monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8")   # chosen, not assumed
     monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-key")
     monkeypatch.setenv("OLYMPUS_MODELS",
                        '[{"provider":"openai","model":"gpt-4o","api_key":"oa"}]')
@@ -102,4 +103,4 @@ def test_default_model_reads_env_live(monkeypatch):
     monkeypatch.setenv("OLYMPUS_MODEL", "claude-opus-4-8-custom")
     assert config.default_model() == "claude-opus-4-8-custom"
     monkeypatch.delenv("OLYMPUS_MODEL", raising=False)
-    assert config.default_model() == "claude-opus-4-8"
+    assert config.default_model() == ""     # no baked-in vendor default

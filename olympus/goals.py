@@ -99,7 +99,8 @@ def goals_every() -> int:
 # --- lifecycle -------------------------------------------------------------
 
 def add(user: str, text: str, contract: str = "") -> str:
-    text = (text or "").strip()
+    text = (text or "").strip()[:1000]          # bound: goal text can't bloat
+    contract = (contract or "").strip()[:1000]
     if not text:
         return "Usage: goal add <what should stay true / get done>"
     goals = _load()
@@ -107,7 +108,7 @@ def add(user: str, text: str, contract: str = "") -> str:
         return (f"There are already {MAX_ACTIVE} active goals — finish or "
                 "drop one first (`goal list`, `goal drop <id>`).")
     g = Goal(id=uuid.uuid4().hex[:8], user=user, text=text,
-             contract=(contract or "").strip() or DEFAULT_CONTRACT,
+             contract=contract or DEFAULT_CONTRACT,
              created=time.time())
     goals.append(g)
     _save(goals)
@@ -214,6 +215,11 @@ def judge(g: Goal, judge_fn: Callable[..., dict] | None = None) -> dict:
     `judge_fn(system, messages, schema)` is injectable for tests; production
     uses the pool's verify-role model (the hallucination-controller seat)."""
     if judge_fn is None:
+        from . import firstrun
+        if not firstrun.configured():
+            return {"done": False, "confidence": 0.0, "evidence": "",
+                    "missing": "no model configured — set a provider key to "
+                               "judge goal completion"}
         from . import backend
         pool = config.ModelPool.from_env()
 
@@ -264,6 +270,7 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
         report = runner(g.user, prompt)
     except Exception as err:
         note_progress(g.id, f"[cycle failed: {err}]")
+        _telemetry(FAIL, str(err)[:120])
         return f"Goal {g.id}: work cycle failed ({str(err)[:120]})"
     note_progress(g.id, report)
 
@@ -273,10 +280,25 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
     for stored in goals:
         if stored.id == g.id:
             stored.checks += 1
-            if verdict["done"] and verdict["confidence"] >= CONFIDENCE_FLOOR:
+            # Behavioral contract at the completion chokepoint (defense in
+            # depth): a goal may close ONLY against concrete evidence at the
+            # confidence floor — an evidence-free "done" is refused.
+            from . import behavioral_contracts as _abc
+            close_ok = True
+            try:
+                _abc.enforce("goal.complete",
+                             {"done": bool(verdict["done"]),
+                              "evidence": verdict.get("evidence", ""),
+                              "confidence": verdict.get("confidence", 0),
+                              "floor": CONFIDENCE_FLOOR})
+            except _abc.ContractViolation:
+                close_ok = False
+            if (close_ok and verdict["done"]
+                    and verdict["confidence"] >= CONFIDENCE_FLOOR):
                 stored.status = "done"
                 stored.evidence = verdict["evidence"][:2000]
                 _save(goals)
+                _telemetry(OK)                    # closed on evidence: a win
                 return (f"Goal {g.id} COMPLETE on evidence: "
                         f"{verdict['evidence'][:160]}")
             if stored.checks >= MAX_CHECKS:
@@ -284,12 +306,27 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
                 stored.evidence = (f"stalled after {MAX_CHECKS} cycles; "
                                    f"still missing: {verdict['missing']}")[:2000]
                 _save(goals)
+                _telemetry(FAIL, f"stalled: {verdict['missing'][:80]}")
                 return (f"Goal {g.id} STALLED after {MAX_CHECKS} cycles "
                         f"(missing: {verdict['missing'][:120]})")
             _save(goals)
+            _telemetry(DEGRADED)                  # progress but not yet done
             return (f"Goal {g.id}: progress logged; not done yet "
                     f"(missing: {verdict['missing'][:120]})")
     return f"Goal {g.id}: vanished mid-cycle"
+
+
+OK, FAIL, DEGRADED = "ok", "fail", "degraded"
+
+
+def _telemetry(outcome: str, detail: str = "") -> None:
+    """Feed the goal cycle's outcome into the self-evolution loop (best-effort;
+    the check_backoff tunable widens the cadence for goals that keep failing)."""
+    try:
+        from . import evolve
+        evolve.record("goals", outcome, detail)
+    except Exception:
+        pass
 
 
 def next_due_in(now: float | None = None) -> float | None:
@@ -316,6 +353,13 @@ def run_due(now: float | None = None,
     interval = goals_every()
     if interval <= 0:
         return []
+    # Self-tuned backoff: when goal cycles keep failing to close, the reviewer
+    # widens the cadence (up to 4x) so a doomed goal stops burning cycles.
+    try:
+        from . import evolve
+        interval = int(interval * evolve.current("goals", "check_backoff"))
+    except Exception:
+        pass
     now = now or time.time()
     out = []
     for g in active():
