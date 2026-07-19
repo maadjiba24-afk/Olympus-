@@ -93,11 +93,12 @@ def _mk_bot(monkeypatch, verify_results):
     calls = {"verify": 0, "dispatch": [], "review": 0}
     monkeypatch.setattr(bot, "_route", _delegate_route)
     monkeypatch.setattr(
-        bot, "_plan", lambda brief, keys: [
+        bot, "_plan", lambda brief, keys, **kw: [
             {"id": "s0", "specialist": "hermes", "task": "t",
              "depends_on": []}])
     monkeypatch.setattr(
-        bot, "_dispatch_dag", lambda steps, tr: [("hermes", "first output")])
+        bot, "_dispatch_dag",
+        lambda steps, tr, **kw: [("hermes", "first output")])
 
     def fake_verify(brief, outputs):
         i = min(calls["verify"], len(verify_results) - 1)
@@ -109,7 +110,7 @@ def _mk_bot(monkeypatch, verify_results):
 
     monkeypatch.setattr(bot, "_verify", fake_verify)
 
-    def fake_dispatch(assignments, tr, overrides=None):
+    def fake_dispatch(assignments, tr, overrides=None, retry_index=0):
         calls["dispatch"].append([a["specialist"] for a in assignments])
         return [("hermes", "reworked output")]
 

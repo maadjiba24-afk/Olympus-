@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Deterministic difficulty pre-scorer (ADR 0005, Phase 3)
+
+- New `olympus/effortscore.py`: a pure, deterministic scorer — (risk class,
+  prompt length, tool count, retry index, needs_verification) → effort tier,
+  zero model calls, zero I/O. Thresholds are plain constants, deliberately
+  not evolve-tunable.
+- The static `effort=` literals in routing, planning, synthesis, and every
+  specialist run are replaced with scored values; the per-specialist
+  `effort` field is now a FLOOR the scorer can raise but never lower below
+  ("high" remains synthesis's floor).
+- A rework runs at the top tier (`retry_index >= 1` → high) on BOTH rework
+  paths (Athena quality retry and the Aletheia answer.verify forced rework).
+  On a single-model pool — where `teacher_for` has no stronger member to
+  swap in — this same-model-more-compute bump IS the escalation, so
+  "thinks harder on hard calls" now exists on the default single-key
+  deployment (traced as `teacher.effort_escalated`).
+
 ### Added — Cross-process safety on shared mutable state (ADR 0005, Phase 2)
 
 - New `olympus/proclock.py`: `fcntl.flock` lockfile wrapper — cross-process

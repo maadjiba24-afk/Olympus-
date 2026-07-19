@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
-               contracts, contrib, i18n, llm, memory, playbooks, profile,
-               recall, relgraph, replaystore, steering,
+               contracts, contrib, effortscore, i18n, llm, memory, playbooks,
+               profile, recall, relgraph, replaystore, steering,
                trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
@@ -242,8 +242,13 @@ class Olympus:
                   + roster() + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
-            return backend.complete_json(self._light(), system,
-                                         messages, ROUTE_SCHEMA, effort="medium")
+            # Scored, floored at medium (ADR 0005): a long, complex message
+            # raises the routing decision itself to high.
+            return backend.complete_json(
+                self._light(), system, messages, ROUTE_SCHEMA,
+                effort=effortscore.at_least(
+                    "medium",
+                    effortscore.score(prompt_chars=len(user_message))))
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
         except json.JSONDecodeError:
@@ -270,7 +275,8 @@ class Olympus:
 
     # -- stage 2: Athena dispatch ------------------------------------------
 
-    def _plan(self, brief: str, keys: list[str]) -> list[dict[str, Any]]:
+    def _plan(self, brief: str, keys: list[str],
+              needs_verification: bool = True) -> list[dict[str, Any]]:
         """Plan a dependency graph of specialist steps.
 
         Each step has an id, a specialist, a self-contained task, and
@@ -325,7 +331,11 @@ class Olympus:
         try:
             steps = backend.complete_json(
                 self._light(), system,
-                [{"role": "user", "content": prompt}], schema, effort="medium",
+                [{"role": "user", "content": prompt}], schema,
+                effort=effortscore.at_least(
+                    "medium",
+                    effortscore.score(prompt_chars=len(brief),
+                                      needs_verification=needs_verification)),
             )["steps"]
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
@@ -463,7 +473,7 @@ class Olympus:
                               "with evidence from your tools.")}
                     for k, _ in outputs]
             with tr.span("verify_rework"):
-                redone = dict(self._dispatch(redo, tr))
+                redone = dict(self._dispatch(redo, tr, retry_index=1))
             outputs2 = [(k, redone.get(k, v)) for k, v in outputs]
             try:
                 with tr.span("reverify_enforced"):
@@ -524,13 +534,17 @@ class Olympus:
             self.pool.for_role("reasoning"),
             system,
             self.history + [{"role": "user", "content": prompt}],
-            effort="high",
+            # "high" is synthesis's FLOOR (ADR 0005): the user-facing compose
+            # never runs below the top tier, whatever the scorer says.
+            effort=effortscore.at_least("high", effortscore.score()),
         )
 
     # -- public entry point --------------------------------------------------
 
     def _run_one(self, key: str, task: str, tr: "trace_mod.Trace",
-                 settings_override: config.Settings | None = None) -> str:
+                 settings_override: config.Settings | None = None,
+                 retry_index: int = 0,
+                 needs_verification: bool = False) -> str:
         """Run a single specialist with failure isolation, on its best model
         (or on `settings_override` when the caller escalates — the teacher
         path routes a failed rework to the strongest pool member).
@@ -558,10 +572,23 @@ class Olympus:
         ask_prev = interaction.set_provider(self._ask_provider)
         try:
             try:
-                output, tool_calls = SPECIALISTS[key].run_counted(
+                # Scored effort with the specialist's own tier as the FLOOR
+                # (ADR 0005): hard signals — a long task, a wide loadout, a
+                # verification-bound run, and above all a rework — raise the
+                # tier; nothing ever lowers it below the specialist's floor.
+                # Deterministic proxies only (no I/O, no model calls).
+                spec = SPECIALISTS[key]
+                effort = effortscore.at_least(
+                    spec.effort,
+                    effortscore.score(
+                        prompt_chars=len(task),
+                        tool_count=len(tools.BASE_TOOLS) + len(spec.extra_tools),
+                        retry_index=retry_index,
+                        needs_verification=needs_verification))
+                output, tool_calls = spec.run_counted(
                     task,
                     settings=settings_override or self.pool.for_specialist(key),
-                    effort=SPECIALISTS[key].effort)
+                    effort=effort)
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
             except Exception as err:
@@ -607,9 +634,13 @@ class Olympus:
     def _dispatch(self, assignments: list[dict[str, str]],
                   tr: "trace_mod.Trace",
                   overrides: dict[str, config.Settings] | None = None,
+                  retry_index: int = 0,
                   ) -> list[tuple[str, str]]:
         """Run flat (independent) assignments in parallel. Used by rework.
-        `overrides` maps specialist key → escalated Settings (teacher path)."""
+        `overrides` maps specialist key → escalated Settings (teacher path);
+        `retry_index` >= 1 marks a rework, which the effort scorer runs at
+        the top tier — on a single-model pool this same-model-more-compute
+        bump IS the escalation (ADR 0005)."""
         for item in assignments:
             spec = SPECIALISTS[item["specialist"]]
             self.report(f"🦉 Athena dispatches {spec.name} ({spec.title})")
@@ -619,7 +650,8 @@ class Olympus:
                 lambda item: (item["specialist"],
                               self._run_one(item["specialist"], item["task"], tr,
                                             (overrides or {}).get(
-                                                item["specialist"]))),
+                                                item["specialist"]),
+                                            retry_index=retry_index)),
                 assignments))
         # Workers appended their contract/egress decisions in completion order;
         # canonicalize this parallel slice so replay is order-stable.
@@ -628,7 +660,8 @@ class Olympus:
         return results
 
     def _dispatch_dag(self, steps: list[dict[str, Any]],
-                      tr: "trace_mod.Trace") -> list[tuple[str, str]]:
+                      tr: "trace_mod.Trace",
+                      needs_verification: bool = False) -> list[tuple[str, str]]:
         """Execute a dependency graph: independent steps run in parallel,
         dependent steps run after their inputs and receive them.
 
@@ -677,7 +710,8 @@ class Olympus:
                         for d in s["depends_on"] if d in done)
                     task = (f"{task}\n\n## Inputs from prior steps "
                             f"(build on these, don't redo them)\n{inputs}")
-                return (s["id"], key, self._run_one(key, task, tr))
+                return (s["id"], key, self._run_one(
+                    key, task, tr, needs_verification=needs_verification))
 
             start = len(tr.decisions)
             with ThreadPoolExecutor(max_workers=min(4, len(ready))) as pool:
@@ -747,7 +781,9 @@ class Olympus:
         brief = route.get("brief") or user_message
         self.report(f"⚡ Zeus delegates → Athena (brief: {brief[:80]}...)")
         with tr.span("plan"):
-            assignments = self._plan(brief, route.get("specialists", []))
+            assignments = self._plan(
+                brief, route.get("specialists", []),
+                needs_verification=route.get("needs_verification", True))
         tr.decision(
             "plan", {"name": "athena", "role": "supervisor"}, assignments,
             status="ok", parent_record_id=route_rec["record_id"], inputs=brief,
@@ -757,7 +793,9 @@ class Olympus:
         tr.event("dispatch", specialists=[a["specialist"] for a in assignments],
                  dag=has_deps)
         with tr.span("dispatch"):
-            outputs = self._dispatch_dag(assignments, tr)
+            outputs = self._dispatch_dag(
+                assignments, tr,
+                needs_verification=route.get("needs_verification", True))
 
         raw = "\n\n".join(f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
         verdict: dict | None = None
@@ -825,8 +863,14 @@ class Olympus:
                     self.report(f"🎓 {SPECIALISTS[k].name}'s rework escalates "
                                 f"to the teacher model ({t.model}).")
                     tr.event("teacher.escalated", specialist=k, model=t.model)
+                else:
+                    # No stronger pool member (single-model pool or already
+                    # strongest): the rework still escalates — SAME model at
+                    # the top effort tier, via retry_index below (ADR 0005).
+                    tr.event("teacher.effort_escalated", specialist=k)
             with tr.span("rework_dispatch"):
-                redone = dict(self._dispatch(redo, tr, overrides=escalated))
+                redone = dict(self._dispatch(redo, tr, overrides=escalated,
+                                             retry_index=1))
             # The teacher's fix becomes homework: distill a provisional,
             # benchmark-gated skill for the student model, in the background.
             for k, t in escalated.items():
