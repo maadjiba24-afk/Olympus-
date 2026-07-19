@@ -208,3 +208,47 @@ def pop_candidate(user: str, cand_id: str) -> dict | None:
                 _save(_CANDS, user, cands)
                 return c
     return None
+
+
+def render_card(user: str) -> str:
+    """One markdown page of everything Olympus believes about this user —
+    WITH receipts: every fact carries its live (decayed) confidence, type, and
+    age. The transparency of a plain memory file, without giving up governance:
+    this is a projection of the gated store, not an editable source of truth
+    (edits go through `olympus memory approve/forget`, which is auditable)."""
+    import time as _time
+    from . import companion, profile
+    lines = [f"# What Olympus knows — {user}", ""]
+    prof = (profile.card(user) or "").strip()
+    if prof:
+        lines += ["## Profile (you told me this)", prof, ""]
+    mems = active_memories(user)
+    if mems:
+        lines.append("## Learned facts (gated, confidence-decayed)")
+        now = _time.time()
+        for m in sorted(mems, key=lambda m: -effective_confidence(m, now)):
+            eff = effective_confidence(m, now)
+            age_d = int((now - float(m.get("created", now))) / 86400)
+            lines.append(f"- {m['content']}")
+            lines.append(f"  `{m.get('type', '?')} · conf {eff:.2f} · "
+                         f"{age_d}d old · id {m['id']}`")
+        lines.append("")
+    held = candidates(user)
+    if held:
+        lines.append("## Held for your review (never auto-committed)")
+        for c in held:
+            lines.append(f"- {c.get('content', '')[:120]}  "
+                         f"`reason: {c.get('reason', '?')} · id {c.get('id', '?')}`")
+        lines.append("")
+    try:
+        comp = (companion.summary(user) or "").strip()
+        if comp and "no adaptation" not in comp.lower():
+            lines += ["## How I've adapted to you", comp, ""]
+    except Exception:
+        pass
+    if len(lines) <= 2:
+        lines.append("_Nothing learned yet — memory builds as we work._")
+    lines += ["---",
+              "_Manage: `olympus memory approve|reject|forget <id>` · "
+              "this page is a projection of the gated store, not a file to edit._"]
+    return "\n".join(lines)

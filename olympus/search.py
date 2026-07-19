@@ -37,6 +37,13 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
 
 def _connect() -> tuple[sqlite3.Connection, bool]:
     conn = sqlite3.connect(_db_path())
+    # WAL: readers never block the writer (gateways index while chat searches),
+    # and a crash mid-write can't corrupt the index. Best-effort — some
+    # filesystems (network mounts) refuse WAL; the default journal still works.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass
     fts = _fts5_available(conn)
     if fts:
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS turns "
@@ -101,6 +108,50 @@ def reindex() -> int:
     for cid, history in _conversations():
         total += index_conversation(cid, history)
     return total
+
+
+def maintain(retain_days: int | None = None) -> dict:
+    """Index hygiene, run by the heartbeat's maintenance sweep (a long-lived
+    server rarely restarts, so startup-time pruning would never fire):
+
+      * drop index rows for conversations whose FILE is gone (orphans);
+      * if OLYMPUS_SEARCH_RETAIN_DAYS > 0, also drop rows for conversations
+        idle longer than that (0 = keep forever — the default, because
+        "remember any conversation, anytime" is the whole point);
+      * VACUUM when anything was removed, so the file actually shrinks.
+
+    Conversation FILES are never touched — they're user data; only the derived
+    index is pruned, and reindex() can always rebuild it."""
+    import os as _os
+    import time as _time
+    if retain_days is None:
+        try:
+            retain_days = int(_os.environ.get("OLYMPUS_SEARCH_RETAIN_DAYS", "0"))
+        except ValueError:
+            retain_days = 0
+    d = config.MEMORY_DIR / "conversations"
+    live: set[str] = set()
+    aged: set[str] = set()
+    cutoff = _time.time() - retain_days * 86400
+    if d.exists():
+        for path in d.glob("*.json"):
+            live.add(path.stem)
+            if retain_days > 0 and path.stat().st_mtime < cutoff:
+                aged.add(path.stem)
+    conn, _ = _connect()
+    try:
+        indexed = {r[0] for r in conn.execute(
+            "SELECT DISTINCT conversation FROM turns").fetchall()}
+        drop = (indexed - live) | (aged & indexed)
+        for cid in drop:
+            conn.execute("DELETE FROM turns WHERE conversation = ?", (cid,))
+        conn.commit()
+        if drop:
+            conn.execute("VACUUM")
+        return {"orphans": len(indexed - live), "aged": len(aged & indexed),
+                "vacuumed": bool(drop)}
+    finally:
+        conn.close()
 
 
 def search(query: str, limit: int = 20,

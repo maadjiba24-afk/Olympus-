@@ -33,11 +33,20 @@ def _reply_subject(subject: str) -> str:
 
 
 def handle_message(bots: dict, msg: dict) -> str | None:
-    """Process one email dict ({sender, subject, body}) and return the reply
-    text that was sent (or None if the sender wasn't allowed). Pure except for
-    the gmail.send call — the poll loop handles fetching/marking read."""
+    """Process one email dict ({sender, subject, body, authenticated}) and
+    return the reply text that was sent (or None if the sender wasn't allowed).
+    Pure except for the gmail.send call — the poll loop handles fetch/mark-read.
+
+    Spoof-guard: when an allowlist is in force, sender identity is load-bearing
+    — so the message must also carry Gmail's DMARC/SPF+DKIM pass verdict
+    (msg["authenticated"]). A From: header alone proves nothing; without this
+    check anyone could impersonate an allowlisted sender with one forged
+    header. No allowlist = identity isn't trusted anyway, so no auth demand."""
     sender = msg.get("sender", "")
     if not _allowed(sender):
+        return None
+    allowlist_active = bool(os.environ.get("OLYMPUS_EMAIL_ALLOW", "").strip())
+    if allowlist_active and not msg.get("authenticated", False):
         return None
     subject = msg.get("subject", "")
     body = (msg.get("body", "") or "").strip()

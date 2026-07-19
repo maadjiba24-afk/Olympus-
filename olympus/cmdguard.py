@@ -119,6 +119,22 @@ _RAW_RULES: list[tuple[re.Pattern[str], str, str, str]] = [
     # History / credential exfiltration hints.
     (re.compile(r"\b(nc|ncat|netcat)\b[^\n]*(?:^|\s)-e(?:\s|$)"),
      CONFIRM, "netcat with -e — can open a reverse shell", "nc-shell"),
+    # Wrapper-proof rm-rf-on-root: `bash -c "rm -rf /"`, `sh -c 'rm -fr /*'`…
+    # hide the rm from tokenized analysis (the executable is bash), so also
+    # catch the pattern in the raw string: rm + a recursive flag + a bare
+    # system-root target (/ or /* followed by space, quote, or end).
+    # DELIBERATE fail-closed trade-off: these raw rules see inside quotes (they
+    # must — that's what makes them wrapper-proof), so a command that merely
+    # *mentions* the pattern in a string (`grep 'rm -rf /' docs`) is also
+    # denied. Printing a catastrophic command is rare; running one is fatal.
+    (re.compile(r"\brm\b[^\n]*\s-[a-zA-Z]*[rR][a-zA-Z]*\s+/(?:\*|\s|['\"]|$)"),
+     DENY, "recursive delete of the filesystem root", "rm-rf-root-raw"),
+    # `find / -delete` (or -exec rm) walks the whole filesystem destructively.
+    (re.compile(r"\bfind\s+/\s[^\n]*(-delete\b|-exec\s+rm\b)"),
+     DENY, "find over the filesystem root with -delete/-exec rm", "find-root-delete"),
+    # shred directly against a block device — same class as dd of=/dev/….
+    (re.compile(r"\bshred\b[^\n]*\s/dev/(sd|nvme|vd|hd|mapper|disk)"),
+     DENY, "shred against a raw block device — wipes the disk", "shred-device"),
 ]
 
 # Command wrappers that precede the real command (`sudo rm …`, `env X=1 rm …`).

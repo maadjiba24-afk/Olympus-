@@ -199,9 +199,13 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
 
 
 def extract(user: str, user_msg: str, reply: str,
-            settings: config.Settings) -> dict:
+            settings: config.Settings, report=None) -> dict:
     """Run the extractor over one turn and apply the write policy. Best-effort:
-    never raises into the caller. Returns a small summary of actions taken."""
+    never raises into the caller. Returns a small summary of actions taken.
+
+    `report(line)` (optional) surfaces memory activity in the moment —
+    "🧠 remembered: …" — so learning is observable in-chat, not only after the
+    fact via /journey. Best-effort; a broken reporter never breaks extraction."""
     summary: dict[str, int] = {}
     # Expected control-flow — quietly do nothing (not errors):
     if not config.MEMORY_ENABLED:
@@ -222,7 +226,8 @@ def extract(user: str, user_msg: str, reply: str,
                  f"Assistant replied:\n{reply[:1500]}")
         summary = _run_extractor(user, convo, settings,
                                  event_kind="turn",
-                                 event_payload={"user": user_msg[:500]})
+                                 event_payload={"user": user_msg[:500]},
+                                 report=report)
     except Exception as err:
         from . import errors
         errors.capture("recall.extract", err, context=(user_msg or "")[:120])
@@ -230,8 +235,12 @@ def extract(user: str, user_msg: str, reply: str,
 
 
 def _run_extractor(user: str, convo: str, settings: config.Settings,
-                   event_kind: str, event_payload: dict) -> dict:
-    """One extractor call over `convo` + the write policy for its output."""
+                   event_kind: str, event_payload: dict, report=None) -> dict:
+    """One extractor call over `convo` + the write policy for its output.
+
+    `report(line)` (optional) surfaces gated-in facts as "🧠 remembered: …" so
+    memory activity is observable in the moment. Best-effort — a broken reporter
+    never breaks extraction."""
     summary: dict[str, int] = {}
     out = backend.complete_json(
         settings, _EXTRACT_SYSTEM,
@@ -244,6 +253,15 @@ def _run_extractor(user: str, convo: str, settings: config.Settings,
         cand["content"] = content
         action = _gate(user, cand, eid)
         summary[action] = summary.get(action, 0) + 1
+        if report is not None and action in ("committed", "superseded",
+                                             "reinforced"):
+            verb = {"committed": "remembered", "superseded": "updated",
+                    "reinforced": "reinforced"}[action]
+            try:
+                report(f"🧠 {verb}: {content[:80]}"
+                       f" (conf {float(cand.get('confidence', 0)):.2f})")
+            except Exception:
+                pass
     rels = relgraph.ingest(user, out.get("relationships") or [])
     if rels:
         summary["relationships"] = rels

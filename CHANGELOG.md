@@ -15,6 +15,88 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-07-19
+
+### Added — session & flow ergonomics (Hermes round 2)
+
+- **Named sessions + browse/resume** — `olympus sessions` (list newest-first
+  with a distilled-state preview line, pick to resume), `olympus -c` (continue
+  the last session), `olympus chat --session <id>`, and `/new [name]` in chat
+  (the old session stays resumable).
+- **`/bg <task>`** — run a one-shot task through the full verified pipeline in
+  the background while you keep chatting; the answer announces itself in-chat
+  and is saved to reports.
+- **`/btw <question>`** — an ephemeral side question: answered with the current
+  context visible but leaving NO trace (no history, no memory extraction, no
+  companion count).
+- **`/model <name>` and `/fast on|off`** — swap the pool's primary model or
+  toggle fast mode mid-session; `/model` keeps the provider/key/endpoint so a
+  credential can never silently migrate hosts.
+- **Delta-setup** — on a configured install, `olympus setup` offers "Fix what's
+  missing", driven by `olympus doctor`'s ✗/⚠ gaps, and ends on the doctor
+  summary (find → fix → confirm).
+- **"Where stuff lives"** — doctor now prints the key paths (config, soul,
+  memory, sessions, workspace) labeled editable vs managed.
+- THREAT_MODEL: documented the no-/yolo stance — DENY-tier commands stay
+  blocked even when approvals are granted.
+- **Model picker type-to-filter** — aggregator-scale discovered lists (>20
+  models) get a substring filter before the numbered pick.
+- **Gateway checklist** — the wizard's messaging step now shows every channel
+  (telegram/discord/slack/signal/email/webhook) with its configured status and
+  lets you set up several in one pass.
+
+### Security — teardown-loop hardening
+
+- **Memory-write hardening** — `sanitize_for_memory` now strips invisible/
+  bidi Unicode BEFORE the injection scan (closing the zero-width-split
+  evasion) and redacts credential-shaped content (API keys, private-key
+  blocks, JWTs, creds-in-URLs) so memory can never become an exfiltration
+  channel.
+- **Command-gate reinforcements** — wrapper-proof raw rule catches
+  `bash -c "rm -rf /"` (payload hidden inside quotes), plus `find / -delete`
+  and `shred` against block devices. Documented fail-closed trade-off: raw
+  rules see inside quotes, so *printing* a catastrophic command is denied too.
+- **Search-index maintenance** — the index opens in WAL mode; the heartbeat
+  maintenance sweep prunes orphaned conversations (file deleted) and, only if
+  `OLYMPUS_SEARCH_RETAIN_DAYS` > 0, aged ones — then VACUUMs. Conversation
+  files are never touched; the index stays rebuildable via `reindex()`.
+- **Email spoof-guard** — when `OLYMPUS_EMAIL_ALLOW` is set, the email gateway
+  also requires Gmail's own DMARC/SPF+DKIM pass verdict
+  (`Authentication-Results`); a From: header alone no longer satisfies the
+  allowlist. Absent verdict = fail closed. Without an allowlist, behavior is
+  unchanged (identity isn't load-bearing).
+
+### Added — memory transparency & reach
+
+- **`olympus memory card`** — one markdown page of everything believed about a
+  user, every fact with live (decayed) confidence, type, age, and id; held
+  candidates listed separately. A projection of the gated store — never an
+  editable file.
+- **Vault mirror** — `OLYMPUS_VAULT_DIR` write-through of lessons, reports, and
+  corrections as dated markdown for curation in Obsidian/any editor. A mirror,
+  not a second source of truth; a broken vault path never breaks a save.
+- **Visible memory activity** — "🧠 remembered/updated/reinforced: …" progress
+  lines as the background extractor gates facts in (all/verbose progress modes).
+- **Soul scaffold** now seeds ## Role and ## Current focus; the wizard's
+  closing hints point at `olympus soul edit`.
+- **Search hit-set distillation** — oversized session-search results are
+  condensed by the pool's fastest model (citations kept); keyless installs fall
+  back to truncation.
+
+### Security — teardown-loop hardening (iteration 3)
+
+- **Webhook rate limiting** — the inbound webhook gateway now enforces a
+  per-IP sliding-window limit (`OLYMPUS_WEBHOOK_RATE_LIMIT`, default 20/min;
+  0 disables). A public entry point that runs the full council on the
+  operator's key can no longer be turned into a key-burn DoS.
+- **Rotation state thread-safety** — credential-rotation state (cursor,
+  exhausted set, per-key stats) is now guarded by a lock, so concurrent
+  gateway worker threads can't race the cursor into skipping or re-hitting a
+  key.
+- **Bounded background-thread registry** — `/bg` finished threads are compacted
+  from the registry on each launch, so a long terminal session can't leak
+  Thread objects.
+
 ### Added — Synthesis faithfulness check (ADR 0005, amendment 4)
 
 - The composed answer is now verified too — the last unverified hop on the
@@ -1235,15 +1317,6 @@ analysis for the full feature comparison.
   the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
   delivery use the pinned opener. (Adapted from Odysseus fix #704; the
   case-insensitive sensitive-file deny-list mirrors their #5097.)
-
-> **Release-state note.** As of this writing the latest *published* release is
-> **0.21.0** (git tag `v0.21.0`, PyPI `olympus-council 0.21.0`). The `0.22.0`
-> through `0.24.0` sections below were prepared and dated but **never tagged or
-> published** — so they are not releases yet, and everything from `0.22.0`
-> down to this note is effectively unreleased pending a tagging decision (see
-> RELEASING.md). The dated headers are kept for review; re-date and tag them
-> when a release is actually cut. `pyproject.toml` currently reads `0.24.0` as
-> the in-development version, not a shipped one.
 
 ## [0.24.0] — 2026-07-03
 

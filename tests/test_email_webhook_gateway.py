@@ -37,8 +37,11 @@ def test_email_allowlist_allows_listed(monkeypatch):
     monkeypatch.setenv("OLYMPUS_EMAIL_ALLOW", "boss@x.com, cfo@x.com")
     monkeypatch.setattr(gmail, "send", lambda *a, **k: {"id": "1"})
     monkeypatch.setattr(gateway, "reply_for", lambda *a, **k: ["ok"])
+    # authenticated=True: with an allowlist active, identity is load-bearing,
+    # so the spoof-guard also demands Gmail's DMARC/SPF verdict.
     assert email_gateway.handle_message(
-        {}, {"sender": "cfo@x.com", "subject": "s", "body": "b"}) == "ok"
+        {}, {"sender": "cfo@x.com", "subject": "s", "body": "b",
+             "authenticated": True}) == "ok"
 
 
 def test_email_poll_marks_read(monkeypatch):
