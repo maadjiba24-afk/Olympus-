@@ -829,6 +829,22 @@ def synth_check_enabled() -> bool:
         "0", "off", "false", "no")
 
 
+def ask_checkpoint_enabled() -> bool:
+    """Checkpoint the ask pipeline's coarse stages to the per-run ledger
+    (`ledger.drive`) so a run killed after the verified council finished but
+    before side effects completed can be RESUMED (recovering the committed
+    answer) instead of recomputing a minutes-long council run.
+
+    OFF BY DEFAULT — the default ask path is byte-identical without it. Always
+    forced off during replay (a replay reconstructs deterministically from the
+    trace; checkpointing would be redundant and must not perturb it).
+    `OLYMPUS_ASK_CHECKPOINT=1` turns it on."""
+    if os.environ.get("OLYMPUS_REPLAY", "").strip():
+        return False
+    return os.environ.get("OLYMPUS_ASK_CHECKPOINT", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def routing_synthetic() -> bool:
     """Mark routing-outcome telemetry from THIS process as synthetic/self-
     generated (OLYMPUS_ROUTING_SYNTHETIC=1) so it never counts toward the

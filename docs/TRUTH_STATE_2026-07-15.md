@@ -1,3 +1,9 @@
+> **⚠️ SUPERSEDED by [`TRUTH_STATE_2026-07-19.md`](TRUTH_STATE_2026-07-19.md).**
+> This audit predates the M0–M4 milestone merges and ADR 0005. Its "Milestone-0
+> candidates" (M0-2 sanitize-at-sink, M0-3 structural envelope, M0-4 single prompt
+> writer) and its "Aletheia is soft / no checkpoint-resume" findings are all now
+> resolved in `main`. Kept for history; read the 07-19 doc for current state.
+
 # Olympus — Truth-State Audit · 2026-07-15
 
 Read-only diagnostic. Evidence hierarchy: **executed command output > code read > docs**.

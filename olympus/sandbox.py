@@ -74,18 +74,61 @@ def workdir() -> Path:
     the web/CLI approval handler, so a context-dependent root makes approved
     actions run somewhere other than where they were previewed — plus it
     breaks inter-specialist file handoff, the gallery, and pre-existing
-    workspaces. Concurrent same-path writes by two specialists remain
-    possible and are accepted; the safe design (threading one pinned root
-    through prepare→approve) is future work."""
+    workspaces.
+
+    The safe design IS now built (see `_effective_root`): `actions.prepare()`
+    pins the root resolved here into the action, and the executors confine to
+    that pinned root — so an approved action runs where it was previewed even
+    though this function stays context-free. That unblocks safe per-worker roots
+    later; until they exist, two specialists sharing this one root can still
+    write the same filename (DEFERRED #8)."""
     d = Path(os.environ.get("OLYMPUS_EXEC_WORKDIR",
                             str(config.MEMORY_DIR / "workspace")))
     d.mkdir(parents=True, exist_ok=True)
     return d.resolve()
 
 
-def _confine(path: str) -> Path:
-    """Resolve `path` under the workdir; raise if it escapes the root."""
-    root = workdir()
+# A pinned root is only ever honored if it is a real, non-system directory —
+# a tampered payload can never redirect a write to the filesystem root or a
+# sensitive system tree. (The path being written still has to CONFINE under
+# the root, so even an honored pin cannot be escaped.)
+_UNSAFE_PIN_ROOTS = frozenset(
+    Path(p) for p in ("/", "/etc", "/root", "/home", "/usr", "/bin",
+                      "/sbin", "/var", "/boot", "/dev", "/proc", "/sys"))
+
+
+def _effective_root(root: str | Path | None = None) -> Path:
+    """The confinement root a file operation runs under.
+
+    Without a pin this is the one shared `workdir()`. With a pin — the root the
+    action captured at PREVIEW time and carried through prepare→approve (ADR
+    0005: "pinning ONE root into the prepared action so preview and execution
+    share it") — execution runs under THAT root, so an approved file action
+    lands exactly where the user previewed it even though `prepare()` ran on a
+    specialist worker thread and `execute()` runs later from the web/CLI
+    approval handler. This is the safe alternative to the rejected
+    context-sensitive `workdir()`: the root travels *with* the action instead
+    of being re-derived from whatever context happens to run it.
+
+    A pin is honored only when it resolves to a real, absolute, non-system
+    directory; anything else (a bogus/tampered `_pinned_root`) fails safe to
+    the live `workdir()`. The path being operated on still has to confine under
+    the returned root, so honoring a pin never widens what can be reached."""
+    if not root:
+        return workdir()
+    try:
+        pinned = Path(root).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return workdir()
+    if (not pinned.is_absolute() or pinned in _UNSAFE_PIN_ROOTS
+            or pinned == Path(pinned.anchor) or not pinned.is_dir()):
+        return workdir()
+    return pinned
+
+
+def _confine(path: str, root: str | Path | None = None) -> Path:
+    """Resolve `path` under the (optionally pinned) root; raise if it escapes."""
+    root = _effective_root(root)
     target = (root / path).resolve() if not os.path.isabs(path) else Path(path).resolve()
     if target != root and root not in target.parents:
         raise ValueError(f"path escapes the workspace root: {path}")
@@ -138,7 +181,8 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def run(command: str, *, timeout: int | None = None,
-        be: str | None = None, watch: str | None = None) -> Result:
+        be: str | None = None, watch: str | None = None,
+        root: str | Path | None = None) -> Result:
     """Run a shell command in the confined workspace. Never raises on a
     non-zero exit — that's reported in the Result; only truly broken setups
     (missing docker, etc.) surface as ok=False with the error in output.
@@ -169,7 +213,7 @@ def run(command: str, *, timeout: int | None = None,
                       f"[rule: {verdict.rule}]. Set OLYMPUS_EXEC_SECURITY=off to "
                       "override (not recommended).")
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
-    root = workdir()
+    root = _effective_root(root)
     be = (be or backend()).lower()
     if be == "docker":
         argv, shell = _docker_cmd(command, root, timeout), False
@@ -263,7 +307,13 @@ def check_written(target: Path, content: str) -> str:
             json.loads(content)
             return "verified: valid JSON"
         if suffix == ".toml":
-            import tomllib
+            try:
+                import tomllib            # stdlib on Python 3.11+
+            except ModuleNotFoundError:  # 3.10: fall back to the tomli backport
+                try:
+                    import tomli as tomllib
+                except ModuleNotFoundError:
+                    return "verified: written (toml parser unavailable)"
             tomllib.loads(content)
             return "verified: valid TOML"
         if suffix in (".yaml", ".yml"):
@@ -280,12 +330,16 @@ def check_written(target: Path, content: str) -> str:
     return "verified: written"
 
 
-def write_file(path: str, content: str) -> dict:
+def write_file(path: str, content: str, *,
+               root: str | Path | None = None) -> dict:
     """Create/overwrite a file inside the workspace. Returns a result dict
     carrying the prior content (if any) so the action can be undone, plus a
     post-write verification (`check`) so silent failures and syntax errors
-    are visible to the agent in the same turn."""
-    target = _confine(path)
+    are visible to the agent in the same turn.
+
+    `root` pins the workspace root (the one captured at preview time) so an
+    approved write lands where it was previewed — see `_effective_root`."""
+    target = _confine(path, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.is_file()
     prior = target.read_text(encoding="utf-8", errors="replace") if existed else None
@@ -459,11 +513,13 @@ def glob_files(pattern: str, path: str = ".") -> str:
 
 
 def edit_file(path: str, old_string: str, new_string: str,
-              replace_all: bool = False) -> dict:
+              replace_all: bool = False, *,
+              root: str | Path | None = None) -> dict:
     """Exact-string replacement in a workspace file — the execute half of the
     'edit_file' ActionType. Result carries the prior content (undo_write
-    reverses it) and the same post-write `check` as write_file."""
-    target = _confine(path)
+    reverses it) and the same post-write `check` as write_file. `root` pins the
+    previewed workspace root (see `_effective_root`)."""
+    target = _confine(path, root)
     if not target.is_file():
         raise ValueError(f"no such file in workspace: {path}")
     if is_sensitive_path(target):
@@ -489,12 +545,13 @@ def edit_file(path: str, old_string: str, new_string: str,
 
 
 def edit_file_diff(path: str, old_string: str, new_string: str,
-                   replace_all: bool = False) -> str:
+                   replace_all: bool = False, *,
+                   root: str | Path | None = None) -> str:
     """Unified diff of what edit_file WOULD do — the preview half. Never
     writes. Returns the diff, or the reason the edit cannot apply."""
     import difflib
     try:
-        target = _confine(path)
+        target = _confine(path, root)
     except ValueError as err:
         return f"(cannot apply: {err})"
     if not target.is_file():

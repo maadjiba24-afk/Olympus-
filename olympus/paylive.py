@@ -37,9 +37,12 @@ so the only executable live path is the one a human explicitly installed.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from . import mandate, payrail
+
+_log = logging.getLogger("olympus.paylive")
 
 # LIVE hard ceilings (minor units). Deliberately LOWER than the sandbox
 # ceilings: real money starts small. Env may only lower them further.
@@ -94,11 +97,22 @@ _adapter: LiveAdapter = DisabledLiveAdapter()
 def register_live_adapter(adapter: LiveAdapter) -> None:
     """Install the live adapter — the operator's deliberate act (human act #2).
     Only a real LiveAdapter is accepted; nothing in this repo calls this with
-    anything but the disabled default."""
+    anything but the disabled default.
+
+    Installing a real-money adapter is the single most consequential act in the
+    system, so it is never silent: it emits a loud WARNING to the operational
+    log. (The DisabledLiveAdapter — the inert default, used to reset — is not a
+    real adapter and is installed quietly.)"""
     global _adapter
     if not isinstance(adapter, LiveAdapter) or adapter.live is not True:
         raise payrail.PaymentError(
             "a live adapter must be a LiveAdapter with live=True")
+    if not isinstance(adapter, DisabledLiveAdapter):
+        _log.warning(
+            "LIVE PAYMENT ADAPTER INSTALLED (%r): real money can now move once "
+            "OLYMPUS_PAYMENT_LIVE is also set and a co-signed, capability-scoped "
+            "mandate clears every gate. This is an operator act; the agent never "
+            "performs it.", getattr(adapter, "name", type(adapter).__name__))
     _adapter = adapter
 
 
@@ -109,6 +123,16 @@ def reset_live_adapter() -> None:
 
 def adapter_ready() -> bool:
     return not isinstance(_adapter, DisabledLiveAdapter)
+
+
+def is_inert() -> bool:
+    """True in the SHIPPED state: real money cannot move. Inert unless BOTH
+    operator acts are done — the flag is set AND a real adapter is registered.
+    A single, machine-checkable safety predicate (doctor/monitoring can assert
+    it) that can never drift from the gates, because it reads them directly.
+    Note: even when this returns False, every individual charge still has to
+    clear the co-signed mandate, key-pin, caps, and contract gates."""
+    return not (payrail.live_enabled() and adapter_ready())
 
 
 # --- cutover status: the go-live checklist, derived from code ----------------

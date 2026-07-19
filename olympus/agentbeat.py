@@ -170,6 +170,14 @@ def is_quiet(reply: str) -> bool:
 def _deliver(beat: Beat, text: str) -> str:
     from . import gateway
     note = f"💓 heartbeat #{beat.id}: {text}"
+    # Egress Phase C: a heartbeat push to a chat channel is a BROADCAST sink.
+    # The direct `deliver_to` path below bypasses gateway.notify_all's guard, so
+    # gate here too — sensitive beat output is held, not pushed to a group.
+    from . import config, egress
+    if config.egress_guard_enabled():
+        d = egress.guard(note, egress.ChannelKind.BROADCAST, user="shared")
+        if d.verdict is egress.Verdict.HOLD:
+            return "nowhere (held: sensitive content)"
     if beat.deliver_to:
         fns = {}
         try:

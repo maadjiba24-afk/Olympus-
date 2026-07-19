@@ -163,7 +163,7 @@ def _run_command_preview(p: dict) -> str:
 
 def _run_command_execute(p: dict) -> dict:
     res = sandbox.run(p.get("command", ""), timeout=p.get("timeout"),
-                      watch=p.get("watch"))
+                      watch=p.get("watch"), root=p.get("_pinned_root"))
     out = {"code": res.code, "ok": res.ok, "output": res.output}
     if res.watched:
         out["watched"] = list(res.watched)
@@ -178,7 +178,8 @@ def _write_file_preview(p: dict) -> str:
 
 
 def _write_file_execute(p: dict) -> dict:
-    return sandbox.write_file(p.get("path", ""), p.get("content", ""))
+    return sandbox.write_file(p.get("path", ""), p.get("content", ""),
+                              root=p.get("_pinned_root"))
 
 
 def _write_document_preview(p: dict) -> str:
@@ -204,14 +205,14 @@ def _edit_file_preview(p: dict) -> str:
     will land, not a description of it."""
     diff = sandbox.edit_file_diff(
         p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
-        bool(p.get("replace_all")))
+        bool(p.get("replace_all")), root=p.get("_pinned_root"))
     return f"Edit file '{p.get('path', '?')}' in the workspace:\n{diff}"
 
 
 def _edit_file_execute(p: dict) -> dict:
     return sandbox.edit_file(
         p.get("path", ""), p.get("old_string", ""), p.get("new_string", ""),
-        bool(p.get("replace_all")))
+        bool(p.get("replace_all")), root=p.get("_pinned_root"))
 
 
 # --- AP2 payment-mandate authorization (ADR 0004) — NO live rail ----------
@@ -325,16 +326,17 @@ def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="run_command", risk_class=actions.IRREVERSIBLE, scope="exec",
         preview=_run_command_preview, execute=_run_command_execute,
+        pins_root=True,
         description="Run a shell command in the confined workspace."))
     actions.register(actions.ActionType(
         name="write_file", risk_class=actions.NOTABLE, scope="exec",
         preview=_write_file_preview, execute=_write_file_execute,
-        undo=sandbox.undo_write,
+        undo=sandbox.undo_write, pins_root=True,
         description="Create/overwrite a file in the workspace (reversible)."))
     actions.register(actions.ActionType(
         name="edit_file", risk_class=actions.NOTABLE, scope="exec",
         preview=_edit_file_preview, execute=_edit_file_execute,
-        undo=sandbox.undo_write,
+        undo=sandbox.undo_write, pins_root=True,
         description="Exact-string edit of a workspace file, previewed as a "
                     "unified diff (reversible)."))
     # User documents — the workspace. No scope gate (it's the user's own

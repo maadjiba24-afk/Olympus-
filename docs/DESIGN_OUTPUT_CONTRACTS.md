@@ -1,6 +1,7 @@
 # Design — Hard Output Contracts (Primitive)
 
-**Status:** implemented (`olympus/contracts.py`, wired in `orchestrator.py`; off by default, gated by `OLYMPUS_CONTRACTS`) · **Scope:** deliberately minimal · **Depends on:** nothing new
+**Status:** implemented (`olympus/contracts.py`, wired in `orchestrator.py`; **ON by default** since ADR 0005 hardening — `OLYMPUS_CONTRACTS=off` is the kill switch) · **Scope:** deliberately minimal · **Depends on:** nothing new
+**Note (ADR 0005):** this doc was written for the original off-by-default rollout; the flag now defaults **on** — enforcement mechanisms never ship dormant, and the shipped contracts encode already-true invariants, so enabling changes no happy-path behavior. Part 7 below preserves the original design rationale; the live default is `on`.
 **Companion doc:** `DESIGN_BOUNDARY_LAYER.md` (phase two — do not read into this one)
 
 ---
@@ -365,6 +366,18 @@ checks stalled.
 Follow the **exact** env-flag convention already in `config.py` (the
 `fast_mode` / `require_byok` pattern, lines 336–347):
 
+> **Superseded by ADR 0005:** the flag now defaults **on**. The current
+> implementation is:
+>
+> ```python
+> def contracts_enabled() -> bool:
+>     """... ON BY DEFAULT (ADR 0005 hardening). OLYMPUS_CONTRACTS=off kill switch."""
+>     return os.environ.get("OLYMPUS_CONTRACTS", "on").strip().lower() not in (
+>         "0", "off", "false", "no")
+> ```
+>
+> The original off-by-default design is retained below for its rationale.
+
 ```python
 def contracts_enabled() -> bool:
     """Enforce hard output contracts on specialist outputs (OLYMPUS_CONTRACTS=1).
@@ -374,9 +387,10 @@ def contracts_enabled() -> bool:
         "1", "true", "yes", "on")
 ```
 
-- **Default off.** Three layers of "this won't bite a new user": the global flag
-  defaults off; even when on, a specialist with `contract=None` is a no-op; and
-  even a violation degrades to "treat this part as missing" rather than crashing.
+- **Default (original design was off; now on per ADR 0005).** Three layers of
+  "this won't bite a new user" still hold: even when on, a specialist with
+  `contract=None` is a no-op; and even a violation degrades to "treat this part
+  as missing" rather than crashing.
 - **Kill-switch is the same flag.** Unset `OLYMPUS_CONTRACTS` (or set it to `0`)
   and all enforcement vanishes instantly, no redeploy of agent code. That is the
   operability requirement for a security primitive on a system whose milestone is
