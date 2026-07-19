@@ -243,3 +243,82 @@ def test_streamed_banner_is_yielded_first(monkeypatch):
     joined = "".join(pieces)
     assert joined.startswith("⚠️ UNVERIFIED")
     assert "streamed reply" in joined
+
+
+# --- hardening addendum ----------------------------------------------------
+
+def test_fast_mode_does_not_skip_the_gate(monkeypatch):
+    """The answer.verify gate is un-bypassable: fast mode skips the Athena
+    review, never the verification chokepoint."""
+    monkeypatch.setenv("OLYMPUS_FAST", "1")
+    bot, calls = _mk_bot(monkeypatch, [REJECT_1, REJECT_2])
+    mode, brief, result = _run(bot)
+    assert calls["verify"] == 2                 # verify + enforced reverify ran
+    assert len(calls["dispatch"]) == 1          # reject still forced a rework
+    assert bot._unverified_banner is not None   # and still downgraded
+    assert calls["review"] == 0                 # only the review was skipped
+
+
+def test_rework_dispatch_error_ships_degraded_immediately(monkeypatch):
+    """A rework that ERRORS (infrastructure, not verification) must ship
+    degraded at once — no second dispatch, no retry loop."""
+    bot, calls = _mk_bot(monkeypatch, [REJECT_1])
+
+    def broken_dispatch(assignments, tr, overrides=None, retry_index=0):
+        calls["dispatch"].append("boom")
+        raise RuntimeError("worker pool exploded")
+
+    monkeypatch.setattr(bot, "_dispatch", broken_dispatch)
+    mode, brief, result = _run(bot)
+    assert result == "bad findings"             # first verified text ships
+    assert calls["dispatch"] == ["boom"]        # exactly one attempt
+    assert calls["verify"] == 1                 # no reverify after the error
+    assert bot._unverified_banner is not None
+    assert "UNVERIFIED" in bot._unverified_banner
+
+
+def test_verify_timeout_routes_to_infra_error_path(monkeypatch):
+    """A hung verifier is cut off by the wall-clock cap and takes the visible
+    degraded path — the reply never stalls forever."""
+    import time as _time
+    monkeypatch.setenv("OLYMPUS_VERIFY_TIMEOUT", "0.3")
+    bot, calls = _mk_bot(monkeypatch, [PASS])
+
+    def hung_verify(brief, outputs):
+        _time.sleep(5)
+        return PASS
+
+    monkeypatch.setattr(bot, "_verify", hung_verify)
+    t0 = _time.monotonic()
+    mode, brief, result = _run(bot)
+    assert _time.monotonic() - t0 < 4           # cut off, not slept out
+    assert "first output" in result             # raw findings still ship
+    assert bot._unverified_banner is not None   # visibly degraded
+    assert "could not run" in bot._unverified_banner
+
+
+def test_verify_timeout_disabled_by_env_zero(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_VERIFY_TIMEOUT", "0")
+    from olympus import config as _config
+    assert _config.verify_timeout() == 0.0
+    bot, calls = _mk_bot(monkeypatch, [PASS])
+    mode, brief, result = _run(bot)             # plain path still works
+    assert result == "clean findings"
+
+
+@pytest.mark.parametrize("pathological", [
+    'VERDICT: {"status": "pass", "unsupported_claims": {"a": 1}, '
+    '"confidence": "very high"}',               # wrong types inside
+    'VERDICT: {"status": "reject", "unsupported_claims": null, '
+    '"confidence": null}',                      # nulls
+    'VERDICT: {"status": 42, "unsupported_claims": [], "confidence": 1}',
+    "VERDICT: " + "{" * 5000,                   # pathological nesting prefix
+])
+def test_parse_verdict_never_crashes_on_garbage(pathological):
+    content, verdict = orchestrator._parse_verdict(pathological)
+    # Either a schema-coerced verdict or None (infra path) — never a crash,
+    # and a verdict with an invalid status never silently passes.
+    if verdict is not None:
+        assert verdict["status"] in ("pass", "warn", "reject")
+        assert isinstance(verdict["unsupported_claims"], list)
+        assert 0.0 <= verdict["confidence"] <= 1.0

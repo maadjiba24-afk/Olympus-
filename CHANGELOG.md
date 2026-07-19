@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Verification gate hardening (ADR 0005, amendment 5)
+
+- **Structural output contracts are ON by default** (`OLYMPUS_CONTRACTS=off`
+  is the kill switch) — enforcement never ships dormant.
+- The verify stage runs under a wall-clock cap (`OLYMPUS_VERIFY_TIMEOUT`,
+  default 600 s): a hung verifier takes the visible UNVERIFIED path instead
+  of stalling the reply.
+- An errored (as opposed to failed) rework ships degraded immediately — no
+  retry loop on either rework path.
+- Tests pin that fast mode cannot skip the answer.verify gate and that
+  verdict parsing never crashes and never silently passes an invalid
+  status.
+
 ## [0.25.0] — 2026-07-19
 
 ### Added — session & flow ergonomics (Hermes round 2)

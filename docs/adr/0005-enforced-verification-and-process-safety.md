@@ -261,6 +261,33 @@ Remaining accepted edges after this: Zeus's direct replies and clarify
 turns are still unverified (they make no factual delegation), and the
 router's `needs_verification=False` opt-out still bypasses the whole chain.
 
+## Amendment 5 (hardening addendum — Phase 1)
+
+Standing rule adopted: **no dormant code ships** — every enforcement
+mechanism is ON by default (kill switches allowed, default-off forbidden).
+That is how the vacuous-true bug happened, and structural output contracts
+were the last default-off enforcement: `contracts_enabled()` now defaults
+ON (`OLYMPUS_CONTRACTS=off` is the kill switch; the shipped contracts
+encode already-true output invariants, so enabling changes no happy-path
+behavior).
+
+Gate hardening, each with a pinning test:
+
+- **Un-bypassable**: fast mode skips the Athena review only — never the
+  answer.verify chokepoint. Proven by test.
+- **Verify wall-clock cap**: the verify stage runs under
+  `OLYMPUS_VERIFY_TIMEOUT` (default 600 s, always on; `0` disables). A hung
+  verifier routes to the existing visible infra-error path instead of
+  stalling the reply; the orphaned worker is discarded.
+- **Errored rework ships degraded immediately**: an EXCEPTION during either
+  rework dispatch (as opposed to a failed verification) never retries — the
+  Aletheia-forced rework banners and ships the first verified text; the
+  Athena quality rework keeps the first-pass outputs and proceeds.
+- **Verdict parsing is total**: schema-validated status enum, coerced claim
+  lists, clamped confidence; any garbage — wrong types, nulls, pathological
+  nesting — yields either a coerced valid verdict or None (the visible
+  degraded path). Never a crash, never a silent pass of an invalid status.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the
