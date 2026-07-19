@@ -312,6 +312,21 @@ Gate hardening, each with a pinning test:
   two-process concurrent-flush test (every line parseable, every run
   present) and an overflow test.
 
+## Amendment 7 (hardening addendum — Phase 3)
+
+- **The spend guard outranks the difficulty dial.** When a daily budget is
+  set and less than 10% of it remains (`usage.budget_headroom_low`,
+  deterministic, error-tolerant), a scored RAISE above the specialist's
+  floor is capped back to the floor and the denial is traced
+  (`effort.budget_capped`). The run itself — reworks included — always
+  still happens: the cap denies extra compute, never the work. With no
+  budget set (the default), nothing changes.
+- **The scorer is a total function.** `score`/`at_least` coerce any input
+  (None, strings, negatives, NaN/inf, arbitrary objects) to harmless
+  defaults — never an exception, always a valid tier, always
+  deterministic. Pinned by a seeded 300-case property test over randomized
+  junk inputs.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

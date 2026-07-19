@@ -793,6 +793,15 @@ class Olympus:
                         tool_count=len(spec.extra_tools),
                         retry_index=retry_index,
                         needs_verification=needs_verification))
+                if effort != spec.effort and usage.budget_headroom_low():
+                    # "Thinks harder" never defeats the spend guard: with
+                    # <10% of the daily budget left, a scored RAISE above
+                    # the specialist's floor is capped back to the floor.
+                    # The run (rework included) still happens — the cap
+                    # denies extra compute, never the work (ADR 0005 am. 7).
+                    tr.event("effort.budget_capped", specialist=key,
+                             denied=effort, floor=spec.effort)
+                    effort = spec.effort
                 output, tool_calls = spec.run_counted(
                     task,
                     settings=settings_override or self.pool.for_specialist(key),

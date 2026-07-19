@@ -182,6 +182,19 @@ def daily_budget() -> float:
         return 0.0
 
 
+def budget_headroom_low() -> bool:
+    """True when a daily budget is set and less than 10% of it remains.
+
+    The effort scorer consults this before RAISING a run above its
+    specialist's floor (ADR 0005 amendment 7): "thinks harder" must never
+    defeat the spend guard. Total: budget errors read as headroom-fine, and
+    with no budget set (limit 0, the default) there is nothing to protect."""
+    limit = daily_budget()
+    if limit <= 0:
+        return False
+    return (limit - today_spend()) < limit * 0.10
+
+
 def budget_status() -> dict:
     """Snapshot for display: limit, spent, remaining, and whether it's hit."""
     limit = daily_budget()
