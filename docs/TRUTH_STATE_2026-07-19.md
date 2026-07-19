@@ -203,10 +203,14 @@ The remainder is deliberate deferral, operational drift, and one wiring caveat.
   concurrency cap, proclock degraded on non-POSIX, …).
 
 ### Operational drift (small, safe to close)
-- **drift-2 (was M0-5): CI tests only Python 3.12** though the package claims
-  3.10–3.13. A version matrix needs per-version hash-locked requirements (the
-  `test`/`browser-smoke` jobs use `--require-hashes -r requirements.lock`, which is
-  3.12-ABI-specific), so it is a small project, not a one-line change.
+- **drift-2 (was M0-5): CI tested only Python 3.12** though the package claims
+  3.10–3.13. **RESOLVED (2026-07-19):** the `test` job now runs a
+  `["3.10","3.11","3.12","3.13"]` matrix. (The earlier note that a matrix would
+  need per-version locks was wrong: `requirements.lock` is a *universal* hash
+  lock — `uv pip compile --generate-hashes` records every distribution's hash,
+  so `--require-hashes` is satisfied on each version from the one lock;
+  confirmed by resolving it under 3.11.) `tests/test_ci_matrix.py` fails if the
+  matrix ever drifts from pyproject's declared support.
 - **Doc/status drift fixed in this pass:** `contracts.py` + `DESIGN_OUTPUT_CONTRACTS.md`
   said "off by default" though `OLYMPUS_CONTRACTS` defaults **on** (ADR 0005) — now
   corrected; ADR 0002's "HALTED before any code" header was stale (the co-signature
