@@ -97,6 +97,98 @@ carries a migration note here.
   from the registry on each launch, so a long terminal session can't leak
   Thread objects.
 
+### Fixed — Second-ring cross-process safety (ADR 0005, amendment 3)
+
+- The acceptance re-audit swept the tree for the heartbeat-vs-web RMW class
+  and found six more shared files; all are now locked and/or atomic:
+  agent beats (`run_due` marks due beats under the lock BEFORE the
+  minutes-long LLM phase — an add from the chat process mid-run is no
+  longer silently deleted), operator jobs (same mark-first restructure),
+  todos, the verified-facts cache (append+trim serialized cross-process
+  with a bounded wait on the verify agent's tool path), heartbeat state,
+  saved conversations, and the conversation-counter reset. Each carries a
+  two-process or lock-contention race test.
+
+### Added — Deterministic difficulty pre-scorer (ADR 0005, Phase 3)
+
+- New `olympus/effortscore.py`: a pure, deterministic scorer — (risk class,
+  prompt length, tool count, retry index, needs_verification) → effort tier,
+  zero model calls, zero I/O. Thresholds are plain constants, deliberately
+  not evolve-tunable.
+- The static `effort=` literals in routing, planning, synthesis, and every
+  specialist run are replaced with scored values; the per-specialist
+  `effort` field is now a FLOOR the scorer can raise but never lower below
+  ("high" remains synthesis's floor).
+- A rework runs at the top tier (`retry_index >= 1` → high) on BOTH rework
+  paths (Athena quality retry and the Aletheia answer.verify forced rework).
+  On a single-model pool — where `teacher_for` has no stronger member to
+  swap in — this same-model-more-compute bump IS the escalation, traced as
+  `teacher.effort_escalated` only when it genuinely changes the call.
+- A 10-agent adversarial review then made the dial REAL rather than
+  cosmetic: a second prompt-length tier makes "high" reachable from length
+  alone (routing included); the tool signal counts only a specialist's
+  EXTRA tools (the 7 shared BASE tools had put most of the roster at the
+  threshold); `risk_class` is genuinely wired — a specialist holding an
+  irreversible/financial action tool always thinks at the top tier; and
+  three light specialists (Iris, Mnemosyne, Chiron) now floor at "medium",
+  so a cheap path exists in production — backstopped by the enforcing
+  answer.verify gate, Athena review, and the retry→high rule. Accepted:
+  replay recordings are version-bound — a behavior-changing release
+  invalidates old recordings by design (the divergence is the tripwire).
+
+### Added — Cross-process safety on shared mutable state (ADR 0005, Phase 2)
+
+- New `olympus/proclock.py`: `fcntl.flock` lockfile wrapper — cross-process
+  AND cross-thread exclusive, reentrant per thread, POSIX-only with a
+  documented degraded fallback. The heartbeat process and the web process no
+  longer race each other's read-modify-writes.
+- Usage ledger RMW (`usage.record`) now holds the cross-process lock —
+  `os.replace` prevented torn files but not lost updates; a two-real-process
+  race test asserts exact totals.
+- `memory.save` filenames are collision-proof (pid + `O_EXCL` create):
+  concurrent same-title writers each keep their note; the 14-digit timestamp
+  prefix is unchanged so date-parsing readers keep working.
+- `watchlist_add`/`watchlist_pop` and every mutating goals load-modify-save
+  cycle now serialize under the cross-process lock.
+- `FileStore.put` last-writer-wins is documented as the accepted KV contract;
+  cross-process RMW callers must hold `proclock` (the Postgres upsert is a
+  blind overwrite, not a CAS — see ADR 0005).
+- A 22-agent adversarial review of this phase confirmed 18 findings — all
+  fixed in-phase: lock scopes split so no in-process mutex is ever held
+  across a flock wait (a wedged peer could have frozen every reply);
+  proclock gained a bounded-`timeout` acquire for hot best-effort paths and
+  sanitized-name reentrancy identity; atomic publish added everywhere a
+  torn read decodes as empty (goals, scheduler jobs, FileStore.put, prefs,
+  watchlist, note bodies via `os.link`); proclock coverage extended to
+  evolve's telemetry/tunables blob (whose torn read could have reset
+  tighten-only security knobs), the scheduler, prefs, and the conversation
+  counter; the goals completion write re-checks active status under the
+  lock; prompt-backup restore matches collision-suffixed filenames.
+- Per-worker sandbox scratch re-rooting was built, adversarially reviewed,
+  and REJECTED: a context-sensitive workdir made approved file actions
+  execute in a different root than they were previewed in, and broke
+  file handoff, the gallery, and pre-existing workspaces. `workdir()` stays
+  one shared, context-free root; the residual concurrent same-path write is
+  documented as accepted in ADR 0005.
+
+### Added — Aletheia is ENFORCING on the interactive path (ADR 0005, Phase 1)
+
+- `_verify` now emits a structured verdict — `{status: pass|warn|reject,
+  unsupported_claims[], confidence}` — parsed from a mandatory machine-readable
+  `VERDICT:` line (missing/malformed = infrastructure failure, handled
+  visibly, never silently).
+- New `answer.verify` behavioral contract evaluated AFTER verification and
+  BEFORE synthesis, feeding the real verdict to the previously dormant
+  `aletheia_verified` predicate (which was never given a `verify_verdict` in
+  production and ran a stage too early).
+- Policy: an affirmative `reject` forces exactly one rework of the council;
+  a second reject ships the reply hard-downgraded behind a structural
+  `⚠️ UNVERIFIED` banner (prepended after synthesis on both the blocking and
+  streaming paths, so the composing model can never drop it), with the
+  unsupported claims listed and the event recorded in the signed decision log.
+- Verify-stage infrastructure errors now degrade visibly (banner + logged
+  decision) instead of silently falling through to raw findings.
+
 ### Changed — Hardening + self-evolution pass over the integration-depth components (D1–D8)
 
 The eight new components (webplan, AP2 flow, extended ABC surface,

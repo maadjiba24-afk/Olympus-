@@ -159,12 +159,14 @@ def test_enabled_violation_degrades_and_pipeline_completes(monkeypatch):
         "mode": "delegate", "direct_reply": None,
         "specialists": ["plutus", "peitho"], "brief": "do it",
         "needs_verification": True})
-    monkeypatch.setattr(bot, "_plan", lambda brief, keys: [
+    monkeypatch.setattr(bot, "_plan", lambda brief, keys, **kw: [
         {"id": "a", "specialist": "plutus", "task": "t1", "depends_on": []},
         {"id": "b", "specialist": "peitho", "task": "t2", "depends_on": []}])
-    # Verify just echoes the bundle so we can inspect what survived.
-    monkeypatch.setattr(bot, "_verify", lambda brief, outputs:
-                        "\n\n".join(f"### {k}\n{v}" for k, v in outputs))
+    # Verify just echoes the bundle (with a passing verdict) so we can
+    # inspect what survived.
+    monkeypatch.setattr(bot, "_verify", lambda brief, outputs: (
+        "\n\n".join(f"### {k}\n{v}" for k, v in outputs),
+        {"status": "pass", "unsupported_claims": [], "confidence": 1.0}))
 
     tr = trace.Trace("t")
     mode, brief, verified = bot._pipeline("a real message", tr)

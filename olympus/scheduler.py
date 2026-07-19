@@ -124,8 +124,21 @@ def _load() -> list[Job]:
 
 
 def _save(jobs: list[Job]) -> None:
-    _path().write_text(json.dumps([asdict(j) for j in jobs], indent=2),
-                       encoding="utf-8")
+    # Atomic publish: _load maps a torn file to [], so a plain write_text
+    # would let a cross-process reader see "no jobs" mid-write (ADR 0005).
+    p = _path()
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps([asdict(j) for j in jobs], indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _mutex():
+    """Cross-process lock for every jobs load-modify-save cycle (ADR 0005):
+    the heartbeat process runs/marks jobs while web/CLI/gateway processes
+    add and remove them — the same shared-JSON pattern as goals.py."""
+    from . import proclock
+    return proclock.lock("scheduler")
 
 
 def add(name: str, interval: str | int, prompt: str,
@@ -133,15 +146,16 @@ def add(name: str, interval: str | int, prompt: str,
         now: float | None = None, skill: str = "") -> Job:
     now = now if now is not None else time.time()
     secs = interval if isinstance(interval, int) else parse_interval(interval)
-    jobs = [j for j in _load() if j.name != name]    # replace by name
-    job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)), prompt=prompt,
-              deliver_to=deliver_to.strip().lower(), user=user, created=now,
-              skill=(skill or "").strip())
-    jobs.append(job)
-    # Bound storage: keep the most-recently-created MAX_JOBS.
-    if len(jobs) > MAX_JOBS:
-        jobs = sorted(jobs, key=lambda j: j.created)[-MAX_JOBS:]
-    _save(jobs)
+    with _mutex():
+        jobs = [j for j in _load() if j.name != name]    # replace by name
+        job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)),
+                  prompt=prompt, deliver_to=deliver_to.strip().lower(),
+                  user=user, created=now, skill=(skill or "").strip())
+        jobs.append(job)
+        # Bound storage: keep the most-recently-created MAX_JOBS.
+        if len(jobs) > MAX_JOBS:
+            jobs = sorted(jobs, key=lambda j: j.created)[-MAX_JOBS:]
+        _save(jobs)
     return job
 
 
@@ -154,32 +168,36 @@ def add_on_exit(name: str, pid: int, prompt: str,
     now = now if now is not None else time.time()
     if not _pid_alive(pid):
         raise ValueError(f"process {pid} isn't running")
-    jobs_ = [j for j in _load() if j.name != name]    # replace by name
-    job = Job(name=name, interval=0, prompt=prompt, kind="on_exit",
-              watch_pid=int(pid), label=(label or "").strip(),
-              deliver_to=deliver_to.strip().lower(), user=user, created=now)
-    jobs_.append(job)
-    if len(jobs_) > MAX_JOBS:
-        jobs_ = sorted(jobs_, key=lambda j: j.created)[-MAX_JOBS:]
-    _save(jobs_)
+    with _mutex():
+        jobs_ = [j for j in _load() if j.name != name]    # replace by name
+        job = Job(name=name, interval=0, prompt=prompt, kind="on_exit",
+                  watch_pid=int(pid), label=(label or "").strip(),
+                  deliver_to=deliver_to.strip().lower(), user=user,
+                  created=now)
+        jobs_.append(job)
+        if len(jobs_) > MAX_JOBS:
+            jobs_ = sorted(jobs_, key=lambda j: j.created)[-MAX_JOBS:]
+        _save(jobs_)
     return job
 
 
 def remove(name: str) -> bool:
-    jobs = _load()
-    kept = [j for j in jobs if j.name != name]
-    _save(kept)
-    return len(kept) != len(jobs)
+    with _mutex():
+        jobs = _load()
+        kept = [j for j in jobs if j.name != name]
+        _save(kept)
+        return len(kept) != len(jobs)
 
 
 def set_enabled(name: str, on: bool) -> bool:
-    jobs = _load()
-    found = False
-    for j in jobs:
-        if j.name == name:
-            j.enabled, found = on, True
-    _save(jobs)
-    return found
+    with _mutex():
+        jobs = _load()
+        found = False
+        for j in jobs:
+            if j.name == name:
+                j.enabled, found = on, True
+        _save(jobs)
+        return found
 
 
 def jobs() -> list[Job]:
@@ -213,20 +231,22 @@ RESUME_AFTER = int(os.environ.get("OLYMPUS_JOB_RESUME_AFTER", "3600"))
 
 
 def _mark_started(name: str, now: float) -> None:
-    jobs_ = _load()
-    for j in jobs_:
-        if j.name == name:
-            j.started_at = now
-    _save(jobs_)
+    with _mutex():
+        jobs_ = _load()
+        for j in jobs_:
+            if j.name == name:
+                j.started_at = now
+        _save(jobs_)
 
 
 def _mark_ran(name: str, now: float) -> None:
-    jobs_ = _load()
-    for j in jobs_:
-        if j.name == name:
-            j.last_run = now
-            j.resume_attempts = 0       # a finished run clears resume state
-    _save(jobs_)
+    with _mutex():
+        jobs_ = _load()
+        for j in jobs_:
+            if j.name == name:
+                j.last_run = now
+                j.resume_attempts = 0   # a finished run clears resume state
+        _save(jobs_)
 
 
 def interrupted(now: float | None = None) -> list[Job]:
@@ -333,11 +353,12 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
 
 
 def _bump_resume(name: str) -> None:
-    jobs_ = _load()
-    for j in jobs_:
-        if j.name == name:
-            j.resume_attempts += 1
-    _save(jobs_)
+    with _mutex():
+        jobs_ = _load()
+        for j in jobs_:
+            if j.name == name:
+                j.resume_attempts += 1
+        _save(jobs_)
 
 
 def _human_interval(secs: int) -> str:
