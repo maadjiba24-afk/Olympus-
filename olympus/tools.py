@@ -1090,12 +1090,21 @@ def _generate_benchmark(specialist: str) -> str:
 
 def _propose_upgrade(title: str, details: str) -> str:
     path = memory.save("upgrades", title, details)
-    issue_url = github.create_issue(
-        f"[Olympus upgrade] {title}",
-        details
-        + "\n\n---\n_Filed automatically by Prometheus, the Olympus "
-          "evolution agent._",
-    )
+    body = (details
+            + "\n\n---\n_Filed automatically by Prometheus, the Olympus "
+              "evolution agent._")
+    # Egress Phase C: a GitHub issue is an EXTERNAL_SINK (C0-only). An
+    # auto-filed upgrade proposal that swept up a stored secret or the user's
+    # PII must not be published to a public tracker. When the egress guard is
+    # enabled, guard(..., EXTERNAL_SINK) HOLDs such content — the proposal is
+    # still saved locally; only the public filing is withheld.
+    if config.egress_guard_enabled():
+        d = egress.guard(f"{title}\n\n{body}", egress.ChannelKind.EXTERNAL_SINK,
+                         user=memory.current_user())
+        if d.verdict is egress.Verdict.HOLD:
+            return (f"Proposal saved to {path}. (GitHub filing withheld by the "
+                    f"egress guard: {d.reason})")
+    issue_url = github.create_issue(f"[Olympus upgrade] {title}", body)
     if issue_url:
         return f"Proposal saved to {path} and filed as GitHub issue: {issue_url}"
     return (f"Proposal saved to {path}. (GitHub auto-filing not active — set "

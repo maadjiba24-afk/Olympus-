@@ -401,6 +401,19 @@ gateway or remain governed solely by the actions spine. **Recommendation: out of
 scope for egress** — they don't leave the box over the network — but document the
 decision so it isn't an accidental gap.
 
+> **Decision (2026-07-19): OUT OF SCOPE — recommendation accepted.**
+> `_run_command_execute` and `_write_file_execute` are host/workspace sinks, not
+> *network* egress: nothing leaves the box over the wire, so the egress gateway's
+> data-class-vs-channel model (which governs "what may go OUT to whom") does not
+> apply. They stay governed by the **actions spine** — deny-by-default risk
+> classes, the autonomy dial, scope gate, and (for commands) `cmdguard`'s
+> fail-closed DENY set — which is the correct control surface for host side
+> effects. Recording this so the omission is a deliberate boundary, not a gap.
+>
+> **Status: Phases A–C implemented; Phase D consciously closed as out-of-scope.**
+> The egress gateway now spans every *network* egress path in the system
+> (email, webhook, contribution pool, chat broadcast, GitHub issue).
+
 **Stop-anywhere property:** each phase is shippable alone. Phase A alone already
 closes the highest-risk holes (email, webhook). If distribution pressure
 intensifies, ship A, pause, resume at B later. The gateway exists after Phase A;

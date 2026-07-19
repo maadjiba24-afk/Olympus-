@@ -287,3 +287,69 @@ def test_egress_records_replay_byte_identical():
     core = trace.decision_core(_egress_decs(rec)[0])
     assert "record_id" not in core and "ts" not in core
     assert core["decision_type"] == "egress"
+
+
+# ======================================================================
+# Phase C — broadcast + external sinks (chat notify_all, agentbeat, GitHub)
+# ======================================================================
+
+def test_notify_all_holds_sensitive_broadcast(monkeypatch):
+    from olympus import gateway, slack
+    sent = []
+    monkeypatch.setattr(slack, "notify", lambda t: (sent.append(t) or True))
+    monkeypatch.setattr(gateway, "NOTIFY_CHANNELS", ("slack",))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    # clean/public → broadcast proceeds
+    assert gateway.notify_all("backup completed: 3 files") == ["slack"]
+    assert sent == ["backup completed: 3 files"]
+    sent.clear()
+    # PII in a proactive push → HELD, reaches no channel
+    assert gateway.notify_all("reminder: email john@corp.com re: the deal") == []
+    assert sent == []
+
+
+def test_notify_all_off_by_default_broadcasts_even_sensitive(monkeypatch):
+    # Distribution safety: with the guard off (default), notify_all is inert —
+    # it fans out exactly as before, so enabling the feature is the only change.
+    from olympus import gateway, slack
+    sent = []
+    monkeypatch.setattr(slack, "notify", lambda t: (sent.append(t) or True))
+    monkeypatch.setattr(gateway, "NOTIFY_CHANNELS", ("slack",))
+    monkeypatch.delenv("OLYMPUS_EGRESS_GUARD", raising=False)
+    assert gateway.notify_all("email john@corp.com") == ["slack"]
+    assert sent == ["email john@corp.com"]
+
+
+def test_agentbeat_deliver_holds_sensitive_to_direct_channel(monkeypatch):
+    # The direct deliver_to path bypasses notify_all, so it must be guarded too.
+    from olympus import agentbeat, slack
+    sent = []
+    monkeypatch.setattr(slack, "notify", lambda t: (sent.append(t) or True))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    beat = agentbeat.Beat(id="1", user="shared", every=86400, prompt="p",
+                          deliver_to="slack")
+    where = agentbeat._deliver(beat, "your card 4111111111111111 was charged")
+    assert "held" in where.lower() and sent == []
+
+
+def test_propose_upgrade_withholds_pii_from_github(monkeypatch):
+    from olympus import tools, github
+    filed = []
+    monkeypatch.setattr(github, "create_issue",
+                        lambda t, b: (filed.append((t, b)) or "http://issue/1"))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    out = tools._propose_upgrade(
+        "contact fix", "reach the maintainer at dev@corp.com about this")
+    assert "withheld" in out.lower() and filed == []      # not filed publicly
+    assert "saved" in out.lower()                          # still saved locally
+
+
+def test_propose_upgrade_files_clean_proposal(monkeypatch):
+    from olympus import tools, github
+    filed = []
+    monkeypatch.setattr(github, "create_issue",
+                        lambda t, b: (filed.append((t, b)) or "http://issue/1"))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    out = tools._propose_upgrade("add caching",
+                                 "cache the model list for five minutes")
+    assert "issue" in out.lower() and len(filed) == 1     # clean → filed
