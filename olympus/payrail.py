@@ -115,8 +115,13 @@ def _day(now: float) -> str:
 
 def _verified_records(user: str):
     """Signed payment records for `user`, or None if the ledger is present but
-    TAMPERED (fail closed — never trust an unverifiable payment history)."""
-    recs = deltas.snapshots(f"payment:{user}")
+    UNTRUSTWORTHY — tampered (signature/chain) OR corrupt (unparseable). Fail
+    closed: never trust an unverifiable payment history, and never let a garbage
+    line escape as an uncaught exception into a charge."""
+    try:
+        recs = deltas.snapshots(f"payment:{user}")
+    except deltas.DeltaError:
+        return None                          # corrupt ledger → untrusted
     if recs and not deltas.verify_history(f"payment:{user}")["ok"]:
         return None
     return recs

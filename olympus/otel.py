@@ -165,6 +165,16 @@ def export_run(record: dict, *, poster=None, now_ns: int | None = None) -> bool:
     if not url.endswith("/v1/traces"):
         url = url + "/v1/traces"
     try:
+        # Funnel through the SAME sovereign egress choke every other outbound
+        # call uses (llm / tools / browser / a2a): a no-op when sovereign mode
+        # is off (a local OTLP collector on loopback is unaffected), but under
+        # sovereign mode a telemetry export to a NON-allowlisted host is
+        # refused — run metadata (agents, timing, costs, hashes) must not leak
+        # past the allowlist just because it is "structure". Enforced here, at
+        # the export decision, so even a custom `poster` is gated.
+        from urllib.parse import urlparse
+        from . import security
+        security.assert_egress_allowed(urlparse(url).hostname or "")
         payload = build_payload(record, now_ns=now_ns)
         send = poster or _post
         send(url, payload)

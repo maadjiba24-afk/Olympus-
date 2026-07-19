@@ -207,6 +207,28 @@ def test_no_decision_module_imports_the_scaffold():
             "only; a reward must never autonomously change behavior")
 
 
+def test_ONLY_the_cli_imports_the_scaffold_packagewide():
+    """H5 hardening: the load-bearing 'no autonomous behavior change' guarantee,
+    checked EXHAUSTIVELY rather than against a hand-picked few. `rlscaffold` may
+    be referenced ONLY by the operator CLI entry point (and itself) — any other
+    module importing it would be a potential write-back path into behavior, so a
+    future accidental wire-up fails this test."""
+    import pathlib
+    import olympus
+    pkg = pathlib.Path(olympus.__file__).resolve().parent
+    allowed = {"rlscaffold.py", "cli.py"}
+    offenders = []
+    for p in pkg.rglob("*.py"):
+        if p.name in allowed:
+            continue
+        src = p.read_text(encoding="utf-8")
+        if "rlscaffold" in src:
+            offenders.append(p.name)
+    assert not offenders, (
+        f"only the CLI may reference the RL scaffold; found references in "
+        f"{offenders} — the scaffold must never be wired into a decision path")
+
+
 def test_scaffold_never_writes_env_or_config():
     """Like the supervision harness, it must be architecturally incapable of
     flipping a switch: no os.environ writes, no config mutation in the source."""

@@ -177,9 +177,21 @@ def _read(target_id: str) -> list[dict]:
     if not path.exists():
         return []
     out: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        try:
             out.append(json.loads(line))
+        except (ValueError, UnicodeDecodeError) as err:
+            # A syntactically corrupt line (FS corruption, or a hostile writer —
+            # these logs are signed precisely against an attacker with FS write
+            # access). Raise a TYPED error so verify_history reports it as a
+            # fail-closed verdict and record_snapshot refuses to extend a
+            # corrupt history, rather than a bare JSONDecodeError escaping into
+            # every consumer. The raw line is NOT echoed (it may carry state).
+            raise DeltaError(
+                f"corrupt snapshot record at line {i} for target "
+                f"{target_id!r}: {err.__class__.__name__}") from err
     return out
 
 
@@ -282,8 +294,17 @@ def verify_history(target_id: str) -> dict:
 
     Returns {ok, found, count, verified, attested, problems}. Because the window
     rolls, seq may start above 0 (older snapshots trimmed) — contiguity is
-    checked from the first retained record, not from genesis."""
-    recs = _read(target_id)
+    checked from the first retained record, not from genesis.
+
+    A corrupt (unparseable) record is a verification FAILURE reported here as
+    ok=False — never an exception escaping into the caller, so the documented
+    fail-closed verdict contract holds even against a garbage-injecting
+    attacker."""
+    try:
+        recs = _read(target_id)
+    except DeltaError as err:
+        return {"ok": False, "found": True, "count": 0, "verified": 0,
+                "attested": False, "problems": [str(err)]}
     out = {"ok": False, "found": bool(recs), "count": len(recs),
            "verified": 0, "attested": False, "problems": []}
     if not recs:
