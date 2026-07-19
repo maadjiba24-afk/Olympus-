@@ -26,11 +26,36 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, prefs, security
+from . import config, egress, prefs, security
 
 MAX_SNAPSHOT_CHARS = 1500
 MAX_QUEUE = 2000
 _LOCK = threading.Lock()
+
+
+def _pool_redact(user: str, text: str) -> str | None:
+    """Pool-safe form of `text`, or None if it must not be pooled at all.
+
+    Phase B (docs/DESIGN_BOUNDARY_LAYER.md): when the egress guard is enabled,
+    the raw snapshot is routed through `egress.guard(..., POOLED)` so the
+    redaction becomes a *policy decision recorded in the signed log* rather than
+    an inline side effect — a HOLD (a stored-secret exfil the guard won't trust
+    redaction to strip) drops the snapshot entirely. This is exactly equivalent
+    to the direct `security.anonymize` path (guard's REDACT calls the same
+    `anonymize`, and PUBLIC text is a no-op for both), so behavior is unchanged;
+    it is now auditable and consistent with every other egress channel.
+
+    When the guard is OFF (the default), fall back to the always-on direct
+    `anonymize` — the pool's privacy floor never depends on the opt-in guard.
+    """
+    if config.egress_guard_enabled():
+        d = egress.guard(str(text), egress.ChannelKind.POOLED, user=user)
+        if d.verdict is egress.Verdict.HOLD:
+            return None
+        if d.verdict is egress.Verdict.REDACT:
+            return d.redacted_text or ""
+        return str(text)            # ALLOW: already within C0 (pool-safe)
+    return security.anonymize(str(text))
 
 
 def _path() -> Path:
@@ -58,12 +83,18 @@ def offer(user: str, model: str, question: str, answer: str) -> bool:
     Returns True if something was contributed."""
     if not is_enabled(user):
         return False
-    q = security.anonymize(str(question))[:MAX_SNAPSHOT_CHARS]
-    a = security.anonymize(str(answer))[:MAX_SNAPSHOT_CHARS]
+    q_red = _pool_redact(user, str(question))
+    a_red = _pool_redact(user, str(answer))
+    # A guard HOLD (stored-secret exfil) on either half drops the whole snapshot.
+    if q_red is None or a_red is None:
+        return False
+    q = q_red[:MAX_SNAPSHOT_CHARS]
+    a = a_red[:MAX_SNAPSHOT_CHARS]
     if not q.strip() or not a.strip():
         return False
-    # A stored secret that survives anonymization (raw or encoded) must never
-    # reach the shared pool — drop the snapshot entirely, don't trust redaction.
+    # Always-on floor (independent of the opt-in egress guard): a stored secret
+    # that survives redaction must never reach the shared pool — drop the
+    # snapshot entirely, don't trust redaction.
     if security.secret_exfil_reason(q + "\n" + a, user):
         return False
     entry = {"model": model or "unknown", "q": q, "a": a, "ts": int(time.time())}

@@ -14,9 +14,12 @@ Enforcement is gated by config.egress_guard_enabled(); OFF BY DEFAULT, so this
 is inert until an operator opts in. Every decision is recorded into the existing
 signed decision log (trace.py) as an `egress` decision — never a separate log.
 
-PHASE A only: the gateway plus the two raw actuators (tools._send_email,
-tools._call_webhook). Other egress sites (contrib/chat/github/sandbox) are
-NOT wired yet (Phases B–D) — see docs/DESIGN_BOUNDARY_LAYER.md Part 5.
+PHASE A: the gateway plus the two raw actuators (tools._send_email,
+tools._call_webhook). PHASE B: the contribution pool (contrib.offer routes its
+snapshot redaction through guard(..., POOLED) — the redaction is now a logged
+policy decision, not an inline side effect). Remaining sites (chat sends,
+github.create_issue) are Phase C; the workspace/host sinks are documented
+out-of-scope (Phase D) — see docs/DESIGN_BOUNDARY_LAYER.md Part 5.
 """
 from __future__ import annotations
 
