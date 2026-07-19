@@ -1,7 +1,7 @@
 # ADR 0002 — AP2 mandates: user co-signature, capability binding, transaction scope
 
-- **Status:** Proposed — **precondition artifact; HALTED for operator approval before any code**
-- **Date:** 2026-07-16
+- **Status:** Partially implemented — the **co-signature & external-custody primitives** shipped (see "On-device user-key custody" below and `olympus/mandate.py`: `co_sign`, `register_user_signer`, `command_signer`, `user_signature_ok`, `verify(require_cosignature=…)`, `OLYMPUS_MANDATE_USER_PUBKEY` pin). What remains **HALTED pending operator approval** is binding these into a *live payment flow* end-to-end (there is no payment rail — see Non-goals) and the Phase-2 adversarial acceptance tests.
+- **Date:** 2026-07-16 · **Updated:** 2026-07-19 (status corrected: the custody primitives are no longer "no code" — they landed with the parked-item hardening; the HALT now scopes to live-rail integration only)
 - **Deciders:** Olympus maintainers (pending)
 - **Supersedes/extends:** [ADR 0001](0001-ap2-payment-mandates.md) (mandate creation + verification only)
 - **Related:** `docs/AP2_THREAT_MODEL.md` (with the milestone-4 addendum),

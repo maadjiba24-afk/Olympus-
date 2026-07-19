@@ -103,3 +103,72 @@ def test_privacy_isolation_of_optin_flag():
     contrib.set_enabled("alice", True)
     assert contrib.is_enabled("alice") is True
     assert contrib.is_enabled("bob") is False    # per-user, not global
+
+
+# --- Phase B: the contribution pool routed through the egress guard ------
+# docs/DESIGN_BOUNDARY_LAYER.md Part 5 Phase B. When OLYMPUS_EGRESS_GUARD is on,
+# the pool's redaction becomes a POOLED policy decision recorded in the log —
+# equivalent to the direct anonymize path, plus auditable + secret-hold.
+
+from olympus import egress, trace  # noqa: E402
+
+
+def test_pool_redaction_via_guard_when_enabled(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    contrib.set_enabled("pb1", True)
+    ok = contrib.offer("pb1", "gpt-4o",
+                       "My email is carol@corp.com, how do I price?",
+                       "Anchor on value; call 4155559876.")
+    assert ok is True
+    row = contrib.recent()[-1]
+    # Redacted through guard(POOLED) exactly as the direct path would have.
+    assert "carol@corp.com" not in row["q"] and "[email]" in row["q"]
+    assert "4155559876" not in row["a"] and "[phone]" in row["a"]
+
+
+def test_pool_holds_stored_secret_via_guard_and_drops(monkeypatch):
+    # A real stored secret (key-shaped env var) that lands in the snapshot must
+    # be HELD by the guard → the whole snapshot is dropped, nothing pooled.
+    secret = "sk-live-9f8e7d6c5b4a3210zzz"
+    monkeypatch.setenv("MYAPP_API_KEY", secret)
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    contrib.set_enabled("pb2", True)
+    before = contrib.count()
+    ok = contrib.offer("pb2", "gpt-4o", "how do I call the API?",
+                       f"use the key {secret} in the header")
+    assert ok is False
+    assert contrib.count() == before        # nothing reached the pool
+
+
+def test_pool_redaction_identical_guard_on_vs_off(monkeypatch):
+    # Equivalence: guard(POOLED) redaction == the direct anonymize path.
+    q = "reach me at dave@x.com or 4155551212 about pricing"
+    a = "the plan token is fine; my number 9998887777 works too"
+    monkeypatch.delenv("OLYMPUS_EGRESS_GUARD", raising=False)
+    contrib.set_enabled("pb_off", True)
+    assert contrib.offer("pb_off", "m", q, a) is True
+    off = contrib.recent()[-1]
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    contrib.set_enabled("pb_on", True)
+    assert contrib.offer("pb_on", "m", q, a) is True
+    on = contrib.recent()[-1]
+    assert on["q"] == off["q"] and on["a"] == off["a"]
+
+
+def test_pool_guard_records_egress_decision(monkeypatch):
+    # The whole point of Phase B: the redaction is now an auditable decision in
+    # the signed Trace, not an inline side effect.
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    contrib.set_enabled("pb3", True)
+    tr = trace.Trace("t")
+    tok = trace.set_current(tr)
+    try:
+        contrib.offer("pb3", "gpt-4o", "email erin@co.com please",
+                      "sure, ping 4155550000")
+    finally:
+        trace.reset_current(tok)
+    pooled = [d for d in tr.decisions
+              if d["decision_type"] == "egress"
+              and d["rationale"]["channel"] == "pooled"]
+    assert pooled, "expected a POOLED egress decision recorded"
+    assert all(d["rationale"]["verdict"] in ("allow", "redact") for d in pooled)
