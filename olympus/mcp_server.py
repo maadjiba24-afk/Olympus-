@@ -98,11 +98,18 @@ def require_auth() -> bool:
 def credential_ok(cred: str | None) -> bool:
     """Constant-time check of a presented credential against the configured
     token. False when no token is configured (an unauthenticated server never
-    'accepts' a credential) or the credential is missing/wrong."""
+    'accepts' a credential) or the credential is missing/wrong.
+
+    Compared as UTF-8 BYTES: `secrets.compare_digest` on `str` raises TypeError
+    if either side contains a non-ASCII character, and this runs on
+    attacker-supplied input — so a crafted token with one non-ASCII byte would
+    otherwise raise instead of returning False (a crash on the auth surface).
+    Bytes comparison is constant-time and never raises on content."""
     expected = _configured_token()
     if not expected or not cred:
         return False
-    return secrets.compare_digest(str(cred), expected)
+    return secrets.compare_digest(str(cred).encode("utf-8"),
+                                  str(expected).encode("utf-8"))
 
 
 def assert_serveable() -> None:
@@ -297,7 +304,22 @@ def serve_stdio() -> None:
                 _error(None, -32700, "parse error")) + "\n")
             sys.stdout.flush()
             continue
-        response = handle_message(msg, session=session)
+        # A well-formed JSON value that isn't an object is not a JSON-RPC
+        # message — reject it without touching handle_message (which would
+        # AttributeError on a list/number).
+        if not isinstance(msg, dict):
+            sys.stdout.write(json.dumps(
+                _error(None, -32600, "invalid request")) + "\n")
+            sys.stdout.flush()
+            continue
+        # One malformed/hostile message must never take the exposed server down
+        # for every other client — turn any handler fault into a JSON-RPC error
+        # (class name only; never echo internal detail).
+        try:
+            response = handle_message(msg, session=session)
+        except Exception as err:
+            response = _error(msg.get("id"), -32603,
+                              f"internal error: {type(err).__name__}")
         if response is not None:
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
