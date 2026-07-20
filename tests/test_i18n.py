@@ -58,7 +58,9 @@ def test_route_and_synthesis_include_language_directive(monkeypatch):
     captured = {}
 
     def fake_json(settings, system, messages, schema, effort="high"):
-        captured["route_system"] = system
+        # First call = routing (carries the language directive); a later call is
+        # the M4 direct-verify screen (internal, English-only by design).
+        captured.setdefault("route_system", system)
         return {"mode": "direct", "direct_reply": "hola",
                 "specialists": [], "brief": None, "needs_verification": False}
 

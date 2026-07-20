@@ -47,8 +47,14 @@ move money after two deliberate human acts.
   (`OLYMPUS_MANDATE_USER_PUBKEY`) remove this for the co-signature — but the
   *default* remains vault-local.
 - The **public default signing seed is forgeable by anyone.** Instances on it
-  are labeled `dev` (integrity, never authenticity). Sovereign mode fails closed
-  on the default seed; `SIGNING.md` carries the compromise-response runbook.
+  are labeled `dev` (integrity, never authenticity). This is now **enforced at
+  boot in production** (M2): with `OLYMPUS_ENV=production` set, the CLI **refuses
+  to boot** (nonzero exit, actionable remediation) when the seed is unset or is
+  the shipped dev seed — `witness.require_production_seed`, called in
+  `cli.main()`. A non-production instance on the default seed still boots but
+  logs a one-line dev-posture warning (dev is allowed, never silent). Sovereign
+  mode likewise fails closed on the default seed; `SIGNING.md` carries the
+  compromise-response runbook.
 
 ## 3. Append-only ledger truncation
 
@@ -95,10 +101,23 @@ traffic is excluded by design, so they cannot be satisfied in a test harness:
 
 ## 6. What the test suite does — and does not — cover
 
-The passing suite proves **architecture, gates, and security logic**. It does
-**not** score **AI-output quality** — that is measured separately by
+The passing unit suite proves **architecture, gates, and security logic**. It
+does **not** score **AI-output quality** — that is measured separately by
 `olympus eval` / `olympus scores`. A green suite means the guardrails are
 correct, not that a given answer is good.
+
+**Now gated in CI (M5).** Answer quality is regression-gated by the
+**answer-quality gate** (`.github/workflows/quality-gate.yml` →
+`scripts/quality_gate.py`): it runs the benchmark and **fails the build** when
+any specialist regresses more than a tolerance (default 1.0/10) below the
+committed baseline (`olympus/quality_baseline.json`). The pass/fail comparison
+is the pure, unit-tested `evals.regression_check`; the live benchmark run makes
+real model calls, so — like the replay gate — the workflow **needs an
+`ANTHROPIC_API_KEY` repo secret and skips cleanly (exit 0) without it**, spend
+capped by `OLYMPUS_DAILY_BUDGET`. The residual therefore narrows but does not
+vanish: quality is only *actually* scored where a key (and a committed baseline)
+is present. Establishing/refreshing the baseline is a human act
+(`--update-baseline`, committed by a maintainer), never the agent's.
 
 ---
 

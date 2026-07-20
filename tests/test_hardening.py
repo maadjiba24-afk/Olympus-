@@ -103,10 +103,15 @@ def test_usage_records_and_reports(monkeypatch):
     assert usage.estimate_cost("claude-opus-4-8", 1000, 500) == 0.0175
 
 
-def test_usage_backpressure_semaphore_exists():
-    sem = usage.slot()
-    assert sem.acquire(timeout=1)
-    sem.release()
+def test_usage_backpressure_slot_acquires():
+    # slot() is a context manager capping concurrent model calls both
+    # per-process AND machine-globally (M3). Acquiring and releasing it must
+    # not raise; the local semaphore is available on entry.
+    with usage.slot():
+        pass
+    # The underlying per-process semaphore still exists and is acquirable.
+    assert usage._SEMAPHORE.acquire(timeout=1)
+    usage._SEMAPHORE.release()
 
 
 # --- tracing -------------------------------------------------------------

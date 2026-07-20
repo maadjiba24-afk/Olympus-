@@ -349,6 +349,52 @@ Gate hardening, each with a pinning test:
   deterministic. Pinned by a seeded 300-case property test over randomized
   junk inputs.
 
+## Amendment 8 (hardening addendum — machine-global model-call cap)
+
+- **The concurrent-model-call cap is now machine-global, not per-process**
+  (closes DEFERRED #9). `usage.slot()` used to acquire only a per-process
+  `threading.BoundedSemaphore`, so the heartbeat and the web/CLI process could
+  jointly run up to 2× `MAX_CONCURRENT_CALLS` and provoke a provider
+  rate-limit storm. It now *also* acquires `proclock.slot("model-call",
+  MAX_CONCURRENT_CALLS)` — a cross-process counting semaphore built by striping
+  a non-blocking `fcntl.flock` over N slot files in `MEMORY_DIR/locks`. The
+  local semaphore is taken first (outer), the machine slot second (inner), so a
+  single process never demands more machine slots than its own cap.
+- **Non-POSIX degradation is explicit.** Where `fcntl` is unavailable
+  (Windows), `proclock.slot` degrades to a no-op with a one-time
+  `errors.capture` warning and only the per-process cap applies — the
+  heartbeat-vs-web split stays documented as unsupported there (DEFERRED #10
+  stays). Acceptance is a two-real-OS-process test: 8 threaded contenders
+  against a cap of 2, asserting the machine-global in-flight peak is exactly 2
+  (never exceeded, and actually reached — not a silent no-op).
+
+## Amendment 9 (hardening addendum — interactive-path verification)
+
+- **Zeus's direct replies are no longer unverified** (closes DEFERRED #6). A
+  `direct` reply skips the council, so before M4 it shipped with no
+  fact-checking at all. `_interactive_verify` now runs ONE cheap, latency-
+  capped structured call (`pool.fastest()`, effort `low`, no tools —
+  `config.interactive_verify_timeout()` default 20 s) that asks whether the
+  reply asserts a checkable real-world fact and, if so, whether it is
+  supported. If a checkable claim is unsupported, the reply ships behind an
+  `⚠️ UNVERIFIED` banner (`_banner_direct`) — bounded, never a silent
+  escalation to a full council run. Casual chat with no checkable claim
+  returns untouched. On by default; `OLYMPUS_INTERACTIVE_VERIFY=off` reverts to
+  the pre-M4 skip (still ledgered).
+- **Every verification skip is now a ledgered exemption** (closes DEFERRED #7).
+  The router's `needs_verification=False` opt-out, clarify turns, direct
+  no-claim replies, a disabled tier, and a verifier infra error each record a
+  `verify.exempt` decision (`_record_verify_exempt`) into the run trace, which
+  flushes durably to `MEMORY_DIR/traces`. The opt-out that once bypassed the
+  chain invisibly is now auditable after the fact — the skip is recorded, never
+  silent.
+- **Bounded, degrade-visible, replay-faithful.** A slow or failed check never
+  banners a casual reply — it degrades to a ledgered `infra_error` exemption
+  and the reply ships as-is. The tier's on/off state is recorded in
+  `tr.meta["interactive_verify"]` and restored on replay (like `fast_mode`), so
+  a recorded run replays byte-identically; pre-M4 traces (no such meta) replay
+  with the tier off and diverge on nothing.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

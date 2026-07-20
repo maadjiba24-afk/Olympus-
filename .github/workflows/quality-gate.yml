@@ -1,0 +1,43 @@
+name: Answer-quality gate
+
+# Answer-quality regression tripwire (closes SECURITY_RESIDUALS §6). The unit
+# suite proves the guardrails are correct; it does NOT score AI-output quality.
+# This gate runs the benchmark (`olympus eval`) and fails if any specialist
+# regresses more than the tolerance below the committed baseline
+# (olympus/quality_baseline.json).
+#
+# Needs an ANTHROPIC_API_KEY repo secret (the eval makes real calls). Spend is
+# capped via OLYMPUS_DAILY_BUDGET. If the secret isn't set, the gate skips
+# cleanly (exit 0) rather than failing — CI without the secret is not a failure.
+#
+# To (re)establish the baseline after an intended quality change: a maintainer
+# runs `python scripts/quality_gate.py --update-baseline` with a key and commits
+# the refreshed olympus/quality_baseline.json.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"        # weekly, Monday 07:00 UTC
+  workflow_dispatch:           # and on demand
+  pull_request:
+    paths:                     # only when something that can move quality changes
+      - "olympus/prompts/**"
+      - "olympus/skills/**"
+      - "olympus/benchmarks.json"
+      - "olympus/quality_baseline.json"
+      - "olympus/evals.py"
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - name: Run the answer-quality gate (skips if no key)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
+        run: python scripts/quality_gate.py
