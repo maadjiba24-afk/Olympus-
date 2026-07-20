@@ -55,6 +55,8 @@ def introspect_postgres(project: str, dsn: str) -> dict:
             kind_note = "view" if "VIEW" in (ttype or "") else "table"
             n = codegraph.add_node(project, f"postgres/{schema}",
                                    f"{schema}.{name}", kind=codegraph.ENTITY)
+            if n is None:                        # graph at the node cap
+                continue
             ids[(schema, name)] = n["id"]
             codegraph.add_rationale(project, f"postgres/{schema}", n["id"],
                                     f"{kind_note} in schema {schema}")
@@ -115,7 +117,8 @@ def introspect_cargo(project: str, root: str | Path) -> dict:
     ids: dict[str, str] = {}
     for name, (rel, _data) in crates.items():
         n = codegraph.add_node(project, rel, name, kind=codegraph.ENTITY)
-        ids[name] = n["id"]
+        if n is not None:                        # skip if at the node cap
+            ids[name] = n["id"]
     for name, (_rel, data) in crates.items():
         deps = data.get("dependencies") or {}
         if isinstance(deps, dict):

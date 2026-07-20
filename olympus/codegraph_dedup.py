@@ -199,7 +199,12 @@ def merge_duplicates(project: str) -> dict:
             if key in seen:
                 continue
             seen.add(key)
-            new_edges.append({**e, "src": src, "dst": dst})
+            # Regenerate the id from the rewritten endpoints so it stays
+            # sha(src+rel+dst) — the invariant subgraph_query's edge dedup and
+            # add_edge's identity both rely on.
+            eid = hashlib.sha256(
+                f"{src}{e['rel']}{dst}".encode()).hexdigest()[:12]
+            new_edges.append({**e, "id": eid, "src": src, "dst": dst})
         codegraph._save(codegraph._NODES, project, nodes_)
         codegraph._save(codegraph._EDGES, project, new_edges)
     return {"groups": len(groups), "merged": len(remap)}

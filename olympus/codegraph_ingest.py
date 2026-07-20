@@ -54,6 +54,8 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
         return None
 
     node = codegraph.add_node(project, rel, path.stem, kind=codegraph.DOCUMENT)
+    if node is None:                             # graph at the node cap
+        return None
     headings = _HEADING_RE.findall(text)
     for i, h in enumerate(headings[:_MAX_HEADINGS]):
         codegraph.add_rationale(project, rel, node["id"], h, slot=f"h{i}")

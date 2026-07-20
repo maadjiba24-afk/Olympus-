@@ -29,6 +29,8 @@ from pathlib import Path
 from . import codegraph
 
 _MAX_FILE_BYTES = 1_000_000        # skip generated monsters; graphs need shape, not bulk
+_MAX_LINE_LEN = 800                # per-line regex input cap — ReDoS backstop on
+                                   # hostile minified/space-padded lines
 _MAX_AMBIGUOUS = 3                 # cap AMBIGUOUS fan-out per call site
 
 # Words that look like calls but are control flow / builtins in most languages.
@@ -80,15 +82,25 @@ LANGS: list[Lang] = [
     Lang("go", (".go",),
          fn=rf"^func\s+(?:\([^)]*\)\s+)?(?P<name>{_ID})\s*[(\[]",
          cls=rf"^type\s+(?P<name>{_ID})\s+(?:struct|interface)\b",
-         imp=r"""^\s*(?:import\s+)?(?:\w+\s+)?"(?P<mod>[^"]+)"$"""),
+         # Require the `import` keyword: a bare `"handler"` on its own line (a
+         # string-literal continuation, not an import) must not become a false
+         # import edge. Block imports — `import ( "a"; "b" )` — are missed; that
+         # is the safe direction (a missed edge, never an invented one).
+         imp=r"""^\s*import\s+(?:\w+\s+)?"(?P<mod>[^"]+)"$"""),
     Lang("rust", (".rs",),
          fn=rf"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?"
             rf"fn\s+(?P<name>{_ID})",
          cls=rf"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+(?P<name>{_ID})",
          imp=rf"^\s*(?:pub\s+)?use\s+(?:crate|super|self)?::?(?P<mod>{_ID})"),
     Lang("java", (".java",),
-         fn=rf"^\s*(?:public|protected|private|static|final|abstract|synchronized"
-            rf"|native|\s)+[\w<>\[\],.\s]+\s+(?P<name>{_ID})\s*\([^;]*$",
+         # LINEAR by construction: `(?:TOKEN[ \t]+)+ NAME (` where TOKEN is a
+         # run of non-space type/modifier chars and the separator is
+         # whitespace. The two character classes are disjoint, so a space run
+         # and a word run each belong to exactly one place — there is no
+         # ambiguous partition for the engine to backtrack over (the old
+         # `(?:…|\s)+[\w…\s]+\s+` form had three overlapping whitespace
+         # quantifiers and was catastrophically backtracking / ReDoS-prone).
+         fn=rf"^[ \t]*(?:[\w<>\[\],.?@]+[ \t]+)+(?P<name>{_ID})[ \t]*\(",
          cls=rf"^\s*(?:public\s+|abstract\s+|final\s+)*"
              rf"(?:class|interface|enum|record)\s+(?P<name>{_ID})",
          imp=rf"^import\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;"),
@@ -103,8 +115,9 @@ LANGS: list[Lang] = [
          cls=rf"^\s*(?:class|struct|enum\s+class)\s+(?P<name>{_ID})",
          imp=r"""^\s*#\s*include\s+["<](?P<mod>[^">]+)[">]"""),
     Lang("csharp", (".cs",),
-         fn=rf"^\s*(?:public|protected|private|internal|static|virtual|override"
-            rf"|async|sealed|\s)+[\w<>\[\],.?\s]+\s+(?P<name>{_ID})\s*\([^;]*$",
+         # Linear token form — see the java note above for why this shape can't
+         # backtrack catastrophically.
+         fn=rf"^[ \t]*(?:[\w<>\[\],.?@]+[ \t]+)+(?P<name>{_ID})[ \t]*\(",
          cls=rf"^\s*(?:public\s+|internal\s+|abstract\s+|sealed\s+|partial\s+|static\s+)*"
              rf"(?:class|interface|enum|struct|record)\s+(?P<name>{_ID})",
          imp=rf"^\s*using\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;"),
@@ -206,59 +219,84 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
 
     qual = path.stem
     mod = codegraph.add_node(project, rel, qual, kind=codegraph.MODULE)
+    if mod is None:                              # graph at the node cap
+        return None
     module_id = mod["id"]
-
-    # Definitions: one pass per shape, keyed by line for call attribution.
-    defs: list[tuple[int, str, str]] = []          # (lineno, node_id, name)
     lines = text.splitlines()
-    for rx, kind in ((lang.fn, codegraph.FUNCTION),
-                     (lang.cls, codegraph.CLASS)):
-        if rx is None:
-            continue
-        for m in rx.finditer(text):
-            name = _first_group(m)
-            if not name or name in _NOT_CALLS:
-                continue
-            lineno = text.count("\n", 0, m.start()) + 1
-            n = codegraph.add_node(project, rel, f"{qual}.{name}", kind=kind,
-                                   span=[lineno, lineno])
-            codegraph.add_edge(project, module_id, "defines", n["id"])
-            defs.append((lineno, n["id"], name))
-    defs.sort()
 
-    # Rationale: NOTE/WHY/HACK comment lines attach to the nearest preceding
-    # definition (or the module). Sanitized inside add_rationale.
-    cm = re.escape(lang.comment)
-    for m in re.finditer(rf"{cm}\s*(.+)$", text, re.M):
-        note = _NOTE_RE.search(m.group(1))
-        if not note:
-            continue
-        lineno = text.count("\n", 0, m.start()) + 1
+    def _owner_at(lineno: int, defs_: list) -> str:
         owner = module_id
-        for dline, did, _name in defs:
+        for dline, did, _name in defs_:
             if dline <= lineno:
                 owner = did
             else:
                 break
-        codegraph.add_rationale(project, rel, owner, note.group(1))
+        return owner
 
-    # Imports (module stems) and call sites attributed to the nearest
-    # preceding definition — approximate for brace languages, which is exactly
-    # why build() marks these calls INFERRED.
-    imports = ([_mod_stem(m.group("mod")) for m in lang.imp.finditer(text)]
-               if lang.imp else [])
+    # Definitions — matched LINE BY LINE, and only on lines within
+    # `_MAX_LINE_LEN`. Every def regex is single-line (`^…$`), so per-line
+    # `search` is equivalent to the old whole-file `finditer` — but it bounds
+    # the input each regex ever sees, which is what defuses catastrophic
+    # backtracking (ReDoS) on a hostile minified/space-padded line in a cloned
+    # repo. A pathological line is skipped, not chewed on.
+    def_rxs = [(rx, kind) for rx, kind in
+               ((lang.fn, codegraph.FUNCTION), (lang.cls, codegraph.CLASS))
+               if rx is not None]
+    defs: list[tuple[int, str, str]] = []          # (lineno, node_id, name)
+    for i, line in enumerate(lines, start=1):
+        if len(line) > _MAX_LINE_LEN:
+            continue
+        for rx, kind in def_rxs:
+            m = rx.search(line)
+            if not m:
+                continue
+            name = _first_group(m)
+            if not name or name in _NOT_CALLS:
+                continue
+            n = codegraph.add_node(project, rel, f"{qual}.{name}", kind=kind,
+                                   span=[i, i])
+            if n is None:
+                break
+            codegraph.add_edge(project, module_id, "defines", n["id"])
+            defs.append((i, n["id"], name))
+            break                                  # a line is one def, not two
+
+    # Rationale: NOTE/WHY/HACK comment lines, each in its own slot so several
+    # notes on one owner don't overwrite each other. Sanitized inside
+    # add_rationale.
+    note_slot = 0
+    for i, line in enumerate(lines, start=1):
+        if len(line) > _MAX_LINE_LEN:
+            continue
+        idx = line.find(lang.comment)
+        if idx < 0:
+            continue
+        note = _NOTE_RE.search(line[idx + len(lang.comment):])
+        if not note:
+            continue
+        codegraph.add_rationale(project, rel, _owner_at(i, defs),
+                                note.group(1), slot=f"n{note_slot}")
+        note_slot += 1
+
+    # Imports (module stems) and call sites attributed to the nearest preceding
+    # definition — approximate for brace languages, which is exactly why
+    # build() marks these edges INFERRED, never ground truth.
+    imports: list[str] = []
+    if lang.imp:
+        for line in lines:
+            if len(line) > _MAX_LINE_LEN:
+                continue
+            m = lang.imp.search(line)
+            if m:
+                imports.append(_mod_stem(m.group("mod")))
     def_names = {name for _, _, name in defs}
     calls: list[tuple[str, str]] = []
     for i, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        if stripped.startswith(lang.comment):
+        if len(line) > _MAX_LINE_LEN:
             continue
-        owner = module_id
-        for dline, did, _name in defs:
-            if dline <= i:
-                owner = did
-            else:
-                break
+        if line.lstrip().startswith(lang.comment):
+            continue
+        owner = _owner_at(i, defs)
         for cm_ in _CALL_RE.finditer(line):
             callee = cm_.group(1)
             if callee in _NOT_CALLS:

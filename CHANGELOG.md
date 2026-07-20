@@ -15,6 +15,64 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security & Fixed — Code-graph hardening pass
+
+Two adversarial reviews (correctness + security) of the new code-graph engine,
+with a regression test for every confirmed finding (`test_codegraph_hardening.py`).
+
+Security:
+- **ReDoS closed.** The Java/C# definition regexes had three overlapping
+  whitespace quantifiers and backtracked catastrophically — a crafted
+  `.java`/`.cs` file in a cloned repo hung `codegraph build`/`update`/`watch`
+  for minutes. Rewritten into a provably linear token form (disjoint
+  token/separator classes), plus a per-line input cap; a hostile file now
+  builds in ~1 s.
+- **Symlink escape closed.** `collect_files` followed symlinks, so a cloned
+  repo could plant `x.yaml -> ~/.ssh/id_rsa` and pull its contents into the
+  graph. It now walks with `followlinks=False`, skips symlinked files/dirs, and
+  drops any path whose real location escapes the root.
+- **Attacker prose kept off the trusted path.** The auto-injected context block
+  and the `codegraph_subgraph`/`codegraph_overview` tools (both TRUSTED, hence
+  unwrapped) now emit STRUCTURE ONLY — rationale/document node labels (free text
+  from comments, docstrings, doc headings) are excluded, so a hostile comment in
+  an analyzed repo can't reach the model as clean text. The explicit CLI view
+  still shows prose.
+- **Global graph bounded.** `codegraph global add` wrote nodes directly, bypassing
+  the node/edge caps; it now enforces them, so the cross-repo graph can't grow
+  without bound.
+- `github.py` refuses a non-HTTPS `GITHUB_API` (never sends the token in the
+  clear), caps the response body, and stops on a redirect to a plaintext host.
+- The self-contained HTML export neutralizes `<!--` and `<script` in the JSON
+  payload, not just `</script>`.
+
+Fixed (correctness):
+- **Node-cap corruption.** At the 20 000-node cap, `add_node` returned an
+  unrelated node, welding every later file's structure onto node[0] as false
+  EXTRACTED edges the oracle would then confirm. It now returns `None` and every
+  extractor skips cleanly.
+- **Incremental update now equals a full build.** A changed file could leave a
+  stale EXTRACTED call/import edge between two *unchanged* files after new code
+  made it ambiguous. `update()` clears all cross-file edges and re-resolves from
+  the manifest, so incremental and full builds are identical.
+- **Oracle honesty.** "X is unused" was REFUTED on AMBIGUOUS/INFERRED incoming
+  edges; it now returns UNKNOWN unless an EXTRACTED caller exists.
+- **Python imports resolve by full dotted path**, so `from b.util import x` with
+  both `a/util.py` and `b/util.py` present resolves to `b.util` (was a false
+  REFUTED / wrong-module edge); an ambiguous stem-only match is INFERRED, never
+  EXTRACTED.
+- **gitignore directory patterns work.** Anchored (`/build/`) and multi-component
+  (`foo/bar/`) directory patterns now correctly exclude the files beneath them.
+- **Watch debounce works.** It snapshotted twice with no wait between, so a
+  save-storm rebuilt once per poll instead of once total; it now waits for the
+  tree to settle (bounded), and an `on_update` exception can't kill the loop.
+- Go bare quoted-string lines no longer become false import edges; regex-engine
+  and stem-only imports are INFERRED, never ground truth; global-graph tags are
+  sanitized so one tag can't be an id-prefix of another (`acme` vs `acme:web`);
+  merged/global edge ids are regenerated to stay `sha(src+rel+dst)`;
+  `pull_files` paginates to 300; multi-language notes get distinct rationale
+  slots; incremental `updated_at` no longer overwrites the full build's
+  `commit_sha`.
+
 ### Added — The code graph absorbs Graphify's pipeline as native capability
 
 The Phase 0 code graph (Python-only, query/impact/path/verify) grows into a

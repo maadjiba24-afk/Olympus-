@@ -77,6 +77,9 @@ class _Walk(ast.NodeVisitor):
         n = codegraph.add_node(
             self.project, self.rel_path, qual, kind=kind,
             span=[node.lineno, getattr(node, "end_lineno", node.lineno)])
+        if n is None:                    # graph at the node cap — skip cleanly
+            self.generic_visit(node)
+            return
         codegraph.add_edge(self.project, parent_id, "defines", n["id"])
         doc = ast.get_docstring(node)
         if doc:
@@ -97,17 +100,24 @@ class _Walk(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef
 
     # -- imports ---------------------------------------------------------
+    # Record the FULL dotted target(s), not just the stem: `from b.util import
+    # x` where both a/util.py and b/util.py exist must resolve to b.util, which
+    # the stem "util" cannot disambiguate. `_resolve` matches a full dotted
+    # module qualname first (EXTRACTED), then falls back to the stem. Both the
+    # dotted path and its last component are recorded so either can match.
     def visit_Import(self, node):
-        for alias in node.names:
-            self.imports.append(alias.name.split(".")[-1])
+        for alias in node.names:            # import a.b.c  /  import a.b as x
+            self.imports.append(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        if node.module:                      # from .config import X / from x.y import Z
-            self.imports.append(node.module.split(".")[-1])
-        else:                                # from . import memory, store
+        if node.module:                     # from a.b import c, d
+            self.imports.append(node.module)
+            for alias in node.names:        # c/d may be submodules of a.b
+                self.imports.append(f"{node.module}.{alias.name}")
+        else:                               # from . import memory, store
             for alias in node.names:
-                self.imports.append(alias.name.split(".")[-1])
+                self.imports.append(alias.name)
         self.generic_visit(node)
 
     # -- calls -----------------------------------------------------------
@@ -127,6 +137,8 @@ def extract_file(project: str, path: Path, root: Path):
         return None
     qual = _module_qual(path, root)
     mod = codegraph.add_node(project, rel, qual, kind=codegraph.MODULE)
+    if mod is None:                          # graph at the node cap
+        return None
     doc = ast.get_docstring(tree)
     if doc:
         codegraph.add_rationale(project, rel, mod["id"], doc)

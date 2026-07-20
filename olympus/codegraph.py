@@ -210,9 +210,14 @@ def _by_label(project: str, name: str) -> list[dict]:
 # --- nodes & edges -------------------------------------------------------
 
 def add_node(project: str, path: str, qual: str, kind: str = FUNCTION,
-             span: list | None = None) -> dict:
+             span: list | None = None) -> dict | None:
     """Upsert a code entity, identified by (path, qualified-name). Returns the
-    node. Re-extraction updates a mutable `span` without changing the id."""
+    node, or ``None`` when the graph is at the node cap and this is a NEW node —
+    callers must treat a ``None`` as "not in the graph" and skip any edge they
+    would have attached. (Returning an unrelated node here, as the spike did,
+    silently welded every over-cap file's structure onto node[0] as false
+    EXTRACTED edges — the exact failure the oracle must never manufacture.)
+    Re-extraction updates a mutable `span` without changing the id."""
     qual = _clean_label(qual)
     if not qual:
         raise ValueError("a node needs a qualified name")
@@ -232,8 +237,8 @@ def add_node(project: str, path: str, qual: str, kind: str = FUNCTION,
             if changed:
                 _save(_NODES, project, nodes_)
             return dict(existing)
-        if len(nodes_) >= _MAX_NODES:          # bounded: keep the existing graph
-            return dict(nodes_[0])
+        if len(nodes_) >= _MAX_NODES:          # bounded: refuse new nodes
+            return None
         node = {"id": nid, "label": label, "qual": qual, "kind": kind,
                 "path": path, "span": span}
         nodes_.append(node)
@@ -259,6 +264,8 @@ def add_rationale(project: str, path: str, owner_id: str, text: str,
         return None
     qual = f"{owner_id}#{_clean_label(slot) or 'doc'}"
     node = add_node(project, path, qual, kind=RATIONALE)
+    if node is None:                              # graph at the node cap
+        return None
     with _LOCK:
         nodes_ = _load(_NODES, project)
         n = _by_id(nodes_, node["id"])
@@ -340,6 +347,21 @@ def remove_paths(project: str, rel_paths: set[str]) -> int:
         _save(_NODES, project, nodes_)
         _save(_EDGES, project, edges_)
     return len(doomed)
+
+
+def remove_edges_by_relation(project: str, rels: set[str]) -> int:
+    """Drop every edge with a relation in `rels`. Incremental update clears the
+    cross-file edges (`calls`/`imports`/`references`) and lets `_resolve`
+    rebuild them from the full manifest, so an incremental graph is byte-for-
+    byte the resolution a full build would produce — no stale EXTRACTED edge
+    survives after new code makes a call ambiguous."""
+    with _LOCK:
+        edges_ = _load(_EDGES, project)
+        kept = [e for e in edges_ if e["rel"] not in rels]
+        removed = len(edges_) - len(kept)
+        if removed:
+            _save(_EDGES, project, kept)
+    return removed
 
 
 def degree(project: str) -> dict[str, int]:
@@ -460,14 +482,33 @@ def describe(project: str, name: str) -> str:
     return "\n".join(lines)
 
 
+# Prose-labeled node kinds: their labels are free text pulled from the analyzed
+# repo (docstrings, comments, doc headings, doc titles). Code/entity labels are
+# identifier-constrained by extraction; prose is not. The trusted, UNWRAPPED
+# paths (the auto-injected context block, the TRUSTED_TOOLS graph tools) surface
+# STRUCTURE ONLY and never a prose label, so a hostile comment in a cloned repo
+# cannot reach the model as clean text through them. Prose stays available in
+# the explicit CLI views, whose output is not auto-injected.
+_PROSE_KINDS = frozenset({RATIONALE, DOCUMENT})
+
+
+def _is_prose(node: dict | None) -> bool:
+    return bool(node) and node.get("kind") in _PROSE_KINDS
+
+
 def context_block(project: str, text: str) -> str:
     """A compact, injectable view of code structure relevant to this turn.
     Returns '' when the toggle is off or the turn names no *distinctive* symbol
     in the graph, so it costs no tokens and never fires on incidental common
-    words — the relgraph discipline, tightened for code identifiers."""
+    words — the relgraph discipline, tightened for code identifiers.
+
+    STRUCTURE ONLY: prose-labeled nodes (rationale/documents) are excluded, so
+    attacker-influenced comment/doc text from an analyzed repo is never injected
+    unwrapped into a turn (see `_PROSE_KINDS`)."""
     if not _ENABLED:
         return ""
-    ents = [n for n in find(project, text) if _distinctive(n["label"])]
+    ents = [n for n in find(project, text)
+            if _distinctive(n["label"]) and not _is_prose(n)]
     if not ents:
         return ""
     nodes_, edges_ = _load(_NODES, project), _load(_EDGES, project)
@@ -485,6 +526,8 @@ def context_block(project: str, text: str) -> str:
                           f"{ent['label']}") if other else None
             else:
                 continue
+            if _is_prose(other):                  # never inject prose unwrapped
+                continue
             if phrase and phrase not in seen:
                 seen.add(phrase)
                 lines.append(f"- {phrase}")
@@ -499,14 +542,20 @@ def context_block(project: str, text: str) -> str:
 
 
 def subgraph_query(project: str, question: str, budget_tokens: int = 2000,
-                   dfs: bool = False) -> str:
+                   dfs: bool = False, include_prose: bool = False) -> str:
     """Answer-shaped subgraph retrieval: seed on the symbols the question
     names, walk outward (BFS by default, DFS on request), and stop when the
     rendered text would exceed `budget_tokens` (~4 chars/token). The graph
     analog of grep-then-read: everything relevant, nothing else, within a
-    predictable context cost. (Graphify's query pattern, absorbed.)"""
+    predictable context cost. (Graphify's query pattern, absorbed.)
+
+    `include_prose` defaults to FALSE — prose-labeled nodes (rationale/
+    documents, whose text comes from the analyzed repo) are excluded. The
+    agent tools and MCP surface call it this way so hostile comment/doc text is
+    never returned unwrapped; the explicit CLI passes True for a full view."""
     budget_chars = max(200, int(budget_tokens) * 4)
-    seeds = find(project, question)
+    seeds = [s for s in find(project, question)
+             if include_prose or not _is_prose(s)]
     if not seeds:
         return ""
     nodes_, edges_ = _load(_NODES, project), _load(_EDGES, project)
@@ -536,6 +585,8 @@ def subgraph_query(project: str, question: str, budget_tokens: int = 2000,
             seen_edges.add(e["id"])
             a, b = by_id.get(e["src"]), by_id.get(e["dst"])
             if not (a and b):
+                continue
+            if not include_prose and (_is_prose(a) or _is_prose(b)):
                 continue
             mark = "" if e.get("tier") == EXTRACTED else f" ({e.get('tier', '?')})"
             line = f"- {a['label']} {e['rel'].replace('_', ' ')} {b['label']}{mark}"
@@ -591,10 +642,14 @@ def _ast_backed(nodes_: list[dict]) -> bool:
     return all(str(n.get("path", "")).endswith(".py") for n in nodes_)
 
 
-def _has_incoming(project: str, dst_nodes, rels) -> bool:
+def _incoming_tiers(project: str, dst_nodes, rels) -> set[str]:
+    """Confidence tiers of edges pointing INTO these nodes via `rels`. The
+    oracle distinguishes 'has an EXTRACTED caller' (proof it is used) from
+    'has only an AMBIGUOUS/INFERRED caller' (a guess that must not settle an
+    is-unused claim either way)."""
     dst_ids = {n["id"] for n in dst_nodes}
-    return any(e["dst"] in dst_ids and e["rel"] in rels for e in
-               _load(_EDGES, project))
+    return {e.get("tier") for e in _load(_EDGES, project)
+            if e["dst"] in dst_ids and e["rel"] in rels}
 
 
 def verify_claim(project: str, claim: str) -> dict:
@@ -630,8 +685,14 @@ def verify_claim(project: str, claim: str) -> dict:
         target = _by_label(project, _last(m.group(1)))
         if not target:
             return {"verdict": "UNKNOWN", "detail": "symbol not in the graph"}
-        if _has_incoming(project, target, {"calls", "references"}):
-            return {"verdict": "REFUTED", "detail": "it has incoming callers"}
+        tiers = _incoming_tiers(project, target, {"calls", "references"})
+        if EXTRACTED in tiers:
+            return {"verdict": "REFUTED",
+                    "detail": "it has an EXTRACTED caller"}
+        if tiers:                                 # only INFERRED/AMBIGUOUS in
+            return {"verdict": "UNKNOWN",
+                    "detail": "its only incoming callers are inferred "
+                              "(regex-level evidence, not proof)"}
         if not _ast_backed(target):
             return {"verdict": "UNKNOWN",
                     "detail": "symbol comes from a regex-extracted file — "

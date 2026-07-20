@@ -97,7 +97,7 @@ def run(args) -> int:
     if action == "query":
         text = codegraph.subgraph_query(project, _arg(args),
                                         budget_tokens=args.budget,
-                                        dfs=args.dfs)
+                                        dfs=args.dfs, include_prose=True)
         print(text or "Nothing in the graph matches that question.")
         return 0 if text else 1
 

@@ -30,6 +30,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -86,21 +87,39 @@ class IgnoreRules:
                 neg = line.startswith("!")
                 self.rules.append((neg, line[1:] if neg else line))
 
-    def ignored(self, rel: str, is_dir: bool = False) -> bool:
+    @staticmethod
+    def _matches(rel: str, pat: str) -> bool:
+        """Does gitignore-subset `pat` match the (file) posix path `rel`?
+
+        - trailing '/'  → directory pattern (matches paths INSIDE the dir);
+        - a leading or interior '/'  → anchored to the root;
+        - otherwise     → matches a component at ANY depth.
+        The old version fnmatched the whole `rel` against a single anchored
+        pattern, so `/build/` and `foo/bar/` never matched the files beneath
+        them and generated/vendored trees got fully indexed."""
+        dir_only = pat.endswith("/")
+        p = pat.strip("/")
+        if not p:
+            return False
+        anchored = pat.startswith("/") or "/" in p        # interior/leading '/'
+        rel_parts = rel.split("/")
+        if anchored:
+            pat_parts = p.split("/")
+            if len(rel_parts) <= len(pat_parts) if dir_only else \
+                    len(rel_parts) < len(pat_parts):
+                return False                               # can't be inside it
+            return all(fnmatch.fnmatch(r, q)
+                       for r, q in zip(rel_parts, pat_parts))
+        # unanchored: match a component at any depth (dirs only when dir_only,
+        # since a trailing-slash pattern never matches the file leaf itself)
+        comps = rel_parts[:-1] if dir_only else rel_parts
+        return any(fnmatch.fnmatch(c, p) for c in comps)
+
+    def ignored(self, rel: str) -> bool:
         rel = rel.replace("\\", "/")
         verdict = False
-        for neg, pat in self.rules:
-            dir_only = pat.endswith("/")
-            pat_ = pat.rstrip("/")
-            anchored = pat_.startswith("/")
-            pat_ = pat_.lstrip("/")
-            if dir_only and not is_dir and not any(
-                    fnmatch.fnmatch(part, pat_) for part in rel.split("/")[:-1]):
-                continue
-            hit = (fnmatch.fnmatch(rel, pat_) if anchored or "/" in pat_
-                   else any(fnmatch.fnmatch(part, pat_)
-                            for part in rel.split("/")))
-            if hit:
+        for neg, pat in self.rules:                        # later patterns win
+            if self._matches(rel, pat):
                 verdict = not neg
         return verdict
 
@@ -110,23 +129,42 @@ class IgnoreRules:
 def collect_files(root: Path, include_docs: bool = True,
                   respect_ignores: bool = True) -> list[Path]:
     """Every extractable file under root, honoring ignore dirs + ignore files.
-    Sorted for deterministic builds."""
+    Sorted for deterministic builds.
+
+    Symlinks are NOT followed and any file whose real path escapes `root` is
+    dropped: a cloned untrusted repo must not be able to plant `x.yaml ->
+    ~/.ssh/id_rsa` (or a symlinked directory) and have its contents pulled into
+    the graph. `os.walk(followlinks=False)` also prevents symlink-cycle hangs
+    that `Path.rglob` could otherwise trigger."""
     rules = IgnoreRules(root) if respect_ignores else None
     suffixes = set(codegraph_langs.SUFFIXES) | {".py"}
     if include_docs:
         suffixes |= set(codegraph_ingest.SUFFIXES)
+    root_real = root.resolve()
     out: list[Path] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in suffixes:
-            continue
-        rel_parts = path.relative_to(root).parts
-        if any(part in _IGNORE_DIRS for part in rel_parts[:-1]):
-            continue
-        rel = "/".join(rel_parts)
-        if rules and rules.ignored(rel):
-            continue
-        out.append(path)
-    return out
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # prune ignored + symlinked directories in place (don't descend)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in _IGNORE_DIRS
+            and not (Path(dirpath) / d).is_symlink())
+        for fn in sorted(filenames):
+            path = Path(dirpath) / fn
+            if path.suffix.lower() not in suffixes or path.is_symlink():
+                continue
+            try:
+                if not path.is_file():
+                    continue
+                real = path.resolve()
+                if real != root_real and root_real not in real.parents:
+                    continue                       # escapes the root — skip
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            if rules and rules.ignored(rel):
+                continue
+            out.append(path)
+    return sorted(out)
 
 
 def _sha(path: Path) -> str:
@@ -176,27 +214,60 @@ def _resolve(project: str, infos: list[dict]) -> dict:
     for n in nodes_:
         if n["kind"] in (codegraph.FUNCTION, codegraph.METHOD):
             func_index.setdefault(n["label"].lower(), []).append(n)
-    # Two module indexes so a code import can never resolve to a same-stem
-    # document (olympus/capabilities.py, not docs/CAPABILITIES.md). Docs look
-    # doc-first, then code — a wikilink usually names another doc.
-    code_index: dict[str, str] = {}
-    doc_index: dict[str, str] = {}
+    # Module indexes, split so a code import can never resolve to a same-stem
+    # document (olympus/capabilities.py, not docs/CAPABILITIES.md). Each keeps a
+    # FULL-qualname map (unique, disambiguates a/util.py from b/util.py) and a
+    # STEM map (may be ambiguous → several candidates). Python imports carry the
+    # full dotted path, so they hit the qual map exactly; a stem-only hit that
+    # is ambiguous is NOT ground truth and is recorded INFERRED, never EXTRACTED.
+    code_qual: dict[str, str] = {}
+    doc_qual: dict[str, str] = {}
+    code_stem: dict[str, list[str]] = {}
+    doc_stem: dict[str, list[str]] = {}
     for info in infos:
-        idx = doc_index if info.get("lang") == "doc" else code_index
-        idx.setdefault(info["stem"].lower(), info["module_id"])
+        is_doc_mod = info.get("lang") == "doc"
+        qmap, smap = ((doc_qual, doc_stem) if is_doc_mod
+                      else (code_qual, code_stem))
+        qmap.setdefault(str(info["qual"]).lower(), info["module_id"])
+        smap.setdefault(str(info["stem"]).lower(),
+                        []).append(info["module_id"])
+
+    def _resolve_import(target: str, is_doc: bool):
+        """(target_id, exact) — exact means a unique full-qualname match
+        (ground-truth EXTRACTED); a stem match is not exact."""
+        t = str(target).lower()
+        qmap = doc_qual if is_doc else code_qual
+        if t in qmap:
+            return qmap[t], True
+        if is_doc and t in code_qual:          # a doc may link to code by path
+            return code_qual[t], True
+        stem = t.rsplit(".", 1)[-1]
+        smap = doc_stem if is_doc else code_stem
+        cands = smap.get(stem) or (code_stem.get(stem) if is_doc else None)
+        if cands and len(cands) == 1:
+            return cands[0], False
+        return None, False
 
     stats = {"imports": 0, "calls_resolved": 0, "calls_inferred": 0,
              "calls_ambiguous": 0, "calls_skipped": 0}
     for info in infos:
         is_doc = info.get("lang") == "doc"
         rel_name = "references" if is_doc else "imports"
-        for stem in info["imports"]:
-            stem_l = str(stem).lower()
-            tgt = (doc_index.get(stem_l) or code_index.get(stem_l) if is_doc
-                   else code_index.get(stem_l))
-            if tgt and tgt != info["module_id"]:
-                if codegraph.add_edge(project, info["module_id"], rel_name, tgt):
-                    stats["imports"] += 1
+        seen_imports: set[str] = set()
+        for target in info["imports"]:
+            tgt, exact = _resolve_import(target, is_doc)
+            if not tgt or tgt == info["module_id"] or tgt in seen_imports:
+                continue
+            # A wikilink/reference is an explicit link (EXTRACTED). A code
+            # import is EXTRACTED only on an exact full-qualname match; a
+            # stem-only guess is INFERRED so the oracle never confirms it.
+            tier = (codegraph.EXTRACTED if (is_doc or exact)
+                    else codegraph.INFERRED)
+            conf = 1.0 if tier == codegraph.EXTRACTED else _INFER_CONF
+            if codegraph.add_edge(project, info["module_id"], rel_name, tgt,
+                                  tier=tier, confidence=conf):
+                seen_imports.add(tgt)
+                stats["imports"] += 1
         certain = info.get("lang") == "python"
         for caller_id, callee in info["calls"]:
             cands = func_index.get(str(callee).lower(), [])
@@ -277,6 +348,13 @@ def update(project: str = "self", root: str = ".",
 
     with codegraph.bulk(project):
         codegraph.remove_paths(project, set(changed) | set(deleted))
+        # Clear ALL cross-file edges, not just those touching changed files: a
+        # new/removed definition elsewhere can change the tier of a call/import
+        # between two UNCHANGED files (unique -> ambiguous, or the reverse).
+        # Re-resolving over the whole manifest then reproduces exactly what a
+        # full build would — incremental and full can never diverge.
+        codegraph.remove_edges_by_relation(
+            project, {"calls", "imports", "references"})
         for rel in deleted:
             manifest.pop(rel, None)
         for rel in changed:
@@ -286,12 +364,13 @@ def update(project: str = "self", root: str = ".",
                 continue
             manifest[rel] = {"sha": _sha(current[rel]), "info": info}
 
-        # Unchanged files keep their nodes; resolution over the WHOLE manifest
-        # re-adds any cross-file edge that remove_paths took with it.
         infos = [m["info"] for m in manifest.values()]
         stats = _resolve(project, infos)
     _save_manifest(project, manifest)
-    codegraph.set_meta(project, built_at=int(time.time()), root=str(root_p))
+    # `updated_at` reflects this incremental pass; `commit_sha` deliberately
+    # stays whatever the last FULL build recorded (an incremental update has no
+    # single commit), so provenance is never silently misattributed.
+    codegraph.set_meta(project, updated_at=int(time.time()), root=str(root_p))
     s = codegraph.stats(project)
     return {"files_changed": len(changed), "files_deleted": len(deleted),
             "nodes": s["nodes"], "edges": s["edges"], "mode": "incremental",
