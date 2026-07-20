@@ -46,7 +46,7 @@
     ]
   },
   "commands": {
-    "count": 111,
+    "count": 112,
     "names": [
       "a2a",
       "actions",
@@ -61,6 +61,7 @@
       "capabilities",
       "chat",
       "code-eval",
+      "codegraph",
       "compare",
       "config",
       "connectors",
@@ -163,7 +164,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 101,
+    "count": 103,
     "names": [
       "add_todo",
       "analyze_image",
@@ -200,7 +201,9 @@
       "call_webhook",
       "codegraph_impact",
       "codegraph_neighbors",
+      "codegraph_overview",
       "codegraph_path",
+      "codegraph_subgraph",
       "complete_todo",
       "create_skill",
       "current_time",

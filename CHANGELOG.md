@@ -15,6 +15,58 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — The code graph absorbs Graphify's pipeline as native capability
+
+The Phase 0 code graph (Python-only, query/impact/path/verify) grows into a
+full knowledge-graph engine — Graphify's feature set (MIT), reimplemented in
+Olympus's idiom: store-backed, injection-sanitized, zero new required
+dependencies, and honest about confidence everywhere.
+
+- **Multi-language extraction** (`codegraph_langs`): one regex engine + a
+  per-language shape table covers ~20 languages (JS/TS, Go, Rust, Java, C/C++,
+  C#, Ruby, PHP, Kotlin, Swift, Scala, Lua, Bash, PowerShell, Elixir, Dart,
+  Zig, Julia, Fortran); Python keeps the stdlib-`ast` extractor. Regex-derived
+  call edges are INFERRED — never EXTRACTED — so the hallucination oracle
+  stays sound, and it now answers UNKNOWN instead of REFUTED where only
+  regex-level evidence exists.
+- **Documents in the same graph** (`codegraph_ingest`): md/mdx/rst/txt/yaml
+  become DOCUMENT nodes; wikilinks and local markdown links become
+  `references` edges; headings become sanitized rationale.
+- **Build + incremental update** (`codegraph_build`): `.gitignore` /
+  `.olympusignore` handling (subset, `!` negation honored), a per-file
+  content-hash manifest, `update()` that re-extracts only changed files, and
+  a bulk write session that turns whole-repo builds from minutes into seconds
+  (this repo: 449 files → ~2 s full build, ~0.5 s incremental).
+- **Analysis** (`codegraph_analysis`): pure-Python deterministic Louvain
+  communities with heuristic zero-token labels, god nodes, surprise-scored
+  cross-community connections, suggested questions, `CODEGRAPH_REPORT.md`,
+  and a measured token benchmark (subgraph vs corpus; 99.8% reduction on this
+  repo's own graph).
+- **Token-budgeted subgraph query** (`codegraph.subgraph_query`): BFS/DFS
+  retrieval that stops at an explicit token budget.
+- **Near-duplicate merging** (`codegraph_dedup`): MinHash + token blocking →
+  Jaro-Winkler verification → union-find merge, prose-labeled nodes only.
+- **Exports** (`codegraph_export`): graph.json, GraphML, Mermaid,
+  self-contained HTML visualization (no CDN, payload escaped), Obsidian vault
+  (own subdirectory, never touches existing notes), agent-crawlable markdown
+  wiki, Cypher, and optional live Neo4j / FalkorDB pushes (lazy drivers).
+- **Watch mode** (`codegraph_watch`): mtime polling + debounce, no daemon deps.
+- **Global graph** (`codegraph_global`): merge per-project graphs into a
+  cross-repo graph with tag-prefixed identity; add/remove/list.
+- **Introspection** (`codegraph_introspect`): live PostgreSQL schema (tables/
+  views/FKs, via the existing `postgres` extra) and Cargo workspace crate
+  dependencies become ENTITY nodes.
+- **Graph-aware PR dashboard** (`codegraph_prs` + read-only `github.py`
+  endpoints): open PRs mapped to the communities and god nodes they touch,
+  with shared-subsystem merge-order risk flagged.
+- **Surface**: `olympus codegraph <action>` CLI (build/update/watch/stats/
+  show/report/query/path/impact/verify/communities/label/dedup/export/
+  benchmark/prs/global/postgres/cargo), two new agent tools
+  (`codegraph_subgraph`, `codegraph_overview` — threat-modeled, stripped when
+  the graph is disabled), and four read-only MCP tools
+  (`olympus_query_codegraph`, `olympus_codegraph_impact`,
+  `olympus_codegraph_report`, `olympus_verify_code_claim`).
+
 ### Changed — Budget-aware escalation + total scorer (ADR 0005, amendment 7)
 
 - "Thinks harder" never defeats the spend guard: with <10% of the daily

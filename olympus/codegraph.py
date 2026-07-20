@@ -4,22 +4,35 @@
 `resolve_handler`?" or "what breaks if I change `add_edge`?" — questions about a
 *codebase*, not a contact network. It shares relgraph's storage, locking, and
 injection-aware conventions, but is keyed per-PROJECT (default "self" =
-Olympus's own source tree) rather than per-user, and is populated by a
-deterministic stdlib-`ast` walk (`codegraph_ast`) rather than an LLM extractor.
+Olympus's own source tree) rather than per-user, and is populated
+deterministically — stdlib-`ast` for Python (`codegraph_ast`), a regex engine
+for ~20 other languages (`codegraph_langs`), documents (`codegraph_ingest`),
+and schema introspection (`codegraph_introspect`) — never by an LLM extractor.
 
 Like everything else: inspectable, on the shared store backend (files by
 default, Postgres when configured), bounded, and the context block costs zero
 tokens when the turn names nothing distinctive in the graph.
 
-Edges carry a confidence *tier* (Graphify's pattern, the one part worth taking):
-EXTRACTED edges come straight from the AST and are ground truth (confidence 1.0);
-INFERRED/AMBIGUOUS edges are guesses. The hallucination oracle (`verify_claim`)
-trusts EXTRACTED only — it never asserts a claim false on the strength of a guess.
-This verification is the thing Graphify itself does not have.
+This module is the graph CORE: nodes/edges/meta, traversal (neighbors, impact,
+shortest_path, token-budgeted subgraph_query), the context block, and the
+hallucination oracle. The rest of the absorbed Graphify surface lives beside
+it: codegraph_build (multi-language + incremental), codegraph_analysis
+(communities/god nodes/surprises/report/benchmark), codegraph_dedup,
+codegraph_export (graphml/mermaid/html/obsidian/wiki/cypher/neo4j/falkordb),
+codegraph_watch, codegraph_global (cross-repo), codegraph_prs (PR dashboard).
+
+Edges carry a confidence *tier* (Graphify's pattern, the one part worth taking
+verbatim): EXTRACTED edges come straight from a real parser and are ground
+truth (confidence 1.0); INFERRED/AMBIGUOUS edges are guesses. The
+hallucination oracle (`verify_claim`) trusts EXTRACTED only, and refuses to
+refute where only regex-level evidence exists — it never asserts a claim false
+on the strength of a guess. This verification is the thing Graphify itself
+does not have.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -37,6 +50,9 @@ EXTRACTED, INFERRED, AMBIGUOUS = "EXTRACTED", "INFERRED", "AMBIGUOUS"
 # node kinds
 MODULE, CLASS, FUNCTION, METHOD, RATIONALE = (
     "module", "class", "function", "method", "rationale")
+# non-code kinds: documents ingested by codegraph_ingest, and schema/manifest
+# entities from codegraph_introspect (tables, crates). Same graph, same rules.
+DOCUMENT, ENTITY = "document", "entity"
 # relations that mean "B depends on A" when traversed from A (for impact)
 _DEP_RELS = frozenset({"calls", "imports", "references"})
 
@@ -108,7 +124,44 @@ def _toks(text: str) -> set[str]:
     return {w.lower() for w in _IDENT.findall(str(text))}
 
 
-def _load(ns: str, project: str) -> list:
+# A build session: while active for a project, node/edge reads and writes hit
+# an in-memory cache with id/edge-key indexes, flushed to the store ONCE at
+# exit. Without it, a whole-repo build pays a full JSON round-trip per node —
+# O(n²) in graph size — which turns "seconds" into "minutes" on a real repo.
+# Single-writer by design (guarded by _LOCK on entry/exit like everything else);
+# concurrent readers in other processes see the pre-build graph until the
+# atomic store.put publishes the new one.
+_BULK: dict | None = None
+
+
+def _bulk_for(project: str) -> dict | None:
+    b = _BULK
+    return b if b and b["key"] == _key(project) else None
+
+
+@contextlib.contextmanager
+def bulk(project: str):
+    """Batch all graph writes for `project`; flush once on exit."""
+    global _BULK
+    with _LOCK:
+        if _BULK is not None:
+            raise RuntimeError("a codegraph bulk session is already active")
+        nodes_ = _load_disk(_NODES, project)
+        edges_ = _load_disk(_EDGES, project)
+        _BULK = {"key": _key(project), "nodes": nodes_, "edges": edges_,
+                 "node_idx": {n["id"]: n for n in nodes_},
+                 "edge_keys": {(e["src"], e["rel"], e["dst"]): e
+                               for e in edges_}}
+    try:
+        yield
+    finally:
+        with _LOCK:
+            b, _BULK = _BULK, None
+        _save(_NODES, project, b["nodes"])
+        _save(_EDGES, project, b["edges"])
+
+
+def _load_disk(ns: str, project: str) -> list:
     blob = store.backend().get(ns, _key(project))
     if not blob:
         return []
@@ -118,11 +171,32 @@ def _load(ns: str, project: str) -> list:
         return []
 
 
+def _load(ns: str, project: str) -> list:
+    b = _bulk_for(project)
+    if b is not None:
+        return b["nodes"] if ns == _NODES else b["edges"]
+    return _load_disk(ns, project)
+
+
 def _save(ns: str, project: str, data) -> None:
+    b = _bulk_for(project)
+    if b is not None:
+        which = "nodes" if ns == _NODES else "edges"
+        if b[which] is not data:               # replaced list (e.g. remove_paths)
+            b[which] = data
+            if which == "nodes":
+                b["node_idx"] = {n["id"]: n for n in data}
+            else:
+                b["edge_keys"] = {(e["src"], e["rel"], e["dst"]): e
+                                  for e in data}
+        return
     store.backend().put(ns, _key(project), json.dumps(data).encode())
 
 
 def _by_id(nodes_: list, nid: str) -> dict | None:
+    b = _BULK
+    if b is not None and b["nodes"] is nodes_:
+        return b["node_idx"].get(nid)
     return next((n for n in nodes_ if n["id"] == nid), None)
 
 
@@ -163,21 +237,27 @@ def add_node(project: str, path: str, qual: str, kind: str = FUNCTION,
         node = {"id": nid, "label": label, "qual": qual, "kind": kind,
                 "path": path, "span": span}
         nodes_.append(node)
+        b = _bulk_for(project)
+        if b is not None and b["nodes"] is nodes_:
+            b["node_idx"][nid] = node
         _save(_NODES, project, nodes_)
     return dict(node)
 
 
-def add_rationale(project: str, path: str, owner_id: str, text: str) -> dict | None:
+def add_rationale(project: str, path: str, owner_id: str, text: str,
+                  slot: str = "doc") -> dict | None:
     """Store a design-intent note (docstring / NOTE/WHY/HACK comment) as a node
     linked to the code it explains. SANITIZED twice — `_clean_label` strips
     newlines and `security.sanitize_for_memory` defangs injection-shaped lines —
     because a comment like '# ignore all previous instructions' must never reach
-    a model as a clean instruction (the existing injection model)."""
+    a model as a clean instruction (the existing injection model). `slot` keys
+    the node within its owner, so one owner can hold several notes (a document's
+    headings) without them collapsing into one."""
     first = next((ln for ln in str(text or "").splitlines() if ln.strip()), "")
     safe = _clean_label(security.sanitize_for_memory(first))
     if not safe:
         return None
-    qual = f"{owner_id}#doc"
+    qual = f"{owner_id}#{_clean_label(slot) or 'doc'}"
     node = add_node(project, path, qual, kind=RATIONALE)
     with _LOCK:
         nodes_ = _load(_NODES, project)
@@ -202,15 +282,23 @@ def add_edge(project: str, src_id: str, rel: str, dst_id: str,
         if not (_by_id(nodes_, src_id) and _by_id(nodes_, dst_id)):
             return None
         edges_ = _load(_EDGES, project)
-        for e in edges_:
-            if e["src"] == src_id and e["dst"] == dst_id and e["rel"] == rel:
-                return dict(e)
+        b = _bulk_for(project)
+        if b is not None and b["edges"] is edges_:
+            hit = b["edge_keys"].get((src_id, rel, dst_id))
+            if hit is not None:
+                return dict(hit)
+        else:
+            for e in edges_:
+                if e["src"] == src_id and e["dst"] == dst_id and e["rel"] == rel:
+                    return dict(e)
         if len(edges_) >= _MAX_EDGES:
             return None
         edge = {"id": hashlib.sha256(f"{src_id}{rel}{dst_id}".encode())
                 .hexdigest()[:12], "src": src_id, "dst": dst_id, "rel": rel,
                 "tier": tier, "confidence": round(float(confidence), 3)}
         edges_.append(edge)
+        if b is not None and b["edges"] is edges_:
+            b["edge_keys"][(src_id, rel, dst_id)] = edge
         _save(_EDGES, project, edges_)
     return dict(edge)
 
@@ -232,6 +320,35 @@ def clear(project: str) -> None:
     """Wipe the graph for a project (a full rebuild starts here)."""
     _save(_NODES, project, [])
     _save(_EDGES, project, [])
+
+
+def remove_paths(project: str, rel_paths: set[str]) -> int:
+    """Drop every node extracted from the given files (plus their rationale
+    nodes) and any edge touching them. The incremental-update primitive: a
+    changed or deleted file removes its old contribution before re-extraction.
+    Returns the number of nodes removed."""
+    if not rel_paths:
+        return 0
+    with _LOCK:
+        nodes_ = _load(_NODES, project)
+        doomed = {n["id"] for n in nodes_ if n.get("path") in rel_paths}
+        if not doomed:
+            return 0
+        nodes_ = [n for n in nodes_ if n["id"] not in doomed]
+        edges_ = [e for e in _load(_EDGES, project)
+                  if e["src"] not in doomed and e["dst"] not in doomed]
+        _save(_NODES, project, nodes_)
+        _save(_EDGES, project, edges_)
+    return len(doomed)
+
+
+def degree(project: str) -> dict[str, int]:
+    """Node id -> number of touching edges (undirected degree)."""
+    counts: dict[str, int] = {}
+    for e in _load(_EDGES, project):
+        counts[e["src"]] = counts.get(e["src"], 0) + 1
+        counts[e["dst"]] = counts.get(e["dst"], 0) + 1
+    return counts
 
 
 def set_meta(project: str, **kv) -> None:
@@ -381,6 +498,59 @@ def context_block(project: str, text: str) -> str:
             "edges are ground truth):\n" + "\n".join(lines[:_MAX_INJECTED]))
 
 
+def subgraph_query(project: str, question: str, budget_tokens: int = 2000,
+                   dfs: bool = False) -> str:
+    """Answer-shaped subgraph retrieval: seed on the symbols the question
+    names, walk outward (BFS by default, DFS on request), and stop when the
+    rendered text would exceed `budget_tokens` (~4 chars/token). The graph
+    analog of grep-then-read: everything relevant, nothing else, within a
+    predictable context cost. (Graphify's query pattern, absorbed.)"""
+    budget_chars = max(200, int(budget_tokens) * 4)
+    seeds = find(project, question)
+    if not seeds:
+        return ""
+    nodes_, edges_ = _load(_NODES, project), _load(_EDGES, project)
+    by_id = {n["id"]: n for n in nodes_}
+    adj: dict[str, list[dict]] = {}
+    for e in edges_:
+        adj.setdefault(e["src"], []).append(e)
+        adj.setdefault(e["dst"], []).append(e)
+
+    lines: list[str] = []
+    used = 0
+    for s in seeds[:8]:
+        where = f" [{s.get('path', '?')}" + (
+            f":{s['span'][0]}]" if s.get("span") else "]")
+        line = f"{s['label']} ({s['kind']}){where}"
+        lines.append(line)
+        used += len(line) + 1
+
+    seen_edges: set[str] = set()
+    seen_nodes = {s["id"] for s in seeds[:8]}
+    frontier: deque = deque((s["id"], 0) for s in seeds[:8])
+    while frontier and used < budget_chars:
+        nid, d = frontier.pop() if dfs else frontier.popleft()
+        for e in adj.get(nid, ()):
+            if e["id"] in seen_edges:
+                continue
+            seen_edges.add(e["id"])
+            a, b = by_id.get(e["src"]), by_id.get(e["dst"])
+            if not (a and b):
+                continue
+            mark = "" if e.get("tier") == EXTRACTED else f" ({e.get('tier', '?')})"
+            line = f"- {a['label']} {e['rel'].replace('_', ' ')} {b['label']}{mark}"
+            if used + len(line) > budget_chars:
+                frontier.clear()
+                break
+            lines.append(line)
+            used += len(line) + 1
+            for nxt in (e["src"], e["dst"]):
+                if nxt not in seen_nodes:
+                    seen_nodes.add(nxt)
+                    frontier.append((nxt, d + 1))
+    return "\n".join(lines)
+
+
 # --- the hallucination oracle -------------------------------------------
 
 _CALLS_RE = re.compile(
@@ -404,6 +574,21 @@ def _has_extracted_edge(project: str, src_nodes, rel, dst_nodes) -> bool:
     dst_ids = {n["id"] for n in dst_nodes}
     return any(e["src"] in src_ids and e["dst"] in dst_ids and e["rel"] == rel
                and e["tier"] == EXTRACTED for e in _load(_EDGES, project))
+
+
+def _has_any_edge(project: str, src_nodes, rel, dst_nodes) -> bool:
+    src_ids = {n["id"] for n in src_nodes}
+    dst_ids = {n["id"] for n in dst_nodes}
+    return any(e["src"] in src_ids and e["dst"] in dst_ids and e["rel"] == rel
+               for e in _load(_EDGES, project))
+
+
+def _ast_backed(nodes_: list[dict]) -> bool:
+    """True when every node comes from a file the AST extractor covers (.py).
+    Regex-extracted languages never get EXTRACTED call edges, so the ABSENCE
+    of one there is not evidence of absence — refuting on it would make the
+    oracle unsound the moment the graph went multi-language."""
+    return all(str(n.get("path", "")).endswith(".py") for n in nodes_)
 
 
 def _has_incoming(project: str, dst_nodes, rels) -> bool:
@@ -430,6 +615,14 @@ def verify_claim(project: str, claim: str) -> dict:
             if _has_extracted_edge(project, a, rel, b):
                 return {"verdict": "CONFIRMED",
                         "detail": f"EXTRACTED {rel} edge present"}
+            if _has_any_edge(project, a, rel, b):
+                return {"verdict": "UNKNOWN",
+                        "detail": f"only an inferred {rel} edge exists "
+                                  f"(regex-level evidence, not proof)"}
+            if not _ast_backed(a) or not _ast_backed(b):
+                return {"verdict": "UNKNOWN",
+                        "detail": "symbols come from regex-extracted files — "
+                                  "absence of an edge is not proof there"}
             return {"verdict": "REFUTED",
                     "detail": f"no EXTRACTED {rel} edge between known symbols"}
     m = _UNUSED_RE.search(claim) or _NOTHING_RE.search(claim)
@@ -439,5 +632,9 @@ def verify_claim(project: str, claim: str) -> dict:
             return {"verdict": "UNKNOWN", "detail": "symbol not in the graph"}
         if _has_incoming(project, target, {"calls", "references"}):
             return {"verdict": "REFUTED", "detail": "it has incoming callers"}
+        if not _ast_backed(target):
+            return {"verdict": "UNKNOWN",
+                    "detail": "symbol comes from a regex-extracted file — "
+                              "missing callers there prove nothing"}
         return {"verdict": "CONFIRMED", "detail": "no incoming callers found"}
     return {"verdict": "UNKNOWN", "detail": "claim shape not recognized"}

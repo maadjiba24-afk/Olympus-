@@ -664,6 +664,48 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.add_argument("--host", default="0.0.0.0")
     p_hook.add_argument("--port", type=int, default=8487)
 
+    from . import codegraph_cli as _cg_cli
+    p_cg = sub.add_parser(
+        "codegraph", help="the code knowledge graph: build/update/watch it, "
+                          "query/path/impact/verify against it, analyze "
+                          "communities, export (json/graphml/mermaid/html/"
+                          "cypher/obsidian/wiki), PR dashboard, global graph")
+    p_cg.add_argument("action", choices=_cg_cli.ACTIONS)
+    p_cg.add_argument("arg", nargs="*", help="action arguments (symbol, "
+                                             "question, tag, dsn, …)")
+    p_cg.add_argument("--project", default="self",
+                      help="graph namespace (default: self)")
+    p_cg.add_argument("--root", default=".",
+                      help="tree to build/update/watch from (default: .)")
+    p_cg.add_argument("--code-only", action="store_true",
+                      help="skip documents (md/rst/txt/yaml)")
+    p_cg.add_argument("--budget", type=int, default=2000,
+                      help="token budget for query/benchmark output")
+    p_cg.add_argument("--dfs", action="store_true",
+                      help="depth-first instead of breadth-first query")
+    p_cg.add_argument("--depth", type=int, default=2,
+                      help="impact traversal depth")
+    p_cg.add_argument("--force", action="store_true",
+                      help="recompute communities instead of using the cache")
+    p_cg.add_argument("--merge", action="store_true",
+                      help="dedup: actually merge the duplicate groups")
+    p_cg.add_argument("--formats", default=None,
+                      help="export formats, comma-separated "
+                           "(json,graphml,mermaid,html,cypher,report,"
+                           "obsidian,wiki)")
+    p_cg.add_argument("--out", default=None,
+                      help="export output directory (default codegraph-out)")
+    p_cg.add_argument("--neo4j", default=None, metavar="BOLT_URI",
+                      help="also push to Neo4j (needs the neo4j driver)")
+    p_cg.add_argument("--falkordb", default=None, metavar="HOST[:PORT]",
+                      help="also push to FalkorDB (needs the falkordb driver)")
+    p_cg.add_argument("--db-user", default="neo4j")
+    p_cg.add_argument("--db-password", default="")
+    p_cg.add_argument("--base", default=None,
+                      help="prs: only PRs targeting this base branch")
+    p_cg.add_argument("--repo", default=None,
+                      help="prs: owner/repo override (default GITHUB_REPO)")
+
     return parser
 
 
@@ -738,6 +780,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "version":
         from . import __version__
         print(f"olympus-council {__version__}")
+    elif args.command == "codegraph":
+        from . import codegraph_cli
+        return codegraph_cli.run(args)
     elif args.command == "growth":
         from . import companion
         print(companion.summary("cli"))

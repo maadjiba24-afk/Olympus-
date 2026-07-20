@@ -1885,6 +1885,9 @@ HANDLERS: dict[str, Callable[..., str]] = {
         from_symbol, to_symbol),
     "verify_code_claim": lambda claim: _fmt_cg_verdict(
         codegraph.verify_claim("self", claim)),
+    "codegraph_subgraph": lambda question, budget_tokens=1500:
+        _codegraph_subgraph(question, budget_tokens),
+    "codegraph_overview": lambda: _codegraph_overview(),
 }
 
 
@@ -1934,6 +1937,35 @@ def _fmt_cg_path(ids: list) -> str:
 
 def _fmt_cg_verdict(v: dict) -> str:
     return f"{v['verdict']}: {v.get('detail', '')}"
+
+
+def _codegraph_subgraph(question: str, budget_tokens) -> str:
+    try:
+        budget = max(200, min(4000, int(budget_tokens)))
+    except (TypeError, ValueError):
+        budget = 1500
+    text = codegraph.subgraph_query("self", question, budget_tokens=budget)
+    return text or ("Nothing in the code graph matches that question "
+                    "(run `olympus codegraph build`, or use grep_files).")
+
+
+def _codegraph_overview() -> str:
+    from . import codegraph_analysis
+    s = codegraph.stats("self")
+    if not s["nodes"]:
+        return "The code graph is empty — run `olympus codegraph build`."
+    gods = codegraph_analysis.god_nodes("self", 6)
+    comm = codegraph_analysis.communities("self")
+    from collections import Counter
+    sizes = Counter(comm["assign"].values())
+    lines = [f"{s['nodes']} nodes, {s['edges']} edges, "
+             f"{len(sizes)} communities.", "God nodes:"]
+    lines += [f"- {g['label']} ({g['kind']}, degree {g['degree']}) — "
+              f"{g.get('path', '?')}" for g in gods]
+    lines.append("Largest communities:")
+    lines += [f"- {comm['labels'].get(str(c), f'community {c}')} ({n} nodes)"
+              for c, n in sizes.most_common(6)]
+    return "\n".join(lines)
 
 
 QUERY_CODEGRAPH = {
@@ -1992,6 +2024,40 @@ CODEGRAPH_PATH = {
                        "to_symbol": {"type": "string"}},
         "required": ["from_symbol", "to_symbol"],
     },
+}
+
+CODEGRAPH_SUBGRAPH = {
+    "name": "codegraph_subgraph",
+    "description": (
+        "Retrieve the subgraph of Olympus's code relevant to a whole QUESTION "
+        "(not just one symbol) within a token budget — seeds on the symbols "
+        "the question names and walks outward until the budget is spent. The "
+        "cheapest way to load 'how does X relate to Y and Z' context; "
+        "prefer it over reading several files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string",
+                         "description": "The question, naming the symbols "
+                                        "of interest"},
+            "budget_tokens": {"type": "integer",
+                              "description": "Output cap (default 1500, max "
+                                             "4000)"},
+        },
+        "required": ["question"],
+    },
+}
+
+CODEGRAPH_OVERVIEW = {
+    "name": "codegraph_overview",
+    "description": (
+        "One-screen structural overview of Olympus's code from the graph: "
+        "node/edge counts, the most-connected symbols (god nodes), and the "
+        "largest communities (subsystems). Call it first when a task spans "
+        "unfamiliar parts of the codebase."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
 }
 
 VERIFY_CODE_CLAIM = {
@@ -3316,6 +3382,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "codegraph_impact": CODEGRAPH_IMPACT,
     "codegraph_path": CODEGRAPH_PATH,
     "verify_code_claim": VERIFY_CODE_CLAIM,
+    "codegraph_subgraph": CODEGRAPH_SUBGRAPH,
+    "codegraph_overview": CODEGRAPH_OVERVIEW,
 }
 
 # Anthropic server-side code sandbox (Hephaestus runs and tests code in it).

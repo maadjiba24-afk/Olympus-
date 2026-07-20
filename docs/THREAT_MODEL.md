@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 101 tools in
+Olympus exposes a **finite, named** tool surface — the 103 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -53,6 +53,8 @@ surface. So the surface and its threat model can't drift apart.
 | `codegraph_neighbors` | Show a symbol's callers/callees/imports | first-party read | Read-only | Recon of own public source structure |
 | `codegraph_impact` | Reverse-dependency closure for a symbol | first-party read | Read-only | Recon of own public source structure |
 | `codegraph_path` | Shortest dependency path between two symbols | first-party read | Read-only | Recon of own public source structure |
+| `codegraph_subgraph` | Token-budgeted subgraph for a whole question | first-party read | Read-only; output bounded by an explicit token budget | Recon of own public source structure |
+| `codegraph_overview` | God nodes / communities / counts from the graph | first-party read | Read-only | Recon of own public source structure |
 | `verify_code_claim` | Check a structural claim against EXTRACTED graph edges | first-party read | Read-only; ground-truth (EXTRACTED) only, INFERRED never authoritative | None significant — verifies, never asserts on a guess |
 | `cache_fact` | Store a fact in memory | first-party write | Sanitized at write | Cache poisoning via injection-shaped text |
 | `save_lesson` | Store a lesson in memory | first-party write | Sanitized at write | Memory poisoning — `sanitize_for_memory` strips injections |

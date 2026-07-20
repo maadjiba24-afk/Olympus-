@@ -14,6 +14,10 @@ Exposed tools:
   olympus_search_documents search the exposed user's documents (read-only)
   olympus_list_todos       list the exposed user's notes/todos/reminders
   olympus_recall_memory    recall facts from the exposed user's memory
+  olympus_query_codegraph  token-budgeted subgraph of the code graph (read-only)
+  olympus_codegraph_impact reverse-dependency analysis for a symbol (read-only)
+  olympus_codegraph_report god nodes / communities / surprises (read-only)
+  olympus_verify_code_claim CONFIRMED/REFUTED/UNKNOWN for a structural claim
 
 The workspace tools are **read-only** and scoped to `OLYMPUS_MCP_USER` (default
 the shared namespace): a caller on the other end of the pipe can read what that
@@ -179,7 +183,84 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    # Code-graph reads. Same trust story as the other workspace tools: pure
+    # reads of graph structure, no actuator, scoped to the exposed project.
+    {
+        "name": "olympus_query_codegraph",
+        "description": ("Token-budgeted subgraph of the code knowledge graph "
+                        "relevant to a question — symbols, how they connect, "
+                        "confidence tags. Read-only."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"question": {"type": "string"},
+                           "budget_tokens": {"type": "integer"}},
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "olympus_codegraph_impact",
+        "description": ("Reverse-dependency analysis from the code graph: "
+                        "everything that transitively calls/imports a symbol "
+                        "— 'what breaks if this changes'. Read-only."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "olympus_codegraph_report",
+        "description": ("The full code-graph report: god nodes, communities, "
+                        "surprising connections, suggested questions. "
+                        "Read-only."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "olympus_verify_code_claim",
+        "description": ("Verify a structural claim ('X calls Y', 'Z is "
+                        "unused') against the graph's ground-truth edges: "
+                        "CONFIRMED, REFUTED, or UNKNOWN. Read-only."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"claim": {"type": "string"}},
+            "required": ["claim"],
+        },
+    },
 ]
+
+_CG_PROJECT_ENV = "OLYMPUS_MCP_CODEGRAPH_PROJECT"
+
+
+def _codegraph_tool(name: str, args: dict) -> str:
+    """Read-only code-graph tools, scoped to one project (default self)."""
+    import os as _os
+
+    from . import codegraph
+    project = _os.environ.get(_CG_PROJECT_ENV, "self")
+    if name == "olympus_query_codegraph":
+        try:
+            budget = max(200, min(4000, int(args.get("budget_tokens", 1500))))
+        except (TypeError, ValueError):
+            budget = 1500
+        return (codegraph.subgraph_query(project,
+                                         str(args.get("question", "")),
+                                         budget_tokens=budget)
+                or "Nothing in the graph matches that question.")
+    if name == "olympus_codegraph_impact":
+        hits = codegraph.find(project, str(args.get("symbol", "")))
+        if not hits:
+            return "No such symbol in the graph."
+        deps = codegraph.impact(project, hits[0]["id"])
+        return ("\n".join(f"- {d['label']} ({d['kind']}) — "
+                          f"{d.get('path', '?')}" for d in deps)
+                or "Nothing depends on it (per the graph).")
+    if name == "olympus_codegraph_report":
+        from . import codegraph_analysis
+        return codegraph_analysis.render_report(project)
+    if name == "olympus_verify_code_claim":
+        v = codegraph.verify_claim(project, str(args.get("claim", "")))
+        return f"{v['verdict']}: {v['detail']}"
+    raise KeyError(name)
 
 
 def _default_ask(message: str) -> str:
@@ -273,6 +354,10 @@ def handle_message(msg: dict, ask: Callable[[str], str] | None = None,
             elif name in ("olympus_search_documents", "olympus_list_todos",
                           "olympus_recall_memory"):
                 text = _workspace_tool(name, args)
+            elif name in ("olympus_query_codegraph", "olympus_codegraph_impact",
+                          "olympus_codegraph_report",
+                          "olympus_verify_code_claim"):
+                text = _codegraph_tool(name, args)
             else:
                 return _error(rid, -32602, f"unknown tool '{name}'")
         except Exception as err:
