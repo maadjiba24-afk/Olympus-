@@ -281,6 +281,36 @@ def check_sovereign_seed() -> None:
         " Labs/CI escape hatch: OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED=1.")
 
 
+def require_production_seed() -> None:
+    """Boot invariant (M2): an `OLYMPUS_ENV=production` instance MUST run on a
+    configured, NON-default signing seed. The public default seed is forgeable,
+    so a production instance on it would sign every decision log, backup, and
+    attestation with a key anyone can reproduce.
+
+    Raises `WitnessError` (the CLI boot turns it into a nonzero exit with the
+    remediation below) when production is set and the seed is UNSET **or** equals
+    the shipped dev seed. Outside production, a default-seed instance still boots
+    but logs a one-line posture warning — dev is allowed, just never silent."""
+    seed = _configured_seed()                       # None, a real secret, or file
+    on_default = seed is None or seed == _DEFAULT_SEED
+    if not config.is_production():
+        if on_default:
+            import logging
+            logging.getLogger("olympus.witness").warning(
+                "signing posture is DEV — running on the PUBLIC default seed: "
+                "signatures prove integrity, not authenticity. Provision a "
+                "secret seed (OLYMPUS_SIGNING_SEED / OLYMPUS_SIGNING_SEED_FILE) "
+                "before setting OLYMPUS_ENV=production. See docs/SIGNING.md.")
+        return
+    if on_default:
+        raise WitnessError(
+            "OLYMPUS_ENV=production but the signing seed is the PUBLIC DEFAULT "
+            "(unset, or set to the shipped dev seed) — it is forgeable, so "
+            "refusing to boot. Fix: run `olympus keygen`, then set "
+            "OLYMPUS_SIGNING_SEED_FILE to the generated file (or "
+            "OLYMPUS_SIGNING_SEED to a long random secret). See docs/SIGNING.md.")
+
+
 def sign(data: bytes) -> str:
     # Defense in depth behind the CLI boot check: catches sovereign mode being
     # enabled after boot, and entry points that don't pass through cli.main().

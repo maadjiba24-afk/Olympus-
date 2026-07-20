@@ -17,18 +17,24 @@ _MAX_SERVE_BYTES = 16 * 1024 * 1024        # never stream something absurd
 
 
 def list_images() -> list[dict]:
-    """Image files in the workspace, newest first: [{name, bytes, updated}]."""
+    """Image files in the workspace, newest first: [{name, bytes, updated}].
+
+    Union across the shared workspace + any per-worker roots (M1), so an image a
+    specialist generated into its own root still shows in the gallery. With no
+    per-worker roots this is exactly the single shared workspace."""
     from . import sandbox
-    d = sandbox.workdir()
-    out = []
-    for p in sorted(d.glob("*")):
-        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS:
-            try:
-                st = p.stat()
-            except OSError:
-                continue
-            out.append({"name": p.name, "bytes": st.st_size,
-                        "updated": st.st_mtime})
+    out, seen = [], set()
+    for d in sandbox._read_roots():
+        for p in sorted(d.glob("*")):
+            if (p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+                    and p.name not in seen):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                seen.add(p.name)
+                out.append({"name": p.name, "bytes": st.st_size,
+                            "updated": st.st_mtime})
     out.sort(key=lambda d: d["updated"], reverse=True)
     return out
 
@@ -38,9 +44,8 @@ def read_image(name: str):
     confined, readable image. Path-confined via the sandbox root — a traversal
     or a non-image is refused."""
     from . import sandbox
-    try:
-        target = sandbox._confine(name)
-    except ValueError:
+    target = sandbox._resolve_read(name)     # union across worker + shared roots
+    if target is None:
         return None
     ext = target.suffix.lower()
     if not target.is_file() or ext not in _IMAGE_EXTS:
@@ -55,9 +60,8 @@ def read_image(name: str):
 
 def delete_image(name: str) -> bool:
     from . import sandbox
-    try:
-        target = sandbox._confine(name)
-    except ValueError:
+    target = sandbox._resolve_read(name)     # union across worker + shared roots
+    if target is None:
         return False
     if not target.is_file() or target.suffix.lower() not in _IMAGE_EXTS:
         return False

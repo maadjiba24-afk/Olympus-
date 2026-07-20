@@ -738,6 +738,16 @@ def main(argv: list[str] | None = None) -> int:
     # instances are untouched. witness.sign() re-checks (defense in depth).
     if args.command != "keygen":
         from . import config as _config, witness as _witness
+        # Production boot invariant (M2): OLYMPUS_ENV=production must run on a
+        # configured, non-default signing seed. On the public default seed
+        # (unset or the shipped dev seed) every decision log/backup/attestation
+        # would be forgeable — refuse to boot with one actionable line. `keygen`
+        # is exempt (it is the fix). Non-production instances just get a warning.
+        try:
+            _witness.require_production_seed()
+        except _witness.WitnessError as err:
+            print(f"[production] {err}", file=sys.stderr)
+            return 1
         if _config.sovereign_mode():
             try:
                 _witness.check_sovereign_seed()

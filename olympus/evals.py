@@ -218,6 +218,76 @@ def run_and_save(settings: config.Settings | None = None) -> str:
     return summary
 
 
+# --- answer-quality regression gate (M5 / SECURITY_RESIDUALS §6) -----------
+# The passing unit suite proves the guardrails; it does NOT score answer
+# quality. This gate does: it runs the benchmark, compares per-specialist
+# averages against a committed baseline, and FAILS when any specialist
+# regresses by more than a tolerance. The comparison core below is PURE
+# (no I/O, no model calls) so it is unit-tested without a key; the live run
+# that produces `scores` needs a real ANTHROPIC_API_KEY (CI secret).
+
+BASELINE_PATH = Path(__file__).resolve().parent / "quality_baseline.json"
+DEFAULT_TOLERANCE = 1.0        # a specialist may drop up to 1.0/10 vs baseline
+
+
+def load_baseline(path: Path | None = None) -> dict[str, float]:
+    """Committed per-specialist baseline scores, or {} if none exists yet."""
+    path = path or BASELINE_PATH
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    scores = raw.get("scores", raw) if isinstance(raw, dict) else {}
+    return {str(k): float(v) for k, v in scores.items()
+            if isinstance(v, (int, float))}
+
+
+def regression_check(scores: dict[str, float], baseline: dict[str, float],
+                     tolerance: float = DEFAULT_TOLERANCE) -> dict:
+    """PURE regression comparison — the heart of the CI gate.
+
+    Returns {"ok": bool, "regressions": [{specialist, baseline, score, drop}],
+    "missing": [specialists in baseline with no fresh score], "checked": int}.
+    A specialist FAILS the gate when its fresh score is more than `tolerance`
+    below its baseline. Specialists absent from the baseline are new coverage,
+    never a regression. A baseline specialist with no fresh score is reported
+    as `missing` (the eval didn't cover it) and fails the gate — a silently
+    dropped benchmark must not pass as green."""
+    tol = max(0.0, float(tolerance))
+    regressions, missing = [], []
+    for spec, base in baseline.items():
+        if spec not in scores:
+            missing.append(spec)
+            continue
+        drop = round(float(base) - float(scores[spec]), 2)
+        if drop > tol:
+            regressions.append({"specialist": spec, "baseline": round(float(base), 2),
+                                "score": round(float(scores[spec]), 2), "drop": drop})
+    return {"ok": not regressions and not missing,
+            "regressions": sorted(regressions, key=lambda r: -r["drop"]),
+            "missing": sorted(missing), "checked": len(baseline)}
+
+
+def format_gate_report(scores: dict[str, float], result: dict,
+                       tolerance: float = DEFAULT_TOLERANCE) -> str:
+    """Human-readable gate outcome for CI logs."""
+    lines = [f"Answer-quality gate (tolerance {tolerance:.2f}/10):"]
+    if not scores:
+        lines.append("  no scores produced (benchmark did not run).")
+    for spec in sorted(scores):
+        lines.append(f"  {spec}: {scores[spec]}/10")
+    for r in result.get("regressions", []):
+        lines.append(f"  ✗ REGRESSION {r['specialist']}: "
+                     f"{r['score']}/10 vs baseline {r['baseline']}/10 "
+                     f"(−{r['drop']})")
+    for spec in result.get("missing", []):
+        lines.append(f"  ✗ MISSING {spec}: in baseline but not scored this run")
+    lines.append("PASS" if result.get("ok") else "FAIL")
+    return "\n".join(lines)
+
+
 def latest_score() -> float | None:
     """Most recent saved benchmark average, if any."""
     files = sorted((config.MEMORY_DIR / "evals").glob("*.md"), reverse=True) \
