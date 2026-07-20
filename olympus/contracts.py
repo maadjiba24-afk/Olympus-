@@ -1,9 +1,13 @@
 """Hard output contracts: a specialist's final output must satisfy its
 contract before the orchestrator accepts it. A violation fails CLOSED.
 
-Enforcement is gated by config.contracts_enabled() and is off by default, so
-this module is inert until an operator turns it on. It records each check as a
-`contract` decision in the existing Trace (trace.py) — never a separate log.
+Enforcement is gated by config.contracts_enabled() and is ON by default
+(ADR 0005 hardening: enforcement mechanisms never ship dormant — the shipped
+contracts encode already-true output invariants, so enabling changes no
+happy-path behavior, and a violation degrades to the same typed "treat as
+missing" marker a crashed specialist produces). `OLYMPUS_CONTRACTS=off` is the
+kill switch. It records each check as a `contract` decision in the existing
+Trace (trace.py) — never a separate log.
 
 This module is PURE: no I/O, no config reads, no logging. The orchestrator
 decides whether to call it (the config gate) and what to do with the result

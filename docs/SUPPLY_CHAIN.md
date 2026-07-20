@@ -19,7 +19,7 @@ an SBOM.
 The lock is generated with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip compile requirements.txt --generate-hashes --output-file requirements.lock
+uv pip compile requirements.txt --generate-hashes --universal --python-version 3.10 --output-file requirements.lock
 ```
 
 Re-run this whenever `requirements.txt` changes, then commit the updated lock.
@@ -71,8 +71,14 @@ downstream consumers can scan Olympus's supply chain against vulnerability feeds
 
 `.github/workflows/ci.yml`:
 
-- the **test** job installs from `requirements.lock` with `--require-hashes`,
-  runs the pre-release guard, then the capability gate and the test suite;
+- the **test** job runs a Python **version matrix** (3.10–3.13, the full range
+  `pyproject` declares) and each leg installs from `requirements.lock` with
+  `--require-hashes`, runs the pre-release guard, then the capability gate and
+  the test suite. `requirements.lock` is a *universal* hash lock —
+  `uv --generate-hashes` records every distribution's hash (all platform/ABI
+  wheels + sdist), so one lock satisfies `--require-hashes` on every matrix
+  Python; no per-version lock files, no unpinned installs. `test_ci_matrix.py`
+  fails the build if the matrix ever drifts from the declared support;
 - the **sbom** job generates and uploads the CycloneDX SBOM.
 
 ## What this is not (yet)

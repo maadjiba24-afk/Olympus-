@@ -14,9 +14,16 @@ Enforcement is gated by config.egress_guard_enabled(); OFF BY DEFAULT, so this
 is inert until an operator opts in. Every decision is recorded into the existing
 signed decision log (trace.py) as an `egress` decision — never a separate log.
 
-PHASE A only: the gateway plus the two raw actuators (tools._send_email,
-tools._call_webhook). Other egress sites (contrib/chat/github/sandbox) are
-NOT wired yet (Phases B–D) — see docs/DESIGN_BOUNDARY_LAYER.md Part 5.
+PHASE A: the gateway plus the two raw actuators (tools._send_email,
+tools._call_webhook). PHASE B: the contribution pool (contrib.offer routes its
+snapshot redaction through guard(..., POOLED)). PHASE C: the broadcast + external
+sinks — gateway.notify_all and agentbeat._deliver via guard(..., BROADCAST), and
+the auto-filed GitHub upgrade issue (tools._propose_upgrade) via
+guard(..., EXTERNAL_SINK); C1/C2 content there is a leak and is HELD. PHASE D:
+the workspace/host sinks (_run_command / _write_file) are documented
+OUT OF SCOPE for the egress gateway — they don't leave the box over the network
+and are governed by the actions spine — see docs/DESIGN_BOUNDARY_LAYER.md Part 5.
+The gateway now spans every network egress path in the system.
 """
 from __future__ import annotations
 
