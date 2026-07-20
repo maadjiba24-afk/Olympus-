@@ -40,4 +40,8 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
+          # Olympus never assumes a model (require_model raises without one),
+          # so CI must pin the eval model explicitly. The judge defaults to
+          # OLYMPUS_JUDGE_MODEL (claude-sonnet-4-6) independently.
+          OLYMPUS_MODEL: "claude-opus-4-8"
         run: python scripts/quality_gate.py
