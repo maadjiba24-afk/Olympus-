@@ -1,16 +1,18 @@
-"""Phase 0 native extractor — stdlib `ast`, zero dependencies.
+"""Python extractor — stdlib `ast`, zero dependencies.
 
 Walks a tree of Python files and populates `codegraph` with EXTRACTED
 (confidence 1.0) structure: modules, classes, functions/methods, `defines`,
 `imports` (to sibling/project modules), and best-effort `calls` edges resolved
-to known symbols in the same project. Unresolved external/stdlib calls and
-imports are SKIPPED in this spike — keeping EXTRACTED edges conservative so the
-oracle's CONFIRMED/REFUTED verdicts stay sound. (TODOs for later: external
-nodes, full name resolution, decorators, dynamic dispatch.)
+to known symbols in the same project. Unresolved external/stdlib calls are
+skipped HERE — `codegraph_build`'s shared resolution pass is where cross-file
+calls gain INFERRED/AMBIGUOUS edges; Python's own unique matches stay
+EXTRACTED because this parser really saw the call.
 
-This is the DEFAULT producer. An optional Graphify backend (36-language) would
-map its node-link output into the same schema behind OLYMPUS_CODEGRAPH_BACKEND —
-that is a later phase, not this spike.
+This began as the Phase 0 spike and is now the Python front of the
+multi-language pipeline: codegraph_build orchestrates it alongside
+codegraph_langs (regex engine, ~20 languages) and codegraph_ingest (documents).
+`build()` below remains the Python-only fast path (the A/B gate measures it);
+`codegraph_build.build()` is the full-corpus entry.
 
 Trust: code from the user's own repo is trusted input (like `read_source_file`),
 but docstrings/comments can carry prompt injection, so all rationale text goes
@@ -143,6 +145,12 @@ def build(project: str = "self", root: str = ".",
     ignore = (ignore_dirs or set()) | _IGNORE_DIRS
     codegraph.clear(project)
 
+    with codegraph.bulk(project):
+        return _build_locked(project, root_p, ignore, commit_sha)
+
+
+def _build_locked(project: str, root_p: Path, ignore: set[str],
+                  commit_sha: str | None) -> dict:
     collected = []
     for path in _iter_py_files(root_p, ignore):
         info = extract_file(project, path, root_p)

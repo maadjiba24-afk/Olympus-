@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->101<!--/cap--> agent tools, and <!--cap:commands-->111<!--/cap-->
+<!--cap:tools-->103<!--/cap--> agent tools, and <!--cap:commands-->112<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -1009,6 +1009,38 @@ setting a preference or editing the playbook."* Crucially, Olympus **suggests,
 never silently changes**: improvement is something you confirm, not something
 done to you. No engagement optimization, no dark-pattern retention — the agent
 earns its keep by being useful, and the track record is yours to see.
+
+### The code knowledge graph — any repo, one queryable structure
+
+Olympus builds a knowledge graph of a codebase locally and deterministically —
+stdlib AST for Python, a regex engine for ~20 other languages, documents
+(markdown/rst/yaml with wikilinks) in the same graph, no LLM call and no new
+dependencies. Every edge carries a confidence tier (`EXTRACTED` = a parser saw
+it, `INFERRED` = best single match, `AMBIGUOUS` = several candidates, all
+shown), and the hallucination oracle only ever confirms or refutes structural
+claims on `EXTRACTED` evidence.
+
+```bash
+olympus codegraph build --root .            # multi-language + docs, seconds
+olympus codegraph report                    # god nodes, communities, surprises
+olympus codegraph query "how does auth reach the database?" --budget 1500
+olympus codegraph path UserService DatabasePool
+olympus codegraph impact rotate_keys        # what breaks if this changes
+olympus codegraph verify "gateway calls vault"   # CONFIRMED/REFUTED/UNKNOWN
+olympus codegraph watch .                   # auto-update on change (no deps)
+olympus codegraph export --formats html,graphml,mermaid,obsidian,wiki,cypher
+olympus codegraph prs                       # open PRs mapped to subsystems
+olympus codegraph global add myrepo         # merge repos into one graph
+olympus codegraph postgres "$DSN"           # live DB schema into the graph
+```
+
+The specialists use the same graph through their tools (`codegraph_subgraph`
+retrieves a token-budgeted answer-shaped slice; `codegraph_overview` orients in
+an unfamiliar tree), Aletheia uses `verify_code_claim` to fact-check structural
+claims, and MCP clients get read-only graph tools from `olympus mcp-serve`.
+Incremental updates re-extract only changed files; communities come from a
+deterministic pure-Python Louvain; `olympus codegraph benchmark "<question>"`
+prints the measured token cost of the graph answer vs pasting the corpus.
 
 ## Layout
 

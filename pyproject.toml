@@ -40,10 +40,12 @@ dependencies = [
 # the dependency surface is fully truthful: nothing the code imports is
 # undeclared. Install what you use, e.g. `pip install olympus-council[all]`.
 [project.optional-dependencies]
-postgres = ["psycopg>=3.1"]        # olympus/store.py — Postgres store backend
+postgres = ["psycopg>=3.1"]        # olympus/store.py + codegraph_introspect — Postgres
 browser = ["websockets>=12.0"]     # olympus/browser.py — CDP-over-WebSocket transport
 sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsing
-all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0"]
+graphdb = ["neo4j>=5.0", "falkordb>=1.0"]  # codegraph_export — live graph-DB pushes
+all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0", "neo4j>=5.0",
+       "falkordb>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/maadjiba24-afk/Olympus-"

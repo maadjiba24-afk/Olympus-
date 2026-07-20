@@ -95,7 +95,8 @@ class Specialist:
             defs = capprofile.filter_tools(defs)
         if not codegraph.enabled():            # graph off → its tools vanish
             _cg = {"query_codegraph", "codegraph_neighbors", "codegraph_impact",
-                   "codegraph_path", "verify_code_claim"}
+                   "codegraph_path", "verify_code_claim", "codegraph_subgraph",
+                   "codegraph_overview"}
             defs = [d for d in defs if d.get("name") not in _cg]
         if task is not None:
             # Per-turn dynamic selection LAST, strictly after every security
@@ -184,6 +185,7 @@ SPECIALISTS: dict[str, Specialist] = {
             web=True, code_exec=True, role="coding",
             extra_tools=("query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
+                         "codegraph_subgraph", "codegraph_overview",
                          "read_file", "list_dir", "grep_files", "glob_files",
                          "edit_file", "prepare_action",
                          "spawn_subagent", "analyze_image"),
@@ -296,6 +298,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "create_skill", "gate_skills", "generate_benchmark",
                          "query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
+                         "codegraph_subgraph", "codegraph_overview",
                          "propose_site_profile"),
         ),
         Specialist(
