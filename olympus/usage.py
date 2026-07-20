@@ -13,13 +13,14 @@ spend reaches it — a seatbelt on their provider bill, not a charge from us.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
 import time
 from pathlib import Path
 
-from . import config, memory
+from . import config, memory, proclock
 
 
 class BudgetExceeded(RuntimeError):
@@ -45,9 +46,24 @@ _TOTALS_LOCK = threading.Lock()
 _LEDGER_LOCK_TIMEOUT = 10.0    # reply path: bounded wait, never a hang
 
 
+# Machine-global cap name. All processes sharing MEMORY_DIR (heartbeat, web,
+# CLI) contend on this single semaphore, so their combined in-flight model
+# calls cannot exceed MAX_CONCURRENT_CALLS (closes DEFERRED #9). On non-fcntl
+# platforms the cross-process half degrades to a no-op with a one-time warning
+# and only the per-process cap applies (DEFERRED #10 stays).
+_GLOBAL_SLOT = "model-call"
+
+
+@contextlib.contextmanager
 def slot():
-    """Context manager: acquire one of the limited model-call slots."""
-    return _SEMAPHORE
+    """Acquire one of the limited model-call slots — capped both per-process
+    (a local BoundedSemaphore) AND machine-globally (a proclock counting
+    semaphore over MEMORY_DIR). The local semaphore is acquired first (outer)
+    so a single process never holds more machine slots than its own cap, then
+    the cross-process slot (inner); both release on exit."""
+    with _SEMAPHORE:
+        with proclock.slot(_GLOBAL_SLOT, config.MAX_CONCURRENT_CALLS):
+            yield
 
 
 def estimate_cost(model: str, in_tokens: int, out_tokens: int) -> float:

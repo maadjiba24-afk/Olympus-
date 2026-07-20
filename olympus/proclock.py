@@ -123,3 +123,61 @@ def lock(name: str, timeout: float | None = DEFAULT_TIMEOUT):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
     finally:
         fh.close()
+
+
+@contextlib.contextmanager
+def slot(name: str, count: int, timeout: float | None = DEFAULT_TIMEOUT):
+    """A cross-process COUNTING semaphore: acquire one of `count` machine-global
+    slots for `name`, so no more than `count` holders run at once across every
+    process AND thread on this machine (closes DEFERRED #9 for the model-call
+    cap). Built by striping over `count` slot files, each held by a non-blocking
+    `flock` — a binary flock per file yields a counting semaphore of width
+    `count`. Blocks (bounded by `timeout`) until a slot frees; raises
+    TimeoutError on expiry.
+
+    Degrades to a NO-OP (per-process limiting only) with a ONE-TIME warning
+    where fcntl is unavailable (Windows — DEFERRED #10 stays)."""
+    global _WARNED
+    count = max(1, int(count))
+    if fcntl is None:                          # pragma: no cover - non-POSIX
+        if not _WARNED:
+            _WARNED = True
+            from . import errors
+            errors.capture("proclock", OSError(
+                "fcntl unavailable — machine-global cap degraded to per-process "
+                "(see ADR 0005 / DEFERRED #10)"), context=name)
+        yield
+        return
+    d = config.MEMORY_DIR / "locks"
+    d.mkdir(parents=True, exist_ok=True)
+    base = _safe(name)
+    fhs = [open(d / f"{base}.slot{i}", "a+b") for i in range(count)]
+    held = None
+    try:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while held is None:
+            for fh in fhs:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held = fh
+                    break
+                except OSError:
+                    continue                   # this slot is taken — try next
+            if held is not None:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"no free '{name}' slot (cap {count}) in {timeout}s")
+            time.sleep(0.01)
+        yield
+    finally:
+        if held is not None:
+            try:
+                fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        for fh in fhs:
+            try:
+                fh.close()
+            except OSError:
+                pass

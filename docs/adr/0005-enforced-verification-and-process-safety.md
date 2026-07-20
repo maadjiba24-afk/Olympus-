@@ -349,6 +349,25 @@ Gate hardening, each with a pinning test:
   deterministic. Pinned by a seeded 300-case property test over randomized
   junk inputs.
 
+## Amendment 8 (hardening addendum — machine-global model-call cap)
+
+- **The concurrent-model-call cap is now machine-global, not per-process**
+  (closes DEFERRED #9). `usage.slot()` used to acquire only a per-process
+  `threading.BoundedSemaphore`, so the heartbeat and the web/CLI process could
+  jointly run up to 2× `MAX_CONCURRENT_CALLS` and provoke a provider
+  rate-limit storm. It now *also* acquires `proclock.slot("model-call",
+  MAX_CONCURRENT_CALLS)` — a cross-process counting semaphore built by striping
+  a non-blocking `fcntl.flock` over N slot files in `MEMORY_DIR/locks`. The
+  local semaphore is taken first (outer), the machine slot second (inner), so a
+  single process never demands more machine slots than its own cap.
+- **Non-POSIX degradation is explicit.** Where `fcntl` is unavailable
+  (Windows), `proclock.slot` degrades to a no-op with a one-time
+  `errors.capture` warning and only the per-process cap applies — the
+  heartbeat-vs-web split stays documented as unsupported there (DEFERRED #10
+  stays). Acceptance is a two-real-OS-process test: 8 threaded contenders
+  against a cap of 2, asserting the machine-global in-flight peak is exactly 2
+  (never exceeded, and actually reached — not a silent no-op).
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the
