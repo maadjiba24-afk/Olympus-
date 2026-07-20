@@ -28,7 +28,12 @@ jobs:
       # from the SAME lock; no per-version lock files, no unpinned installs.
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
-      - run: pip install pytest
+      # `pytest` is the runner; `openai` is CI-only TEST tooling (not a shipped
+      # dependency) — it's the client tests/test_openai_endpoint.py uses to
+      # drive the OpenAI-compatible server. Without it those tests self-skip,
+      # leaving the endpoint untested; installing it here exercises it on every
+      # matrix leg (same pattern as build/twine/cyclonedx/playwright elsewhere).
+      - run: pip install pytest openai
       # Refuse pre-release (alpha/beta/rc/dev) dependencies.
       - run: python scripts/check_no_prerelease.py requirements.lock
       - run: python -m compileall -q olympus
