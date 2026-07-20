@@ -22,7 +22,7 @@ What this DELIBERATELY does NOT do:
   * ship a working LIVE processor. The live branch of `charge()` delegates to
     `paylive.execute_live` — a fully-built path that ships INERT: it fails
     closed unless an operator BOTH sets `OLYMPUS_PAYMENT_LIVE` and registers a
-    real adapter, and neither exists in this repository (see ADR 0003). The
+    real adapter, and neither exists in this repository (see ADR 0006). The
     agent never sets `OLYMPUS_PAYMENT_LIVE` and never registers an adapter.
 """
 

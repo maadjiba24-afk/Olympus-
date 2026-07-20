@@ -1,4 +1,4 @@
-# ADR 0003 — Live payment path: built in full, shipped inert
+# ADR 0006 — Live payment path: built in full, shipped inert
 
 **Status:** accepted
 **Date:** 2026-07-17
