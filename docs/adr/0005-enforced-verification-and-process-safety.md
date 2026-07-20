@@ -164,6 +164,18 @@ reverted**:
   action executes under the exact root it was previewed under, regardless of the
   context that runs it — closing the preview≠execution hazard and unblocking safe
   per-worker roots. Tests: `tests/test_pinned_root.py`.
+  **Update (M1, per-worker roots now built — DEFERRED #8 CLOSED):**
+  `orchestrator._run_one` scopes each dispatched specialist to its own write
+  root `workspace/agents/<key>/` (`sandbox.set_worker_root`), and
+  `actions.prepare()` pins `sandbox.current_root()` (the scoped per-worker root
+  when set, else the shared workspace) — so two specialists writing the same
+  filename never clobber, and preview still equals execution across the thread
+  hop. The regression that originally got context-sensitive `workdir()` rejected
+  is avoided by making **reads a UNION** across the worker roots + the shared
+  root (`sandbox._read_roots`/`_resolve_read`), so inter-specialist handoff, the
+  gallery (`gallery.list_images`), and pre-existing workspaces stay visible. With
+  no worker scope, every path is byte-identical to the single shared workspace.
+  Tests: `tests/test_per_worker_roots.py`.
 - **Lock-scope hygiene:** an in-process mutex must never be held across a
   flock wait (a wedged peer process would freeze every thread queueing on
   the mutex — found on the usage ledger's reply path). Rule: take the flock

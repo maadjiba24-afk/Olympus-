@@ -296,7 +296,10 @@ def prepare(user: str, type_name: str, payload: dict,
     if at.pins_root and "_pinned_root" not in payload:
         try:
             from . import sandbox
-            payload = {**payload, "_pinned_root": str(sandbox.workdir())}
+            # current_root() is the scoped per-worker root when a specialist is
+            # dispatched (M1), else the shared workspace — so preview and
+            # execution share the SAME root even across the thread hop.
+            payload = {**payload, "_pinned_root": str(sandbox.current_root())}
         except Exception:
             pass                       # never block preparing an action on this
     try:

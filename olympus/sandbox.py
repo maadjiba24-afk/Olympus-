@@ -40,6 +40,7 @@ transports over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
 
 from __future__ import annotations
 
+import contextvars
 import os
 import re
 import shlex
@@ -113,8 +114,18 @@ def _effective_root(root: str | Path | None = None) -> Path:
     A pin is honored only when it resolves to a real, absolute, non-system
     directory; anything else (a bogus/tampered `_pinned_root`) fails safe to
     the live `workdir()`. The path being operated on still has to confine under
-    the returned root, so honoring a pin never widens what can be reached."""
+    the returned root, so honoring a pin never widens what can be reached.
+
+    With no explicit pin, writes land in the current PER-WORKER root when one is
+    scoped (M1 / DEFERRED #8: `set_worker_root` during a specialist's dispatch),
+    so two specialists writing the same filename never clobber each other; with
+    no worker scope this is just the one shared `workdir()` — unchanged."""
     if not root:
+        wr = _WORKER_ROOT.get()
+        if wr:
+            p = Path(wr)
+            if p.is_dir():
+                return p
         return workdir()
     try:
         pinned = Path(root).resolve()
@@ -124,6 +135,89 @@ def _effective_root(root: str | Path | None = None) -> Path:
             or pinned == Path(pinned.anchor) or not pinned.is_dir()):
         return workdir()
     return pinned
+
+
+# --- per-worker workspace roots (M1 / DEFERRED #8) -----------------------
+# Each specialist worker in a dispatch can be scoped to its OWN write root
+# under `workspace/agents/<worker>/`, so concurrent same-name writes never
+# clobber. Reads are a UNION across the worker roots + the shared root (see
+# `_read_roots`), so the gallery, inter-specialist handoff, and pre-existing
+# workspaces stay visible — the regression that got context-sensitive
+# `workdir()` rejected (ADR 0005). Off unless a worker root is scoped: with no
+# scope and no `agents/` dir, every path below is exactly the pre-M1 behavior.
+_WORKER_ROOT: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "olympus_worker_root", default=None)
+_AGENTS_DIR = "agents"          # reserved subdir; excluded from base walks
+
+
+def _safe_worker(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", str(name)).strip("-")[:64] or "worker"
+
+
+def worker_root(name: str) -> Path:
+    """The per-worker write root `workspace/agents/<name>/` (created)."""
+    d = workdir() / _AGENTS_DIR / _safe_worker(name)
+    d.mkdir(parents=True, exist_ok=True)
+    return d.resolve()
+
+
+def set_worker_root(name: str | None):
+    """Scope subsequent writes in THIS context (thread/copied-context) to a
+    per-worker root. Returns a token for `reset_worker_root`. `None` clears."""
+    return _WORKER_ROOT.set(str(worker_root(name)) if name else None)
+
+
+def reset_worker_root(token) -> None:
+    _WORKER_ROOT.reset(token)
+
+
+def current_worker_root() -> Path | None:
+    v = _WORKER_ROOT.get()
+    return Path(v) if v else None
+
+
+def current_root() -> Path:
+    """The root a write lands in right now — the scoped per-worker root, or the
+    shared workspace. `actions.prepare()` pins THIS so preview == execution."""
+    return _effective_root(None)
+
+
+def _read_roots() -> list[Path]:
+    """Roots a READ may resolve against, in precedence order: the current
+    worker root (if scoped), the shared workspace, then sibling worker roots.
+    De-duplicated. With no worker scope and no `agents/` dir this is just
+    `[workdir()]` — identical to pre-M1 reads."""
+    out: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(p: Path) -> None:
+        rp = p.resolve()
+        if rp.is_dir() and rp not in seen:
+            seen.add(rp)
+            out.append(rp)
+
+    cur = current_worker_root()
+    if cur:
+        _add(cur)
+    _add(workdir())
+    agents = workdir() / _AGENTS_DIR
+    if agents.is_dir():
+        for d in sorted(agents.iterdir()):
+            _add(d)
+    return out
+
+
+def _resolve_read(path: str) -> Path | None:
+    """Union read: the first EXISTING confined file for `path` across
+    `_read_roots()` (worker root wins), or None. Absolute paths resolve once."""
+    for r in _read_roots():
+        try:
+            target = _confine(path, r)
+        except ValueError:
+            continue
+        if target.exists():
+            return target
+    return None
 
 
 def _confine(path: str, root: str | Path | None = None) -> Path:
@@ -392,12 +486,17 @@ def is_sensitive_path(path: "Path | str") -> bool:
 def read_file(path: str, start_line: int | None = None,
               end_line: int | None = None) -> str:
     """Read a workspace file, optionally only lines [start_line, end_line]
-    (1-indexed, inclusive) — a large file need not cost its whole length."""
+    (1-indexed, inclusive) — a large file need not cost its whole length.
+
+    Union read (M1): a bare name resolves across the current worker root, the
+    shared workspace, then sibling worker roots — so a specialist reads its own
+    file, and handoff/pre-existing files stay visible."""
     try:
-        target = _confine(path)
+        _confine(path)                       # surface an escape as an error
     except ValueError as err:
         return f"Error: {err}"
-    if not target.is_file():
+    target = _resolve_read(path)
+    if target is None or not target.is_file():
         return f"Error: no such file in workspace: {path}"
     if is_sensitive_path(target):
         return f"Error: refusing to read a credential file: {path}"
