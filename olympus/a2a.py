@@ -137,10 +137,19 @@ FetchFn = "callable"        # (url, data, headers, timeout) -> (status, bytes)
 
 
 def _default_fetch(url: str, data: bytes | None, headers: dict, timeout: int):
-    import urllib.request
-    req = urllib.request.Request(url, data=data, headers=headers,
-                                 method="POST" if data else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    # Route through the SAME hardened opener the rest of the codebase uses
+    # (tools._pinned_opener): it dials the SSRF-validated IP itself
+    # (DNS-rebinding defense — no second resolution to flip after `_guard`'s
+    # check) and re-runs `url_block_reason` on EVERY 3xx hop, so a peer at an
+    # allowed URL cannot 302-redirect us to loopback / cloud-metadata / an
+    # internal host. A one-shot `urllib.urlopen` (the old code) does neither.
+    # Proxied egress uses the proxy opener (the proxy is the control point).
+    import urllib.request as _r
+    from . import tools
+    req = _r.Request(url, data=data, headers=headers,
+                     method="POST" if data else "GET")
+    opener = tools._proxy_opener() if tools._proxied(url) else tools._pinned_opener()
+    with opener.open(req, timeout=timeout) as resp:
         return resp.status, resp.read(_MAX_RESPONSE + 1)
 
 

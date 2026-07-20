@@ -28,6 +28,37 @@ def test_catastrophic_commands_are_denied(command):
     assert not allowed and verdict.blocked_by
 
 
+# A shell wrapper (`bash -c "…"`) hides the real command from tokenized
+# analysis (argv[0] is the shell). The gate must unwrap the inline script and
+# apply every rule to what the shell would actually run — otherwise
+# `bash -c "rm -rf /home"` slips past the bare-`/` raw backstop.
+@pytest.mark.parametrize("command", [
+    'bash -c "rm -rf /home"',
+    'sh -c "rm -rf /etc"',
+    "sh -c 'rm -rf ~'",
+    'bash -c "rm --recursive --force /*"',   # long-form flags, wrapped
+    'bash -c "echo hi; rm -rf /var"',        # inline script with a separator
+    'sudo bash -c "rm -rf /usr"',            # wrapper + shell -c
+    'sh -c "mkfs.ext4 /dev/sda1"',
+    'bash -c "shutdown -h now"',
+    'bash -c "bash -c \\"rm -rf /boot\\""',  # nested shell -c
+])
+def test_shell_wrapped_catastrophes_are_denied(command):
+    assert cmdguard.scan(command).level == cmdguard.DENY
+    allowed, verdict = cmdguard.check(command)
+    assert not allowed and verdict.blocked_by
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "echo hello world"',
+    'sh -c "ls -la /home"',                  # listing a system path is fine
+    'bash -c "rm -rf ./build"',              # relative workspace path
+    'bash -c "python script.py"',
+])
+def test_shell_wrapped_benign_commands_stay_safe(command):
+    assert cmdguard.scan(command).level == cmdguard.SAFE
+
+
 @pytest.mark.parametrize("command", [
     "ls -la",
     "python script.py",

@@ -145,6 +145,35 @@ _WRAPPERS = frozenset({
 })
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# Shells that run an INLINE script via `-c` — `bash -c "rm -rf /home"`. The
+# script hides its real command from tokenized analysis (argv[0] is the shell,
+# not `rm`), and the raw backstop regex only catches a bare `/` root with
+# short flags. So we extract the inline script and re-scan it (below), applying
+# every rule to the command the shell would actually run. Depth-bounded against
+# `bash -c "bash -c ..."` nesting.
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh", "fish"})
+_MAX_UNWRAP_DEPTH = 3
+
+
+def _shell_c_payloads(tokens: list[str]) -> list[str]:
+    """Inline scripts a shell would run via `-c`, so they can be re-scanned.
+    Handles `bash -c <script>` and the glued `-c<script>` form."""
+    stripped = _strip_wrappers(tokens)
+    if not stripped or os.path.basename(stripped[0]) not in _SHELLS:
+        return []
+    out: list[str] = []
+    i = 1
+    while i < len(stripped):
+        tok = stripped[i]
+        if tok == "-c" and i + 1 < len(stripped):
+            out.append(stripped[i + 1])
+            i += 2
+            continue
+        if tok.startswith("-c") and len(tok) > 2:
+            out.append(tok[2:])
+        i += 1
+    return out
+
 
 def _strip_wrappers(tokens: list[str]) -> list[str]:
     """Drop leading wrapper commands, their options, and VAR=val assignments so
@@ -184,7 +213,7 @@ def _iter_rm_targets(tokens: list[str]) -> tuple[bool, bool, list[str]]:
     return True, (recursive and force) or recursive, targets
 
 
-def _scan_one(command: str) -> Verdict:
+def _scan_one(command: str, _depth: int = 0) -> Verdict:
     """Classify a single (already split) command segment."""
     cmd = command.strip()
     if not cmd:
@@ -216,6 +245,18 @@ def _scan_one(command: str) -> Verdict:
                     worst = v
                 break
 
+    # Unwrap `bash -c "<script>"` / `sh -c '<script>'`: the inline script hides
+    # its real command from the tokenized analysis above (argv[0] is the shell),
+    # so scan it too and fold in the worst verdict. This applies EVERY rule to
+    # the command the shell would actually run — closing e.g.
+    # `bash -c "rm -rf /home"`, which the raw backstop (bare `/` + short flags)
+    # misses. Depth-bounded against `bash -c "bash -c ..."`.
+    if _depth < _MAX_UNWRAP_DEPTH:
+        for inner in _shell_c_payloads(tokens):
+            v = scan(inner, _depth=_depth + 1)
+            if worst is None or _severity(v.level) > _severity(worst.level):
+                worst = v
+
     return worst or Verdict(SAFE, "no dangerous pattern matched", "ok")
 
 
@@ -227,17 +268,19 @@ def _severity(level: str) -> int:
 _SEPARATORS = re.compile(r"&&|\|\||;|\n|\|")
 
 
-def scan(command: str) -> Verdict:
+def scan(command: str, *, _depth: int = 0) -> Verdict:
     """Classify a shell command, returning the most severe verdict across all
-    of its `&&` / `;` / `|`-separated segments."""
+    of its `&&` / `;` / `|`-separated segments. `_depth` bounds the recursion
+    used to unwrap `sh -c`/`bash -c` inline scripts."""
     command = command or ""
     worst = Verdict(SAFE, "no dangerous pattern matched", "ok")
     for seg in _SEPARATORS.split(command):
-        v = _scan_one(seg)
+        v = _scan_one(seg, _depth)
         if _severity(v.level) > _severity(worst.level):
             worst = v
-    # Whole-command raw rules (a pipe like `curl … | sh` spans two segments).
-    whole = _scan_one(command.replace("\n", " "))
+    # Whole-command raw rules (a pipe like `curl … | sh` spans two segments;
+    # also where a `bash -c "a; b"` inline script is seen intact for unwrapping).
+    whole = _scan_one(command.replace("\n", " "), _depth)
     if _severity(whole.level) > _severity(worst.level):
         worst = whole
     return worst

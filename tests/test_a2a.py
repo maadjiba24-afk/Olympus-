@@ -119,3 +119,47 @@ def test_fetch_card_parses(monkeypatch):
     out = a2a.fetch_card("https://peer.test/.well-known/agent.json",
                          fetcher=lambda *a: (200, json.dumps(card).encode()))
     assert out["name"] == "Peer"
+
+
+# --- B-fix: outbound fetch goes through the SSRF-pinned / redirect-revalidating
+# opener (tools._pinned_opener), not a raw urlopen. tests/test_ssrf_fetch.py and
+# tests/test_dns_rebinding.py prove that opener blocks rebinding/redirects; these
+# assert A2A actually routes through it. ---
+
+class _FakeResp:
+    status = 200
+    def read(self, n=None): return b"ok"
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def test_default_fetch_uses_the_pinned_ssrf_opener(monkeypatch):
+    from olympus import tools
+    used = {}
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            used["kind"] = "pinned"
+            used["url"] = req.full_url
+            return _FakeResp()
+
+    monkeypatch.setattr(tools, "_proxied", lambda url: False)
+    monkeypatch.setattr(tools, "_pinned_opener", lambda: _Opener())
+    status, body = a2a._default_fetch("https://peer.test/card", None, {}, 5)
+    assert status == 200 and bytes(body) == b"ok"
+    assert used["kind"] == "pinned" and used["url"] == "https://peer.test/card"
+
+
+def test_default_fetch_uses_proxy_opener_when_proxied(monkeypatch):
+    from olympus import tools
+    used = {}
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            used["kind"] = "proxy"
+            return _FakeResp()
+
+    monkeypatch.setattr(tools, "_proxied", lambda url: True)
+    monkeypatch.setattr(tools, "_proxy_opener", lambda: _Opener())
+    a2a._default_fetch("https://peer.test/card", None, {}, 5)
+    assert used["kind"] == "proxy"          # proxy is the egress control point
