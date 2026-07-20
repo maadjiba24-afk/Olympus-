@@ -368,6 +368,33 @@ Gate hardening, each with a pinning test:
   against a cap of 2, asserting the machine-global in-flight peak is exactly 2
   (never exceeded, and actually reached — not a silent no-op).
 
+## Amendment 9 (hardening addendum — interactive-path verification)
+
+- **Zeus's direct replies are no longer unverified** (closes DEFERRED #6). A
+  `direct` reply skips the council, so before M4 it shipped with no
+  fact-checking at all. `_interactive_verify` now runs ONE cheap, latency-
+  capped structured call (`pool.fastest()`, effort `low`, no tools —
+  `config.interactive_verify_timeout()` default 20 s) that asks whether the
+  reply asserts a checkable real-world fact and, if so, whether it is
+  supported. If a checkable claim is unsupported, the reply ships behind an
+  `⚠️ UNVERIFIED` banner (`_banner_direct`) — bounded, never a silent
+  escalation to a full council run. Casual chat with no checkable claim
+  returns untouched. On by default; `OLYMPUS_INTERACTIVE_VERIFY=off` reverts to
+  the pre-M4 skip (still ledgered).
+- **Every verification skip is now a ledgered exemption** (closes DEFERRED #7).
+  The router's `needs_verification=False` opt-out, clarify turns, direct
+  no-claim replies, a disabled tier, and a verifier infra error each record a
+  `verify.exempt` decision (`_record_verify_exempt`) into the run trace, which
+  flushes durably to `MEMORY_DIR/traces`. The opt-out that once bypassed the
+  chain invisibly is now auditable after the fact — the skip is recorded, never
+  silent.
+- **Bounded, degrade-visible, replay-faithful.** A slow or failed check never
+  banners a casual reply — it degrades to a ledgered `infra_error` exemption
+  and the reply ships as-is. The tier's on/off state is recorded in
+  `tr.meta["interactive_verify"]` and restored on replay (like `fast_mode`), so
+  a recorded run replays byte-identically; pre-M4 traces (no such meta) replay
+  with the tier off and diverge on nothing.
+
 ## Consequences
 
 - The interactive path gains its first enforcing verification gate; the

@@ -138,6 +138,46 @@ def _banner_synth(additions: list[str]) -> str:
             "resolve them:\n" + lines)
 
 
+def _banner_direct(claims: list[str]) -> str:
+    lines = "\n".join(f"- {c}" for c in claims[:10]) or "- (unspecified)"
+    return ("⚠️ UNVERIFIED — this quick reply asserts factual claims the "
+            "fast-path check could not confirm. For a fact-checked answer, "
+            "ask again and it will be routed through the full council:\n"
+            + lines)
+
+
+# Bounded-latency check for a Zeus DIRECT reply (ADR 0005 amendment 9). One
+# cheap structured call: is any real-world factual claim asserted, and if so
+# is it supported? Casual chat / opinions / meta-questions have no checkable
+# claim → the tier records a ledgered exemption and returns the reply as-is.
+_DIRECT_VERIFY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "checkable": {
+            "type": "boolean",
+            "description": "True ONLY if the reply asserts a specific, "
+                           "verifiable real-world fact (a date, statistic, "
+                           "attribution, causal or historical claim). "
+                           "Greetings, opinions, chit-chat, meta-questions "
+                           "about Olympus, and requests to the user are False.",
+        },
+        "supported": {
+            "type": "boolean",
+            "description": "True if every checkable claim is well-established "
+                           "and correct to your knowledge. Ignored when "
+                           "checkable is False.",
+        },
+        "unsupported_claims": {
+            "type": "array", "items": {"type": "string"},
+            "description": "The specific claims you cannot support (verbatim, "
+                           "short). Empty when supported is True.",
+        },
+    },
+    "required": ["checkable", "supported", "unsupported_claims"],
+    "additionalProperties": False,
+}
+
+
 SYNTH_CHECK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -584,6 +624,101 @@ class Olympus:
         banner = getattr(self, "_unverified_banner", None)
         return f"{banner}\n\n{reply}" if banner else reply
 
+    # -- interactive-path verification (ADR 0005 amendment 9 / DEFERRED #6) --
+
+    def _direct_verify_call(self, user_message: str, reply: str) -> dict:
+        """One cheap structured call: does the direct reply assert an
+        unsupported real-world fact? Runs on the pool's FASTEST model at low
+        effort to stay bounded. No tools — this is a knowledge/plausibility
+        screen, not a web fact-check (that is what full delegation is for)."""
+        system = (
+            "You screen a quick assistant reply for unverified factual claims. "
+            "You are a fast gate, not a researcher: judge from established "
+            "knowledge only, never fetch anything. Be strict about what counts "
+            "as a checkable claim and honest about what you cannot support.")
+        prompt = (
+            f"The user said:\n{user_message}\n\n"
+            f"The assistant's quick reply:\n{reply}\n\n"
+            "Does this reply assert any specific, verifiable real-world fact? "
+            "If so, is every such claim well-established and correct?")
+        return backend.complete_json(
+            self.pool.fastest(), system,
+            [{"role": "user", "content": prompt}], _DIRECT_VERIFY_SCHEMA,
+            effort="low")
+
+    def _record_verify_exempt(self, tr: "trace_mod.Trace", mode: str,
+                              reason: str) -> None:
+        """Ledger a deliberate verification skip (closes DEFERRED #7's silent
+        opt-out). The trace flushes durably to MEMORY_DIR/traces, so every
+        exemption is auditable after the fact — the skip is recorded, never
+        invisible."""
+        tr.decision(
+            "verify.exempt", {"name": "aletheia", "role": "verify"},
+            {"mode": mode, "reason": reason}, status="skipped",
+            inputs=None, model=None)
+
+    def _interactive_verify(self, user_message: str, reply: str,
+                            tr: "trace_mod.Trace") -> str:
+        """Bounded-latency verification of a Zeus DIRECT reply (closes DEFERRED
+        #6). Returns the reply, prefixed with an UNVERIFIED banner iff the
+        bounded check found an unsupported factual claim. Every outcome —
+        pass, banner, no-claim, disabled, timeout, infra error — is ledgered,
+        so the previously-silent skip is now auditable (DEFERRED #7)."""
+        if not config.interactive_verify_enabled():
+            self._record_verify_exempt(tr, "direct", "disabled")
+            return reply
+        timeout = config.interactive_verify_timeout()
+        try:
+            if not timeout:
+                verdict = self._direct_verify_call(user_message, reply)
+            else:
+                import contextvars
+                from concurrent.futures import TimeoutError as _FutTimeout
+                ctx = contextvars.copy_context()
+                ex = ThreadPoolExecutor(max_workers=1)
+                try:
+                    fut = ex.submit(ctx.run, self._direct_verify_call,
+                                    user_message, reply)
+                    try:
+                        verdict = fut.result(timeout=timeout)
+                    except _FutTimeout:
+                        raise TimeoutError(
+                            f"direct verify exceeded {timeout:.0f}s") from None
+                finally:
+                    ex.shutdown(wait=False)
+        except replaystore.ReplayDivergence:
+            raise                       # never mask a replay divergence
+        except Exception as err:
+            # A slow/failed OPTIONAL check must not degrade a casual reply into
+            # a banner — but it is recorded, so the miss is never silent.
+            tr.event("direct_verify.failed", error=str(err)[:200])
+            self._record_verify_exempt(tr, "direct", "infra_error")
+            return reply
+
+        checkable = bool(verdict.get("checkable"))
+        supported = bool(verdict.get("supported"))
+        claims = [c for c in (verdict.get("unsupported_claims") or [])
+                  if isinstance(c, str) and c.strip()][:10]
+        if not checkable:
+            self._record_verify_exempt(tr, "direct", "no_checkable_claim")
+            return reply
+        if supported and not claims:
+            tr.decision(
+                "direct_verify", {"name": "aletheia", "role": "verify"},
+                {"status": "pass"}, status="ok",
+                inputs=reply, model=self._light_meta())
+            return reply
+        # Checkable AND unsupported → ship behind the banner (user's M4 choice:
+        # bounded banner, never a silent escalation to a full council run).
+        tr.decision(
+            "direct_verify", {"name": "aletheia", "role": "verify"},
+            {"status": "unsupported", "claims": claims}, status="ok",
+            inputs=reply, model=self._light_meta())
+        tr.event("direct_verify.bannered", claims=claims)
+        self.report("⚠️ The quick reply asserts unverified claims; it will "
+                    "carry an UNVERIFIED banner.")
+        return f"{_banner_direct(claims)}\n\n{reply}"
+
     # -- stage 4.5: synthesis faithfulness (ADR 0005 amendment 4) ----------
 
     def _check_synthesis(self, user_message: str, verified: str,
@@ -979,6 +1114,10 @@ class Olympus:
         # replay too — otherwise a fast-recorded run replayed normally (or vice
         # versa) adds/drops decisions and diverges spuriously.
         tr.meta["fast_mode"] = config.fast_mode()
+        # The interactive tier adds a model call on the direct path, so its
+        # on/off state is part of the decision path and must be reproduced on
+        # replay (like fast_mode above).
+        tr.meta["interactive_verify"] = config.interactive_verify_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -988,7 +1127,12 @@ class Olympus:
             response_ref=replaystore.last_ref())
 
         if route.get("mode") == "direct" and route.get("direct_reply"):
-            return "direct", "", route["direct_reply"]
+            # DEFERRED #6: a direct reply skips the council, so screen it with
+            # the bounded-latency tier — banner it if it asserts an unsupported
+            # fact, else return it untouched (and ledger the exemption).
+            reply = self._interactive_verify(
+                user_message, route["direct_reply"], tr)
+            return "direct", "", reply
 
         # Clarify: the request is genuinely ambiguous — ask 1-2 questions instead
         # of guessing. Gated on Zeus choosing this mode (see zeus.md), so it
@@ -998,6 +1142,9 @@ class Olympus:
                   if isinstance(q, str) and q.strip()][:2]
             if qs:
                 tr.event("clarify", questions=qs)
+                # Clarifying questions assert no real-world fact — nothing to
+                # verify — but the skip is ledgered so it is never silent (#7).
+                self._record_verify_exempt(tr, "clarify", "no_claim")
                 return "clarify", "", _format_clarify(qs)
             # Model asked to clarify but gave no questions — fall through to a
             # normal delegation rather than replying with nothing.
@@ -1043,7 +1190,11 @@ class Olympus:
                 tr.event("verify.verdict_missing")
                 verify_error = True
         else:
+            # DEFERRED #7: the router's needs_verification=False opt-out no
+            # longer skips SILENTLY — it is recorded as a ledgered exemption,
+            # so an auditor can see every turn that bypassed the chain and why.
             verified = raw
+            self._record_verify_exempt(tr, "delegate", "router_opt_out")
 
         if config.fast_mode():
             # Fast mode skips the optional quality-review round-trip entirely.
@@ -1812,6 +1963,13 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     # reproduce the recorded setting or the replay adds/drops decisions.
     prev_fast = os.environ.get("OLYMPUS_FAST")
     os.environ["OLYMPUS_FAST"] = "1" if _meta.get("fast_mode") else "0"
+    # The interactive tier adds a direct-path model call, so replay it in the
+    # recorded on/off state or a recorded-on run replayed off drops the
+    # direct_verify decision and diverges. Absent in pre-M4 traces → treat as
+    # off so old runs replay unchanged.
+    prev_iv = os.environ.get("OLYMPUS_INTERACTIVE_VERIFY")
+    os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = \
+        "on" if _meta.get("interactive_verify") else "off"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -1828,6 +1986,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_FAST", None)
         else:
             os.environ["OLYMPUS_FAST"] = prev_fast
+        if prev_iv is None:
+            os.environ.pop("OLYMPUS_INTERACTIVE_VERIFY", None)
+        else:
+            os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = prev_iv
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

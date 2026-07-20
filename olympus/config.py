@@ -820,6 +820,32 @@ def verify_timeout() -> float:
         return 600.0
 
 
+def interactive_verify_enabled() -> bool:
+    """Bounded-latency verification of Zeus's DIRECT replies (ADR 0005
+    amendment 9 / closes DEFERRED #6). A direct reply skips the full council,
+    so before M4 it shipped entirely unverified. This runs one cheap, latency-
+    capped structured check: if the reply asserts a checkable real-world fact
+    that the checker cannot support, the reply ships behind an UNVERIFIED
+    banner; casual chat with no factual claim is recorded as a ledgered
+    exemption and returned untouched. On by default; OLYMPUS_INTERACTIVE_VERIFY=off
+    disables (the pre-M4 silent-skip, still ledgered as an exemption)."""
+    return os.environ.get("OLYMPUS_INTERACTIVE_VERIFY", "on").strip().lower() \
+        not in ("0", "off", "false", "no")
+
+
+def interactive_verify_timeout() -> float:
+    """Wall-clock cap on the interactive direct-reply verifier, in seconds.
+    Kept small so a casual turn never stalls on a slow check — on expiry the
+    turn degrades to a ledgered exemption (recorded, never silent) and the
+    direct reply ships as-is. OLYMPUS_INTERACTIVE_VERIFY_TIMEOUT=0 disables the
+    cap (block until the check returns)."""
+    try:
+        return max(0.0, float(os.environ.get(
+            "OLYMPUS_INTERACTIVE_VERIFY_TIMEOUT", "20")))
+    except ValueError:
+        return 20.0
+
+
 def synth_check_enabled() -> bool:
     """Faithfulness check of the composed answer against the verified
     findings (ADR 0005 amendment 4): the synthesis stage was the last

@@ -38,7 +38,9 @@ def test_orchestrator_injects_soul_into_route(monkeypatch, tmp_path):
     seen = {}
 
     def fake_complete_json(settings, system, messages, schema, **k):
-        seen["system"] = system
+        # The FIRST call is Zeus's routing decision (the one soul is injected
+        # into); a later call is the M4 direct-verify screen (internal, no soul).
+        seen.setdefault("route_system", system)
         return {"mode": "direct", "direct_reply": "hi", "specialists": [],
                 "brief": None, "clarifying_questions": [],
                 "needs_verification": False}
@@ -46,7 +48,7 @@ def test_orchestrator_injects_soul_into_route(monkeypatch, tmp_path):
     monkeypatch.setattr(orchestrator.backend, "complete_json", fake_complete_json)
     bot = orchestrator.Olympus(user="soul-u")
     bot.ask("hello")
-    assert "SIGNATURE_SOUL_MARKER" in seen["system"]
+    assert "SIGNATURE_SOUL_MARKER" in seen["route_system"]
 
 
 # --- cron-attached skills -------------------------------------------------
