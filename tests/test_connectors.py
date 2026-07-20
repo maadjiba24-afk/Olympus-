@@ -162,3 +162,29 @@ def test_mcp_only_on_anthropic_backend(monkeypatch, tmp_path):
     ]}))
     assert SPECIALISTS["argus"].mcp_defs("anthropic")        # present
     assert SPECIALISTS["argus"].mcp_defs("openai") == []     # not on others
+
+
+# --- C-fix: a corrupt connectors.json must NOT be silently wiped -------------
+
+def test_add_mcp_server_fails_closed_on_corrupt_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(connectors, "mcp_scan_reason", lambda *a, **k: None)
+    assert "saved" in connectors.add_mcp_server("good", "https://a.test/mcp",
+                                                type="data")
+    path = connectors._config_path()
+    assert "good" in path.read_text()
+    path.write_text("{ this is not valid json", encoding="utf-8")
+    out = connectors.add_mcp_server("second", "https://b.test/mcp", type="data")
+    assert out.startswith("Error:") and "unreadable" in out
+    assert path.read_text() == "{ this is not valid json"
+
+
+def test_add_mcp_server_writes_atomically(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setattr(connectors, "mcp_scan_reason", lambda *a, **k: None)
+    connectors.add_mcp_server("s1", "https://a.test/mcp", type="data")
+    connectors.add_mcp_server("s2", "https://b.test/mcp", type="data")
+    data = json.loads(connectors._config_path().read_text())
+    names = {s["name"] for s in data["servers"]}
+    assert names == {"s1", "s2"}
+    assert not list(tmp_path.glob("connectors.json.tmp"))

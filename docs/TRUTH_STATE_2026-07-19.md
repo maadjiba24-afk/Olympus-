@@ -1,5 +1,18 @@
 # Olympus — Truth-State Audit · 2026-07-19
 
+> **Erratum (post-audit correction).** A later audit found two errors in this
+> snapshot; they are corrected here rather than by rewriting the dated body:
+> 1. **CI Python matrix.** The exec-summary (line ~60), Section A (line ~84),
+>    and the M0-5 row (line ~169) call CI "3.12 only / OPEN." Section D (line
+>    ~202) correctly records it as **DONE**. The latter is right: `ci.yml`'s
+>    `test` job runs the full **3.10–3.13** matrix (pinned by
+>    `tests/test_ci_matrix.py`). Treat the "3.12 only / OPEN" lines as stale.
+> 2. **Action count.** Passages citing "**17 actions**" are wrong — the manifest
+>    and code register **23** (the extra six are the `computer_*` actions in
+>    `computeruse.py`). The doc's verification one-liner omitted `import
+>    computeruse`, so it counted before those registered; `capabilities --check`
+>    validates 23 and passes.
+
 Read-only diagnostic (supersedes `TRUTH_STATE_2026-07-15.md`). Evidence hierarchy:
 **executed command output > code read > docs**. `README` / `THREAT_MODEL` /
 `capabilities.json` are treated as *claims to verify*, never as evidence.

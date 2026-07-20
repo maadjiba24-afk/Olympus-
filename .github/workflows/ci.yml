@@ -28,12 +28,17 @@ jobs:
       # from the SAME lock; no per-version lock files, no unpinned installs.
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
-      # `pytest` is the runner; `openai` is CI-only TEST tooling (not a shipped
-      # dependency) — it's the client tests/test_openai_endpoint.py uses to
-      # drive the OpenAI-compatible server. Without it those tests self-skip,
-      # leaving the endpoint untested; installing it here exercises it on every
-      # matrix leg (same pattern as build/twine/cyclonedx/playwright elsewhere).
-      - run: pip install pytest openai
+      # `pytest` is the runner; `openai` and `pyyaml` are CI-only TEST tooling
+      # (not shipped dependencies). Without them these tests self-skip, leaving
+      # coverage dark:
+      #   * openai — the client tests/test_openai_endpoint.py uses to drive the
+      #     OpenAI-compatible server.
+      #   * pyyaml — required by the ABC drift guard (tests/test_abc.py,
+      #     test_abc_surface.py) that pins behavioral_contracts.yaml against the
+      #     embedded _DEFAULT_CONTRACTS mirror; without it a drift between the
+      #     human-readable YAML and the authoritative embedded dict ships
+      #     uncaught. (Same de-darking pattern as build/twine/cyclonedx/playwright.)
+      - run: pip install pytest openai pyyaml
       # Refuse pre-release (alpha/beta/rc/dev) dependencies.
       - run: python scripts/check_no_prerelease.py requirements.lock
       - run: python -m compileall -q olympus

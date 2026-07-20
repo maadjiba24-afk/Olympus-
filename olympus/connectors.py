@@ -259,6 +259,15 @@ def _config_path() -> Path:
     return config.MEMORY_DIR / "connectors.json"
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + os.replace so a crash or a concurrent reader can
+    never see a half-written connectors.json (the corruption that used to make
+    the next add_mcp_server drop the whole registry)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _raw_mcp_definitions() -> list[dict]:
     defs: list[dict] = []
     path = _config_path()
@@ -372,8 +381,16 @@ def add_mcp_server(name: str, url: str, type: str = "data",
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            pass
-    data.setdefault("servers", [])
+            # FAIL CLOSED: a corrupt/truncated file must not be silently reset
+            # to empty and overwritten — that would DROP every previously saved
+            # MCP server. Refuse, exactly as remove_mcp_server does.
+            return ("Error: connectors.json is unreadable — refusing to "
+                    "overwrite it (that would drop every saved MCP server). "
+                    "Fix or remove the file, then retry.")
+    if not isinstance(data, dict):
+        return "Error: connectors.json is malformed (not a JSON object)."
+    servers = data.get("servers")
+    data["servers"] = servers if isinstance(servers, list) else []
     data["servers"] = [s for s in data["servers"] if s.get("name") != name]
     entry = {"name": name, "url": url, "type": type}
     if auth_env:
@@ -381,7 +398,7 @@ def add_mcp_server(name: str, url: str, type: str = "data",
     if specialists:
         entry["specialists"] = specialists
     data["servers"].append(entry)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(data, indent=2))
     return f"MCP server '{name}' saved ({type})."
 
 
@@ -400,7 +417,7 @@ def remove_mcp_server(name: str) -> str:
     if len(kept) == len(servers):
         return f"Error: no MCP server named '{name}'."
     data["servers"] = kept
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(data, indent=2))
     return f"MCP server '{name}' removed."
 
 
