@@ -762,8 +762,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
-        from . import interaction
+        from . import interaction, sandbox
         ask_prev = interaction.set_provider(self._ask_provider)
+        # Scope this specialist's file writes to its OWN workspace root
+        # (workspace/agents/<key>/), so two specialists writing the same
+        # filename never clobber (M1 / DEFERRED #8). Reads stay a union across
+        # roots, so handoff and the gallery are unaffected. Reset in `finally`.
+        wr_token = sandbox.set_worker_root(key)
         try:
             try:
                 # Scored effort with the specialist's own tier as the FLOOR
@@ -845,6 +850,7 @@ class Olympus:
                             "and answer from the other specialists.]")
             return output
         finally:
+            sandbox.reset_worker_root(wr_token)
             interaction.reset_provider(ask_prev)
             trace_mod.reset_current(token)
 
