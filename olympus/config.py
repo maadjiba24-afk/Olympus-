@@ -872,6 +872,14 @@ def sovereign_mode() -> bool:
         "1", "true", "yes", "on")
 
 
+def is_production() -> bool:
+    """True when OLYMPUS_ENV marks this a production deployment. Gates the
+    fail-closed production signing-seed guard (`witness.require_production_seed`):
+    a production instance may not boot on the public, forgeable default seed."""
+    return os.environ.get("OLYMPUS_ENV", "").strip().lower() in (
+        "production", "prod")
+
+
 def sovereign_allow_dev_seed() -> bool:
     """Labs/CI escape hatch (OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED): let sovereign
     mode run on the PUBLIC default signing seed. Every artifact signed that way

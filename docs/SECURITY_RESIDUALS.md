@@ -47,8 +47,14 @@ move money after two deliberate human acts.
   (`OLYMPUS_MANDATE_USER_PUBKEY`) remove this for the co-signature — but the
   *default* remains vault-local.
 - The **public default signing seed is forgeable by anyone.** Instances on it
-  are labeled `dev` (integrity, never authenticity). Sovereign mode fails closed
-  on the default seed; `SIGNING.md` carries the compromise-response runbook.
+  are labeled `dev` (integrity, never authenticity). This is now **enforced at
+  boot in production** (M2): with `OLYMPUS_ENV=production` set, the CLI **refuses
+  to boot** (nonzero exit, actionable remediation) when the seed is unset or is
+  the shipped dev seed — `witness.require_production_seed`, called in
+  `cli.main()`. A non-production instance on the default seed still boots but
+  logs a one-line dev-posture warning (dev is allowed, never silent). Sovereign
+  mode likewise fails closed on the default seed; `SIGNING.md` carries the
+  compromise-response runbook.
 
 ## 3. Append-only ledger truncation
 
