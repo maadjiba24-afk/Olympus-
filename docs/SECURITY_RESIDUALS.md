@@ -101,10 +101,23 @@ traffic is excluded by design, so they cannot be satisfied in a test harness:
 
 ## 6. What the test suite does — and does not — cover
 
-The passing suite proves **architecture, gates, and security logic**. It does
-**not** score **AI-output quality** — that is measured separately by
+The passing unit suite proves **architecture, gates, and security logic**. It
+does **not** score **AI-output quality** — that is measured separately by
 `olympus eval` / `olympus scores`. A green suite means the guardrails are
 correct, not that a given answer is good.
+
+**Now gated in CI (M5).** Answer quality is regression-gated by the
+**answer-quality gate** (`.github/workflows/quality-gate.yml` →
+`scripts/quality_gate.py`): it runs the benchmark and **fails the build** when
+any specialist regresses more than a tolerance (default 1.0/10) below the
+committed baseline (`olympus/quality_baseline.json`). The pass/fail comparison
+is the pure, unit-tested `evals.regression_check`; the live benchmark run makes
+real model calls, so — like the replay gate — the workflow **needs an
+`ANTHROPIC_API_KEY` repo secret and skips cleanly (exit 0) without it**, spend
+capped by `OLYMPUS_DAILY_BUDGET`. The residual therefore narrows but does not
+vanish: quality is only *actually* scored where a key (and a committed baseline)
+is present. Establishing/refreshing the baseline is a human act
+(`--update-baseline`, committed by a maintainer), never the agent's.
 
 ---
 
