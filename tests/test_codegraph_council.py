@@ -4,7 +4,7 @@ the gate CLI action."""
 
 import pytest
 
-from olympus import codegraph, codegraph_build, config, store
+from olympus import codegraph, codegraph_build, codegraph_langs, config, store
 
 
 @pytest.fixture(autouse=True)
@@ -122,3 +122,73 @@ def test_gate_action_registered_and_dispatches(monkeypatch):
         arg = []
     assert codegraph_cli.run(Args()) == 0
     assert called == {"root": "."}
+
+
+# --- iter-3 hardening: review findings, each with a regression -------------
+
+def test_scan_claims_ignores_english_uses_prose(tmp_path):
+    """HIGH review finding: 'The parser uses config' must NOT become a false
+    REFUTED verdict fed to Aletheia as ground truth."""
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.py").write_text("def parser():\n    pass\n\ndef config():\n    pass\n")
+    codegraph_build.build("self", root)
+    assert codegraph.scan_claims(
+        "self", "The parser uses config values to decide formatting") == []
+
+
+def test_scan_claims_requires_distinctive_operands(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.py").write_text("def get():\n    pass\n\ndef set():\n    pass\n")
+    codegraph_build.build("self", root)
+    # short common-word symbols: a 'get calls set' English phrase is not a claim
+    assert codegraph.scan_claims("self", "get calls set") == []
+
+
+def test_scan_claims_still_verifies_distinctive_claims(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.py").write_text(
+        "def resolve_handler():\n    dispatch_event()\n\n"
+        "def dispatch_event():\n    pass\n")
+    codegraph_build.build("self", root)
+    verds = {c["claim"]: c["verdict"]
+             for c in codegraph.scan_claims(
+                 "self", "resolve_handler calls dispatch_event")}
+    assert verds.get("resolve_handler calls dispatch_event") == "CONFIRMED"
+
+
+def test_scan_claims_is_bounded_on_hostile_bundle(tmp_path):
+    import time as _t
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.py").write_text(
+        "\n".join(f"def sym{i}():\n    pass" for i in range(200)))
+    codegraph_build.build("self", root)
+    hostile = " ".join(f"zzAlpha{i} calls zzBeta{i}" for i in range(4000))
+    start = _t.perf_counter()
+    codegraph.scan_claims("self", hostile)
+    assert (_t.perf_counter() - start) < 2.0    # bounded by _SCAN_MATCH_CAP
+
+
+@pytest.mark.parametrize("kw", ["with", "using", "lock", "foreach"])
+def test_control_keywords_not_extracted_as_methods(tmp_path, kw):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.ts").write_text(f"{kw} (obj) {{\n  doThing();\n}}\n"
+                               "class K {\n  real() {}\n}\n")
+    codegraph_langs.extract_file("p", root / "a.ts", root)
+    labels = {n["label"] for n in codegraph.nodes("p")}
+    assert kw not in labels and "real" in labels
+
+
+def test_method_shorthand_is_linear_without_the_length_cap():
+    """F2: the pattern itself must be near-linear, not merely saved by the
+    per-line cap — a 40k-char space-padded near-miss must not take seconds."""
+    import time as _t
+    spec = next(x for x in codegraph_langs.LANGS if x.name == "typescript")
+    for line in (" " * 40000 + "x(", "\t" * 40000 + "async foo("):
+        start = _t.perf_counter()
+        spec.fn.search(line)
+        assert (_t.perf_counter() - start) < 1.0

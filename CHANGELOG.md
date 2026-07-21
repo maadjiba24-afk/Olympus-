@@ -15,6 +15,39 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph drives self-evolution + hardening
+
+The code graph becomes an ACTIVE part of how Olympus improves itself, not just a
+tool a specialist can call — then a two-front adversarial review (correctness +
+security) hardened the wiring, with a regression test per confirmed finding.
+
+- **Aletheia auto-checks structural claims.** `codegraph.scan_claims()` finds
+  the structural claims in the specialist outputs and verifies each against the
+  graph; the hallucination controller receives CONFIRMED facts as ground truth
+  and "no edge found" notes as ADVISORY — deterministic, firing even if the
+  verifier never calls the tool.
+- **Every self-upgrade proposal is stamped with its blast radius.**
+  `codegraph.impact_report()` + `propose_upgrade` now record what depends on the
+  code a proposal names, from the EXTRACTED-truth graph.
+- **`olympus codegraph gate`** wires the previously-standalone A/B harness into
+  the CLI (does the graph reduce file reads / tokens / model calls /
+  hallucination flags).
+- **TS/JS/Vue class-method shorthand** (`name(params) {`) is now extracted —
+  guarded so calls, arrow/function callbacks, and control statements are never
+  false positives.
+
+Hardening (all confirmed by review, each with a regression test):
+- scan_claims no longer treats the English word "uses" as a call claim and
+  requires both symbols to be *distinctive* identifiers, so ordinary prose
+  ("the parser uses config") can't become a false REFUTED verdict; a hard match
+  cap bounds work on a hostile bundle (was unbounded — 13.5 s → 3 ms).
+- `with`/`using`/`lock`/`foreach`/… control statements are no longer welded in
+  as phantom method nodes.
+- the method-shorthand regex was rewritten to be genuinely near-linear (a
+  40 k-char padded line: 12–15 s → 9 ms), not merely saved by the line-length
+  cap.
+
+
 ### Added — Code graph: package-manifest nodes (iteration 4)
 
 `pyproject.toml`, `package.json`, `go.mod`, and `pom.xml` are now indexed:

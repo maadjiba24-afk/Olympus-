@@ -737,22 +737,45 @@ def verify_claim(project: str, claim: str) -> dict:
     return {"verdict": "UNKNOWN", "detail": "claim shape not recognized"}
 
 
+# scan_claims is PROACTIVE — it runs over untrusted specialist prose, unlike
+# verify_claim which the model deliberately invokes. So it is deliberately
+# conservative to avoid mistaking ordinary English for a code claim:
+#   - the calls verb "uses" is dropped (verify_claim keeps it for the model's
+#     own deliberate use). "The parser uses config values" is prose, not a claim.
+#   - BOTH referenced symbols must be *distinctive* identifiers (snake_case /
+#     camelCase / long-uncommon) — plain-word noun pairs never qualify.
+#   - a hard cap on total regex matches examined bounds the work on a hostile
+#     bundle stuffed with symbol-pair phrases (was unbounded: UNKNOWN verdicts
+#     did not count toward the limit).
+_SCAN_CALLS_RE = re.compile(
+    r"\b([A-Za-z_][\w.]+)\b\s+(?:calls|invokes)\s+\b([A-Za-z_][\w.]+)\b", re.I)
+_SCAN_MATCH_CAP = 25
+
+
 def scan_claims(project: str, text: str, limit: int = 8) -> list[dict]:
-    """Find EVERY structural claim in a block of free text (a specialist's
-    answer, an upgrade proposal) and verify each against the graph. Returns only
-    the DECISIVE verdicts ({claim, verdict, detail} for CONFIRMED/REFUTED),
-    skipping UNKNOWN — the honest ground-truth signal the council can act on. A
-    no-op (returns []) when the graph is empty or the toggle is off, so it is
-    always safe to call in the pipeline.
+    """Find structural claims in a block of free text (a specialist's answer, an
+    upgrade proposal) and verify each against the graph. Returns only DECISIVE
+    verdicts ({claim, verdict, detail} for CONFIRMED/REFUTED), skipping UNKNOWN.
+    Conservative by design (see the note above): it will miss loosely-phrased
+    claims rather than mis-flag prose as a false verdict. A no-op (returns [])
+    when the graph is empty or the toggle is off, so it is always safe to call.
 
     `verify_claim` alone only checks the first match in a string; this finds all
-    matches so a paragraph making several claims is fully checked."""
+    matches (bounded) so a paragraph making several claims is fully checked."""
     if not _ENABLED:
         return []
     out: list[dict] = []
     seen: set[str] = set()
-    for rx in (_CALLS_RE, _IMPORTS_RE, _UNUSED_RE, _NOTHING_RE):
+    examined = 0
+    for rx in (_SCAN_CALLS_RE, _IMPORTS_RE, _UNUSED_RE, _NOTHING_RE):
         for m in rx.finditer(str(text or "")):
+            if examined >= _SCAN_MATCH_CAP:
+                return out
+            examined += 1
+            # every referenced symbol must be distinctive — filters English
+            # sentences whose words happen to match the claim shape.
+            if not all(_distinctive(_last(g)) for g in m.groups() if g):
+                continue
             frag = " ".join(m.group(0).split())
             key = frag.lower()
             if key in seen:
