@@ -39,9 +39,22 @@ jobs:
       - name: Run the answer-quality gate (skips if no key)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
-          # Olympus never assumes a model (require_model raises without one),
-          # so CI must pin the eval model explicitly. The judge defaults to
-          # OLYMPUS_JUDGE_MODEL (claude-sonnet-4-6) independently.
-          OLYMPUS_MODEL: "claude-opus-4-8"
-        run: python scripts/quality_gate.py
+        # Olympus never assumes a model (require_model raises without one), so
+        # CI pins provider + model explicitly, keyed on which secret exists:
+        # an Anthropic key wins; otherwise a Kimi (Moonshot) key runs through
+        # the OpenAI-compatible provider. Models are pinned to CONCRETE
+        # versions — a floating alias would silently shift the baseline.
+        # With neither secret, the gate script skips cleanly (exit 0).
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            export OLYMPUS_PROVIDER="anthropic"
+            export OLYMPUS_MODEL="claude-opus-4-8"
+          elif [ -n "$KIMI_API_KEY" ]; then
+            export OLYMPUS_PROVIDER="openai"
+            export OPENAI_API_KEY="$KIMI_API_KEY"
+            export OLYMPUS_BASE_URL="https://api.moonshot.ai/v1"
+            export OLYMPUS_MODEL="kimi-k2-0905-preview"
+          fi
+          python scripts/quality_gate.py
