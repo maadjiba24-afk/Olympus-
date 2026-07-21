@@ -36,12 +36,29 @@ jobs:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
-      - name: Run the answer-quality gate (skips if no key)
+      # Olympus never assumes a model, so CI resolves provider + model from
+      # whichever provider secret exists (first present wins, in this order):
+      # ANTHROPIC_API_KEY (native), then OPENAI / GEMINI / DEEPSEEK / GROQ /
+      # MISTRAL / XAI / OPENROUTER / KIMI via the OpenAI-compatible provider,
+      # with the model discovered from that account's own /models inventory.
+      # The resolved config lands in $GITHUB_ENV for the gate step. With no
+      # secret at all, nothing is exported and the gate skips cleanly.
+      # NOTE: the gate ENFORCES only when the resolved model matches the one
+      # recorded in olympus/quality_baseline.json — on a different model it
+      # reports without gating until a maintainer re-baselines.
+      - name: Resolve eval provider from available secrets
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: python scripts/ci_provider_resolve.py
+      - name: Run the answer-quality gate (skips if no key)
+        env:
           OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
-          # Olympus never assumes a model (require_model raises without one),
-          # so CI must pin the eval model explicitly. The judge defaults to
-          # OLYMPUS_JUDGE_MODEL (claude-sonnet-4-6) independently.
-          OLYMPUS_MODEL: "claude-opus-4-8"
         run: python scripts/quality_gate.py

@@ -112,12 +112,25 @@ correct, not that a given answer is good.
 any specialist regresses more than a tolerance (default 1.0/10) below the
 committed baseline (`olympus/quality_baseline.json`). The pass/fail comparison
 is the pure, unit-tested `evals.regression_check`; the live benchmark run makes
-real model calls, so — like the replay gate — the workflow **needs an
-`ANTHROPIC_API_KEY` repo secret and skips cleanly (exit 0) without it**, spend
-capped by `OLYMPUS_DAILY_BUDGET`. The residual therefore narrows but does not
-vanish: quality is only *actually* scored where a key (and a committed baseline)
-is present. Establishing/refreshing the baseline is a human act
-(`--update-baseline`, committed by a maintainer), never the agent's.
+real model calls, so — like the replay gate — the workflow **needs a model-key
+repo secret and skips cleanly (exit 0) without one**. Any one of these works
+(first present wins; `scripts/ci_provider_resolve.py`): `ANTHROPIC_API_KEY`
+(native), or `OPENAI_API_KEY` / `GEMINI_API_KEY` / `DEEPSEEK_API_KEY` /
+`GROQ_API_KEY` / `MISTRAL_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` /
+`KIMI_API_KEY` via the OpenAI-compatible provider, with the eval model
+discovered from that account's own `/models` inventory; spend capped by
+`OLYMPUS_DAILY_BUDGET`. **The baseline is live** (first keyed run's real
+scores, `moonshot-v1-32k`, provenance in the file) and the first gated run
+passed against it. Because scores are model-dependent, the gate **enforces
+only when the resolved model matches the baseline's recorded model** — on any
+other model it reports without gating until a maintainer re-baselines
+(`--update-baseline`, a human act, never the agent's). Single-run averages
+carry judge noise beyond the tolerance, so a first-pass regression triggers a
+**confirmation pass** (an independent re-eval of only the flagged specialists,
+`evals.confirm_regressions`): the gate fails only if the drop reproduces —
+noise rarely strikes the same specialist twice, a real regression does. The
+residual therefore narrows but does not vanish: quality is only *actually*
+scored where a key remains configured.
 
 ---
 

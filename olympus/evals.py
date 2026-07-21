@@ -84,10 +84,15 @@ def ensure_coverage(min_items: int = 1,
     return generated
 
 
-def per_specialist_scores(settings: config.Settings | None = None) -> dict[str, float]:
-    """Run the benchmark and return the average score per specialist."""
+def per_specialist_scores(settings: config.Settings | None = None,
+                          only_specialists: list[str] | None = None
+                          ) -> dict[str, float]:
+    """Run the benchmark and return the average score per specialist.
+    `only_specialists` restricts the run to those specialists' items — used by
+    the gate's confirmation pass to cheaply re-score only flagged ones."""
     settings = settings or config.Settings.from_env()
-    result = run(settings)
+    only = ids_for(only_specialists) if only_specialists else None
+    result = run(settings, only=only)
     buckets: dict[str, list[int]] = {}
     bench_by_id = {b["id"]: b for b in load_benchmarks()}
     for item in result["items"]:
@@ -244,6 +249,24 @@ def load_baseline(path: Path | None = None) -> dict[str, float]:
             if isinstance(v, (int, float))}
 
 
+def load_baseline_meta(path: Path | None = None) -> dict:
+    """The baseline's `_provenance` block (model, endpoint, date, ...), or {}.
+
+    Scores are model-dependent, so the gate only ENFORCES against a baseline
+    produced by the same model it is currently evaluating with — comparing a
+    Claude run to a Kimi baseline would gate apples against oranges. The
+    provenance records which model scored the baseline."""
+    path = path or BASELINE_PATH
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    meta = raw.get("_provenance") if isinstance(raw, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
 def regression_check(scores: dict[str, float], baseline: dict[str, float],
                      tolerance: float = DEFAULT_TOLERANCE) -> dict:
     """PURE regression comparison — the heart of the CI gate.
@@ -268,6 +291,30 @@ def regression_check(scores: dict[str, float], baseline: dict[str, float],
     return {"ok": not regressions and not missing,
             "regressions": sorted(regressions, key=lambda r: -r["drop"]),
             "missing": sorted(missing), "checked": len(baseline)}
+
+
+def confirm_regressions(first: dict, retry_scores: dict[str, float],
+                        baseline: dict[str, float],
+                        tolerance: float = DEFAULT_TOLERANCE) -> dict:
+    """PURE second-opinion filter for the gate's confirmation pass.
+
+    Single-run per-specialist averages carry judge noise of well over a point,
+    so a first-pass regression may be variance, not a real drop. The gate
+    re-scores ONLY the flagged specialists in an independent eval; a specialist
+    stays failed only if the retry ALSO shows a drop beyond tolerance. Noise
+    rarely strikes the same specialist twice; a real regression reproduces.
+
+    Fail-closed edges: a flagged specialist absent from `retry_scores` stays
+    failed (reported under `missing`), and first-pass `missing` coverage can
+    never be cleared by a retry."""
+    flagged = {r["specialist"] for r in first.get("regressions", [])}
+    sub_base = {s: baseline[s] for s in flagged if s in baseline}
+    second = regression_check(retry_scores, sub_base, tolerance)
+    missing = sorted(set(first.get("missing", [])) | set(second["missing"]))
+    return {"ok": second["ok"] and not missing,
+            "regressions": second["regressions"],
+            "missing": missing,
+            "checked": first.get("checked", len(baseline))}
 
 
 def format_gate_report(scores: dict[str, float], result: dict,

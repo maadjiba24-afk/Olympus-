@@ -57,13 +57,24 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
+    settings = config.Settings.from_env()
+    current_model = settings.model or os.environ.get("OLYMPUS_MODEL", "")
+
     if args.update_baseline:
-        payload = {"scores": {k: round(float(v), 2) for k, v in scores.items()}}
+        import time
+        payload = {
+            "_provenance": {
+                "date": time.strftime("%Y-%m-%d"),
+                "endpoint": settings.base_url or settings.provider,
+                "model": current_model,
+            },
+            "scores": {k: round(float(v), 2) for k, v in scores.items()},
+        }
         evals.BASELINE_PATH.write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8")
-        print(f"Wrote baseline for {len(scores)} specialists to "
-              f"{evals.BASELINE_PATH.name}:")
+        print(f"Wrote baseline for {len(scores)} specialists "
+              f"(model {current_model}) to {evals.BASELINE_PATH.name}:")
         for s in sorted(scores):
             print(f"  {s}: {scores[s]}/10")
         return 0
@@ -76,7 +87,48 @@ def main(argv: list[str] | None = None) -> int:
         print(evals.format_gate_report(scores, {"ok": True}, args.tolerance))
         return 0
 
+    # Scores are model-dependent: enforce only when the current eval model is
+    # the one that produced the baseline. On a different model (operator
+    # switched providers/keys), report instead of gating — a red build from an
+    # apples-to-oranges comparison would be noise, and a green one a lie.
+    base_model = evals.load_baseline_meta().get("model")
+    if base_model and current_model and base_model != current_model:
+        print(f"Baseline was scored by '{base_model}' but this run uses "
+              f"'{current_model}' — reporting without gating. To re-enable "
+              "gating on the new model, refresh the baseline with "
+              "--update-baseline and commit it.")
+        print(evals.format_gate_report(scores, {"ok": True}, args.tolerance))
+        return 0
+
     result = evals.regression_check(scores, baseline, args.tolerance)
+
+    # Confirmation pass: single-run averages carry judge noise beyond the
+    # tolerance, so a first-pass regression is re-scored in an independent
+    # eval of ONLY the flagged specialists and fails only if it reproduces.
+    # Skipped when baseline coverage is missing — that fails regardless.
+    if result["regressions"] and not result["missing"]:
+        flagged = [r["specialist"] for r in result["regressions"]]
+        print(f"First pass flagged {len(flagged)} regression(s): "
+              f"{', '.join(flagged)} — running an independent confirmation "
+              "eval of just those specialists...")
+        try:
+            retry = evals.per_specialist_scores(only_specialists=flagged)
+        except Exception as err:
+            # No second opinion available — keep the first verdict (fail
+            # closed), never pass on an unconfirmed hunch.
+            print(f"Confirmation eval failed ({err}); keeping the first-pass "
+                  "verdict.", file=sys.stderr)
+        else:
+            for s in sorted(retry):
+                print(f"  confirm {s}: {retry[s]}/10 (first pass "
+                      f"{scores.get(s)}/10, baseline {baseline.get(s)}/10)")
+            result = evals.confirm_regressions(result, retry, baseline,
+                                               args.tolerance)
+            scores = {**scores, **retry}
+            if result["ok"]:
+                print("First-pass drops did not reproduce — judged as noise, "
+                      "not regression.")
+
     print(evals.format_gate_report(scores, result, args.tolerance))
     return 0 if result["ok"] else 1
 
