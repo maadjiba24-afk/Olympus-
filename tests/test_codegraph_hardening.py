@@ -525,3 +525,81 @@ def test_citations_excluded_from_god_nodes(tmp_path):
 
 def test_language_count_is_at_least_37():
     assert len(codegraph_langs.LANGS) >= 37
+
+
+# --- iteration 4: package-manifest canonical nodes -------------------------
+
+def test_manifest_shared_dependency_is_one_hub_node(tmp_path):
+    root = tmp_path / "r"
+    (root / "svc").mkdir(parents=True)
+    (root / "web").mkdir()
+    (root / "svc" / "pyproject.toml").write_text(
+        '[project]\nname = "svc"\ndependencies = ["requests>=2", "shared"]\n')
+    (root / "web" / "package.json").write_text(
+        '{"name":"web","dependencies":{"shared":"1.0","lodash":"4"}}')
+    codegraph_build.build("p", root)
+    shared = [n for n in codegraph.nodes("p") if n["label"] == "shared"]
+    assert len(shared) == 1                       # canonical, not per-manifest
+    inbound = [e for e in codegraph.edges("p")
+               if e["dst"] == shared[0]["id"] and e["rel"] == "depends_on"]
+    assert len(inbound) == 2                       # both packages point at it
+
+
+def test_manifest_impact_follows_depends_on(tmp_path):
+    root = tmp_path / "r"
+    (root / "a").mkdir(parents=True)
+    (root / "b").mkdir()
+    (root / "a" / "pyproject.toml").write_text(
+        '[project]\nname = "a"\ndependencies = ["shared"]\n')
+    (root / "b" / "package.json").write_text(
+        '{"name":"b","dependencies":{"shared":"1"}}')
+    codegraph_build.build("p", root)
+    s = [n for n in codegraph.nodes("p") if n["label"] == "shared"][0]["id"]
+    # "what breaks if shared changes" -> both dependents
+    assert {"a", "b"} == {n["label"] for n in codegraph.impact("p", s)}
+
+
+def test_go_mod_and_pom_parse(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "go.mod").write_text(
+        "module example.com/app\nrequire (\n"
+        "  github.com/pkg/errors v0.9.1\n  golang.org/x/net v0.1.0\n)\n")
+    (root / "pom.xml").write_text(
+        "<project><artifactId>myapp</artifactId><dependencies>"
+        "<dependency><artifactId>guava</artifactId></dependency>"
+        "</dependencies></project>")
+    codegraph_build.build("p", root)
+    pkgs = {n["label"] for n in codegraph.nodes("p")
+            if n["kind"] == codegraph.ENTITY}
+    assert {"app", "errors", "net", "myapp", "guava"} <= pkgs
+
+
+def test_manifest_incremental_drops_removed_dependency(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["keep", "drop"]\n')
+    codegraph_build.build("p", root)
+    assert "drop" in {n["label"] for n in codegraph.nodes("p")
+                      if n["kind"] == codegraph.ENTITY}
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = ["keep"]\n')
+    codegraph_build.update("p", root)
+    app = [n for n in codegraph.nodes("p") if n["label"] == "app"][0]["id"]
+    dsts = {next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["dst"])
+            for e in codegraph.edges("p")
+            if e["src"] == app and e["rel"] == "depends_on"}
+    assert dsts == {"keep"}                         # 'drop' no longer linked
+
+
+def test_hostile_manifest_dep_count_is_bounded(tmp_path):
+    import json as _json
+    root = tmp_path / "r"
+    root.mkdir()
+    huge = {"name": "x", "dependencies": {f"d{i}": "1" for i in range(2000)}}
+    (root / "package.json").write_text(_json.dumps(huge))
+    codegraph_build.build("p", root)
+    from olympus import codegraph_manifest
+    deps = [e for e in codegraph.edges("p") if e["rel"] == "depends_on"]
+    assert len(deps) <= codegraph_manifest._MAX_DEPS

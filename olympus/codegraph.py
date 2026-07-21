@@ -61,14 +61,14 @@ CITATION = "citation"          # an ADR/RFC a doc or comment points to
 _CITATION_RE = re.compile(r"\b(ADR|RFC)[-\s]?0*(\d{1,5})\b", re.I)
 # relations that mean "B depends on A" when traversed from A (for impact).
 # `inherits`/`implements` count: change a base class and every subclass is
-# affected, so reverse-traversal for impact must follow them.
+# affected. `depends_on` too: change a package and its dependents are affected.
 _DEP_RELS = frozenset({"calls", "imports", "references", "inherits",
-                       "implements"})
+                       "implements", "depends_on"})
 # cross-file relations rebuilt from scratch on every incremental update (they
 # depend on the whole graph, not one file), kept in one place so build/update
 # and the resolver never drift.
 _CROSS_FILE_RELS = frozenset({"calls", "imports", "references", "inherits",
-                              "implements"})
+                              "implements", "depends_on"})
 
 _MAX_NODES = 20000          # per project; bound storage + injection cost
 _MAX_EDGES = 80000

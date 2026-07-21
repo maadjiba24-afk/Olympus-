@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph: package-manifest nodes (iteration 4)
+
+`pyproject.toml`, `package.json`, `go.mod`, and `pom.xml` are now indexed:
+the declared package and each dependency become **canonical name-keyed**
+`entity` nodes (one hub per package, however many manifests name it), linked
+by `depends_on`. So a dependency shared across services shows up as the single
+hub it is, `impact` follows `depends_on` ("what breaks if this package
+changes"), and it's a graph query to find every dependent. Parsed with the
+stdlib (tomllib/json + line regexes) — no new dependency, dep count bounded
+against a hostile manifest. Edges run through the shared resolver, so an
+incremental update drops a removed dependency instead of leaving it stale.
+5 new tests.
+
 ### Added — Code graph: 4 more languages + ADR/RFC citations (iteration 3)
 
 - **37 languages** now: adds Pascal/Delphi, Verilog/SystemVerilog, Salesforce

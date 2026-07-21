@@ -34,7 +34,8 @@ import os
 import time
 from pathlib import Path
 
-from . import codegraph, codegraph_ast, codegraph_ingest, codegraph_langs, store
+from . import (codegraph, codegraph_ast, codegraph_ingest, codegraph_langs,
+               codegraph_manifest, store)
 
 _MANIFEST = "codegraph.manifest"
 
@@ -150,7 +151,9 @@ def collect_files(root: Path, include_docs: bool = True,
             and not (Path(dirpath) / d).is_symlink())
         for fn in sorted(filenames):
             path = Path(dirpath) / fn
-            if path.suffix.lower() not in suffixes or path.is_symlink():
+            is_manifest = fn.lower() in codegraph_manifest.MANIFEST_NAMES
+            if (path.suffix.lower() not in suffixes and not is_manifest) \
+                    or path.is_symlink():
                 continue
             try:
                 if not path.is_file():
@@ -175,6 +178,8 @@ def _sha(path: Path) -> str:
 
 
 def _extract(project: str, path: Path, root: Path) -> dict | None:
+    if path.name.lower() in codegraph_manifest.MANIFEST_NAMES:
+        return codegraph_manifest.extract_file(project, path, root)
     if path.suffix.lower() == ".py":
         info = codegraph_ast.extract_file(project, path, root)
         if info is not None:
@@ -252,8 +257,18 @@ def _resolve(project: str, infos: list[dict]) -> dict:
         return None, False
 
     stats = {"imports": 0, "calls_resolved": 0, "calls_inferred": 0,
-             "calls_ambiguous": 0, "calls_skipped": 0, "inherits": 0}
+             "calls_ambiguous": 0, "calls_skipped": 0, "inherits": 0,
+             "depends_on": 0}
     for info in infos:
+        # Package manifests: the declared package `depends_on` each dependency,
+        # both canonical name-keyed nodes. Built in the shared pass so update()
+        # clears + rebuilds them and a removed dependency never lingers.
+        for dep in info.get("manifest_deps", ()):
+            dep_node = codegraph_manifest.pkg_node(project, dep)
+            if dep_node and dep_node["id"] != info["module_id"]:
+                if codegraph.add_edge(project, info["module_id"], "depends_on",
+                                      dep_node["id"]):
+                    stats["depends_on"] += 1
         # Inheritance: resolve base-class names to CLASS nodes. Python bases are
         # explicit in the AST, so a unique match is EXTRACTED (ground truth);
         # a regex-derived base is INFERRED; several same-named classes give
