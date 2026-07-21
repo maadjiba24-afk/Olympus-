@@ -361,6 +361,9 @@ def handle_message(msg: dict, ask: Callable[[str], str] | None = None,
             else:
                 return _error(rid, -32602, f"unknown tool '{name}'")
         except Exception as err:
+            # In-band error text is a deliberate contract (the caller sees why a
+            # tool failed). The read-only codegraph tools touch only local graph
+            # state, so this carries no more than the existing council tools do.
             return _result(rid, {"content": [{"type": "text",
                                               "text": f"Error: {err}"}],
                                  "isError": True})

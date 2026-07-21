@@ -18,6 +18,8 @@ from . import codegraph_build
 
 _POLL_SECONDS = 3.0
 _DEBOUNCE_SECONDS = 2.0
+_MAX_SETTLE_ROUNDS = 30            # cap the debounce wait so constant churn
+                                  # still eventually rebuilds (no livelock)
 
 
 def _snapshot(root: Path, include_docs: bool) -> dict[str, float]:
@@ -48,17 +50,26 @@ def watch(project: str, root: str | Path, include_docs: bool = True,
             now = _snapshot(root_p, include_docs)
             if now == last:
                 continue
-            # debounce: wait for the tree to sit still before rebuilding
-            settle = _snapshot(root_p, include_docs)
-            while settle != now:
-                now = settle
+            # Debounce: SLEEP first, then re-snapshot; only rebuild once the
+            # tree has stopped changing. (The old order snapshotted twice with
+            # no sleep between, so the wait never happened and a save-storm
+            # triggered one rebuild per poll instead of one total.) Bounded so
+            # unrelenting churn still makes forward progress instead of
+            # livelocking the loop forever.
+            for _ in range(_MAX_SETTLE_ROUNDS):
                 time.sleep(_DEBOUNCE_SECONDS)
                 settle = _snapshot(root_p, include_docs)
+                if settle == now:
+                    break
+                now = settle
             stats = codegraph_build.update(project, str(root_p), include_docs)
             rebuilds += 1
             last = now
             if on_update:
-                on_update(stats)
+                try:
+                    on_update(stats)
+                except Exception:                  # an observer must not kill
+                    pass                           # the watch loop
     except KeyboardInterrupt:
         pass
     return rebuilds

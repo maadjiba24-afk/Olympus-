@@ -15,6 +15,125 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph: package-manifest nodes (iteration 4)
+
+`pyproject.toml`, `package.json`, `go.mod`, and `pom.xml` are now indexed:
+the declared package and each dependency become **canonical name-keyed**
+`entity` nodes (one hub per package, however many manifests name it), linked
+by `depends_on`. So a dependency shared across services shows up as the single
+hub it is, `impact` follows `depends_on` ("what breaks if this package
+changes"), and it's a graph query to find every dependent. Parsed with the
+stdlib (tomllib/json + line regexes) — no new dependency, dep count bounded
+against a hostile manifest. Edges run through the shared resolver, so an
+incremental update drops a removed dependency instead of leaving it stale.
+5 new tests.
+
+### Added — Code graph: 4 more languages + ADR/RFC citations (iteration 3)
+
+- **37 languages** now: adds Pascal/Delphi, Verilog/SystemVerilog, Salesforce
+  Apex (classes + triggers), and Vue/Svelte/Astro single-file components
+  (matched via their `<script>` block). Pascal and Apex extract inheritance.
+- **ADR/RFC citation nodes**: `ADR-0007`, `ADR 7`, `RFC 2119`, `RFC-7231` in any
+  doc or code comment become one canonical `citation` node (normalized label)
+  with a `cites` edge from the file — so "what code depends on ADR-7?" is a
+  graph query. Citation labels are a fixed normalized form, never raw text, and
+  are excluded from god-node ranking.
+- Class/module patterns now match before function patterns, so a line that
+  could look like both (Apex `trigger X on Y (...)`) is read as the declaration
+  it is. 11 new tests; ReDoS-safety check re-run over all 37 languages.
+
+### Added — Code graph: 12 more languages (self-evolution iteration 2)
+
+The regex engine grows from 21 to **33 languages**, the biggest parity gap from
+the completeness audit — all via the zero-dependency engine, all ReDoS-checked
+at the line cap: Objective-C, Groovy/Gradle, SQL, Terraform/HCL, Perl, R,
+Haskell, OCaml, Clojure, Erlang, Solidity, Nim. Objective-C and Solidity also
+extract inheritance (`@interface X : Y`, `contract X is Y`). 15 new tests,
+including a blanket ReDoS-safety check over every language's every regex.
+
+### Added — Code graph: inheritance edges (self-evolution iteration 1)
+
+The code graph is Olympus's own compounding asset — a moat it keeps deepening
+over time. This iteration adds `inherits`/`implements` edges, closing the
+richest single parity gap with the tool the capability was absorbed from and
+strengthening every downstream view at once (impact now follows a base-class
+change to its subclasses; communities and the report see the type hierarchy).
+
+- Python: class bases from the AST → `inherits` edges, EXTRACTED (ground truth,
+  so `verify_claim` can confirm/refute them). External bases (`Exception`,
+  `object`) don't resolve, keeping the tier honest.
+- ~10 OO languages via the regex engine (Java/TS/Ruby/C#/Kotlin/Swift/Scala/
+  PHP/C++): base names pulled from the class line's inheritance clause,
+  recorded INFERRED (regex evidence, never ground truth); multiple same-named
+  bases → AMBIGUOUS. `extends` + `implements` with multiple interfaces all
+  captured. Base identifiers are extracted in code, not a second regex — no new
+  ReDoS surface (verified at the line cap).
+- `inherits`/`implements` join the dependency relations traversed for impact
+  and the cross-file relations rebuilt on every incremental update.
+
+Roadmap for subsequent iterations (each one bounded, test-gated, committed):
+more languages (Objective-C, HCL, SQL, Groovy), deeper council integration
+(Prometheus consults `codegraph_impact` before self-upgrades), graph-health
+metrics tracked over time, and the remaining parity gaps.
+
+### Security & Fixed — Code-graph hardening pass
+
+Two adversarial reviews (correctness + security) of the new code-graph engine,
+with a regression test for every confirmed finding (`test_codegraph_hardening.py`).
+
+Security:
+- **ReDoS closed.** The Java/C# definition regexes had three overlapping
+  whitespace quantifiers and backtracked catastrophically — a crafted
+  `.java`/`.cs` file in a cloned repo hung `codegraph build`/`update`/`watch`
+  for minutes. Rewritten into a provably linear token form (disjoint
+  token/separator classes), plus a per-line input cap; a hostile file now
+  builds in ~1 s.
+- **Symlink escape closed.** `collect_files` followed symlinks, so a cloned
+  repo could plant `x.yaml -> ~/.ssh/id_rsa` and pull its contents into the
+  graph. It now walks with `followlinks=False`, skips symlinked files/dirs, and
+  drops any path whose real location escapes the root.
+- **Attacker prose kept off the trusted path.** The auto-injected context block
+  and the `codegraph_subgraph`/`codegraph_overview` tools (both TRUSTED, hence
+  unwrapped) now emit STRUCTURE ONLY — rationale/document node labels (free text
+  from comments, docstrings, doc headings) are excluded, so a hostile comment in
+  an analyzed repo can't reach the model as clean text. The explicit CLI view
+  still shows prose.
+- **Global graph bounded.** `codegraph global add` wrote nodes directly, bypassing
+  the node/edge caps; it now enforces them, so the cross-repo graph can't grow
+  without bound.
+- `github.py` refuses a non-HTTPS `GITHUB_API` (never sends the token in the
+  clear), caps the response body, and stops on a redirect to a plaintext host.
+- The self-contained HTML export neutralizes `<!--` and `<script` in the JSON
+  payload, not just `</script>`.
+
+Fixed (correctness):
+- **Node-cap corruption.** At the 20 000-node cap, `add_node` returned an
+  unrelated node, welding every later file's structure onto node[0] as false
+  EXTRACTED edges the oracle would then confirm. It now returns `None` and every
+  extractor skips cleanly.
+- **Incremental update now equals a full build.** A changed file could leave a
+  stale EXTRACTED call/import edge between two *unchanged* files after new code
+  made it ambiguous. `update()` clears all cross-file edges and re-resolves from
+  the manifest, so incremental and full builds are identical.
+- **Oracle honesty.** "X is unused" was REFUTED on AMBIGUOUS/INFERRED incoming
+  edges; it now returns UNKNOWN unless an EXTRACTED caller exists.
+- **Python imports resolve by full dotted path**, so `from b.util import x` with
+  both `a/util.py` and `b/util.py` present resolves to `b.util` (was a false
+  REFUTED / wrong-module edge); an ambiguous stem-only match is INFERRED, never
+  EXTRACTED.
+- **gitignore directory patterns work.** Anchored (`/build/`) and multi-component
+  (`foo/bar/`) directory patterns now correctly exclude the files beneath them.
+- **Watch debounce works.** It snapshotted twice with no wait between, so a
+  save-storm rebuilt once per poll instead of once total; it now waits for the
+  tree to settle (bounded), and an `on_update` exception can't kill the loop.
+- Go bare quoted-string lines no longer become false import edges; regex-engine
+  and stem-only imports are INFERRED, never ground truth; global-graph tags are
+  sanitized so one tag can't be an id-prefix of another (`acme` vs `acme:web`);
+  merged/global edge ids are regenerated to stay `sha(src+rel+dst)`;
+  `pull_files` paginates to 300; multi-language notes get distinct rationale
+  slots; incremental `updated_at` no longer overwrites the full build's
+  `commit_sha`.
+
 ### Added — The code graph absorbs Graphify's pipeline as native capability
 
 The Phase 0 code graph (Python-only, query/impact/path/verify) grows into a

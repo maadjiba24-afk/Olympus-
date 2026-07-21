@@ -56,6 +56,19 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
+def _base_name(base) -> str | None:
+    """Last-component name of a base-class expression: `Foo` -> 'Foo',
+    `pkg.Base` -> 'Base', `Generic[T]` -> 'Generic'. Subscripts/others yield
+    None (nothing resolvable)."""
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    if isinstance(base, ast.Subscript):
+        return _base_name(base.value)
+    return None
+
+
 class _Walk(ast.NodeVisitor):
     """One pass over a module: create class/function/method nodes + `defines`
     edges, and collect raw imports and call sites for later resolution."""
@@ -69,6 +82,7 @@ class _Walk(ast.NodeVisitor):
         self.scope = [(module_id, module_qual, codegraph.MODULE)]
         self.imports: list[str] = []              # imported module stems
         self.calls: list[tuple[str, str]] = []    # (caller_id, callee_name)
+        self.inherits: list[tuple[str, str]] = []  # (class_id, base_name)
 
     # -- defs ------------------------------------------------------------
     def _add_def(self, node, kind: str):
@@ -77,7 +91,15 @@ class _Walk(ast.NodeVisitor):
         n = codegraph.add_node(
             self.project, self.rel_path, qual, kind=kind,
             span=[node.lineno, getattr(node, "end_lineno", node.lineno)])
+        if n is None:                    # graph at the node cap — skip cleanly
+            self.generic_visit(node)
+            return
         codegraph.add_edge(self.project, parent_id, "defines", n["id"])
+        if kind == codegraph.CLASS:      # record explicit base classes
+            for base in getattr(node, "bases", ()):
+                name = _base_name(base)
+                if name:
+                    self.inherits.append((n["id"], name))
         doc = ast.get_docstring(node)
         if doc:
             codegraph.add_rationale(self.project, self.rel_path, n["id"], doc)
@@ -97,17 +119,24 @@ class _Walk(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef
 
     # -- imports ---------------------------------------------------------
+    # Record the FULL dotted target(s), not just the stem: `from b.util import
+    # x` where both a/util.py and b/util.py exist must resolve to b.util, which
+    # the stem "util" cannot disambiguate. `_resolve` matches a full dotted
+    # module qualname first (EXTRACTED), then falls back to the stem. Both the
+    # dotted path and its last component are recorded so either can match.
     def visit_Import(self, node):
-        for alias in node.names:
-            self.imports.append(alias.name.split(".")[-1])
+        for alias in node.names:            # import a.b.c  /  import a.b as x
+            self.imports.append(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
-        if node.module:                      # from .config import X / from x.y import Z
-            self.imports.append(node.module.split(".")[-1])
-        else:                                # from . import memory, store
+        if node.module:                     # from a.b import c, d
+            self.imports.append(node.module)
+            for alias in node.names:        # c/d may be submodules of a.b
+                self.imports.append(f"{node.module}.{alias.name}")
+        else:                               # from . import memory, store
             for alias in node.names:
-                self.imports.append(alias.name.split(".")[-1])
+                self.imports.append(alias.name)
         self.generic_visit(node)
 
     # -- calls -----------------------------------------------------------
@@ -122,17 +151,22 @@ def extract_file(project: str, path: Path, root: Path):
     """Pass A for one file: returns its module info, or None if unparseable."""
     rel = str(path.relative_to(root))
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=rel)
     except (SyntaxError, ValueError, OSError):
         return None
     qual = _module_qual(path, root)
     mod = codegraph.add_node(project, rel, qual, kind=codegraph.MODULE)
+    if mod is None:                          # graph at the node cap
+        return None
+    codegraph.add_citations(project, rel, mod["id"], src)   # ADR/RFC refs
     doc = ast.get_docstring(tree)
     if doc:
         codegraph.add_rationale(project, rel, mod["id"], doc)
     w = _Walk(project, rel, mod["id"], qual)
     w.visit(tree)
     return {"qual": qual, "stem": path.stem, "module_id": mod["id"],
+            "inherits": w.inherits,
             "rel": rel, "imports": w.imports, "calls": w.calls}
 
 

@@ -21,14 +21,23 @@ def configured() -> bool:
     return bool(os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPO"))
 
 
+_MAX_RESPONSE_BYTES = 8 * 1024 * 1024      # cap a hostile/huge API body
+
+
 def _get(path: str, repo: str | None = None) -> list | dict | None:
     """Authenticated GET against the GitHub API; None when unconfigured or
-    unreachable (callers degrade, never crash)."""
+    unreachable (callers degrade, never crash). HTTPS-only (the bearer token
+    must never ride a plaintext request) and size-capped."""
     token = os.environ.get("GITHUB_TOKEN")
     repo = repo or os.environ.get("GITHUB_REPO")
     if not token or not repo:
         return None
     api = os.environ.get("GITHUB_API", "https://api.github.com").rstrip("/")
+    if not api.lower().startswith("https://"):
+        import logging
+        logging.getLogger("olympus.github").warning(
+            "refusing non-HTTPS GITHUB_API %r — not sending the token", api)
+        return None
     req = urllib.request.Request(
         f"{api}/repos/{repo}/{path.lstrip('/')}",
         headers={"Authorization": f"Bearer {token}",
@@ -36,7 +45,11 @@ def _get(path: str, repo: str | None = None) -> list | dict | None:
                  "User-Agent": "olympus-agent"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
+            # a redirect to a non-HTTPS host would drop the token onto plaintext
+            if not resp.geturl().lower().startswith("https://"):
+                return None
+            return json.loads(resp.read(_MAX_RESPONSE_BYTES + 1)
+                              [:_MAX_RESPONSE_BYTES])
     except Exception as err:
         import logging
         logging.getLogger("olympus.github").warning("GET %s failed: %s",
@@ -58,11 +71,16 @@ def list_pulls(base: str | None = None, repo: str | None = None) -> list[dict]:
 
 
 def pull_files(number: int, repo: str | None = None) -> list[str]:
-    """Paths changed by one PR (first 300 files — the API page bound)."""
-    data = _get(f"pulls/{int(number)}/files?per_page=100", repo)
-    if not isinstance(data, list):
-        return []
-    return [f.get("filename") or "" for f in data if f.get("filename")]
+    """Paths changed by one PR (up to 300 files, paginated 100/page)."""
+    out: list[str] = []
+    for page in range(1, 4):                       # 3 pages × 100 = 300
+        data = _get(f"pulls/{int(number)}/files?per_page=100&page={page}", repo)
+        if not isinstance(data, list) or not data:
+            break
+        out.extend(f.get("filename") or "" for f in data if f.get("filename"))
+        if len(data) < 100:
+            break
+    return out
 
 
 def create_issue(title: str, body: str) -> str | None:

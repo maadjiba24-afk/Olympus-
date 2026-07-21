@@ -221,7 +221,11 @@ def to_html(project: str) -> str:
                   for e in data["edges"]
                   if e["src"] in keep and e["dst"] in keep],
     }
-    payload = json.dumps(slim).replace("</", "<\\/")     # never close our tag
+    # Neutralize every way the JSON payload could break out of its <script>
+    # container: `</script>` (via `</`), an HTML comment open, and a nested
+    # `<script`. Labels are attacker-influenced (function names, doc titles).
+    payload = (json.dumps(slim).replace("</", "<\\/")
+               .replace("<!--", "<\\!--").replace("<script", "<\\script"))
     return (_HTML_PAGE
             .replace("__TITLE__", _x(project))
             .replace("__DATA__", payload))
