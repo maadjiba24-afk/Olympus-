@@ -280,6 +280,35 @@ LANGS: list[Lang] = [
             rf"(?P<name>{_ID})",
          cls=rf"^\s*type\s+(?P<name>{_ID})",
          imp=r"^\s*(?:import|include)\s+(?P<mod>[\w./]+)"),
+    Lang("pascal", (".pas", ".pp", ".dpr", ".dpk", ".lpr"),
+         # Pascal/Delphi keywords are case-insensitive.
+         fn=rf"(?i:^\s*(?:procedure|function|constructor|destructor))\s+"
+            rf"(?:{_ID}\.)?(?P<name>{_ID})",
+         cls=rf"^\s*(?:(?i:type)\s+)?(?P<name>{_ID})\s*=\s*"
+             rf"(?i:class|object|record|interface)",
+         imp=rf"(?i:^\s*uses)\s+(?P<mod>{_ID})",
+         inh=rf"{_ID}\s*=\s*(?i:class|interface)\s*\(\s*(?P<bases>[\w, ]+)"),
+    Lang("verilog", (".v", ".sv", ".svh"),
+         fn=rf"^\s*(?:module|task|function)\s+(?:\w+\s+)?(?P<name>{_ID})"
+            rf"|^\s*(?:endmodule)?\s*module\s+(?P<name2>{_ID})",
+         cls=rf"^\s*(?:class|interface|package)\s+(?P<name>{_ID})",
+         imp=rf"^\s*(?:import|`include)\s+[\"<]?(?P<mod>[\w./]+)"),
+    Lang("apex", (".cls", ".trigger"),
+         # Salesforce Apex — Java-like; linear token form (see java note).
+         fn=rf"^[ \t]*(?:[\w<>\[\],.?@]+[ \t]+)+(?P<name>{_ID})[ \t]*\(",
+         cls=rf"^\s*(?:(?:public|private|global|protected|virtual|abstract"
+             rf"|with sharing|without sharing|static)\s+)*"
+             rf"(?:class|interface|enum)\s+(?P<name>{_ID})"
+             rf"|^\s*trigger\s+(?P<name2>{_ID})",
+         inh=r"(?:extends|implements)\s+(?P<bases>[^\n{]+)"),
+    Lang("webscript", (".vue", ".svelte", ".astro"),
+         # Single-file components: match the JS/TS in their <script> block.
+         fn=rf"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(?P<name>{_ID})"
+            rf"|^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name2>{_ID})\s*=\s*"
+            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>",
+         cls=rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?"
+             rf"class\s+(?P<name>{_ID})",
+         imp=r"""import\s.*?from\s+['"](?P<mod>[^'"]+)['"]"""),
 ]
 
 SUFFIXES: dict[str, Lang] = {s: lang for lang in LANGS for s in lang.suffixes}
@@ -322,6 +351,7 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
     if mod is None:                              # graph at the node cap
         return None
     module_id = mod["id"]
+    codegraph.add_citations(project, rel, module_id, text)   # ADR/RFC refs
     lines = text.splitlines()
 
     def _owner_at(lineno: int, defs_: list) -> str:
@@ -339,8 +369,13 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
     # the input each regex ever sees, which is what defuses catastrophic
     # backtracking (ReDoS) on a hostile minified/space-padded line in a cloned
     # repo. A pathological line is skipped, not chewed on.
+    # Class/module patterns are tried BEFORE function patterns: on a line that
+    # could look like both (e.g. Apex `trigger X on Y (...)`, which the linear
+    # method form would otherwise misread as a call to `Y`), the structural
+    # declaration wins. A real function line has no class keyword, so this is
+    # harmless everywhere else.
     def_rxs = [(rx, kind) for rx, kind in
-               ((lang.fn, codegraph.FUNCTION), (lang.cls, codegraph.CLASS))
+               ((lang.cls, codegraph.CLASS), (lang.fn, codegraph.FUNCTION))
                if rx is not None]
     defs: list[tuple[int, str, str]] = []          # (lineno, node_id, name)
     class_lines: dict[int, str] = {}               # lineno -> class node id

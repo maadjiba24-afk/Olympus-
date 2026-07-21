@@ -191,7 +191,8 @@ def god_nodes(project: str, top_n: int = _MAX_GOD_NODES) -> list[dict]:
     degree = codegraph.degree(project)
     out = []
     for n in codegraph.nodes(project):
-        if n["kind"] in (codegraph.RATIONALE, codegraph.DOCUMENT):
+        if n["kind"] in (codegraph.RATIONALE, codegraph.DOCUMENT,
+                         codegraph.CITATION):
             continue
         if n["label"].lower() in codegraph_build._SHADOWED:
             continue

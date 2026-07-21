@@ -448,3 +448,80 @@ def test_all_new_language_regexes_are_redos_safe():
 
 def test_language_count_is_at_least_33():
     assert len(codegraph_langs.LANGS) >= 33
+
+
+# --- iteration 3: more languages + ADR/RFC citations -----------------------
+
+@pytest.mark.parametrize("fname,text,expect", [
+    ("x.pas", "unit U;\nprocedure Draw;\nfunction Sum: Integer;\n"
+              "type TCat = class(TAnimal)\n", {"Draw", "Sum", "TCat"}),
+    ("x.sv", "module cpu(input clk);\nendmodule\nclass Packet;\nendclass\n",
+     {"cpu", "Packet"}),
+    ("x.cls", "public class Acct {\n  public void save() {}\n}\n",
+     {"Acct", "save"}),
+    ("x.trigger", "trigger AcctTrg on Account (before insert) {}\n",
+     {"AcctTrg"}),
+    ("x.vue", "<script>\nimport {a} from './a'\nfunction setup() {}\n"
+              "class Widget {}\n</script>\n", {"setup", "Widget"}),
+], ids=["pascal", "verilog", "apex-class", "apex-trigger", "vue"])
+def test_iter3_language_extraction(tmp_path, fname, text, expect):
+    root = tmp_path / "l"
+    root.mkdir()
+    (root / fname).write_text(text)
+    info = codegraph_langs.extract_file("p", root / fname, root)
+    labels = {n["label"] for n in codegraph.nodes("p")}
+    assert info is not None and expect <= labels
+
+
+def test_class_first_keeps_multiline_methods(tmp_path):
+    # cls-first ordering must not drop methods on their own lines
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.java").write_text(
+        "public class C {\n  public void m() {}\n  int n() { return 1; }\n}\n")
+    codegraph_langs.extract_file("p", root / "a.java", root)
+    assert {"C", "m", "n"} <= {n["label"] for n in codegraph.nodes("p")}
+
+
+def test_adr_rfc_citations_collapse_and_link(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "design.md").write_text(
+        "# Design\nSee ADR-0007 and RFC 2119 for rationale.\n")
+    (root / "impl.py").write_text("# implements ADR 7 decision\ndef f(): pass\n")
+    codegraph_build.build("p", root)
+    cnodes = sorted(n["label"] for n in codegraph.nodes("p")
+                    if n["kind"] == codegraph.CITATION)
+    # "ADR-0007" and "ADR 7" collapse to ONE canonical node
+    assert cnodes == ["ADR-0007", "RFC-2119"]
+    cites = {(next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["src"]),
+              next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["dst"]))
+             for e in codegraph.edges("p") if e["rel"] == "cites"}
+    # both the doc and the code file cite ADR-0007 -> it's a shared hub
+    assert ("design", "ADR-0007") in cites and ("impl", "ADR-0007") in cites
+
+
+def test_citation_label_is_normalized_not_raw_text(tmp_path):
+    # citation labels are a fixed form, never attacker-controlled text
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "d.md").write_text("see adr-42 and RFC-2119 please\n")
+    codegraph_build.build("p", root)
+    labels = {n["label"] for n in codegraph.nodes("p")
+              if n["kind"] == codegraph.CITATION}
+    assert labels == {"ADR-0042", "RFC-2119"}
+
+
+def test_citations_excluded_from_god_nodes(tmp_path):
+    from olympus import codegraph_analysis
+    root = tmp_path / "r"
+    root.mkdir()
+    for i in range(8):
+        (root / f"m{i}.py").write_text(f"# see ADR-1\ndef f{i}(): pass\n")
+    codegraph_build.build("p", root)
+    gods = codegraph_analysis.god_nodes("p")
+    assert all(g["kind"] != codegraph.CITATION for g in gods)
+
+
+def test_language_count_is_at_least_37():
+    assert len(codegraph_langs.LANGS) >= 37

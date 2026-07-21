@@ -15,6 +15,20 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph: 4 more languages + ADR/RFC citations (iteration 3)
+
+- **37 languages** now: adds Pascal/Delphi, Verilog/SystemVerilog, Salesforce
+  Apex (classes + triggers), and Vue/Svelte/Astro single-file components
+  (matched via their `<script>` block). Pascal and Apex extract inheritance.
+- **ADR/RFC citation nodes**: `ADR-0007`, `ADR 7`, `RFC 2119`, `RFC-7231` in any
+  doc or code comment become one canonical `citation` node (normalized label)
+  with a `cites` edge from the file — so "what code depends on ADR-7?" is a
+  graph query. Citation labels are a fixed normalized form, never raw text, and
+  are excluded from god-node ranking.
+- Class/module patterns now match before function patterns, so a line that
+  could look like both (Apex `trigger X on Y (...)`) is read as the declaration
+  it is. 11 new tests; ReDoS-safety check re-run over all 37 languages.
+
 ### Added — Code graph: 12 more languages (self-evolution iteration 2)
 
 The regex engine grows from 21 to **33 languages**, the biggest parity gap from

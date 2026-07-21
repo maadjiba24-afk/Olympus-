@@ -53,6 +53,12 @@ MODULE, CLASS, FUNCTION, METHOD, RATIONALE = (
 # non-code kinds: documents ingested by codegraph_ingest, and schema/manifest
 # entities from codegraph_introspect (tables, crates). Same graph, same rules.
 DOCUMENT, ENTITY = "document", "entity"
+CITATION = "citation"          # an ADR/RFC a doc or comment points to
+
+# Design-record references worth first-classing: "ADR-0007", "ADR 7",
+# "RFC 2119", "RFC-7231". Normalized to "ADR-0007" / "RFC-2119" so every
+# mention collapses onto ONE citation node the code can be traced to.
+_CITATION_RE = re.compile(r"\b(ADR|RFC)[-\s]?0*(\d{1,5})\b", re.I)
 # relations that mean "B depends on A" when traversed from A (for impact).
 # `inherits`/`implements` count: change a base class and every subclass is
 # affected, so reverse-traversal for impact must follow them.
@@ -283,6 +289,28 @@ def add_rationale(project: str, path: str, owner_id: str, text: str,
             node = dict(n)
     add_edge(project, node["id"], "explains", owner_id)
     return node
+
+
+def add_citations(project: str, path: str, owner_id: str, text: str) -> int:
+    """Turn every ADR/RFC reference in `text` into a shared CITATION node with
+    a `cites` edge from `owner_id`. One canonical node per record (ADR-0007),
+    so 'which code cites ADR-7?' is a graph query. Returns the count added.
+    Labels here are a fixed normalized form (ADR-/RFC- + digits), never raw
+    attacker text, so no sanitization gap."""
+    added = 0
+    seen: set[str] = set()
+    for kind, num in _CITATION_RE.findall(str(text or "")):
+        label = f"{kind.upper()}-{int(num):04d}"
+        if label in seen:
+            continue
+        seen.add(label)
+        node = add_node(project, f"@citations/{kind.lower()}", label,
+                        kind=CITATION)
+        if node is None:
+            continue
+        if add_edge(project, owner_id, "cites", node["id"]):
+            added += 1
+    return added
 
 
 def add_edge(project: str, src_id: str, rel: str, dst_id: str,

@@ -151,13 +151,15 @@ def extract_file(project: str, path: Path, root: Path):
     """Pass A for one file: returns its module info, or None if unparseable."""
     rel = str(path.relative_to(root))
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=rel)
     except (SyntaxError, ValueError, OSError):
         return None
     qual = _module_qual(path, root)
     mod = codegraph.add_node(project, rel, qual, kind=codegraph.MODULE)
     if mod is None:                          # graph at the node cap
         return None
+    codegraph.add_citations(project, rel, mod["id"], src)   # ADR/RFC refs
     doc = ast.get_docstring(tree)
     if doc:
         codegraph.add_rationale(project, rel, mod["id"], doc)
