@@ -36,44 +36,29 @@ jobs:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
-      - name: Run the answer-quality gate (skips if no key)
+      # Olympus never assumes a model, so CI resolves provider + model from
+      # whichever provider secret exists (first present wins, in this order):
+      # ANTHROPIC_API_KEY (native), then OPENAI / GEMINI / DEEPSEEK / GROQ /
+      # MISTRAL / XAI / OPENROUTER / KIMI via the OpenAI-compatible provider,
+      # with the model discovered from that account's own /models inventory.
+      # The resolved config lands in $GITHUB_ENV for the gate step. With no
+      # secret at all, nothing is exported and the gate skips cleanly.
+      # NOTE: the gate ENFORCES only when the resolved model matches the one
+      # recorded in olympus/quality_baseline.json — on a different model it
+      # reports without gating until a maintainer re-baselines.
+      - name: Resolve eval provider from available secrets
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: python scripts/ci_provider_resolve.py
+      - name: Run the answer-quality gate (skips if no key)
+        env:
           OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
-        # Olympus never assumes a model (require_model raises without one), so
-        # CI pins provider + model explicitly, keyed on which secret exists:
-        # an Anthropic key wins; otherwise a Kimi (Moonshot) key runs through
-        # the OpenAI-compatible provider. Models are pinned to CONCRETE
-        # versions — a floating alias would silently shift the baseline.
-        # With neither secret, the gate script skips cleanly (exit 0).
-        run: |
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
-            export OLYMPUS_PROVIDER="anthropic"
-            export OLYMPUS_MODEL="claude-opus-4-8"
-          elif [ -n "$KIMI_API_KEY" ]; then
-            export OLYMPUS_PROVIDER="openai"
-            export OPENAI_API_KEY="$KIMI_API_KEY"
-            export OLYMPUS_BASE_URL="https://api.moonshot.ai/v1"
-            # Model availability differs per Moonshot account/tier, so resolve
-            # against the account's own /v1/models inventory: first match from
-            # the preference list wins (newest capable first), else the first
-            # kimi-* id, else the first id. The inventory and the choice are
-            # logged so the baseline records exactly what scored it.
-            ids=$(curl -sf https://api.moonshot.ai/v1/models \
-                    -H "Authorization: Bearer $KIMI_API_KEY" \
-                  | python3 -c "import json,sys; print('\n'.join(m['id'] for m in json.load(sys.stdin).get('data',[])))")
-            echo "Available Moonshot models:"; echo "$ids" | sed 's/^/  /'
-            for cand in kimi-k2-0905-preview kimi-k2-0711-preview \
-                        kimi-k2-turbo-preview kimi-latest \
-                        moonshot-v1-32k moonshot-v1-8k; do
-              if echo "$ids" | grep -qx "$cand"; then
-                export OLYMPUS_MODEL="$cand"; break
-              fi
-            done
-            if [ -z "${OLYMPUS_MODEL:-}" ]; then
-              export OLYMPUS_MODEL=$(echo "$ids" | grep -m1 '^kimi' || echo "$ids" | head -1)
-            fi
-            echo "Using eval model: $OLYMPUS_MODEL"
-          fi
-          python scripts/quality_gate.py
+        run: python scripts/quality_gate.py
