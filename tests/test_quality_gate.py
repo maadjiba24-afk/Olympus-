@@ -87,6 +87,86 @@ def test_format_gate_report_shows_verdict():
     assert "REGRESSION plutus" in out and out.strip().endswith("FAIL")
 
 
+# --- baseline provenance (model-mismatch guard) ---------------------------
+
+def test_load_baseline_meta_roundtrip(tmp_path):
+    p = tmp_path / "baseline.json"
+    p.write_text(json.dumps({
+        "_provenance": {"model": "moonshot-v1-32k", "date": "2026-07-21"},
+        "scores": {"plutus": 9.6},
+    }))
+    assert evals.load_baseline_meta(p)["model"] == "moonshot-v1-32k"
+    assert evals.load_baseline(p) == {"plutus": 9.6}   # scores unaffected
+
+
+def test_load_baseline_meta_absent_is_empty(tmp_path):
+    p = tmp_path / "baseline.json"
+    p.write_text(json.dumps({"scores": {"plutus": 9.6}}))
+    assert evals.load_baseline_meta(p) == {}
+    assert evals.load_baseline_meta(tmp_path / "nope.json") == {}
+
+
+def test_committed_baseline_records_its_model():
+    # The shipped baseline must carry provenance, else the mismatch guard
+    # cannot tell which model scored it and would gate apples vs oranges.
+    meta = evals.load_baseline_meta()
+    if evals.load_baseline():                  # only once a baseline exists
+        assert meta.get("model"), "committed baseline lacks _provenance.model"
+
+
+# --- CI provider resolver (pure selection logic) --------------------------
+
+def _resolver():
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / "scripts" / "ci_provider_resolve.py"
+    spec = importlib.util.spec_from_file_location("ci_provider_resolve", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_pick_model_prefers_listed_order():
+    r = _resolver()
+    ids = ["gpt-4o", "gpt-5", "gpt-4.1"]
+    assert r.pick_model(ids, ["gpt-5.1", "gpt-5", "gpt-4o"], "gpt") == "gpt-5"
+
+
+def test_pick_model_falls_back_to_prefix_then_first():
+    r = _resolver()
+    assert r.pick_model(["other", "kimi-k9"], ["nope"], "kimi") == "kimi-k9"
+    assert r.pick_model(["only-model"], ["nope"], "zzz") == "only-model"
+    assert r.pick_model([], ["nope"], "zzz") is None
+
+
+def test_pick_model_kimi_account_inventory_stays_on_baseline_model():
+    # Regression pin: the real Moonshot account inventory (no preview ids)
+    # must keep resolving to moonshot-v1-32k — the model that produced the
+    # committed baseline — or gating silently turns into report-only.
+    r = _resolver()
+    kimi_prefs = next(p for env, _, p, _ in r.OPENAI_COMPAT
+                      if env == "KIMI_API_KEY")
+    inventory = ["kimi-k2.7-code", "moonshot-v1-8k-vision-preview",
+                 "moonshot-v1-128k-vision-preview", "kimi-k2.6",
+                 "moonshot-v1-32k-vision-preview", "kimi-k2.5",
+                 "moonshot-v1-128k", "kimi-k3", "moonshot-v1-auto",
+                 "moonshot-v1-32k", "kimi-k2.7-code-highspeed",
+                 "moonshot-v1-8k"]
+    assert r.pick_model(inventory, kimi_prefs, "kimi") == "moonshot-v1-32k"
+
+
+def test_resolver_with_no_keys_emits_nothing(tmp_path):
+    script = Path(__file__).resolve().parent.parent / "scripts" / "ci_provider_resolve.py"
+    env = {k: v for k, v in os.environ.items()
+           if not k.endswith("_API_KEY") and k != "GITHUB_ENV"}
+    dest = tmp_path / "github.env"
+    env["GITHUB_ENV"] = str(dest)
+    r = subprocess.run([sys.executable, str(script)],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0
+    assert "skip" in r.stderr.lower()
+    assert not dest.exists() or dest.read_text() == ""
+
+
 # --- CI wrapper: clean skip when no key (real subprocess) -----------------
 
 def test_gate_script_skips_without_key():
