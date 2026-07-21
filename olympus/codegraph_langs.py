@@ -42,6 +42,10 @@ _NOT_CALLS = frozenset({
     "public", "private", "static", "void", "int", "string", "bool", "float",
     "double", "char", "long", "let", "var", "const", "in", "of", "do", "else",
     "try", "raise", "echo", "exit", "until", "unless", "elif", "then",
+    # `with (obj) {` (JS), `using (x) {` (C#), `lock (x) {` (C#), `foreach`,
+    # `synchronized`, `fixed` — control statements that take `(...) {` and would
+    # otherwise be welded in as phantom methods by the shorthand pattern.
+    "with", "using", "lock", "foreach", "synchronized", "fixed", "when",
 })
 
 _CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
@@ -94,17 +98,37 @@ class Lang:
 
 _ID = r"[A-Za-z_][A-Za-z0-9_]*"
 
+# Class/object method shorthand: `name(params) {` — a definition, not a call.
+# Guards against false positives: params must contain NO parens (`[^()]*`), which
+# rejects `it("x", function(){…})` and arrow-callback lines like
+# `describe("x", () => {`; an optional TS return-type annotation is allowed
+# before the body brace. Control keywords (if/for/while/with/…) are filtered by
+# `_NOT_CALLS` in the extractor.
+#
+# The single leading `[ \t]*` is the ONLY unbounded whitespace matcher — the
+# generator `*` carries its own trailing space and each modifier keyword
+# consumes its `[ \t]+`, so a whitespace run can be partitioned exactly one way
+# and there is nothing for the engine to backtrack over (an earlier draft had a
+# second `[ \t]*` before the name, which made a non-matching space-padded line
+# O(n²)). The per-line `_MAX_LINE_LEN` cap remains as defense in depth.
+_METHOD_SHORTHAND = (
+    r"^[ \t]*(?:(?:public|private|protected|readonly|static|async|get|set|"
+    r"override)[ \t]+)*(?:\*[ \t]*)?(?P<name3>[A-Za-z_$][A-Za-z0-9_$]*)[ \t]*"
+    r"\([^()]*\)(?:[ \t]*:[ \t]*[^\n{;=]+)?[ \t]*\{")
+
 LANGS: list[Lang] = [
     Lang("javascript", (".js", ".jsx", ".mjs", ".cjs"),
          fn=rf"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(?P<name>{_ID})"
             rf"|^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name2>{_ID})\s*=\s*"
-            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>",
+            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>"
+            rf"|{_METHOD_SHORTHAND}",
          cls=rf"^\s*(?:export\s+)?(?:abstract\s+)?class\s+(?P<name>{_ID})",
          imp=r"""(?:import\s.*?from\s+|require\s*\(\s*)['"](?P<mod>[^'"]+)['"]"""),
     Lang("typescript", (".ts", ".tsx", ".mts", ".cts"),
          fn=rf"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(?P<name>{_ID})"
             rf"|^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name2>{_ID})\s*=\s*"
-            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>",
+            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>"
+            rf"|{_METHOD_SHORTHAND}",
          cls=rf"^\s*(?:export\s+)?(?:abstract\s+)?"
              rf"(?:class|interface|enum)\s+(?P<name>{_ID})",
          imp=r"""import\s.*?from\s+['"](?P<mod>[^'"]+)['"]""",
@@ -305,7 +329,8 @@ LANGS: list[Lang] = [
          # Single-file components: match the JS/TS in their <script> block.
          fn=rf"^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*(?P<name>{_ID})"
             rf"|^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name2>{_ID})\s*=\s*"
-            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>",
+            rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>"
+            rf"|{_METHOD_SHORTHAND}",
          cls=rf"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?"
              rf"class\s+(?P<name>{_ID})",
          imp=r"""import\s.*?from\s+['"](?P<mod>[^'"]+)['"]"""),
@@ -315,7 +340,7 @@ SUFFIXES: dict[str, Lang] = {s: lang for lang in LANGS for s in lang.suffixes}
 
 
 def _first_group(m: re.Match) -> str | None:
-    for g in ("name", "name2"):
+    for g in ("name", "name2", "name3"):
         try:
             if m.group(g):
                 return m.group(g)

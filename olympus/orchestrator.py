@@ -449,9 +449,36 @@ class Olympus:
             f"### Output from {SPECIALISTS[k].name} ({SPECIALISTS[k].title})\n{v}"
             for k, v in outputs
         )
+        # Proactively check structural code claims the specialists made against
+        # the graph, and hand Aletheia the verdicts up front (deterministic —
+        # fires even if the verifier never calls the tool). CONFIRMED is ground
+        # truth. A "no edge found" note is ADVISORY, not an override: the scanner
+        # can pattern-match an incidental English sentence, so Aletheia is told
+        # to act on it only if a specialist asserted it as literal code
+        # structure — never to reject a correct answer over a loose phrasing.
+        graph_block = ""
+        if codegraph.enabled():
+            claims = codegraph.scan_claims("self", bundle)
+            confirmed = [c for c in claims if c["verdict"] == "CONFIRMED"]
+            refuted = [c for c in claims if c["verdict"] == "REFUTED"]
+            parts = []
+            if confirmed:
+                parts.append(
+                    "Code-graph CONFIRMED (ground truth from EXTRACTED edges — "
+                    "trust over web guesses):\n"
+                    + "\n".join(f'- "{c["claim"]}"' for c in confirmed))
+            if refuted:
+                parts.append(
+                    "Code-graph found NO direct edge for these — verify ONLY if "
+                    "a specialist asserted them as literal code structure (an "
+                    "incidental or conceptual mention is fine, not a "
+                    "fabrication):\n"
+                    + "\n".join(f'- "{c["claim"]}"' for c in refuted))
+            if parts:
+                graph_block = "\n\n" + "\n\n".join(parts)
         task = (
             f"Original task brief:\n{brief}\n\n"
-            f"Specialist outputs to verify:\n{bundle}\n\n"
+            f"Specialist outputs to verify:\n{bundle}{graph_block}\n\n"
             "Verify the factual claims. First call recall_fact to reuse "
             "anything already verified; use web_search only for checkable, "
             "consequential claims not in the cache. Produce the corrected, "

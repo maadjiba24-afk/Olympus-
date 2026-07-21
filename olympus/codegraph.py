@@ -735,3 +735,86 @@ def verify_claim(project: str, claim: str) -> dict:
                               "missing callers there prove nothing"}
         return {"verdict": "CONFIRMED", "detail": "no incoming callers found"}
     return {"verdict": "UNKNOWN", "detail": "claim shape not recognized"}
+
+
+# scan_claims is PROACTIVE — it runs over untrusted specialist prose, unlike
+# verify_claim which the model deliberately invokes. So it is deliberately
+# conservative to avoid mistaking ordinary English for a code claim:
+#   - the calls verb "uses" is dropped (verify_claim keeps it for the model's
+#     own deliberate use). "The parser uses config values" is prose, not a claim.
+#   - BOTH referenced symbols must be *distinctive* identifiers (snake_case /
+#     camelCase / long-uncommon) — plain-word noun pairs never qualify.
+#   - a hard cap on total regex matches examined bounds the work on a hostile
+#     bundle stuffed with symbol-pair phrases (was unbounded: UNKNOWN verdicts
+#     did not count toward the limit).
+_SCAN_CALLS_RE = re.compile(
+    r"\b([A-Za-z_][\w.]+)\b\s+(?:calls|invokes)\s+\b([A-Za-z_][\w.]+)\b", re.I)
+_SCAN_MATCH_CAP = 25
+
+
+def scan_claims(project: str, text: str, limit: int = 8) -> list[dict]:
+    """Find structural claims in a block of free text (a specialist's answer, an
+    upgrade proposal) and verify each against the graph. Returns only DECISIVE
+    verdicts ({claim, verdict, detail} for CONFIRMED/REFUTED), skipping UNKNOWN.
+    Conservative by design (see the note above): it will miss loosely-phrased
+    claims rather than mis-flag prose as a false verdict. A no-op (returns [])
+    when the graph is empty or the toggle is off, so it is always safe to call.
+
+    `verify_claim` alone only checks the first match in a string; this finds all
+    matches (bounded) so a paragraph making several claims is fully checked."""
+    if not _ENABLED:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    examined = 0
+    for rx in (_SCAN_CALLS_RE, _IMPORTS_RE, _UNUSED_RE, _NOTHING_RE):
+        for m in rx.finditer(str(text or "")):
+            if examined >= _SCAN_MATCH_CAP:
+                return out
+            examined += 1
+            # every referenced symbol must be distinctive — filters English
+            # sentences whose words happen to match the claim shape.
+            if not all(_distinctive(_last(g)) for g in m.groups() if g):
+                continue
+            frag = " ".join(m.group(0).split())
+            key = frag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            v = verify_claim(project, frag)
+            if v["verdict"] in ("CONFIRMED", "REFUTED"):
+                out.append({"claim": frag, **v})
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def impact_report(project: str, text: str, depth: int = 2,
+                  max_symbols: int = 3, max_each: int = 8) -> str:
+    """A deterministic 'blast radius' note for the symbols named in `text`:
+    for the most-connected symbols mentioned, what (transitively) depends on
+    them. Empty string when nothing named is in the graph. Used to stamp every
+    self-upgrade proposal with the impact of the code it touches."""
+    if not _ENABLED:
+        return ""
+    hits = [n for n in find(project, text)
+            if n["kind"] in (FUNCTION, METHOD, CLASS, MODULE)]
+    if not hits:
+        return ""
+    deg = degree(project)
+    hits.sort(key=lambda n: -deg.get(n["id"], 0))
+    lines: list[str] = []
+    for n in hits[:max_symbols]:
+        deps = impact(project, n["id"], depth=depth)
+        if not deps:
+            lines.append(f"- `{n['label']}` ({n.get('path', '?')}): nothing in "
+                         f"the graph depends on it.")
+            continue
+        names = ", ".join(f"`{d['label']}`" for d in deps[:max_each])
+        more = "" if len(deps) <= max_each else f" (+{len(deps) - max_each} more)"
+        lines.append(f"- `{n['label']}` ({n.get('path', '?')}): {len(deps)} "
+                     f"dependent(s) — {names}{more}")
+    if not lines:
+        return ""
+    return ("Graph impact (what depends on the symbols named above; from the "
+            "EXTRACTED-truth graph):\n" + "\n".join(lines))

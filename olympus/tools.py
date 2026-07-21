@@ -1089,6 +1089,15 @@ def _generate_benchmark(specialist: str) -> str:
 
 
 def _propose_upgrade(title: str, details: str) -> str:
+    # Stamp the proposal with the blast radius of the code it names, straight
+    # from the graph — so every self-upgrade record carries "what depends on
+    # this" deterministically, not only when the model remembered to look.
+    impact = ""
+    if codegraph.enabled():
+        note = codegraph.impact_report("self", f"{title}\n{details}")
+        if note:
+            impact = "\n\n---\n" + note
+    details = details + impact
     path = memory.save("upgrades", title, details)
     body = (details
             + "\n\n---\n_Filed automatically by Prometheus, the Olympus "
