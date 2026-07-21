@@ -735,3 +735,63 @@ def verify_claim(project: str, claim: str) -> dict:
                               "missing callers there prove nothing"}
         return {"verdict": "CONFIRMED", "detail": "no incoming callers found"}
     return {"verdict": "UNKNOWN", "detail": "claim shape not recognized"}
+
+
+def scan_claims(project: str, text: str, limit: int = 8) -> list[dict]:
+    """Find EVERY structural claim in a block of free text (a specialist's
+    answer, an upgrade proposal) and verify each against the graph. Returns only
+    the DECISIVE verdicts ({claim, verdict, detail} for CONFIRMED/REFUTED),
+    skipping UNKNOWN — the honest ground-truth signal the council can act on. A
+    no-op (returns []) when the graph is empty or the toggle is off, so it is
+    always safe to call in the pipeline.
+
+    `verify_claim` alone only checks the first match in a string; this finds all
+    matches so a paragraph making several claims is fully checked."""
+    if not _ENABLED:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for rx in (_CALLS_RE, _IMPORTS_RE, _UNUSED_RE, _NOTHING_RE):
+        for m in rx.finditer(str(text or "")):
+            frag = " ".join(m.group(0).split())
+            key = frag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            v = verify_claim(project, frag)
+            if v["verdict"] in ("CONFIRMED", "REFUTED"):
+                out.append({"claim": frag, **v})
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def impact_report(project: str, text: str, depth: int = 2,
+                  max_symbols: int = 3, max_each: int = 8) -> str:
+    """A deterministic 'blast radius' note for the symbols named in `text`:
+    for the most-connected symbols mentioned, what (transitively) depends on
+    them. Empty string when nothing named is in the graph. Used to stamp every
+    self-upgrade proposal with the impact of the code it touches."""
+    if not _ENABLED:
+        return ""
+    hits = [n for n in find(project, text)
+            if n["kind"] in (FUNCTION, METHOD, CLASS, MODULE)]
+    if not hits:
+        return ""
+    deg = degree(project)
+    hits.sort(key=lambda n: -deg.get(n["id"], 0))
+    lines: list[str] = []
+    for n in hits[:max_symbols]:
+        deps = impact(project, n["id"], depth=depth)
+        if not deps:
+            lines.append(f"- `{n['label']}` ({n.get('path', '?')}): nothing in "
+                         f"the graph depends on it.")
+            continue
+        names = ", ".join(f"`{d['label']}`" for d in deps[:max_each])
+        more = "" if len(deps) <= max_each else f" (+{len(deps) - max_each} more)"
+        lines.append(f"- `{n['label']}` ({n.get('path', '?')}): {len(deps)} "
+                     f"dependent(s) — {names}{more}")
+    if not lines:
+        return ""
+    return ("Graph impact (what depends on the symbols named above; from the "
+            "EXTRACTED-truth graph):\n" + "\n".join(lines))

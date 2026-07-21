@@ -635,3 +635,49 @@ def test_pyproject_fallback_matches_real_parser(monkeypatch):
     monkeypatch.setattr(m, "_parse_toml", lambda text: {})
     fallback = m._pyproject_fields(src)
     assert real == fallback == ("svc", ["a", "b", "c"])
+
+
+# --- iteration: TS/JS class-method shorthand -------------------------------
+
+def test_ts_class_method_shorthand_is_extracted(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.ts").write_text(
+        "class Svc {\n  run() {}\n"
+        "  async fetch(url: string): Promise<number> { return 1 }\n"
+        "  static make(): Svc { return new Svc() }\n"
+        "  get name(): string { return 'x' }\n"
+        "  private helper(a, b) { return a }\n}\nfunction top() {}\n")
+    codegraph_langs.extract_file("p", root / "a.ts", root)
+    labels = {n["label"] for n in codegraph.nodes("p")}
+    assert {"Svc", "run", "fetch", "make", "name", "helper", "top"} <= labels
+
+
+@pytest.mark.parametrize("fname", ["a.ts", "b.js", "c.vue"])
+def test_method_shorthand_no_false_positives_on_calls(tmp_path, fname):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / fname).write_text(
+        'describe("suite", () => {\n'
+        '  it("does a thing", function() {\n'
+        '    expect(x).toBe(1);\n  });\n});\n'
+        'useEffect(() => {\n  doThing();\n}, []);\n'
+        'if (cond) {\n  while (x) {\n    switch (y) {\n    }\n  }\n}\n'
+        'for (let i = 0; i < 10; i++) {\n}\n'
+        'myCall(a, b);\n')
+    codegraph_langs.extract_file("p", root / fname, root)
+    labels = {n["label"] for n in codegraph.nodes("p")}
+    forbidden = {"describe", "it", "useEffect", "if", "while", "switch",
+                 "for", "expect", "myCall", "function", "doThing", "toBe"}
+    assert not (labels & forbidden), labels & forbidden
+
+
+def test_method_shorthand_is_not_redos_prone():
+    import time as _t
+    spec = next(x for x in codegraph_langs.LANGS if x.name == "typescript")
+    for line in ("x" * 780, "public " * 100, "(" * 390, ")" * 390):
+        line = line[:codegraph_langs._MAX_LINE_LEN]
+        start = _t.perf_counter()
+        for _ in range(20):
+            spec.fn.search(line)
+        assert (_t.perf_counter() - start) < 1.0

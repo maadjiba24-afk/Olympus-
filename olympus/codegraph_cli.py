@@ -29,7 +29,7 @@ _EXPORT_FORMATS = ("json", "graphml", "mermaid", "html", "cypher", "report",
 
 ACTIONS = ("build", "update", "watch", "stats", "show", "report", "query",
            "path", "impact", "verify", "communities", "label", "dedup",
-           "export", "benchmark", "prs", "global", "postgres", "cargo")
+           "export", "benchmark", "prs", "global", "postgres", "cargo", "gate")
 
 
 def _arg(args, n: int = 0, default: str = "") -> str:
@@ -255,6 +255,14 @@ def run(args) -> int:
         print(f"Mapped {r['crates']} crates, {r['depends_on']} dependency "
               f"edges.")
         return 0
+
+    if action == "gate":
+        # A/B harness: does the graph reduce file reads / tokens / model calls /
+        # hallucination flags enough to earn its place? Runs the council over a
+        # task set graph-off vs graph-on, so it needs a configured backend.
+        from . import codegraph_gate
+        result = codegraph_gate.run_gate(root=args.root)
+        return 0 if result["passed"] else 1
 
     print(f"Unknown codegraph action: {action}")
     return 1

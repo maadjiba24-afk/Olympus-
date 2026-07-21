@@ -449,9 +449,25 @@ class Olympus:
             f"### Output from {SPECIALISTS[k].name} ({SPECIALISTS[k].title})\n{v}"
             for k, v in outputs
         )
+        # Proactively check any structural code claims the specialists made
+        # against the graph's EXTRACTED ground truth, and hand Aletheia the
+        # verdicts up front. This is deterministic — it fires even if the
+        # verifier never calls the tool — and a REFUTED claim is exactly the
+        # kind of confident-but-wrong assertion the controller must catch.
+        graph_block = ""
+        if codegraph.enabled():
+            claims = codegraph.scan_claims("self", bundle)
+            if claims:
+                lines = "\n".join(
+                    f'- {c["verdict"]}: "{c["claim"]}" — {c["detail"]}'
+                    for c in claims)
+                graph_block = (
+                    "\n\nCode-graph ground truth (deterministic; trust this over "
+                    "web guesses for Olympus's own structure — treat any REFUTED "
+                    "claim as unsupported):\n" + lines)
         task = (
             f"Original task brief:\n{brief}\n\n"
-            f"Specialist outputs to verify:\n{bundle}\n\n"
+            f"Specialist outputs to verify:\n{bundle}{graph_block}\n\n"
             "Verify the factual claims. First call recall_fact to reuse "
             "anything already verified; use web_search only for checkable, "
             "consequential claims not in the cache. Produce the corrected, "
