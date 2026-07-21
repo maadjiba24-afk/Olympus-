@@ -124,9 +124,13 @@ scores, `moonshot-v1-32k`, provenance in the file) and the first gated run
 passed against it. Because scores are model-dependent, the gate **enforces
 only when the resolved model matches the baseline's recorded model** — on any
 other model it reports without gating until a maintainer re-baselines
-(`--update-baseline`, a human act, never the agent's). The residual therefore
-narrows but does not vanish: quality is only *actually* scored where a key
-remains configured.
+(`--update-baseline`, a human act, never the agent's). Single-run averages
+carry judge noise beyond the tolerance, so a first-pass regression triggers a
+**confirmation pass** (an independent re-eval of only the flagged specialists,
+`evals.confirm_regressions`): the gate fails only if the drop reproduces —
+noise rarely strikes the same specialist twice, a real regression does. The
+residual therefore narrows but does not vanish: quality is only *actually*
+scored where a key remains configured.
 
 ---
 

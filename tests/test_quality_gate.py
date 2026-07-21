@@ -87,6 +87,45 @@ def test_format_gate_report_shows_verdict():
     assert "REGRESSION plutus" in out and out.strip().endswith("FAIL")
 
 
+# --- confirmation pass (noise vs real regression) --------------------------
+
+def test_confirm_clears_noise():
+    # First pass flags a drop; the independent retry is back within tolerance
+    # → judged noise, gate passes.
+    base = {"angelos": 9.4, "chronos": 7.2, "plutus": 9.6}
+    first = evals.regression_check(
+        {"angelos": 7.8, "chronos": 7.0, "plutus": 9.6}, base, 1.0)
+    assert [r["specialist"] for r in first["regressions"]] == ["angelos"]
+    final = evals.confirm_regressions(first, {"angelos": 8.8}, base, 1.0)
+    assert final["ok"] and not final["regressions"] and not final["missing"]
+
+
+def test_confirm_keeps_real_regression():
+    # The retry reproduces the drop → confirmed, gate fails.
+    base = {"angelos": 9.4}
+    first = evals.regression_check({"angelos": 7.8}, base, 1.0)
+    final = evals.confirm_regressions(first, {"angelos": 7.6}, base, 1.0)
+    assert not final["ok"]
+    assert final["regressions"][0]["specialist"] == "angelos"
+    assert final["regressions"][0]["drop"] == 1.8       # drop from RETRY score
+
+
+def test_confirm_retry_missing_specialist_fails_closed():
+    # A flagged specialist absent from the retry cannot be cleared.
+    base = {"angelos": 9.4}
+    first = evals.regression_check({"angelos": 7.8}, base, 1.0)
+    final = evals.confirm_regressions(first, {}, base, 1.0)
+    assert not final["ok"] and final["missing"] == ["angelos"]
+
+
+def test_confirm_never_clears_missing_coverage():
+    # First-pass missing coverage stays failed even if retry looks clean.
+    base = {"angelos": 9.4, "aegis": 9.0}
+    first = evals.regression_check({"angelos": 7.8}, base, 1.0)  # aegis missing
+    final = evals.confirm_regressions(first, {"angelos": 9.0}, base, 1.0)
+    assert not final["ok"] and "aegis" in final["missing"]
+
+
 # --- baseline provenance (model-mismatch guard) ---------------------------
 
 def test_load_baseline_meta_roundtrip(tmp_path):

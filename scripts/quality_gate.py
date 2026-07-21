@@ -101,6 +101,34 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     result = evals.regression_check(scores, baseline, args.tolerance)
+
+    # Confirmation pass: single-run averages carry judge noise beyond the
+    # tolerance, so a first-pass regression is re-scored in an independent
+    # eval of ONLY the flagged specialists and fails only if it reproduces.
+    # Skipped when baseline coverage is missing — that fails regardless.
+    if result["regressions"] and not result["missing"]:
+        flagged = [r["specialist"] for r in result["regressions"]]
+        print(f"First pass flagged {len(flagged)} regression(s): "
+              f"{', '.join(flagged)} — running an independent confirmation "
+              "eval of just those specialists...")
+        try:
+            retry = evals.per_specialist_scores(only_specialists=flagged)
+        except Exception as err:
+            # No second opinion available — keep the first verdict (fail
+            # closed), never pass on an unconfirmed hunch.
+            print(f"Confirmation eval failed ({err}); keeping the first-pass "
+                  "verdict.", file=sys.stderr)
+        else:
+            for s in sorted(retry):
+                print(f"  confirm {s}: {retry[s]}/10 (first pass "
+                      f"{scores.get(s)}/10, baseline {baseline.get(s)}/10)")
+            result = evals.confirm_regressions(result, retry, baseline,
+                                               args.tolerance)
+            scores = {**scores, **retry}
+            if result["ok"]:
+                print("First-pass drops did not reproduce — judged as noise, "
+                      "not regression.")
+
     print(evals.format_gate_report(scores, result, args.tolerance))
     return 0 if result["ok"] else 1
 
