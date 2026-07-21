@@ -55,6 +55,25 @@ jobs:
             export OLYMPUS_PROVIDER="openai"
             export OPENAI_API_KEY="$KIMI_API_KEY"
             export OLYMPUS_BASE_URL="https://api.moonshot.ai/v1"
-            export OLYMPUS_MODEL="kimi-k2-0905-preview"
+            # Model availability differs per Moonshot account/tier, so resolve
+            # against the account's own /v1/models inventory: first match from
+            # the preference list wins (newest capable first), else the first
+            # kimi-* id, else the first id. The inventory and the choice are
+            # logged so the baseline records exactly what scored it.
+            ids=$(curl -sf https://api.moonshot.ai/v1/models \
+                    -H "Authorization: Bearer $KIMI_API_KEY" \
+                  | python3 -c "import json,sys; print('\n'.join(m['id'] for m in json.load(sys.stdin).get('data',[])))")
+            echo "Available Moonshot models:"; echo "$ids" | sed 's/^/  /'
+            for cand in kimi-k2-0905-preview kimi-k2-0711-preview \
+                        kimi-k2-turbo-preview kimi-latest \
+                        moonshot-v1-32k moonshot-v1-8k; do
+              if echo "$ids" | grep -qx "$cand"; then
+                export OLYMPUS_MODEL="$cand"; break
+              fi
+            done
+            if [ -z "${OLYMPUS_MODEL:-}" ]; then
+              export OLYMPUS_MODEL=$(echo "$ids" | grep -m1 '^kimi' || echo "$ids" | head -1)
+            fi
+            echo "Using eval model: $OLYMPUS_MODEL"
           fi
           python scripts/quality_gate.py
