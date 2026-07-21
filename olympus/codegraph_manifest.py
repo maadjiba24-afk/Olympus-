@@ -9,8 +9,10 @@ shared dependency shows up as the hub it is.
 
 Declared package and each dependency become `entity` nodes; the manifest's
 package gets a `depends_on` edge to each dependency. Everything is parsed with
-the stdlib (tomllib/json + line regexes) — no new dependency, and `pom.xml` is
-read with a small regex rather than an XML parser (we only need artifact ids).
+the stdlib (json + line regexes; `tomllib` when present, a `tomli` or pure-regex
+fallback on Python 3.10 where `tomllib` does not exist) — no new dependency, and
+`pom.xml` is read with a small regex rather than an XML parser (only artifact
+ids are needed).
 Dependency names are the manifest's own declared strings — first-partyish, but
 still routed through the same node-label sanitizer as everything else.
 """
@@ -43,8 +45,64 @@ def _parse_toml(text: str) -> dict:
     try:
         import tomllib
         return tomllib.loads(text)
+    except ModuleNotFoundError:
+        try:                                     # Python 3.10 has no tomllib
+            import tomli
+            return tomli.loads(text)
+        except Exception:
+            return {}
     except Exception:
         return {}
+
+
+def _dep_name(spec: str) -> str:
+    """Package name out of a requirement string: 'requests>=2,<3' -> 'requests',
+    'foo[extra]==1' -> 'foo'."""
+    m = re.match(r"[A-Za-z0-9._-]+", str(spec).strip())
+    return m.group(0) if m else ""
+
+
+def _pyproject_fields(text: str) -> tuple[str, list[str]]:
+    """(package name, dependency names) from a pyproject.toml. Uses a real TOML
+    parser when one is importable (tomllib on 3.11+, tomli on 3.10); otherwise
+    a zero-dependency regex fallback, so the manifest path never silently loses
+    dependencies on a Python without tomllib (the bug that slipped past a
+    3.11-only local run and failed CI on 3.10)."""
+    data = _parse_toml(text)
+    if data:
+        proj = data.get("project") or {}
+        name = str(proj.get("name") or "")
+        deps = [_dep_name(d) for d in (proj.get("dependencies") or [])]
+        return name, [d for d in deps if d][:_MAX_DEPS]
+    # Fallback: [project].name and its dependencies array, by regex.
+    name = ""
+    nm = re.search(r'(?m)^\s*name\s*=\s*["\']([^"\']+)["\']', text)
+    if nm:
+        name = nm.group(1)
+    deps: list[str] = []
+    dm = re.search(r'(?m)^\s*dependencies\s*=\s*\[', text)
+    if dm:
+        # Walk to the matching ']' by bracket depth — a dependency's own extras
+        # (`foo[extra]`) contain balanced brackets, so a non-greedy `.*?]` would
+        # stop early and drop that dependency.
+        start = dm.end() - 1                     # the '['
+        depth, arr = 0, ""
+        for j in range(start, min(len(text), start + 20000)):
+            c = text[j]
+            if c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+                if depth == 0:
+                    arr = text[start + 1:j]
+                    break
+        else:
+            arr = text[start + 1:start + 20000]
+        for s in re.findall(r'["\']([^"\']+)["\']', arr):
+            d = _dep_name(s)
+            if d:
+                deps.append(d)
+    return name, deps[:_MAX_DEPS]
 
 
 def extract_file(project: str, path: Path, root: Path) -> dict | None:
@@ -64,13 +122,8 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
     pkg_name = ""
     deps: list[str] = []
     if name == "pyproject.toml":
-        data = _parse_toml(text)
-        proj = data.get("project") or {}
-        pkg_name = str(proj.get("name") or path.parent.name)
-        for dep in (proj.get("dependencies") or [])[:_MAX_DEPS]:
-            m = re.match(r"[A-Za-z0-9._-]+", str(dep))
-            if m:
-                deps.append(m.group(0))
+        pkg_name, deps = _pyproject_fields(text)
+        pkg_name = pkg_name or path.parent.name
     elif name == "package.json":
         try:
             data = json.loads(text)

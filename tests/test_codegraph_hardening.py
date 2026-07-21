@@ -603,3 +603,35 @@ def test_hostile_manifest_dep_count_is_bounded(tmp_path):
     from olympus import codegraph_manifest
     deps = [e for e in codegraph.edges("p") if e["rel"] == "depends_on"]
     assert len(deps) <= codegraph_manifest._MAX_DEPS
+
+
+# --- CI regression: pyproject deps must resolve without tomllib (py3.10) ----
+
+def test_pyproject_deps_resolve_without_a_toml_library(tmp_path, monkeypatch):
+    """Python 3.10 has no stdlib `tomllib`; the manifest path must still extract
+    dependencies via its regex fallback. (A 3.11-only local run masked this and
+    it failed CI on 3.10.)"""
+    from olympus import codegraph_manifest
+    monkeypatch.setattr(codegraph_manifest, "_parse_toml", lambda text: {})
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\ndependencies = [\n'
+        '  "requests>=2,<3",\n  "shared",\n  "foo[extra]==1",\n]\n'
+        '[tool.other]\nname = "not-the-package"\n')
+    codegraph_build.build("p", root)
+    ents = {n["label"] for n in codegraph.nodes("p")
+            if n["kind"] == codegraph.ENTITY}
+    # package name comes from [project], not [tool.other]; extras don't drop foo
+    assert {"app", "requests", "shared", "foo"} <= ents
+    assert "not-the-package" not in ents
+
+
+def test_pyproject_fallback_matches_real_parser(monkeypatch):
+    from olympus import codegraph_manifest as m
+    src = ('[project]\nname = "svc"\n'
+           'dependencies = ["a>=1", "b[x]==2", "c"]\n')
+    real = m._pyproject_fields(src)
+    monkeypatch.setattr(m, "_parse_toml", lambda text: {})
+    fallback = m._pyproject_fields(src)
+    assert real == fallback == ("svc", ["a", "b", "c"])
