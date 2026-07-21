@@ -46,6 +46,29 @@ _NOT_CALLS = frozenset({
 
 _CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _NOTE_RE = re.compile(r"(?:NOTE|WHY|HACK|TODO\(why\))[:\s]\s*(.+)", re.I)
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Modifier/keyword tokens that appear inside an inheritance clause but are not
+# base types (e.g. `class C : public Base` in C++, `where T : new()` in C#).
+_INH_KEYWORDS = frozenset({
+    "public", "private", "protected", "internal", "virtual", "abstract",
+    "override", "sealed", "final", "open", "static", "readonly", "partial",
+    "where", "out", "in", "ref", "new", "class", "struct", "interface",
+    "enum", "record", "object", "trait", "extends", "implements", "with",
+    "by", "data", "sealed", "companion",
+})
+
+
+def _bases_from(clause: str) -> list[str]:
+    """Base-type identifiers from an inheritance clause, keywords/generics
+    stripped. `public Base, IThing<T>` -> ['Base', 'IThing']."""
+    out: list[str] = []
+    for ident in _IDENT_RE.findall(clause):
+        low = ident.lower()
+        if low in _INH_KEYWORDS or low in _NOT_CALLS or ident in out:
+            continue
+        out.append(ident)
+    return out
 
 
 class Lang:
@@ -54,13 +77,19 @@ class Lang:
 
     def __init__(self, name: str, suffixes: tuple[str, ...], fn: str,
                  cls: str | None = None, imp: str | None = None,
-                 comment: str = "//"):
+                 comment: str = "//", inh: str | None = None):
         self.name = name
         self.suffixes = suffixes
         self.fn = re.compile(fn, re.M)
         self.cls = re.compile(cls, re.M) if cls else None
         self.imp = re.compile(imp, re.M) if imp else None
         self.comment = comment
+        # `inh` captures a class line's inheritance CLAUSE in group "bases"
+        # (the text after extends/implements/:/<). Base identifiers are pulled
+        # from that clause in code, not by a second regex, so there is no
+        # nested-quantifier ReDoS surface. Keep the clause class simple and
+        # bounded; the per-line length cap is the backstop.
+        self.inh = re.compile(inh, re.M) if inh else None
 
 
 _ID = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -78,7 +107,8 @@ LANGS: list[Lang] = [
             rf"(?:async\s*)?(?:\([^)]*\)|{_ID})\s*=>",
          cls=rf"^\s*(?:export\s+)?(?:abstract\s+)?"
              rf"(?:class|interface|enum)\s+(?P<name>{_ID})",
-         imp=r"""import\s.*?from\s+['"](?P<mod>[^'"]+)['"]"""),
+         imp=r"""import\s.*?from\s+['"](?P<mod>[^'"]+)['"]""",
+         inh=r"(?:extends|implements)\s+(?P<bases>[^\n{]+)"),
     Lang("go", (".go",),
          fn=rf"^func\s+(?:\([^)]*\)\s+)?(?P<name>{_ID})\s*[(\[]",
          cls=rf"^type\s+(?P<name>{_ID})\s+(?:struct|interface)\b",
@@ -103,7 +133,8 @@ LANGS: list[Lang] = [
          fn=rf"^[ \t]*(?:[\w<>\[\],.?@]+[ \t]+)+(?P<name>{_ID})[ \t]*\(",
          cls=rf"^\s*(?:public\s+|abstract\s+|final\s+)*"
              rf"(?:class|interface|enum|record)\s+(?P<name>{_ID})",
-         imp=rf"^import\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;"),
+         imp=rf"^import\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;",
+         inh=r"(?:extends|implements)\s+(?P<bases>[^\n{]+)"),
     Lang("c", (".c", ".h"),
          fn=rf"^(?:static\s+|inline\s+|extern\s+)*[\w*]+[\s*]+(?P<name>{_ID})"
             rf"\s*\([^;]*$",
@@ -113,42 +144,52 @@ LANGS: list[Lang] = [
          fn=rf"^(?:static\s+|inline\s+|virtual\s+|constexpr\s+|template\s*<[^>]*>\s*)*"
             rf"[\w:<>&*~]+[\s&*]+(?P<name>{_ID})\s*\([^;]*$",
          cls=rf"^\s*(?:class|struct|enum\s+class)\s+(?P<name>{_ID})",
-         imp=r"""^\s*#\s*include\s+["<](?P<mod>[^">]+)[">]"""),
+         imp=r"""^\s*#\s*include\s+["<](?P<mod>[^">]+)[">]""",
+         inh=rf"(?:class|struct)\s+{_ID}\s*:\s*(?P<bases>[^\n{{]+)"),
     Lang("csharp", (".cs",),
          # Linear token form — see the java note above for why this shape can't
          # backtrack catastrophically.
          fn=rf"^[ \t]*(?:[\w<>\[\],.?@]+[ \t]+)+(?P<name>{_ID})[ \t]*\(",
          cls=rf"^\s*(?:public\s+|internal\s+|abstract\s+|sealed\s+|partial\s+|static\s+)*"
              rf"(?:class|interface|enum|struct|record)\s+(?P<name>{_ID})",
-         imp=rf"^\s*using\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;"),
+         imp=rf"^\s*using\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})\s*;",
+         inh=rf"(?:class|interface|struct|record)\s+{_ID}(?:<[^>]*>)?\s*:\s*"
+             rf"(?P<bases>[^\n{{]+)"),
     Lang("ruby", (".rb",), comment="#",
          fn=rf"^\s*def\s+(?:self\.)?(?P<name>{_ID}[?!]?)",
          cls=rf"^\s*(?:class|module)\s+(?P<name>{_ID})",
-         imp=r"""^\s*require(?:_relative)?\s+['"](?P<mod>[^'"]+)['"]"""),
+         imp=r"""^\s*require(?:_relative)?\s+['"](?P<mod>[^'"]+)['"]""",
+         inh=rf"^\s*class\s+{_ID}\s*<\s*(?P<bases>[\w:]+)"),
     Lang("php", (".php",),
          fn=rf"^\s*(?:public\s+|protected\s+|private\s+|static\s+|abstract\s+|final\s+)*"
             rf"function\s+(?P<name>{_ID})",
          cls=rf"^\s*(?:abstract\s+|final\s+)*(?:class|interface|trait|enum)\s+(?P<name>{_ID})",
-         imp=rf"^\s*use\s+[\w\\]*?(?P<mod>{_ID})\s*;"),
+         imp=rf"^\s*use\s+[\w\\]*?(?P<mod>{_ID})\s*;",
+         inh=r"(?:extends|implements)\s+(?P<bases>[^\n{]+)"),
     Lang("kotlin", (".kt", ".kts"),
          fn=rf"^\s*(?:public\s+|private\s+|internal\s+|protected\s+|open\s+"
             rf"|override\s+|suspend\s+|inline\s+)*fun\s+(?:<[^>]*>\s*)?"
             rf"(?:[\w.<>?]+\.)?(?P<name>{_ID})",
          cls=rf"^\s*(?:public\s+|private\s+|internal\s+|open\s+|abstract\s+|sealed\s+"
              rf"|data\s+|enum\s+|annotation\s+)*(?:class|interface|object)\s+(?P<name>{_ID})",
-         imp=rf"^import\s+[\w.]*?(?P<mod>{_ID})$"),
+         imp=rf"^import\s+[\w.]*?(?P<mod>{_ID})$",
+         inh=rf"(?:class|interface|object)\s+{_ID}(?:\s*\([^)]*\))?\s*:\s*"
+             rf"(?P<bases>[^\n{{]+)"),
     Lang("swift", (".swift",),
          fn=rf"^\s*(?:public\s+|private\s+|internal\s+|open\s+|static\s+|override\s+"
             rf"|mutating\s+)*func\s+(?P<name>{_ID})",
          cls=rf"^\s*(?:public\s+|open\s+|final\s+)*"
              rf"(?:class|struct|enum|protocol|extension)\s+(?P<name>{_ID})",
-         imp=rf"^\s*import\s+(?P<mod>{_ID})"),
+         imp=rf"^\s*import\s+(?P<mod>{_ID})",
+         inh=rf"(?:class|struct|enum|protocol|extension)\s+{_ID}\s*:\s*"
+             rf"(?P<bases>[^\n{{]+)"),
     Lang("scala", (".scala",),
          fn=rf"^\s*(?:override\s+|private\s+|protected\s+|implicit\s+|final\s+)*"
             rf"def\s+(?P<name>{_ID})",
          cls=rf"^\s*(?:sealed\s+|abstract\s+|final\s+|case\s+)*"
              rf"(?:class|trait|object)\s+(?P<name>{_ID})",
-         imp=rf"^import\s+[\w.]*?(?P<mod>{_ID})"),
+         imp=rf"^import\s+[\w.]*?(?P<mod>{_ID})",
+         inh=r"(?:extends|with)\s+(?P<bases>[^\n{]+)"),
     Lang("lua", (".lua", ".luau"), comment="--",
          fn=rf"^\s*(?:local\s+)?function\s+(?:[\w.:]+[.:])?(?P<name>{_ID})",
          imp=r"""require\s*\(?\s*['"](?P<mod>[^'"]+)['"]"""),
@@ -243,6 +284,7 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
                ((lang.fn, codegraph.FUNCTION), (lang.cls, codegraph.CLASS))
                if rx is not None]
     defs: list[tuple[int, str, str]] = []          # (lineno, node_id, name)
+    class_lines: dict[int, str] = {}               # lineno -> class node id
     for i, line in enumerate(lines, start=1):
         if len(line) > _MAX_LINE_LEN:
             continue
@@ -259,7 +301,23 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
                 break
             codegraph.add_edge(project, module_id, "defines", n["id"])
             defs.append((i, n["id"], name))
+            if kind == codegraph.CLASS:
+                class_lines[i] = n["id"]
             break                                  # a line is one def, not two
+
+    # Inheritance: on each class line, pull base identifiers out of the
+    # captured clause (in code — no second regex, no ReDoS surface).
+    inherits: list[tuple[str, str]] = []
+    if lang.inh and class_lines:
+        for i, cid in class_lines.items():
+            line = lines[i - 1]
+            if len(line) > _MAX_LINE_LEN:
+                continue
+            m = lang.inh.search(line)
+            if not m:
+                continue
+            for base in _bases_from(m.group("bases")):
+                inherits.append((cid, base))
 
     # Rationale: NOTE/WHY/HACK comment lines, each in its own slot so several
     # notes on one owner don't overwrite each other. Sanitized inside
@@ -309,4 +367,4 @@ def extract_file(project: str, path: Path, root: Path) -> dict | None:
 
     return {"qual": qual, "stem": path.stem, "module_id": module_id,
             "rel": rel, "imports": imports, "calls": calls,
-            "lang": lang.name}
+            "inherits": inherits, "lang": lang.name}

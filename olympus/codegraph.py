@@ -53,8 +53,16 @@ MODULE, CLASS, FUNCTION, METHOD, RATIONALE = (
 # non-code kinds: documents ingested by codegraph_ingest, and schema/manifest
 # entities from codegraph_introspect (tables, crates). Same graph, same rules.
 DOCUMENT, ENTITY = "document", "entity"
-# relations that mean "B depends on A" when traversed from A (for impact)
-_DEP_RELS = frozenset({"calls", "imports", "references"})
+# relations that mean "B depends on A" when traversed from A (for impact).
+# `inherits`/`implements` count: change a base class and every subclass is
+# affected, so reverse-traversal for impact must follow them.
+_DEP_RELS = frozenset({"calls", "imports", "references", "inherits",
+                       "implements"})
+# cross-file relations rebuilt from scratch on every incremental update (they
+# depend on the whole graph, not one file), kept in one place so build/update
+# and the resolver never drift.
+_CROSS_FILE_RELS = frozenset({"calls", "imports", "references", "inherits",
+                              "implements"})
 
 _MAX_NODES = 20000          # per project; bound storage + injection cost
 _MAX_EDGES = 80000

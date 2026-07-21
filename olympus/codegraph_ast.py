@@ -56,6 +56,19 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
+def _base_name(base) -> str | None:
+    """Last-component name of a base-class expression: `Foo` -> 'Foo',
+    `pkg.Base` -> 'Base', `Generic[T]` -> 'Generic'. Subscripts/others yield
+    None (nothing resolvable)."""
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    if isinstance(base, ast.Subscript):
+        return _base_name(base.value)
+    return None
+
+
 class _Walk(ast.NodeVisitor):
     """One pass over a module: create class/function/method nodes + `defines`
     edges, and collect raw imports and call sites for later resolution."""
@@ -69,6 +82,7 @@ class _Walk(ast.NodeVisitor):
         self.scope = [(module_id, module_qual, codegraph.MODULE)]
         self.imports: list[str] = []              # imported module stems
         self.calls: list[tuple[str, str]] = []    # (caller_id, callee_name)
+        self.inherits: list[tuple[str, str]] = []  # (class_id, base_name)
 
     # -- defs ------------------------------------------------------------
     def _add_def(self, node, kind: str):
@@ -81,6 +95,11 @@ class _Walk(ast.NodeVisitor):
             self.generic_visit(node)
             return
         codegraph.add_edge(self.project, parent_id, "defines", n["id"])
+        if kind == codegraph.CLASS:      # record explicit base classes
+            for base in getattr(node, "bases", ()):
+                name = _base_name(base)
+                if name:
+                    self.inherits.append((n["id"], name))
         doc = ast.get_docstring(node)
         if doc:
             codegraph.add_rationale(self.project, self.rel_path, n["id"], doc)
@@ -145,6 +164,7 @@ def extract_file(project: str, path: Path, root: Path):
     w = _Walk(project, rel, mod["id"], qual)
     w.visit(tree)
     return {"qual": qual, "stem": path.stem, "module_id": mod["id"],
+            "inherits": w.inherits,
             "rel": rel, "imports": w.imports, "calls": w.calls}
 
 

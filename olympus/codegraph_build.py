@@ -211,9 +211,12 @@ def _resolve(project: str, infos: list[dict]) -> dict:
     what is missing."""
     nodes_ = codegraph.nodes(project)
     func_index: dict[str, list[dict]] = {}
+    class_index: dict[str, list[dict]] = {}
     for n in nodes_:
         if n["kind"] in (codegraph.FUNCTION, codegraph.METHOD):
             func_index.setdefault(n["label"].lower(), []).append(n)
+        elif n["kind"] == codegraph.CLASS:
+            class_index.setdefault(n["label"].lower(), []).append(n)
     # Module indexes, split so a code import can never resolve to a same-stem
     # document (olympus/capabilities.py, not docs/CAPABILITIES.md). Each keeps a
     # FULL-qualname map (unique, disambiguates a/util.py from b/util.py) and a
@@ -249,8 +252,33 @@ def _resolve(project: str, infos: list[dict]) -> dict:
         return None, False
 
     stats = {"imports": 0, "calls_resolved": 0, "calls_inferred": 0,
-             "calls_ambiguous": 0, "calls_skipped": 0}
+             "calls_ambiguous": 0, "calls_skipped": 0, "inherits": 0}
     for info in infos:
+        # Inheritance: resolve base-class names to CLASS nodes. Python bases are
+        # explicit in the AST, so a unique match is EXTRACTED (ground truth);
+        # a regex-derived base is INFERRED; several same-named classes give
+        # AMBIGUOUS edges. External/stdlib bases (object, Exception, …) simply
+        # don't resolve and are skipped, keeping the tier honest.
+        certain_inh = info.get("lang") == "python"
+        for class_id, base in info.get("inherits", ()):
+            cands = class_index.get(str(base).lower(), [])
+            same_file = [c for c in cands if c["path"] == info["rel"]]
+            cands = same_file or cands
+            if not cands or (len(cands) == 1 and cands[0]["id"] == class_id):
+                continue
+            if len(cands) == 1:
+                tier = (codegraph.EXTRACTED if certain_inh
+                        else codegraph.INFERRED)
+                conf = 1.0 if certain_inh else _INFER_CONF
+                if codegraph.add_edge(project, class_id, "inherits",
+                                      cands[0]["id"], tier=tier, confidence=conf):
+                    stats["inherits"] += 1
+            elif len(cands) <= codegraph_langs._MAX_AMBIGUOUS:
+                for c in cands:
+                    if c["id"] != class_id and codegraph.add_edge(
+                            project, class_id, "inherits", c["id"],
+                            tier=codegraph.AMBIGUOUS, confidence=_AMBIG_CONF):
+                        stats["inherits"] += 1
         is_doc = info.get("lang") == "doc"
         rel_name = "references" if is_doc else "imports"
         seen_imports: set[str] = set()
@@ -354,7 +382,7 @@ def update(project: str = "self", root: str = ".",
         # Re-resolving over the whole manifest then reproduces exactly what a
         # full build would — incremental and full can never diverge.
         codegraph.remove_edges_by_relation(
-            project, {"calls", "imports", "references"})
+            project, set(codegraph._CROSS_FILE_RELS))
         for rel in deleted:
             manifest.pop(rel, None)
         for rel in changed:

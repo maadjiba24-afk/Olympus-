@@ -312,3 +312,77 @@ def test_github_refuses_non_https_api(monkeypatch):
     monkeypatch.setenv("GITHUB_REPO", "o/r")
     monkeypatch.setenv("GITHUB_API", "http://evil.internal")
     assert github._get("pulls") is None            # token never leaves on http
+
+
+# --- iteration: inheritance / implements edges -----------------------------
+
+def test_python_inheritance_is_extracted(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "base.py").write_text("class Animal:\n    pass\n")
+    (root / "dog.py").write_text(
+        "from base import Animal\n\nclass Dog(Animal):\n    pass\n")
+    codegraph_build.build("p", root)
+    e = [x for x in codegraph.edges("p") if x["rel"] == "inherits"]
+    assert len(e) == 1 and e[0]["tier"] == codegraph.EXTRACTED
+    # a base-class change impacts its subclass (inherits is a dependency rel)
+    animal = codegraph.find("p", "Animal")[0]["id"]
+    assert "Dog" in {n["label"] for n in codegraph.impact("p", animal)}
+
+
+@pytest.mark.parametrize("fname,text,pair", [
+    ("a.java", "class Circle extends Shape {}\nclass Shape {}\n",
+     ("Circle", "Shape")),
+    ("a.ts", "class Svc extends Base {}\nclass Base {}\n", ("Svc", "Base")),
+    ("a.rb", "class Sub < Sup\nend\nclass Sup\nend\n", ("Sub", "Sup")),
+    ("a.cs", "class Impl : IFace {}\ninterface IFace {}\n", ("Impl", "IFace")),
+    ("a.kt", "class Child : Parent {}\nclass Parent {}\n", ("Child", "Parent")),
+    ("a.swift", "class V : U {}\nclass U {}\n", ("V", "U")),
+    ("a.scala", "class C extends D\nclass D\n", ("C", "D")),
+    ("a.php", "class A extends B {}\nclass B {}\n", ("A", "B")),
+], ids=["java", "ts", "ruby", "csharp", "kotlin", "swift", "scala", "php"])
+def test_regex_inheritance_is_inferred(tmp_path, fname, text, pair):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / fname).write_text(text)
+    codegraph_build.build("p", root)
+    ids = {n["label"]: n["id"] for n in codegraph.nodes("p")}
+    got = {(next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["src"]),
+            next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["dst"]))
+           for e in codegraph.edges("p") if e["rel"] == "inherits"}
+    assert pair in got
+    tier = next(e["tier"] for e in codegraph.edges("p")
+                if e["rel"] == "inherits" and e["src"] == ids[pair[0]])
+    assert tier == codegraph.INFERRED           # regex bases are never ground truth
+
+
+def test_java_multiple_bases_extends_and_implements(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "a.java").write_text(
+        "public class C extends Base implements I1, I2 {}\n"
+        "class Base {}\ninterface I1 {}\ninterface I2 {}\n")
+    codegraph_build.build("p", root)
+    bases = {next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["dst"])
+             for e in codegraph.edges("p") if e["rel"] == "inherits"}
+    assert {"Base", "I1", "I2"} <= bases
+
+
+def test_external_base_class_does_not_resolve(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "e.py").write_text("class MyError(Exception):\n    pass\n")
+    codegraph_build.build("p", root)
+    # Exception isn't a node here → no false inherits edge, no false CONFIRM
+    assert not [e for e in codegraph.edges("p") if e["rel"] == "inherits"]
+
+
+def test_inheritance_regexes_are_not_redos_prone():
+    for spec in codegraph_langs.LANGS:
+        if not spec.inh:
+            continue
+        line = ("class C extends " + "A " * 400)[:codegraph_langs._MAX_LINE_LEN]
+        start = time.perf_counter()
+        for _ in range(30):
+            spec.inh.search(line)
+        assert (time.perf_counter() - start) < 1.0

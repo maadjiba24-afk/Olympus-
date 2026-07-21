@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph: inheritance edges (self-evolution iteration 1)
+
+The code graph is Olympus's own compounding asset — a moat it keeps deepening
+over time. This iteration adds `inherits`/`implements` edges, closing the
+richest single parity gap with the tool the capability was absorbed from and
+strengthening every downstream view at once (impact now follows a base-class
+change to its subclasses; communities and the report see the type hierarchy).
+
+- Python: class bases from the AST → `inherits` edges, EXTRACTED (ground truth,
+  so `verify_claim` can confirm/refute them). External bases (`Exception`,
+  `object`) don't resolve, keeping the tier honest.
+- ~10 OO languages via the regex engine (Java/TS/Ruby/C#/Kotlin/Swift/Scala/
+  PHP/C++): base names pulled from the class line's inheritance clause,
+  recorded INFERRED (regex evidence, never ground truth); multiple same-named
+  bases → AMBIGUOUS. `extends` + `implements` with multiple interfaces all
+  captured. Base identifiers are extracted in code, not a second regex — no new
+  ReDoS surface (verified at the line cap).
+- `inherits`/`implements` join the dependency relations traversed for impact
+  and the cross-file relations rebuilt on every incremental update.
+
+Roadmap for subsequent iterations (each one bounded, test-gated, committed):
+more languages (Objective-C, HCL, SQL, Groovy), deeper council integration
+(Prometheus consults `codegraph_impact` before self-upgrades), graph-health
+metrics tracked over time, and the remaining parity gaps.
+
 ### Security & Fixed — Code-graph hardening pass
 
 Two adversarial reviews (correctness + security) of the new code-graph engine,
