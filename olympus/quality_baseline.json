@@ -1,0 +1,20 @@
+{
+  "_provenance": {
+    "date": "2026-07-21",
+    "endpoint": "https://api.moonshot.ai/v1",
+    "model": "moonshot-v1-32k",
+    "run": "https://github.com/maadjiba24-afk/Olympus-/actions/runs/29839683673"
+  },
+  "scores": {
+    "aegis": 9.0,
+    "angelos": 9.4,
+    "argus": 9.4,
+    "chiron": 9.2,
+    "chronos": 7.2,
+    "hephaestus": 7.4,
+    "iris": 9.8,
+    "mnemosyne": 8.4,
+    "peitho": 7.6,
+    "plutus": 9.6
+  }
+}
