@@ -112,11 +112,15 @@ correct, not that a given answer is good.
 any specialist regresses more than a tolerance (default 1.0/10) below the
 committed baseline (`olympus/quality_baseline.json`). The pass/fail comparison
 is the pure, unit-tested `evals.regression_check`; the live benchmark run makes
-real model calls, so — like the replay gate — the workflow **needs an
-`ANTHROPIC_API_KEY` repo secret and skips cleanly (exit 0) without it**, spend
-capped by `OLYMPUS_DAILY_BUDGET`. The residual therefore narrows but does not
-vanish: quality is only *actually* scored where a key (and a committed baseline)
-is present. Establishing/refreshing the baseline is a human act
+real model calls, so — like the replay gate — the workflow **needs a model-key
+repo secret and skips cleanly (exit 0) without one**: `ANTHROPIC_API_KEY`
+(preferred) or `KIMI_API_KEY` (Moonshot, via the OpenAI-compatible provider
+with the eval model resolved from the account's `/v1/models` inventory), spend
+capped by `OLYMPUS_DAILY_BUDGET`. **The baseline is live**: committed from the
+first keyed run's real per-specialist scores (`moonshot-v1-32k`; provenance in
+the file), and the first gated run passed against it. The residual therefore
+narrows but does not vanish: quality is only *actually* scored where a key
+remains configured. Refreshing the baseline stays a human act
 (`--update-baseline`, committed by a maintainer), never the agent's.
 
 ---
