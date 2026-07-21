@@ -15,6 +15,15 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Code graph: 12 more languages (self-evolution iteration 2)
+
+The regex engine grows from 21 to **33 languages**, the biggest parity gap from
+the completeness audit — all via the zero-dependency engine, all ReDoS-checked
+at the line cap: Objective-C, Groovy/Gradle, SQL, Terraform/HCL, Perl, R,
+Haskell, OCaml, Clojure, Erlang, Solidity, Nim. Objective-C and Solidity also
+extract inheritance (`@interface X : Y`, `contract X is Y`). 15 new tests,
+including a blanket ReDoS-safety check over every language's every regex.
+
 ### Added — Code graph: inheritance edges (self-evolution iteration 1)
 
 The code graph is Olympus's own compounding asset — a moat it keeps deepening

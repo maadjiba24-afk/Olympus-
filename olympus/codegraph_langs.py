@@ -221,6 +221,65 @@ LANGS: list[Lang] = [
             rf"(?:subroutine|function)\s+(?P<name>{_ID})",
          cls=rf"^\s*module\s+(?P<name>{_ID})",
          imp=rf"^\s*use\s+(?P<mod>{_ID})"),
+    Lang("objc", (".m", ".mm"),
+         # Objective-C methods: `-(ret)name` / `+(ret)name`, one per line.
+         fn=rf"^[ \t]*[-+][ \t]*\([^)]*\)[ \t]*(?P<name>{_ID})",
+         cls=rf"^\s*@(?:interface|implementation|protocol)\s+(?P<name>{_ID})",
+         imp=r"""^\s*#\s*(?:import|include)\s+["<](?P<mod>[^">]+)[">]""",
+         inh=rf"@interface\s+{_ID}\s*:\s*(?P<bases>{_ID})"),
+    Lang("groovy", (".groovy", ".gradle"),
+         # `def name(` OR `Type name(` — explicit alternation so the return
+         # type can't greedily eat into the method name, and linear (disjoint
+         # token/space classes) so it can't backtrack catastrophically.
+         fn=rf"^[ \t]*(?:(?:public|private|protected|static|final)[ \t]+)*"
+            rf"(?:def[ \t]+(?P<name>{_ID})|[\w.<>\[\]]+[ \t]+(?P<name2>{_ID}))"
+            rf"[ \t]*\(",
+         cls=rf"^\s*(?:@\w+\s+)*(?:public\s+|abstract\s+|final\s+)*"
+             rf"(?:class|interface|trait|enum)\s+(?P<name>{_ID})",
+         imp=rf"^import\s+(?:static\s+)?[\w.]*?(?P<mod>{_ID})",
+         inh=r"(?:extends|implements)\s+(?P<bases>[^\n{]+)"),
+    Lang("sql", (".sql",), comment="--",
+         fn=rf"(?i:create)\s+(?:or\s+replace\s+)?(?i:function|procedure)\s+"
+            rf"(?:if\s+not\s+exists\s+)?(?P<name>[\w.\"]+)",
+         cls=rf"(?i:create)\s+(?:or\s+replace\s+)?"
+             rf"(?i:table|view|materialized\s+view)\s+"
+             rf"(?:if\s+not\s+exists\s+)?(?P<name>[\w.\"]+)"),
+    Lang("terraform", (".tf", ".tfvars", ".hcl"), comment="#",
+         fn=r"""^\s*(?:resource|data)\s+"(?P<name>[\w.-]+)\"""",
+         cls=r"""^\s*(?:module|provider|variable|output)\s+"(?P<name>[\w.-]+)\"""",
+         imp=r"""source\s*=\s*"(?P<mod>[^"]+)\""""),
+    Lang("perl", (".pl", ".pm"), comment="#",
+         fn=rf"^\s*sub\s+(?P<name>{_ID})",
+         cls=rf"^\s*package\s+(?P<name>[\w:]+)",
+         imp=rf"^\s*use\s+(?P<mod>[\w:]+)"),
+    Lang("r", (".r",), comment="#",
+         fn=rf"^\s*(?P<name>[\w.]+)\s*(?:<-|=)\s*function",
+         imp=r"^\s*(?:library|require)\s*\(\s*[\"']?(?P<mod>[\w.]+)"),
+    Lang("haskell", (".hs",), comment="--",
+         fn=r"^(?P<name>[a-z_][\w']*)\s*::",
+         cls=r"^(?:data|newtype|class|type)\s+(?P<name>[A-Z][\w']*)",
+         imp=r"^import\s+(?:qualified\s+)?(?P<mod>[\w.]+)"),
+    Lang("ocaml", (".ml", ".mli"), comment="(*",
+         fn=rf"^\s*let\s+(?:rec\s+)?(?P<name>{_ID})",
+         cls=rf"^\s*module\s+(?:type\s+)?(?P<name>{_ID})",
+         imp=rf"^\s*open\s+(?P<mod>{_ID})"),
+    Lang("clojure", (".clj", ".cljs", ".cljc"), comment=";",
+         fn=r"\(defn-?\s+(?P<name>[\w.?!*+<>=/-]+)",
+         cls=r"\(ns\s+(?P<name>[\w.]+)"),
+    Lang("erlang", (".erl", ".hrl"), comment="%",
+         fn=r"^(?P<name>[a-z]\w*)\s*\(",
+         cls=r"^\s*-module\(\s*(?P<name>\w+)",
+         imp=r"^\s*-import\(\s*(?P<mod>\w+)"),
+    Lang("solidity", (".sol",),
+         fn=rf"^\s*function\s+(?P<name>{_ID})",
+         cls=rf"^\s*(?:abstract\s+)?(?:contract|interface|library)\s+(?P<name>{_ID})",
+         imp=r"""^\s*import\s+.*?["'](?P<mod>[^"']+)["']""",
+         inh=rf"(?:contract|interface)\s+{_ID}\s+is\s+(?P<bases>[^\n{{]+)"),
+    Lang("nim", (".nim",), comment="#",
+         fn=rf"^\s*(?:proc|func|method|template|macro|iterator|converter)\s+"
+            rf"(?P<name>{_ID})",
+         cls=rf"^\s*type\s+(?P<name>{_ID})",
+         imp=r"^\s*(?:import|include)\s+(?P<mod>[\w./]+)"),
 ]
 
 SUFFIXES: dict[str, Lang] = {s: lang for lang in LANGS for s in lang.suffixes}

@@ -1013,7 +1013,10 @@ earns its keep by being useful, and the track record is yours to see.
 ### The code knowledge graph — any repo, one queryable structure
 
 Olympus builds a knowledge graph of a codebase locally and deterministically —
-stdlib AST for Python, a regex engine for ~20 other languages, documents
+stdlib AST for Python, a regex engine for 30+ other languages (JS/TS, Go, Rust,
+Java, C/C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Objective-C, Groovy, Lua,
+Bash, PowerShell, Elixir, Dart, Zig, Julia, Fortran, Perl, R, Haskell, OCaml,
+Clojure, Erlang, Solidity, Nim, SQL, Terraform/HCL), documents
 (markdown/rst/yaml with wikilinks) in the same graph, no LLM call and no new
 dependencies. Every edge carries a confidence tier (`EXTRACTED` = a parser saw
 it, `INFERRED` = best single match, `AMBIGUOUS` = several candidates, all

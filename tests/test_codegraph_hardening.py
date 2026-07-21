@@ -386,3 +386,65 @@ def test_inheritance_regexes_are_not_redos_prone():
         for _ in range(30):
             spec.inh.search(line)
         assert (time.perf_counter() - start) < 1.0
+
+
+# --- iteration 2: expanded language coverage -------------------------------
+
+@pytest.mark.parametrize("fname,text,expect", [
+    ("x.m", "@interface Cat : Animal\n-(void)meow;\n@end\n", {"Cat", "meow"}),
+    ("x.groovy", "class B extends Base {\n  def run() {}\n}\n", {"B", "run"}),
+    ("x.sql", "CREATE TABLE users (id int);\n"
+              "CREATE FUNCTION f() RETURNS int AS $$ $$;\n", {"users", "f"}),
+    ("x.tf", 'resource "aws_instance" "web" {}\nmodule "vpc" {}\n',
+     {"aws_instance", "vpc"}),
+    ("x.pl", "package Foo;\nsub bar {\n}\n", {"Foo", "bar"}),
+    ("x.r", "myfn <- function(x) {\n}\n", {"myfn"}),
+    ("x.hs", "module M\ndata Tree = Leaf\nfoo :: Int\n", {"Tree", "foo"}),
+    ("x.ml", "module M = struct\nlet compute x = x\n", {"M", "compute"}),
+    ("x.clj", "(ns app.core)\n(defn handle [r] r)\n", {"core", "handle"}),
+    ("x.erl", "-module(srv).\nloop(S) ->\n  ok.\n", {"srv", "loop"}),
+    ("x.sol", "contract Token is ERC20 {\n  function mint() public {}\n}\n",
+     {"Token", "mint"}),
+    ("x.nim", "type Obj = object\nproc greet() =\n  discard\n", {"Obj", "greet"}),
+], ids=["objc", "groovy", "sql", "terraform", "perl", "r", "haskell",
+        "ocaml", "clojure", "erlang", "solidity", "nim"])
+def test_new_language_extraction(tmp_path, fname, text, expect):
+    root = tmp_path / "l"
+    root.mkdir()
+    (root / fname).write_text(text)
+    info = codegraph_langs.extract_file("p", root / fname, root)
+    labels = {n["label"] for n in codegraph.nodes("p")}
+    assert info is not None and expect <= labels
+
+
+def test_new_language_inheritance(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "t.sol").write_text(
+        "contract Token is Base {}\ncontract Base {}\n")
+    (root / "c.m").write_text(
+        "@interface Cat : Animal\n@end\n@interface Animal\n@end\n")
+    codegraph_build.build("p", root)
+    got = {(next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["src"]),
+            next(n["label"] for n in codegraph.nodes("p") if n["id"] == e["dst"]))
+           for e in codegraph.edges("p") if e["rel"] == "inherits"}
+    assert ("Token", "Base") in got and ("Cat", "Animal") in got
+
+
+def test_all_new_language_regexes_are_redos_safe():
+    import time as _t
+    hostile = ["public " + " " * 780 + "x", "a " * 390, "x" * 790, "(" * 390]
+    for spec in codegraph_langs.LANGS:
+        for rx in (spec.fn, spec.cls, spec.imp, spec.inh):
+            if rx is None:
+                continue
+            for line in hostile:
+                line = line[:codegraph_langs._MAX_LINE_LEN]
+                start = _t.perf_counter()
+                for _ in range(20):
+                    rx.search(line)
+                assert (_t.perf_counter() - start) < 1.0, spec.name
+
+
+def test_language_count_is_at_least_33():
+    assert len(codegraph_langs.LANGS) >= 33
