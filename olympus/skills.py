@@ -15,11 +15,18 @@ without a human in the loop.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
 import time
 from pathlib import Path
 
 from . import config
+
+# Near-duplicate cosine threshold for write-time skill dedup. Tunable; high by
+# default so only genuinely-overlapping skills are flagged.
+_DUP_THRESHOLD = float(os.environ.get("OLYMPUS_SKILL_DUP_THRESHOLD", "0.90"))
 
 
 def _dir() -> Path:
@@ -82,7 +89,18 @@ def create(name: str, description: str, instructions: str, *,
     )
     verb = "updated" if existed else "created"
     tag = " (provisional — pending benchmark)" if provisional else ""
-    return (f"Skill '{name}' {verb}{tag}. It is visible to every specialist.")
+    msg = f"Skill '{name}' {verb}{tag}. It is visible to every specialist."
+
+    # Best-effort semantic layer: warm this skill's embedding, and — only for a
+    # genuinely NEW skill — flag near-duplicates so the library doesn't accrete
+    # overlapping skills. No-op (and no cost) when embeddings aren't configured.
+    dups = [] if existed else near_duplicates(name, description, instructions)
+    _skill_embedding(_slug(name), _emb_text(name, description, instructions))
+    if dups:
+        listed = ", ".join(f"'{d['name']}' ({d['score']:.2f})" for d in dups[:3])
+        msg += (f"\n⚠ Near-duplicate of existing skill(s): {listed}. "
+                "Consider consolidating instead of adding overlap.")
+    return msg
 
 
 def read(name: str) -> str:
@@ -91,6 +109,130 @@ def read(name: str) -> str:
         available = ", ".join(p.stem for p in sorted(_dir().glob("*.md"))) or "none"
         return f"No skill named '{name}'. Available skills: {available}"
     return path.read_text(encoding="utf-8", errors="replace")[:20_000]
+
+
+# --- semantic layer (best-effort; only active when an embeddings endpoint is
+# configured, exactly like recall.py — the hot path stays free otherwise) -----
+
+def _emb_text(name: str, description: str, instructions: str) -> str:
+    """The text a skill is embedded from: its name + description + a bounded
+    slice of the instructions (enough to capture intent without huge payloads)."""
+    return f"{name}\n{description}\n{instructions}".strip()[:4000]
+
+
+def _emb_cache_path() -> Path:
+    return _dir() / ".embeddings.json"
+
+
+def _load_emb_cache() -> dict:
+    p = _emb_cache_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_emb_cache(cache: dict) -> None:
+    p = _emb_cache_path()
+    tmp = p.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _skill_embedding(slug: str, emb_text: str) -> list[float] | None:
+    """Embedding for a skill, cached by content hash so re-embedding only
+    happens when the skill text changes. Best-effort: None when embeddings are
+    unavailable or the call fails."""
+    from . import embed
+    if not embed.available():
+        return None
+    h = _text_hash(emb_text)
+    cache = _load_emb_cache()
+    ent = cache.get(slug)
+    if isinstance(ent, dict) and ent.get("hash") == h and ent.get("vec"):
+        return ent["vec"]
+    vec = embed.embed_one(emb_text)
+    if vec:
+        cache[slug] = {"hash": h, "vec": vec}
+        _save_emb_cache(cache)
+    return vec
+
+
+def _skill_emb_text_from_file(text: str) -> str:
+    """Reconstruct the embedding text from a stored skill file."""
+    name = _title(text)
+    desc = ""
+    body_lines: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("> ") and not desc:
+            desc = s[2:].strip()
+        elif s and not s.startswith(("<!--", "# ", "> ", "_Last updated:")):
+            body_lines.append(s)
+    return _emb_text(name, desc, "\n".join(body_lines))
+
+
+def search(query: str, limit: int = 5,
+           specialist: str | None = None) -> list[dict]:
+    """Semantic (cosine-ranked) skill search. Best-effort: returns [] when no
+    embeddings endpoint is configured, so callers fall back to the prompt
+    `index`. Each hit is {name, slug, score}."""
+    from . import embed
+    if not embed.available():
+        return []
+    qvec = embed.embed_one(query)
+    if not qvec:
+        return []
+    scored: list[tuple[float, str, str]] = []
+    for path in sorted(_dir().glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not _visible_to(_meta(text, "specialist"), specialist):
+            continue
+        vec = _skill_embedding(path.stem, _skill_emb_text_from_file(text))
+        if not vec:
+            continue
+        scored.append((embed.cosine(qvec, vec), _title(text) or path.stem,
+                       path.stem))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [{"name": n, "slug": s, "score": round(c, 3)}
+            for c, n, s in scored[:limit] if c > 0]
+
+
+def near_duplicates(name: str, description: str, instructions: str,
+                    threshold: float | None = None) -> list[dict]:
+    """Existing skills semantically near a proposed one (cosine ≥ threshold),
+    excluding the same slug. Best-effort: [] when embeddings are unavailable —
+    so dedup never blocks a save, it only informs. Each hit is {name, score}."""
+    from . import embed
+    if not embed.available():
+        return []
+    thr = _DUP_THRESHOLD if threshold is None else threshold
+    nvec = embed.embed_one(_emb_text(name, description, instructions))
+    if not nvec:
+        return []
+    self_slug = _slug(name)
+    out: list[dict] = []
+    for path in sorted(_dir().glob("*.md")):
+        if path.stem == self_slug:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        vec = _skill_embedding(path.stem, _skill_emb_text_from_file(text))
+        if not vec:
+            continue
+        c = embed.cosine(nvec, vec)
+        if c >= thr:
+            out.append({"name": _title(text) or path.stem, "score": round(c, 3)})
+    out.sort(key=lambda d: d["score"], reverse=True)
+    return out
 
 
 GLOBAL_SPECIALIST = "all"   # tag a skill `specialist: all` to share it with everyone
