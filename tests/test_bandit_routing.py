@@ -149,3 +149,41 @@ def test_horizon_excludes_removed_model():
     pick = bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS)
     assert pick in (OPUS, HAIKU)                         # valid in-pool member
     assert pick is HAIKU                                 # untried arm explored first
+
+
+# --- self-evolution: exploration constant self-tunes (moat) --------------
+
+from olympus import evolve   # noqa: E402
+
+
+def test_ucb_score_uses_self_tuned_exploration():
+    store.reset()
+    assert bandit_routing._exploration() == 1.414        # the registered default
+    evolve._set_param("bandit", "exploration", 0.5)
+    assert bandit_routing._exploration() == 0.5          # picks up the tuned value
+    store.reset()
+
+
+def test_choose_respects_tuned_exploration():
+    # At the exploration floor, the higher-MEAN arm wins (small bonus); a
+    # lightly-sampled but weaker arm no longer gets explored into the pick.
+    store.reset()
+    evolve._set_param("bandit", "exploration", 0.3)
+    _seed("chiron", "claude-opus-4-8", "approve", 30)    # mean reward 1.0
+    _seed("chiron", "claude-haiku-4-5", "approve", 4)
+    _seed("chiron", "claude-haiku-4-5", "retry", 8)      # mean reward ~0.33
+    pick = bandit_routing.choose([OPUS, HAIKU], "chiron", HAIKU)
+    assert pick is OPUS                                  # exploitation wins
+    store.reset()
+
+
+def test_evolution_reduces_exploration_on_degradation():
+    store.reset()
+    before = bandit_routing._exploration()
+    for _ in range(evolve._MIN_SAMPLES + 2):
+        evolve.record("bandit", evolve.DEGRADED, "retry")
+    evolve.review()
+    after = bandit_routing._exploration()
+    assert after < before                                # explores less over time
+    assert after >= 0.3                                  # clamped to the floor
+    store.reset()

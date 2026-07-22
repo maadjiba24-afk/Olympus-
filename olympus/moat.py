@@ -78,6 +78,8 @@ def status() -> dict:
         "flag": "OLYMPUS_BANDIT_ROUTING",
         "active": bandit.get("active", False),
         "arms": len(bandit.get("arms", [])),
+        "health": health.get("bandit", {}),
+        "tuned": tunables.get("bandit.exploration", {}),
     }
 
     # File-defined agents.
@@ -141,7 +143,13 @@ def render() -> str:
 
     b = s["bandit_routing"]
     lines.append(f"  [{on(b)}] bandit routing ({b['flag']}) — "
-                 f"active={b['active']}, {b['arms']} arms observed")
+                 f"active={b['active']}, {b['arms']} arms observed"
+                 f"  {_health_flag(b['health'])}")
+    if b["tuned"]:
+        t = b["tuned"]
+        lines.append(f"          self-tuned bandit.exploration = "
+                     f"{t.get('current')} [{t.get('lo')}..{t.get('hi')}] "
+                     "(explores less when outcomes degrade)")
 
     fa = s["file_agents"]
     lines.append(f"  [{on(fa)}] file agents ({fa['flag']}) — "

@@ -65,11 +65,26 @@ def _arms(specialist: str) -> tuple[dict, int]:
     return arms, total
 
 
-def ucb_score(reward: float, n: int, total: int, c: float = _C) -> float:
+def _exploration() -> float:
+    """The self-tuned exploration constant (defaults to sqrt(2)). `evolve` lowers
+    it when routing outcomes degrade under the bandit, so it explores less and
+    trusts the empirical best more. Falls back to the constant on any read
+    error."""
+    try:
+        from . import evolve
+        return float(evolve.current("bandit", "exploration"))
+    except Exception:
+        return _C
+
+
+def ucb_score(reward: float, n: int, total: int, c: float | None = None) -> float:
     """UCB1 score: mean reward + exploration bonus. An unpulled arm (n=0) scores
-    +inf so it is tried before any exploitation."""
+    +inf so it is tried before any exploitation. `c` defaults to the self-tuned
+    exploration constant."""
     if n <= 0:
         return float("inf")
+    if c is None:
+        c = _C
     mean = reward / n
     return mean + c * math.sqrt(math.log(max(total, 1)) / n)
 
@@ -93,10 +108,11 @@ def choose(members, specialist: str, heuristic_pick):
         total = sum(arms.get(m.model or "", {"n": 0})["n"] for m in members)
         if total < MIN_WARMUP:
             return None                    # warm up on the heuristic first
+        c = _exploration()                 # self-tuned exploration constant
         scored = []
         for m in members:
             a = arms.get(m.model or "", {"n": 0, "reward": 0.0})
-            score = ucb_score(a["reward"], a["n"], total)
+            score = ucb_score(a["reward"], a["n"], total, c)
             scored.append((score, m.model or "", m))
         # Highest UCB wins; ties → model name ascending (fully deterministic).
         scored.sort(key=lambda t: (-t[0], t[1]))

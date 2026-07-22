@@ -1535,6 +1535,16 @@ class Olympus:
                 models=models, roles=roles,
                 review_verdict=review.get("verdict"),
                 synthetic=config.routing_synthetic())
+            # When the bandit is driving model selection, every routing outcome
+            # IS a bandit outcome — a genuine signal. Feed it to the evolution
+            # spine so the exploration constant self-tunes (explore less when
+            # outcomes degrade). Replay-safe: this whole method is skipped during
+            # replay, and the bandit itself is off during replay.
+            from . import bandit_routing
+            if bandit_routing.enabled():
+                good = review.get("verdict") == "approve"
+                self._evolve_record("bandit", "ok" if good else "degraded",
+                                    review.get("verdict") or "")
         except Exception:
             pass
 
