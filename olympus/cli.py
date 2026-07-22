@@ -664,6 +664,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_sl.add_argument("--host", default="0.0.0.0")
     p_sl.add_argument("--port", type=int, default=8487)
 
+    p_mm = sub.add_parser("mattermost", help="serve the Mattermost outgoing-"
+                          "webhook endpoint (needs MATTERMOST_OUTGOING_TOKEN)")
+    p_mm.add_argument("--host", default="0.0.0.0")
+    p_mm.add_argument("--port", type=int, default=8489)
+    p_gc = sub.add_parser("googlechat", help="serve the Google Chat app "
+                          "endpoint (needs GOOGLECHAT_VERIFY_TOKEN)")
+    p_gc.add_argument("--host", default="0.0.0.0")
+    p_gc.add_argument("--port", type=int, default=8490)
+
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
     p_email = sub.add_parser("email", help="run the email gateway — answer "
@@ -2059,6 +2068,18 @@ def main(argv: list[str] | None = None) -> int:
             matrix.run_bot()
         except KeyboardInterrupt:
             print("\nMatrix gateway stopped.")
+    elif args.command == "mattermost":
+        from . import mattermost
+        try:
+            mattermost.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nMattermost channel stopped.")
+    elif args.command == "googlechat":
+        from . import googlechat
+        try:
+            googlechat.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nGoogle Chat channel stopped.")
     elif args.command == "gateway":
         from . import gateway
         if args.gw_status:

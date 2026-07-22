@@ -46,7 +46,7 @@
     ]
   },
   "commands": {
-    "count": 113,
+    "count": 115,
     "names": [
       "a2a",
       "actions",
@@ -85,6 +85,7 @@
       "gate",
       "gateway",
       "goal",
+      "googlechat",
       "grant",
       "graph",
       "growth",
@@ -99,6 +100,7 @@
       "limit",
       "liveeval",
       "matrix",
+      "mattermost",
       "mcp-serve",
       "memory",
       "moa",

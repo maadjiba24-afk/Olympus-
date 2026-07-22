@@ -162,3 +162,26 @@ def route(channel: str, prefix: str, sender_id, text: str, bots: dict,
                                    prefix=prefix, uid=uid):
         send_fn(chunk)
     return True
+
+
+def collect_reply(channel: str, prefix: str, sender_id, text: str, bots: dict,
+                  limiter: "RateLimiter | None" = None) -> str | None:
+    """Reply-RETURNING variant of `route`, for webhook channels that answer in
+    the HTTP response instead of via a separate send call. Returns the reply
+    text (pairing/deny messages included), or None when the message was dropped
+    (rate-limited). Same access spine as `route` — untrusted by default."""
+    paired = try_pair(channel, sender_id, text)
+    if paired is not None:
+        return paired
+    if not allowed(channel, sender_id):
+        # A webhook can't throttle a per-sender hint across requests as cleanly
+        # as a poller, but the access decision is identical: deny.
+        return pair_hint(channel)
+    if limiter is not None and limiter.hit(str(sender_id)):
+        return ("You're sending requests faster than I can safely run them — "
+                "give it a moment.")
+    from . import gateway
+    uid = f"{prefix}-{sender_id}"
+    chunks = gateway.reply_for(bots, str(sender_id), text, prefix=prefix,
+                               uid=uid)
+    return "\n\n".join(chunks)

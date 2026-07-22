@@ -71,7 +71,8 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
 
 
 # Every chat platform that exposes an ambient notify() for proactive pushes.
-NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal", "ntfy", "matrix")
+NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal", "ntfy", "matrix",
+                   "mattermost", "googlechat")
 
 
 # --- in-flight work journal (session auto-resume) --------------------------
@@ -162,10 +163,12 @@ def notify_all(text: str) -> list[str]:
         d = egress.guard(text, egress.ChannelKind.BROADCAST, user="shared")
         if d.verdict is egress.Verdict.HOLD:
             return []
-    from . import discord, matrix, ntfy, signal as signal_gw, slack, telegram
+    from . import (discord, googlechat, matrix, mattermost, ntfy,
+                   signal as signal_gw, slack, telegram)
     fns = {"telegram": telegram.notify, "discord": discord.notify,
            "slack": slack.notify, "signal": signal_gw.notify,
-           "ntfy": ntfy.notify, "matrix": matrix.notify}
+           "ntfy": ntfy.notify, "matrix": matrix.notify,
+           "mattermost": mattermost.notify, "googlechat": googlechat.notify}
     delivered = []
     for name in NOTIFY_CHANNELS:
         try:
