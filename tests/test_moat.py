@@ -8,8 +8,8 @@ from olympus import cli, evolve, moat, store
 def test_status_covers_every_capability():
     caps = moat.status()["capabilities"]
     assert set(caps) == {"vector_recall", "swarm", "consensus",
-                         "semantic_routing", "bandit_routing", "file_agents",
-                         "federation"}
+                         "semantic_routing", "semantic_skills", "bandit_routing",
+                         "file_agents", "federation"}
     for c in caps.values():
         assert "enabled" in c and "flag" in c
 
@@ -17,8 +17,8 @@ def test_status_covers_every_capability():
 def test_render_is_readable():
     out = moat.render()
     assert "Olympus moat" in out
-    for label in ("vector recall", "swarm", "consensus", "bandit routing",
-                  "file agents", "federation"):
+    for label in ("vector recall", "swarm", "consensus", "semantic skills",
+                  "bandit routing", "file agents", "federation"):
         assert label in out
 
 

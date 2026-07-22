@@ -36,7 +36,7 @@ from . import (agent, backend, codegraph, companion, config, connectors,
                memory, playbooks, profile, recall, relgraph, replaystore,
                steering, trace as trace_mod, tools, usage)
 from .specialists import (SPECIALISTS, roster, semantic_roster,
-                          semantic_routing_enabled)
+                          semantic_routing_enabled, semantic_skills_enabled)
 
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1000,6 +1000,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        # Same thread-hop reason as trace above: the dispatch pool starts workers
+        # with a fresh context, so re-publish the replay run scope here or a
+        # specialist's prompt-assembly `frozen_context` (semantic skill index)
+        # would silently skip freezing in record mode while replay still expects
+        # the frozen value — diverging the replay. Harmless in replay (which keys
+        # off the global OLYMPUS_REPLAY env regardless).
+        replaystore.set_run(tr.id)
         from . import interaction, sandbox
         ask_prev = interaction.set_provider(self._ask_provider)
         # Scope this specialist's file writes to its OWN workspace root
@@ -1293,6 +1300,11 @@ class Olympus:
         # a run recorded with it on, replayed with it off, would hash a different
         # route request. Record it so replay reproduces the same routing path.
         tr.meta["semantic_routing"] = semantic_routing_enabled()
+        # Semantic skills scope each specialist's in-prompt skill index to the
+        # task (task-dependent), so a run recorded with it on, replayed with it
+        # off, would hash a different per-specialist request. Record it so replay
+        # reproduces the same prompt-assembly path.
+        tr.meta["semantic_skills"] = semantic_skills_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -2198,6 +2210,12 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_semroute = os.environ.get("OLYMPUS_SEMANTIC_ROUTING")
     os.environ["OLYMPUS_SEMANTIC_ROUTING"] = \
         "1" if _meta.get("semantic_routing") else "0"
+    # Semantic skills scope each specialist's in-prompt skill index, so reproduce
+    # the recorded state or a semantic-recorded run replayed without it hashes a
+    # different per-specialist request.
+    prev_semskills = os.environ.get("OLYMPUS_SEMANTIC_SKILLS")
+    os.environ["OLYMPUS_SEMANTIC_SKILLS"] = \
+        "1" if _meta.get("semantic_skills") else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2230,6 +2248,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_SEMANTIC_ROUTING", None)
         else:
             os.environ["OLYMPUS_SEMANTIC_ROUTING"] = prev_semroute
+        if prev_semskills is None:
+            os.environ.pop("OLYMPUS_SEMANTIC_SKILLS", None)
+        else:
+            os.environ["OLYMPUS_SEMANTIC_SKILLS"] = prev_semskills
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

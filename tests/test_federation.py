@@ -285,3 +285,120 @@ def test_unreadable_token_file_denies(monkeypatch, tmp_path):
     status, _ = federation.handle_request(
         "POST", "/federation/task", {}, {"Authorization": "Bearer x"})
     assert status == 401                       # fail-closed, not a 500
+
+
+# --- federation depth: capability discovery + multi-peer aggregation -----
+
+@needs_crypto
+def test_capabilities_card_is_signed_and_scrubbed():
+    card = federation.capabilities_card()
+    ok, payload = federation.verify_envelope(card)
+    assert ok and payload["kind"] == "capabilities"
+    assert isinstance(payload["specialists"], list) and payload["specialists"]
+    assert all("key" in s and "title" in s for s in payload["specialists"])
+    assert isinstance(payload["skills"], int)
+
+
+@needs_crypto
+def test_capabilities_route_requires_pinned_peer(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION_TOKEN", "s3cret")
+    # signed by an UNPINNED key → 403 even with the right bearer token
+    env = federation.sign_envelope({"kind": "capabilities_request"})
+    status, _ = federation.handle_request(
+        "POST", "/federation/capabilities", env,
+        {"Authorization": "Bearer s3cret"})
+    assert status == 403
+
+
+@needs_crypto
+def test_capabilities_route_needs_auth():
+    status, _ = federation.handle_request(
+        "POST", "/federation/capabilities", {}, {})
+    assert status == 401                         # fail-closed, no token
+
+
+@needs_crypto
+def test_capabilities_route_serves_pinned_peer(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION_TOKEN", "s3cret")
+    federation.add_peer("peer", federation.public_key(), trust="task")
+    env = federation.sign_envelope({"kind": "capabilities_request"})
+    status, resp = federation.handle_request(
+        "POST", "/federation/capabilities", env,
+        {"Authorization": "Bearer s3cret"})
+    assert status == 200
+    ok, payload = federation.verify_envelope(resp)
+    assert ok and payload["kind"] == "capabilities"
+
+
+@needs_crypto
+def test_discover_peer_verifies_and_returns_card(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION", "1")
+    federation.add_peer("peer", federation.public_key(),
+                        url="https://p.example", trust="task")
+
+    def fake_fetch(url, data, headers, timeout):
+        assert url.endswith("/federation/capabilities")
+        env = json.loads(data)
+        ok, payload = federation.verify_envelope(env)
+        assert ok and payload["kind"] == "capabilities_request"
+        return 200, json.dumps(federation.capabilities_card()).encode("utf-8")
+
+    card = federation.discover_peer("peer", fetcher=fake_fetch)
+    assert card["peer"] == "peer"
+    assert isinstance(card["specialists"], list) and card["specialists"]
+    assert isinstance(card["skills"], int)
+
+
+@needs_crypto
+def test_discover_peer_rejects_wrong_signer(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION", "1")
+    # Pin a peer to a DIFFERENT key than the reply is signed with → pin mismatch.
+    federation.add_peer("peer", "0" * 64, url="https://p.example", trust="task")
+
+    def fake_fetch(url, data, headers, timeout):
+        return 200, json.dumps(federation.capabilities_card()).encode("utf-8")
+
+    with pytest.raises(federation.FederationError):
+        federation.discover_peer("peer", fetcher=fake_fetch)
+
+
+def test_discover_peer_disabled():
+    federation.add_peer("peer", "kk", url="https://p.example", trust="task")
+    with pytest.raises(federation.FederationError):
+        federation.discover_peer("peer")            # OLYMPUS_FEDERATION off
+
+
+@needs_crypto
+def test_call_peers_aggregates_and_isolates_failures(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION", "1")
+    federation.add_peer("good", federation.public_key(),
+                        url="https://good.example", trust="task")
+    federation.add_peer("bad", federation.public_key(),
+                        url="https://bad.example", trust="task")
+
+    def fake_fetch(url, data, headers, timeout):
+        if "bad.example" in url:
+            raise federation.FederationError("boom")
+        reply = federation.sign_envelope({"kind": "task_result",
+                                          "answer": "ok from good"})
+        return 200, json.dumps(reply).encode("utf-8")
+
+    out = federation.call_peers(["good", "bad", "good"], "q", fetcher=fake_fetch)
+    # deterministic order, duplicate 'good' collapsed, one failure isolated
+    assert [r["peer"] for r in out] == ["good", "bad"]
+    assert "ok from good" in out[0]["answer"] and "untrusted" in out[0]["answer"]
+    assert "error" in out[1]
+
+
+def test_call_peers_disabled():
+    with pytest.raises(federation.FederationError):
+        federation.call_peers(["p"], "q")           # OLYMPUS_FEDERATION off
+
+
+@needs_crypto
+def test_trusted_peer_names_filters_and_sorts():
+    federation.add_peer("zeta", "k1", url="https://z.example", trust="task")
+    federation.add_peer("alpha", "k2", url="https://a.example", trust="trusted")
+    federation.add_peer("blocked", "k3", url="https://b.example", trust="blocked")
+    federation.add_peer("nourl", "k4", trust="task")     # no url → excluded
+    assert federation.trusted_peer_names() == ["alpha", "zeta"]

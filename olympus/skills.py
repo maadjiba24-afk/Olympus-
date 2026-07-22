@@ -259,6 +259,19 @@ def _visible_to(owner: str | None, specialist: str | None) -> bool:
     return owner == specialist
 
 
+def _index_line(path: Path, text: str) -> str:
+    """The one-line index entry for a skill file: `- Name: description (prov)`."""
+    name = _title(text) or path.stem
+    desc = ""
+    for line in text.splitlines():
+        if line.startswith("> "):
+            desc = line[2:].strip()
+            break
+    prov = " (provisional)" if _meta(text, "provisional") is not None \
+        or "<!-- provisional -->" in text else ""
+    return f"- {name}: {desc}{prov}"
+
+
 def index(specialist: str | None = None) -> str:
     """One line per skill. With `specialist`, scope to the skills that
     specialist should actually see (its own + global); without it, list all."""
@@ -267,16 +280,31 @@ def index(specialist: str | None = None) -> str:
         text = path.read_text(encoding="utf-8", errors="replace")
         if not _visible_to(_meta(text, "specialist"), specialist):
             continue
-        name = _title(text) or path.stem
-        desc = ""
-        for line in text.splitlines():
-            if line.startswith("> "):
-                desc = line[2:].strip()
-                break
-        prov = " (provisional)" if _meta(text, "provisional") is not None \
-            or "<!-- provisional -->" in text else ""
-        lines.append(f"- {name}: {desc}{prov}")
+        lines.append(_index_line(path, text))
     return "\n".join(lines) if lines else "(no skills built yet)"
+
+
+def scoped_index(specialist: str | None, task: str,
+                 limit: int = 12) -> str | None:
+    """The top-`limit` skills most relevant to `task` (semantic cosine),
+    formatted exactly like `index` so `read_skill` still resolves each name.
+
+    Returns None when embeddings are unavailable or nothing scores > 0, so a
+    caller falls back to the full `index`. Visibility (own + global) is enforced
+    by `search`, so a task-scoped block never leaks another specialist's skills.
+    Every listed skill remains loadable by name, and any unlisted skill is still
+    reachable via `read_skill` — scoping trims the *prompt*, not the library."""
+    hits = search(task, limit=limit, specialist=specialist)
+    if not hits:
+        return None
+    lines = []
+    for h in hits:
+        path = _dir() / f"{h['slug']}.md"
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines.append(_index_line(path, text))
+    return "\n".join(lines) if lines else None
 
 
 def count() -> int:

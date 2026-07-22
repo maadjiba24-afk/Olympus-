@@ -127,15 +127,17 @@ class Specialist:
         return [s.to_api() for s in connectors.mcp_for(
             self.key, allow_action=allow_action)]
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, task: str | None = None) -> str:
         # Scope the skill index to THIS specialist (its own skills + global
         # ones). A skill tagged for another specialist never enters this prompt,
         # so a benchmark-gated skill can't degrade specialists it was never
-        # measured against.
+        # measured against. When semantic skills are on and the library is large,
+        # `_skill_index_for` narrows that scope further to the top-K relevant to
+        # `task`; otherwise it's the full per-specialist index.
         base = self.prompt_text or agent.load_prompt(self.key)
         return (base
                 + "\n\n## Skill library (load with read_skill before "
-                  "relevant tasks)\n" + skills.index(self.key)
+                  "relevant tasks)\n" + _skill_index_for(self.key, task)
                 + self._extra_context()
                 + _UNTRUSTED_NOTE)
 
@@ -163,7 +165,7 @@ class Specialist:
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
         effort = effort or self.effort
-        return backend.run_agent_counted(settings, self.system_prompt(), task,
+        return backend.run_agent_counted(settings, self.system_prompt(task), task,
                                          self.tool_defs(settings.provider,
                                                         task=task),
                                          mcp_servers=self.mcp_defs(settings.provider),
@@ -440,12 +442,68 @@ def semantic_roster(task: str) -> str:
     if (not semantic_routing_enabled()
             or len(SPECIALISTS) < _SEMANTIC_ROSTER_MIN):
         return roster()
+    from . import replaystore
     try:
-        from . import replaystore
         return replaystore.frozen_context("route.roster",
                                           lambda: _semantic_order(task))
+    except replaystore.ReplayDivergence:
+        # A missing frozen roster on replay is a genuine divergence — surface it
+        # precisely rather than masking it behind the plain roster.
+        raise
     except Exception:
         return roster()
+
+
+# --- semantic skill retrieval: scope a specialist's skill index to the task ---
+#
+# The full per-specialist skill index is injected into every system prompt.
+# That's ideal while a library is small, but once a specialist accrues dozens of
+# skills the index bloats the prompt with mostly-irrelevant lines. When the
+# library is large AND embeddings are configured, surface only the top-K skills
+# most relevant to THIS task instead of the whole list. Opt-in
+# (`OLYMPUS_SEMANTIC_SKILLS`), engages only above a size threshold, replay-frozen
+# at the call site, and always degrades to the full index — so no skill ever
+# becomes unreachable (the specialist can still read_skill any skill by name).
+
+_SEMANTIC_SKILLS_MIN = 24          # ≤ this many skills, the full index is fine
+_SEMANTIC_SKILLS_K = 12            # top-K surfaced when scoping to a task
+
+
+def semantic_skills_enabled() -> bool:
+    return os.environ.get("OLYMPUS_SEMANTIC_SKILLS", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def _skill_index_for(specialist_key: str, task: str | None) -> str:
+    """The skill-library block for a specialist's system prompt: the full
+    per-specialist index by default; a task-scoped top-K when semantic skills are
+    on, a task is present, and the library is large enough to benefit. Frozen per
+    run for replay-safety (the full path stays unfrozen, so historical runs are
+    unaffected); best-effort → full index on any failure.
+
+    Gate on the flag + task + size only, NOT embeddings, so a run that took the
+    frozen path replays down it too (flag restored from meta) and reproduces the
+    recorded block regardless of embedding availability at replay time —
+    `scoped_index` itself degrades to the full index when embeddings are absent."""
+    full = skills.index(specialist_key)
+    if (not semantic_skills_enabled() or not task
+            or skills.count() < _SEMANTIC_SKILLS_MIN):
+        return full
+    from . import replaystore
+    try:
+        def _scoped() -> str:
+            scoped = skills.scoped_index(specialist_key, task,
+                                         limit=_SEMANTIC_SKILLS_K)
+            return scoped if scoped else full   # embeddings absent → full index
+        return replaystore.frozen_context(
+            f"skills.block.{specialist_key}", _scoped)
+    except replaystore.ReplayDivergence:
+        # A missing frozen block on replay is a genuine divergence (e.g. the
+        # library crossed the size threshold since the recorded run) — let it
+        # surface precisely here, never masked into a later request-hash mismatch.
+        raise
+    except Exception:
+        return full
 
 
 # Merge any operator-defined file agents into the registry (OLYMPUS_AGENTS, off

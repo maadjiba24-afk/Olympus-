@@ -430,14 +430,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_fed = sub.add_parser(
         "federation",
         help="cross-instance federation (signed, opt-in): show identity, "
-             "pin/list/remove peers, call a peer, serve the listener, or list "
+             "pin/list/remove peers, call a peer, discover a peer's "
+             "capabilities, ask all peers, serve the listener, or list "
              "staged peer lessons")
     p_fed.add_argument(
         "action", nargs="?", default="identity",
         choices=["identity", "add-peer", "peers", "remove-peer", "call",
-                 "serve", "lessons"])
+                 "capabilities", "ask-all", "serve", "lessons"])
     p_fed.add_argument("name", nargs="?", default=None,
-                       help="peer name (add-peer/remove-peer/call)")
+                       help="peer name (add-peer/remove-peer/call/capabilities) "
+                            "or message (ask-all)")
     p_fed.add_argument("value", nargs="?", default=None,
                        help="pubkey (add-peer) or message (call)")
     p_fed.add_argument("--url", default="", help="peer base URL (add-peer)")
@@ -1555,6 +1557,28 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(federation.call_peer(args.name, args.value,
                                                token=args.token))
+            elif act == "capabilities":
+                if not args.name:
+                    print("Usage: olympus federation capabilities <peer-name> "
+                          "[--token TOKEN]")
+                else:
+                    card = federation.discover_peer(args.name, token=args.token)
+                    print(_json.dumps(card, indent=2))
+            elif act == "ask-all":
+                if not args.name:
+                    print("Usage: olympus federation ask-all <message> "
+                          "[--token TOKEN]")
+                else:
+                    # `name` carries the message here (ask-all takes no peer).
+                    targets = federation.trusted_peer_names()
+                    if not targets:
+                        print("No pinned peers with a URL to ask.")
+                    for r in federation.call_peers(targets, args.name,
+                                                   token=args.token):
+                        if "error" in r:
+                            print(f"- [{r['peer']}] refused: {r['error']}")
+                        else:
+                            print(f"- [{r['peer']}] {r['answer']}")
             elif act == "serve":
                 from . import config
                 def _ask(text: str) -> str:
