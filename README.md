@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->106<!--/cap--> agent tools, and <!--cap:commands-->112<!--/cap-->
+<!--cap:tools-->106<!--/cap--> agent tools, and <!--cap:commands-->113<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -569,7 +569,8 @@ federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)):
   Olympus instances: ed25519 handshake reusing the `witness` root of trust,
   pinned/tiered peer trust, an egress-guarded transport, and shared-lesson sync
   that is scrubbed, trusted-only, and staged as candidates for your gate — never
-  auto-committed.
+  auto-committed. Drive it from the CLI:
+  `olympus federation identity | add-peer | peers | call | serve | lessons`.
 
 ### Connectors: MCP servers & custom plugins
 
