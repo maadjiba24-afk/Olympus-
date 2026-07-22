@@ -63,3 +63,90 @@ def test_build_pool_config_claude_code_needs_no_key():
         providers.Member("claude-code", "claude-opus-4-8")])
     assert cfg["OLYMPUS_PROVIDER"] == "claude-code"
     assert "OLYMPUS_API_KEY" not in cfg and "ANTHROPIC_API_KEY" not in cfg
+
+
+# --- Azure OpenAI (openai_compat variant, detected by endpoint host) --------
+
+def test_azure_catalog_entry_rides_openai_backend():
+    az = providers.get("azure")
+    assert az is not None and az.backend == "openai"
+
+
+def test_azure_endpoint_url_is_deployment_scoped(monkeypatch):
+    from olympus import config, openai_compat as oc
+    monkeypatch.delenv("OLYMPUS_AZURE_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("OLYMPUS_AZURE_API_VERSION", raising=False)
+    s = config.Settings(provider="openai", model="gpt4o-deploy",
+                        base_url="https://res.openai.azure.com")
+    base = s.base_url.rstrip("/")
+    assert oc._is_azure(base)
+    url = oc._endpoint_url(s, base)
+    assert url == ("https://res.openai.azure.com/openai/deployments/"
+                   "gpt4o-deploy/chat/completions?api-version=2024-10-21")
+    # deployment + api-version overrides
+    monkeypatch.setenv("OLYMPUS_AZURE_DEPLOYMENT", "d2")
+    monkeypatch.setenv("OLYMPUS_AZURE_API_VERSION", "2025-03-01")
+    url2 = oc._endpoint_url(s, base)
+    assert "/deployments/d2/" in url2 and "api-version=2025-03-01" in url2
+
+
+def test_azure_uses_api_key_header_not_bearer():
+    from olympus import openai_compat as oc
+    azure = "https://res.openai.azure.com"
+    h = oc._auth_headers(azure, "SECRET")
+    assert h.get("api-key") == "SECRET" and "Authorization" not in h
+
+
+def test_non_azure_openai_is_unchanged():
+    from olympus import config, openai_compat as oc
+    s = config.Settings(provider="openai", model="gpt-4o",
+                        base_url="https://api.openai.com/v1")
+    assert not oc._is_azure("https://api.openai.com/v1")
+    assert oc._endpoint_url(s, "https://api.openai.com/v1") == \
+        "https://api.openai.com/v1/chat/completions"
+    h = oc._auth_headers("https://api.openai.com/v1", "K")
+    assert h["Authorization"] == "Bearer K" and "api-key" not in h
+
+
+# --- AWS Bedrock (Claude via anthropic.AnthropicBedrock) --------------------
+
+def test_bedrock_validate_and_usable():
+    from olympus import config
+    ok = config.Settings(provider="bedrock",
+                         model="anthropic.claude-3-5-sonnet-20241022-v2:0")
+    assert ok.validate() is None and ok.usable()
+    no_model = config.Settings(provider="bedrock", model="")
+    assert no_model.validate() and "Bedrock model" in no_model.validate()
+
+
+def test_bedrock_member_host_uses_region(monkeypatch):
+    from olympus import config
+    monkeypatch.setenv("OLYMPUS_BEDROCK_REGION", "ap-southeast-2")
+    s = config.Settings(provider="bedrock", model="anthropic.claude-x")
+    assert config.member_host(s) == "bedrock-runtime.ap-southeast-2.amazonaws.com"
+
+
+def test_bedrock_catalog_entry():
+    az = providers.get("bedrock")
+    assert az is not None and az.backend == "bedrock"
+
+
+def test_bedrock_client_constructs_anthropic_bedrock(monkeypatch):
+    import anthropic
+    from olympus import config, llm
+    captured = {}
+
+    class FakeBedrock:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(anthropic, "AnthropicBedrock", FakeBedrock, raising=False)
+    monkeypatch.setattr(llm, "_clients", {})
+    monkeypatch.setenv("OLYMPUS_BEDROCK_REGION", "us-west-2")
+    monkeypatch.setenv("OLYMPUS_BEDROCK_ACCESS_KEY", "AKIATEST")
+    monkeypatch.setenv("OLYMPUS_BEDROCK_SECRET_KEY", "shh")
+    s = config.Settings(provider="bedrock", model="anthropic.claude-x")
+    c = llm.client(s)
+    assert isinstance(c, FakeBedrock)
+    assert captured["aws_region"] == "us-west-2"
+    assert captured["aws_access_key"] == "AKIATEST"

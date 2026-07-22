@@ -166,9 +166,46 @@ def _strict_object_schema(schema: Any) -> Any:
     return schema
 
 
+def _bedrock_client(settings: config.Settings | None):
+    """Construct an AWS-Bedrock-backed Anthropic client. Claude-on-Bedrock is
+    API-compatible with anthropic.Anthropic, so every downstream call path
+    (streaming, caching, tools, output_config) works unchanged. Credentials come
+    from the standard AWS chain (env / shared config / instance role); region
+    from OLYMPUS_BEDROCK_REGION or AWS_REGION."""
+    import os
+    try:
+        from anthropic import AnthropicBedrock
+    except Exception as err:  # boto3 not installed / SDK too old
+        raise RuntimeError(
+            "Bedrock needs the AWS extra — run `pip install 'anthropic[bedrock]'` "
+            f"(boto3). Import failed: {err}") from err
+    region = (os.environ.get("OLYMPUS_BEDROCK_REGION")
+              or os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+    kwargs: dict[str, Any] = {"aws_region": region}
+    # Explicit static creds are optional — without them the SDK/boto3 falls back
+    # to the shared-config/instance-role chain.
+    ak = os.environ.get("OLYMPUS_BEDROCK_ACCESS_KEY") or os.environ.get("AWS_ACCESS_KEY_ID")
+    sk = os.environ.get("OLYMPUS_BEDROCK_SECRET_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if ak and sk:
+        kwargs["aws_access_key"] = ak
+        kwargs["aws_secret_key"] = sk
+        st = os.environ.get("AWS_SESSION_TOKEN")
+        if st:
+            kwargs["aws_session_token"] = st
+    return AnthropicBedrock(**kwargs)
+
+
 def client(settings: config.Settings | None = None) -> anthropic.Anthropic:
     key = settings.api_key if settings else None
     base = settings.base_url if settings else None
+    if settings and settings.provider == "bedrock":
+        cache_key = ("__bedrock__", config.member_host(settings))
+        if cache_key not in _clients:
+            if len(_clients) >= _CLIENTS_MAX:
+                _clients.pop(next(iter(_clients)))
+            _clients[cache_key] = _bedrock_client(settings)
+        return _clients[cache_key]
     cache_key = (key, base)
     if cache_key not in _clients:
         if len(_clients) >= _CLIENTS_MAX:
