@@ -17,6 +17,36 @@ carries a migration note here.
 
 ## [0.26.0] — 2026-07-22
 
+### Added — Four native-capability deepenings (verification, adaptation, providers, review)
+
+Four extensions that strengthen existing Olympus subsystems along its core axes.
+No new tools — capability accounting is unchanged. Closes three tracked
+`DEFERRED.md` items (#2, #4, and the OpenAI-compatible half of #5).
+
+- **Code graph — verify honesty fix.** `verify_claim` no longer false-REFUTEs a
+  real call whose callee name is defined in more than `_MAX_AMBIGUOUS` places
+  (the resolver skips those edges, so absence isn't proof). It now returns the
+  honest `UNKNOWN` — an Aletheia correctness fix, since it was asserting a true
+  claim false (e.g. `_run_command_execute calls run`). Refutation power is kept
+  for uniquely-named callees.
+- **Skills — semantic dedup + retrieval.** Write-time embedding dedup flags
+  near-duplicate skills at `create()` time (deterministic, no model call), and a
+  new `skills.search()` gives cosine-ranked retrieval. Reuses `embed.py`;
+  best-effort and zero-cost when `OLYMPUS_EMBED_MODEL` is unset. The embedding
+  cache is keyed by content hash AND model so a model change re-embeds rather
+  than silently serving stale-dimension vectors. Closes DEFERRED #2.
+- **Providers — per-model effort tiers.** `low/medium/high` now map to
+  `reasoning_effort` for the OpenAI-compatible reasoning families that accept it
+  (OpenAI o-series/gpt-5, Gemini 2.5 / thinking), allowlist-gated so a
+  non-reasoning model is never sent an unknown param. Also fixes a latent break:
+  those models require `max_completion_tokens`, not `max_tokens`. Kill-switch:
+  `OLYMPUS_DISABLE_REASONING_EFFORT`. Closes the OpenAI-compatible half of #5.
+- **Orchestrator — Athena bounded multi-pass review.** When Athena orders a
+  rework, the reworked output is now RE-REVIEWED once (bounded — never a third
+  pass). It runs only on the minority of turns that actually reworked, so the
+  common approve-first path pays for a single review. Closes the one-shot half
+  of DEFERRED #4.
+
 ### Added — Absorb OpenManus's capabilities as native Olympus features
 
 The capabilities of [OpenManus](https://github.com/FoundationAgents/OpenManus)
