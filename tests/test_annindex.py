@@ -3,7 +3,7 @@
 import math
 import random
 
-from olympus import annindex
+from olympus import annindex, store
 
 
 def _cos(a, b):
@@ -118,6 +118,17 @@ def test_persistence_roundtrip():
 def test_from_bytes_tolerates_garbage():
     assert len(annindex.HNSW.from_bytes(None)) == 0
     assert len(annindex.HNSW.from_bytes(b"not json")) == 0
+
+
+def test_store_backed_persistence():
+    store.reset()
+    idx = annindex.build(_rand_vectors(50, 8, seed=8))
+    annindex.save_index("test.ann", "idx1", idx)
+    reloaded = annindex.load_index("test.ann", "idx1")
+    q = list(idx._vectors["v0010"])
+    assert idx.search(q, k=5) == reloaded.search(q, k=5)
+    assert len(annindex.load_index("test.ann", "missing")) == 0
+    store.reset()
 
 
 # --- incremental graph ops ----------------------------------------------

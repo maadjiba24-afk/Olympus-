@@ -326,6 +326,18 @@ def nearest(query, items, k: int = 8, *,
     return idx.search(q, k, min_sim=min_sim)
 
 
+def save_index(namespace: str, key: str, idx: HNSW) -> None:
+    """Persist an index through `store.backend()` — inherits the file/Postgres
+    switch and the atomic-write guarantee, so a persistent index is a config
+    switch, not a rewrite."""
+    store.backend().put(namespace, key, idx.to_bytes())
+
+
+def load_index(namespace: str, key: str) -> HNSW:
+    """Load a persisted index (an empty one if absent or corrupt)."""
+    return HNSW.from_bytes(store.backend().get(namespace, key))
+
+
 def dedup_match(vector, items, *, threshold: float = 0.92):
     """The nearest existing item whose similarity to `vector` meets `threshold`,
     or None. The primitive behind write-time semantic dedup (DEFERRED #2): a
