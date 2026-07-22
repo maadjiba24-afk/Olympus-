@@ -15,6 +15,17 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Docs — Firecrawl analysis & adoption tracking
+
+Added `docs/FIRECRAWL_TRACKING.md`: an analysis-only inventory and critique of
+[firecrawl/firecrawl](https://github.com/firecrawl/firecrawl) (feature/endpoint
+map, engine/queue architecture, and a security review) with a ranked watchlist
+of what's worth turning to Olympus's own agent framework — readability-grade
+HTML→Markdown, schema-guided extraction with pool-verification, URL `map`, and
+change-monitoring — plus an explicit "do not adopt" list (network-only SSRF
+model, inline-string injection defense, ungoverned `executeJavascript`,
+open-by-default self-host). No Firecrawl code is used; inspiration analysis only.
+
 ### Added — Absorbed capabilities as a native, self-evolving moat
 
 Six capabilities surveyed from an external agent harness (ruflo), re-built
