@@ -88,6 +88,11 @@ class Specialist:
         if self.code_exec and provider == "anthropic":
             defs.append(tools.CODE_EXECUTION_TOOL)
         defs += connectors.plugin_tools_for(self.key, allow_action=allow_action)
+        # Native (stdio/SSE) MCP tools — provider-independent, so they load on
+        # EVERY backend (unlike the Anthropic-only server-side url connectors in
+        # mcp_defs). allow_action gates action servers out of ingesting runs,
+        # exactly like plugin_tools_for above.
+        defs += connectors.mcp_client_tools_for(self.key, allow_action=allow_action)
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)
@@ -170,6 +175,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Personal finance, budgeting, investing concepts, "
                         "business finance, market analysis, pricing.",
             web=True,
+            extra_tools=("chart_from_data",),
         ),
         Specialist(
             key="peitho", name="Peitho", title="Marketing Specialist",
@@ -178,7 +184,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "documents to the user's workspace.",
             web=True,
             extra_tools=("generate_image", "edit_image", "text_to_speech",
-                         "transcribe_audio", "browse_page", "analyze_image",
+                         "transcribe_audio", "browse_page", "crawl_site",
+                         "chart_from_data", "analyze_image",
                          "list_documents", "read_document", "search_documents",
                          "write_document"),
         ),
@@ -192,7 +199,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "codegraph_impact", "codegraph_path",
                          "codegraph_subgraph", "codegraph_overview",
                          "read_file", "list_dir", "grep_files", "glob_files",
-                         "edit_file", "prepare_action",
+                         "edit_file", "run_python", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(
@@ -255,7 +262,8 @@ SPECIALISTS: dict[str, Specialist] = {
             # actuator (browser_act) from its live loadout — it can read/learn
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
-            extra_tools=("browse_page", "analyze_image", "browser_open",
+            extra_tools=("browse_page", "crawl_site", "analyze_image",
+                         "browser_open",
                          "browser_read", "browser_read_ax", "browser_save_pdf",
                          "browser_console", "browser_screenshot",
                          "browser_act", "browser_skills", "browser_skill_record",

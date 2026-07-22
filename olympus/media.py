@@ -351,3 +351,262 @@ def browse_page(url: str) -> str:
         out.append("\n## Links on this page")
         out += [f"- {link}" for link in links]
     return "\n".join(out)
+
+
+# --- deep crawl (bounded BFS over the gated fetcher) ------------------------
+
+_CRAWL_MAX_DEPTH = 3
+_CRAWL_MAX_PAGES = 25
+_CRAWL_BYTE_CAP = 200_000
+_CRAWL_PER_PAGE = 6000
+
+
+def crawl_site(url: str, depth: int = 1, max_pages: int = 10,
+               same_domain: bool = True) -> str:
+    """Recursively crawl from `url` and return a concatenated markdown digest of
+    the pages visited — multi-page reading built on the same gated primitives as
+    browse_page. EVERY hop goes through tools._http_get, so the SSRF/egress and
+    redirect re-check gate applies to each fetched URL. Bounded three ways
+    (page count, link depth, and aggregate bytes) so a crawl can't run away with
+    the token budget."""
+    import urllib.parse
+    from . import tools
+    try:
+        depth = max(0, min(_CRAWL_MAX_DEPTH, int(depth)))
+    except (TypeError, ValueError):
+        depth = 1
+    try:
+        max_pages = max(1, min(_CRAWL_MAX_PAGES, int(max_pages)))
+    except (TypeError, ValueError):
+        max_pages = 10
+
+    start_host = urllib.parse.urlparse(url).netloc
+    frontier: list[tuple[str, int]] = [(url, 0)]
+    visited: set[str] = set()
+    pages: list[str] = []
+    total = 0
+    truncated = False
+
+    while frontier and len(pages) < max_pages:
+        if total >= _CRAWL_BYTE_CAP:
+            truncated = True
+            break
+        current, d = frontier.pop(0)
+        if current in visited:
+            continue
+        visited.add(current)
+        try:
+            html = tools._http_get(current)          # SSRF/egress gate per hop
+        except Exception as err:
+            pages.append(f"## {current}\n[error: {str(err)[:150]}]")
+            continue
+        text = tools._strip_html(html)[:_CRAWL_PER_PAGE]
+        total += len(text)
+        pages.append(f"## {current}\n\n{text}")
+        if d < depth:
+            for link in extract_links(html, limit=50):
+                if link in visited:
+                    continue
+                if same_domain and \
+                        urllib.parse.urlparse(link).netloc != start_host:
+                    continue
+                frontier.append((link, d + 1))
+
+    header = (f"Crawled {len(pages)} page(s) from {url} "
+              f"(depth≤{depth}, same_domain={same_domain}).")
+    if truncated or frontier:
+        header += (" Stopped early at a bound (max_pages / byte cap); "
+                   "not every reachable page was visited.")
+    return "\n\n---\n\n".join([header] + pages)
+
+
+# --- data visualization (pure-Python SVG; zero new dependency) --------------
+
+_CHART_TYPES = ("bar", "line", "scatter", "pie")
+_CHART_MAX_POINTS = 500      # enough for any readable chart; bounds SVG size
+
+
+def _parse_csv(data: str):
+    """Return (header, rows) from inline CSV text or a workspace CSV file. A
+    bare filename (or a workspace-relative path that exists) is read from the
+    confined workspace; anything else is treated as inline CSV."""
+    import csv
+    import io
+
+    text = data
+    looks_like_path = ("\n" not in data.strip()) and (
+        data.strip().endswith(".csv") or "/" in data.strip())
+    if looks_like_path:
+        try:
+            target = sandbox._confine(data.strip())
+            if target.is_file():
+                text = target.read_text(encoding="utf-8")
+        except Exception:
+            text = data
+    reader = csv.reader(io.StringIO(text))
+    rows = [r for r in reader if any(c.strip() for c in r)]
+    if not rows:
+        return [], []
+    return rows[0], rows[1:]
+
+
+def _svg_escape(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+_CHART_PALETTE = ("#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#b07aa1",
+                  "#76b7b2", "#edc948", "#ff9da7", "#9c755f", "#bab0ac")
+
+
+def _render_chart_svg(chart_type, labels, values, title, xlabel, ylabel):
+    """Render a minimal, self-contained SVG chart. No external libraries."""
+    W, H = 720, 420
+    pad_l, pad_r, pad_t, pad_b = 60, 24, 48 if title else 24, 60
+    plot_w, plot_h = W - pad_l - pad_r, H - pad_t - pad_b
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
+             f'viewBox="0 0 {W} {H}" font-family="sans-serif" font-size="12">',
+             f'<rect width="{W}" height="{H}" fill="white"/>']
+    if title:
+        parts.append(f'<text x="{W/2}" y="24" text-anchor="middle" '
+                     f'font-size="16" font-weight="bold">{_svg_escape(title)}</text>')
+
+    if chart_type == "pie":
+        import math
+        total = sum(v for v in values if v > 0) or 1.0
+        cx, cy, r = W / 2, pad_t + plot_h / 2, min(plot_w, plot_h) / 2
+        angle = -math.pi / 2
+        for i, (lab, val) in enumerate(zip(labels, values)):
+            if val <= 0:
+                continue
+            sweep = 2 * math.pi * (val / total)
+            x1, y1 = cx + r * math.cos(angle), cy + r * math.sin(angle)
+            angle += sweep
+            x2, y2 = cx + r * math.cos(angle), cy + r * math.sin(angle)
+            large = 1 if sweep > math.pi else 0
+            color = _CHART_PALETTE[i % len(_CHART_PALETTE)]
+            parts.append(f'<path d="M{cx:.1f},{cy:.1f} L{x1:.1f},{y1:.1f} '
+                         f'A{r:.1f},{r:.1f} 0 {large},1 {x2:.1f},{y2:.1f} Z" '
+                         f'fill="{color}"/>')
+            ly = pad_t + i * 18
+            parts.append(f'<rect x="{W-pad_r-120}" y="{ly}" width="10" '
+                         f'height="10" fill="{color}"/>')
+            parts.append(f'<text x="{W-pad_r-104}" y="{ly+9}">'
+                         f'{_svg_escape(lab)} ({val:g})</text>')
+        parts.append("</svg>")
+        return "\n".join(parts)
+
+    # cartesian charts (bar / line / scatter)
+    vmax = max(values) if values else 1.0
+    vmin = min(values + [0.0]) if values else 0.0
+    span = (vmax - vmin) or 1.0
+    x0, y0 = pad_l, pad_t + plot_h
+    # axes
+    parts.append(f'<line x1="{x0}" y1="{pad_t}" x2="{x0}" y2="{y0}" stroke="#888"/>')
+    parts.append(f'<line x1="{x0}" y1="{y0}" x2="{pad_l+plot_w}" y2="{y0}" stroke="#888"/>')
+    # y gridlines/labels (0 and max)
+    for frac in (0.0, 0.5, 1.0):
+        gy = y0 - frac * plot_h
+        val = vmin + frac * span
+        parts.append(f'<line x1="{x0}" y1="{gy:.1f}" x2="{pad_l+plot_w}" '
+                     f'y2="{gy:.1f}" stroke="#eee"/>')
+        parts.append(f'<text x="{x0-6}" y="{gy+4:.1f}" text-anchor="end">{val:g}</text>')
+    n = len(values)
+    if n:
+        slot = plot_w / n
+        def px(i):
+            return x0 + slot * (i + 0.5)
+        def py(v):
+            return y0 - ((v - vmin) / span) * plot_h
+        if chart_type == "bar":
+            bw = slot * 0.6
+            for i, (lab, val) in enumerate(zip(labels, values)):
+                bh = ((val - vmin) / span) * plot_h
+                color = _CHART_PALETTE[i % len(_CHART_PALETTE)]
+                parts.append(f'<rect x="{px(i)-bw/2:.1f}" y="{y0-bh:.1f}" '
+                             f'width="{bw:.1f}" height="{bh:.1f}" fill="{color}"/>')
+        elif chart_type == "line":
+            pts = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(values))
+            parts.append(f'<polyline points="{pts}" fill="none" '
+                         f'stroke="{_CHART_PALETTE[0]}" stroke-width="2"/>')
+        elif chart_type == "scatter":
+            for i, v in enumerate(values):
+                parts.append(f'<circle cx="{px(i):.1f}" cy="{py(v):.1f}" r="3.5" '
+                             f'fill="{_CHART_PALETTE[0]}"/>')
+        # x labels (thinned to avoid overlap)
+        step = max(1, n // 12)
+        for i, lab in enumerate(labels):
+            if i % step:
+                continue
+            # Truncate the RAW label before escaping — slicing an escaped string
+            # could cut an entity like &lt; into invalid XML.
+            parts.append(f'<text x="{px(i):.1f}" y="{y0+16}" text-anchor="middle">'
+                         f'{_svg_escape(lab[:14])}</text>')
+    if xlabel:
+        parts.append(f'<text x="{pad_l+plot_w/2}" y="{H-6}" text-anchor="middle">'
+                     f'{_svg_escape(xlabel)}</text>')
+    if ylabel:
+        parts.append(f'<text x="14" y="{pad_t+plot_h/2}" text-anchor="middle" '
+                     f'transform="rotate(-90 14 {pad_t+plot_h/2})">'
+                     f'{_svg_escape(ylabel)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def chart_from_data(data: str, chart_type: str = "bar", x: str = "", y: str = "",
+                    title: str = "", filename: str = "") -> str:
+    """Render a chart from tabular data and save it into the workspace as SVG.
+
+    `data` is inline CSV (a header row + rows) or the name of a CSV file in the
+    workspace. `x`/`y` name the label and value columns (default: first two
+    columns). Pure-Python SVG — no matplotlib/pandas needed — so it works on the
+    minimal install. Returns a status string naming the saved file."""
+    ctype = (chart_type or "bar").lower()
+    if ctype not in _CHART_TYPES:
+        return (f"Error: unknown chart_type '{chart_type}'. "
+                f"Use one of: {', '.join(_CHART_TYPES)}.")
+    header, rows = _parse_csv(data)
+    if not header or not rows:
+        return "Error: no tabular data found (expected CSV with a header row)."
+
+    def _col_index(name, default):
+        if name and name in header:
+            return header.index(name)
+        return default
+    xi = _col_index(x, 0)
+    yi = _col_index(y, 1 if len(header) > 1 else 0)
+
+    import math
+    labels, values = [], []
+    dropped_nonfinite = 0
+    for r in rows:
+        if len(labels) >= _CHART_MAX_POINTS:
+            break
+        if xi >= len(r) or yi >= len(r):
+            continue
+        try:
+            v = float(str(r[yi]).replace(",", "").strip())
+        except ValueError:
+            continue
+        # Reject NaN/±inf — they poison the axis math and emit invalid SVG
+        # coordinates that break renderers.
+        if not math.isfinite(v):
+            dropped_nonfinite += 1
+            continue
+        values.append(v)
+        labels.append(str(r[xi]).strip())
+    if not values:
+        extra = (" (all values were non-finite)" if dropped_nonfinite else "")
+        return (f"Error: column '{y or header[yi]}' has no finite numeric "
+                f"values to plot{extra}.")
+    capped = len(rows) > _CHART_MAX_POINTS
+
+    svg = _render_chart_svg(ctype, labels, values, title,
+                            x or header[xi], y or (header[yi] if yi < len(header) else ""))
+    name = filename or f"chart-{int(time.time())}.svg"
+    if not name.lower().endswith(".svg"):
+        name += ".svg"
+    sandbox.write_file(name, svg)                    # confine + write
+    note = (f" (capped at the first {_CHART_MAX_POINTS} rows)" if capped else "")
+    return (f"Chart ({ctype}, {len(values)} points) saved to workspace: "
+            f"{name}{note}")

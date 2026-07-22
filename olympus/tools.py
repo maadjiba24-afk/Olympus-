@@ -1005,6 +1005,23 @@ def _edit_file_tool(path: str, old_string: str, new_string: str,
         title=f"Edit {path}")
 
 
+def _run_python_tool(code: str, timeout: int | None = None) -> str:
+    """Run Python in the sandbox: stage it for EXPLICIT approval, exactly like a
+    `run_command`/`edit_file` staged via prepare_action — never auto-executed.
+
+    Same reasoning as `_edit_file_tool`: this can be granted to a `web=True`
+    specialist that ingests untrusted content, so a real actuator here would let
+    an injected page's "run this code" instruction execute. Its safety is being
+    always-staged (the human approves the snippet before it runs), so it is NOT
+    in `security.ACTION_TOOLS`; and because `cmdguard` cannot inspect Python
+    semantics, untrusted code should run on the docker backend (see
+    `sandbox.run_python`)."""
+    payload: dict = {"code": code}
+    if timeout is not None:
+        payload["timeout"] = timeout
+    return _prepare_action("run_python", payload, title="Run Python snippet")
+
+
 def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
     return _spine_action("call_webhook", {"name": name, "payload": payload or {}},
                          f"Webhook {name}", f"Webhook '{name}'")
@@ -1788,6 +1805,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "glob_files": lambda pattern, path=".": _sandbox().glob_files(pattern, path),
     "edit_file": lambda path, old_string, new_string, replace_all=False:
         _edit_file_tool(path, old_string, new_string, replace_all),
+    "run_python": lambda code, timeout=None: _run_python_tool(code, timeout),
     "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
         specialist, task),
     "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
@@ -1814,6 +1832,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
         text, filename),
     "transcribe_audio": lambda path: _media().transcribe_audio(path),
     "browse_page": lambda url: _media().browse_page(url),
+    "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True:
+        _media().crawl_site(url, depth, max_pages, same_domain),
+    "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
+        filename="": _media().chart_from_data(data, chart_type, x, y, title,
+                                              filename),
     "analyze_image": lambda image, question="": _media().analyze_image(
         image, question),
     "browser_open": _browser_open,
@@ -2175,6 +2198,31 @@ EDIT_FILE = {
     },
 }
 
+RUN_PYTHON = {
+    "name": "run_python",
+    "description": (
+        "Run a Python snippet in the confined workspace to compute, test, or "
+        "process files — use this instead of guessing a result you could just "
+        "calculate. Prints are captured; nothing is returned unless you print "
+        "it. The run is prepared as an approval-gated action (never auto-runs, "
+        "even at high autonomy): the user sees the snippet and approves before "
+        "it executes. It shares the workspace-exec scope with run_command and "
+        "runs under the sandbox (docker isolation when configured)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string",
+                     "description": "Python source to execute. Use print() to "
+                                    "surface results."},
+            "timeout": {"type": "integer",
+                        "description": "Optional per-run activity timeout in "
+                                       "seconds."},
+        },
+        "required": ["code"],
+    },
+}
+
 TRIGGER_RESEARCH = {
     "name": "trigger_research",
     "description": (
@@ -2418,6 +2466,58 @@ BROWSE_PAGE = {
         "type": "object",
         "properties": {"url": {"type": "string"}},
         "required": ["url"],
+    },
+}
+
+CRAWL_SITE = {
+    "name": "crawl_site",
+    "description": (
+        "Recursively crawl from a starting URL and return a combined text digest "
+        "of the pages visited — use when one page isn't enough and you need to "
+        "read across a section of a site. Bounded by depth, page count and total "
+        "size. Every hop goes through the same safety gate as web_fetch."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Starting URL to crawl"},
+            "depth": {"type": "integer",
+                      "description": "Link depth to follow (0-3, default 1)"},
+            "max_pages": {"type": "integer",
+                          "description": "Max pages to fetch (1-25, default 10)"},
+            "same_domain": {"type": "boolean",
+                            "description": "Only follow links on the same domain "
+                                           "(default true)"},
+        },
+        "required": ["url"],
+    },
+}
+
+CHART_FROM_DATA = {
+    "name": "chart_from_data",
+    "description": (
+        "Render a chart from tabular data and save it into the workspace as an "
+        "SVG file — use this to VISUALIZE data instead of describing it. `data` "
+        "is inline CSV (header row + rows) or the name of a CSV file in the "
+        "workspace. Charts: bar, line, scatter, pie."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "data": {"type": "string",
+                     "description": "Inline CSV text, or a workspace CSV filename"},
+            "chart_type": {"type": "string",
+                           "enum": ["bar", "line", "scatter", "pie"],
+                           "description": "Chart kind (default bar)"},
+            "x": {"type": "string",
+                  "description": "Label column name (default: first column)"},
+            "y": {"type": "string",
+                  "description": "Value column name (default: second column)"},
+            "title": {"type": "string", "description": "Chart title"},
+            "filename": {"type": "string",
+                         "description": "Output filename (default chart-<ts>.svg)"},
+        },
+        "required": ["data"],
     },
 }
 
@@ -3326,6 +3426,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "grep_files": GREP_FILES,
     "glob_files": GLOB_FILES,
     "edit_file": EDIT_FILE,
+    "run_python": RUN_PYTHON,
     "spawn_subagent": SPAWN_SUBAGENT,
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,
@@ -3334,6 +3435,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "text_to_speech": TEXT_TO_SPEECH,
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
+    "crawl_site": CRAWL_SITE,
+    "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,
@@ -3461,9 +3564,13 @@ def _schedule_task(name: str, interval: str, prompt: str,
 
 
 def resolve_handler(name: str):
-    """Find a tool handler: built-in first, then custom plugins."""
+    """Find a tool handler: built-in first, then custom plugins, then native
+    (stdio/SSE) MCP tools."""
     handler = HANDLERS.get(name)
     if handler is not None:
         return handler
     from . import connectors  # local import to avoid an import cycle
-    return connectors.plugin_handler(name)
+    plugin = connectors.plugin_handler(name)
+    if plugin is not None:
+        return plugin
+    return connectors.mcp_client_handler(name)

@@ -77,6 +77,10 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              "read_inbox", "read_email", "read_calendar",
                              "triage_inbox",
                              "browse_page",
+                             # A recursive crawl fetches many attacker-controlled
+                             # pages and folds them into one digest — untrusted
+                             # external content, same as browse_page.
+                             "crawl_site",
                              # A vision model's read of an image is external
                              # content — text-in-image injection is injection.
                              "analyze_image",
@@ -118,7 +122,8 @@ TRUSTED_TOOLS = frozenset({
     "browser_operate", "browser_pattern", "browser_restore_auth",
     "browser_save_auth", "browser_save_pdf", "browser_skill_record",
     "browser_skills", "browser_switch_tab", "browser_tabs",
-    "browser_upload", "cache_fact", "call_webhook", "codegraph_impact",
+    "browser_upload", "cache_fact", "call_webhook", "chart_from_data",
+    "codegraph_impact",
     "codegraph_neighbors", "codegraph_overview", "codegraph_path",
     "codegraph_subgraph", "complete_todo",
     "create_skill", "current_time", "edit_file", "edit_image",
@@ -133,7 +138,7 @@ TRUSTED_TOOLS = frozenset({
     "query_codegraph", "read_document", "read_file", "read_skill",
     "read_source_file", "recall_fact", "recall_memory", "recent_learning",
     "refresh_email_style", "restore_prompt", "run_benchmark",
-    "run_code_benchmark", "save_lesson", "schedule_task",
+    "run_code_benchmark", "run_python", "save_lesson", "schedule_task",
     "search_documents", "search_sessions", "send_email",
     "set_advanced_mode", "site_profile_record", "site_profiles",
     "site_template_record", "spawn_subagent", "text_to_speech",

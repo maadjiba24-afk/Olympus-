@@ -170,6 +170,28 @@ def _run_command_execute(p: dict) -> dict:
     return out
 
 
+def _run_python_preview(p: dict) -> str:
+    code = p.get("code", "")
+    snippet = code if len(code) <= 2000 else code[:2000] + "\n…[truncated]"
+    # cmdguard is shell-only and cannot inspect Python semantics, so the preview
+    # shows the whole snippet for a human to read before it runs, and names the
+    # backend — the real isolation for untrusted code is the docker backend.
+    note = ("" if sandbox.backend() == "docker" else
+            "\n  (local backend: runs with your privileges — approve only code "
+            "you trust; set OLYMPUS_EXEC_BACKEND=docker to isolate)")
+    return (f"Run Python in the workspace ({sandbox.backend()} backend):"
+            f"{note}\n\n{snippet}")
+
+
+def _run_python_execute(p: dict) -> dict:
+    res = sandbox.run_python(p.get("code", ""), timeout=p.get("timeout"),
+                             watch=p.get("watch"), root=p.get("_pinned_root"))
+    out = {"code": res.code, "ok": res.ok, "output": res.output}
+    if res.watched:
+        out["watched"] = list(res.watched)
+    return out
+
+
 def _write_file_preview(p: dict) -> str:
     body = p.get("content", "")
     return (f"Write file '{p.get('path', '?')}' "
@@ -328,6 +350,13 @@ def register_builtins() -> None:
         preview=_run_command_preview, execute=_run_command_execute,
         pins_root=True,
         description="Run a shell command in the confined workspace."))
+    # Python execution — the same exec scope + irreversible/never-auto posture as
+    # run_command, routed through sandbox.run_python (gate + confinement + caps).
+    actions.register(actions.ActionType(
+        name="run_python", risk_class=actions.IRREVERSIBLE, scope="exec",
+        preview=_run_python_preview, execute=_run_python_execute,
+        pins_root=True,
+        description="Run a Python snippet in the confined workspace."))
     actions.register(actions.ActionType(
         name="write_file", risk_class=actions.NOTABLE, scope="exec",
         preview=_write_file_preview, execute=_write_file_execute,

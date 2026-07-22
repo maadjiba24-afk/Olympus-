@@ -1,23 +1,35 @@
 {
-  "_comment": "Copy this to memory/connectors.json (or set OLYMPUS_MCP_SERVERS to this JSON) to connect MCP servers. MCP runs server-side on the Anthropic backend. 'data' servers are read-only and treated as untrusted input; 'action' servers change the world and are only active in non-ingesting specialist runs (assign them to chronos). Tokens are read from the named env var, never stored here.",
+  "_comment": "Copy this to memory/connectors.json (or set OLYMPUS_MCP_SERVERS to this JSON) to connect MCP servers. transport 'url' runs server-side on the Anthropic backend; 'sse' and 'stdio' run through Olympus's native client and work on EVERY backend. 'data' servers are read-only and treated as untrusted input; 'action' servers change the world and are only active in non-ingesting specialist runs (assign them to chronos) AND require the name in OLYMPUS_MCP_ACTION_ALLOWLIST. A 'stdio' server spawns a local process and additionally requires its name in OLYMPUS_MCP_STDIO_ALLOWLIST. Tokens are read from the named env var, never stored here.",
   "servers": [
     {
       "name": "tavily",
       "url": "https://mcp.tavily.com/mcp/",
+      "transport": "url",
       "type": "data",
       "auth_env": "TAVILY_MCP_TOKEN",
       "specialists": ["argus", "aletheia"]
     },
     {
-      "name": "notion",
-      "url": "https://mcp.notion.com/mcp",
+      "name": "tavily_any_backend",
+      "url": "https://mcp.tavily.com/mcp/",
+      "transport": "sse",
       "type": "data",
-      "auth_env": "NOTION_MCP_TOKEN",
-      "specialists": ["chiron", "chronos"]
+      "auth_env": "TAVILY_MCP_TOKEN",
+      "specialists": ["argus"]
+    },
+    {
+      "name": "localfiles",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+      "type": "data",
+      "env_pass": [],
+      "specialists": ["chronos"]
     },
     {
       "name": "github",
       "url": "https://api.githubcopilot.com/mcp/",
+      "transport": "url",
       "type": "action",
       "auth_env": "GITHUB_MCP_TOKEN",
       "specialists": ["chronos"]

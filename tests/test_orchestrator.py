@@ -159,3 +159,61 @@ def test_due_treats_nonpositive_cadence_as_off():
     assert heartbeat._due({}, "x", 0, now=1e18) is False
     assert heartbeat._due({}, "x", -1, now=1e18) is False
     assert heartbeat._due({}, "x", 3600, now=1e18) is True   # positive still fires
+
+
+# --- DEFERRED #4: Athena re-reviews a rework (bounded, only when it reworked) --
+
+def _mk_bot_with_rework(monkeypatch, review_seq):
+    """A bot whose pipeline reaches the rework path; `_review` returns the next
+    verdict from `review_seq` on each call, tracking the call count."""
+    bot = orchestrator.Olympus(user="tester")
+    monkeypatch.setattr(bot, "_route", lambda msg: {
+        "mode": "delegate", "direct_reply": None, "specialists": ["argus"],
+        "brief": "do it", "needs_verification": True})
+    monkeypatch.setattr(bot, "_plan", lambda brief, keys, **kw: [
+        {"id": "s1", "specialist": "argus", "task": "t", "depends_on": []}])
+    monkeypatch.setattr(bot, "_dispatch_dag",
+                        lambda steps, tr, **kw: [("argus", "first-attempt")])
+    monkeypatch.setattr(bot, "_dispatch",
+                        lambda redo, tr, overrides=None, **kw: [("argus", "reworked")])
+    monkeypatch.setattr(bot, "_verify", lambda brief, outputs: (
+        "verified", {"status": "pass", "unsupported_claims": []}))
+    calls = {"review": 0}
+
+    def review(brief, verified):
+        v = review_seq[min(calls["review"], len(review_seq) - 1)]
+        calls["review"] += 1
+        return v
+    monkeypatch.setattr(bot, "_review", review)
+    return bot, calls
+
+
+def test_rework_is_re_reviewed_once(monkeypatch):
+    # First review orders a retry; after the rework, Athena reviews AGAIN.
+    bot, calls = _mk_bot_with_rework(monkeypatch, [
+        {"verdict": "retry", "feedback": "fix", "retry_specialists": ["argus"]},
+        {"verdict": "approve", "feedback": "", "retry_specialists": []}])
+    tr = trace.Trace("chat", "tester")
+    bot._pipeline("a real user message", tr)
+    assert calls["review"] == 2          # initial review + one bounded re-review
+
+
+def test_no_rework_means_no_second_review(monkeypatch):
+    # First review approves → no rework, so no extra review call (cost saved on
+    # the common path — the whole point of the deferral's concern).
+    bot, calls = _mk_bot_with_rework(monkeypatch, [
+        {"verdict": "approve", "feedback": "", "retry_specialists": []}])
+    tr = trace.Trace("chat", "tester")
+    bot._pipeline("a real user message", tr)
+    assert calls["review"] == 1
+
+
+def test_re_review_is_bounded_no_third_pass(monkeypatch):
+    # Even if the re-review STILL flags a retry, Athena does not loop again —
+    # the improved answer ships (bounded to exactly one rework).
+    bot, calls = _mk_bot_with_rework(monkeypatch, [
+        {"verdict": "retry", "feedback": "fix", "retry_specialists": ["argus"]},
+        {"verdict": "retry", "feedback": "still", "retry_specialists": ["argus"]}])
+    tr = trace.Trace("chat", "tester")
+    bot._pipeline("a real user message", tr)
+    assert calls["review"] == 2          # never a third review / second rework
