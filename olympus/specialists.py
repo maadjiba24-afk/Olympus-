@@ -43,6 +43,10 @@ class Specialist:
     # today's behavior; lets the hard specialists stay deep while light ones can
     # be dialed down for cost without touching the rest.
     effort: str = "high"
+    # Inline system prompt for file-defined agents (agentreg): when non-empty it
+    # replaces the prompts/<key>.md lookup. The 13 built-in specialists leave it
+    # "" and keep loading their curated prompt file unchanged.
+    prompt_text: str = ""
 
     def _ingests(self, provider: str) -> bool:
         """Does this specialist's loadout read external/untrusted content?
@@ -120,7 +124,8 @@ class Specialist:
         # ones). A skill tagged for another specialist never enters this prompt,
         # so a benchmark-gated skill can't degrade specialists it was never
         # measured against.
-        return (agent.load_prompt(self.key)
+        base = self.prompt_text or agent.load_prompt(self.key)
+        return (base
                 + "\n\n## Skill library (load with read_skill before "
                   "relevant tasks)\n" + skills.index(self.key)
                 + self._extra_context()
@@ -344,3 +349,15 @@ def roster() -> str:
         f"- {s.key}: {s.name}, {s.title} — {s.description}"
         for s in SPECIALISTS.values()
     )
+
+
+# Merge any operator-defined file agents into the registry (OLYMPUS_AGENTS, off
+# by default → no-op). Done here, after SPECIALISTS is fully built, so roster(),
+# Athena's plan enum, and dispatch all see them with no call-site changes. The
+# local import avoids an import cycle (agentreg imports only config/security at
+# module load); a broken agents dir can never crash startup.
+try:
+    from . import agentreg as _agentreg
+    _agentreg.install(SPECIALISTS)
+except Exception:
+    pass

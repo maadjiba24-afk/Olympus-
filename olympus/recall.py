@@ -279,6 +279,13 @@ def flush_slice(user: str, history_text: str,
         return summary
     if len((history_text or "").strip()) < config.MEMORY_MIN_CHARS:
         return summary
+    # Claude-Code-parity lifecycle event: memory compaction is about to run.
+    # Observe-only; a plugin can snapshot the slice but never alter it.
+    try:
+        from . import connectors
+        connectors.emit("pre_compact", user, history_text)
+    except Exception:
+        pass
     from . import usage
     try:
         usage.check_budget()
