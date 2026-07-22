@@ -522,7 +522,12 @@ class Olympus:
         falls back to the single-verifier result, so consensus can only ADD
         scrutiny, never remove the existing guarantee."""
         import contextvars
-        n = consensus.verifier_count()
+        # Freeze the (possibly self-tuned) panel size for this run: the evolution
+        # spine may grow it over time, so a replayed run must reproduce the count
+        # it recorded, not re-read a since-changed tunable (same discipline as
+        # the swarm/interactive toggles — replay must not diverge).
+        n = replaystore.frozen_context("consensus.verifiers",
+                                       consensus.verifier_count)
 
         def _one(index: int) -> tuple[str, dict | None]:
             lens_task = (task + "\n\nVERIFICATION LENS (weigh this most): "
@@ -554,7 +559,15 @@ class Olympus:
         # to N=1 and weakening the guarantee this method advertises. Too few
         # verdicts → the visible degraded path (ADR 0005), same as a total
         # verifier failure.
-        if len(verdicts) < consensus.majority_threshold(n):
+        # Feed the evolution spine: a formed quorum is OK, a floor-miss is
+        # DEGRADED. Sustained degradation makes `evolve` widen the panel over
+        # time so transient verifier errors get outvoted — the capability gets
+        # stronger the more it is used. Telemetry only (never on the replay
+        # path), best-effort.
+        quorum_met = len(verdicts) >= consensus.majority_threshold(n)
+        self._evolve_record("consensus", "ok" if quorum_met else "degraded",
+                            f"{len(verdicts)}/{n} verdicts")
+        if not quorum_met:
             content = next((c for c, _ in results if c), "")
             return content, None
         agg = consensus.safest_verdict(verdicts)
@@ -1212,12 +1225,32 @@ class Olympus:
             return self._run_one(consulter, task, tr)
 
         try:
-            return dytopo.run_consultation(topo, outputs, _runner, max_rounds=1)
+            refined = dytopo.run_consultation(topo, outputs, _runner,
+                                              max_rounds=1)
+            self._evolve_record("swarm", "ok",
+                                f"{kind} {len(topo.edges)} edges")
+            return refined
         except replaystore.ReplayDivergence:
             raise
         except Exception as err:                       # never break the pipeline
             tr.event("swarm.consult.failed", error=str(err)[:200])
+            self._evolve_record("swarm", "degraded", str(err)[:80])
             return outputs
+
+    @staticmethod
+    def _evolve_record(feature: str, outcome: str, detail: str = "") -> None:
+        """Feed a capability's outcome to the self-evolution spine — telemetry
+        only, skipped on the replay path, and never able to break the caller.
+        This is how the absorbed capabilities accrue a track record and (where a
+        registered tunable exists) get tuned toward their better setting over
+        time."""
+        if os.environ.get("OLYMPUS_REPLAY"):
+            return
+        try:
+            from . import evolve
+            evolve.record(feature, outcome, detail)
+        except Exception:
+            pass
 
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns

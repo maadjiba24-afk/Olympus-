@@ -2,7 +2,7 @@
 
 import threading
 
-from olympus import backend, config, consensus, orchestrator
+from olympus import backend, config, consensus, evolve, orchestrator, store
 
 _PASS = ('ok\nVERDICT: {"status": "pass", "unsupported_claims": [], '
          '"confidence": 0.9}')
@@ -178,3 +178,44 @@ def test_quorum_met_returns_verdict(monkeypatch):
     vs = config.Settings(provider="anthropic", model="claude-opus-4-8")
     content, verdict = bot._verify_consensus("sys", "task", vs, [], [])
     assert verdict is not None and verdict["status"] == "pass"
+
+
+# --- self-evolution: consensus tunes its own panel over time -------------
+
+def test_verifier_count_reads_self_tuned_value(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_CONSENSUS_VERIFIERS", raising=False)
+    store.reset()
+    assert consensus.verifier_count() == 3            # default
+    evolve._set_param("consensus", "verifiers", 5)
+    assert consensus.verifier_count() == 5            # picks up the tuned value
+    store.reset()
+
+
+def test_env_override_beats_self_tuned(monkeypatch):
+    store.reset()
+    evolve._set_param("consensus", "verifiers", 7)
+    monkeypatch.setenv("OLYMPUS_CONSENSUS_VERIFIERS", "1")
+    assert consensus.verifier_count() == 1            # operator override wins
+    store.reset()
+
+
+def test_tuned_value_is_coerced_odd_and_clamped(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_CONSENSUS_VERIFIERS", raising=False)
+    store.reset()
+    evolve._set_param("consensus", "verifiers", 4)    # even
+    assert consensus.verifier_count() == 5            # bumped to odd
+    store.reset()
+
+
+def test_evolution_widens_panel_on_sustained_degradation(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_CONSENSUS_VERIFIERS", raising=False)
+    store.reset()
+    before = consensus.verifier_count()               # 3
+    # Simulate the quorum failing to form, run after run.
+    for _ in range(evolve._MIN_SAMPLES + 2):
+        evolve.record("consensus", evolve.DEGRADED, "1/3 verdicts")
+    evolve.review()                                   # the periodic tuner
+    after = consensus.verifier_count()
+    assert after > before                             # panel widened itself
+    assert after <= consensus._MAX_VERIFIERS
+    store.reset()

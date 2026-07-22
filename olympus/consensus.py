@@ -32,16 +32,28 @@ def enabled() -> bool:
 
 
 def verifier_count() -> int:
-    """How many verifiers to fan out to (`OLYMPUS_CONSENSUS_VERIFIERS`, default
-    3), clamped to an odd count in [1, _MAX_VERIFIERS] so a majority always
-    exists."""
-    try:
-        n = int(os.environ.get("OLYMPUS_CONSENSUS_VERIFIERS",
-                               str(_DEFAULT_VERIFIERS)))
-    except (TypeError, ValueError):
-        n = _DEFAULT_VERIFIERS
+    """How many verifiers to fan out to, clamped to an odd count in
+    [1, _MAX_VERIFIERS] so a majority always exists.
+
+    Precedence: an explicit `OLYMPUS_CONSENSUS_VERIFIERS` env override wins
+    (operator control); otherwise the SELF-TUNED value from the evolution spine
+    (`evolve` widens the panel when the quorum keeps failing to form). Falls back
+    to the default on any read error, so this never breaks verification. The
+    resolved value is frozen per run at the call site for replay-safety."""
+    env = os.environ.get("OLYMPUS_CONSENSUS_VERIFIERS")
+    if env is not None:
+        try:
+            n = int(env)
+        except (TypeError, ValueError):
+            n = _DEFAULT_VERIFIERS
+    else:
+        try:
+            from . import evolve
+            n = int(round(evolve.current("consensus", "verifiers")))
+        except Exception:
+            n = _DEFAULT_VERIFIERS
     n = max(1, min(n, _MAX_VERIFIERS))
-    return n if n % 2 == 1 else n + 1        # keep it odd (no split decisions)
+    return n if n % 2 == 1 else min(n + 1, _MAX_VERIFIERS)   # odd, no split
 
 
 # --- pure tally primitives -----------------------------------------------

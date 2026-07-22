@@ -131,6 +131,11 @@ for _t in (
     Tunable("dytopo", "max_out_degree", lo=1, hi=3, default=2,
             on_fail="decrease",
             note="sparser collaboration graph when routing degrades"),
+    # Absorbed-capability knobs (ruflo → native, self-evolving). Non-security
+    # resource/quality knobs — bounded cost/breadth, never a safety gate.
+    Tunable("consensus", "verifiers", lo=1, hi=7, default=3, on_fail="increase",
+            note="widen the verifier panel when the quorum keeps failing to "
+                 "form, so transient verifier errors are outvoted"),
     Tunable("emem", "max_fragments", lo=4, hi=12, default=12,
             on_fail="decrease",
             note="reconstruct fewer episode fragments when it degrades"),
