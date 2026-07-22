@@ -210,6 +210,31 @@ def fetch_pricing(provider: Provider, api_key: str = "",
     return out
 
 
+def discover_for_settings(settings) -> list[str]:
+    """The model IDs the LIVE configured credentials can reach — runtime model
+    discovery (ClawRouter-style), not just at wizard time. Maps a config
+    `Settings` to the right catalog provider (or an ad-hoc OpenAI-compatible
+    one for a custom base_url) and queries its model list. Best-effort: []."""
+    backend = getattr(settings, "provider", "openai")
+    base = getattr(settings, "base_url", "") or ""
+    key = getattr(settings, "api_key", "") or ""
+    if backend == "claude-code":
+        return []                              # local CLI: no discoverable list
+    prov = None
+    for p in CATALOG:
+        if p.backend == backend and p.base_url and base and \
+                p.base_url.rstrip("/") == base.rstrip("/"):
+            prov = p
+            break
+    if prov is None:
+        # Ad-hoc provider from the live settings (anthropic default host, or a
+        # custom OpenAI-compatible endpoint).
+        default_base = "https://api.anthropic.com" if backend == "anthropic" \
+            else base
+        prov = Provider("_live", "configured", backend, base_url=default_base)
+    return fetch_models(prov, api_key=key, base_url=base)
+
+
 @dataclass
 class Member:
     """One chosen provider entry, ready to become pool config."""

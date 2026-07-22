@@ -6,9 +6,9 @@ introduced, and a running watchlist of what is coming next, so we can later deci
 which ideas are worth implementing in Olympus. **No OpenClaw code is used here** —
 this is competitive/inspiration analysis only.
 
-- **Last checked:** 2026-07-03
-- **Latest stable release:** `2026.6.11` (2026-06-30)
-- **Latest pre-release:** `2026.7.1-beta.1` (2026-07-02)
+- **Last checked:** 2026-07-18
+- **Latest stable release:** `2026.7.1` (2026-07-13)
+- **Latest pre-release:** `2026.7.2-beta.3` (2026-07-18)
 - **Maintenance:** a scheduled session check re-scans the releases page and appends
   new versions to this file as they ship.
 
@@ -53,6 +53,14 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
 - Slack **router relay mode**: a central router dispatches mentions/threads to the
   right gateway in managed multi-gateway deployments.
 - Mattermost native slash commands (`/oc_queue` tunes queuing mode and debounce).
+- **Olympus absorption (2026-07-22):** an **SMS channel** (`sms.py`, `olympus
+  sms`) — the buildable slice of OpenClaw's telephony surface. Twilio-compatible
+  inbound over the same untrusted-by-default spine (`X-Twilio-Signature`
+  HMAC-SHA1 verified in constant time, fail-closed without a token; TwiML
+  replies; generic error text so an exception never leaks over the wire),
+  outbound via Twilio REST, wired into `notify_all`. No media stack: an SMS is
+  plain text, so it needs no audio/dependencies — unlike live voice calls
+  (below).
 
 ### 2.2 Model / provider layer
 - Multi-provider catalog: Anthropic, OpenAI (+ Codex OAuth, no API key needed),
@@ -144,6 +152,12 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
   node apps (iOS 26 visual refresh, Android Talk Mode); **Apple Watch companion**
   with inbox + controls; iOS share extension.
 - WebChat channel served by the gateway.
+- **Olympus absorption (2026-07-22):** where OpenClaw ships a stack of native
+  clients (menu-bar app, Windows Hub, iOS/Android node apps, Apple Watch), the
+  Olympus web UI is instead an **installable PWA** — a web app manifest,
+  offline-shell service worker, and app icons rendered by a pure-Python PNG
+  encoder (stdlib `zlib` only, no new dependencies). One surface, add-to-home-
+  screen on any platform, served by the existing web server (`olympus/pwa.py`).
 
 ### 2.8 Security & trust
 - Inbound DMs untrusted by default; pairing-based access policies; DM lockdown
@@ -168,6 +182,14 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
   screenshot/video capture; character-vibes evaluation reports.
 - OpenTelemetry observability; structured provider logs; gateway lazy-loading
   and startup-latency work; plugin metadata caching.
+- **Olympus absorption (2026-07-22):** OpenClaw's *Crestodian conversational
+  onboarding* (2026.7.1) and adaptive latency become native Olympus behaviours:
+  a first-contact `/start` welcome shown once per chat identity
+  (`onboarding.py`), and **`/fast auto`** — a per-message latency decision
+  (`config.estimate_fast`/`fast_mode_for`) resolved once per turn in the
+  orchestrator so quick asks skip the review round-trip while substantial ones
+  still get the full council + Athena review. On/off/auto is settable from any
+  channel with `/fast`.
 
 ---
 
@@ -181,7 +203,10 @@ beta introduced something notable on its own.
 
 | Version | Date | Headline changes |
 |---|---|---|
-| **2026.7.1-beta.1** *(pre-release)* | 2026-07-02 | GPT-5.6 family support; `openclaw attach` external harness; Telegram `/login` Codex pairing + run steering; **on-exit event-driven cron**; iOS 26 visual refresh; iMessage native polls; **per-conversation capability profiles**; 222 PRs of reliability fixes. |
+| **2026.7.2-beta.3** *(pre-release)* | 2026-07-18 | Supersedes beta.2 (07-17); ~300 contributions. Incremental hardening of the 7.2 cycle: Codex CLI bump (0.144.6), **cron claim-race fix**, gateway restart-admission and reply-finalization recovery, Signal reconnection, config auto-saving. Carries: cloud-worker sessions, headless-node device capabilities, allowlist-privilege fix, Linux deb/AppImage, plugin provenance verification, guided setup. |
+| **2026.7.2-beta.2** *(pre-release)* | 2026-07-17 | Supersedes beta.1; 400+ fixes from 100+ contributors. New vs beta.1: **Linux deb/AppImage bundles** + Windows install continues right after winget adds Node; iOS fresh-install credential-handling security fix; **plugin provenance verification for untrusted sources**; Unicode-safe truncation/display; stalled-provider network timeouts; gateway restart/session-recovery hardening. Carries the cycle themes: cloud-worker sessions, headless-node device capabilities, channel-safety fixes, guided setup. |
+| **2026.7.2-beta.1** *(pre-release)* | 2026-07-15 | Next cycle opens (2,425 PRs merged). **Remote coding sessions on cloud workers** (Control UI sessions run on remote workers; Codex/Claude catalog sessions open in terminals on their owning hosts); foreground Voice Wake on Android; camera/location/notification capabilities exposed from headless Linux nodes; **channel-allowlist fix: allowlists no longer grant owner access**; Telegram durable-ingress preserved across restarts; Signal stop/approval controls stay responsive mid-turn; guided Control UI provider/channel setup; gateway restart-admission wedge fix. |
+| **2026.7.1** | 2026-07-13 | The six-beta cycle consolidated: 2,018 PRs from 532 contributors. **GPT-5.6 default + Claude Sonnet 5/Mythos 5, Tencent Hy3, Meta Muse Spark 1.1, Featherless**; **ClawRouter** (credential-scoped dynamic model discovery, budget tracking); `openclaw attach` grants Claude Code temporary TTL-bound session access; **Crestodian conversational onboarding** (validated connections, resumable setup); Control UI overhaul (session-first, tasks/usage/pairing/health in the conversation view); **change-triggered scheduled work** (run only when something changed) + on-exit cron; workspace terminals on web/iOS/Android; remote browser-tab pairing; mobile offline caches, Watch voice, auto session titles; **gateway safe mode ends restart loops**; iMessage polls; Telegram `/login` pairing + `/steer`/`/tell` run steering. |
 | **2026.6.11** | 2026-06-30 | Dependability release: 150+ fixes for misplaced replies, stuck sends, reconnects, model setup; per-DM model overrides; Mattermost `/oc_queue` slash command; Slack router relay mode; Raft external agent wake; safer admin defaults; official Docker Hub mirror. |
 | **2026.6.10** | 2026-06-24 | **`/fast auto`** (auto fast-mode for short exchanges); session-transcript SDK for plugins; GLM-5.2 / Kimi K2.7 catalog; cross-channel session identity fix. |
 | **2026.6.9** | 2026-06-21 | Telegram rich-HTML delivery; agent turn recovery (retries, history repair, reply reconciliation); Codex auto plugin approvals + remote-node exec; provider plugins as independent npm packages; Watch controls on iOS. |
@@ -245,7 +270,7 @@ beta introduced something notable on its own.
 OpenClaw does not publish a formal roadmap; "future" is visible through betas and
 merge activity. Current signals:
 
-- **2026.7.1 stable** is imminent (beta.1 shipped 2026-07-02 with 222 PRs):
+- **2026.7.2 cycle open** (beta.1 2026-07-15): remote cloud-worker sessions, mobile automation parity, channel-safety hardening. Next signals to watch:
   GPT-5.6 support, external harness attach, event-driven cron (`on-exit`),
   capability profiles per conversation, iMessage polls, iOS 26 refresh.
 - Recurring investment themes to expect more of: reliability/dependability
@@ -348,9 +373,23 @@ Original plan for reference:
     and upgrades resume with a continuation instead of dropping tasks.
 
 ### Explicitly not adopting
+*(Superseded in places by the full-pivot absorption — see the per-section
+"Olympus absorption" notes above. This is the original, more conservative line.)*
 - 20+ channels, mobile/watch apps, Control UI (contradicts headless-first).
+  → Partially revisited: mobile/watch clients are replaced by one **installable
+    PWA** (`pwa.py`); SMS is now a native channel (`sms.py`).
 - Voice stack: wake word, TTS, phone calls, meeting bots (no media stack).
-- Browser automation / Chrome relay (operator harness already covers this).
-- Plugin marketplace (premature for single-user; revisit if a plugin surface
-  opens — then reuse OpenClaw's trust-policy design as reference).
-- Image/video generation, Live Canvas (outside the verified-answers focus).
+  → TTS voice replies are now native (Wave 2b). SMS covers the text slice of
+    telephony. Still **out of bounds** (genuine boundary items that require an
+    always-on audio/media pipeline or hardware Olympus deliberately doesn't
+    carry): **wake-word detection**, **live voice calls** (streaming speech in
+    and out), and **meeting bots**. These stay honestly unbuilt rather than
+    stubbed.
+- Browser automation / Chrome relay — the operator harness (`browser.py`)
+  already covers headless fetch/scrape; a full interactive Chrome relay remains
+  out of scope (needs a persistent browser runtime).
+- Plugin marketplace → the trust-policy design was absorbed as a **provenance-
+  pinned plugin installer** (`pluginstore.py`, Wave 2c); a hosted marketplace
+  itself is still premature for single-user.
+- Image/video generation, Live Canvas → image generation is now native (Wave
+  2a); Live Canvas (a live collaborative UI surface) remains out of scope.

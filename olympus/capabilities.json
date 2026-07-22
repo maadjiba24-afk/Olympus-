@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 114,
+    "count": 119,
     "names": [
       "a2a",
       "actions",
@@ -87,6 +87,7 @@
       "gate",
       "gateway",
       "goal",
+      "googlechat",
       "grant",
       "graph",
       "growth",
@@ -100,6 +101,8 @@
       "learned",
       "limit",
       "liveeval",
+      "matrix",
+      "mattermost",
       "mcp-serve",
       "memory",
       "moa",
@@ -113,6 +116,7 @@
       "pair",
       "pay-live",
       "playbook",
+      "plugin",
       "profile",
       "pubkey",
       "queue",
@@ -143,6 +147,7 @@
       "slack",
       "sleeptime",
       "sleeptime-supervise",
+      "sms",
       "soul",
       "status",
       "telegram",

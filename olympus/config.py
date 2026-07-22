@@ -820,9 +820,72 @@ def progress_allows(line: str, mode: str | None = None) -> bool:
 def fast_mode() -> bool:
     """Latency mode: run the lightweight pipeline stages (route/plan) on the
     pool's fastest model and skip the optional Athena review stage. Trades a
-    little polish for markedly lower latency (OLYMPUS_FAST=1)."""
-    return os.environ.get("OLYMPUS_FAST", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    little polish for markedly lower latency (OLYMPUS_FAST=1).
+
+    `OLYMPUS_FAST=auto` is NOT globally truthy — the per-turn decision is made
+    by `fast_mode_for(text)` and read through the orchestrator, so a bare
+    `fast_mode()` in auto reports the conservative default (full quality)."""
+    return fast_setting() == "on"
+
+
+def fast_setting() -> str:
+    """Normalized fast-mode setting: 'on', 'off', or 'auto'."""
+    raw = os.environ.get("OLYMPUS_FAST", "").strip().lower()
+    if raw == "auto":
+        return "auto"
+    if raw in ("1", "true", "yes", "on"):
+        return "on"
+    return "off"
+
+
+def fast_auto() -> bool:
+    """True when fast mode is left to a per-message heuristic (OLYMPUS_FAST=auto)."""
+    return fast_setting() == "auto"
+
+
+# Words that mark a request as worth the full council + review round-trip, even
+# when it is short. Substring match, lowercased.
+_HEAVY_WORDS = (
+    "analyz", "analys", "compare", "comparison", "design", "architect",
+    "prove", "proof", "debug", "refactor", "review", "audit", "investigat",
+    "comprehensive", "thorough", "in depth", "in-depth", "deep dive",
+    "evaluate", "optimi", "research", "diagnos", "security", "correctness",
+    "tradeoff", "trade-off", "step by step", "step-by-step", "explain why",
+    "root cause", "strateg", "plan ", "critique", "assess",
+)
+
+
+def estimate_fast(text: str) -> bool:
+    """Heuristic for OLYMPUS_FAST=auto: True → run the fast path, False → give
+    the request the full council + review. Pure and deterministic (so a replay
+    of an auto turn is reproducible). Conservative: any sign of a substantial
+    request drops to full quality; only short, simple asks stay fast."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if len(t) > 300:
+        return False
+    if len(t.split()) > 50:
+        return False
+    if "```" in t or t.count("\n") >= 4:          # code / structured input
+        return False
+    if t.count("?") >= 2:                          # several questions at once
+        return False
+    if any(w in low for w in _HEAVY_WORDS):
+        return False
+    return True
+
+
+def fast_mode_for(text: str) -> bool:
+    """Resolve the effective fast-mode for one turn: honour an explicit on/off,
+    and defer to `estimate_fast(text)` when the setting is 'auto'."""
+    setting = fast_setting()
+    if setting == "on":
+        return True
+    if setting == "off":
+        return False
+    return estimate_fast(text)
 
 
 def verify_timeout() -> float:
