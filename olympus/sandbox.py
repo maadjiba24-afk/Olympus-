@@ -252,6 +252,24 @@ def _docker_cmd(command: str, root: Path, timeout: int) -> list[str]:
             "-v", f"{root}:/work", "-w", "/work"]
     if not net:
         args += ["--network", "none"]
+    # Resource caps. cmdguard screens shell syntax only — it cannot see danger
+    # inside interpreted code (e.g. a Python snippet), so on the docker backend we
+    # also bound what a runaway command can consume. Memory and PID caps default
+    # on (safe for ordinary workloads); CPU share and a non-root uid are opt-in
+    # because a wrong value can break a legitimate build. Any cap can be disabled
+    # with 0/off/none.
+    mem = os.environ.get("OLYMPUS_EXEC_MEM", "512m").strip()
+    if mem and mem.lower() not in ("0", "off", "none"):
+        args += ["--memory", mem]
+    pids = os.environ.get("OLYMPUS_EXEC_PIDS", "256").strip()
+    if pids and pids.lower() not in ("0", "off", "none"):
+        args += ["--pids-limit", pids]
+    cpus = os.environ.get("OLYMPUS_EXEC_CPUS", "").strip()
+    if cpus:
+        args += ["--cpus", cpus]
+    user = os.environ.get("OLYMPUS_EXEC_USER", "").strip()
+    if user:
+        args += ["--user", user]
     args += [image, "sh", "-c", command]
     return args
 
@@ -376,6 +394,38 @@ def run(command: str, *, timeout: int | None = None,
     if len(out) > OUTPUT_CAP:
         out = out[:OUTPUT_CAP] + f"\n…[truncated, {len(out)} bytes total]"
     return Result(proc.returncode == 0, proc.returncode, out.strip(), watched)
+
+
+# A rare, fixed marker (never randomized — determinism keeps replay stable). The
+# quoted heredoc delimiter stops the shell from expanding anything in the snippet,
+# so shell metacharacters in the Python source are inert.
+_PY_HEREDOC = "OLYMPUS_PY_HEREDOC_EOF"
+
+
+def run_python(code: str, *, timeout: int | None = None,
+               be: str | None = None, watch: str | None = None,
+               root: str | Path | None = None) -> Result:
+    """Run a Python snippet in the confined workspace, with the exact same
+    security gate, root confinement, activity timeout and output cap as `run()`.
+
+    The snippet is fed to `python3` on stdin through a single-quoted heredoc, so
+    the shell never expands it and metacharacters in the source are inert.
+
+    SECURITY: `cmdguard` understands *shell* syntax only — it CANNOT see danger
+    inside Python source (`import os; os.system(...)`, `shutil.rmtree('/')`, a
+    socket exfil, …) and is effectively a no-op on Python semantics. Untrusted
+    code therefore MUST run on the `docker` backend (network-none, resource
+    capped); on the `local` backend a snippet runs with the invoking user's full
+    privileges, guarded only by the human approval that staged it. The heredoc
+    body is still passed through `cmdguard` (so obvious shell-shaped payloads are
+    refused), but do not mistake that for isolation of the Python itself."""
+    if not (code or "").strip():
+        return Result(False, 2, "empty code")
+    if _PY_HEREDOC in code:
+        return Result(False, 2, "code may not contain the reserved marker "
+                      f"{_PY_HEREDOC!r}")
+    command = f"python3 - <<'{_PY_HEREDOC}'\n{code}\n{_PY_HEREDOC}"
+    return run(command, timeout=timeout, be=be, watch=watch, root=root)
 
 
 def check_written(target: Path, content: str) -> str:

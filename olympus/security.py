@@ -133,7 +133,7 @@ TRUSTED_TOOLS = frozenset({
     "query_codegraph", "read_document", "read_file", "read_skill",
     "read_source_file", "recall_fact", "recall_memory", "recent_learning",
     "refresh_email_style", "restore_prompt", "run_benchmark",
-    "run_code_benchmark", "save_lesson", "schedule_task",
+    "run_code_benchmark", "run_python", "save_lesson", "schedule_task",
     "search_documents", "search_sessions", "send_email",
     "set_advanced_mode", "site_profile_record", "site_profiles",
     "site_template_record", "spawn_subagent", "text_to_speech",

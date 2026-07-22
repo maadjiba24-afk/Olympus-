@@ -187,7 +187,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "codegraph_impact", "codegraph_path",
                          "codegraph_subgraph", "codegraph_overview",
                          "read_file", "list_dir", "grep_files", "glob_files",
-                         "edit_file", "prepare_action",
+                         "edit_file", "run_python", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(

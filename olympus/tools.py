@@ -1005,6 +1005,23 @@ def _edit_file_tool(path: str, old_string: str, new_string: str,
         title=f"Edit {path}")
 
 
+def _run_python_tool(code: str, timeout: int | None = None) -> str:
+    """Run Python in the sandbox: stage it for EXPLICIT approval, exactly like a
+    `run_command`/`edit_file` staged via prepare_action — never auto-executed.
+
+    Same reasoning as `_edit_file_tool`: this can be granted to a `web=True`
+    specialist that ingests untrusted content, so a real actuator here would let
+    an injected page's "run this code" instruction execute. Its safety is being
+    always-staged (the human approves the snippet before it runs), so it is NOT
+    in `security.ACTION_TOOLS`; and because `cmdguard` cannot inspect Python
+    semantics, untrusted code should run on the docker backend (see
+    `sandbox.run_python`)."""
+    payload: dict = {"code": code}
+    if timeout is not None:
+        payload["timeout"] = timeout
+    return _prepare_action("run_python", payload, title="Run Python snippet")
+
+
 def _call_webhook_tool(name: str, payload: dict | None = None) -> str:
     return _spine_action("call_webhook", {"name": name, "payload": payload or {}},
                          f"Webhook {name}", f"Webhook '{name}'")
@@ -1788,6 +1805,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "glob_files": lambda pattern, path=".": _sandbox().glob_files(pattern, path),
     "edit_file": lambda path, old_string, new_string, replace_all=False:
         _edit_file_tool(path, old_string, new_string, replace_all),
+    "run_python": lambda code, timeout=None: _run_python_tool(code, timeout),
     "spawn_subagent": lambda specialist, task: _subagents().spawn_tool(
         specialist, task),
     "schedule_task": lambda name, interval, prompt, deliver_to="", skill="":
@@ -2172,6 +2190,31 @@ EDIT_FILE = {
                                            "(default false)"},
         },
         "required": ["path", "old_string", "new_string"],
+    },
+}
+
+RUN_PYTHON = {
+    "name": "run_python",
+    "description": (
+        "Run a Python snippet in the confined workspace to compute, test, or "
+        "process files — use this instead of guessing a result you could just "
+        "calculate. Prints are captured; nothing is returned unless you print "
+        "it. The run is prepared as an approval-gated action (never auto-runs, "
+        "even at high autonomy): the user sees the snippet and approves before "
+        "it executes. It shares the workspace-exec scope with run_command and "
+        "runs under the sandbox (docker isolation when configured)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string",
+                     "description": "Python source to execute. Use print() to "
+                                    "surface results."},
+            "timeout": {"type": "integer",
+                        "description": "Optional per-run activity timeout in "
+                                       "seconds."},
+        },
+        "required": ["code"],
     },
 }
 
@@ -3326,6 +3369,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "grep_files": GREP_FILES,
     "glob_files": GLOB_FILES,
     "edit_file": EDIT_FILE,
+    "run_python": RUN_PYTHON,
     "spawn_subagent": SPAWN_SUBAGENT,
     "schedule_task": SCHEDULE_TASK,
     "search_sessions": SEARCH_SESSIONS,
