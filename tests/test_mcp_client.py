@@ -10,8 +10,9 @@ from olympus import connectors, mcp_client, security, tools
 
 @pytest.fixture(autouse=True)
 def isolate(monkeypatch):
-    # Fresh kind-cache each test; block real DNS in the URL gate (no network).
+    # Fresh caches each test; block real DNS in the URL gate (no network).
     monkeypatch.setattr(mcp_client, "_KIND_CACHE", {})
+    monkeypatch.setattr(mcp_client, "_SCHEMA_CACHE", {})
     monkeypatch.setattr(security, "url_block_reason", lambda url, **k: None)
     monkeypatch.delenv("OLYMPUS_MCP_STDIO_ALLOWLIST", raising=False)
     monkeypatch.delenv("OLYMPUS_MCP_ACTION_ALLOWLIST", raising=False)
@@ -148,3 +149,30 @@ def test_call_on_unconfigured_server_is_a_clean_error(monkeypatch):
     monkeypatch.setattr(connectors, "mcp_servers", lambda: [])
     out = mcp_client.call("ghost", "do_thing", {})
     assert out.startswith("Error:") and "not configured" in out
+
+
+def test_discover_caches_within_ttl(monkeypatch):
+    # discover() should not reconnect on every call — the second call inside the
+    # TTL returns the cached schemas without touching the transport again.
+    calls = {"n": 0}
+
+    def fake_run_sync(coro_factory, timeout):
+        calls["n"] += 1
+        class _T:
+            name = "do_thing"
+            description = "d"
+            inputSchema = {"type": "object", "properties": {}}
+        return [_T()]
+
+    monkeypatch.setattr(mcp_client, "have_sdk", lambda: True)
+    monkeypatch.setattr(mcp_client, "_run_sync", fake_run_sync)
+    srv = connectors.MCPServer(name="cached", transport="sse",
+                               url="https://x/y", type="data")
+    first = mcp_client.discover(srv)
+    second = mcp_client.discover(srv)
+    assert [d["name"] for d in first] == ["mcp__cached__do_thing"]
+    assert second == first
+    assert calls["n"] == 1                    # only one real connection
+    mcp_client.clear_cache()
+    mcp_client.discover(srv)
+    assert calls["n"] == 2                    # cache cleared → reconnect

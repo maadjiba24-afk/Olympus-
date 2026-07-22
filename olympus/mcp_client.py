@@ -46,11 +46,24 @@ _PREFIX = "mcp__"
 
 DISCOVER_TIMEOUT = 20.0
 CALL_TIMEOUT = 120.0
+# tool_defs() is rebuilt frequently (potentially every turn); without a cache a
+# configured server would be reconnected — a stdio process re-spawned — on every
+# build. Cache the discovered schemas per server for a short TTL; a server that
+# grows a tool mid-session is picked up within DISCOVER_TTL seconds.
+DISCOVER_TTL = 300.0
 
 # name -> "data" | "action": the trust kind of each discovered tool, populated
 # by discover() and read by the connectors/security classification helpers so
 # they never need to reconnect. A miss is treated as untrusted (fail-closed).
 _KIND_CACHE: dict[str, str] = {}
+# server name -> (monotonic_deadline, schemas)
+_SCHEMA_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def clear_cache() -> None:
+    """Drop cached discovery results (used by tests, or after reconfiguring)."""
+    _SCHEMA_CACHE.clear()
+    _KIND_CACHE.clear()
 
 
 def have_sdk() -> bool:
@@ -177,6 +190,12 @@ def discover(server) -> list[dict]:
     (namespaced `mcp__server__tool`). Returns [] on any failure — a broken
     server simply contributes no tools. Also records each tool's trust kind in
     `_KIND_CACHE` so the security classification never needs to reconnect."""
+    import time
+    name = getattr(server, "name", "?")
+    cached = _SCHEMA_CACHE.get(name)
+    if cached and cached[0] > time.monotonic():
+        return cached[1]
+
     if not have_sdk():
         _log.warning("the 'mcp' package is not installed; install "
                      "olympus-council[mcp] to use stdio/SSE MCP servers")
@@ -189,8 +208,7 @@ def discover(server) -> list[dict]:
     try:
         raw = _run_sync(lambda: _with_session(server, _list), DISCOVER_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 — contained
-        _log.warning("discovery of '%s' failed: %s",
-                     getattr(server, "name", "?"), exc)
+        _log.warning("discovery of '%s' failed: %s", name, exc)
         return []
 
     kind = (getattr(server, "type", "data") or "data").lower()
@@ -208,6 +226,7 @@ def discover(server) -> list[dict]:
             "input_schema": getattr(t, "inputSchema", None)
             or {"type": "object", "properties": {}},
         })
+    _SCHEMA_CACHE[name] = (time.monotonic() + DISCOVER_TTL, schemas)
     return schemas
 
 
