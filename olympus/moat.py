@@ -31,7 +31,7 @@ def status() -> dict:
     """A structured snapshot of every absorbed capability: whether it is on, its
     self-evolution health, and its current self-tuned settings."""
     from . import (agentreg, annindex, bandit_routing, consensus, dytopo,
-                   evolve, federation)
+                   evolve, federation, specialists)
 
     health = _safe(evolve.health, {}) or {}
     tunables = (_safe(evolve.summary, {}) or {}).get("tunables", {})
@@ -62,6 +62,13 @@ def status() -> dict:
         "verifiers": _safe(consensus.verifier_count, None),
         "health": health.get("consensus", {}),
         "tuned": tunables.get("consensus.verifiers", {}),
+    }
+
+    # Semantic routing (relevance-orders the roster; earns its keep at scale).
+    caps["semantic_routing"] = {
+        "enabled": _safe(specialists.semantic_routing_enabled, False),
+        "flag": "OLYMPUS_SEMANTIC_ROUTING",
+        "roster": _safe(lambda: len(specialists.SPECIALISTS), 0),
     }
 
     # Bandit routing (explores under-sampled models).
@@ -127,6 +134,10 @@ def render() -> str:
         lines.append(f"          self-tuned consensus.verifiers = "
                      f"{t.get('current')} [{t.get('lo')}..{t.get('hi')}] "
                      "(widens when quorum keeps failing)")
+
+    sr = s["semantic_routing"]
+    lines.append(f"  [{on(sr)}] semantic routing ({sr['flag']}) — "
+                 f"relevance-orders the {sr['roster']}-agent roster")
 
     b = s["bandit_routing"]
     lines.append(f"  [{on(b)}] bandit routing ({b['flag']}) — "

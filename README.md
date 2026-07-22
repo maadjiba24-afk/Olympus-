@@ -541,7 +541,7 @@ lower-bound ranking, and every activation gate are in
 
 ### Native adaptive extensions (opt-in, replay-safe)
 
-Six capabilities extend the council natively — each is **off by default**, so the
+These capabilities extend the council natively — each is **off by default**, so the
 standard install is unchanged, and each is deterministic/replay-safe by
 construction (design contract in
 [ADR 0008](docs/adr/0008-native-adaptive-extensions.md);
@@ -564,6 +564,10 @@ stronger the more they run — watch the board with `olympus moat`:
 - **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer —
   the counterpart to the conservative learned selector — that gives an
   under-sampled model a bounded number of shots before settling on the best.
+- **Semantic routing (`OLYMPUS_SEMANTIC_ROUTING`).** Orders the specialist roster
+  shown to Zeus by embedding-relevance to the request (reorder-only, never
+  trims) — a no-op for the curated 13, earning its keep once many file agents are
+  loaded and the roster grows large. Replay-frozen on the route path.
 - **File-defined agents (`OLYMPUS_AGENTS`).** Drop a `<key>.md` file (frontmatter
   + system prompt) to add a routable specialist without editing source —
   safety-bounded so a file agent can never gain action tools or self-modify.

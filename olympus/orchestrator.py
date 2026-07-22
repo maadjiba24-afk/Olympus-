@@ -35,7 +35,8 @@ from . import (agent, backend, codegraph, companion, config, connectors,
                consensus, contracts, contrib, dytopo, effortscore, i18n, llm,
                memory, playbooks, profile, recall, relgraph, replaystore,
                steering, trace as trace_mod, tools, usage)
-from .specialists import SPECIALISTS, roster
+from .specialists import (SPECIALISTS, roster, semantic_roster,
+                          semantic_routing_enabled)
 
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -316,7 +317,8 @@ class Olympus:
         from . import soul
         system = (agent.load_prompt("zeus") + soul.block()
                   + "\n\n## Specialist roster\n"
-                  + roster() + i18n.directive(self.user) + mem_ctx)
+                  + semantic_roster(user_message)
+                  + i18n.directive(self.user) + mem_ctx)
         messages = self.history + [{"role": "user", "content": user_message}]
         try:
             # Scored, floored at medium (ADR 0005): a long, complex message
@@ -1287,6 +1289,10 @@ class Olympus:
         # kind) so replay_run reproduces the same path.
         tr.meta["swarm_enabled"] = dytopo.swarm_enabled()
         tr.meta["swarm_topology"] = dytopo.swarm_topology_kind()
+        # Semantic routing reorders the roster shown to Zeus (task-dependent), so
+        # a run recorded with it on, replayed with it off, would hash a different
+        # route request. Record it so replay reproduces the same routing path.
+        tr.meta["semantic_routing"] = semantic_routing_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -2177,6 +2183,11 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     os.environ["OLYMPUS_SWARM"] = "1" if _meta.get("swarm_enabled") else "0"
     if _meta.get("swarm_topology"):
         os.environ["OLYMPUS_SWARM_TOPOLOGY"] = str(_meta["swarm_topology"])
+    # Semantic routing reorders the route roster, so reproduce the recorded state
+    # or a semantic-recorded run replayed without it hashes a different route.
+    prev_semroute = os.environ.get("OLYMPUS_SEMANTIC_ROUTING")
+    os.environ["OLYMPUS_SEMANTIC_ROUTING"] = \
+        "1" if _meta.get("semantic_routing") else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2205,6 +2216,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_SWARM_TOPOLOGY", None)
         else:
             os.environ["OLYMPUS_SWARM_TOPOLOGY"] = prev_swarm_topo
+        if prev_semroute is None:
+            os.environ.pop("OLYMPUS_SEMANTIC_ROUTING", None)
+        else:
+            os.environ["OLYMPUS_SEMANTIC_ROUTING"] = prev_semroute
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

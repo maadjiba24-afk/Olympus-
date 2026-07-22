@@ -8,7 +8,8 @@ from olympus import cli, evolve, moat, store
 def test_status_covers_every_capability():
     caps = moat.status()["capabilities"]
     assert set(caps) == {"vector_recall", "swarm", "consensus",
-                         "bandit_routing", "file_agents", "federation"}
+                         "semantic_routing", "bandit_routing", "file_agents",
+                         "federation"}
     for c in caps.values():
         assert "enabled" in c and "flag" in c
 
