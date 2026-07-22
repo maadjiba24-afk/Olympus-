@@ -151,3 +151,92 @@ def test_synthesis_injects_document_grounding(user, monkeypatch):
     bot._synthesize("where is my hotel in lisbon?", "brief", "verified")
     assert "From your documents" in captured["system"]
     assert "Baixa" in captured["system"]
+
+
+# --- persistent ANN index (moat iter 3: vector recall at scale) ----------
+
+from olympus import annindex, memory, store   # noqa: E402
+
+
+def _many_docs(u, n):
+    """n one-chunk documents with distinct embeddable content."""
+    for i in range(n):
+        documents.save(u, f"doc{i:03d}", f"topic number {i} unique marker {i}")
+
+
+def _planted_embed(query_marker):
+    """Embed so the chunk whose text contains `query_marker` is the clear match."""
+    def fake_embed(texts):
+        out = []
+        for t in texts:
+            out.append([1.0, 0.0] if query_marker in t else [0.0, 1.0])
+        return out
+    return fake_embed
+
+
+def test_corpus_signature_tracks_changes(user):
+    idx = {"a": {"mtime": 1.0, "chunks": ["x"]}}
+    s1 = docrag._corpus_signature(idx)
+    assert docrag._corpus_signature(idx) == s1                 # stable
+    idx["a"]["mtime"] = 2.0
+    assert docrag._corpus_signature(idx) != s1                 # mtime change
+    idx["a"]["mtime"] = 1.0
+    idx["a"]["chunks"] = ["x", "y"]
+    assert docrag._corpus_signature(idx) != s1                 # chunk-count change
+
+
+def test_persistent_index_caches_and_rebuilds(user, monkeypatch):
+    store.reset()
+    monkeypatch.setattr(embed, "available", lambda: True)
+    monkeypatch.setattr(embed, "embed", _planted_embed("marker 3"))
+    _many_docs(user, 6)
+    index = docrag.build_index(user)
+    items = {f"{s}\x00{i}": e["embeddings"][i]
+             for s, e in index.items() for i in range(len(e["chunks"]))}
+
+    builds = {"n": 0}
+    real_build = annindex.build
+    monkeypatch.setattr(annindex, "build",
+                        lambda it: (builds.__setitem__("n", builds["n"] + 1),
+                                    real_build(it))[1])
+    docrag._persistent_index(user, index, items)
+    assert builds["n"] == 1                        # first call builds
+    docrag._persistent_index(user, index, items)
+    assert builds["n"] == 1                        # signature matched → loaded
+    # change the corpus signature → rebuild
+    index2 = dict(index)
+    first = sorted(index2)[0]
+    index2[first] = {**index2[first], "mtime": 999.0}
+    docrag._persistent_index(user, index2, items)
+    assert builds["n"] == 2                        # rebuilt on change
+
+
+def test_retrieve_uses_graph_when_ann_on_and_large(user, monkeypatch):
+    store.reset()
+    monkeypatch.setenv("OLYMPUS_ANN", "1")
+    monkeypatch.setattr(annindex, "EXACT_THRESHOLD", 3)        # tiny corpus counts as "large"
+    monkeypatch.setattr(embed, "available", lambda: True)
+    monkeypatch.setattr(embed, "embed", _planted_embed("marker 4"))
+    monkeypatch.setattr(embed, "embed_one",
+                        lambda q: [1.0, 0.0])                  # query matches marker 4
+    _many_docs(user, 8)
+    hits = docrag.retrieve(user, "find marker 4", k=3)
+    assert hits, "graph retrieval returned nothing"
+    assert "marker 4" in hits[0]["text"]                      # planted chunk on top
+    # the persistent index was built and stored
+    assert store.backend().get(docrag._ANN_NS, memory.safe_id(user)) is not None
+    store.reset()
+
+
+def test_retrieve_exact_when_ann_off(user, monkeypatch):
+    store.reset()
+    monkeypatch.delenv("OLYMPUS_ANN", raising=False)
+    monkeypatch.setattr(embed, "available", lambda: True)
+    monkeypatch.setattr(embed, "embed", _planted_embed("marker 2"))
+    monkeypatch.setattr(embed, "embed_one", lambda q: [1.0, 0.0])
+    _many_docs(user, 8)
+    hits = docrag.retrieve(user, "find marker 2", k=3)
+    assert "marker 2" in hits[0]["text"]
+    # no persistent index built on the exact path
+    assert store.backend().get(docrag._ANN_NS, memory.safe_id(user)) is None
+    store.reset()

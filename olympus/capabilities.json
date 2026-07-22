@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 112,
+    "count": 114,
     "names": [
       "a2a",
       "actions",
@@ -82,6 +82,7 @@
       "evolve",
       "explain",
       "export-trajectories",
+      "federation",
       "gallery",
       "gate",
       "gateway",
@@ -102,6 +103,7 @@
       "mcp-serve",
       "memory",
       "moa",
+      "moat",
       "models",
       "next-wake",
       "notes",

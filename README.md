@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->106<!--/cap--> agent tools, and <!--cap:commands-->112<!--/cap-->
+<!--cap:tools-->106<!--/cap--> agent tools, and <!--cap:commands-->114<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -545,7 +545,9 @@ Six capabilities extend the council natively — each is **off by default**, so 
 standard install is unchanged, and each is deterministic/replay-safe by
 construction (design contract in
 [ADR 0008](docs/adr/0008-native-adaptive-extensions.md);
-federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)):
+federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)). They are
+wired into Olympus's self-evolution spine, so they measure themselves and get
+stronger the more they run — watch the board with `olympus moat`:
 
 - **Vector recall (`OLYMPUS_ANN`).** A pure-Python HNSW index. The one-shot
   recall seams stay an exact cosine scan (optimal for a single query and always
@@ -569,7 +571,8 @@ federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)):
   Olympus instances: ed25519 handshake reusing the `witness` root of trust,
   pinned/tiered peer trust, an egress-guarded transport, and shared-lesson sync
   that is scrubbed, trusted-only, and staged as candidates for your gate — never
-  auto-committed.
+  auto-committed. Drive it from the CLI:
+  `olympus federation identity | add-peer | peers | call | serve | lessons`.
 
 ### Connectors: MCP servers & custom plugins
 
