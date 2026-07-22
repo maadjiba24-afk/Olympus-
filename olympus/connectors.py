@@ -2,10 +2,17 @@
 
 Two ways to extend Olympus with external tools and data:
 
-1. **MCP servers** (remote, URL-based). Olympus speaks the Model Context
-   Protocol natively on the Anthropic backend — connect any of the hundreds of
-   community MCP servers (GitHub, Notion, Postgres, Slack, Tavily, …) by adding
-   a definition. Tools run server-side on Anthropic's infra.
+1. **MCP servers**. Connect any of the hundreds of community MCP servers
+   (GitHub, Notion, Postgres, Slack, Tavily, …) by adding a definition. Three
+   transports:
+     - `url`   — Anthropic's server-side connector; tools run on Anthropic's
+                 infra (default; Anthropic backend only).
+     - `sse`   — the native client (olympus/mcp_client.py) drives the server
+                 over HTTP/SSE; works on EVERY backend.
+     - `stdio` — the native client spawns a LOCAL MCP process; works on every
+                 backend, gated behind OLYMPUS_MCP_STDIO_ALLOWLIST (arbitrary
+                 local execution). Native tools are namespaced `mcp__srv__tool`
+                 and dispatch through resolve_handler like any builtin.
 
 2. **Custom plugins** (local Python). Drop a `.py` file in the plugins
    directory that registers tool functions with `@plugin(...)`. These run
@@ -238,11 +245,25 @@ def clear_hooks() -> None:
 @dataclass(frozen=True)
 class MCPServer:
     name: str
-    url: str
+    url: str = ""                      # required for url/sse; empty for stdio
     type: str = "data"                 # "data" | "action"
     auth_env: str | None = None        # env var holding the bearer token
     specialists: tuple[str, ...] = ()  # () = all specialists
     allowed_tools: tuple[str, ...] = ()  # restrict to these MCP tool names
+    # transport:
+    #   "url"   — Anthropic server-side connector (default; anthropic backend only)
+    #   "sse"   — native client, HTTP/SSE, works on EVERY backend
+    #   "stdio" — native client, local subprocess, works on EVERY backend
+    transport: str = "url"
+    command: str = ""                  # stdio: the program to launch
+    args: tuple[str, ...] = ()         # stdio: its arguments
+    env_pass: tuple[str, ...] = ()     # stdio: host env var NAMES to pass through
+
+    def is_native(self) -> bool:
+        """True for the client-driven transports (sse/stdio) — the ones served
+        by olympus.mcp_client on all backends, as opposed to the Anthropic
+        server-side url connector."""
+        return self.transport in ("sse", "stdio")
 
     def to_api(self) -> dict[str, Any]:
         d: dict[str, Any] = {"type": "url", "name": self.name, "url": self.url}
@@ -290,14 +311,24 @@ def _raw_mcp_definitions() -> list[dict]:
 def mcp_servers() -> list[MCPServer]:
     servers = []
     for d in _raw_mcp_definitions():
-        if not d.get("name") or not d.get("url"):
+        if not d.get("name"):
+            continue
+        transport = (d.get("transport") or "url").lower()
+        # url/sse need a url; stdio needs a command. Skip malformed entries.
+        if transport in ("url", "sse") and not d.get("url"):
+            continue
+        if transport == "stdio" and not d.get("command"):
             continue
         servers.append(MCPServer(
-            name=d["name"], url=d["url"],
+            name=d["name"], url=d.get("url", ""),
             type=(d.get("type") or "data").lower(),
             auth_env=d.get("auth_env"),
             specialists=tuple(d.get("specialists") or ()),
             allowed_tools=tuple(d.get("allowed_tools") or ()),
+            transport=transport,
+            command=d.get("command", ""),
+            args=tuple(d.get("args") or ()),
+            env_pass=tuple(d.get("env_pass") or ()),
         ))
     return servers
 
@@ -314,9 +345,14 @@ def action_allowlist() -> set[str]:
 
 
 def mcp_for(specialist_key: str, *, allow_action: bool) -> list[MCPServer]:
+    """Anthropic server-side (url) MCP servers attached to a specialist. Native
+    sse/stdio servers are excluded — they are served client-side by
+    olympus.mcp_client (see mcp_client_tools_for)."""
     allowed_actions = action_allowlist()
     out = []
     for s in mcp_servers():
+        if s.transport != "url":
+            continue  # native transports run through the client, not the API
         if s.specialists and specialist_key not in s.specialists:
             continue
         if s.type == "action":
@@ -328,6 +364,62 @@ def mcp_for(specialist_key: str, *, allow_action: bool) -> list[MCPServer]:
     return out
 
 
+def _native_mcp_for(specialist_key: str, *, allow_action: bool) -> list[MCPServer]:
+    """Native (sse/stdio) MCP servers attached to a specialist, after the SAME
+    action-allowlist gate as the server-side path. Used by the client to know
+    which servers to discover/dispatch for this run."""
+    allowed_actions = action_allowlist()
+    out = []
+    for s in mcp_servers():
+        if not s.is_native():
+            continue
+        if s.specialists and specialist_key not in s.specialists:
+            continue
+        if s.type == "action":
+            if not allow_action or s.name not in allowed_actions:
+                continue  # action servers are inert unless operator-allowlisted
+        out.append(s)
+    return out
+
+
+def mcp_client_tools_for(specialist_key: str, *, allow_action: bool) -> list[dict]:
+    """Tool schemas from the native (client-driven) MCP servers attached to this
+    specialist, namespaced `mcp__server__tool`. Mirrors plugin_tools_for: action
+    servers are excluded unless allowed, so a run that ingests untrusted content
+    never receives an MCP actuator (capability separation)."""
+    from . import mcp_client
+    out: list[dict] = []
+    for s in _native_mcp_for(specialist_key, allow_action=allow_action):
+        out += mcp_client.discover(s)
+    return out
+
+
+def mcp_client_handler(name: str) -> Callable[..., str] | None:
+    """Dispatch for a namespaced native MCP tool (`mcp__server__tool`)."""
+    from . import mcp_client
+    parts = mcp_client.split_name(name)
+    if not parts:
+        return None
+    server, tool = parts
+    if mcp_client._resolve(server) is None:
+        return None
+    return lambda **kwargs: mcp_client.call(server, tool, kwargs)
+
+
+def mcp_client_action_names() -> set[str]:
+    """Discovered native MCP tool names whose server is an ACTION server — the
+    set capability-separation strips from any ingesting run."""
+    from . import mcp_client
+    return {n for n, kind in mcp_client._KIND_CACHE.items() if kind == "action"}
+
+
+def mcp_client_data_names() -> set[str]:
+    """Discovered native MCP tool names whose server is a DATA server — treated
+    as ingestion (their output is untrusted external content)."""
+    from . import mcp_client
+    return {n for n, kind in mcp_client._KIND_CACHE.items() if kind == "data"}
+
+
 def specialist_has_data_mcp(specialist_key: str) -> bool:
     return any(s.type == "data" and (not s.specialists
                                      or specialist_key in s.specialists)
@@ -337,7 +429,18 @@ def specialist_has_data_mcp(specialist_key: str) -> bool:
 _ENV_NAME = None      # compiled lazily
 
 
-def mcp_scan_reason(name: str, url: str, auth_env: str | None = None) -> str | None:
+def stdio_allowlist() -> set[str]:
+    """Native stdio MCP servers the operator has explicitly enabled by name.
+
+    A stdio server is an arbitrary LOCAL process Olympus will spawn — strictly
+    more dangerous than a URL connector — so it stays inert until its name is in
+    OLYMPUS_MCP_STDIO_ALLOWLIST, mirroring the action-allowlist pattern."""
+    raw = os.environ.get("OLYMPUS_MCP_STDIO_ALLOWLIST", "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+def mcp_scan_reason(name: str, url: str, auth_env: str | None = None, *,
+                    transport: str = "url", command: str = "") -> str | None:
     """Security scan for an MCP server definition; reason string when it must
     be refused, None when clean. Persisted connector config is a durable
     attack surface — a poisoned entry exfiltrates every future request's
@@ -347,15 +450,31 @@ def mcp_scan_reason(name: str, url: str, auth_env: str | None = None) -> str | N
     from . import security
     if _ENV_NAME is None:
         _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-    if not url.lower().startswith("https://"):
-        return "MCP server URLs must be https (tokens ride on every request)"
-    if security._URL_CRED.search(url):
-        return "the URL embeds credentials — use auth_env instead"
-    reason = security.url_block_reason(url)
-    if reason:
-        return f"the URL is blocked ({reason})"
+    transport = (transport or "url").lower()
     if security.looks_like_injection(name):
         return "the server name contains prompt-injection markers"
+    if transport in ("sse", "stdio") and "__" in name:
+        # The name namespaces every tool as mcp__<name>__<tool>; a '__' inside
+        # it would make the tool-name split ambiguous.
+        return "a native MCP server name may not contain '__'"
+
+    if transport == "stdio":
+        if not command:
+            return "a stdio MCP server needs a 'command' to launch"
+        # Arbitrary local execution — require the explicit operator allowlist.
+        if name not in stdio_allowlist():
+            return ("stdio MCP servers execute a local process, so they are "
+                    "inert until the operator adds the name to "
+                    "OLYMPUS_MCP_STDIO_ALLOWLIST")
+    else:  # url / sse both ride HTTP and carry tokens on every request
+        if not url.lower().startswith("https://"):
+            return "MCP server URLs must be https (tokens ride on every request)"
+        if security._URL_CRED.search(url):
+            return "the URL embeds credentials — use auth_env instead"
+        reason = security.url_block_reason(url)
+        if reason:
+            return f"the URL is blocked ({reason})"
+
     if auth_env and not _ENV_NAME.match(auth_env):
         return ("auth_env must be an environment variable NAME (e.g. "
                 "MY_MCP_TOKEN), never a literal token — tokens don't belong "
@@ -426,6 +545,7 @@ def summary() -> str:
     lines = ["MCP servers:"]
     servers = mcp_servers()
     allowed = action_allowlist()
+    stdio_ok = stdio_allowlist()
     if servers:
         for s in servers:
             who = ", ".join(s.specialists) or "all"
@@ -434,7 +554,14 @@ def summary() -> str:
             if s.type == "action":
                 state = (" [ACTIVE: allowlisted]" if s.name in allowed
                          else " [INERT: add to OLYMPUS_MCP_ACTION_ALLOWLIST]")
-            lines.append(f"  - {s.name} ({s.type}){state} → {who}{auth}  {s.url}")
+            if s.transport == "stdio" and s.name not in stdio_ok:
+                state += " [INERT: add to OLYMPUS_MCP_STDIO_ALLOWLIST]"
+            reach = ("server-side/anthropic" if s.transport == "url"
+                     else "native/all-backends")
+            target = s.url if s.transport in ("url", "sse") else \
+                f"{s.command} {' '.join(s.args)}".strip()
+            lines.append(f"  - {s.name} ({s.type}, {s.transport}:{reach})"
+                         f"{state} → {who}{auth}  {target}")
     else:
         lines.append("  (none configured)")
     lines.append("Custom plugins:")

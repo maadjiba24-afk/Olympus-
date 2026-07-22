@@ -105,6 +105,25 @@ CATALOG: tuple[Provider, ...] = (
              "openai", auth="local", base_url="http://localhost:11434/v1",
              tradeoff="free; runs on your machine; no cloud",
              sample_models=("llama3.1", "qwen2.5")),
+    Provider("bedrock", "AWS Bedrock — AWS credentials",
+             "bedrock", auth="api_key",
+             key_url="https://console.aws.amazon.com/bedrock/home#/modelaccess",
+             tradeoff="Claude on your AWS account; full capability parity",
+             note="Uses the standard AWS credential chain (env / shared config "
+                  "/ instance role). Set OLYMPUS_BEDROCK_REGION (or AWS_REGION) "
+                  "and use a Bedrock model id as the model, e.g. "
+                  "anthropic.claude-3-5-sonnet-20241022-v2:0. Needs the AWS "
+                  "extra: pip install 'anthropic[bedrock]'.",
+             sample_models=("anthropic.claude-3-5-sonnet-20241022-v2:0",)),
+    Provider("azure", "Azure OpenAI — API key",
+             "openai", auth="api_key",
+             key_url="https://portal.azure.com",
+             tradeoff="enterprise/EU-hosted; same models as OpenAI",
+             note="Enter your resource endpoint as the base URL "
+                  "(https://<resource>.openai.azure.com) and your DEPLOYMENT "
+                  "name as the model. Set OLYMPUS_AZURE_API_VERSION to override "
+                  "the API version; OLYMPUS_AZURE_DEPLOYMENT if it differs from "
+                  "the model name. Uses the api-key header automatically."),
     Provider("custom", "Custom OpenAI-compatible endpoint",
              "openai", auth="api_key",
              note="Enter the base URL and model yourself."),

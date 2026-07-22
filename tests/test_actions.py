@@ -204,3 +204,35 @@ def test_why_is_recorded_and_round_trips(reg):
     a = actions.prepare("u", "t_send", {"to": "x@y.z"},
                         why="you asked me to confirm the meeting")
     assert actions.get("u", a.id).why == "you asked me to confirm the meeting"
+
+
+# --- run_python: Python execution rides the same spine as run_command ------
+
+def test_run_python_prepares_then_executes_under_exec_scope(monkeypatch, tmp_path):
+    """End-to-end: the built-in run_python action stages (never auto-runs),
+    then executes the snippet through the sandbox once the exec scope is
+    granted and the user approves — same posture as run_command."""
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    assert "run_python" in actions.registered()
+
+    # Never auto-executes, even at the highest autonomy (irreversible/exec).
+    actions.grant_scope("shared", "exec")
+    actions.set_autonomy("shared", actions.L4_STANDING)
+    a = actions.prepare("shared", "run_python", {"code": "print(2 ** 10)"})
+    assert a.status == actions.PREPARED
+    assert not actions.can_auto_execute(a)
+
+    # Explicit approval runs it and captures stdout.
+    done = actions.approve("shared", a.id)
+    assert done.status == actions.EXECUTED
+    assert done.result["ok"] and "1024" in done.result["output"]
+
+
+def test_run_python_without_exec_scope_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    a = actions.prepare("shared", "run_python", {"code": "print('x')"})
+    done = actions.approve("shared", a.id)          # no exec scope granted
+    assert done.status == actions.FAILED
+    assert "not granted" in done.error

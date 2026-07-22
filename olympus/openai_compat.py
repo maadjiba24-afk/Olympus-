@@ -46,6 +46,52 @@ def _is_quota_error(code: int, detail: str) -> bool:
     return any(m in low for m in _QUOTA_MARKERS)
 
 
+# Azure OpenAI speaks the same request/response body as OpenAI, but on a
+# deployment-scoped URL with an `api-key` header instead of `Authorization:
+# Bearer`. Detecting it by endpoint host lets Azure ride the whole openai_compat
+# rotation/failover/usage machinery unchanged (provider stays "openai").
+_AZURE_DEFAULT_API_VERSION = "2024-10-21"
+
+
+def _is_azure(base: str) -> bool:
+    # Match only the canonical Azure OpenAI host. A broader `.azure.com` catch
+    # would misroute an ordinary OpenAI-compatible proxy that merely happens to
+    # be Azure-hosted (it expects Bearer auth, not the api-key header).
+    host = (urlparse(base).hostname or "").lower()
+    return host.endswith(".openai.azure.com")
+
+
+def _endpoint_url(settings: config.Settings, base: str) -> str:
+    """The /chat/completions URL for this endpoint — deployment-scoped +
+    api-version query for Azure, plain for every other OpenAI-compatible host."""
+    if not _is_azure(base):
+        return f"{base}/chat/completions"
+    import os
+    from urllib.parse import quote
+    deployment = (os.environ.get("OLYMPUS_AZURE_DEPLOYMENT")
+                  or settings.model or "").strip()
+    if not deployment:
+        raise ValueError(
+            "Azure OpenAI needs a deployment name — set the model to your "
+            "Azure deployment, or set OLYMPUS_AZURE_DEPLOYMENT.")
+    api_version = os.environ.get("OLYMPUS_AZURE_API_VERSION",
+                                 _AZURE_DEFAULT_API_VERSION)
+    return (f"{base}/openai/deployments/{quote(deployment, safe='')}"
+            f"/chat/completions?api-version={quote(api_version, safe='')}")
+
+
+def _auth_headers(base: str, key: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if key:
+        # Azure authenticates with an `api-key` header; everyone else with a
+        # standard OpenAI-style bearer token.
+        if _is_azure(base):
+            headers["api-key"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
 def _record_key_use(base: str, masked: str) -> None:
     with _ROT_LOCK:
         _key_stats.setdefault(base, {})
@@ -77,7 +123,7 @@ def rotation_report(settings: config.Settings) -> str:
 
 def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
-    url = f"{base}/chat/completions"
+    url = _endpoint_url(settings, base)
     # Sovereign egress choke: under sovereign mode a model call to a
     # non-allowlisted host fails closed here (no-op when sovereign is off).
     security.assert_egress_allowed(urlparse(url).hostname or "")
@@ -96,9 +142,7 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     for k_off in range(n):
         idx = (start + k_off) % n
         key = key_ring[idx]
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        headers = _auth_headers(base, key)
         masked = config.mask_key(key) if key else "(no key)"
 
         for attempt in range(4):

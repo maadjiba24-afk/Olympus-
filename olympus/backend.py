@@ -79,7 +79,7 @@ def _dispatch_text(s: config.Settings, system: str,
     if s.provider == "moa":
         from . import moa
         return moa.complete_text(s, system, messages, effort)
-    if s.provider == "anthropic":
+    if s.provider in ("anthropic", "bedrock"):
         response = llm.complete(system, messages, settings=s, effort=effort)
         if response.stop_reason == "refusal":
             return "[The model declined this request for safety reasons.]"
@@ -112,7 +112,7 @@ def complete_json(settings: config.Settings, system: str,
         if s.provider == "moa":
             from . import moa
             return moa.complete_json(s, system, messages, schema, effort)
-        if s.provider == "anthropic":
+        if s.provider in ("anthropic", "bedrock"):
             response = llm.complete(system, messages, settings=s,
                                     effort=effort, output_schema=schema)
             if response.stop_reason == "refusal":
@@ -152,7 +152,7 @@ def run_agent_counted(settings: config.Settings, system: str, task: str,
         # env key.
         token = config.use_active_settings(s)
         try:
-            if s.provider == "anthropic":
+            if s.provider in ("anthropic", "bedrock"):
                 return agent.run_agent_counted(system, task, settings=s,
                                                tool_defs=tool_defs,
                                                mcp_servers=mcp_servers,

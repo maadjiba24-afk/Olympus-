@@ -1,6 +1,6 @@
 {
   "actions": {
-    "count": 23,
+    "count": 24,
     "names": [
       "authorize_payment",
       "browser_operate",
@@ -20,6 +20,7 @@
       "gmail_draft",
       "gmail_send",
       "run_command",
+      "run_python",
       "save_note",
       "send_email",
       "webhook_egress_held",
@@ -164,7 +165,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 103,
+    "count": 106,
     "names": [
       "add_todo",
       "analyze_image",
@@ -199,12 +200,14 @@
       "browser_upload",
       "cache_fact",
       "call_webhook",
+      "chart_from_data",
       "codegraph_impact",
       "codegraph_neighbors",
       "codegraph_overview",
       "codegraph_path",
       "codegraph_subgraph",
       "complete_todo",
+      "crawl_site",
       "create_skill",
       "current_time",
       "edit_file",
@@ -249,6 +252,7 @@
       "restore_prompt",
       "run_benchmark",
       "run_code_benchmark",
+      "run_python",
       "save_lesson",
       "schedule_task",
       "search_documents",
