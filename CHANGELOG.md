@@ -91,6 +91,19 @@ new tools or commands — capability accounting is unchanged.
 
 ### Fixed
 
+- **Code graph — no false-precise edge on a shadowed method.** Qualifier
+  narrowing now skips shadow-prone method names (`get`, `update`, `count`, …):
+  the import-alias map has no scope tracking, so a local var/param that shadows an
+  imported module name (`def h(store): store.get(k)`) would otherwise assert a
+  false `EXTRACTED`/1.0 edge to `store.get` for a plain `dict.get`. Those names
+  fall through to the same-file-only `_SHADOWED` rule, as before.
+- **Replay — the semantic prompt-shaping paths re-raise `ReplayDivergence`.**
+  `semantic_roster` and the new `_skill_index_for` wrapped `frozen_context` in a
+  broad best-effort `except`; since `ReplayDivergence` subclasses `RuntimeError`
+  it was swallowed, masking a genuine divergence (e.g. a skill library that
+  crossed the size threshold since the recorded run) behind a later request-hash
+  mismatch. Both now re-raise it, matching the orchestrator's frozen-context
+  sites.
 - **Replay — frozen run-state now survives the dispatch thread hop.** The active
   run scope used by `replaystore.frozen_context` moved from a `threading.local`
   to a `ContextVar`, and the specialist worker re-publishes it (like the trace

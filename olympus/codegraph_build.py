@@ -341,7 +341,15 @@ def _resolve(project: str, infos: list[dict]) -> dict:
             # files is pinned to the one module its qualifier names → a precise
             # EXTRACTED edge, where the generic rules below could only emit
             # AMBIGUOUS or skip. len==1 is left untouched (already EXTRACTED).
-            if certain and qualifier and len(cands) > 1:
+            # Shadow-prone method names (`get`, `update`, `count`, …) are EXCLUDED:
+            # the import-alias map has no scope tracking, so a local var/param that
+            # shadows an imported module name (`def h(store): store.get(k)`) is
+            # indistinguishable from the module — narrowing there would assert a
+            # false-precise 1.0 edge to `store.get` for a plain `dict.get`. For
+            # these names we fall through to the `_SHADOWED` rule below (same-file
+            # only), exactly as an unqualified shadowed call is handled.
+            if (certain and qualifier and len(cands) > 1
+                    and str(callee).lower() not in _SHADOWED):
                 precise = _narrow_by_qualifier(cands, qualifier, aliases)
                 if precise is not None:
                     if codegraph.add_edge(project, caller_id, "calls",

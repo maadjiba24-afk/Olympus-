@@ -264,3 +264,29 @@ def test_from_import_alias_narrows(tmp_path):
     to_mem = [e for e in codegraph.edges("p") if e["src"] == run["id"]
               and e["dst"] == mem_save["id"] and e["rel"] == "calls"]
     assert to_mem and to_mem[0]["tier"] == codegraph.EXTRACTED
+
+
+def test_qualifier_does_not_false_pin_a_shadowed_method(tmp_path):
+    # A local PARAMETER `store` shadows the imported module `store`; the alias
+    # map has no scope tracking, so a naive narrowing would pin the plain
+    # `store.get(k)` (a dict-like .get) to `store.get` as a 1.0 EXTRACTED edge.
+    # `get` is a shadow-prone name → narrowing must be skipped, and `_SHADOWED`
+    # then restricts `get` to same-file (here: no same-file def → no edge).
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "store.py").write_text("def get():\n    pass\n")
+    (root / "cache.py").write_text("def get():\n    pass\n")   # 2nd def → ambiguous
+    (root / "caller.py").write_text(
+        "from . import store\n\n"
+        "def handle(store):\n    store.get('k')\n")
+    codegraph_build.build("p", root)
+
+    handle = _node("p", "handle", "caller.py")
+    store_get = _node("p", "get", "store.py")
+    bad = [e for e in codegraph.edges("p") if e["src"] == handle["id"]
+           and e["dst"] == store_get["id"] and e["rel"] == "calls"]
+    assert not bad                       # no false-precise edge to store.get
+    # And no EXTRACTED/1.0 edge to ANY `get` was fabricated from the qualifier.
+    cache_get = _node("p", "get", "cache.py")
+    assert not [e for e in codegraph.edges("p") if e["src"] == handle["id"]
+                and e["dst"] == cache_get["id"]]

@@ -442,10 +442,14 @@ def semantic_roster(task: str) -> str:
     if (not semantic_routing_enabled()
             or len(SPECIALISTS) < _SEMANTIC_ROSTER_MIN):
         return roster()
+    from . import replaystore
     try:
-        from . import replaystore
         return replaystore.frozen_context("route.roster",
                                           lambda: _semantic_order(task))
+    except replaystore.ReplayDivergence:
+        # A missing frozen roster on replay is a genuine divergence — surface it
+        # precisely rather than masking it behind the plain roster.
+        raise
     except Exception:
         return roster()
 
@@ -485,15 +489,19 @@ def _skill_index_for(specialist_key: str, task: str | None) -> str:
     if (not semantic_skills_enabled() or not task
             or skills.count() < _SEMANTIC_SKILLS_MIN):
         return full
+    from . import replaystore
     try:
-        from . import replaystore
-
         def _scoped() -> str:
             scoped = skills.scoped_index(specialist_key, task,
                                          limit=_SEMANTIC_SKILLS_K)
             return scoped if scoped else full   # embeddings absent → full index
         return replaystore.frozen_context(
             f"skills.block.{specialist_key}", _scoped)
+    except replaystore.ReplayDivergence:
+        # A missing frozen block on replay is a genuine divergence (e.g. the
+        # library crossed the size threshold since the recorded run) — let it
+        # surface precisely here, never masked into a later request-hash mismatch.
+        raise
     except Exception:
         return full
 

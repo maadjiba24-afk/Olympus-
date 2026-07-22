@@ -8,6 +8,8 @@ engages only above a size threshold, is replay-frozen at the call site, and
 always degrades to the full index — no skill ever becomes unreachable.
 """
 
+import pytest
+
 from olympus import embed, skills, specialists, store
 from olympus.specialists import SPECIALISTS
 
@@ -126,6 +128,23 @@ def test_system_prompt_scopes_to_task(monkeypatch):
     prompt = SPECIALISTS["chiron"].system_prompt("help me set pricing")
     assert "Pricing Playbook" in prompt
     assert "Hardening Guide" not in prompt        # irrelevant skill trimmed
+    store.reset()
+
+
+def test_skill_index_reraises_replay_divergence(monkeypatch):
+    # A missing frozen block in replay mode is a genuine divergence — it must
+    # PROPAGATE, not be swallowed by the broad best-effort catch (which would
+    # relocate/mask the divergence into a later request-hash mismatch).
+    from olympus import replaystore
+    monkeypatch.setenv("OLYMPUS_SEMANTIC_SKILLS", "1")
+    monkeypatch.setattr(specialists, "_SEMANTIC_SKILLS_MIN", 2)
+    _stub_embed(monkeypatch)
+    _seed_many()
+    # Enter replay mode for a run whose frozen context dir has no recorded block.
+    monkeypatch.setenv("OLYMPUS_REPLAY", "run-that-never-recorded")
+    store.reset()
+    with pytest.raises(replaystore.ReplayDivergence):
+        specialists._skill_index_for("chiron", "help me set pricing")
     store.reset()
 
 
