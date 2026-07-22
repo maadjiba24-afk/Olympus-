@@ -84,6 +84,11 @@ class Specialist:
         if self.code_exec and provider == "anthropic":
             defs.append(tools.CODE_EXECUTION_TOOL)
         defs += connectors.plugin_tools_for(self.key, allow_action=allow_action)
+        # Native (stdio/SSE) MCP tools — provider-independent, so they load on
+        # EVERY backend (unlike the Anthropic-only server-side url connectors in
+        # mcp_defs). allow_action gates action servers out of ingesting runs,
+        # exactly like plugin_tools_for above.
+        defs += connectors.mcp_client_tools_for(self.key, allow_action=allow_action)
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)

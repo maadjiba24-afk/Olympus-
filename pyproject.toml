@@ -43,9 +43,10 @@ dependencies = [
 postgres = ["psycopg>=3.1"]        # olympus/store.py + codegraph_introspect — Postgres
 browser = ["websockets>=12.0"]     # olympus/browser.py — CDP-over-WebSocket transport
 sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsing
+mcp = ["mcp>=1.5.0"]               # olympus/mcp_client.py — native stdio/SSE MCP client
 graphdb = ["neo4j>=5.0", "falkordb>=1.0"]  # codegraph_export — live graph-DB pushes
-all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0", "neo4j>=5.0",
-       "falkordb>=1.0"]
+all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0", "mcp>=1.5.0",
+       "neo4j>=5.0", "falkordb>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/maadjiba24-afk/Olympus-"

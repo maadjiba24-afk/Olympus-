@@ -3505,9 +3505,13 @@ def _schedule_task(name: str, interval: str, prompt: str,
 
 
 def resolve_handler(name: str):
-    """Find a tool handler: built-in first, then custom plugins."""
+    """Find a tool handler: built-in first, then custom plugins, then native
+    (stdio/SSE) MCP tools."""
     handler = HANDLERS.get(name)
     if handler is not None:
         return handler
     from . import connectors  # local import to avoid an import cycle
-    return connectors.plugin_handler(name)
+    plugin = connectors.plugin_handler(name)
+    if plugin is not None:
+        return plugin
+    return connectors.mcp_client_handler(name)
