@@ -281,7 +281,7 @@ class Olympus:
     def _light(self) -> config.Settings:
         """Settings for the lightweight stages (route/plan/review). In fast mode
         these run on the pool's fastest model instead of the strongest one."""
-        return (self.pool.fastest() if config.fast_mode()
+        return (self.pool.fastest() if self._fast()
                 else self.pool.for_role("reasoning"))
 
     @staticmethod
@@ -792,7 +792,7 @@ class Olympus:
         a missing double-check is not unverified content (ADR 0005 am. 4)."""
         verified = getattr(self, "_synth_check_source", None)
         if (not verified or not config.synth_check_enabled()
-                or config.fast_mode()):
+                or self._fast()):
             return reply
         try:
             verdict = self._check_synthesis(user_message, verified, reply)
@@ -846,7 +846,7 @@ class Olympus:
         recompose (bounded, honest — the check still runs and is recorded)."""
         verified = getattr(self, "_synth_check_source", None)
         if (not verified or not config.synth_check_enabled()
-                or config.fast_mode()):
+                or self._fast()):
             return None
         try:
             verdict = self._check_synthesis(user_message, verified, joined)
@@ -1117,11 +1117,23 @@ class Olympus:
 
         return outputs
 
+    def _fast(self) -> bool:
+        """Effective fast-mode for the current turn. Uses the per-turn value
+        resolved at the top of `_pipeline` (which honours OLYMPUS_FAST=auto);
+        falls back to the global setting outside a pipeline run."""
+        val = getattr(self, "_fast_turn", None)
+        return config.fast_mode() if val is None else val
+
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
         self._unverified_banner = None  # set by the answer.verify chokepoint
         self._synth_check_source = None  # verified findings for stage 4.5
+        # Resolve fast-mode ONCE per turn so an OLYMPUS_FAST=auto decision is
+        # consistent across every stage of this pipeline (route/plan skip,
+        # review skip, synthesis check). Recomputed each turn; on replay the
+        # env is a concrete 1/0, so this reproduces the recorded value.
+        self._fast_turn = config.fast_mode_for(user_message)
         replaystore.set_run(tr.id)      # scope frozen run-state to this run
         # Record the enforcement mode as run metadata so a replay can reproduce
         # it: a run recorded with contracts ON, replayed with them OFF, would
@@ -1140,7 +1152,7 @@ class Olympus:
         # routes route/plan onto pool.fastest()), so it must be reproduced on
         # replay too — otherwise a fast-recorded run replayed normally (or vice
         # versa) adds/drops decisions and diverges spuriously.
-        tr.meta["fast_mode"] = config.fast_mode()
+        tr.meta["fast_mode"] = self._fast()
         # The interactive tier adds a model call on the direct path, so its
         # on/off state is part of the decision path and must be reproduced on
         # replay (like fast_mode above).
@@ -1223,7 +1235,7 @@ class Olympus:
             verified = raw
             self._record_verify_exempt(tr, "delegate", "router_opt_out")
 
-        if config.fast_mode():
+        if self._fast():
             # Fast mode skips the optional quality-review round-trip entirely.
             tr.event("review.skipped", reason="fast_mode")
             review = {"verdict": "approve", "feedback": "", "retry_specialists": []}

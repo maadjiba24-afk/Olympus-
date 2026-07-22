@@ -174,6 +174,14 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
   screenshot/video capture; character-vibes evaluation reports.
 - OpenTelemetry observability; structured provider logs; gateway lazy-loading
   and startup-latency work; plugin metadata caching.
+- **Olympus absorption (2026-07-22):** OpenClaw's *Crestodian conversational
+  onboarding* (2026.7.1) and adaptive latency become native Olympus behaviours:
+  a first-contact `/start` welcome shown once per chat identity
+  (`onboarding.py`), and **`/fast auto`** — a per-message latency decision
+  (`config.estimate_fast`/`fast_mode_for`) resolved once per turn in the
+  orchestrator so quick asks skip the review round-trip while substantial ones
+  still get the full council + Athena review. On/off/auto is settable from any
+  channel with `/fast`.
 
 ---
 

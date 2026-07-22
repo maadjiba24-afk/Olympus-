@@ -61,6 +61,7 @@ HELP = (
     "/approve <id> · /deny <id> — decide a held command from chat\n"
     "/usage — tokens and cost for this session and today\n"
     "/model [name|auto] — pin this conversation to a model (opus/sonnet/gpt…)\n"
+    "/fast [on|off|auto] — latency mode; auto decides per message\n"
     "/reset — start fresh (keeps a distilled summary of what we covered)\n"
 )
 
@@ -196,6 +197,39 @@ def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
     return chunk("Steering queue is full; note dropped.")
 
 
+def _set_fast(arg: str) -> str:
+    """Handle `/fast [on|off|auto]`. Instance-wide (fast mode is a process
+    setting, like it is in the CLI/TUI), persisted so it survives a restart.
+    'auto' lets Olympus decide per message: quick asks stay fast, substantial
+    ones get the full council + review."""
+    val = (arg or "").strip().lower()
+    if not val:
+        cur = config.fast_setting()
+        note = {"on": "every reply skips the optional review for lower latency",
+                "off": "every reply gets the full council + review",
+                "auto": "I decide per message — quick asks fast, hard ones full"}
+        return (f"Fast mode is **{cur}** — {note[cur]}.\n"
+                "Change it with /fast on · /fast off · /fast auto")
+    mapping = {"on": "1", "1": "1", "yes": "1", "true": "1",
+               "off": "0", "0": "0", "no": "0", "false": "0",
+               "auto": "auto"}
+    if val not in mapping:
+        return "Usage: /fast [on|off|auto]"
+    stored = mapping[val]
+    os.environ["OLYMPUS_FAST"] = stored
+    try:
+        from . import firstrun
+        firstrun.save_env_value("OLYMPUS_FAST", stored)
+    except Exception:
+        pass                        # env is set for this process regardless
+    setting = config.fast_setting()
+    blurb = {"on": "Fast mode ON — I'll skip the optional review round-trip.",
+             "off": "Fast mode OFF — every reply gets the full council + review.",
+             "auto": "Fast mode AUTO — quick asks stay fast; substantial ones "
+                     "get the full council + review."}
+    return blurb[setting]
+
+
 def reply_for(bots: dict, user_key: str, text: str,
               prefix: str = "ol", uid: str | None = None) -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
@@ -211,6 +245,11 @@ def reply_for(bots: dict, user_key: str, text: str,
     cmd = cmd.lower()
 
     if cmd in ("/start", "/help"):
+        from . import onboarding
+        wid = uid or f"{prefix}-{memory.safe_id(user_key)}"
+        if cmd == "/start" and onboarding.is_new(wid):
+            onboarding.mark_seen(wid)
+            return chunk(onboarding.welcome() + "\n\n" + HELP)
         return chunk(HELP)
     if cmd == "/steer":
         # Fallback for transports that didn't fast-path it; same behavior.
@@ -283,6 +322,8 @@ def reply_for(bots: dict, user_key: str, text: str,
         # pin (or unpin) takes effect on the next message, not next restart.
         bots.pop(uid, None)
         return chunk(reply)
+    if cmd == "/fast":
+        return chunk(_set_fast(arg))
     if cmd == "/profile":
         # View-only: a conversation can see its boundary, never widen it
         # (assignment is operator-side via `olympus restrict`).
