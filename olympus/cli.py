@@ -522,6 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8484)
 
+    sub.add_parser("matrix", help="run the Matrix channel "
+                                  "(needs MATRIX_HOMESERVER + MATRIX_ACCESS_TOKEN)")
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
     p_gw = sub.add_parser(
@@ -2051,6 +2053,12 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "matrix":
+        from . import matrix
+        try:
+            matrix.run_bot()
+        except KeyboardInterrupt:
+            print("\nMatrix gateway stopped.")
     elif args.command == "gateway":
         from . import gateway
         if args.gw_status:
