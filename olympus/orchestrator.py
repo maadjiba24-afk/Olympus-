@@ -32,9 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
-               contracts, contrib, dytopo, effortscore, i18n, llm, memory,
-               playbooks, profile, recall, relgraph, replaystore, steering,
-               trace as trace_mod, tools, usage)
+               consensus, contracts, contrib, dytopo, effortscore, i18n, llm,
+               memory, playbooks, profile, recall, relgraph, replaystore,
+               steering, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -504,9 +504,67 @@ class Olympus:
         mcp = [s.to_api() for s in connectors.mcp_for("aletheia",
                                                       allow_action=False)] \
             if vs.provider == "anthropic" else []
+        if consensus.enabled():
+            return self._verify_consensus(system, task, vs, tool_defs, mcp)
         raw = backend.run_agent(vs, system, task, tool_defs,
                                 mcp_servers=mcp, effort="high")
         return _parse_verdict(raw)
+
+    def _verify_consensus(self, system: str, task: str,
+                          vs: config.Settings, tool_defs: list,
+                          mcp: list) -> tuple[str, dict | None]:
+        """Multi-verifier quorum (OLYMPUS_CONSENSUS). Fan out N verifiers, each
+        given a distinct lens, and fold their verdicts with a safety-biased
+        quorum so a single confidently-wrong verifier cannot pass a fabrication
+        (or reject a correct answer). Each verifier runs under a copied context
+        so replay/trace/user contextvars survive the thread hop; verdicts are
+        aggregated in verifier-index order for determinism. On total failure it
+        falls back to the single-verifier result, so consensus can only ADD
+        scrutiny, never remove the existing guarantee."""
+        import contextvars
+        n = consensus.verifier_count()
+
+        def _one(index: int) -> tuple[str, dict | None]:
+            lens_task = (task + "\n\nVERIFICATION LENS (weigh this most): "
+                         + consensus.lens_for(index))
+            raw = backend.run_agent(vs, system, lens_task, tool_defs,
+                                    mcp_servers=mcp, effort="high")
+            return _parse_verdict(raw)
+
+        results: list[tuple[str, dict | None]] = [("", None)] * n
+        with ThreadPoolExecutor(max_workers=min(n, config.MAX_CONCURRENT_CALLS)) \
+                as ex:
+            futs = {}
+            for i in range(n):
+                ctx = contextvars.copy_context()
+                futs[ex.submit(ctx.run, _one, i)] = i
+            for fut in futs:
+                i = futs[fut]
+                try:
+                    results[i] = fut.result()
+                except replaystore.ReplayDivergence:
+                    raise                       # never mask a replay divergence
+                except Exception:
+                    results[i] = ("", None)
+
+        verdicts = [v for _, v in results if v is not None]
+        if not verdicts:
+            # Every verifier failed to produce a verdict — hand back the first
+            # content with no verdict so the caller takes the visible degraded
+            # path (ADR 0005), exactly as a single failed verifier would.
+            content = next((c for c, _ in results if c), "")
+            return content, None
+        agg = consensus.safest_verdict(verdicts)
+        # Return the corrected content from a verifier that matched the consensus
+        # status, preferring the most confident; falls back to any content.
+        matching = [(v.get("confidence", 0.0), c)
+                    for c, v in results
+                    if v is not None and v.get("status") == agg["status"]]
+        content = (max(matching, key=lambda t: t[0])[1] if matching
+                   else next((c for c, _ in results if c), ""))
+        return content, {"status": agg["status"],
+                         "unsupported_claims": agg["unsupported_claims"],
+                         "confidence": agg["confidence"]}
 
     def _verify_timed(self, brief: str,
                       outputs: list[tuple[str, str]]) -> tuple[str, dict | None]:
