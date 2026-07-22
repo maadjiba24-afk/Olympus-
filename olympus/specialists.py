@@ -6,6 +6,9 @@ specialist = add a prompt file + one entry here (Prometheus proposes these).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass, field
 
 from . import (agent, codegraph, config, connectors, contracts, security,
@@ -351,12 +354,98 @@ SPECIALISTS: dict[str, Specialist] = {
 }
 
 
+def _roster_line(s: "Specialist") -> str:
+    return f"- {s.key}: {s.name}, {s.title} — {s.description}"
+
+
 def roster() -> str:
     """Routing card given to Zeus and Athena."""
-    return "\n".join(
-        f"- {s.key}: {s.name}, {s.title} — {s.description}"
-        for s in SPECIALISTS.values()
-    )
+    return "\n".join(_roster_line(s) for s in SPECIALISTS.values())
+
+
+# --- semantic routing: order the roster by relevance to the task ----------
+#
+# Keyword routing over 13 curated descriptions is already excellent, so this is a
+# NO-OP for the default install. It earns its keep once many file agents
+# (agentreg) are loaded: the roster grows large and the LLM benefits from seeing
+# the fitting agents FIRST. It only ever REORDERS — never trims — so every
+# specialist stays routable. Opt-in (`OLYMPUS_SEMANTIC_ROUTING`), engages only
+# with embeddings AND a large roster, and is replay-frozen at the call site.
+
+_SEMANTIC_ROSTER_MIN = 16          # ≤ this, the plain roster is fine
+_DESCVEC_NS = "specialists.descvec"
+
+
+def semantic_routing_enabled() -> bool:
+    return os.environ.get("OLYMPUS_SEMANTIC_ROUTING", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def _descriptions() -> dict[str, str]:
+    return {s.key: f"{s.name} {s.title}. {s.description}"
+            for s in SPECIALISTS.values()}
+
+
+def _description_vectors(descs: dict) -> dict | None:
+    """Embed the specialist descriptions, cached by a registry signature so the
+    network cost is paid once per roster shape, not once per route."""
+    from . import embed, store
+    sig = hashlib.sha256(
+        "|".join(f"{k}:{v}" for k, v in sorted(descs.items())).encode()
+    ).hexdigest()
+    try:
+        blob = store.backend().get(_DESCVEC_NS, "vectors")
+        if blob:
+            data = json.loads(blob)
+            if data.get("sig") == sig and isinstance(data.get("vecs"), dict):
+                return data["vecs"]
+    except Exception:
+        pass
+    vecs = embed.embed(list(descs.values()))
+    if not vecs or len(vecs) != len(descs):
+        return None
+    out = {k: vecs[i] for i, k in enumerate(descs)}
+    try:
+        store.backend().put(_DESCVEC_NS, "vectors",
+                            json.dumps({"sig": sig, "vecs": out}).encode())
+    except Exception:
+        pass
+    return out
+
+
+def _semantic_order(task: str) -> str:
+    from . import annindex, embed
+    descs = _descriptions()
+    vecs = _description_vectors(descs)
+    qv = embed.embed_one(task)
+    if not vecs or not qv:
+        return roster()
+    ranked = annindex.nearest(qv, vecs, k=len(vecs), min_sim=-1.0)
+    order = [k for k, _ in ranked]
+    order += [k for k in descs if k not in set(order)]     # keep every agent
+    return "\n".join(_roster_line(SPECIALISTS[k])
+                     for k in order if k in SPECIALISTS)
+
+
+def semantic_roster(task: str) -> str:
+    """The roster ordered most-relevant-first for `task` when semantic routing is
+    on, embeddings are configured, and the roster is large enough to benefit; the
+    plain (static) roster otherwise. Frozen per run for replay-safety (the plain
+    path stays unfrozen, so historical runs are unaffected); best-effort → plain
+    roster on any failure."""
+    # Gate on the flag + roster size only, NOT embeddings, so a run that took the
+    # frozen path replays down it too (flag restored from meta) and reproduces the
+    # recorded roster regardless of embedding availability at replay time.
+    # `_semantic_order` degrades to the plain roster when embeddings are absent.
+    if (not semantic_routing_enabled()
+            or len(SPECIALISTS) < _SEMANTIC_ROSTER_MIN):
+        return roster()
+    try:
+        from . import replaystore
+        return replaystore.frozen_context("route.roster",
+                                          lambda: _semantic_order(task))
+    except Exception:
+        return roster()
 
 
 # Merge any operator-defined file agents into the registry (OLYMPUS_AGENTS, off

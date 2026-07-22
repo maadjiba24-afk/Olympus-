@@ -136,6 +136,10 @@ for _t in (
     Tunable("consensus", "verifiers", lo=1, hi=7, default=3, on_fail="increase",
             note="widen the verifier panel when the quorum keeps failing to "
                  "form, so transient verifier errors are outvoted"),
+    Tunable("bandit", "exploration", lo=0.3, hi=2.0, default=1.414,
+            on_fail="decrease",
+            note="explore less (trust the empirical best) when routing outcomes "
+                 "degrade under the bandit"),
     Tunable("emem", "max_fragments", lo=4, hi=12, default=12,
             on_fail="decrease",
             note="reconstruct fewer episode fragments when it degrades"),
