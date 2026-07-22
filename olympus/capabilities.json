@@ -46,7 +46,7 @@
     ]
   },
   "commands": {
-    "count": 115,
+    "count": 116,
     "names": [
       "a2a",
       "actions",
@@ -113,6 +113,7 @@
       "pair",
       "pay-live",
       "playbook",
+      "plugin",
       "profile",
       "pubkey",
       "queue",

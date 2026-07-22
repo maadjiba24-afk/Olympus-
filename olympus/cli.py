@@ -505,6 +505,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_lim.add_argument("n", nargs="?", type=int, help="max per day (0 = off)")
 
     sub.add_parser("connectors", help="list configured MCP servers and plugins")
+    p_plugin = sub.add_parser(
+        "plugin", help="install/verify third-party tool plugins with pinned "
+                       "provenance (deny-by-default; hash-checked)")
+    p_plugin.add_argument("action", nargs="?", default="list",
+                          choices=["install", "list", "verify", "remove"])
+    p_plugin.add_argument("source", nargs="?", default="",
+                          help="install: file path or https URL; remove: name")
+    p_plugin.add_argument("--sha256", default="",
+                          help="pinned SHA-256 the code must match")
+    p_plugin.add_argument("--name", default="", help="override the module name")
+    p_plugin.add_argument("--allow-unpinned", action="store_true",
+                          help="install a local file without a pinned hash "
+                               "(you accept the risk)")
     p_mcp = sub.add_parser("add-mcp", help="add an MCP server connector")
     p_mcp.add_argument("name")
     p_mcp.add_argument("url")
@@ -1900,6 +1913,45 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "connectors":
         from . import connectors
         print(connectors.summary())
+    elif args.command == "plugin":
+        from . import pluginstore
+        if args.action == "install":
+            if not args.source:
+                print("Usage: olympus plugin install <file|https-url> "
+                      "--sha256 <hash>")
+                return 1
+            try:
+                res = pluginstore.install(
+                    args.source, sha256=args.sha256, name=args.name,
+                    allow_unpinned=args.allow_unpinned)
+            except ValueError as err:
+                print(f"Refused: {err}")
+                return 1
+            print(f"✓ Installed '{res['name']}' (sha256 {res['sha256'][:16]}…). "
+                  "It loads on the next run.")
+        elif args.action == "list":
+            items = pluginstore.list_installed()
+            if not items:
+                print("No installed plugins. "
+                      "Add one: olympus plugin install <src> --sha256 <hash>")
+            for it in items:
+                print(f"  {it['name']}  ({it['sha256'][:16]}…)  "
+                      f"from {it['source']}  @ {it['installed_at']}")
+        elif args.action == "verify":
+            rows = pluginstore.verify()
+            if not rows:
+                print("No installed plugins to verify.")
+            for r in rows:
+                mark = "✓" if r["status"] == "ok" else "⚠"
+                print(f"  {mark} {r['name']}: {r['status']}")
+            if any(r["status"] != "ok" for r in rows):
+                return 1
+        elif args.action == "remove":
+            if not args.source:
+                print("Usage: olympus plugin remove <name>")
+                return 1
+            print("Removed." if pluginstore.remove(args.source)
+                  else "No such installed plugin.")
     elif args.command == "add-mcp":
         from . import connectors
         specialists = ([s.strip() for s in args.specialists.split(",")]

@@ -82,24 +82,43 @@ def _plugins_dir() -> Path | None:
 
 
 def load_plugins(force: bool = False) -> None:
-    """Import every .py in the plugins directory once, registering its tools."""
+    """Import every .py in the plugins directories once, registering its tools.
+
+    Two directories are scanned: the classic dev dir (PROJECT_ROOT/plugins or
+    OLYMPUS_PLUGINS_DIR) and the hardened installer's dir (pluginstore). When
+    OLYMPUS_PLUGIN_ENFORCE is on, ONLY plugins whose on-disk hash matches the
+    install manifest are run — an installer-tampered or unmanifested file is
+    skipped, closing the "drop a file, it executes" hole."""
     global _PLUGINS_LOADED
     if _PLUGINS_LOADED and not force:
         return
     _PLUGINS_LOADED = True
-    d = _plugins_dir()
-    if not d or not d.is_dir():
-        return
-    for path in sorted(d.glob("*.py")):
-        if path.name.startswith("_"):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location(
-                f"olympus_plugin_{path.stem}", path)
-            module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-            spec.loader.exec_module(module)  # type: ignore[union-attr]
-        except Exception as err:  # a broken plugin must not crash Olympus
-            print(f"[connectors] failed to load plugin {path.name}: {err}")
+    from . import pluginstore
+    verified = pluginstore.verified_names()      # None = enforcement off
+    dirs = []
+    dev = _plugins_dir()
+    if dev and dev.is_dir():
+        dirs.append(dev)
+    store = pluginstore.plugins_dir()
+    if store not in dirs:
+        dirs.append(store)
+    seen: set[str] = set()
+    for d in dirs:
+        for path in sorted(d.glob("*.py")):
+            if path.name.startswith("_") or path.stem in seen:
+                continue
+            if verified is not None and path.stem not in verified:
+                print(f"[connectors] skipping unverified plugin {path.name} "
+                      "(OLYMPUS_PLUGIN_ENFORCE is on)")
+                continue
+            seen.add(path.stem)
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"olympus_plugin_{path.stem}", path)
+                module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+                spec.loader.exec_module(module)  # type: ignore[union-attr]
+            except Exception as err:  # a broken plugin must not crash Olympus
+                print(f"[connectors] failed to load plugin {path.name}: {err}")
 
 
 def plugin_tools_for(specialist_key: str, *, allow_action: bool) -> list[dict]:
