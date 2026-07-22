@@ -71,6 +71,15 @@ def status() -> dict:
         "roster": _safe(lambda: len(specialists.SPECIALISTS), 0),
     }
 
+    # Semantic skill retrieval (scopes a specialist's in-prompt skill index to
+    # the task; earns its keep once a library outgrows the prompt).
+    from . import skills as _skills
+    caps["semantic_skills"] = {
+        "enabled": _safe(specialists.semantic_skills_enabled, False),
+        "flag": "OLYMPUS_SEMANTIC_SKILLS",
+        "skills": _safe(_skills.count, 0),
+    }
+
     # Bandit routing (explores under-sampled models).
     bandit = _safe(bandit_routing.status, {}) or {}
     caps["bandit_routing"] = {
@@ -140,6 +149,10 @@ def render() -> str:
     sr = s["semantic_routing"]
     lines.append(f"  [{on(sr)}] semantic routing ({sr['flag']}) — "
                  f"relevance-orders the {sr['roster']}-agent roster")
+
+    ss = s["semantic_skills"]
+    lines.append(f"  [{on(ss)}] semantic skills ({ss['flag']}) — "
+                 f"task-scopes the in-prompt skill index ({ss['skills']} skills)")
 
     b = s["bandit_routing"]
     lines.append(f"  [{on(b)}] bandit routing ({b['flag']}) — "

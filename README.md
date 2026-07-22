@@ -568,6 +568,13 @@ stronger the more they run — watch the board with `olympus moat`:
   shown to Zeus by embedding-relevance to the request (reorder-only, never
   trims) — a no-op for the curated 13, earning its keep once many file agents are
   loaded and the roster grows large. Replay-frozen on the route path.
+- **Semantic skill retrieval (`OLYMPUS_SEMANTIC_SKILLS`).** Scopes the per-agent
+  skill index injected into a specialist's prompt to the top-K skills most
+  relevant to the task (embedding cosine), instead of the whole list — a no-op
+  until a specialist's library actually outgrows the prompt, and always degrading
+  to the full index (no skill ever becomes unreachable; any skill is still
+  loadable by name with `read_skill`). Replay-frozen per specialist on the
+  prompt-assembly path.
 - **File-defined agents (`OLYMPUS_AGENTS`).** Drop a `<key>.md` file (frontmatter
   + system prompt) to add a routable specialist without editing source —
   safety-bounded so a file agent can never gain action tools or self-modify.
