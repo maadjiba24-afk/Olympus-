@@ -548,10 +548,13 @@ class Olympus:
                     results[i] = ("", None)
 
         verdicts = [v for _, v in results if v is not None]
-        if not verdicts:
-            # Every verifier failed to produce a verdict — hand back the first
-            # content with no verdict so the caller takes the visible degraded
-            # path (ADR 0005), exactly as a single failed verifier would.
+        # Require a QUORUM of the intended panel to have actually produced a
+        # verdict. Otherwise (e.g. 2 of 3 verifiers hit transient API errors) a
+        # single survivor's `pass` would decide, silently collapsing the quorum
+        # to N=1 and weakening the guarantee this method advertises. Too few
+        # verdicts → the visible degraded path (ADR 0005), same as a total
+        # verifier failure.
+        if len(verdicts) < consensus.majority_threshold(n):
             content = next((c for c, _ in results if c), "")
             return content, None
         agg = consensus.safest_verdict(verdicts)
@@ -1244,6 +1247,13 @@ class Olympus:
         # on/off state is part of the decision path and must be reproduced on
         # replay (like fast_mode above).
         tr.meta["interactive_verify"] = config.interactive_verify_enabled()
+        # The swarm consultation pass refines outputs (and emits extra _run_one
+        # calls) BEFORE verify, so the verify request-hash is computed over the
+        # refined text. A run recorded with swarm ON, replayed with it OFF, would
+        # verify the UNrefined outputs → divergence. Record it (and the topology
+        # kind) so replay_run reproduces the same path.
+        tr.meta["swarm_enabled"] = dytopo.swarm_enabled()
+        tr.meta["swarm_topology"] = dytopo.swarm_topology_kind()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -2102,6 +2112,15 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_iv = os.environ.get("OLYMPUS_INTERACTIVE_VERIFY")
     os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = \
         "on" if _meta.get("interactive_verify") else "off"
+    # The swarm consultation pass refines outputs before verify, so reproduce the
+    # recorded on/off state and topology or a swarm-recorded run replayed without
+    # it verifies unrefined text → divergence. Absent in pre-hardening traces →
+    # off, so old runs replay unchanged.
+    prev_swarm = os.environ.get("OLYMPUS_SWARM")
+    prev_swarm_topo = os.environ.get("OLYMPUS_SWARM_TOPOLOGY")
+    os.environ["OLYMPUS_SWARM"] = "1" if _meta.get("swarm_enabled") else "0"
+    if _meta.get("swarm_topology"):
+        os.environ["OLYMPUS_SWARM_TOPOLOGY"] = str(_meta["swarm_topology"])
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2122,6 +2141,14 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_INTERACTIVE_VERIFY", None)
         else:
             os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = prev_iv
+        if prev_swarm is None:
+            os.environ.pop("OLYMPUS_SWARM", None)
+        else:
+            os.environ["OLYMPUS_SWARM"] = prev_swarm
+        if prev_swarm_topo is None:
+            os.environ.pop("OLYMPUS_SWARM_TOPOLOGY", None)
+        else:
+            os.environ["OLYMPUS_SWARM_TOPOLOGY"] = prev_swarm_topo
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

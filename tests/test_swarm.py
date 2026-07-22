@@ -1,6 +1,10 @@
 """Native swarm topologies + the consultation driver (dytopo extensions)."""
 
-from olympus import dytopo
+import types
+
+import anthropic
+
+from olympus import dytopo, llm
 
 
 def _edge_set(topo):
@@ -134,3 +138,120 @@ def test_consultation_skips_missing_peer_context():
     out = dict(dytopo.run_consultation(topo, outputs, runner))
     assert called == []                # no peer_ctx for w1's consulted → skip
     assert out["w1"] == "w1 answer"
+
+
+# --- hardening: duplicate specialist keys are preserved (M1) -------------
+
+def test_consultation_preserves_duplicate_keys():
+    # Athena can assign one specialist to two DAG steps → duplicate keys.
+    topo = dytopo.star("apollo", ["hermes"], mode="in")   # hermes -> apollo
+    outputs = [("apollo", "A1"), ("apollo", "A2"), ("hermes", "H")]
+    out = dytopo.run_consultation(
+        topo, outputs, lambda c, p, o: o + "+")
+    # NOTHING is collapsed: both apollo slots survive with their own text.
+    assert out == [("apollo", "A1"), ("apollo", "A2"), ("hermes", "H+")]
+    assert len(out) == 3
+
+
+def test_consultation_refines_all_slots_of_a_consulter():
+    topo = dytopo.star("lead", ["worker"], mode="in")     # worker -> lead
+    outputs = [("worker", "W1"), ("worker", "W2"), ("lead", "L")]
+    out = dict((i, v) for i, (k, v) in enumerate(
+        dytopo.run_consultation(topo, outputs, lambda c, p, o: o + "!")))
+    assert out[0] == "W1!" and out[1] == "W2!"     # both worker slots refined
+
+
+# --- hardening: mesh cap is FAIR — no node is starved (L3) ---------------
+
+def test_mesh_fair_cap_keeps_every_node_connected():
+    topo = dytopo.mesh([f"n{i}" for i in range(30)])   # full mesh = 870 edges
+    assert len(topo.edges) <= dytopo._MAX_EDGES
+    srcs = {e.src for e in topo.edges}
+    assert len(srcs) == len(topo.nodes)            # every node has an out-edge
+    # each node's out-degree is bounded but non-zero
+    from collections import Counter
+    outdeg = Counter(e.src for e in topo.edges)
+    assert all(v >= 1 for v in outdeg.values())
+
+
+# --- hardening: swarm state is recorded in meta + restored on replay (H1) -
+
+def _msg(text):
+    return anthropic.types.Message.model_validate({
+        "id": "m", "type": "message", "role": "assistant", "model": "claude-test",
+        "content": [{"type": "text", "text": text}], "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 5, "output_tokens": 5,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+    })
+
+
+def _swarm_client():
+    import json as _json
+    counter = {"n": 0}
+
+    def stream(**params):
+        schema = ((params.get("output_config") or {}).get("format") or {}).get(
+            "schema") or {}
+        props = schema.get("properties", {})
+        blob = _json.dumps(params.get("messages") or "") + str(
+            params.get("system") or "")
+
+        class _S:
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+            def get_final_message(s):
+                if "mode" in props:                     # Zeus route
+                    return _msg(_json.dumps(
+                        {"mode": "delegate", "direct_reply": None,
+                         "specialists": ["argus", "plutus"], "brief": "b",
+                         "needs_verification": True}))
+                if "steps" in props:                    # Athena plan: 2 steps
+                    return _msg(_json.dumps({"steps": [
+                        {"id": "s1", "specialist": "argus", "task": "t1",
+                         "depends_on": []},
+                        {"id": "s2", "specialist": "plutus", "task": "t2",
+                         "depends_on": []}]}))
+                if "verdict" in props:                  # Athena review
+                    return _msg(_json.dumps(
+                        {"verdict": "approve", "feedback": "",
+                         "retry_specialists": []}))
+                if "Specialist outputs to verify" in blob:   # Aletheia verify
+                    return _msg('checked\nVERDICT: {"status": "pass", '
+                                '"unsupported_claims": [], "confidence": 0.9}')
+                counter["n"] += 1                       # specialist / consult run
+                return _msg(f"finding-{counter['n']}")
+        return _S()
+
+    msgs = types.SimpleNamespace(stream=stream)
+    return types.SimpleNamespace(messages=msgs,
+                                 beta=types.SimpleNamespace(messages=msgs))
+
+
+def test_swarm_recorded_run_replays_clean(monkeypatch):
+    """A run recorded with OLYMPUS_SWARM on must replay byte-identically even
+    when the replay process has swarm unset — replay_run restores it from the
+    recorded meta. Without the fix the verify stage would hash the UNrefined
+    outputs and diverge."""
+    from olympus import config, orchestrator, recall
+    monkeypatch.setattr(recall, "context_block", lambda *a, **k: "")
+    monkeypatch.setattr(config, "MEMORY_ENABLED", False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("OLYMPUS_SWARM", "1")
+    monkeypatch.setenv("OLYMPUS_SWARM_TOPOLOGY", "star")
+    monkeypatch.setattr(llm, "client", lambda settings=None: _swarm_client())
+
+    bot = orchestrator.Olympus(pool=config.ModelPool.from_env())
+    bot.ask("do the thing")
+    rid = bot.last_run_id
+
+    # Replay with swarm UNSET in the ambient env and the API hard-forbidden.
+    monkeypatch.delenv("OLYMPUS_SWARM", raising=False)
+    monkeypatch.delenv("OLYMPUS_SWARM_TOPOLOGY", raising=False)
+    monkeypatch.setattr(llm, "client", lambda settings=None: (
+        _ for _ in ()).throw(AssertionError("replay must not call the API")))
+    original, _fresh, diffs = orchestrator.replay_run(rid)
+
+    assert original["meta"]["swarm_enabled"] is True     # recorded in meta
+    assert original["meta"]["swarm_topology"] == "star"
+    assert diffs == []                                   # byte-identical replay

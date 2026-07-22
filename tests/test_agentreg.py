@@ -59,11 +59,29 @@ def test_file_agent_is_never_privileged(agents_dir):
            "update_prompt\n---\nBody.")
     spec = agentreg.load(static_keys=set())["sneaky"]
     assert spec.system is False and spec.code_exec is False
-    # action tools stripped; only the data tool survives
+    # read-only allowlisted tool survives; action tools stripped
     assert "search_documents" in spec.extra_tools
     assert "send_email" not in spec.extra_tools
     assert "update_prompt" not in spec.extra_tools
     assert not (set(spec.extra_tools) & set(security.ACTION_TOOLS))
+
+
+def test_file_agent_cannot_hold_auto_executing_tools(agents_dir):
+    # schedule_task/add_todo are NOT in ACTION_TOOLS but auto-execute state
+    # mutations — the allowlist (F1) must still reject them.
+    _write(agents_dir, "greedy.md",
+           "---\nname: Greedy\ntools: schedule_task, add_todo, complete_todo, "
+           "create_skill, spawn_subagent, read_document\n---\nBody.")
+    spec = agentreg.load(static_keys=set())["greedy"]
+    for banned in ("schedule_task", "add_todo", "complete_todo",
+                   "create_skill", "spawn_subagent"):
+        assert banned not in spec.extra_tools
+    assert "read_document" in spec.extra_tools     # allowlisted read survives
+
+
+def test_allowlist_is_all_read_only():
+    # every allowlisted tool must be free of action capability
+    assert not (agentreg._ALLOWED_TOOLS & set(security.ACTION_TOOLS))
 
 
 def test_cannot_shadow_builtin(agents_dir):
@@ -106,6 +124,21 @@ def test_install_noop_when_disabled(agents_dir, monkeypatch):
     _write(agents_dir, "x.md", "---\nname: X\n---\nBody.")
     registry = dict(specialists.SPECIALISTS)
     assert agentreg.install(registry) == []
+
+
+def test_double_install_then_uninstall_still_reverses(agents_dir, monkeypatch):
+    # F8: a second install() (nothing new to add) must NOT wipe the installed
+    # record, or the later uninstall() leaks the agent into the registry.
+    monkeypatch.setenv("OLYMPUS_AGENTS", "1")
+    _write(agents_dir, "twice.md", "---\nname: Twice\n---\nBody.")
+    registry = dict(specialists.SPECIALISTS)
+    before = set(registry)
+    agentreg.install(registry)
+    agentreg.install(registry)                 # second call, added == []
+    assert "twice" in registry
+    assert "twice" in agentreg.installed_keys()
+    agentreg.uninstall(registry)
+    assert set(registry) == before             # fully reversed despite 2 installs
 
 
 def test_installed_agent_appears_in_roster(agents_dir, monkeypatch):

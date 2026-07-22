@@ -12,11 +12,21 @@ by construction, mirroring `subagents._is_privileged`:
 
   * a file agent is ALWAYS `system=False` and `code_exec=False` — a file can
     never mint a self-modifying or sandbox-exec agent;
-  * its requested tools are filtered against `security.ACTION_TOOLS`, so a file
-    agent can read/ingest but never send an email, drive a browser, or rewrite a
-    prompt — capability separation holds even for agents that ingest the web;
+  * its tools come from a fail-closed READ-ONLY ALLOWLIST (`_ALLOWED_TOOLS`), not
+    merely "anything that isn't an ACTION_TOOL" — so it can read/ingest but never
+    send an email, drive a browser, rewrite a prompt, OR reach an auto-executing
+    mutation like `schedule_task`/`add_todo` that `ACTION_TOOLS` omits;
   * it can never shadow a built-in specialist (a key collision keeps the
     built-in).
+
+TRUST BOUNDARY (F2): the agents dir is an OPERATOR-TRUSTED location, exactly like
+the plugins dir. A file agent's body becomes a trusted system prompt and the
+directory sits outside the signed release manifest, so `olympus verify` will not
+attest it — anyone with write access to that dir can author a routed agent. This
+is why the feature is OFF by default and the tool surface is allowlisted: the
+blast radius of a hostile file is bounded to a read/analyse agent with an
+attacker-authored prompt, never an actuator. Treat write access to the agents
+dir as equivalent to write access to the plugins dir.
 
 Opt-in via `OLYMPUS_AGENTS` (default OFF): with the flag off, `install()` is a
 no-op and the registry is exactly the built-in 13, so the default install is
@@ -77,15 +87,42 @@ def _parse(text: str) -> tuple[dict, str]:
     return meta, body.strip()
 
 
+# A file agent is a READ/ANALYSE agent by design. Its tools are drawn from an
+# explicit fail-closed ALLOWLIST of read-only / ingest tools — NOT merely
+# "everything that isn't an ACTION_TOOL". `security.ACTION_TOOLS` is the
+# strip-from-ingesting-runs set (email/webhook/browser-act/prompt-rewrite); it
+# deliberately excludes auto-executing state mutations like `schedule_task`
+# (registers an unattended recurring job) and `add_todo`/`complete_todo` (mutate
+# user state with no approval hold). Subtracting only ACTION_TOOLS would let a
+# dropped-in .md file gain those, contradicting the safety guarantee. A positive
+# allowlist is fail-closed: an unrecognised or newly-added tool is denied until
+# it is consciously added here.
+_ALLOWED_TOOLS = frozenset({
+    # web / media ingest (read-only)
+    "browse_page", "analyze_image", "watch_youtube", "transcribe_audio",
+    # documents (read-only)
+    "list_documents", "read_document", "search_documents",
+    # source / codebase (read-only)
+    "read_file", "list_dir", "grep_files", "glob_files",
+    # code graph (read-only)
+    "query_codegraph", "codegraph_neighbors", "codegraph_impact",
+    "codegraph_path", "codegraph_subgraph", "codegraph_overview",
+    # memory / fact recall (read-only)
+    "recall_memory", "recall_fact",
+})
+
+
 def _safe_tools(raw: str) -> tuple[str, ...]:
-    """Requested tools minus any action tool (capability separation at load
-    time) and minus any tool Olympus doesn't define."""
+    """Requested tools intersected with the read-only allowlist AND filtered
+    against `security.ACTION_TOOLS` (belt and suspenders) AND known to Olympus.
+    Fail-closed: anything not explicitly allowed is dropped."""
     from . import tools
     known = set(tools.EXTRA_TOOLS)
     out = []
     for name in (raw or "").replace(",", " ").split():
         name = name.strip()
-        if name and name in known and name not in security.ACTION_TOOLS:
+        if (name and name in _ALLOWED_TOOLS and name in known
+                and name not in security.ACTION_TOOLS):
             out.append(name)
     return tuple(dict.fromkeys(out))          # dedupe, order-stable
 
@@ -167,7 +204,13 @@ def install(into: dict | None = None) -> list[str]:
         if key not in into:                    # never overwrite a built-in
             into[key] = spec
             added.append(key)
-    _installed[:] = added
+    # ACCUMULATE the installed record across calls. A naive `_installed[:] =
+    # added` would, on a second install() (where everything is already present
+    # and `added` is empty), wipe the record and make a later uninstall() a
+    # no-op, leaking file agents into the registry.
+    for key in added:
+        if key not in _installed:
+            _installed.append(key)
     return added
 
 

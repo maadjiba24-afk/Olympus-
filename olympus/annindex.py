@@ -6,8 +6,18 @@ corpus is small, but it does not scale: `DEFERRED.md` #2/#3 note that
 embedding-based skill retrieval and write-time dedup only become worthwhile
 "when libraries outgrow" the small-N regime. This module is that scaling path —
 a pure-Python HNSW graph (Malkov & Yashunin, 2016) that answers top-k in
-sublinear time, wired behind the SAME cosine seams so behaviour is identical when
-the corpus is small or the feature is off.
+sublinear time.
+
+Two entry points, and the distinction matters for performance:
+
+  * `nearest(query, items, ...)` — a ONE-SHOT scan. Given a fresh item set and a
+    single query it is ALWAYS an exact cosine scan and returns the true top-k,
+    because building a graph to answer one query costs more than the scan it
+    would replace. This is the drop-in for the existing cosine seams.
+  * a PERSISTENT `HNSW` index (`build`/`load_index` once, `.search()` or
+    `query_index()` per query) — this is where sublinear query time actually
+    lives, amortised across MANY queries over a stable corpus. `OLYMPUS_ANN` and
+    `EXACT_THRESHOLD` gate graph-vs-exact THERE, not on the one-shot path.
 
 Design constraints (the Olympus house style, mirroring `dytopo`/`emem`):
 
@@ -64,13 +74,31 @@ def enabled() -> bool:
 
 # --- vector helpers (pure) -----------------------------------------------
 
+def _finite(vec) -> tuple[float, ...]:
+    """Coerce a vector to finite floats — NaN/inf components become 0.0. A NaN
+    would otherwise poison similarity comparisons: it violates ordering
+    transitivity and can leave the HNSW frontier/prune sorts partially ordered,
+    corrupting neighbour selection. Sanitising at the boundary keeps every score
+    a real number."""
+    out = []
+    for x in vec:
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            f = 0.0
+        out.append(f if math.isfinite(f) else 0.0)
+    return tuple(out)
+
+
 def _norm(vec) -> tuple[float, ...]:
     """Unit-normalise so cosine similarity is a plain dot product. A zero (or
-    empty) vector normalises to itself and scores 0 against everything."""
+    empty) vector normalises to itself and scores 0 against everything.
+    Non-finite components are sanitised to 0.0 first (see `_finite`)."""
+    vec = _finite(vec)
     s = math.sqrt(sum(x * x for x in vec))
     if s == 0.0:
-        return tuple(float(x) for x in vec)
-    return tuple(float(x) / s for x in vec)
+        return vec
+    return tuple(x / s for x in vec)
 
 
 def _dot(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -273,19 +301,28 @@ class HNSW:
 
     @classmethod
     def from_bytes(cls, blob: bytes | None) -> "HNSW":
+        """Rebuild an index from `to_bytes` output. Returns an EMPTY index on an
+        absent, unparseable, OR structurally-malformed blob (wrong-typed fields
+        from a version skew or a partial/corrupted store write) — never raises,
+        so a corrupt persisted index degrades to a rebuild rather than crashing
+        the retrieval path."""
         if not blob:
             return cls()
         try:
             d = json.loads(blob)
-        except (ValueError, TypeError):
+            if not isinstance(d, dict):
+                return cls()
+            idx = cls(dim=int(d.get("dim", 0)))
+            idx._vectors = {str(k): tuple(float(x) for x in v)
+                            for k, v in (d.get("vectors") or {}).items()}
+            idx._levels = {str(k): int(v)
+                           for k, v in (d.get("levels") or {}).items()}
+            idx._links = [dict(layer) for layer in (d.get("links") or [])]
+            idx._entry = d.get("entry")
+            idx._top = int(d.get("top", -1))
+            return idx
+        except (ValueError, TypeError, AttributeError):
             return cls()
-        idx = cls(dim=int(d.get("dim", 0)))
-        idx._vectors = {k: tuple(v) for k, v in d.get("vectors", {}).items()}
-        idx._levels = {k: int(v) for k, v in d.get("levels", {}).items()}
-        idx._links = [dict(layer) for layer in d.get("links", [])]
-        idx._entry = d.get("entry")
-        idx._top = int(d.get("top", -1))
-        return idx
 
 
 def build(items) -> HNSW:
@@ -307,11 +344,18 @@ def nearest(query, items, k: int = 8, *,
     """Top-k `(id, cosine_similarity)` for `query` over `items` (a
     `{id: vector}` dict or an iterable of `(id, vector)`), similarity desc.
 
-    This is the drop-in replacement for an O(N) cosine scan. It stays EXACT
-    (brute force, identical results) when the feature is off or the corpus is
-    below `EXACT_THRESHOLD`; only a large corpus with `OLYMPUS_ANN` on pays for
-    (and benefits from) the HNSW graph. Vectors are normalised internally, so
-    callers pass raw embeddings."""
+    This is a ONE-SHOT scan: given a fresh item set and a single query, an exact
+    cosine scan is optimal — building an HNSW graph to answer one query costs
+    more than the O(N) scan it would replace (build is O(N·log N·degree)). So
+    `nearest` is always exact and always returns the true top-k. Vectors are
+    normalised internally (and NaN/inf sanitised), so callers pass raw
+    embeddings.
+
+    Sublinear query time is a property of a PERSISTENT index amortised over MANY
+    queries, not of a one-shot call. A caller with a stable corpus queried
+    repeatedly should build an `HNSW` once (`build(...)` / `load_index(...)`),
+    keep it, and call `.search()` per query — that is where `OLYMPUS_ANN` /
+    `EXACT_THRESHOLD` decide graph-vs-exact."""
     if isinstance(items, dict):
         items = list(items.items())
     else:
@@ -319,10 +363,22 @@ def nearest(query, items, k: int = 8, *,
     if not items:
         return []
     q = _norm(query)
-    if not enabled() or len(items) < EXACT_THRESHOLD:
-        exact = [(nid, _norm(vec)) for nid, vec in items]
+    exact = [(nid, _norm(vec)) for nid, vec in items]
+    return _exact(q, exact, k, min_sim)
+
+
+def query_index(idx: HNSW, query, k: int = 8, *,
+                min_sim: float = 0.0) -> list[tuple[str, float]]:
+    """Query a PERSISTENT index: HNSW graph search when `OLYMPUS_ANN` is on and
+    the index is above `EXACT_THRESHOLD`, else an exact scan over its stored
+    vectors (identical results). This is the seam where the graph's amortised
+    speedup actually pays off — the caller has already paid the build once."""
+    if len(idx) == 0:
+        return []
+    q = _norm(query)
+    if not enabled() or len(idx) < EXACT_THRESHOLD:
+        exact = [(nid, vec) for nid, vec in idx._vectors.items()]
         return _exact(q, exact, k, min_sim)
-    idx = build(items)
     return idx.search(q, k, min_sim=min_sim)
 
 

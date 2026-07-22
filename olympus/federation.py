@@ -45,9 +45,37 @@ LABEL = "federation/v1"            # witness domain-separated subkey label
 _NS_PEERS = "federation.peers"
 _NS_INBOX = "federation.lessons"
 _MAX_LESSONS = 200
+_MAX_INBOUND = 1_000_000           # hard cap on an inbound request body (F3)
 _LOCK = threading.Lock()
 
 TRUST_LEVELS = ("blocked", "task", "trusted")
+
+
+def _max_age() -> int:
+    """Optional freshness window for signed task/lesson envelopes, in seconds
+    (`OLYMPUS_FEDERATION_MAX_AGE`). 0/unset disables the check (default), because
+    a strict window is fragile under cross-instance clock skew; an operator who
+    wants anti-replay on the wire sets it. Lesson-flood replay is defeated
+    regardless by content dedup in `import_lessons`."""
+    try:
+        return max(0, int(os.environ.get("OLYMPUS_FEDERATION_MAX_AGE", "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _too_old(payload: dict) -> bool:
+    """True if `payload['at']` is older than the configured window (or malformed
+    when a window is set). No window configured → never too old."""
+    window = _max_age()
+    if window <= 0:
+        return False
+    import calendar
+    at = str((payload or {}).get("at") or "")
+    try:
+        epoch = calendar.timegm(time.strptime(at, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return True                # a window is set but the stamp is unusable
+    return (time.time() - epoch) > window
 
 
 def enabled() -> bool:
@@ -176,7 +204,8 @@ def add_peer(name: str, public_key: str, *, url: str = "",
     if not name or not public_key:
         raise FederationError("a peer needs a name and a public key")
     if trust not in TRUST_LEVELS:
-        trust = "task"
+        trust = "blocked"          # fail-closed: an unknown/typo'd level grants
+        #                            nothing, never silently "task" (F5)
     peer = Peer(name=name, public_key=public_key, url=url.strip(), trust=trust)
     with _LOCK:
         peers = _load_peers()
@@ -248,11 +277,8 @@ def import_lessons(envelope: dict) -> dict:
     peer = peer_by_key(pub)
     if not peer or _trust_rank(peer.trust) < _trust_rank("trusted"):
         raise FederationError("peer is not trusted for lesson sharing")
-    staged = []
-    for lesson in payload.get("lessons", [])[:_MAX_LESSONS]:
-        text = _scrub(lesson)                    # defense-in-depth re-scrub
-        if text:
-            staged.append({"text": text, "from": peer.name})
+    if _too_old(payload):
+        raise FederationError("lesson bundle is stale (outside freshness window)")
     with _LOCK:
         existing = []
         raw = store.backend().get(_NS_INBOX, "candidates")
@@ -261,6 +287,17 @@ def import_lessons(envelope: dict) -> dict:
                 existing = json.loads(raw)
             except (ValueError, TypeError):
                 existing = []
+        # Dedupe by text against what's already staged. This defeats the
+        # replay-flood: a captured, genuinely-signed bundle re-sent by a lesser
+        # peer stages nothing new, so it cannot evict legitimate candidates out
+        # of the _MAX_LESSONS window (F4).
+        seen = {e.get("text") for e in existing if isinstance(e, dict)}
+        staged = []
+        for lesson in payload.get("lessons", [])[:_MAX_LESSONS]:
+            text = _scrub(lesson)                # defense-in-depth re-scrub
+            if text and text not in seen:
+                seen.add(text)
+                staged.append({"text": text, "from": peer.name})
         existing.extend(staged)
         store.backend().put(_NS_INBOX, "candidates",
                             json.dumps(existing[-_MAX_LESSONS:]).encode("utf-8"))
@@ -339,9 +376,13 @@ def _bearer_token() -> str | None:
 
 def _auth_ok(headers: dict) -> bool:
     """Constant-time bearer check. Fail-closed: serving with no token configured
-    refuses every authenticated route."""
+    — OR a transiently-unreadable token file — refuses every authenticated route
+    (a clean 401, never a 500 that could mask monitoring) (F7)."""
     import hmac
-    want = _bearer_token()
+    try:
+        want = _bearer_token()
+    except FederationError:
+        return False
     if not want:
         return False
     got = ""
@@ -392,6 +433,8 @@ def handle_request(method: str, path: str, body: dict, headers: dict,
         peer = peer_by_key(pub) if ok else None
         if not ok or not peer or _trust_rank(peer.trust) < _trust_rank("task"):
             return 403, {"error": "unknown, unsigned, or blocked peer"}
+        if _too_old(payload):
+            return 408, {"error": "task envelope is stale"}
         text = str(payload.get("text") or "")
         if not text:
             return 400, {"error": "task carries no text"}
@@ -422,11 +465,22 @@ def run_server(ask, *, host: str = "127.0.0.1", port: int = 8489) -> None:      
 
     class _Handler(BaseHTTPRequestHandler):
         def _dispatch(self, method):
-            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+            except (TypeError, ValueError):
+                length = 0
+            # Cap the pre-auth read so an oversized Content-Length can't exhaust
+            # memory before any check runs (F3). Reject rather than truncate.
+            if length > _MAX_INBOUND:
+                self.send_response(413)
+                self.end_headers()
+                return
             raw = self.rfile.read(length) if length else b""
             try:
                 data = json.loads(raw) if raw else {}
-            except ValueError:
+                if not isinstance(data, dict):
+                    data = {}
+            except (ValueError, RecursionError):   # incl. deeply-nested JSON
                 data = {}
             hdrs = {k: v for k, v in self.headers.items()}
             status, payload = handle_request(method, self.path, data, hdrs,

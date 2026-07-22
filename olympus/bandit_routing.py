@@ -85,7 +85,12 @@ def choose(members, specialist: str, heuristic_pick):
     try:
         if not enabled() or len(members) <= 1:
             return None
-        arms, total = _arms(specialist)
+        arms, _ = _arms(specialist)
+        # UCB horizon = pulls of the CURRENT arms only. Counting pulls of
+        # since-removed models would inflate the sqrt(log(total)/n) exploration
+        # term and skew the ranking between surviving arms (textbook UCB1 sums
+        # over the active arm set).
+        total = sum(arms.get(m.model or "", {"n": 0})["n"] for m in members)
         if total < MIN_WARMUP:
             return None                    # warm up on the heuristic first
         scored = []

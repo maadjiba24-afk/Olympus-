@@ -1,6 +1,11 @@
 """Native quorum consensus — tally primitives + safety-biased verdict fold."""
 
-from olympus import consensus
+import threading
+
+from olympus import backend, config, consensus, orchestrator
+
+_PASS = ('ok\nVERDICT: {"status": "pass", "unsupported_claims": [], '
+         '"confidence": 0.9}')
 
 
 # --- gating + counts -----------------------------------------------------
@@ -118,3 +123,58 @@ def test_verdict_empty_is_cautious():
 def test_lens_cycles():
     assert consensus.lens_for(0) == consensus.LENSES[0]
     assert consensus.lens_for(len(consensus.LENSES)) == consensus.LENSES[0]
+
+
+# --- hardening: a pass verdict never carries unsupported claims ----------
+
+def test_pass_verdict_clears_claims():
+    # n=5, passes=3 (quorum), zero rejects → status pass; the two warns' claims
+    # must NOT ride along on a clean bill of health.
+    out = consensus.safest_verdict([
+        _v("pass"), _v("pass"), _v("pass"),
+        _v("warn", ["lingering doubt"]), _v("warn", ["another"]),
+    ])
+    assert out["status"] == "pass"
+    assert out["unsupported_claims"] == []       # cleared on pass
+    # warn still keeps them
+    warned = consensus.safest_verdict([_v("warn", ["x"]), _v("warn", ["y"]),
+                                       _v("pass")])
+    assert warned["status"] == "warn" and warned["unsupported_claims"] == ["x", "y"]
+
+
+# --- hardening: orchestrator quorum floor under verifier failure ---------
+
+def _consensus_bot(monkeypatch, verdict_count):
+    """A bot whose N=3 verifier fan-out returns a parseable verdict for the
+    first `verdict_count` calls and unparseable text for the rest."""
+    monkeypatch.setenv("OLYMPUS_CONSENSUS", "1")
+    monkeypatch.setenv("OLYMPUS_CONSENSUS_VERIFIERS", "3")
+    bot = orchestrator.Olympus(user="qfloor")
+    lock, calls = threading.Lock(), {"n": 0}
+
+    def fake_run_agent(settings, system, task, tool_defs,
+                       mcp_servers=None, effort="high"):
+        with lock:
+            calls["n"] += 1
+            i = calls["n"]
+        return _PASS if i <= verdict_count else "no verdict in this reply"
+
+    monkeypatch.setattr(backend, "run_agent", fake_run_agent)
+    return bot
+
+
+def test_quorum_floor_degrades_when_too_few_verdicts(monkeypatch):
+    # Only 1 of 3 verifiers produced a verdict (< majority 2) → visible degraded
+    # path (verdict None), NOT a lone verifier's pass deciding.
+    bot = _consensus_bot(monkeypatch, verdict_count=1)
+    vs = config.Settings(provider="anthropic", model="claude-opus-4-8")
+    content, verdict = bot._verify_consensus("sys", "task", vs, [], [])
+    assert verdict is None
+
+
+def test_quorum_met_returns_verdict(monkeypatch):
+    # 2 of 3 verifiers agree pass → quorum met → an aggregated verdict returns.
+    bot = _consensus_bot(monkeypatch, verdict_count=2)
+    vs = config.Settings(provider="anthropic", model="claude-opus-4-8")
+    content, verdict = bot._verify_consensus("sys", "task", vs, [], [])
+    assert verdict is not None and verdict["status"] == "pass"

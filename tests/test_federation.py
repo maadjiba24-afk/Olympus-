@@ -97,8 +97,8 @@ def test_peer_registry_crud():
 def test_add_peer_validates():
     with pytest.raises(federation.FederationError):
         federation.add_peer("", "key")
-    # unknown trust normalises to "task"
-    assert federation.add_peer("bob", "bb22", trust="wizard").trust == "task"
+    # unknown/typo'd trust fails CLOSED to "blocked", never silently "task" (F5)
+    assert federation.add_peer("bob", "bb22", trust="wizard").trust == "blocked"
 
 
 # --- shared-lesson sync (sanitised, trusted-only, candidate-only) --------
@@ -241,3 +241,47 @@ def test_call_peer_blocks_localhost(monkeypatch):
                         url="http://localhost:22", trust="task")
     with pytest.raises(federation.FederationError):
         federation.call_peer("evil", "x", fetcher=lambda *a: (200, b"{}"))
+
+
+# --- hardening: lesson-replay dedup (F4) --------------------------------
+
+@needs_crypto
+def test_lesson_replay_is_deduped():
+    federation.add_peer("peer", federation.public_key(), trust="trusted")
+    env = federation.export_lessons(["double-check dates", "cite sources"])
+    first = federation.import_lessons(env)
+    assert first["staged"] == 2
+    # Replaying the SAME signed bundle stages nothing new — cannot flood/evict.
+    second = federation.import_lessons(env)
+    assert second["staged"] == 0
+    assert len(federation.staged_lessons()) == 2
+
+
+# --- hardening: optional freshness window (F4) --------------------------
+
+@needs_crypto
+def test_stale_lesson_bundle_rejected(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_FEDERATION_MAX_AGE", "60")
+    federation.add_peer("peer", federation.public_key(), trust="trusted")
+    # sign a bundle then hand-age its timestamp past the window
+    env = federation.export_lessons(["old lesson"])
+    env["payload"]["at"] = "2000-01-01T00:00:00Z"
+    # re-sign the tampered payload so it's validly signed but stale
+    env = federation.sign_envelope(env["payload"])
+    with pytest.raises(federation.FederationError):
+        federation.import_lessons(env)
+
+
+def test_max_age_default_off():
+    assert federation._max_age() == 0
+    assert federation._too_old({"at": "2000-01-01T00:00:00Z"}) is False
+
+
+# --- hardening: token-file error fails closed to 401 (F7) ---------------
+
+def test_unreadable_token_file_denies(monkeypatch, tmp_path):
+    missing = tmp_path / "nope.token"
+    monkeypatch.setenv("OLYMPUS_FEDERATION_TOKEN_FILE", str(missing))
+    status, _ = federation.handle_request(
+        "POST", "/federation/task", {}, {"Authorization": "Bearer x"})
+    assert status == 401                       # fail-closed, not a 500

@@ -127,3 +127,25 @@ def test_status_reports_arms():
     st = bandit_routing.status()
     assert st["flag_enabled"] is True and st["active"] is True
     assert any(a["specialist"] == "chiron" for a in st["arms"])
+
+
+# --- hardening: UCB horizon uses CURRENT arms only (M-bandit-3) ----------
+
+def test_warmup_ignores_removed_model_pulls():
+    # 40 pulls on a model no longer in the pool + only 4 on the current arms →
+    # the current-arm total (4) is below MIN_WARMUP, so the bandit abstains
+    # instead of engaging on inflated stale history.
+    _seed("chiron", "gpt-legacy", "approve", 40)        # removed from pool
+    _seed("chiron", "claude-opus-4-8", "approve", 4)    # current
+    assert bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS) is None
+
+
+def test_horizon_excludes_removed_model():
+    # Enough current-arm data to engage; the removed model's 100 pulls must not
+    # distort the pick. Opus (all-positive) should still be chosen over the
+    # untried Haiku only via exploration — here we assert a stable, valid pick.
+    _seed("chiron", "gpt-legacy", "approve", 100)       # removed
+    _seed("chiron", "claude-opus-4-8", "approve", 10)   # current, good
+    pick = bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS)
+    assert pick in (OPUS, HAIKU)                         # valid in-pool member
+    assert pick is HAIKU                                 # untried arm explored first

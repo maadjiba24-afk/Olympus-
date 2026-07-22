@@ -547,9 +547,10 @@ construction (design contract in
 [ADR 0008](docs/adr/0008-native-adaptive-extensions.md);
 federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)):
 
-- **Vector recall at scale (`OLYMPUS_ANN`).** A pure-Python HNSW index behind the
-  existing semantic-recall seams. Exact (identical results) below a size
-  threshold or when off; a sublinear graph query only once a corpus is large.
+- **Vector recall (`OLYMPUS_ANN`).** A pure-Python HNSW index. The one-shot
+  recall seams stay an exact cosine scan (optimal for a single query and always
+  the true top-k); the graph's sublinear speedup is available to callers that
+  keep a persistent index and query it many times over a stable corpus.
 - **Swarm topologies (`OLYMPUS_SWARM`).** After the DAG dispatch, wire the
   assigned specialists into an explicit shape — `star` (coordinator), `mesh`
   (all-to-all cross-check), `hierarchical` (review tree), or `ring` — and let

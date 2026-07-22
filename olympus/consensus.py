@@ -154,15 +154,19 @@ def safest_verdict(verdicts, *, byzantine: bool = False) -> dict:
     else:
         status = "warn"
 
+    # A `pass` verdict must not carry unsupported claims — that would be an
+    # internally-inconsistent verdict dict (clean bill of health + listed
+    # concerns). Claims are only meaningful on warn/reject.
     claims: list[str] = []
-    seen: set[str] = set()
-    for v in verdicts:
-        if v["status"] == "pass":
-            continue
-        for c in v.get("unsupported_claims", []) or []:
-            if c not in seen:
-                seen.add(c)
-                claims.append(c)
+    if status != "pass":
+        seen: set[str] = set()
+        for v in verdicts:
+            if v["status"] == "pass":
+                continue
+            for c in v.get("unsupported_claims", []) or []:
+                if c not in seen:
+                    seen.add(c)
+                    claims.append(c)
     confs = [float(v.get("confidence", 0.0)) for v in verdicts]
     mean_conf = round(sum(confs) / n, 4) if n else 0.0
     agreement = round(counts.get(status, 0) / n, 4)

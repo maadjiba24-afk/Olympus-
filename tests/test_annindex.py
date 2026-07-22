@@ -162,3 +162,60 @@ def test_dedup_match():
     assert near is not None and near[0] == "known"
     far = annindex.dedup_match([0.5, 0.5, 0.7], items, threshold=0.95)
     assert far is None
+
+
+# --- hardening: NaN/inf sanitisation (L1) -------------------------------
+
+def test_nan_inf_sanitised_no_crash():
+    items = {"a": [1.0, 0.0], "b": [float("nan"), float("inf")]}
+    got = annindex.nearest([1.0, 0.0], items, k=2)   # must not raise
+    # b's non-finite components become 0 → zero vector → similarity 0
+    assert dict(got).get("a") == 1.0
+    assert dict(got).get("b", 0.0) == 0.0
+
+
+def test_finite_helper():
+    assert annindex._finite([1.0, float("nan"), float("inf"), -float("inf")]) == (
+        1.0, 0.0, 0.0, 0.0)
+
+
+# --- hardening: from_bytes tolerates STRUCTURAL corruption (M3) ----------
+
+def test_from_bytes_structural_corruption():
+    import json
+    for bad in ({"links": [5]}, {"dim": "x"}, {"vectors": {"a": 3}},
+                {"levels": {"a": "y"}}, [1, 2, 3], "a string"):
+        idx = annindex.HNSW.from_bytes(json.dumps(bad).encode())
+        assert len(idx) == 0          # degrades to empty, never raises
+
+
+def test_load_index_survives_corrupt_store(monkeypatch):
+    store.reset()
+    store.backend().put("t.ann", "k", b'{"vectors": {"a": 3}}')   # valid JSON, bad shape
+    assert len(annindex.load_index("t.ann", "k")) == 0            # no crash
+    store.reset()
+
+
+# --- hardening: nearest() is exact + deterministic even with ANN on (M2) -
+
+def test_nearest_exact_and_deterministic_with_ann_on(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_ANN", "1")
+    items = _rand_vectors(400, 12, seed=11)    # > EXACT_THRESHOLD
+    q = items["v0200"]
+    got = annindex.nearest(q, items, k=5)
+    brute = sorted(((_cos(q, v), i) for i, v in items.items()),
+                   key=lambda t: (-t[0], t[1]))[:5]
+    assert [i for i, _ in got] == [i for _, i in brute]   # exact, not approximate
+    assert got == annindex.nearest(q, items, k=5)         # deterministic
+
+
+# --- hardening: query_index — the persistent-graph seam -----------------
+
+def test_query_index_matches_exact(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_ANN", "1")
+    items = _rand_vectors(300, 10, seed=12)
+    idx = annindex.build(items)
+    q = items["v0100"]
+    graph = annindex.query_index(idx, q, k=1)     # HNSW path (>threshold, ANN on)
+    assert graph and graph[0][1] > 0.999          # finds the planted vector
+    assert annindex.query_index(annindex.HNSW(), q, k=3) == []   # empty index

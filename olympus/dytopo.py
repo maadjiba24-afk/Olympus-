@@ -230,11 +230,23 @@ def _capped(edges: list[Edge]) -> tuple[Edge, ...]:
 
 def mesh(nodes) -> Topology:
     """All-to-all: every specialist consults every other. Dense by design, but
-    still hard-capped at `_MAX_EDGES` (excess edges are dropped in stable
-    order), so a large council degrades to a capped mesh rather than exploding."""
+    still hard-capped at `_MAX_EDGES` — and the cap is applied FAIRLY: each
+    node's out-degree is bounded to `_MAX_EDGES // n` so a large council degrades
+    to an evenly-thinned mesh where every node keeps some peers, rather than a
+    lopsided one where the first few sorted nodes consume the whole budget."""
     ns = _clean_nodes(nodes)
-    edges = [Edge(src=a, dst=b, score=1.0)
-             for a in ns for b in ns if a != b]
+    n = len(ns)
+    per_source = max(1, _MAX_EDGES // n) if n else _MAX_EDGES
+    edges: list[Edge] = []
+    for a in ns:
+        kept = 0
+        for b in ns:
+            if a == b:
+                continue
+            edges.append(Edge(src=a, dst=b, score=1.0))
+            kept += 1
+            if kept >= per_source:
+                break
     return Topology(nodes=ns, edges=_capped(edges))
 
 
@@ -326,22 +338,36 @@ def run_consultation(topology: Topology, outputs, runner, *,
     stays pure and unit-testable with no model. Returns outputs in the SAME shape
     and order; a runner that raises or returns falsy leaves that output
     untouched. Bounded by `rounds()` (≤ `_MAX_ROUNDS`) and the topology caps, so
-    the number of extra model calls is provably limited."""
-    current = {k: v for k, v in outputs}
-    order = [k for k, _ in outputs]
-    present = set(order)
+    the number of extra model calls is provably limited.
+
+    Duplicate specialist keys are preserved: Athena can assign one specialist to
+    two DAG steps, so `outputs` may carry the same key twice with different text.
+    Refinement is POSITIONAL (each slot keeps its own answer) — a key is never
+    collapsed to a single value, which would silently drop one step's output."""
+    # Positional list, not a dict, so repeated keys keep their distinct answers.
+    current: list[list] = [[k, v] for k, v in outputs]
+    present = {k for k, _ in current}
+
+    def _peer_ctx(key: str) -> str:
+        for k, v in current:            # first occurrence — deterministic
+            if k == key:
+                return v
+        return ""
+
     for consultations in rounds(topology, max_rounds=max_rounds):
         for consulter, consulted in consultations:
             if consulter not in present or consulted not in present:
                 continue
-            peer_ctx = current.get(consulted, "")
-            own = current.get(consulter, "")
+            peer_ctx = _peer_ctx(consulted)
             if not peer_ctx:
                 continue
-            try:
-                refined = runner(consulter, peer_ctx, own)
-            except Exception:
-                refined = None
-            if refined:
-                current[consulter] = refined
-    return [(k, current[k]) for k in order]
+            for pair in current:        # refine every slot for this consulter
+                if pair[0] != consulter:
+                    continue
+                try:
+                    refined = runner(consulter, peer_ctx, pair[1])
+                except Exception:
+                    refined = None
+                if refined:
+                    pair[1] = refined
+    return [(k, v) for k, v in current]
