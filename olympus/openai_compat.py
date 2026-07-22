@@ -80,6 +80,35 @@ def _endpoint_url(settings: config.Settings, base: str) -> str:
             f"/chat/completions?api-version={quote(api_version, safe='')}")
 
 
+def _supports_reasoning_effort(model: str) -> bool:
+    """Whether this OpenAI-compatible model accepts the `reasoning_effort`
+    parameter. Conservative allowlist — sending it to a model that doesn't
+    support it 400s the request, so we only enable it for the known reasoning
+    families (OpenAI o-series + gpt-5, Gemini 2.5 / thinking). The provider
+    prefix (`openai/`, `google/`) and any `:tag` suffix are stripped first so
+    OpenRouter-style ids match too."""
+    m = (model or "").lower().rsplit("/", 1)[-1].split(":", 1)[0]
+    if m.startswith(("o1", "o3", "o4", "gpt-5")):
+        return True
+    if m.startswith("gemini-2.5"):
+        return True
+    return m.startswith("gemini") and "thinking" in m
+
+
+def _reasoning_params(model: str, effort: str) -> dict:
+    """Map Olympus's effort tier (low/medium/high) to `reasoning_effort` for
+    models that support it. Empty dict otherwise (or when disabled via
+    OLYMPUS_DISABLE_REASONING_EFFORT, the escape hatch if a proxy rejects it)."""
+    import os
+    if os.environ.get("OLYMPUS_DISABLE_REASONING_EFFORT", "").strip().lower() in (
+            "1", "true", "yes", "on"):
+        return {}
+    if not _supports_reasoning_effort(model):
+        return {}
+    val = (effort or "").lower()
+    return {"reasoning_effort": val} if val in ("low", "medium", "high") else {}
+
+
 def _auth_headers(base: str, key: str | None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if key:
@@ -216,18 +245,21 @@ def extract_json(text: str) -> dict[str, Any]:
 
 def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
-    # NOTE: `effort` is accepted for parity with the Anthropic backend's
-    # interface but is NOT applied here — OpenAI-compatible endpoints express
-    # reasoning effort only on specific reasoning models (via `reasoning_effort`),
-    # and blindly sending it would 400 the many models that don't support it. So
-    # on this path effort is a deliberate no-op rather than a silent control.
-    resp = _post(settings, {
+    payload: dict[str, Any] = {
         "model": settings.model,
         "messages": [{"role": "system", "content": system}, *messages],
-        # Bound the response — without a cap, reasoning models can generate
-        # unboundedly (a major latency/cost sink). config.MAX_TOKENS is generous.
-        "max_tokens": config.MAX_TOKENS,
-    })
+    }
+    # Map the effort tier to `reasoning_effort` for models that support it
+    # (allowlist-gated so non-reasoning models are never sent an unknown param).
+    payload.update(_reasoning_params(settings.model, effort))
+    # Bound the response — without a cap, reasoning models can generate
+    # unboundedly (a major latency/cost sink). config.MAX_TOKENS is generous.
+    # Reasoning models (o-series/gpt-5) REQUIRE `max_completion_tokens` and
+    # reject the legacy `max_tokens`, so pick the right key per model.
+    tok_key = ("max_completion_tokens" if _supports_reasoning_effort(settings.model)
+               else "max_tokens")
+    payload[tok_key] = config.MAX_TOKENS
+    resp = _post(settings, payload)
     return (resp["choices"][0]["message"].get("content") or "").strip()
 
 
@@ -252,10 +284,12 @@ def run_agent(settings: config.Settings, system: str, task: str,
     ]
     payload_tools = _to_openai_tools(tool_defs) if tool_defs else None
 
+    reasoning = _reasoning_params(settings.model, effort)
     for _ in range(max_iterations):
         payload: dict[str, Any] = {"model": settings.model, "messages": messages}
         if payload_tools:
             payload["tools"] = payload_tools
+        payload.update(reasoning)
         message = _post(settings, payload)["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
 

@@ -159,3 +159,49 @@ def test_azure_empty_deployment_is_rejected():
     import pytest
     with pytest.raises(ValueError, match="deployment"):
         oc._endpoint_url(s, "https://r.openai.azure.com")
+
+
+# --- per-provider effort tiers (reasoning_effort on supporting models) -------
+
+def test_reasoning_effort_model_detection():
+    from olympus import openai_compat as oc
+    for m in ("o3-mini", "openai/o3", "gpt-5", "gpt-5-mini",
+              "google/gemini-2.5-pro", "gemini-2.5-flash"):
+        assert oc._supports_reasoning_effort(m), m
+    for m in ("gpt-4o", "deepseek-chat", "llama-3.3-70b", "gemini-1.5-pro",
+              "mistral-large", ""):
+        assert not oc._supports_reasoning_effort(m), m
+
+
+def test_effort_maps_to_reasoning_effort_only_for_supported(monkeypatch):
+    from olympus import openai_compat as oc
+    monkeypatch.delenv("OLYMPUS_DISABLE_REASONING_EFFORT", raising=False)
+    assert oc._reasoning_params("o3", "high") == {"reasoning_effort": "high"}
+    assert oc._reasoning_params("o3", "medium") == {"reasoning_effort": "medium"}
+    assert oc._reasoning_params("gpt-4o", "high") == {}       # non-reasoning
+    assert oc._reasoning_params("o3", "bogus") == {}          # unknown tier
+    monkeypatch.setenv("OLYMPUS_DISABLE_REASONING_EFFORT", "1")
+    assert oc._reasoning_params("o3", "high") == {}           # kill-switch
+
+
+def test_complete_text_payload_for_reasoning_model(monkeypatch):
+    from olympus import config, openai_compat as oc
+    monkeypatch.delenv("OLYMPUS_DISABLE_REASONING_EFFORT", raising=False)
+    captured = {}
+    monkeypatch.setattr(oc, "_post", lambda s, p: (
+        captured.update(p) or {"choices": [{"message": {"content": "ok"}}]}))
+    s = config.Settings(provider="openai", model="o3-mini", api_key="k")
+    oc.complete_text(s, "sys", [{"role": "user", "content": "hi"}], effort="low")
+    assert captured["reasoning_effort"] == "low"
+    # reasoning models require max_completion_tokens, not the legacy max_tokens
+    assert "max_completion_tokens" in captured and "max_tokens" not in captured
+
+
+def test_complete_text_payload_for_plain_model(monkeypatch):
+    from olympus import config, openai_compat as oc
+    captured = {}
+    monkeypatch.setattr(oc, "_post", lambda s, p: (
+        captured.update(p) or {"choices": [{"message": {"content": "ok"}}]}))
+    s = config.Settings(provider="openai", model="gpt-4o", api_key="k")
+    oc.complete_text(s, "sys", [{"role": "user", "content": "hi"}], effort="high")
+    assert "reasoning_effort" not in captured and "max_tokens" in captured
