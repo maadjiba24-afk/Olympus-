@@ -1314,6 +1314,29 @@ class Olympus:
                 verdict = None
                 verify_error = True
 
+            # DEFERRED #4: the rework is now RE-REVIEWED once (bounded — Athena
+            # never loops beyond this second pass). This closes the one-shot gap
+            # without the cost the deferral warned about: it runs ONLY on the
+            # minority of turns that actually reworked, so the common
+            # approve-first-time path still pays for a single review. Athena
+            # stays a nudge (fail-open); a lingering concern is surfaced as
+            # advisory rather than triggering another expensive rework.
+            with tr.span("re_review"):
+                review = self._review(brief, verified)
+            tr.decision(
+                "re_review", {"name": "athena", "role": "supervisor"}, review,
+                status="ok", inputs=verified, model=self._model_meta(),
+                request_hash=replaystore.last_ref(),
+                response_ref=replaystore.last_ref())
+            if review.get("verdict") == "retry":
+                tr.event("re_review.still_flagged",
+                         feedback=review.get("feedback", "")[:200])
+                self.report("🦉 Athena still has minor concerns after the "
+                            "rework — shipping the improved answer (bounded to "
+                            "one rework, so no further loop).")
+            else:
+                self.report("🦉 Athena approves the reworked answer.")
+
         # --- answer.verify chokepoint (ADR 0005) --------------------------
         # AFTER verification, BEFORE synthesis: the structured verdict feeds
         # the aletheia_verified predicate at the stage where a real verdict

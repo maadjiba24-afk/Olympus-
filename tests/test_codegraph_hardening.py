@@ -681,3 +681,29 @@ def test_method_shorthand_is_not_redos_prone():
         for _ in range(20):
             spec.fn.search(line)
         assert (_t.perf_counter() - start) < 1.0
+
+
+# --- Honesty: verify must not REFUTE a call to an over-common name ---------
+
+def test_verify_does_not_refute_calls_to_overcommon_names():
+    """A callee defined in more than `_MAX_AMBIGUOUS` places is SKIPPED at build
+    (no edge is ever made), so absence of an edge is NOT proof of absence. verify
+    must return UNKNOWN, not a false REFUTED — the Aletheia honesty rule. Against
+    the pre-fix code this asserted REFUTED (a false negative on a real call, e.g.
+    `X calls run` with 18 `run`s)."""
+    p = "honesty"
+    codegraph.add_node(p, "caller.py", "mod.caller", codegraph.FUNCTION)
+    # define the callee name in _MAX_AMBIGUOUS + 1 places → build would skip it
+    for i in range(codegraph_langs._MAX_AMBIGUOUS + 1):
+        codegraph.add_node(p, f"f{i}.py", f"m{i}.common", codegraph.FUNCTION)
+    # a genuinely unique callee, also uncalled
+    codegraph.add_node(p, "u.py", "mod.unique", codegraph.FUNCTION)
+
+    # over-common callee, no edge → honest UNKNOWN (not REFUTED)
+    v_common = codegraph.verify_claim(p, "caller calls common")
+    assert v_common["verdict"] == "UNKNOWN", v_common
+    assert "too many places" in v_common["detail"]
+
+    # unique callee, no edge, both AST-backed → refutation power is retained
+    v_unique = codegraph.verify_claim(p, "caller calls unique")
+    assert v_unique["verdict"] == "REFUTED", v_unique
