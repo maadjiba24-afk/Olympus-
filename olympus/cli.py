@@ -448,6 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="peer's inbound bearer token (call)")
     p_fed.add_argument("--host", default="127.0.0.1", help="serve bind host")
     p_fed.add_argument("--port", type=int, default=8489, help="serve port")
+    p_moat = sub.add_parser(
+        "moat",
+        help="unified status of the absorbed, self-evolving capabilities "
+             "(vector recall, swarm, consensus, bandit, file agents, "
+             "federation) — enabled?, health, and self-tuned settings")
+    p_moat.add_argument("--json", action="store_true",
+                        help="machine-readable status")
     p_scaf = sub.add_parser("scaffold-evolve",
                             help="propose-only scaffold evolution: status, or "
                                  "list archived proposals as diffs (never "
@@ -1568,6 +1575,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"- [{s.get('from', '?')}] {s.get('text', '')}")
         except federation.FederationError as err:
             print(f"Refused: {err}")
+    elif args.command == "moat":
+        from . import moat
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps(moat.status(), indent=2, default=str))
+        else:
+            print(moat.render())
     elif args.command == "scaffold-evolve":
         from . import scaffold_evolve as _se
         import json as _json

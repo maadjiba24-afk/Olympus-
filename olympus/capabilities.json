@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 113,
+    "count": 114,
     "names": [
       "a2a",
       "actions",
@@ -103,6 +103,7 @@
       "mcp-serve",
       "memory",
       "moa",
+      "moat",
       "models",
       "next-wake",
       "notes",
