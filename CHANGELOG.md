@@ -15,6 +15,175 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Absorbed capabilities as a native, self-evolving moat
+
+Six capabilities surveyed from an external agent harness (ruflo), re-built
+natively in Olympus's own idioms — each **off by default**, deterministic, and
+replay-safe — then wired into Olympus's self-evolution spine so they measure
+themselves and get stronger the more they run. Design locked in ADR 0007
+(federation), ADR 0008 (the shared opt-in/replay-safe contract), and ADR 0009
+(the self-evolving moat).
+
+- **Vector recall at scale (`OLYMPUS_ANN`).** A pure-Python HNSW index
+  (`annindex.py`). One-shot recall stays an exact scan; `docrag` keeps a
+  PERSISTENT graph (built once, keyed to a corpus signature) for real sublinear
+  recall over the document corpus.
+- **Swarm topologies (`OLYMPUS_SWARM`).** `dytopo` gains explicit mesh / star /
+  hierarchical / ring shapes and a post-dispatch consultation pass; wired into
+  `_pipeline` (recorded in trace meta and restored on replay).
+- **Quorum consensus verification (`OLYMPUS_CONSENSUS`).** `consensus.py` folds
+  N lens-diverse verifiers with a safety-biased quorum, and **self-tunes its
+  verifier panel** via `evolve` when the quorum keeps failing to form (frozen
+  per run for replay).
+- **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer
+  (`bandit_routing.py`) alongside the conservative learned selector; its
+  exploration constant **self-tunes** via `evolve` (explores less when routing
+  outcomes degrade).
+- **Semantic routing (`OLYMPUS_SEMANTIC_ROUTING`).** Orders the specialist roster
+  shown to Zeus by embedding-relevance to the request (reorder-only, replay-
+  frozen) — a no-op for the curated 13, earning its keep at scale with many file
+  agents.
+- **File-defined agents (`OLYMPUS_AGENTS`).** `agentreg.py` loads `<key>.md`
+  agents into the registry, safety-bounded to a read-only tool allowlist.
+- **Cross-instance federation (`OLYMPUS_FEDERATION`).** `federation.py` +
+  `olympus federation` CLI: ed25519 handshake over the `witness` root of trust,
+  pinned/tiered peers, egress-guarded transport, and scrubbed, trusted-only,
+  candidate-only lesson sync.
+- **`olympus moat`.** A status board showing each capability's enabled state,
+  self-evolution health, and current self-tuned settings.
+
+Capability accounting stays truthful: `olympus federation` and `olympus moat`
+are the only new commands (113 → 114); no new tools or agents.
+
+### Added — Two more `DEFERRED.md` closures (code-graph precision, skill retrieval)
+
+Two further deepenings along the same axes, each closing a tracked deferral. No
+new tools or commands — capability accounting is unchanged.
+
+- **Code graph — qualified-call precision (closes #15).** A qualified Python call
+  (`memory.save()`) is now pinned to the exact module its qualifier names via the
+  per-file import-alias map, emitting a precise `EXTRACTED` (confidence 1.0) edge
+  instead of being dropped as ambiguous. So `impact` stops under-reporting and
+  `verify` answers `CONFIRMED`/`REFUTED` where it previously could only say
+  `UNKNOWN` for a name defined in many files. Strictly additive: only narrows
+  `len(cands) > 1` qualified calls; unqualified / unique / unresolved calls are
+  unchanged, and non-unique narrowing falls back to the prior behaviour.
+- **Skills — task-scoped semantic retrieval in the live prompt (closes #3).**
+  `OLYMPUS_SEMANTIC_SKILLS` swaps a specialist's full in-prompt skill index for
+  the top-K skills most relevant to the task (`skills.scoped_index()`, cosine
+  over the existing embedding cache). Opt-in and off by default; engages only
+  once a specialist's library outgrows the prompt; degrades to the full index
+  when embeddings are absent so no skill becomes unreachable (any skill stays
+  loadable by name via `read_skill`). Recorded in trace meta and replay-frozen
+  per specialist on the prompt-assembly path, and surfaced on the `olympus moat`
+  board.
+
+- **Federation — capability discovery + multi-peer aggregation.** A pinned peer
+  can POST a signed request to `/federation/capabilities` and receive a signed
+  card of what an instance offers (specialist roster + skill count, no skill
+  contents), gated by the same pinned-peer + `task`-trust check as a task.
+  `federation.call_peers()` fans one task across several trusted peers and
+  collects each reply as untrusted data, isolating a dead peer so it never sinks
+  the fan-out. New CLI actions `olympus federation capabilities <peer>` and
+  `ask-all <message>` (positional actions — command accounting unchanged). Reuses
+  the existing signed-envelope, trust, scrub, and egress machinery — no new trust
+  surface.
+
+### Fixed
+
+- **Code graph — no false-precise edge on a shadowed method.** Qualifier
+  narrowing now skips shadow-prone method names (`get`, `update`, `count`, …):
+  the import-alias map has no scope tracking, so a local var/param that shadows an
+  imported module name (`def h(store): store.get(k)`) would otherwise assert a
+  false `EXTRACTED`/1.0 edge to `store.get` for a plain `dict.get`. Those names
+  fall through to the same-file-only `_SHADOWED` rule, as before.
+- **Replay — the semantic prompt-shaping paths re-raise `ReplayDivergence`.**
+  `semantic_roster` and the new `_skill_index_for` wrapped `frozen_context` in a
+  broad best-effort `except`; since `ReplayDivergence` subclasses `RuntimeError`
+  it was swallowed, masking a genuine divergence (e.g. a skill library that
+  crossed the size threshold since the recorded run) behind a later request-hash
+  mismatch. Both now re-raise it, matching the orchestrator's frozen-context
+  sites.
+- **Replay — frozen run-state now survives the dispatch thread hop.** The active
+  run scope used by `replaystore.frozen_context` moved from a `threading.local`
+  to a `ContextVar`, and the specialist worker re-publishes it (like the trace
+  contextvar) — so a `frozen_context` call made on a dispatch worker (the new
+  task-scoped skill index) freezes in record mode and reproduces on replay,
+  instead of silently skipping the freeze on workers and diverging.
+
+## [0.26.0] — 2026-07-22
+
+### Added — Four native-capability deepenings (verification, adaptation, providers, review)
+
+Four extensions that strengthen existing Olympus subsystems along its core axes.
+No new tools — capability accounting is unchanged. Closes three tracked
+`DEFERRED.md` items (#2, #4, and the OpenAI-compatible half of #5).
+
+- **Code graph — verify honesty fix.** `verify_claim` no longer false-REFUTEs a
+  real call whose callee name is defined in more than `_MAX_AMBIGUOUS` places
+  (the resolver skips those edges, so absence isn't proof). It now returns the
+  honest `UNKNOWN` — an Aletheia correctness fix, since it was asserting a true
+  claim false (e.g. `_run_command_execute calls run`). Refutation power is kept
+  for uniquely-named callees.
+- **Skills — semantic dedup + retrieval.** Write-time embedding dedup flags
+  near-duplicate skills at `create()` time (deterministic, no model call), and a
+  new `skills.search()` gives cosine-ranked retrieval. Reuses `embed.py`;
+  best-effort and zero-cost when `OLYMPUS_EMBED_MODEL` is unset. The embedding
+  cache is keyed by content hash AND model so a model change re-embeds rather
+  than silently serving stale-dimension vectors. Closes DEFERRED #2.
+- **Providers — per-model effort tiers.** `low/medium/high` now map to
+  `reasoning_effort` for the OpenAI-compatible reasoning families that accept it
+  (OpenAI o-series/gpt-5, Gemini 2.5 / thinking), allowlist-gated so a
+  non-reasoning model is never sent an unknown param. Also fixes a latent break:
+  those models require `max_completion_tokens`, not `max_tokens`. Kill-switch:
+  `OLYMPUS_DISABLE_REASONING_EFFORT`. Closes the OpenAI-compatible half of #5.
+- **Orchestrator — Athena bounded multi-pass review.** When Athena orders a
+  rework, the reworked output is now RE-REVIEWED once (bounded — never a third
+  pass). It runs only on the minority of turns that actually reworked, so the
+  common approve-first path pays for a single review. Closes the one-shot half
+  of DEFERRED #4.
+
+### Added — Absorb OpenManus's capabilities as native Olympus features
+
+The capabilities of [OpenManus](https://github.com/FoundationAgents/OpenManus)
+are absorbed as *native* Olympus features — registered in Olympus's own
+registries, security-gated, capability-accounted, and tested — not a bolted-on
+copy. Most of OpenManus was already native (browser, computer-use, web
+search/fetch, Docker sandbox, file tools, gated shell exec, MCP server, the
+specialist council); these close the genuine gaps and, in security and provider
+reach, go past the original.
+
+- **`run_python`** — provider-independent Python execution as an approval-gated
+  `ActionType` (irreversible, `exec` scope, never auto-runs) routed through the
+  confined `sandbox.run_python` (cmdguard, root confinement, timeout, output
+  cap), plus a first-class tool that stages it.
+- **Native MCP client** (`olympus/mcp_client.py`) — connects to external MCP
+  servers over **stdio + SSE** on *every* backend (not just Anthropic's
+  server-side connector). Tools are namespaced `mcp__server__tool` and dispatch
+  through `resolve_handler`; capability-separated; stdio gated behind
+  `OLYMPUS_MCP_STDIO_ALLOWLIST`; output enveloped as untrusted; tool
+  descriptions injection-scanned; discovery cached with a TTL. Requires the
+  optional extra: `pip install olympus-council[mcp]`.
+- **`chart_from_data`** — tabular data → bar/line/scatter/pie chart as
+  pure-Python SVG (zero new deps), labels XML-escaped, path-confined.
+- **`crawl_site`** — bounded recursive crawl over the SSRF-gated fetcher
+  (depth/page/byte caps, same-domain option); classified as untrusted ingestion.
+- **Azure OpenAI** — deployment-scoped URL + `api-key` header, detected by
+  endpoint host; rides the existing key-rotation/failover machinery.
+- **AWS Bedrock** — Claude via `anthropic.AnthropicBedrock`, full capability
+  parity; server-side tools degrade to the client-side path by provider string.
+- **Docker sandbox hardening** — `--cap-drop ALL` + `no-new-privileges` +
+  memory/PID caps by default, `--network none` kept.
+
+Security & accounting: new tools classified in exactly one of `TRUSTED_TOOLS`
+xor `INGESTION_TOOLS` (fail-closed envelope test enforced), threat-model rows +
+capability manifest regenerated (106 tools / 24 actions), README counts bound.
+Consciously-deferred edges (Daytona remote sandbox, native A2A server,
+non-Claude Bedrock converse, persistent shell) are recorded in `DEFERRED.md`.
+Opt-in live integration tests validate the MCP client end-to-end against a real
+stdio server, and the docker/Azure/Bedrock external legs where the
+infrastructure exists.
+
 ### Added — Code graph drives self-evolution + hardening
 
 The code graph becomes an ACTIVE part of how Olympus improves itself, not just a
@@ -2432,7 +2601,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.25.0...v0.26.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0

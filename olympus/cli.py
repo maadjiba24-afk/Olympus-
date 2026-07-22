@@ -431,6 +431,36 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["card", "call"])
     p_a2a.add_argument("url", nargs="?", default=None, help="peer task URL (call)")
     p_a2a.add_argument("message", nargs="?", default=None, help="message (call)")
+    p_fed = sub.add_parser(
+        "federation",
+        help="cross-instance federation (signed, opt-in): show identity, "
+             "pin/list/remove peers, call a peer, discover a peer's "
+             "capabilities, ask all peers, serve the listener, or list "
+             "staged peer lessons")
+    p_fed.add_argument(
+        "action", nargs="?", default="identity",
+        choices=["identity", "add-peer", "peers", "remove-peer", "call",
+                 "capabilities", "ask-all", "serve", "lessons"])
+    p_fed.add_argument("name", nargs="?", default=None,
+                       help="peer name (add-peer/remove-peer/call/capabilities) "
+                            "or message (ask-all)")
+    p_fed.add_argument("value", nargs="?", default=None,
+                       help="pubkey (add-peer) or message (call)")
+    p_fed.add_argument("--url", default="", help="peer base URL (add-peer)")
+    p_fed.add_argument("--trust", default="task",
+                       choices=["blocked", "task", "trusted"],
+                       help="peer trust level (add-peer; default task)")
+    p_fed.add_argument("--token", default=None,
+                       help="peer's inbound bearer token (call)")
+    p_fed.add_argument("--host", default="127.0.0.1", help="serve bind host")
+    p_fed.add_argument("--port", type=int, default=8489, help="serve port")
+    p_moat = sub.add_parser(
+        "moat",
+        help="unified status of the absorbed, self-evolving capabilities "
+             "(vector recall, swarm, consensus, bandit, file agents, "
+             "federation) — enabled?, health, and self-tuned settings")
+    p_moat.add_argument("--json", action="store_true",
+                        help="machine-readable status")
     p_scaf = sub.add_parser("scaffold-evolve",
                             help="propose-only scaffold evolution: status, or "
                                  "list archived proposals as diffs (never "
@@ -1528,6 +1558,91 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Refused: {err}")
         else:
             print(_json.dumps(a2a.card(), indent=2))
+    elif args.command == "federation":
+        from . import federation
+        import json as _json
+        act = args.action
+        try:
+            if act == "identity":
+                print(_json.dumps(federation.identity(), indent=2))
+            elif act == "add-peer":
+                if not args.name or not args.value:
+                    print("Usage: olympus federation add-peer <name> <pubkey> "
+                          "[--url URL] [--trust blocked|task|trusted]")
+                else:
+                    p = federation.add_peer(args.name, args.value,
+                                            url=args.url, trust=args.trust)
+                    print(f"Pinned peer '{p.name}' (trust={p.trust})"
+                          + (f" at {p.url}" if p.url else "") + ".")
+            elif act == "peers":
+                ps = federation.peers()
+                if not ps:
+                    print("No peers pinned.")
+                for p in ps:
+                    print(f"- {p.name}  trust={p.trust}  "
+                          f"{p.url or '(no url)'}  {p.public_key[:16]}…")
+            elif act == "remove-peer":
+                if not args.name:
+                    print("Usage: olympus federation remove-peer <name>")
+                else:
+                    print("Removed." if federation.remove_peer(args.name)
+                          else "No such peer.")
+            elif act == "call":
+                if not args.name or not args.value:
+                    print("Usage: olympus federation call <peer-name> <message> "
+                          "[--token TOKEN]")
+                else:
+                    print(federation.call_peer(args.name, args.value,
+                                               token=args.token))
+            elif act == "capabilities":
+                if not args.name:
+                    print("Usage: olympus federation capabilities <peer-name> "
+                          "[--token TOKEN]")
+                else:
+                    card = federation.discover_peer(args.name, token=args.token)
+                    print(_json.dumps(card, indent=2))
+            elif act == "ask-all":
+                if not args.name:
+                    print("Usage: olympus federation ask-all <message> "
+                          "[--token TOKEN]")
+                else:
+                    # `name` carries the message here (ask-all takes no peer).
+                    targets = federation.trusted_peer_names()
+                    if not targets:
+                        print("No pinned peers with a URL to ask.")
+                    for r in federation.call_peers(targets, args.name,
+                                                   token=args.token):
+                        if "error" in r:
+                            print(f"- [{r['peer']}] refused: {r['error']}")
+                        else:
+                            print(f"- [{r['peer']}] {r['answer']}")
+            elif act == "serve":
+                from . import config
+                def _ask(text: str) -> str:
+                    # Fresh council per inbound task → no history bleed between
+                    # peers. The peer text is already wrapped untrusted by
+                    # federation before it reaches here.
+                    return orchestrator.Olympus(
+                        pool=config.ModelPool.from_env(),
+                        user=federation._instance_name()).ask(text)
+                print(f"Serving federation on {args.host}:{args.port} "
+                      "(Ctrl-C to stop)…", file=sys.stderr)
+                federation.run_server(_ask, host=args.host, port=args.port)
+            elif act == "lessons":
+                staged = federation.staged_lessons()
+                if not staged:
+                    print("No staged peer lessons.")
+                for s in staged:
+                    print(f"- [{s.get('from', '?')}] {s.get('text', '')}")
+        except federation.FederationError as err:
+            print(f"Refused: {err}")
+    elif args.command == "moat":
+        from . import moat
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps(moat.status(), indent=2, default=str))
+        else:
+            print(moat.render())
     elif args.command == "scaffold-evolve":
         from . import scaffold_evolve as _se
         import json as _json

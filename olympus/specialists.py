@@ -6,6 +6,9 @@ specialist = add a prompt file + one entry here (Prometheus proposes these).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass, field
 
 from . import (agent, codegraph, config, connectors, contracts, security,
@@ -43,6 +46,10 @@ class Specialist:
     # today's behavior; lets the hard specialists stay deep while light ones can
     # be dialed down for cost without touching the rest.
     effort: str = "high"
+    # Inline system prompt for file-defined agents (agentreg): when non-empty it
+    # replaces the prompts/<key>.md lookup. The 13 built-in specialists leave it
+    # "" and keep loading their curated prompt file unchanged.
+    prompt_text: str = ""
 
     def _ingests(self, provider: str) -> bool:
         """Does this specialist's loadout read external/untrusted content?
@@ -84,6 +91,11 @@ class Specialist:
         if self.code_exec and provider == "anthropic":
             defs.append(tools.CODE_EXECUTION_TOOL)
         defs += connectors.plugin_tools_for(self.key, allow_action=allow_action)
+        # Native (stdio/SSE) MCP tools — provider-independent, so they load on
+        # EVERY backend (unlike the Anthropic-only server-side url connectors in
+        # mcp_defs). allow_action gates action servers out of ingesting runs,
+        # exactly like plugin_tools_for above.
+        defs += connectors.mcp_client_tools_for(self.key, allow_action=allow_action)
 
         if not self.system:
             defs = security.filter_tools(defs, ingests_external=ingests)
@@ -115,14 +127,17 @@ class Specialist:
         return [s.to_api() for s in connectors.mcp_for(
             self.key, allow_action=allow_action)]
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, task: str | None = None) -> str:
         # Scope the skill index to THIS specialist (its own skills + global
         # ones). A skill tagged for another specialist never enters this prompt,
         # so a benchmark-gated skill can't degrade specialists it was never
-        # measured against.
-        return (agent.load_prompt(self.key)
+        # measured against. When semantic skills are on and the library is large,
+        # `_skill_index_for` narrows that scope further to the top-K relevant to
+        # `task`; otherwise it's the full per-specialist index.
+        base = self.prompt_text or agent.load_prompt(self.key)
+        return (base
                 + "\n\n## Skill library (load with read_skill before "
-                  "relevant tasks)\n" + skills.index(self.key)
+                  "relevant tasks)\n" + _skill_index_for(self.key, task)
                 + self._extra_context()
                 + _UNTRUSTED_NOTE)
 
@@ -150,7 +165,7 @@ class Specialist:
         from . import backend  # local import: backend imports this module's peers
         settings = settings or config.Settings.from_env()
         effort = effort or self.effort
-        return backend.run_agent_counted(settings, self.system_prompt(), task,
+        return backend.run_agent_counted(settings, self.system_prompt(task), task,
                                          self.tool_defs(settings.provider,
                                                         task=task),
                                          mcp_servers=self.mcp_defs(settings.provider),
@@ -165,6 +180,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Personal finance, budgeting, investing concepts, "
                         "business finance, market analysis, pricing.",
             web=True,
+            extra_tools=("chart_from_data",),
         ),
         Specialist(
             key="peitho", name="Peitho", title="Marketing Specialist",
@@ -173,7 +189,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "documents to the user's workspace.",
             web=True,
             extra_tools=("generate_image", "edit_image", "text_to_speech",
-                         "transcribe_audio", "browse_page", "analyze_image",
+                         "transcribe_audio", "browse_page", "crawl_site",
+                         "chart_from_data", "analyze_image",
                          "list_documents", "read_document", "search_documents",
                          "write_document"),
         ),
@@ -187,7 +204,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "codegraph_impact", "codegraph_path",
                          "codegraph_subgraph", "codegraph_overview",
                          "read_file", "list_dir", "grep_files", "glob_files",
-                         "edit_file", "prepare_action",
+                         "edit_file", "run_python", "prepare_action",
                          "spawn_subagent", "analyze_image"),
         ),
         Specialist(
@@ -250,7 +267,8 @@ SPECIALISTS: dict[str, Specialist] = {
             # actuator (browser_act) from its live loadout — it can read/learn
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
-            extra_tools=("browse_page", "analyze_image", "browser_open",
+            extra_tools=("browse_page", "crawl_site", "analyze_image",
+                         "browser_open",
                          "browser_read", "browser_read_ax", "browser_save_pdf",
                          "browser_console", "browser_screenshot",
                          "browser_act", "browser_skills", "browser_skill_record",
@@ -338,9 +356,163 @@ SPECIALISTS: dict[str, Specialist] = {
 }
 
 
+def _roster_line(s: "Specialist") -> str:
+    return f"- {s.key}: {s.name}, {s.title} — {s.description}"
+
+
 def roster() -> str:
     """Routing card given to Zeus and Athena."""
-    return "\n".join(
-        f"- {s.key}: {s.name}, {s.title} — {s.description}"
-        for s in SPECIALISTS.values()
-    )
+    return "\n".join(_roster_line(s) for s in SPECIALISTS.values())
+
+
+# --- semantic routing: order the roster by relevance to the task ----------
+#
+# Keyword routing over 13 curated descriptions is already excellent, so this is a
+# NO-OP for the default install. It earns its keep once many file agents
+# (agentreg) are loaded: the roster grows large and the LLM benefits from seeing
+# the fitting agents FIRST. It only ever REORDERS — never trims — so every
+# specialist stays routable. Opt-in (`OLYMPUS_SEMANTIC_ROUTING`), engages only
+# with embeddings AND a large roster, and is replay-frozen at the call site.
+
+_SEMANTIC_ROSTER_MIN = 16          # ≤ this, the plain roster is fine
+_DESCVEC_NS = "specialists.descvec"
+
+
+def semantic_routing_enabled() -> bool:
+    return os.environ.get("OLYMPUS_SEMANTIC_ROUTING", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def _descriptions() -> dict[str, str]:
+    return {s.key: f"{s.name} {s.title}. {s.description}"
+            for s in SPECIALISTS.values()}
+
+
+def _description_vectors(descs: dict) -> dict | None:
+    """Embed the specialist descriptions, cached by a registry signature so the
+    network cost is paid once per roster shape, not once per route."""
+    from . import embed, store
+    sig = hashlib.sha256(
+        "|".join(f"{k}:{v}" for k, v in sorted(descs.items())).encode()
+    ).hexdigest()
+    try:
+        blob = store.backend().get(_DESCVEC_NS, "vectors")
+        if blob:
+            data = json.loads(blob)
+            if data.get("sig") == sig and isinstance(data.get("vecs"), dict):
+                return data["vecs"]
+    except Exception:
+        pass
+    vecs = embed.embed(list(descs.values()))
+    if not vecs or len(vecs) != len(descs):
+        return None
+    out = {k: vecs[i] for i, k in enumerate(descs)}
+    try:
+        store.backend().put(_DESCVEC_NS, "vectors",
+                            json.dumps({"sig": sig, "vecs": out}).encode())
+    except Exception:
+        pass
+    return out
+
+
+def _semantic_order(task: str) -> str:
+    from . import annindex, embed
+    descs = _descriptions()
+    vecs = _description_vectors(descs)
+    qv = embed.embed_one(task)
+    if not vecs or not qv:
+        return roster()
+    ranked = annindex.nearest(qv, vecs, k=len(vecs), min_sim=-1.0)
+    order = [k for k, _ in ranked]
+    order += [k for k in descs if k not in set(order)]     # keep every agent
+    return "\n".join(_roster_line(SPECIALISTS[k])
+                     for k in order if k in SPECIALISTS)
+
+
+def semantic_roster(task: str) -> str:
+    """The roster ordered most-relevant-first for `task` when semantic routing is
+    on, embeddings are configured, and the roster is large enough to benefit; the
+    plain (static) roster otherwise. Frozen per run for replay-safety (the plain
+    path stays unfrozen, so historical runs are unaffected); best-effort → plain
+    roster on any failure."""
+    # Gate on the flag + roster size only, NOT embeddings, so a run that took the
+    # frozen path replays down it too (flag restored from meta) and reproduces the
+    # recorded roster regardless of embedding availability at replay time.
+    # `_semantic_order` degrades to the plain roster when embeddings are absent.
+    if (not semantic_routing_enabled()
+            or len(SPECIALISTS) < _SEMANTIC_ROSTER_MIN):
+        return roster()
+    from . import replaystore
+    try:
+        return replaystore.frozen_context("route.roster",
+                                          lambda: _semantic_order(task))
+    except replaystore.ReplayDivergence:
+        # A missing frozen roster on replay is a genuine divergence — surface it
+        # precisely rather than masking it behind the plain roster.
+        raise
+    except Exception:
+        return roster()
+
+
+# --- semantic skill retrieval: scope a specialist's skill index to the task ---
+#
+# The full per-specialist skill index is injected into every system prompt.
+# That's ideal while a library is small, but once a specialist accrues dozens of
+# skills the index bloats the prompt with mostly-irrelevant lines. When the
+# library is large AND embeddings are configured, surface only the top-K skills
+# most relevant to THIS task instead of the whole list. Opt-in
+# (`OLYMPUS_SEMANTIC_SKILLS`), engages only above a size threshold, replay-frozen
+# at the call site, and always degrades to the full index — so no skill ever
+# becomes unreachable (the specialist can still read_skill any skill by name).
+
+_SEMANTIC_SKILLS_MIN = 24          # ≤ this many skills, the full index is fine
+_SEMANTIC_SKILLS_K = 12            # top-K surfaced when scoping to a task
+
+
+def semantic_skills_enabled() -> bool:
+    return os.environ.get("OLYMPUS_SEMANTIC_SKILLS", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def _skill_index_for(specialist_key: str, task: str | None) -> str:
+    """The skill-library block for a specialist's system prompt: the full
+    per-specialist index by default; a task-scoped top-K when semantic skills are
+    on, a task is present, and the library is large enough to benefit. Frozen per
+    run for replay-safety (the full path stays unfrozen, so historical runs are
+    unaffected); best-effort → full index on any failure.
+
+    Gate on the flag + task + size only, NOT embeddings, so a run that took the
+    frozen path replays down it too (flag restored from meta) and reproduces the
+    recorded block regardless of embedding availability at replay time —
+    `scoped_index` itself degrades to the full index when embeddings are absent."""
+    full = skills.index(specialist_key)
+    if (not semantic_skills_enabled() or not task
+            or skills.count() < _SEMANTIC_SKILLS_MIN):
+        return full
+    from . import replaystore
+    try:
+        def _scoped() -> str:
+            scoped = skills.scoped_index(specialist_key, task,
+                                         limit=_SEMANTIC_SKILLS_K)
+            return scoped if scoped else full   # embeddings absent → full index
+        return replaystore.frozen_context(
+            f"skills.block.{specialist_key}", _scoped)
+    except replaystore.ReplayDivergence:
+        # A missing frozen block on replay is a genuine divergence (e.g. the
+        # library crossed the size threshold since the recorded run) — let it
+        # surface precisely here, never masked into a later request-hash mismatch.
+        raise
+    except Exception:
+        return full
+
+
+# Merge any operator-defined file agents into the registry (OLYMPUS_AGENTS, off
+# by default → no-op). Done here, after SPECIALISTS is fully built, so roster(),
+# Athena's plan enum, and dispatch all see them with no call-site changes. The
+# local import avoids an import cycle (agentreg imports only config/security at
+# module load); a broken agents dir can never crash startup.
+try:
+    from . import agentreg as _agentreg
+    _agentreg.install(SPECIALISTS)
+except Exception:
+    pass

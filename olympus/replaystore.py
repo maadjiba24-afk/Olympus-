@@ -23,6 +23,7 @@ reasoning itself.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -39,6 +40,15 @@ from . import config
 _EXCLUDE_FROM_HASH = ("container",)
 
 _local = threading.local()
+
+# The active run id lives in a ContextVar (not thread-local) so it survives the
+# thread hop the dispatcher makes via `contextvars.copy_context()`: specialists
+# run on worker threads, and their prompt-assembly `frozen_context` calls must
+# see the SAME run scope the main thread set — otherwise record-mode freezing is
+# silently skipped on workers while replay-mode (keyed off the global
+# OLYMPUS_REPLAY env) still tries to read the frozen value, and the run diverges.
+_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "olympus_replay_run", default=None)
 
 
 class ReplayDivergence(RuntimeError):
@@ -156,12 +166,14 @@ def get_tool(tool_use_id: str) -> dict | None:
 # so a genuine code/prompt change is still detected as a divergence.
 
 def set_run(run_id: str | None) -> None:
-    """Mark the current run on this thread so `frozen_context` can key by it."""
-    _local.run_id = run_id
+    """Mark the current run so `frozen_context` can key by it. Stored in a
+    ContextVar so a `copy_context()`ed worker thread (specialist dispatch,
+    verify pool) inherits the same scope the main thread set."""
+    _run_id_var.set(run_id)
 
 
 def _current_run() -> str | None:
-    return replaying() or getattr(_local, "run_id", None)
+    return replaying() or _run_id_var.get()
 
 
 def _ctx_dir():

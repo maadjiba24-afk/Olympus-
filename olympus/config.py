@@ -175,9 +175,10 @@ class Settings:
 
     def validate(self) -> str | None:
         """Return an error message if unusable, else None."""
-        if self.provider not in ("anthropic", "openai", "claude-code", "moa"):
+        if self.provider not in ("anthropic", "openai", "claude-code", "moa",
+                                 "bedrock"):
             return (f"Unknown provider '{self.provider}' "
-                    "(use anthropic, openai, claude-code, or moa).")
+                    "(use anthropic, openai, bedrock, claude-code, or moa).")
         # Olympus never assumes a model. OpenAI-compatible settings must name
         # one explicitly (an env OLYMPUS_MODEL belongs to the primary provider
         # and could be a different vendor's ID). Anthropic settings may fall
@@ -190,6 +191,12 @@ class Settings:
         if self.provider == "anthropic" and not (self.model or default_model()):
             return ("No model chosen — Olympus doesn't assume one. Set "
                     "OLYMPUS_MODEL or run `olympus setup`.")
+        # Bedrock rides the Anthropic SDK (via anthropic.AnthropicBedrock) but
+        # needs an explicit Bedrock model id (e.g.
+        # anthropic.claude-3-5-sonnet-20241022-v2:0) — no assumed default.
+        if self.provider == "bedrock" and not self.model:
+            return ("Set a Bedrock model id (OLYMPUS_MODEL), e.g. "
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0.")
         return None
 
     def usable(self) -> bool:
@@ -197,8 +204,9 @@ class Settings:
             return False
         # anthropic reads its key from the env; claude-code authenticates via the
         # local `claude` CLI (your subscription); moa rides the pool members'
-        # own credentials; others need a key/url.
-        return (self.provider in ("anthropic", "claude-code", "moa")
+        # own credentials; bedrock authenticates via the AWS credential chain
+        # (env/instance role); others need a key/url.
+        return (self.provider in ("anthropic", "claude-code", "moa", "bedrock")
                 or bool(self.api_key) or bool(self.base_url))
 
 
@@ -468,8 +476,17 @@ class ModelPool:
         # chooses among self.members, which sovereign mode already filtered, and
         # falls back to the heuristic on anything short of that — so with no
         # data (or the flag off) this line is a no-op.
-        from . import learned_routing
-        return learned_routing.choose(self.members, key, heuristic) or heuristic
+        # An operator runs at most one adaptive selector: the UCB1 bandit
+        # (explores under-sampled models) OR the conservative learned selector
+        # (only exploits decisive evidence). Both read the same outcome ledger,
+        # both are off by default and disabled during replay, and both fall back
+        # to the heuristic on anything short of full evidence — so this line is a
+        # no-op with no data or with both flags off.
+        from . import bandit_routing, learned_routing
+        adaptive = (bandit_routing.choose(self.members, key, heuristic)
+                    if bandit_routing.enabled()
+                    else learned_routing.choose(self.members, key, heuristic))
+        return adaptive or heuristic
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints
@@ -992,6 +1009,12 @@ def member_host(s: "Settings") -> str:
     CLI, which itself egresses to Anthropic, so it counts as remote.)"""
     if s.base_url:
         return (urlparse(s.base_url).hostname or "").lower()
+    if s.provider == "bedrock":
+        import os
+        region = (os.environ.get("OLYMPUS_BEDROCK_REGION")
+                  or os.environ.get("AWS_REGION")
+                  or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+        return f"bedrock-runtime.{region}.amazonaws.com"
     return {"anthropic": "api.anthropic.com",
             "claude-code": "api.anthropic.com",
             "openai": "api.openai.com"}.get(s.provider, "")

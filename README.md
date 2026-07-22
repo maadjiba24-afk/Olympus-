@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->103<!--/cap--> agent tools, and <!--cap:commands-->117<!--/cap-->
+<!--cap:tools-->106<!--/cap--> agent tools, and <!--cap:commands-->119<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -538,6 +538,55 @@ olympus routing-stats     # counts, the data-gate verdict, and the selector's ev
 What's logged, the outcome-signal precedence, the privacy posture, the Wilson
 lower-bound ranking, and every activation gate are in
 [docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
+
+### Native adaptive extensions (opt-in, replay-safe)
+
+These capabilities extend the council natively — each is **off by default**, so the
+standard install is unchanged, and each is deterministic/replay-safe by
+construction (design contract in
+[ADR 0008](docs/adr/0008-native-adaptive-extensions.md);
+federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)). They are
+wired into Olympus's self-evolution spine, so they measure themselves and get
+stronger the more they run — watch the board with `olympus moat`:
+
+- **Vector recall (`OLYMPUS_ANN`).** A pure-Python HNSW index. The one-shot
+  recall seams stay an exact cosine scan (optimal for a single query and always
+  the true top-k); the graph's sublinear speedup is available to callers that
+  keep a persistent index and query it many times over a stable corpus.
+- **Swarm topologies (`OLYMPUS_SWARM`).** After the DAG dispatch, wire the
+  assigned specialists into an explicit shape — `star` (coordinator), `mesh`
+  (all-to-all cross-check), `hierarchical` (review tree), or `ring` — and let
+  each consult its peers to refine its answer before verification.
+- **Quorum verification (`OLYMPUS_CONSENSUS`).** Replace the single verifier with
+  an odd panel of lens-diverse verifiers folded by a safety-biased quorum: a
+  fabrication survives only if a majority miss it, and any unresolved dissent
+  lands on the cautious verdict.
+- **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer —
+  the counterpart to the conservative learned selector — that gives an
+  under-sampled model a bounded number of shots before settling on the best.
+- **Semantic routing (`OLYMPUS_SEMANTIC_ROUTING`).** Orders the specialist roster
+  shown to Zeus by embedding-relevance to the request (reorder-only, never
+  trims) — a no-op for the curated 13, earning its keep once many file agents are
+  loaded and the roster grows large. Replay-frozen on the route path.
+- **Semantic skill retrieval (`OLYMPUS_SEMANTIC_SKILLS`).** Scopes the per-agent
+  skill index injected into a specialist's prompt to the top-K skills most
+  relevant to the task (embedding cosine), instead of the whole list — a no-op
+  until a specialist's library actually outgrows the prompt, and always degrading
+  to the full index (no skill ever becomes unreachable; any skill is still
+  loadable by name with `read_skill`). Replay-frozen per specialist on the
+  prompt-assembly path.
+- **File-defined agents (`OLYMPUS_AGENTS`).** Drop a `<key>.md` file (frontmatter
+  + system prompt) to add a routable specialist without editing source —
+  safety-bounded so a file agent can never gain action tools or self-modify.
+- **Federation (`OLYMPUS_FEDERATION`).** Mutually-authenticated links to other
+  Olympus instances: ed25519 handshake reusing the `witness` root of trust,
+  pinned/tiered peer trust, an egress-guarded transport, and shared-lesson sync
+  that is scrubbed, trusted-only, and staged as candidates for your gate — never
+  auto-committed. A pinned peer can also fetch a signed **capabilities card**
+  (roster + skill count, no skill contents) to learn what an instance offers, and
+  `ask-all` fans one task across every trusted peer, each reply returned as
+  untrusted data. Drive it from the CLI: `olympus federation identity | add-peer |
+  peers | call | capabilities | ask-all | serve | lessons`.
 
 ### Connectors: MCP servers & custom plugins
 

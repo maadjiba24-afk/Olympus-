@@ -714,6 +714,24 @@ def verify_claim(project: str, claim: str) -> dict:
                 return {"verdict": "UNKNOWN",
                         "detail": "symbols come from regex-extracted files — "
                                   "absence of an edge is not proof there"}
+            # Honesty guard (Aletheia): a call to an over-common name is
+            # deliberately SKIPPED at build time — when a name is defined in more
+            # than `_MAX_AMBIGUOUS` places, the resolver makes NO edge to any of
+            # them (edges to all would be noise). So for such a callee, absence
+            # of an edge is not proof of absence; refuting would be a false
+            # negative on a real call (e.g. `X calls run`, with 18 `run`s). Mirror
+            # the build's rule and stay UNKNOWN rather than assert REFUTED.
+            from . import codegraph_langs
+            # Count only CALLABLE definitions of the callee — the build's
+            # resolver skips a call when its name has more than _MAX_AMBIGUOUS
+            # *function/method* candidates (classes/vars with the same label are
+            # not call targets), so mirror that exactly.
+            callable_defs = sum(1 for n in b if n.get("kind") in (FUNCTION, METHOD))
+            if rel == "calls" and callable_defs > codegraph_langs._MAX_AMBIGUOUS:
+                return {"verdict": "UNKNOWN",
+                        "detail": "the callee name is defined in too many "
+                                  "places to resolve calls to it (skipped at "
+                                  "build) — absence of an edge is not proof"}
             return {"verdict": "REFUTED",
                     "detail": f"no EXTRACTED {rel} edge between known symbols"}
     m = _UNUSED_RE.search(claim) or _NOTHING_RE.search(claim)

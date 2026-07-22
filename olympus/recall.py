@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from . import backend, config, embed, relgraph, security, usermem
+from . import annindex, backend, config, embed, relgraph, security, usermem
 
 _WORD = re.compile(r"[a-z0-9]+")
 # Common words carry no relevance signal and cause false lexical matches.
@@ -279,6 +279,13 @@ def flush_slice(user: str, history_text: str,
         return summary
     if len((history_text or "").strip()) < config.MEMORY_MIN_CHARS:
         return summary
+    # Claude-Code-parity lifecycle event: memory compaction is about to run.
+    # Observe-only; a plugin can snapshot the slice but never alter it.
+    try:
+        from . import connectors
+        connectors.emit("pre_compact", user, history_text)
+    except Exception:
+        pass
     from . import usage
     try:
         usage.check_budget()
@@ -298,22 +305,37 @@ def flush_slice(user: str, history_text: str,
 
 # --- read path -----------------------------------------------------------
 
+_SEMANTIC_K = 64   # cap on semantic candidates (the token budget trims further)
+
+
 def _semantic_hits(user: str, query: str, already: set[str]) -> list[tuple]:
     """Cosine-ranked memories with embeddings, excluding ids already found
-    lexically. Best-effort: empty if embeddings are unavailable or fail."""
+    lexically. Best-effort: empty if embeddings are unavailable or fail.
+
+    Candidate generation goes through `annindex.nearest`, which is an exact
+    cosine scan (identical to the old inline loop) for typical memory sets and
+    an HNSW graph query only when the set is large and `OLYMPUS_ANN` is on — so
+    behaviour is unchanged by default and merely scales when a user's memory
+    outgrows the small-N regime."""
     qvec = embed.embed_one(query)
     if not qvec:
         return []
-    out = []
+    lookup: dict[str, tuple[float, dict]] = {}
+    items: dict[str, list] = {}
     for m in usermem.active_memories(user):
         if m["id"] in already or not m.get("embedding"):
             continue
         eff = usermem.effective_confidence(m)
         if eff < config.MEMORY_RETRIEVAL_FLOOR_CONF:
             continue
-        c = embed.cosine(qvec, m["embedding"])
-        if c >= config.MEMORY_SEMANTIC_THRESHOLD:
-            out.append((m.get("importance", 0.5) * eff * c, m))
+        lookup[m["id"]] = (eff, m)
+        items[m["id"]] = m["embedding"]
+    out = []
+    for mem_id, sim in annindex.nearest(
+            qvec, items, k=_SEMANTIC_K,
+            min_sim=config.MEMORY_SEMANTIC_THRESHOLD):
+        eff, m = lookup[mem_id]
+        out.append((m.get("importance", 0.5) * eff * sim, m))
     return out
 
 

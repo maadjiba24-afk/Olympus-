@@ -56,6 +56,17 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
+def _call_qualifier(node: ast.Call) -> str:
+    """The immediate qualifier of a `X.func()` call — 'X' for `memory.save()`,
+    '' for a bare `save()` or a deeper `a.b.save()` chain. Combined with the
+    module's import-alias map, this lets the resolver pin a call to a name
+    defined in many files down to the one module it actually targets (#15)."""
+    f = node.func
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        return f.value.id
+    return ""
+
+
 def _base_name(base) -> str | None:
     """Last-component name of a base-class expression: `Foo` -> 'Foo',
     `pkg.Base` -> 'Base', `Generic[T]` -> 'Generic'. Subscripts/others yield
@@ -81,8 +92,9 @@ class _Walk(ast.NodeVisitor):
         self.module_qual = module_qual
         self.scope = [(module_id, module_qual, codegraph.MODULE)]
         self.imports: list[str] = []              # imported module stems
-        self.calls: list[tuple[str, str]] = []    # (caller_id, callee_name)
+        self.calls: list[tuple[str, str, str]] = []  # (caller, callee, qualifier)
         self.inherits: list[tuple[str, str]] = []  # (class_id, base_name)
+        self.aliases: dict[str, str] = {}   # local name -> imported module target
 
     # -- defs ------------------------------------------------------------
     def _add_def(self, node, kind: str):
@@ -127,6 +139,10 @@ class _Walk(ast.NodeVisitor):
     def visit_Import(self, node):
         for alias in node.names:            # import a.b.c  /  import a.b as x
             self.imports.append(alias.name)
+            # The name bound in this scope → the module it points at, so a later
+            # `x.func()` / `foo.func()` can be pinned to that module (#15).
+            bound = alias.asname or alias.name.split(".")[0]
+            self.aliases[bound] = alias.name
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
@@ -134,16 +150,21 @@ class _Walk(ast.NodeVisitor):
             self.imports.append(node.module)
             for alias in node.names:        # c/d may be submodules of a.b
                 self.imports.append(f"{node.module}.{alias.name}")
+                bound = alias.asname or alias.name
+                self.aliases[bound] = f"{node.module}.{alias.name}"
         else:                               # from . import memory, store
             for alias in node.names:
                 self.imports.append(alias.name)
+                bound = alias.asname or alias.name
+                self.aliases[bound] = alias.name
         self.generic_visit(node)
 
     # -- calls -----------------------------------------------------------
     def visit_Call(self, node):
         name = _callee_name(node)
         if name:
-            self.calls.append((self.scope[-1][0], name))
+            self.calls.append(
+                (self.scope[-1][0], name, _call_qualifier(node)))
         self.generic_visit(node)
 
 
@@ -166,7 +187,7 @@ def extract_file(project: str, path: Path, root: Path):
     w = _Walk(project, rel, mod["id"], qual)
     w.visit(tree)
     return {"qual": qual, "stem": path.stem, "module_id": mod["id"],
-            "inherits": w.inherits,
+            "inherits": w.inherits, "aliases": w.aliases,
             "rel": rel, "imports": w.imports, "calls": w.calls}
 
 
@@ -209,7 +230,8 @@ def _build_locked(project: str, root_p: Path, ignore: set[str],
             if tgt and tgt != info["module_id"]:
                 if codegraph.add_edge(project, info["module_id"], "imports", tgt):
                     imports_added += 1
-        for caller_id, callee in info["calls"]:
+        for call in info["calls"]:
+            caller_id, callee = call[0], call[1]   # 3-tuple; qualifier unused here
             cands = func_index.get(callee.lower(), [])
             if not cands:
                 calls_skipped += 1            # external/stdlib — skip in the spike
