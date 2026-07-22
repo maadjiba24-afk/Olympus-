@@ -15,6 +15,49 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-07-22
+
+### Added — Absorb OpenManus's capabilities as native Olympus features
+
+The capabilities of [OpenManus](https://github.com/FoundationAgents/OpenManus)
+are absorbed as *native* Olympus features — registered in Olympus's own
+registries, security-gated, capability-accounted, and tested — not a bolted-on
+copy. Most of OpenManus was already native (browser, computer-use, web
+search/fetch, Docker sandbox, file tools, gated shell exec, MCP server, the
+specialist council); these close the genuine gaps and, in security and provider
+reach, go past the original.
+
+- **`run_python`** — provider-independent Python execution as an approval-gated
+  `ActionType` (irreversible, `exec` scope, never auto-runs) routed through the
+  confined `sandbox.run_python` (cmdguard, root confinement, timeout, output
+  cap), plus a first-class tool that stages it.
+- **Native MCP client** (`olympus/mcp_client.py`) — connects to external MCP
+  servers over **stdio + SSE** on *every* backend (not just Anthropic's
+  server-side connector). Tools are namespaced `mcp__server__tool` and dispatch
+  through `resolve_handler`; capability-separated; stdio gated behind
+  `OLYMPUS_MCP_STDIO_ALLOWLIST`; output enveloped as untrusted; tool
+  descriptions injection-scanned; discovery cached with a TTL. Requires the
+  optional extra: `pip install olympus-council[mcp]`.
+- **`chart_from_data`** — tabular data → bar/line/scatter/pie chart as
+  pure-Python SVG (zero new deps), labels XML-escaped, path-confined.
+- **`crawl_site`** — bounded recursive crawl over the SSRF-gated fetcher
+  (depth/page/byte caps, same-domain option); classified as untrusted ingestion.
+- **Azure OpenAI** — deployment-scoped URL + `api-key` header, detected by
+  endpoint host; rides the existing key-rotation/failover machinery.
+- **AWS Bedrock** — Claude via `anthropic.AnthropicBedrock`, full capability
+  parity; server-side tools degrade to the client-side path by provider string.
+- **Docker sandbox hardening** — `--cap-drop ALL` + `no-new-privileges` +
+  memory/PID caps by default, `--network none` kept.
+
+Security & accounting: new tools classified in exactly one of `TRUSTED_TOOLS`
+xor `INGESTION_TOOLS` (fail-closed envelope test enforced), threat-model rows +
+capability manifest regenerated (106 tools / 24 actions), README counts bound.
+Consciously-deferred edges (Daytona remote sandbox, native A2A server,
+non-Claude Bedrock converse, persistent shell) are recorded in `DEFERRED.md`.
+Opt-in live integration tests validate the MCP client end-to-end against a real
+stdio server, and the docker/Azure/Bedrock external legs where the
+infrastructure exists.
+
 ### Added — Code graph drives self-evolution + hardening
 
 The code graph becomes an ACTIVE part of how Olympus improves itself, not just a
@@ -2432,7 +2475,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.25.0...v0.26.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.18.0...v0.19.0
