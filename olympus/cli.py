@@ -685,6 +685,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "endpoint (needs GOOGLECHAT_VERIFY_TOKEN)")
     p_gc.add_argument("--host", default="0.0.0.0")
     p_gc.add_argument("--port", type=int, default=8490)
+    p_sms = sub.add_parser("sms", help="serve the SMS channel over Twilio's "
+                           "webhook (needs TWILIO_AUTH_TOKEN)")
+    p_sms.add_argument("--host", default="0.0.0.0")
+    p_sms.add_argument("--port", type=int, default=8491)
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
@@ -2132,6 +2136,12 @@ def main(argv: list[str] | None = None) -> int:
             googlechat.run_server(args.host, args.port)
         except KeyboardInterrupt:
             print("\nGoogle Chat channel stopped.")
+    elif args.command == "sms":
+        from . import sms
+        try:
+            sms.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nSMS channel stopped.")
     elif args.command == "gateway":
         from . import gateway
         if args.gw_status:

@@ -53,6 +53,14 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
 - Slack **router relay mode**: a central router dispatches mentions/threads to the
   right gateway in managed multi-gateway deployments.
 - Mattermost native slash commands (`/oc_queue` tunes queuing mode and debounce).
+- **Olympus absorption (2026-07-22):** an **SMS channel** (`sms.py`, `olympus
+  sms`) — the buildable slice of OpenClaw's telephony surface. Twilio-compatible
+  inbound over the same untrusted-by-default spine (`X-Twilio-Signature`
+  HMAC-SHA1 verified in constant time, fail-closed without a token; TwiML
+  replies; generic error text so an exception never leaks over the wire),
+  outbound via Twilio REST, wired into `notify_all`. No media stack: an SMS is
+  plain text, so it needs no audio/dependencies — unlike live voice calls
+  (below).
 
 ### 2.2 Model / provider layer
 - Multi-provider catalog: Anthropic, OpenAI (+ Codex OAuth, no API key needed),
@@ -365,9 +373,23 @@ Original plan for reference:
     and upgrades resume with a continuation instead of dropping tasks.
 
 ### Explicitly not adopting
+*(Superseded in places by the full-pivot absorption — see the per-section
+"Olympus absorption" notes above. This is the original, more conservative line.)*
 - 20+ channels, mobile/watch apps, Control UI (contradicts headless-first).
+  → Partially revisited: mobile/watch clients are replaced by one **installable
+    PWA** (`pwa.py`); SMS is now a native channel (`sms.py`).
 - Voice stack: wake word, TTS, phone calls, meeting bots (no media stack).
-- Browser automation / Chrome relay (operator harness already covers this).
-- Plugin marketplace (premature for single-user; revisit if a plugin surface
-  opens — then reuse OpenClaw's trust-policy design as reference).
-- Image/video generation, Live Canvas (outside the verified-answers focus).
+  → TTS voice replies are now native (Wave 2b). SMS covers the text slice of
+    telephony. Still **out of bounds** (genuine boundary items that require an
+    always-on audio/media pipeline or hardware Olympus deliberately doesn't
+    carry): **wake-word detection**, **live voice calls** (streaming speech in
+    and out), and **meeting bots**. These stay honestly unbuilt rather than
+    stubbed.
+- Browser automation / Chrome relay — the operator harness (`browser.py`)
+  already covers headless fetch/scrape; a full interactive Chrome relay remains
+  out of scope (needs a persistent browser runtime).
+- Plugin marketplace → the trust-policy design was absorbed as a **provenance-
+  pinned plugin installer** (`pluginstore.py`, Wave 2c); a hosted marketplace
+  itself is still premature for single-user.
+- Image/video generation, Live Canvas → image generation is now native (Wave
+  2a); Live Canvas (a live collaborative UI surface) remains out of scope.
