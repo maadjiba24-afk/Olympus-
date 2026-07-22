@@ -539,6 +539,37 @@ What's logged, the outcome-signal precedence, the privacy posture, the Wilson
 lower-bound ranking, and every activation gate are in
 [docs/LEARNED_ROUTING.md](docs/LEARNED_ROUTING.md).
 
+### Native adaptive extensions (opt-in, replay-safe)
+
+Six capabilities extend the council natively — each is **off by default**, so the
+standard install is unchanged, and each is deterministic/replay-safe by
+construction (design contract in
+[ADR 0008](docs/adr/0008-native-adaptive-extensions.md);
+federation in [ADR 0007](docs/adr/0007-cross-instance-federation.md)):
+
+- **Vector recall at scale (`OLYMPUS_ANN`).** A pure-Python HNSW index behind the
+  existing semantic-recall seams. Exact (identical results) below a size
+  threshold or when off; a sublinear graph query only once a corpus is large.
+- **Swarm topologies (`OLYMPUS_SWARM`).** After the DAG dispatch, wire the
+  assigned specialists into an explicit shape — `star` (coordinator), `mesh`
+  (all-to-all cross-check), `hierarchical` (review tree), or `ring` — and let
+  each consult its peers to refine its answer before verification.
+- **Quorum verification (`OLYMPUS_CONSENSUS`).** Replace the single verifier with
+  an odd panel of lens-diverse verifiers folded by a safety-biased quorum: a
+  fabrication survives only if a majority miss it, and any unresolved dissent
+  lands on the cautious verdict.
+- **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer —
+  the counterpart to the conservative learned selector — that gives an
+  under-sampled model a bounded number of shots before settling on the best.
+- **File-defined agents (`OLYMPUS_AGENTS`).** Drop a `<key>.md` file (frontmatter
+  + system prompt) to add a routable specialist without editing source —
+  safety-bounded so a file agent can never gain action tools or self-modify.
+- **Federation (`OLYMPUS_FEDERATION`).** Mutually-authenticated links to other
+  Olympus instances: ed25519 handshake reusing the `witness` root of trust,
+  pinned/tiered peer trust, an egress-guarded transport, and shared-lesson sync
+  that is scrubbed, trusted-only, and staged as candidates for your gate — never
+  auto-committed.
+
 ### Connectors: MCP servers & custom plugins
 
 Olympus connects to external tools and data two ways, both governed by the
