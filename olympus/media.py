@@ -338,15 +338,17 @@ def extract_links(html: str, limit: int = 30) -> list[str]:
 
 
 def browse_page(url: str) -> str:
-    """Fetch a page as readable text and list its links — structural browsing."""
-    from . import tools
+    """Fetch a page as clean readable markdown and list its links — structural
+    browsing. Content quality comes from `webctx.to_markdown` (readability-grade,
+    zero-dependency); the fetch still routes through the SSRF/egress-gated
+    `tools._http_get`, and the result is wrapped untrusted like any ingestion."""
+    from . import tools, webctx
     try:
         html = tools._http_get(url)
     except Exception as err:
         return f"Error fetching {url}: {str(err)[:200]}"
-    text = tools._strip_html(html)[:8000]
-    links = extract_links(html)
-    out = [f"# {url}", "", text]
+    md, links, title = webctx.to_markdown(html, base_url=url)
+    out = [f"# {title or url}", f"<{url}>", "", md[:8000]]
     if links:
         out.append("\n## Links on this page")
         out += [f"- {link}" for link in links]
@@ -362,61 +364,29 @@ _CRAWL_PER_PAGE = 6000
 
 
 def crawl_site(url: str, depth: int = 1, max_pages: int = 10,
-               same_domain: bool = True) -> str:
+               same_domain: bool = True, include: list | None = None,
+               exclude: list | None = None) -> str:
     """Recursively crawl from `url` and return a concatenated markdown digest of
-    the pages visited — multi-page reading built on the same gated primitives as
-    browse_page. EVERY hop goes through tools._http_get, so the SSRF/egress and
-    redirect re-check gate applies to each fetched URL. Bounded three ways
-    (page count, link depth, and aggregate bytes) so a crawl can't run away with
-    the token budget."""
-    import urllib.parse
-    from . import tools
-    try:
-        depth = max(0, min(_CRAWL_MAX_DEPTH, int(depth)))
-    except (TypeError, ValueError):
-        depth = 1
-    try:
-        max_pages = max(1, min(_CRAWL_MAX_PAGES, int(max_pages)))
-    except (TypeError, ValueError):
-        max_pages = 10
-
-    start_host = urllib.parse.urlparse(url).netloc
-    frontier: list[tuple[str, int]] = [(url, 0)]
-    visited: set[str] = set()
-    pages: list[str] = []
-    total = 0
-    truncated = False
-
-    while frontier and len(pages) < max_pages:
-        if total >= _CRAWL_BYTE_CAP:
-            truncated = True
-            break
-        current, d = frontier.pop(0)
-        if current in visited:
-            continue
-        visited.add(current)
-        try:
-            html = tools._http_get(current)          # SSRF/egress gate per hop
-        except Exception as err:
-            pages.append(f"## {current}\n[error: {str(err)[:150]}]")
-            continue
-        text = tools._strip_html(html)[:_CRAWL_PER_PAGE]
-        total += len(text)
-        pages.append(f"## {current}\n\n{text}")
-        if d < depth:
-            for link in extract_links(html, limit=50):
-                if link in visited:
-                    continue
-                if same_domain and \
-                        urllib.parse.urlparse(link).netloc != start_host:
-                    continue
-                frontier.append((link, d + 1))
-
-    header = (f"Crawled {len(pages)} page(s) from {url} "
-              f"(depth≤{depth}, same_domain={same_domain}).")
-    if truncated or frontier:
-        header += (" Stopped early at a bound (max_pages / byte cap); "
+    the pages visited. The traversal + clean per-page markdown now come from
+    `webctx.crawl`; EVERY hop still routes through tools._http_get, so the
+    SSRF/egress + redirect re-check gate applies per URL. Bounded by page count,
+    link depth and aggregate bytes; optional `include`/`exclude` glob-filter the
+    followed links."""
+    from . import webctx
+    r = webctx.crawl(url, depth=depth, max_pages=max_pages, include=include,
+                     exclude=exclude, same_domain=same_domain,
+                     formats=("markdown",))
+    header = (f"Crawled {r['count']} page(s) from {url} "
+              f"(depth≤{r['depth']}, same_domain={r['same_domain']}).")
+    if r.get("truncated"):
+        header += (" Stopped early at a bound (max_pages / depth / byte cap); "
                    "not every reachable page was visited.")
+    pages = []
+    for p in r["pages"]:
+        if p.get("error"):
+            pages.append(f"## {p['url']}\n[error: {p['error']}]")
+        else:
+            pages.append(f"## {p['url']}\n\n{p.get('markdown', '')}")
     return "\n\n---\n\n".join([header] + pages)
 
 

@@ -56,3 +56,66 @@ def test_soft_dependencies_are_declared_as_optional_extras():
         assert soft in declared, (
             f"{soft!r} is imported in olympus/ but is not declared in "
             "[project.optional-dependencies]")
+
+
+# Import name -> distribution (pyproject) name, for the few that differ.
+_IMPORT_TO_DIST = {
+    "yaml": "pyyaml",
+    "docx": "python-docx",
+    "youtube_transcript_api": "youtube-transcript-api",
+}
+# Stdlib backports that need no declaration: `tomli` is only imported as a
+# Python-3.10 fallback for stdlib `tomllib`, and even then a pure-regex fallback
+# exists (codegraph_manifest.py) — so it is not a required install.
+_STDLIB_BACKPORTS = {"tomli"}
+
+
+def _third_party_imports() -> set[str]:
+    """Every top-level third-party module olympus/ imports anywhere — including
+    inside functions/try-blocks — via an AST walk (NOT a hand-maintained list)."""
+    import ast
+    import sys
+
+    stdlib = set(sys.stdlib_module_names)
+    found: set[str] = set()
+    for path in (ROOT / "olympus").rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+    return {m for m in found if m not in stdlib and m != "olympus"}
+
+
+def _required_packages() -> set[str]:
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    out: set[str] = set()
+    for spec in data["project"]["dependencies"]:
+        name = re.split(r"[<>=!~ \[]", spec, 1)[0].strip().lower()
+        if name:
+            out.add(name)
+    return out
+
+
+def test_no_undeclared_third_party_imports():
+    # The load-bearing "small, auditable dependency surface" claim, ENFORCED: the
+    # code may not import any third-party module that isn't a declared required
+    # dependency or optional extra. This scans the code (AST), so a new lazy
+    # import (e.g. pypdf for parse_document) FAILS CI until it is declared —
+    # unlike the hardcoded check above, which could not have caught it.
+    declared = _required_packages() | _declared_optional_packages()
+    undeclared = []
+    for mod in sorted(_third_party_imports()):
+        if mod in _STDLIB_BACKPORTS:
+            continue
+        dist = _IMPORT_TO_DIST.get(mod, mod).lower()
+        if dist not in declared:
+            undeclared.append(f"{mod} (-> {dist})")
+    assert not undeclared, (
+        "olympus imports third-party modules not declared in pyproject "
+        f"[project.dependencies] or [optional-dependencies]: {undeclared}")

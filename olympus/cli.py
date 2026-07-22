@@ -306,6 +306,49 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--out", default=None,
                        help="also write the report to this markdown file")
 
+    # --- Web Context suite (native Firecrawl-absorption; olympus/webctx.py) ---
+    p_scrape = sub.add_parser(
+        "scrape", help="scrape a URL to clean markdown (+links)")
+    p_scrape.add_argument("url")
+    p_scrape.add_argument("--out", default=None, help="write markdown to a file")
+
+    p_crawl = sub.add_parser(
+        "crawl", help="recursively crawl a site into clean markdown")
+    p_crawl.add_argument("url")
+    p_crawl.add_argument("--depth", type=int, default=1)
+    p_crawl.add_argument("--max-pages", type=int, default=10, dest="max_pages")
+    p_crawl.add_argument("--include", action="append", default=None)
+    p_crawl.add_argument("--exclude", action="append", default=None)
+
+    p_map = sub.add_parser("map", help="discover URLs under a site (fast)")
+    p_map.add_argument("url")
+    p_map.add_argument("--limit", type=int, default=200)
+    p_map.add_argument("--subdomains", action="store_true")
+
+    p_ext = sub.add_parser(
+        "extract", help="verified schema-guided extraction from a URL")
+    p_ext.add_argument("url")
+    p_ext.add_argument("--schema", default=None,
+                       help="JSON schema string for the object to extract")
+    p_ext.add_argument("--prompt", default="", help="extraction focus")
+    p_ext.add_argument("--no-verify", action="store_true")
+
+    p_llms = sub.add_parser("llmstxt", help="generate llms.txt for a site")
+    p_llms.add_argument("url")
+    p_llms.add_argument("--max-urls", type=int, default=20, dest="max_urls")
+    p_llms.add_argument("--out", default=None)
+
+    p_mon = sub.add_parser("monitor", help="watch URLs for changes")
+    mon_sub = p_mon.add_subparsers(dest="monitor_cmd")
+    p_mon_add = mon_sub.add_parser("add", help="watch a URL")
+    p_mon_add.add_argument("url")
+    p_mon_add.add_argument("--every", type=int, default=60,
+                           help="check cadence in minutes (>=15)")
+    mon_sub.add_parser("list", help="list watched URLs")
+    p_mon_rm = mon_sub.add_parser("remove", help="stop watching")
+    p_mon_rm.add_argument("id")
+    mon_sub.add_parser("run", help="run all due checks now (one pass)")
+
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
 
@@ -1392,6 +1435,64 @@ def main(argv: list[str] | None = None) -> int:
             from pathlib import Path
             Path(args.out).write_text(report, encoding="utf-8")
             print(f"\n[written to {args.out}]", file=sys.stderr)
+    elif args.command == "scrape":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import media
+        out = media.browse_page(args.url)
+        print(out)
+        if args.out:
+            from pathlib import Path
+            Path(args.out).write_text(out, encoding="utf-8")
+            print(f"\n[written to {args.out}]", file=sys.stderr)
+    elif args.command == "crawl":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import media
+        print(media.crawl_site(args.url, args.depth, args.max_pages,
+                               include=args.include, exclude=args.exclude))
+    elif args.command == "map":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import tools
+        print(tools._web_map(args.url, args.limit, args.subdomains))
+    elif args.command == "extract":
+        if not firstrun.ensure_ready():
+            return 1
+        import json as _json
+        from . import tools
+        schema = {"type": "object"}
+        if args.schema:
+            try:
+                schema = _json.loads(args.schema)
+            except _json.JSONDecodeError:
+                print("--schema must be valid JSON.", file=sys.stderr)
+                return 1
+        print(tools._web_extract(args.url, schema, args.prompt,
+                                 not args.no_verify))
+    elif args.command == "llmstxt":
+        if not firstrun.ensure_ready():
+            return 1
+        from . import tools
+        out = tools._generate_llmstxt(args.url, args.max_urls)
+        print(out)
+        if args.out:
+            from pathlib import Path
+            Path(args.out).write_text(out, encoding="utf-8")
+            print(f"\n[written to {args.out}]", file=sys.stderr)
+    elif args.command == "monitor":
+        from . import webmonitor
+        user = memory.current_user()
+        if args.monitor_cmd == "add":
+            print(webmonitor.add(user, args.url, interval=args.every * 60))
+        elif args.monitor_cmd == "remove":
+            print(webmonitor.remove(user, args.id))
+        elif args.monitor_cmd == "run":
+            lines = webmonitor.run_due()
+            print("\n".join(lines) if lines else
+                  "Nothing due (or OLYMPUS_WEB_MONITOR is off).")
+        else:
+            print(webmonitor.list_text(user))
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
     elif args.command == "audit":

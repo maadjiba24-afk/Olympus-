@@ -15,16 +15,39 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Docs — Firecrawl analysis & adoption tracking
+### Added — Native "Web Context" suite (Firecrawl absorbed as a moat)
 
-Added `docs/FIRECRAWL_TRACKING.md`: an analysis-only inventory and critique of
-[firecrawl/firecrawl](https://github.com/firecrawl/firecrawl) (feature/endpoint
-map, engine/queue architecture, and a security review) with a ranked watchlist
-of what's worth turning to Olympus's own agent framework — readability-grade
-HTML→Markdown, schema-guided extraction with pool-verification, URL `map`, and
-change-monitoring — plus an explicit "do not adopt" list (network-only SSRF
-model, inline-string injection defense, ungoverned `executeJavascript`,
-open-by-default self-host). No Firecrawl code is used; inspiration analysis only.
+Absorbed [Firecrawl](https://github.com/firecrawl/firecrawl)'s full web-data
+surface as native Olympus capabilities — turning each of its weaknesses into a
+structural strength (design locked in ADR 0010). New module `olympus/webctx.py`
+(pure-stdlib readability→markdown, scrape, map, crawl, batch, verified
+extraction, llms.txt, diff, PDF/DOCX parse) and `olympus/webmonitor.py`
+(opt-in, replay-inert scheduled change-monitoring), wired as **8 new tools**
+(114 total) and **6 new CLI commands** (120 total):
+
+- `web_map`, `web_batch_scrape`, `web_extract`, `generate_llmstxt`,
+  `parse_document`, `web_diff` (ingestion), `web_monitor_add`/`web_monitor_list`
+  (own-state), plus `olympus scrape|crawl|map|extract|llmstxt|monitor`.
+- The existing `browse_page`/`crawl_site` are **upgraded** to `webctx`
+  clean-markdown (readability-grade, zero-dependency) rather than shipping a
+  duplicate scrape/crawl surface; `crawl_site` gains `include`/`exclude` filters.
+
+Every Firecrawl weakness answered natively: **SSRF** — every fetch (page,
+sitemap, robots, crawl hop, document, diff, monitor) routes through the
+IP-pinned `tools._http_get`/new `tools._http_get_bytes` (no fail-open socket
+hook, no rebinding window); **injection** — every model hop wraps scraped bytes
+via `security.wrap_untrusted` and the fetching tools are in `INGESTION_TOOLS`
+so actuators are stripped from the run; **unverified extraction** —
+`web_extract` runs a second `verify` pool role that flags unsupported values;
+**open-by-default / ungoverned JS** — new tools are inert until invoked, the
+monitor is opt-in (`OLYMPUS_WEB_MONITOR`, off during replay), and page actuation
+stays behind the governed browser harness. PDF/DOCX parsing is a new optional
+`[docs]` extra (lazy-imported, path-confined via `sandbox._confine`), and a new
+AST import-scan test enforces the "3 required deps" claim so no lazy import can
+ship undeclared. New tests: `tests/test_webctx.py`, `tests/test_webmonitor.py`.
+
+Analysis that motivated this ships in `docs/FIRECRAWL_TRACKING.md` (inventory +
+security critique + adoption watchlist; no Firecrawl code used).
 
 ### Added — Absorbed capabilities as a native, self-evolving moat
 

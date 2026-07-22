@@ -103,7 +103,17 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # folds them into its report; treat the report as
                              # untrusted (and keep action tools out of any run
                              # that can invoke it).
-                             "trigger_research"})
+                             "trigger_research",
+                             # Web Context suite (olympus/webctx.py): each fetches
+                             # attacker-controlled pages/sitemaps/documents and
+                             # folds them into markdown/extraction — untrusted
+                             # external content, same class as browse_page. (The
+                             # monitor-management verbs web_monitor_add/_list touch
+                             # only Olympus's own store and are TRUSTED below.
+                             # scrape/crawl stay served by browse_page/crawl_site,
+                             # already ingestion-classified above.)
+                             "web_map", "web_batch_scrape", "web_extract",
+                             "generate_llmstxt", "parse_document", "web_diff"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
@@ -143,6 +153,11 @@ TRUSTED_TOOLS = frozenset({
     "set_advanced_mode", "site_profile_record", "site_profiles",
     "site_template_record", "spawn_subagent", "text_to_speech",
     "update_prompt", "verify_code_claim", "write_document",
+    # Web-monitor management: these read/modify only Olympus's own watch store
+    # (no external fetch) — an action confirmation / own-state read, like
+    # add_todo / list_todos. The scheduled CHECK that does fetch lives in the
+    # heartbeat (webmonitor.run_due), not in a tool.
+    "web_monitor_add", "web_monitor_list",
 })
 
 _ENVELOPE_HEADER = (
