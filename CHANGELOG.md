@@ -15,6 +15,40 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Absorbed capabilities as a native, self-evolving moat
+
+Six capabilities surveyed from an external agent harness (ruflo), re-built
+natively in Olympus's own idioms — each **off by default**, deterministic, and
+replay-safe — then wired into Olympus's self-evolution spine so they measure
+themselves and get stronger the more they run. Design locked in ADR 0007
+(federation), ADR 0008 (the shared opt-in/replay-safe contract), and ADR 0009
+(the self-evolving moat).
+
+- **Vector recall at scale (`OLYMPUS_ANN`).** A pure-Python HNSW index
+  (`annindex.py`). One-shot recall stays an exact scan; `docrag` keeps a
+  PERSISTENT graph (built once, keyed to a corpus signature) for real sublinear
+  recall over the document corpus.
+- **Swarm topologies (`OLYMPUS_SWARM`).** `dytopo` gains explicit mesh / star /
+  hierarchical / ring shapes and a post-dispatch consultation pass; wired into
+  `_pipeline` (recorded in trace meta and restored on replay).
+- **Quorum consensus verification (`OLYMPUS_CONSENSUS`).** `consensus.py` folds
+  N lens-diverse verifiers with a safety-biased quorum, and **self-tunes its
+  verifier panel** via `evolve` when the quorum keeps failing to form (frozen
+  per run for replay).
+- **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer
+  (`bandit_routing.py`) alongside the conservative learned selector.
+- **File-defined agents (`OLYMPUS_AGENTS`).** `agentreg.py` loads `<key>.md`
+  agents into the registry, safety-bounded to a read-only tool allowlist.
+- **Cross-instance federation (`OLYMPUS_FEDERATION`).** `federation.py` +
+  `olympus federation` CLI: ed25519 handshake over the `witness` root of trust,
+  pinned/tiered peers, egress-guarded transport, and scrubbed, trusted-only,
+  candidate-only lesson sync.
+- **`olympus moat`.** A status board showing each capability's enabled state,
+  self-evolution health, and current self-tuned settings.
+
+Capability accounting stays truthful: `olympus federation` and `olympus moat`
+are the only new commands (113 → 114); no new tools or agents.
+
 ## [0.26.0] — 2026-07-22
 
 ### Added — Four native-capability deepenings (verification, adaptation, providers, review)
