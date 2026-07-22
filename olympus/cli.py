@@ -463,7 +463,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
     sub.add_parser("scores", help="show per-specialist benchmark scores")
-    sub.add_parser("models", help="show the model pool and role assignments")
+    p_models = sub.add_parser("models",
+                              help="show the model pool and role assignments")
+    p_models.add_argument("action", nargs="?", default="show",
+                          choices=["show", "discover"],
+                          help="'discover' lists the models your configured "
+                               "key can reach (live)")
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
@@ -1522,7 +1527,28 @@ def main(argv: list[str] | None = None) -> int:
         print(orchestrator.train_specialists(focus=args.focus))
     elif args.command == "models":
         from . import config
-        print(config.ModelPool.from_env().assignment())
+        if getattr(args, "action", "show") == "discover":
+            from . import providers
+            settings = config.Settings.from_env()
+            if not settings.usable():
+                print("No usable model credentials configured. "
+                      "Run `olympus setup`.")
+                return 1
+            found = providers.discover_for_settings(settings)
+            if not found:
+                print(f"No models discovered for {settings.provider}"
+                      f"{'/' + settings.base_url if settings.base_url else ''} "
+                      "(the provider may not expose a model list, or the key "
+                      "lacks access).")
+            else:
+                print(f"{len(found)} model(s) reachable with the configured "
+                      f"{settings.provider} credentials:")
+                for mid in found:
+                    print(f"  {mid}")
+                print("\nAdd any of these to your pool via OLYMPUS_MODELS "
+                      "or `olympus setup model`.")
+        else:
+            print(config.ModelPool.from_env().assignment())
     elif args.command in ("actions", "approve", "reject", "edit", "undo",
                           "autonomy", "earned-autonomy", "grant", "revoke",
                           "limit"):
