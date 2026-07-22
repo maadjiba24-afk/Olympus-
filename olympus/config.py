@@ -476,8 +476,17 @@ class ModelPool:
         # chooses among self.members, which sovereign mode already filtered, and
         # falls back to the heuristic on anything short of that — so with no
         # data (or the flag off) this line is a no-op.
-        from . import learned_routing
-        return learned_routing.choose(self.members, key, heuristic) or heuristic
+        # An operator runs at most one adaptive selector: the UCB1 bandit
+        # (explores under-sampled models) OR the conservative learned selector
+        # (only exploits decisive evidence). Both read the same outcome ledger,
+        # both are off by default and disabled during replay, and both fall back
+        # to the heuristic on anything short of full evidence — so this line is a
+        # no-op with no data or with both flags off.
+        from . import bandit_routing, learned_routing
+        adaptive = (bandit_routing.choose(self.members, key, heuristic)
+                    if bandit_routing.enabled()
+                    else learned_routing.choose(self.members, key, heuristic))
+        return adaptive or heuristic
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints

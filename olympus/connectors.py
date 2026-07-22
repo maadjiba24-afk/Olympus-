@@ -151,12 +151,19 @@ def plugin_data_names_for(specialist_key: str) -> set[str]:
 # forking Olympus. Events:
 #
 #   session_start(user, conversation_id)      an Olympus instance came up
+#   session_end(user, conversation_id)        the conversation closed
 #   run_start(user, message) / run_end(user, reply)   one ask() pipeline
+#   pre_compact(user, text)    memory compaction/flush is about to run
 #   pre_llm_call(params) / post_llm_call(params, response)   observe-only
 #   pre_tool(name, params)     may BLOCK ({"block": reason}) or REWRITE the
 #                              input ({"params": {...}}); None = pass through
 #   post_tool(name, params, result)   may REWRITE the result by returning a
 #                                     string; None = pass through
+#
+# This mirrors the Claude Code hook surface natively (session_start≈SessionStart,
+# session_end≈SessionEnd, run_start≈UserPromptSubmit, run_end≈Stop,
+# pre_compact≈PreCompact, pre_tool≈PreToolUse, post_tool≈PostToolUse), so a
+# plugin written against those lifecycle points has an Olympus home.
 #
 # pre/post_llm_call are deliberately observe-only: mutating the request there
 # would silently change the replay hash and break byte-identical replay. Tool
@@ -164,8 +171,9 @@ def plugin_data_names_for(specialist_key: str) -> set[str]:
 # bypasses) the approval spine — it can only make policy stricter. A raising
 # hook is logged and skipped: a broken plugin must not take down the agent.
 
-HOOK_EVENTS = ("session_start", "run_start", "run_end",
-               "pre_llm_call", "post_llm_call", "pre_tool", "post_tool")
+HOOK_EVENTS = ("session_start", "session_end", "run_start", "run_end",
+               "pre_compact", "pre_llm_call", "post_llm_call",
+               "pre_tool", "post_tool")
 
 _HOOKS: dict[str, list[Callable]] = {}
 

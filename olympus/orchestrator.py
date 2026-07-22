@@ -32,9 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
-               contracts, contrib, effortscore, i18n, llm, memory, playbooks,
-               profile, recall, relgraph, replaystore, steering,
-               trace as trace_mod, tools, usage)
+               consensus, contracts, contrib, dytopo, effortscore, i18n, llm,
+               memory, playbooks, profile, recall, relgraph, replaystore,
+               steering, trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
 ROUTE_SCHEMA: dict[str, Any] = {
@@ -504,9 +504,83 @@ class Olympus:
         mcp = [s.to_api() for s in connectors.mcp_for("aletheia",
                                                       allow_action=False)] \
             if vs.provider == "anthropic" else []
+        if consensus.enabled():
+            return self._verify_consensus(system, task, vs, tool_defs, mcp)
         raw = backend.run_agent(vs, system, task, tool_defs,
                                 mcp_servers=mcp, effort="high")
         return _parse_verdict(raw)
+
+    def _verify_consensus(self, system: str, task: str,
+                          vs: config.Settings, tool_defs: list,
+                          mcp: list) -> tuple[str, dict | None]:
+        """Multi-verifier quorum (OLYMPUS_CONSENSUS). Fan out N verifiers, each
+        given a distinct lens, and fold their verdicts with a safety-biased
+        quorum so a single confidently-wrong verifier cannot pass a fabrication
+        (or reject a correct answer). Each verifier runs under a copied context
+        so replay/trace/user contextvars survive the thread hop; verdicts are
+        aggregated in verifier-index order for determinism. On total failure it
+        falls back to the single-verifier result, so consensus can only ADD
+        scrutiny, never remove the existing guarantee."""
+        import contextvars
+        # Freeze the (possibly self-tuned) panel size for this run: the evolution
+        # spine may grow it over time, so a replayed run must reproduce the count
+        # it recorded, not re-read a since-changed tunable (same discipline as
+        # the swarm/interactive toggles — replay must not diverge).
+        n = replaystore.frozen_context("consensus.verifiers",
+                                       consensus.verifier_count)
+
+        def _one(index: int) -> tuple[str, dict | None]:
+            lens_task = (task + "\n\nVERIFICATION LENS (weigh this most): "
+                         + consensus.lens_for(index))
+            raw = backend.run_agent(vs, system, lens_task, tool_defs,
+                                    mcp_servers=mcp, effort="high")
+            return _parse_verdict(raw)
+
+        results: list[tuple[str, dict | None]] = [("", None)] * n
+        with ThreadPoolExecutor(max_workers=min(n, config.MAX_CONCURRENT_CALLS)) \
+                as ex:
+            futs = {}
+            for i in range(n):
+                ctx = contextvars.copy_context()
+                futs[ex.submit(ctx.run, _one, i)] = i
+            for fut in futs:
+                i = futs[fut]
+                try:
+                    results[i] = fut.result()
+                except replaystore.ReplayDivergence:
+                    raise                       # never mask a replay divergence
+                except Exception:
+                    results[i] = ("", None)
+
+        verdicts = [v for _, v in results if v is not None]
+        # Require a QUORUM of the intended panel to have actually produced a
+        # verdict. Otherwise (e.g. 2 of 3 verifiers hit transient API errors) a
+        # single survivor's `pass` would decide, silently collapsing the quorum
+        # to N=1 and weakening the guarantee this method advertises. Too few
+        # verdicts → the visible degraded path (ADR 0005), same as a total
+        # verifier failure.
+        # Feed the evolution spine: a formed quorum is OK, a floor-miss is
+        # DEGRADED. Sustained degradation makes `evolve` widen the panel over
+        # time so transient verifier errors get outvoted — the capability gets
+        # stronger the more it is used. Telemetry only (never on the replay
+        # path), best-effort.
+        quorum_met = len(verdicts) >= consensus.majority_threshold(n)
+        self._evolve_record("consensus", "ok" if quorum_met else "degraded",
+                            f"{len(verdicts)}/{n} verdicts")
+        if not quorum_met:
+            content = next((c for c, _ in results if c), "")
+            return content, None
+        agg = consensus.safest_verdict(verdicts)
+        # Return the corrected content from a verifier that matched the consensus
+        # status, preferring the most confident; falls back to any content.
+        matching = [(v.get("confidence", 0.0), c)
+                    for c, v in results
+                    if v is not None and v.get("status") == agg["status"]]
+        content = (max(matching, key=lambda t: t[0])[1] if matching
+                   else next((c for c, _ in results if c), ""))
+        return content, {"status": agg["status"],
+                         "unsupported_claims": agg["unsupported_claims"],
+                         "confidence": agg["confidence"]}
 
     def _verify_timed(self, brief: str,
                       outputs: list[tuple[str, str]]) -> tuple[str, dict | None]:
@@ -1117,6 +1191,67 @@ class Olympus:
 
         return outputs
 
+    def _consult(self, outputs: list[tuple[str, str]],
+                 tr: "trace_mod.Trace") -> list[tuple[str, str]]:
+        """Optional topology-driven cross-check: after the DAG produces every
+        specialist's first-pass output, wire the assigned specialists into an
+        explicit swarm shape (star/mesh/hierarchical/ring) and let each consulter
+        refine its answer in light of the peers it consults.
+
+        OFF by default (`OLYMPUS_SWARM`): when disabled this is a literal no-op,
+        so the pipeline stays byte-identical. When enabled it reuses the safe
+        `_run_one` funnel (output contract, per-worker sandbox root, replay
+        freezing) for every refinement, and is fully wrapped: a ReplayDivergence
+        propagates (never masked), any other failure falls back to the original
+        outputs. The extra model calls are hard-bounded by the topology caps and
+        a single consultation round."""
+        if not dytopo.swarm_enabled() or len(outputs) < 2:
+            return outputs
+        keys = [k for k, _ in outputs]
+        kind = dytopo.swarm_topology_kind()
+        # A star centres on the first-dispatched specialist (the plan's lead);
+        # other shapes use the flat key list.
+        topo = dytopo.named_topology(kind, keys, hub=keys[0])
+        tr.event("swarm.consult", topology=kind, nodes=len(topo.nodes),
+                 edges=len(topo.edges))
+
+        def _runner(consulter: str, peer_ctx: str, own: str) -> str:
+            task = (
+                "Revisit your answer in light of a peer specialist's findings "
+                "below. Keep what stands, correct what conflicts, and integrate "
+                "anything that improves your answer. Return your full, updated "
+                "answer only.\n\n## Your current answer\n" + (own or "") +
+                "\n\n## Peer specialist's findings\n" + peer_ctx)
+            return self._run_one(consulter, task, tr)
+
+        try:
+            refined = dytopo.run_consultation(topo, outputs, _runner,
+                                              max_rounds=1)
+            self._evolve_record("swarm", "ok",
+                                f"{kind} {len(topo.edges)} edges")
+            return refined
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:                       # never break the pipeline
+            tr.event("swarm.consult.failed", error=str(err)[:200])
+            self._evolve_record("swarm", "degraded", str(err)[:80])
+            return outputs
+
+    @staticmethod
+    def _evolve_record(feature: str, outcome: str, detail: str = "") -> None:
+        """Feed a capability's outcome to the self-evolution spine — telemetry
+        only, skipped on the replay path, and never able to break the caller.
+        This is how the absorbed capabilities accrue a track record and (where a
+        registered tunable exists) get tuned toward their better setting over
+        time."""
+        if os.environ.get("OLYMPUS_REPLAY"):
+            return
+        try:
+            from . import evolve
+            evolve.record(feature, outcome, detail)
+        except Exception:
+            pass
+
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
@@ -1145,6 +1280,13 @@ class Olympus:
         # on/off state is part of the decision path and must be reproduced on
         # replay (like fast_mode above).
         tr.meta["interactive_verify"] = config.interactive_verify_enabled()
+        # The swarm consultation pass refines outputs (and emits extra _run_one
+        # calls) BEFORE verify, so the verify request-hash is computed over the
+        # refined text. A run recorded with swarm ON, replayed with it OFF, would
+        # verify the UNrefined outputs → divergence. Record it (and the topology
+        # kind) so replay_run reproduces the same path.
+        tr.meta["swarm_enabled"] = dytopo.swarm_enabled()
+        tr.meta["swarm_topology"] = dytopo.swarm_topology_kind()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -1194,6 +1336,12 @@ class Olympus:
             outputs = self._dispatch_dag(
                 assignments, tr,
                 needs_verification=route.get("needs_verification", True))
+
+        # Optional topology-driven consultation pass (OLYMPUS_SWARM, off by
+        # default → no-op). Refines outputs before verification.
+        if dytopo.swarm_enabled():
+            with tr.span("consult"):
+                outputs = self._consult(outputs, tr)
 
         raw = "\n\n".join(f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
         verdict: dict | None = None
@@ -2020,6 +2168,15 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_iv = os.environ.get("OLYMPUS_INTERACTIVE_VERIFY")
     os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = \
         "on" if _meta.get("interactive_verify") else "off"
+    # The swarm consultation pass refines outputs before verify, so reproduce the
+    # recorded on/off state and topology or a swarm-recorded run replayed without
+    # it verifies unrefined text → divergence. Absent in pre-hardening traces →
+    # off, so old runs replay unchanged.
+    prev_swarm = os.environ.get("OLYMPUS_SWARM")
+    prev_swarm_topo = os.environ.get("OLYMPUS_SWARM_TOPOLOGY")
+    os.environ["OLYMPUS_SWARM"] = "1" if _meta.get("swarm_enabled") else "0"
+    if _meta.get("swarm_topology"):
+        os.environ["OLYMPUS_SWARM_TOPOLOGY"] = str(_meta["swarm_topology"])
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2040,6 +2197,14 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_INTERACTIVE_VERIFY", None)
         else:
             os.environ["OLYMPUS_INTERACTIVE_VERIFY"] = prev_iv
+        if prev_swarm is None:
+            os.environ.pop("OLYMPUS_SWARM", None)
+        else:
+            os.environ["OLYMPUS_SWARM"] = prev_swarm
+        if prev_swarm_topo is None:
+            os.environ.pop("OLYMPUS_SWARM_TOPOLOGY", None)
+        else:
+            os.environ["OLYMPUS_SWARM_TOPOLOGY"] = prev_swarm_topo
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:
