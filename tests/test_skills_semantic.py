@@ -90,3 +90,23 @@ def test_embedding_cache_avoids_recompute(semantic, monkeypatch):
     # the only new embed calls on the 2nd search are for the query itself (1),
     # not re-embedding the unchanged skill.
     assert calls["n"] - first <= 1
+
+
+def test_embedding_cache_invalidates_on_model_change(monkeypatch):
+    """Changing the embed model must invalidate cached vectors (they live in a
+    different space) — otherwise search silently returns nothing until every
+    skill is re-saved. The cache re-embeds under the new model."""
+    monkeypatch.setattr(embed, "available", lambda: True)
+    monkeypatch.setattr(embed, "_model", lambda: "model-a")
+    monkeypatch.setattr(embed, "embed_one", lambda t: [1.0, 0.0, 0.0])
+    skills.create("Runner", "run", "run code")
+    v1 = skills._skill_embedding("runner", "run code")
+    assert v1 == [1.0, 0.0, 0.0]
+
+    # switch to a different model (different-dimension vectors)
+    monkeypatch.setattr(embed, "_model", lambda: "model-b")
+    monkeypatch.setattr(embed, "embed_one", lambda t: [0.0, 1.0, 0.0, 0.0])
+    v2 = skills._skill_embedding("runner", "run code")
+    assert v2 == [0.0, 1.0, 0.0, 0.0], "stale model vec served after model change"
+    # and the cache now records the new model
+    assert skills._load_emb_cache()["runner"]["model"] == "model-b"

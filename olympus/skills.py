@@ -156,13 +156,19 @@ def _skill_embedding(slug: str, emb_text: str) -> list[float] | None:
     if not embed.available():
         return None
     h = _text_hash(emb_text)
+    model = embed._model() or ""
     cache = _load_emb_cache()
     ent = cache.get(slug)
-    if isinstance(ent, dict) and ent.get("hash") == h and ent.get("vec"):
+    # Invalidate on a model change too: vectors from a different embedding model
+    # live in a different space (often a different dimension), so a stale entry
+    # would score 0 against a freshly-embedded query — silently breaking search
+    # until every skill was re-saved. Re-embed when the model or content changes.
+    if (isinstance(ent, dict) and ent.get("hash") == h
+            and ent.get("model") == model and ent.get("vec")):
         return ent["vec"]
     vec = embed.embed_one(emb_text)
     if vec:
-        cache[slug] = {"hash": h, "vec": vec}
+        cache[slug] = {"hash": h, "model": model, "vec": vec}
         _save_emb_cache(cache)
     return vec
 

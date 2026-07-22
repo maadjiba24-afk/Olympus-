@@ -722,7 +722,12 @@ def verify_claim(project: str, claim: str) -> dict:
             # negative on a real call (e.g. `X calls run`, with 18 `run`s). Mirror
             # the build's rule and stay UNKNOWN rather than assert REFUTED.
             from . import codegraph_langs
-            if rel == "calls" and len(b) > codegraph_langs._MAX_AMBIGUOUS:
+            # Count only CALLABLE definitions of the callee — the build's
+            # resolver skips a call when its name has more than _MAX_AMBIGUOUS
+            # *function/method* candidates (classes/vars with the same label are
+            # not call targets), so mirror that exactly.
+            callable_defs = sum(1 for n in b if n.get("kind") in (FUNCTION, METHOD))
+            if rel == "calls" and callable_defs > codegraph_langs._MAX_AMBIGUOUS:
                 return {"verdict": "UNKNOWN",
                         "detail": "the callee name is defined in too many "
                                   "places to resolve calls to it (skipped at "
