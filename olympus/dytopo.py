@@ -199,3 +199,149 @@ def route(descriptors, *, max_out_degree: int | None = None, max_rounds: int = 3
     except Exception:
         pass
     return res
+
+
+# --- explicit named topologies (the swarm-shape vocabulary) --------------
+#
+# `induce` above builds the topology *dynamically* from what each specialist
+# says it needs/offers. Sometimes you instead want a *fixed* collaboration
+# shape — every specialist cross-checks every other (mesh), workers report to a
+# coordinator (star), or a review chain (hierarchical). These constructors emit
+# the SAME `Topology`/`Edge` type, so `rounds()`, `RouteResult`, and the
+# consultation driver below treat an explicit shape and an induced one
+# identically. All are pure, deterministic, and clamped to the same hard caps.
+
+def _clean_nodes(nodes) -> tuple[str, ...]:
+    """De-dupe, drop falsy, sort for a stable order, cap at `_MAX_NODES`."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in nodes or []:
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        out.append(str(n))
+    out.sort()
+    return tuple(out[:_MAX_NODES])
+
+
+def _capped(edges: list[Edge]) -> tuple[Edge, ...]:
+    return tuple(edges[:_MAX_EDGES])
+
+
+def mesh(nodes) -> Topology:
+    """All-to-all: every specialist consults every other. Dense by design, but
+    still hard-capped at `_MAX_EDGES` (excess edges are dropped in stable
+    order), so a large council degrades to a capped mesh rather than exploding."""
+    ns = _clean_nodes(nodes)
+    edges = [Edge(src=a, dst=b, score=1.0)
+             for a in ns for b in ns if a != b]
+    return Topology(nodes=ns, edges=_capped(edges))
+
+
+def star(hub: str, nodes, *, mode: str = "in") -> Topology:
+    """Coordinator shape. `mode="in"` (default): every worker consults the hub
+    (workers→hub, the centralized/queen pattern). `"out"`: the hub consults every
+    worker (hub→workers). `"both"`: bidirectional. The hub is always a node even
+    if absent from `nodes`."""
+    ns = list(_clean_nodes(list(nodes) + ([hub] if hub else [])))
+    edges: list[Edge] = []
+    for n in ns:
+        if n == hub or not hub:
+            continue
+        if mode in ("in", "both"):
+            edges.append(Edge(src=n, dst=hub, score=1.0))
+        if mode in ("out", "both"):
+            edges.append(Edge(src=hub, dst=n, score=1.0))
+    edges.sort(key=lambda e: (e.src, e.dst))
+    return Topology(nodes=tuple(ns), edges=_capped(edges))
+
+
+def hierarchical(layers) -> Topology:
+    """A review tree: `layers` is an ordered list of node-lists, top to bottom;
+    every node in layer i consults every node in layer i+1 (parent→child). Models
+    a plan→implement→review escalation. Clamped like the rest."""
+    clean_layers = [list(_clean_nodes(layer)) for layer in (layers or [])]
+    all_nodes = _clean_nodes([n for layer in clean_layers for n in layer])
+    edges: list[Edge] = []
+    for i in range(len(clean_layers) - 1):
+        for parent in clean_layers[i]:
+            for child in clean_layers[i + 1]:
+                if parent != child:
+                    edges.append(Edge(src=parent, dst=child, score=1.0))
+    edges.sort(key=lambda e: (e.src, e.dst))
+    return Topology(nodes=all_nodes, edges=_capped(edges))
+
+
+def ring(nodes) -> Topology:
+    """Each specialist consults the next, closing the loop — a cheap
+    round-robin cross-check (n edges for n nodes)."""
+    ns = _clean_nodes(nodes)
+    if len(ns) < 2:
+        return Topology(nodes=ns, edges=())
+    edges = [Edge(src=ns[i], dst=ns[(i + 1) % len(ns)], score=1.0)
+             for i in range(len(ns))]
+    return Topology(nodes=ns, edges=_capped(edges))
+
+
+_NAMED = {"mesh": mesh, "ring": ring}
+
+
+def named_topology(kind: str, nodes, *, hub: str | None = None,
+                   layers=None) -> Topology:
+    """Dispatch a topology by name over a flat node list. `star` needs `hub`;
+    `hierarchical` needs `layers`; `mesh`/`ring` need only `nodes`. Unknown
+    kinds fall back to `mesh` (the safest cross-check shape)."""
+    kind = (kind or "").strip().lower()
+    if kind == "star":
+        return star(hub or (sorted(_clean_nodes(nodes))[:1] or [""])[0], nodes)
+    if kind == "hierarchical":
+        return hierarchical(layers or [list(_clean_nodes(nodes))])
+    return _NAMED.get(kind, mesh)(nodes)
+
+
+# --- swarm consultation driver (dependency-injected → testable) ----------
+
+def swarm_enabled() -> bool:
+    """Whether a topology-driven consultation pass runs after the DAG dispatch.
+    Default OFF: when unset the council pipeline is byte-identical to today."""
+    return os.environ.get("OLYMPUS_SWARM", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def swarm_topology_kind() -> str:
+    """Which explicit shape the consultation pass uses (`OLYMPUS_SWARM_TOPOLOGY`,
+    default `star` — the cheapest useful cross-check)."""
+    return (os.environ.get("OLYMPUS_SWARM_TOPOLOGY", "star").strip().lower()
+            or "star")
+
+
+def run_consultation(topology: Topology, outputs, runner, *,
+                     max_rounds: int = 1) -> list[tuple[str, str]]:
+    """Refine first-pass specialist outputs by letting each consulter revisit its
+    answer in light of the peers it consults.
+
+    `outputs` is the DAG's `[(specialist_key, text), ...]`. `runner(consulter,
+    peer_context, own_output) -> str` is INJECTED — the orchestrator passes a
+    real specialist runner; tests pass a deterministic fake — so this scheduler
+    stays pure and unit-testable with no model. Returns outputs in the SAME shape
+    and order; a runner that raises or returns falsy leaves that output
+    untouched. Bounded by `rounds()` (≤ `_MAX_ROUNDS`) and the topology caps, so
+    the number of extra model calls is provably limited."""
+    current = {k: v for k, v in outputs}
+    order = [k for k, _ in outputs]
+    present = set(order)
+    for consultations in rounds(topology, max_rounds=max_rounds):
+        for consulter, consulted in consultations:
+            if consulter not in present or consulted not in present:
+                continue
+            peer_ctx = current.get(consulted, "")
+            own = current.get(consulter, "")
+            if not peer_ctx:
+                continue
+            try:
+                refined = runner(consulter, peer_ctx, own)
+            except Exception:
+                refined = None
+            if refined:
+                current[consulter] = refined
+    return [(k, current[k]) for k in order]

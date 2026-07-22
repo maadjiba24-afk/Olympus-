@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 from . import (agent, backend, codegraph, companion, config, connectors,
-               contracts, contrib, effortscore, i18n, llm, memory, playbooks,
-               profile, recall, relgraph, replaystore, steering,
+               contracts, contrib, dytopo, effortscore, i18n, llm, memory,
+               playbooks, profile, recall, relgraph, replaystore, steering,
                trace as trace_mod, tools, usage)
 from .specialists import SPECIALISTS, roster
 
@@ -1117,6 +1117,47 @@ class Olympus:
 
         return outputs
 
+    def _consult(self, outputs: list[tuple[str, str]],
+                 tr: "trace_mod.Trace") -> list[tuple[str, str]]:
+        """Optional topology-driven cross-check: after the DAG produces every
+        specialist's first-pass output, wire the assigned specialists into an
+        explicit swarm shape (star/mesh/hierarchical/ring) and let each consulter
+        refine its answer in light of the peers it consults.
+
+        OFF by default (`OLYMPUS_SWARM`): when disabled this is a literal no-op,
+        so the pipeline stays byte-identical. When enabled it reuses the safe
+        `_run_one` funnel (output contract, per-worker sandbox root, replay
+        freezing) for every refinement, and is fully wrapped: a ReplayDivergence
+        propagates (never masked), any other failure falls back to the original
+        outputs. The extra model calls are hard-bounded by the topology caps and
+        a single consultation round."""
+        if not dytopo.swarm_enabled() or len(outputs) < 2:
+            return outputs
+        keys = [k for k, _ in outputs]
+        kind = dytopo.swarm_topology_kind()
+        # A star centres on the first-dispatched specialist (the plan's lead);
+        # other shapes use the flat key list.
+        topo = dytopo.named_topology(kind, keys, hub=keys[0])
+        tr.event("swarm.consult", topology=kind, nodes=len(topo.nodes),
+                 edges=len(topo.edges))
+
+        def _runner(consulter: str, peer_ctx: str, own: str) -> str:
+            task = (
+                "Revisit your answer in light of a peer specialist's findings "
+                "below. Keep what stands, correct what conflicts, and integrate "
+                "anything that improves your answer. Return your full, updated "
+                "answer only.\n\n## Your current answer\n" + (own or "") +
+                "\n\n## Peer specialist's findings\n" + peer_ctx)
+            return self._run_one(consulter, task, tr)
+
+        try:
+            return dytopo.run_consultation(topo, outputs, _runner, max_rounds=1)
+        except replaystore.ReplayDivergence:
+            raise
+        except Exception as err:                       # never break the pipeline
+            tr.event("swarm.consult.failed", error=str(err)[:200])
+            return outputs
+
     def _pipeline(self, user_message: str, tr: "trace_mod.Trace") -> tuple[str, str, str]:
         """Run routing → dispatch → verify → review. Returns
         (mode, brief, verified_or_reply)."""
@@ -1194,6 +1235,12 @@ class Olympus:
             outputs = self._dispatch_dag(
                 assignments, tr,
                 needs_verification=route.get("needs_verification", True))
+
+        # Optional topology-driven consultation pass (OLYMPUS_SWARM, off by
+        # default → no-op). Refines outputs before verification.
+        if dytopo.swarm_enabled():
+            with tr.span("consult"):
+                outputs = self._consult(outputs, tr)
 
         raw = "\n\n".join(f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
         verdict: dict | None = None
