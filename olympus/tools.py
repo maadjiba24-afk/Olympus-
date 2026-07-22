@@ -1832,6 +1832,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
         text, filename),
     "transcribe_audio": lambda path: _media().transcribe_audio(path),
     "browse_page": lambda url: _media().browse_page(url),
+    "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True:
+        _media().crawl_site(url, depth, max_pages, same_domain),
+    "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
+        filename="": _media().chart_from_data(data, chart_type, x, y, title,
+                                              filename),
     "analyze_image": lambda image, question="": _media().analyze_image(
         image, question),
     "browser_open": _browser_open,
@@ -2461,6 +2466,58 @@ BROWSE_PAGE = {
         "type": "object",
         "properties": {"url": {"type": "string"}},
         "required": ["url"],
+    },
+}
+
+CRAWL_SITE = {
+    "name": "crawl_site",
+    "description": (
+        "Recursively crawl from a starting URL and return a combined text digest "
+        "of the pages visited — use when one page isn't enough and you need to "
+        "read across a section of a site. Bounded by depth, page count and total "
+        "size. Every hop goes through the same safety gate as web_fetch."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Starting URL to crawl"},
+            "depth": {"type": "integer",
+                      "description": "Link depth to follow (0-3, default 1)"},
+            "max_pages": {"type": "integer",
+                          "description": "Max pages to fetch (1-25, default 10)"},
+            "same_domain": {"type": "boolean",
+                            "description": "Only follow links on the same domain "
+                                           "(default true)"},
+        },
+        "required": ["url"],
+    },
+}
+
+CHART_FROM_DATA = {
+    "name": "chart_from_data",
+    "description": (
+        "Render a chart from tabular data and save it into the workspace as an "
+        "SVG file — use this to VISUALIZE data instead of describing it. `data` "
+        "is inline CSV (header row + rows) or the name of a CSV file in the "
+        "workspace. Charts: bar, line, scatter, pie."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "data": {"type": "string",
+                     "description": "Inline CSV text, or a workspace CSV filename"},
+            "chart_type": {"type": "string",
+                           "enum": ["bar", "line", "scatter", "pie"],
+                           "description": "Chart kind (default bar)"},
+            "x": {"type": "string",
+                  "description": "Label column name (default: first column)"},
+            "y": {"type": "string",
+                  "description": "Value column name (default: second column)"},
+            "title": {"type": "string", "description": "Chart title"},
+            "filename": {"type": "string",
+                         "description": "Output filename (default chart-<ts>.svg)"},
+        },
+        "required": ["data"],
     },
 }
 
@@ -3378,6 +3435,8 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "text_to_speech": TEXT_TO_SPEECH,
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
+    "crawl_site": CRAWL_SITE,
+    "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,
     "browser_read": BROWSER_READ,

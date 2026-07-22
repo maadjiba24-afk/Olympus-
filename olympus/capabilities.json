@@ -165,7 +165,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 104,
+    "count": 106,
     "names": [
       "add_todo",
       "analyze_image",
@@ -200,12 +200,14 @@
       "browser_upload",
       "cache_fact",
       "call_webhook",
+      "chart_from_data",
       "codegraph_impact",
       "codegraph_neighbors",
       "codegraph_overview",
       "codegraph_path",
       "codegraph_subgraph",
       "complete_todo",
+      "crawl_site",
       "create_skill",
       "current_time",
       "edit_file",

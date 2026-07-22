@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 104 tools in
+Olympus exposes a **finite, named** tool surface — the 106 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -68,6 +68,7 @@ surface. So the surface and its threat model can't drift apart.
 | `read_file` | Read a file from the confined workspace | first-party read | Read-only; path-confined to the workspace root | Path traversal — `_confine` refuses paths escaping the root |
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
 | `browse_page` | Fetch a page as text + extract links | ingests untrusted | SSRF/egress gate on the URL and every redirect (`_http_get`); output wrapped | SSRF (incl. redirect-to-internal) — refused by `url_block_reason`; injected content — wrapped |
+| `crawl_site` | Recursively crawl a site into a text digest | ingests untrusted | Every hop routes through `_http_get` (SSRF/egress gate + redirect re-check); bounded by depth (≤3), page count (≤25) and an aggregate byte cap; optional same-domain restriction; output wrapped | SSRF amplification / crawl runaway — each URL re-gated, hard-bounded on pages+depth+bytes; injected page content — wrapped |
 | `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |
@@ -117,6 +118,7 @@ surface. So the surface and its threat model can't drift apart.
 | `spawn_subagent` | Delegate a sub-task to another specialist | first-party (orchestration) | Runs a known specialist; gated by that specialist's own loadout | Delegation loop / cost — isolated per branch, budget-guarded |
 | `schedule_task` | Schedule a recurring unattended task | first-party (gated) | Runs later through the full pipeline on the server's own key | Cost/abuse via runaway schedules — min interval + budget guard |
 | `generate_image` | Generate an image into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn / disallowed content — key-gated, confined output |
+| `chart_from_data` | Render tabular data (inline CSV / workspace file) into an SVG chart | first-party (workspace) | Pure-Python SVG (no network, no external service); reads only a path-confined (`_confine`) workspace CSV; all text/labels XML-escaped into the SVG; writes only into the confined workspace | XSS-in-SVG via crafted labels — escaped on render; path escape — `_confine`; no egress or key surface |
 | `edit_image` | AI-edit an existing workspace image, saving the result as a NEW file | external actuator | Reads the source path-confined via `_confine` (image types only, size-capped) and writes only to the confined workspace; the source is never overwritten; needs a media API key | Cost burn / disallowed content — key-gated, confined I/O, non-destructive (original preserved) |
 | `text_to_speech` | Synthesize audio into the workspace | external actuator | Writes only to the confined workspace; needs a media API key | Cost burn — key-gated, confined output |
 | `transcribe_audio` | Transcribe a workspace audio file to text | ingestion | Reads only from the confined workspace; key-gated; transcript is wrapped as untrusted content | Injection via spoken/recorded content — transcript is data, capability separation applies |

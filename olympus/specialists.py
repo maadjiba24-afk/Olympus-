@@ -170,6 +170,7 @@ SPECIALISTS: dict[str, Specialist] = {
             description="Personal finance, budgeting, investing concepts, "
                         "business finance, market analysis, pricing.",
             web=True,
+            extra_tools=("chart_from_data",),
         ),
         Specialist(
             key="peitho", name="Peitho", title="Marketing Specialist",
@@ -178,7 +179,8 @@ SPECIALISTS: dict[str, Specialist] = {
                         "documents to the user's workspace.",
             web=True,
             extra_tools=("generate_image", "edit_image", "text_to_speech",
-                         "transcribe_audio", "browse_page", "analyze_image",
+                         "transcribe_audio", "browse_page", "crawl_site",
+                         "chart_from_data", "analyze_image",
                          "list_documents", "read_document", "search_documents",
                          "write_document"),
         ),
@@ -255,7 +257,8 @@ SPECIALISTS: dict[str, Specialist] = {
             # actuator (browser_act) from its live loadout — it can read/learn
             # via the harness but never act on a logged-in session in the same
             # run. The read/learn tools (open/read/skills) remain.
-            extra_tools=("browse_page", "analyze_image", "browser_open",
+            extra_tools=("browse_page", "crawl_site", "analyze_image",
+                         "browser_open",
                          "browser_read", "browser_read_ax", "browser_save_pdf",
                          "browser_console", "browser_screenshot",
                          "browser_act", "browser_skills", "browser_skill_record",
