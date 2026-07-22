@@ -36,7 +36,13 @@ themselves and get stronger the more they run. Design locked in ADR 0007
   verifier panel** via `evolve` when the quorum keeps failing to form (frozen
   per run for replay).
 - **Bandit routing (`OLYMPUS_BANDIT_ROUTING`).** A deterministic UCB1 explorer
-  (`bandit_routing.py`) alongside the conservative learned selector.
+  (`bandit_routing.py`) alongside the conservative learned selector; its
+  exploration constant **self-tunes** via `evolve` (explores less when routing
+  outcomes degrade).
+- **Semantic routing (`OLYMPUS_SEMANTIC_ROUTING`).** Orders the specialist roster
+  shown to Zeus by embedding-relevance to the request (reorder-only, replay-
+  frozen) — a no-op for the curated 13, earning its keep at scale with many file
+  agents.
 - **File-defined agents (`OLYMPUS_AGENTS`).** `agentreg.py` loads `<key>.md`
   agents into the registry, safety-bounded to a read-only tool allowlist.
 - **Cross-instance federation (`OLYMPUS_FEDERATION`).** `federation.py` +
