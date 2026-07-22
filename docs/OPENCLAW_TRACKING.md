@@ -144,6 +144,12 @@ Everything OpenClaw has shipped to date, grouped for adoption decisions.
   node apps (iOS 26 visual refresh, Android Talk Mode); **Apple Watch companion**
   with inbox + controls; iOS share extension.
 - WebChat channel served by the gateway.
+- **Olympus absorption (2026-07-22):** where OpenClaw ships a stack of native
+  clients (menu-bar app, Windows Hub, iOS/Android node apps, Apple Watch), the
+  Olympus web UI is instead an **installable PWA** — a web app manifest,
+  offline-shell service worker, and app icons rendered by a pure-Python PNG
+  encoder (stdlib `zlib` only, no new dependencies). One surface, add-to-home-
+  screen on any platform, served by the existing web server (`olympus/pwa.py`).
 
 ### 2.8 Security & trust
 - Inbound DMs untrusted by default; pairing-based access policies; DM lockdown

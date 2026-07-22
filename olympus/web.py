@@ -1626,9 +1626,33 @@ class Handler(BaseHTTPRequestHandler):
                    "require_byok": config.require_byok(),
                    "has_server_key": config.Settings.from_env().usable()}
             from .specialists import SPECIALISTS
+            from . import pwa
             page = (PAGE.replace("__OLYMPUS_CFG__", json.dumps(cfg))
                         .replace("__OLYMPUS_NSPEC__", str(len(SPECIALISTS))))
+            page = pwa.inject(page)          # make the UI installable
             self._send(200, page.encode(), "text/html; charset=utf-8")
+            return
+        if url.path in ("/manifest.webmanifest", "/sw.js") \
+                or url.path.startswith("/icons/"):
+            # PWA assets: public, no auth — the shell must load before login,
+            # exactly like "/". Served by the pure-Python pwa layer.
+            from . import pwa
+            if url.path == "/manifest.webmanifest":
+                self._send(200, pwa.manifest().encode(),
+                           "application/manifest+json")
+                return
+            if url.path == "/sw.js":
+                self._send(200, pwa.service_worker().encode(),
+                           "application/javascript")
+                return
+            _icons = {"/icons/olympus-192.png": (192, False),
+                      "/icons/olympus-512.png": (512, False),
+                      "/icons/olympus-maskable-512.png": (512, True)}
+            spec = _icons.get(url.path)
+            if spec is None:
+                self._send(404, b"not found", "text/plain; charset=utf-8")
+                return
+            self._send(200, pwa.icon(spec[0], maskable=spec[1]), "image/png")
             return
         if url.path in ("/privacy", "/terms"):
             from . import legal               # public: legal pages need no auth
