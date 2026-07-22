@@ -78,6 +78,17 @@ new tools or commands — capability accounting is unchanged.
   per specialist on the prompt-assembly path, and surfaced on the `olympus moat`
   board.
 
+- **Federation — capability discovery + multi-peer aggregation.** A pinned peer
+  can POST a signed request to `/federation/capabilities` and receive a signed
+  card of what an instance offers (specialist roster + skill count, no skill
+  contents), gated by the same pinned-peer + `task`-trust check as a task.
+  `federation.call_peers()` fans one task across several trusted peers and
+  collects each reply as untrusted data, isolating a dead peer so it never sinks
+  the fan-out. New CLI actions `olympus federation capabilities <peer>` and
+  `ask-all <message>` (positional actions — command accounting unchanged). Reuses
+  the existing signed-envelope, trust, scrub, and egress machinery — no new trust
+  surface.
+
 ### Fixed
 
 - **Replay — frozen run-state now survives the dispatch thread hop.** The active

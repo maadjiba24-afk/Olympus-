@@ -582,8 +582,11 @@ stronger the more they run — watch the board with `olympus moat`:
   Olympus instances: ed25519 handshake reusing the `witness` root of trust,
   pinned/tiered peer trust, an egress-guarded transport, and shared-lesson sync
   that is scrubbed, trusted-only, and staged as candidates for your gate — never
-  auto-committed. Drive it from the CLI:
-  `olympus federation identity | add-peer | peers | call | serve | lessons`.
+  auto-committed. A pinned peer can also fetch a signed **capabilities card**
+  (roster + skill count, no skill contents) to learn what an instance offers, and
+  `ask-all` fans one task across every trusted peer, each reply returned as
+  untrusted data. Drive it from the CLI: `olympus federation identity | add-peer |
+  peers | call | capabilities | ask-all | serve | lessons`.
 
 ### Connectors: MCP servers & custom plugins
 

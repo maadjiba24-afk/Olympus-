@@ -94,3 +94,28 @@ def test_lessons_lists_staged(capsys):
     federation.import_lessons(federation.export_lessons(["double-check dates"]))
     _, out = _run(["federation", "lessons"], capsys)
     assert "double-check dates" in out and "[peer]" in out
+
+
+# --- capability discovery + multi-peer aggregation -----------------------
+
+def test_capabilities_usage_when_incomplete(capsys):
+    _, out = _run(["federation", "capabilities"], capsys)         # no peer
+    assert "Usage:" in out
+
+
+def test_capabilities_refused_when_disabled(monkeypatch, capsys):
+    monkeypatch.delenv("OLYMPUS_FEDERATION", raising=False)
+    federation.add_peer("peer", "kk", url="https://p.example", trust="task")
+    _, out = _run(["federation", "capabilities", "peer"], capsys)
+    assert "Refused:" in out and "disabled" in out
+
+
+def test_ask_all_usage_when_incomplete(capsys):
+    _, out = _run(["federation", "ask-all"], capsys)              # no message
+    assert "Usage:" in out
+
+
+def test_ask_all_no_peers(monkeypatch, capsys):
+    monkeypatch.setenv("OLYMPUS_FEDERATION", "1")
+    _, out = _run(["federation", "ask-all", "a question"], capsys)
+    assert "No pinned peers" in out
