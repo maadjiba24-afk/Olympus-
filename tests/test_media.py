@@ -370,3 +370,22 @@ def test_chart_from_data_reads_workspace_file(monkeypatch, tmp_path):
 def test_chart_from_data_is_trusted_first_party():
     assert "chart_from_data" in security.TRUSTED_TOOLS
     assert security.should_wrap("chart_from_data") is False
+
+
+def test_chart_rejects_non_finite_values(monkeypatch, tmp_path):
+    # NaN/inf must not reach the SVG (they emit invalid coordinates).
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    from olympus import sandbox
+    out = media.chart_from_data("k,v\na,inf\nb,nan\nc,3\n", chart_type="bar",
+                                filename="nf")
+    assert "1 points" in out                       # only the finite row survives
+    svg = sandbox.read_file("nf.svg")
+    assert "nan" not in svg.lower() and "inf" not in svg.lower()
+    assert media.chart_from_data("k,v\na,inf\nb,nan\n").startswith("Error")
+
+
+def test_chart_caps_row_count(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    big = "k,v\n" + "\n".join(f"r{i},{i}" for i in range(2000))
+    out = media.chart_from_data(big, chart_type="line", filename="big")
+    assert f"{media._CHART_MAX_POINTS} points" in out and "capped" in out

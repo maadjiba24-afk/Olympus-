@@ -150,3 +150,12 @@ def test_bedrock_client_constructs_anthropic_bedrock(monkeypatch):
     assert isinstance(c, FakeBedrock)
     assert captured["aws_region"] == "us-west-2"
     assert captured["aws_access_key"] == "AKIATEST"
+
+
+def test_azure_empty_deployment_is_rejected():
+    from olympus import config, openai_compat as oc
+    s = config.Settings(provider="openai", model="",
+                        base_url="https://r.openai.azure.com")
+    import pytest
+    with pytest.raises(ValueError, match="deployment"):
+        oc._endpoint_url(s, "https://r.openai.azure.com")

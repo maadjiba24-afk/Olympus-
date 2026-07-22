@@ -423,6 +423,7 @@ def crawl_site(url: str, depth: int = 1, max_pages: int = 10,
 # --- data visualization (pure-Python SVG; zero new dependency) --------------
 
 _CHART_TYPES = ("bar", "line", "scatter", "pie")
+_CHART_MAX_POINTS = 500      # enough for any readable chart; bounds SVG size
 
 
 def _parse_csv(data: str):
@@ -575,18 +576,30 @@ def chart_from_data(data: str, chart_type: str = "bar", x: str = "", y: str = ""
     xi = _col_index(x, 0)
     yi = _col_index(y, 1 if len(header) > 1 else 0)
 
+    import math
     labels, values = [], []
+    dropped_nonfinite = 0
     for r in rows:
+        if len(labels) >= _CHART_MAX_POINTS:
+            break
         if xi >= len(r) or yi >= len(r):
             continue
         try:
-            values.append(float(str(r[yi]).replace(",", "").strip()))
+            v = float(str(r[yi]).replace(",", "").strip())
         except ValueError:
             continue
+        # Reject NaN/±inf — they poison the axis math and emit invalid SVG
+        # coordinates that break renderers.
+        if not math.isfinite(v):
+            dropped_nonfinite += 1
+            continue
+        values.append(v)
         labels.append(str(r[xi]).strip())
     if not values:
-        return (f"Error: column '{y or header[yi]}' has no numeric values to "
-                "plot.")
+        extra = (" (all values were non-finite)" if dropped_nonfinite else "")
+        return (f"Error: column '{y or header[yi]}' has no finite numeric "
+                f"values to plot{extra}.")
+    capped = len(rows) > _CHART_MAX_POINTS
 
     svg = _render_chart_svg(ctype, labels, values, title,
                             x or header[xi], y or (header[yi] if yi < len(header) else ""))
@@ -594,4 +607,6 @@ def chart_from_data(data: str, chart_type: str = "bar", x: str = "", y: str = ""
     if not name.lower().endswith(".svg"):
         name += ".svg"
     sandbox.write_file(name, svg)                    # confine + write
-    return f"Chart ({ctype}, {len(values)} points) saved to workspace: {name}"
+    note = (f" (capped at the first {_CHART_MAX_POINTS} rows)" if capped else "")
+    return (f"Chart ({ctype}, {len(values)} points) saved to workspace: "
+            f"{name}{note}")

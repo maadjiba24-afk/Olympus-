@@ -46,6 +46,13 @@ _PREFIX = "mcp__"
 
 DISCOVER_TIMEOUT = 20.0
 CALL_TIMEOUT = 120.0
+# Hardening bounds against a hostile / buggy server. Tool descriptions enter the
+# model's tool list UNWRAPPED (the untrusted-content envelope only guards call
+# *output*), so a server must not be able to bloat the prompt or smuggle
+# instructions through a description or a huge tool list / result.
+_MCP_MAX_TOOLS = 64          # tools advertised per server
+_MCP_DESC_CAP = 600          # chars of tool description kept
+_MCP_OUTPUT_CAP = 60_000     # chars of a single tool-call result kept
 # tool_defs() is rebuilt frequently (potentially every turn); without a cache a
 # configured server would be reconnected — a stdio process re-spawned — on every
 # build. Cache the discovered schemas per server for a short TTL; a server that
@@ -217,17 +224,38 @@ def discover(server) -> list[dict]:
     for t in raw or []:
         if allowed and t.name not in allowed:
             continue
-        full = tool_name(server.name, t.name)
+        if len(schemas) >= _MCP_MAX_TOOLS:
+            _log.warning("server '%s' advertises >%d tools; capping",
+                         name, _MCP_MAX_TOOLS)
+            break
+        full = tool_name(name, t.name)
         _KIND_CACHE[full] = kind
         schemas.append({
             "name": full,
-            "description": (getattr(t, "description", "") or
-                            f"MCP tool '{t.name}' on server '{server.name}'."),
+            "description": _clean_description(
+                getattr(t, "description", ""), name, t.name),
             "input_schema": getattr(t, "inputSchema", None)
             or {"type": "object", "properties": {}},
         })
     _SCHEMA_CACHE[name] = (time.monotonic() + DISCOVER_TTL, schemas)
     return schemas
+
+
+def _clean_description(desc: str, server: str, tool: str) -> str:
+    """Bound and neutralize a server-supplied tool description before it enters
+    the model's (unwrapped) tool list. A description carrying prompt-injection
+    markers is withheld — a hostile server must not be able to plant
+    instructions in the tool schema."""
+    from . import security
+    desc = (desc or "").strip()
+    if not desc:
+        return f"MCP tool '{tool}' on server '{server}'."
+    if security.looks_like_injection(desc):
+        return (f"MCP tool '{tool}' on server '{server}' "
+                "(description withheld: it contained prompt-injection markers).")
+    if len(desc) > _MCP_DESC_CAP:
+        desc = desc[:_MCP_DESC_CAP] + "…"
+    return desc
 
 
 def _render(result) -> str:
@@ -240,6 +268,8 @@ def _render(result) -> str:
         else:
             parts.append(str(item))
     out = "\n".join(p for p in parts if p)
+    if len(out) > _MCP_OUTPUT_CAP:
+        out = out[:_MCP_OUTPUT_CAP] + f"\n…[truncated, {len(out)} chars total]"
     if getattr(result, "isError", False):
         return f"MCP tool reported an error:\n{out or '(no detail)'}"
     return out or "(no output)"

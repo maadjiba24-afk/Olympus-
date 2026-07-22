@@ -270,6 +270,12 @@ def _docker_cmd(command: str, root: Path, timeout: int) -> list[str]:
     user = os.environ.get("OLYMPUS_EXEC_USER", "").strip()
     if user:
         args += ["--user", user]
+    # Defense in depth: a contained command needs no Linux capabilities and no
+    # privilege escalation. Both on by default; opt out with OLYMPUS_EXEC_CAPS=on
+    # (e.g. if a workload legitimately needs a capability).
+    if os.environ.get("OLYMPUS_EXEC_CAPS", "").strip().lower() not in (
+            "1", "true", "yes", "on"):
+        args += ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
     args += [image, "sh", "-c", command]
     return args
 
@@ -400,6 +406,7 @@ def run(command: str, *, timeout: int | None = None,
 # quoted heredoc delimiter stops the shell from expanding anything in the snippet,
 # so shell metacharacters in the Python source are inert.
 _PY_HEREDOC = "OLYMPUS_PY_HEREDOC_EOF"
+MAX_PY_CODE = 256_000        # bound the snippet a single run_python may carry
 
 
 def run_python(code: str, *, timeout: int | None = None,
@@ -421,6 +428,9 @@ def run_python(code: str, *, timeout: int | None = None,
     refused), but do not mistake that for isolation of the Python itself."""
     if not (code or "").strip():
         return Result(False, 2, "empty code")
+    if len(code) > MAX_PY_CODE:
+        return Result(False, 2, f"code too large ({len(code)} bytes; "
+                      f"limit {MAX_PY_CODE})")
     if _PY_HEREDOC in code:
         return Result(False, 2, "code may not contain the reserved marker "
                       f"{_PY_HEREDOC!r}")

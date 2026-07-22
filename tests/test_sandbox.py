@@ -218,3 +218,18 @@ def test_invalid_watch_pattern_is_reported_not_fatal(monkeypatch, tmp_path):
     res = sandbox.run("echo hi", watch="[unclosed")
     assert res.ok
     assert "invalid watch pattern" in res.watched[0]
+
+
+def test_docker_drops_caps_and_blocks_privesc_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("OLYMPUS_EXEC_CAPS", raising=False)
+    argv = sandbox._docker_cmd("echo hi", tmp_path, 30)
+    assert "--cap-drop" in argv and "ALL" in argv
+    assert "no-new-privileges" in argv
+    monkeypatch.setenv("OLYMPUS_EXEC_CAPS", "on")
+    assert "--cap-drop" not in sandbox._docker_cmd("echo hi", tmp_path, 30)
+
+
+def test_run_python_rejects_oversized_code(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    res = sandbox.run_python("x=1\n" * 100_000)
+    assert not res.ok and res.code == 2 and "too large" in res.output

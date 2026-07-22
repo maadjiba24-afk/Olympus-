@@ -67,12 +67,17 @@ def _endpoint_url(settings: config.Settings, base: str) -> str:
     if not _is_azure(base):
         return f"{base}/chat/completions"
     import os
+    from urllib.parse import quote
     deployment = (os.environ.get("OLYMPUS_AZURE_DEPLOYMENT")
                   or settings.model or "").strip()
+    if not deployment:
+        raise ValueError(
+            "Azure OpenAI needs a deployment name — set the model to your "
+            "Azure deployment, or set OLYMPUS_AZURE_DEPLOYMENT.")
     api_version = os.environ.get("OLYMPUS_AZURE_API_VERSION",
                                  _AZURE_DEFAULT_API_VERSION)
-    return (f"{base}/openai/deployments/{deployment}/chat/completions"
-            f"?api-version={api_version}")
+    return (f"{base}/openai/deployments/{quote(deployment, safe='')}"
+            f"/chat/completions?api-version={quote(api_version, safe='')}")
 
 
 def _auth_headers(base: str, key: str | None) -> dict[str, str]:
