@@ -20,7 +20,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config, documents, embed, memory
+from . import annindex, config, documents, embed, memory
 
 _CHUNK_CHARS = 1200
 _CHUNK_OVERLAP = 200
@@ -126,15 +126,30 @@ def retrieve(user: str, query: str, k: int = 4) -> list[dict]:
         return []
     qtokens = _tokens(query)
     qvec = embed.embed_one(query) if embed.available() else None
+    # Vector similarities for every embedded chunk in one pass through
+    # `annindex.nearest` — an exact cosine scan by default, an HNSW query only
+    # when the corpus is large and OLYMPUS_ANN is on. Cosine over high-dimension
+    # embeddings dominates the per-chunk cost, so this is where the graph pays
+    # off; the lexical floor below is unchanged.
+    vec_sims: dict[str, float] = {}
+    if qvec:
+        items: dict[str, list] = {}
+        for slug, entry in index.items():
+            embs = entry.get("embeddings") or []
+            chunks = entry.get("chunks") or []
+            for i in range(min(len(chunks), len(embs))):
+                if embs[i]:
+                    items[f"{slug}\x00{i}"] = embs[i]
+        if items:
+            for key, sim in annindex.nearest(
+                    qvec, items, k=len(items), min_sim=-1.0):
+                vec_sims[key] = max(0.0, sim)
     scored = []
     for slug, entry in index.items():
         chunks = entry.get("chunks") or []
-        embs = entry.get("embeddings")
         for i, ch in enumerate(chunks):
             lex = _overlap(qtokens, _tokens(ch))
-            vec = 0.0
-            if qvec and embs and i < len(embs) and embs[i]:
-                vec = max(0.0, embed.cosine(qvec, embs[i]))
+            vec = vec_sims.get(f"{slug}\x00{i}", 0.0)
             score = max(vec, lex) if qvec else lex
             if score >= _FLOOR:
                 scored.append({"document": entry.get("name", slug),
