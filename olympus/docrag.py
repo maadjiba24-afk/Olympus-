@@ -15,12 +15,22 @@ untrusted (a document the user wrote is not an external attacker surface).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
 
-from . import annindex, config, documents, embed, memory
+from . import annindex, config, documents, embed, memory, store
+
+# Persistent HNSW index over the user's document chunks — the one place with a
+# stable, cached, repeatedly-queried corpus, so the graph's amortised speedup
+# actually pays off (unlike a one-shot `nearest` scan). Keyed to a corpus
+# signature so it rebuilds ONLY when documents change.
+_ANN_NS = "docrag.ann"
+_ANN_SIG_NS = "docrag.ann.sig"
+_ANN_CANDIDATES = 128        # vector-candidate pool; the lexical floor covers the rest
 
 _CHUNK_CHARS = 1200
 _CHUNK_OVERLAP = 200
@@ -117,6 +127,38 @@ def build_index(user: str) -> dict:
     return fresh
 
 
+def _corpus_signature(index: dict) -> bytes:
+    """A cheap fingerprint of the embedded corpus — per-doc mtime + chunk count.
+    Changes exactly when a document is added, removed, or re-embedded, so it is
+    the right key for "is my persistent index still valid?"."""
+    parts = [f"{slug}:{e.get('mtime')}:{len(e.get('chunks') or [])}"
+             for slug, e in sorted(index.items())]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest().encode()
+
+
+def _persistent_index(user: str, index: dict, items: dict) -> annindex.HNSW:
+    """Build-or-load the user's persistent HNSW. Loads the cached graph when the
+    corpus signature matches (the common case turn-to-turn); rebuilds and
+    re-persists only when documents changed. Best-effort — a store hiccup just
+    falls back to an in-memory build."""
+    key = memory.safe_id(user)
+    sig = _corpus_signature(index)
+    try:
+        if store.backend().get(_ANN_SIG_NS, key) == sig:
+            idx = annindex.load_index(_ANN_NS, key)
+            if len(idx) == len(items):
+                return idx
+    except Exception:
+        pass
+    idx = annindex.build(items)
+    try:
+        annindex.save_index(_ANN_NS, key, idx)
+        store.backend().put(_ANN_SIG_NS, key, sig)
+    except Exception:
+        pass
+    return idx
+
+
 def retrieve(user: str, query: str, k: int = 4) -> list[dict]:
     """Top-k relevant document chunks: [{document, text, score}]. Semantic when
     embeddings are configured, lexical otherwise (and lexical always contributes
@@ -126,11 +168,13 @@ def retrieve(user: str, query: str, k: int = 4) -> list[dict]:
         return []
     qtokens = _tokens(query)
     qvec = embed.embed_one(query) if embed.available() else None
-    # Vector similarities for every embedded chunk in one pass through
-    # `annindex.nearest` — an exact cosine scan by default, an HNSW query only
-    # when the corpus is large and OLYMPUS_ANN is on. Cosine over high-dimension
-    # embeddings dominates the per-chunk cost, so this is where the graph pays
-    # off; the lexical floor below is unchanged.
+    # Vector similarities for the embedded chunks. Two regimes, same result shape:
+    #  * small corpus / OLYMPUS_ANN off / replay → an exact cosine scan over all
+    #    chunks (identical to before), so the default path is unchanged.
+    #  * large corpus + OLYMPUS_ANN on → query a PERSISTENT HNSW graph (built
+    #    once, reused turn-to-turn), so retrieval scales sublinearly on the
+    #    high-dimension cosine that dominates per-chunk cost. The graph is skipped
+    #    during replay to keep that path side-effect-free.
     vec_sims: dict[str, float] = {}
     if qvec:
         items: dict[str, list] = {}
@@ -141,8 +185,16 @@ def retrieve(user: str, query: str, k: int = 4) -> list[dict]:
                 if embs[i]:
                     items[f"{slug}\x00{i}"] = embs[i]
         if items:
-            for key, sim in annindex.nearest(
-                    qvec, items, k=len(items), min_sim=-1.0):
+            use_graph = (annindex.enabled()
+                         and len(items) >= annindex.EXACT_THRESHOLD
+                         and not os.environ.get("OLYMPUS_REPLAY"))
+            if use_graph:
+                idx = _persistent_index(user, index, items)
+                hits = annindex.query_index(
+                    idx, qvec, k=min(len(items), _ANN_CANDIDATES), min_sim=-1.0)
+            else:
+                hits = annindex.nearest(qvec, items, k=len(items), min_sim=-1.0)
+            for key, sim in hits:
                 vec_sims[key] = max(0.0, sim)
     scored = []
     for slug, entry in index.items():
