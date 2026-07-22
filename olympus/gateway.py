@@ -46,6 +46,8 @@ HELP = (
     "/heartbeat add <every> <prompt> — a periodic check that only pings you "
     "when something needs attention (list · drop <id>)\n"
     "/onexit <pid> <prompt> — run a task once when that process exits\n"
+    "/onchange <cmd> :: <prompt> — run a task whenever a command's output "
+    "changes\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
     "/wiki [show <page>] — the concept pages Olympus maintains about "
@@ -301,6 +303,23 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(str(err))
         return chunk(f"⏳ Watching pid {job.watch_pid} — when it exits I'll "
                      f"run: {prompt.strip()}")
+    if cmd == "/onchange":
+        from . import scheduler
+        watch, _, prompt = arg.strip().partition("::")
+        if not watch.strip() or not prompt.strip():
+            return chunk("Usage: /onchange <command> :: <what to do on change>\n"
+                         "e.g. /onchange git -C ~/repo log -1 :: summarize the "
+                         "new commit")
+        channel = {"tg": "telegram", "dc": "discord",
+                   "sl": "slack", "sg": "signal"}.get(uid.split("-", 1)[0], "")
+        try:
+            job = scheduler.add_on_change(
+                f"onchange-{memory.safe_id(watch)[:16]}", watch.strip(),
+                prompt.strip(), user=uid, deliver_to=channel)
+        except ValueError as err:
+            return chunk(str(err))
+        return chunk(f"👁 Watching `{job.watch_cmd}` — when its output changes "
+                     f"I'll run: {prompt.strip()}")
     if cmd == "/heartbeat":
         from . import agentbeat
         sub, _, rest = arg.strip().partition(" ")

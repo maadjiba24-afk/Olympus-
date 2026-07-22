@@ -345,6 +345,10 @@ def build_parser() -> argparse.ArgumentParser:
                          metavar="PID",
                          help="event-driven: run once when this process exits "
                               "(the interval argument is ignored)")
+    p_sched.add_argument("--on-change", default="", dest="on_change_cmd",
+                         metavar="CMD",
+                         help="change-driven: run whenever this command's "
+                              "output changes (the interval argument is ignored)")
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
@@ -1937,6 +1941,16 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 print(f"Scheduled '{job.name}' to run once when pid "
                       f"{job.watch_pid} exits.")
+            elif args.on_change_cmd:
+                try:
+                    job = scheduler.add_on_change(
+                        args.name, args.on_change_cmd, prompt,
+                        deliver_to=args.deliver_to, user="cli")
+                except ValueError as err:
+                    print(err)
+                    return 1
+                print(f"Scheduled '{job.name}' to run when the output of "
+                      f"`{job.watch_cmd}` changes.")
             else:
                 job = scheduler.add(args.name, args.interval, prompt,
                                     deliver_to=args.deliver_to, user="cli")

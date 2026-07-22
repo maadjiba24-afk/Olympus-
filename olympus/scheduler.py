@@ -70,6 +70,27 @@ def _path():
 
 
 ON_EXIT_POLL = 30      # how often an on-exit watch is worth re-checking
+ON_CHANGE_POLL = int(os.environ.get("OLYMPUS_ONCHANGE_POLL", "60"))
+_WATCH_MAX_BYTES = 1_000_000     # cap watched output so a chatty command
+                                 # can't blow up memory or the state file
+
+
+def _watch_hash(cmd: str) -> str | None:
+    """Hash the stdout of a watched command (the change signal). Returns None
+    when the command can't be run or fails — treated as 'no observation this
+    tick', never as a change, so a flaky watch command doesn't spam runs."""
+    if not cmd.strip():
+        return None
+    import hashlib
+    import subprocess
+    try:
+        out = subprocess.run(cmd, shell=True, capture_output=True,
+                             timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return hashlib.sha256(out.stdout[:_WATCH_MAX_BYTES]).hexdigest()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -98,11 +119,13 @@ class Job:
     last_run: float = 0.0
     created: float = field(default=0.0)
     skill: str = ""              # optional skill loaded before the job's prompt
-    kind: str = "interval"       # "interval" | "on_exit" (event-driven)
+    kind: str = "interval"       # "interval" | "on_exit" | "on_change"
     watch_pid: int = 0           # on_exit: fire when this process exits
-    label: str = ""              # on_exit: human name for the watched work
+    label: str = ""              # on_exit/on_change: human name for the watch
     started_at: float = 0.0      # run in progress (crash/upgrade detection)
     resume_attempts: int = 0     # interrupted-run retries (bounded at 1)
+    watch_cmd: str = ""          # on_change: command whose output is watched
+    last_hash: str = ""          # on_change: last observed output hash
 
     def due(self, now: float) -> bool:
         if not self.enabled:
@@ -110,6 +133,11 @@ class Job:
         if self.kind == "on_exit":
             # Event-driven: due the moment the watched process is gone.
             return self.watch_pid > 0 and not _pid_alive(self.watch_pid)
+        if self.kind == "on_change":
+            # Change-driven jobs never fire on a cadence; run_due checks their
+            # watched output on a throttled poll (keeps due() pure + cheap —
+            # it must not spawn a subprocess).
+            return False
         return (now - self.last_run) >= self.interval
 
 
@@ -181,6 +209,32 @@ def add_on_exit(name: str, pid: int, prompt: str,
     return job
 
 
+def add_on_change(name: str, watch_cmd: str, prompt: str,
+                  deliver_to: str = "", user: str = "shared",
+                  label: str = "", now: float | None = None) -> Job:
+    """Change-driven schedule kind: run `prompt` whenever the stdout of
+    `watch_cmd` changes ("summarize the deploy log when it changes", "alert me
+    when this API's response differs"). The current output is captured as the
+    baseline at creation, so only a SUBSEQUENT change fires — never the first
+    observation. Unlike on_exit it is recurring: it fires on every change."""
+    now = now if now is not None else time.time()
+    if not watch_cmd.strip():
+        raise ValueError("a watched command is required")
+    baseline = _watch_hash(watch_cmd)      # capture now so first change fires
+    with _mutex():
+        jobs_ = [j for j in _load() if j.name != name]
+        job = Job(name=name, interval=0, prompt=prompt, kind="on_change",
+                  watch_cmd=watch_cmd.strip(), last_hash=baseline or "",
+                  label=(label or "").strip(),
+                  deliver_to=deliver_to.strip().lower(), user=user,
+                  created=now, last_run=now)
+        jobs_.append(job)
+        if len(jobs_) > MAX_JOBS:
+            jobs_ = sorted(jobs_, key=lambda j: j.created)[-MAX_JOBS:]
+        _save(jobs_)
+    return job
+
+
 def remove(name: str) -> bool:
     with _mutex():
         jobs = _load()
@@ -211,8 +265,8 @@ def due(now: float | None = None) -> list[Job]:
 
 def next_due_in(now: float | None = None) -> float | None:
     """Seconds until the soonest enabled job is due (None if no enabled jobs).
-    An on-exit watch has no cadence: it costs a liveness poll, so it asks to
-    be re-checked shortly (0 the moment the watched process is gone)."""
+    An on-exit/on-change watch has no cadence: it costs a poll, so it asks to
+    be re-checked shortly (0 the moment its trigger has fired)."""
     now = now if now is not None else time.time()
     waits = []
     for j in _load():
@@ -220,9 +274,41 @@ def next_due_in(now: float | None = None) -> float | None:
             continue
         if j.kind == "on_exit":
             waits.append(0.0 if j.due(now) else float(ON_EXIT_POLL))
+        elif j.kind == "on_change":
+            # Re-poll the watched command at most every ON_CHANGE_POLL seconds.
+            waits.append(max(0.0, ON_CHANGE_POLL - (now - j.last_run)))
         else:
             waits.append(max(0.0, j.interval - (now - j.last_run)))
     return min(waits) if waits else None
+
+
+def changed(now: float | None = None) -> list[tuple]:
+    """on_change jobs whose watched output differs from the last observation,
+    throttled to one check per ON_CHANGE_POLL. Returns (job, new_hash) pairs;
+    the caller persists new_hash so the same change fires only once."""
+    now = now if now is not None else time.time()
+    out = []
+    for j in _load():
+        if not j.enabled or j.kind != "on_change":
+            continue
+        if now - j.last_run < ON_CHANGE_POLL:
+            continue                       # not time to re-poll yet
+        cur = _watch_hash(j.watch_cmd)
+        if cur is None:                    # couldn't observe — try next tick
+            continue
+        if cur != j.last_hash:
+            out.append((j, cur))
+    return out
+
+
+def _mark_hash(name: str, new_hash: str, now: float) -> None:
+    with _mutex():
+        jobs_ = _load()
+        for j in jobs_:
+            if j.name == name:
+                j.last_hash = new_hash
+                j.last_run = now
+        _save(jobs_)
 
 
 # A run that started this long ago and never finished is presumed dead
@@ -296,6 +382,9 @@ def _effective_prompt(job: Job) -> str:
         what = job.label or f"process {job.watch_pid}"
         return (f"The watched work has finished: {what} (pid {job.watch_pid}) "
                 f"has exited.\n\n{job.prompt}")
+    if job.kind == "on_change":
+        what = job.label or f"`{job.watch_cmd}`"
+        return (f"The watched output changed: {what}.\n\n{job.prompt}")
     if not job.skill:
         return job.prompt
     try:
@@ -321,6 +410,15 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     for job in interrupted(now):
         if all(j.name != job.name for j in ready):
             resumed_names.add(job.name)
+            ready.append(job)
+    # Change-driven jobs: poll their watched output and fire on a difference.
+    # The new hash is persisted BEFORE running so the same change fires once,
+    # even if the run itself fails.
+    changed_hashes: dict[str, str] = {}
+    for job, new_hash in changed(now):
+        if all(j.name != job.name for j in ready):
+            changed_hashes[job.name] = new_hash
+            _mark_hash(job.name, new_hash, now)
             ready.append(job)
     if not ready:
         return log
@@ -384,9 +482,13 @@ def summary() -> str:
         state = "" if j.enabled else " (disabled)"
         to = f" → {j.deliver_to}" if j.deliver_to else ""
         using = f" [skill: {j.skill}]" if getattr(j, "skill", "") else ""
-        if getattr(j, "kind", "interval") == "on_exit":
+        kind = getattr(j, "kind", "interval")
+        if kind == "on_exit":
             what = j.label or f"pid {j.watch_pid}"
             when = f"when {what} exits"
+        elif kind == "on_change":
+            what = j.label or f"`{j.watch_cmd}`"
+            when = f"when {what} changes"
         else:
             when = f"every {_human_interval(j.interval)}"
         lines.append(f"  {j.name}: {when}{to}{using}{state}"
