@@ -111,3 +111,69 @@ def test_no_write_or_actuator_tool_is_exposed():
     banned = ("write_document", "add_todo", "complete_todo", "send_email",
               "run_command", "prepare_action", "edit_file", "browser_act")
     assert not any(b in names for b in banned)
+
+
+# --- governed Aegis / discovery reads (read/prepare only) -------------------
+
+def test_governed_tools_listed():
+    names = [t["name"] for t in
+             mcp_server.handle_message(_req("tools/list"))["result"]["tools"]]
+    for n in ("olympus_assess_report", "olympus_assess_scorecard",
+              "olympus_discover_report"):
+        assert n in names
+
+
+def test_no_scan_grant_or_actuate_across_mcp():
+    # An assessment (grant scope / recon / audit / validate / run) can NEVER be
+    # initiated across the MCP boundary — only read/prepare surfaces are exposed.
+    names = [t["name"] for t in
+             mcp_server.handle_message(_req("tools/list"))["result"]["tools"]]
+    banned = ("assess_authorize", "assess_scope", "assess_recon",
+              "assess_http_audit", "assess_sast", "assess_secrets",
+              "assess_deps", "assess_validate", "assess_run",
+              "note_knowledge_gap")
+    assert not any(b in names for b in banned)
+
+
+def test_assess_report_scoped_and_read_only(monkeypatch, tmp_path):
+    from olympus import assess, config
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setenv("OLYMPUS_MCP_USER", "carol")
+    assess.record_finding(assess.Finding(
+        title="Reflected XSS", severity="high", cwe="CWE-79",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+        location="https://app/x?q=1", source="sast"), user="carol")
+    res = mcp_server.handle_message(
+        _req("tools/call", name="olympus_assess_report",
+             arguments={"format": "sarif"}))
+    text = res["result"]["content"][0]["text"]
+    assert not res["result"].get("isError")
+    assert '"CWE-79"' in text or "CWE-79" in text     # SARIF carries the finding
+    # A different user sees none of carol's findings.
+    monkeypatch.setenv("OLYMPUS_MCP_USER", "dave")
+    other = mcp_server.handle_message(
+        _req("tools/call", name="olympus_assess_report", arguments={}))
+    assert "No findings recorded" in other["result"]["content"][0]["text"]
+
+
+def test_assess_scorecard_is_pure(monkeypatch, tmp_path):
+    from olympus import config
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    res = mcp_server.handle_message(
+        _req("tools/call", name="olympus_assess_scorecard", arguments={}))
+    text = res["result"]["content"][0]["text"]
+    assert not res["result"].get("isError")
+    assert "precision" in text.lower()               # the self-benchmark
+    assert "contain" in text.lower()                 # the containment proof
+
+
+def test_discover_report_read_only(monkeypatch, tmp_path):
+    from olympus import config, discovery
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setenv("OLYMPUS_MCP_USER", "erin")
+    discovery.note_gap("knowledge", "how HTTP/3 flow control works", user="erin")
+    res = mcp_server.handle_message(
+        _req("tools/call", name="olympus_discover_report", arguments={}))
+    text = res["result"]["content"][0]["text"]
+    assert not res["result"].get("isError")
+    assert "http/3" in text.lower()

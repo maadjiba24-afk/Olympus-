@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — MCP surfacing: governed read-only Aegis + discovery over the council server
+
+The `olympus mcp-serve` server now exposes three **read/prepare-only** tools, so
+an MCP client (Claude Desktop, an IDE, another agent) can consume the assessment
+and discovery output without ever crossing the actuation boundary:
+
+- `olympus_assess_report` — export the ledgered findings as markdown / json /
+  SARIF 2.1.0, scoped to `OLYMPUS_MCP_USER`.
+- `olympus_assess_scorecard` — the Aegis self-benchmark (precision/recall/F1)
+  plus the blast-radius containment proof. Pure — no scope, network, or scan.
+- `olympus_discover_report` — the self-discovery ledger (open gaps + proposals).
+
+Governed by the same rule as the workspace tools: **no write, no actuator, no
+network** crosses the pipe. An assessment still requires a signed, in-process
+authorization — grant-scope / recon / audit / validate / run are deliberately
+NOT exposed and cannot be initiated across the MCP boundary (a test asserts the
+exclusion). Tests: 6 new.
+
 ### Added — Discovery auto-signal: an UNVERIFIED answer becomes a knowledge gap
 
 Closed the loop between verification and self-discovery. When Aletheia ships an
