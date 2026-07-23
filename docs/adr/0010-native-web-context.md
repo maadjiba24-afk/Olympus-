@@ -124,3 +124,37 @@ opt-in), its unverified extraction, its dual-queue/FoundationDB operational
 complexity, and its polyglot FFI/native build surface (the whole suite is
 pure-stdlib; PDF/DOCX is an optional extra imported lazily inside the parser, so
 the three-required-dependency footprint is unchanged).
+
+## Addendum — self-evolution extensions (new territory)
+
+Three extensions deepen the moat along ADR 0009's self-evolving axis. All obey
+the absorbed-capability contract (ADR 0008): opt-in for autonomous behavior,
+replay-inert, bounded, corrupt-quarantining, additive-only, own tests.
+
+1. **Learned action-profiles.** `domainlore` now records the *safe action
+   profile* that beat a domain's byte baseline, not just that interaction
+   helped. `scrape(actions=None)` with `OLYMPUS_WEB_AUTO_ACTIONS=1` replays that
+   earned profile through the governed harness; every step is re-validated
+   against the safe-verb allowlist, and an explicit `actions=` always wins.
+
+2. **Operator-gated fleet lore sharing.** `federation` gains
+   `export_domainlore`/`import_domainlore` and a `/federation/domainlore` route,
+   mirroring the lesson-sync guarantees: signed envelopes, `trusted`-only,
+   secrets/PII scrubbed. Imported facts STAGE in the corpus's staging area and
+   are folded into the live corpus only by the operator's explicit
+   `merge_staged` — purely additive, never overwriting local truth, never
+   relaxing a fetch gate.
+
+3. **Auto-drafted build proposals.** `webproposals` turns a proposal-kind
+   discovery into a full, evidence-backed build proposal (motivation, evidence,
+   concrete change, safety posture, acceptance criteria) queued for the
+   operator to accept / decline / mark built. It is explicitly NOT a code
+   generator — it produces a reviewable engineering artifact, never a behavior
+   change.
+
+Why still safe: none of the three can open a fetch the gate would refuse. Auto
+actions run only governed safe verbs behind an opt-in flag; shared lore is a
+staged hint a human merges; a proposal is text a human acts on. The moat gets a
+data network effect (per-domain profiles that compound and now travel a fleet)
+and a discovery flywheel (the system drafts its own roadmap) without widening
+the trust surface.

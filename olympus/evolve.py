@@ -149,6 +149,14 @@ for _t in (
     Tunable("scaffold_evolve", "max_archive", lo=50, hi=200, default=200,
             on_fail="decrease",
             note="keep a smaller variant archive when proposals keep failing"),
+    # Web-context fetch knob (domainlore feeds ok/fail from every scrape). A
+    # resource/quality knob, not a safety gate: on sustained fetch failure the
+    # reviewer lengthens the per-socket timeout (slow origins get more room);
+    # bounded so a hostile slow-drip still can't hang a worker indefinitely.
+    Tunable("webctx", "fetch_timeout", lo=6, hi=20, default=12,
+            on_fail="increase",
+            note="give slow origins more time when web fetches keep failing "
+                 "(bounded — slow-drip is still capped)"),
     # Earned-autonomy policy knobs (trust.py). SECURITY-relevant, so tighten_only:
     # when the operator degrades, the earned-autonomy envelope auto-narrows
     # (higher bar to earn trust, longer settle after a surprise, fewer unattended

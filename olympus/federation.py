@@ -51,6 +51,7 @@ LABEL = "federation/v1"            # witness domain-separated subkey label
 _NS_PEERS = "federation.peers"
 _NS_INBOX = "federation.lessons"
 _MAX_LESSONS = 200
+_MAX_SHARE = 1000                  # hard cap on domains in a shared-lore bundle
 _MAX_INBOUND = 1_000_000           # hard cap on an inbound request body (F3)
 _LOCK = threading.Lock()
 
@@ -321,6 +322,120 @@ def staged_lessons() -> list[dict]:
         return []
 
 
+# --- shared domain lore (raw per-domain facts, operator-gated) ------------
+#
+# Deeper than lesson sync: a `trusted` peer's *raw domain lore* — where a
+# sitemap/feed lives, whether a site needs interaction (and the safe profile
+# that works) or a mobile UA, its robots posture — crosses the wire, is scrubbed,
+# and STAGES as candidates in the local corpus's own staging area. It is folded
+# into the live corpus only by the operator's explicit merge. Nothing it carries
+# can relax a fetch gate; every fetch is re-gated regardless of who contributed
+# the hint. This is the domainlore moat compounding across a fleet without
+# widening the trust surface.
+
+def _scrub_share_row(row: dict) -> dict | None:
+    """Scrub one shareable lore row before it leaves (or as it enters): the
+    free-text `site_name` is defanged + PII-stripped; the domain is validated as
+    a bare hostname; URLs pass through (a mangled URL simply fails the fetch gate
+    later — safe); the action profile is bounded *structurally* (well-formed safe
+    steps only). Verb safety is re-enforced at use, so a whole-string PII scrub —
+    which would mangle the JSON and silently drop legitimate profiles — is the
+    wrong tool here; the structural sanitizer is."""
+    if not isinstance(row, dict):
+        return None
+    from . import domainlore
+    dom = str(row.get("domain", "")).strip().lower()[:253]
+    if not domainlore._valid_domain(dom):
+        return None
+
+    def _cnt(v):
+        try:
+            return max(0, min(_MAX_SHARE, int(v)))
+        except (TypeError, ValueError):
+            return 0
+    return {"domain": dom,
+            "sitemap_url": str(row.get("sitemap_url", ""))[:300],
+            "feed_url": str(row.get("feed_url", ""))[:300],
+            "site_name": _scrub(str(row.get("site_name", "")))[:200],
+            "action_profile": domainlore._sanitize_profile(
+                str(row.get("action_profile", ""))),
+            "robots_disallow": bool(row.get("robots_disallow")),
+            "has_jsonld": bool(row.get("has_jsonld")),
+            "mobile_helped": _cnt(row.get("mobile_helped")),
+            "actions_helped": _cnt(row.get("actions_helped"))}
+
+
+def export_domainlore(min_visits: int = 2, limit: int = 500) -> dict:
+    """A signed bundle of this instance's durable per-domain facts for a trusted
+    peer. Only domains with a real track record cross; every field is scrubbed."""
+    from . import domainlore
+    rows = []
+    try:
+        rows = domainlore.shareable(min_visits=min_visits, limit=limit)
+    except Exception:
+        rows = []
+    clean = [c for c in (_scrub_share_row(r) for r in rows) if c]
+    return sign_envelope({"kind": "domainlore", "name": _instance_name(),
+                          "domains": clean[:_MAX_SHARE], "at": _now_iso()})
+
+
+def import_domainlore(envelope: dict) -> dict:
+    """Verify a peer's lore bundle and STAGE its rows as candidates in the local
+    corpus's staging area — never folded into the live corpus without the
+    operator's merge. Rejects anything not signed by a `trusted` pinned peer."""
+    ok, payload = verify_envelope(envelope)
+    if not ok or payload.get("kind") != "domainlore":
+        raise FederationError("lore bundle failed signature verification")
+    pub = str((envelope.get("integrity") or {}).get("publicKey") or "")
+    peer = peer_by_key(pub)
+    if not peer or _trust_rank(peer.trust) < _trust_rank("trusted"):
+        raise FederationError("peer is not trusted for lore sharing")
+    if _too_old(payload):
+        raise FederationError("lore bundle is stale (outside freshness window)")
+    raw = payload.get("domains")
+    rows = [c for c in (_scrub_share_row(r)
+                        for r in (raw if isinstance(raw, list) else [])) if c]
+    from . import domainlore
+    staged = domainlore.stage_shared(rows[:_MAX_SHARE], source=peer.name)
+    return {"staged": staged, "from": peer.name}
+
+
+def push_domainlore(name: str, *, token: str | None = None, fetcher=None,
+                    min_visits: int = 2, limit: int = 500) -> dict:
+    """Send this instance's scrubbed domain lore to a pinned `trusted` peer.
+    Opt-in and egress-gated exactly like `call_peer`; sharing raw lore requires
+    the highest trust level (a `task` peer cannot receive it)."""
+    if not enabled():
+        raise FederationError("federation is disabled (set OLYMPUS_FEDERATION=1)")
+    peer = get_peer(name)
+    if not peer or not peer.url:
+        raise FederationError(f"unknown or URL-less peer: {name}")
+    if _trust_rank(peer.trust) < _trust_rank("trusted"):
+        raise FederationError(f"peer {name} is not trusted for lore sharing")
+    url = peer.url.rstrip("/") + "/federation/domainlore"
+    reason = security.url_block_reason(url, resolve=False)
+    if reason:
+        raise FederationError(f"egress refused: {reason}")
+    envelope = export_domainlore(min_visits=min_visits, limit=limit)
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    fetch = fetcher or a2a._default_fetch
+    status, body = fetch(url, json.dumps(envelope).encode("utf-8"), headers,
+                         a2a._OUT_TIMEOUT)
+    if int(status) >= 400:
+        raise FederationError(f"peer {name} returned HTTP {status}")
+    try:
+        resp = json.loads(bytes(body)[:a2a._MAX_RESPONSE].decode("utf-8",
+                                                                 "replace"))
+    except (ValueError, json.JSONDecodeError):
+        resp = {}
+    return {"peer": peer.name,
+            "sent": len(envelope["payload"]["domains"]),
+            "staged": int(resp.get("staged", 0) or 0)
+            if isinstance(resp, dict) else 0}
+
+
 # --- capability discovery (signed card of what this instance can do) ------
 
 def capabilities_card() -> dict:
@@ -551,6 +666,7 @@ def handle_request(method: str, path: str, body: dict, headers: dict,
     # path 404s (doesn't masquerade as an auth failure).
     if (method, path) not in (("POST", "/federation/task"),
                               ("POST", "/federation/lessons"),
+                              ("POST", "/federation/domainlore"),
                               ("POST", "/federation/capabilities")):
         return 404, {"error": "unknown federation route"}
     if not _auth_ok(headers):
@@ -591,6 +707,12 @@ def handle_request(method: str, path: str, body: dict, headers: dict,
     if method == "POST" and path == "/federation/lessons":
         try:
             return 200, import_lessons(body or {})
+        except FederationError as err:
+            return 403, {"error": str(err)}
+
+    if method == "POST" and path == "/federation/domainlore":
+        try:
+            return 200, import_domainlore(body or {})
         except FederationError as err:
             return 403, {"error": str(err)}
 

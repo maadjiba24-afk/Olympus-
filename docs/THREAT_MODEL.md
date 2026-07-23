@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 125 tools in
+Olympus exposes a **finite, named** tool surface — the 126 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -69,6 +69,7 @@ surface. So the surface and its threat model can't drift apart.
 | `list_dir` | List a workspace directory | first-party read | Read-only; path-confined | Recon outside the workspace — confined to the root |
 | `browse_page` | Fetch a page as text + extract links | ingests untrusted | SSRF/egress gate on the URL and every redirect (`_http_get`); output wrapped | SSRF (incl. redirect-to-internal) — refused by `url_block_reason`; injected content — wrapped |
 | `crawl_site` | Recursively crawl a site into a clean-markdown digest | ingests untrusted | Every hop routes through `_http_get` (SSRF/egress gate + redirect re-check) via `webctx.crawl`; bounded by depth (≤3), page count (≤25) and an aggregate byte cap; optional same-domain + include/exclude glob restriction; output wrapped | SSRF amplification / crawl runaway — each URL re-gated, hard-bounded on pages+depth+bytes; injected page content — wrapped |
+| `web_scrape` | Advanced single-URL scrape (formats/branding/images/attributes/json; optional pre-scrape actions, mobile/locale hints) | ingests untrusted | Fetch via `_http_get` (SSRF/egress/port-allowlist); every model-bound format wrapped; `actions` run ONLY through the governed browser harness (SSRF-gated nav, ledgered CDP, no ungoverned JS — `executeJavascript` is rejected, not run); output bounded | SSRF / injection — gated + wrapped; ungoverned actuation — refused, only safe verbs via the governed, ephemeral harness |
 | `web_map` | Discover URLs under a site (robots/sitemap/one-hop links) | ingests untrusted | Every robots/sitemap/nested-index/link fetch routes through `_http_get`; results deduped, sorted, hard-capped (≤500); output wrapped | SSRF via a crafted sitemap/robots URL — each fetch re-gated; discovered URLs are attacker-controlled data, wrapped |
 | `web_batch_scrape` | Scrape a list of URLs (≤25) into markdown | ingests untrusted | Each URL independently gated via `webctx.scrape`→`_http_get`; per-list and per-page bounds; output wrapped | SSRF / cost runaway — every URL re-gated, list hard-capped; injected content wrapped |
 | `web_extract` | Verified schema-guided extraction from URLs/text | ingests untrusted | Sources fetched via `_http_get`; content `wrap_untrusted`-enveloped before EVERY model hop (extract + verify); a second `verify` pool role re-checks values; source count capped (≤10) | Prompt injection via page content — structurally enveloped on every hop and actuators stripped (INGESTION); hallucinated values — flagged by the verify role |
