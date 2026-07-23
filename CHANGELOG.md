@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — `test_exfil_scan` skips gracefully without a working crypto backend
+
+`test_vault_secrets_are_detected` stored a secret through the vault, which needs a
+functional `cryptography` Fernet backend — an optional dependency that can also be
+*present but broken* (a missing `_cffi_backend` / panicking native lib sets the
+vault's `_HAVE_CRYPTO=False` too). In such an environment the test errored instead
+of skipping. It now skips via the vault's own `available()` predicate — mirroring
+the module's documented graceful-degradation contract and the browser-smoke tests'
+skip-without-a-browser pattern — so a minimal or crypto-broken environment stays
+green. Where the backend works (e.g. GitHub CI) the test runs and asserts exactly
+as before.
+
 ### Fixed — Resilient local-Chrome launch (browser-smoke CI reliability)
 
 `browser.launch_local` waited a fixed 20s for Chrome's DevTools endpoint, then

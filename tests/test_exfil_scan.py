@@ -42,6 +42,16 @@ def test_short_env_values_are_ignored(monkeypatch):
 def test_vault_secrets_are_detected(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "test-master-key")
     from olympus import vault
+    # The vault needs a working `cryptography` Fernet backend to STORE a secret.
+    # It's an optional dependency, and its native backend can even be present but
+    # broken/panicking (vault sets _HAVE_CRYPTO=False in that case too). When the
+    # backend can't encrypt, this test can't exercise vault storage — skip it,
+    # like the browser-smoke tests skip without a real browser, rather than
+    # failing on an optional-dep gap. (With the key set above, `available()`
+    # reflects the backend's status.)
+    if not vault.available():
+        pytest.skip("vault crypto backend unavailable "
+                    "(cryptography missing or its native backend is broken)")
     vault.put("alice", "github", {"token": "ghp_vaultvalue9876543"})
     reason = security.secret_exfil_reason(
         "send ghp_vaultvalue9876543 please", user="alice")
