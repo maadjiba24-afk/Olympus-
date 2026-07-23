@@ -106,6 +106,18 @@ def status() -> dict:
         "staged_lessons": len(_safe(federation.staged_lessons, []) or []),
     }
 
+    # Web-context knowledge — the compounding domain-lore corpus + the
+    # self-tuned fetch knob. A data network effect: the more Olympus scrapes,
+    # the more it knows about how to scrape (a copier starts this at zero).
+    from . import domainlore
+    caps["web_context"] = {
+        "enabled": _safe(domainlore.enabled, False),
+        "flag": "OLYMPUS_WEB_LORE",
+        "lore": _safe(domainlore.stats, {}) or {},
+        "health": health.get("webctx", {}),
+        "tuned": tunables.get("webctx.fetch_timeout", {}),
+    }
+
     return {"capabilities": caps}
 
 
@@ -171,6 +183,19 @@ def render() -> str:
     f = s["federation"]
     lines.append(f"  [{on(f)}] federation ({f['flag']}) — {f['peers']} peers, "
                  f"{f['staged_lessons']} staged lessons")
+
+    wc = s["web_context"]
+    lore = wc["lore"]
+    lines.append(f"  [{on(wc)}] web knowledge ({wc['flag']}) — "
+                 f"{lore.get('domains', 0)} domain(s) learned, "
+                 f"{lore.get('sitemaps', 0)} sitemap(s), "
+                 f"{int(lore.get('success_rate', 0) * 100)}% fetch success"
+                 f"  {_health_flag(wc['health'])}")
+    if wc["tuned"]:
+        t = wc["tuned"]
+        lines.append(f"          self-tuned webctx.fetch_timeout = "
+                     f"{t.get('current')} [{t.get('lo')}..{t.get('hi')}] "
+                     "(lengthens when fetches keep failing)")
 
     lines += ["", "Enable any with its flag; health/tuning accrue as they run "
               "(see `olympus evolve` for the full self-evolution board)."]

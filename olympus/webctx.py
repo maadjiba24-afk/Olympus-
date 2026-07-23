@@ -447,16 +447,26 @@ def _device_headers(mobile: bool, location: str) -> dict:
     return hdrs
 
 
+def _fetch_timeout() -> float:
+    """The per-socket timeout, self-tuned by the evolve reviewer from real
+    fetch outcomes (domainlore records ok/fail). Falls back to the constant."""
+    try:
+        from . import evolve
+        return float(evolve.current("webctx", "fetch_timeout"))
+    except Exception:
+        return _FETCH_TIMEOUT
+
+
 def _fetch_html(url: str, mobile: bool = False, location: str = "") -> str:
     """Fetch a page through the SSRF/egress-gated, rebinding-pinned path with a
-    port allowlist and a tight socket timeout. `mobile`/`location` add device and
-    language request hints. Raises ValueError (blocked) or urllib errors
-    (network); callers convert to a clean error string. Byte-capped."""
+    port allowlist and a self-tuned socket timeout. `mobile`/`location` add
+    device and language request hints. Raises ValueError (blocked) or urllib
+    errors (network); callers convert to a clean error string. Byte-capped."""
     from . import tools
     if not _port_allowed(url):
         raise ValueError(f"refusing non-web port for {urlparse(url).netloc}")
     headers = _device_headers(mobile, location) or None
-    html = tools._http_get(url, timeout=_FETCH_TIMEOUT, headers=headers)
+    html = tools._http_get(url, timeout=_fetch_timeout(), headers=headers)
     return html[:_PAGE_BYTE_CAP]
 
 
@@ -510,10 +520,34 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
     try:
         html = _fetch_html(url, mobile=mobile, location=location)
     except ValueError as err:                       # SSRF/egress/secret-exfil
+        _observe(url, ok=False, blocked=True)
         return {"url": url, "error": f"blocked: {err}"}
     except Exception as err:
+        _observe(url, ok=False)
         return {"url": url, "error": f"fetch failed: {str(err)[:200]}"}
-    return _assemble(url, html, formats, schema, prompt, attributes)
+    result = _assemble(url, html, formats, schema, prompt, attributes)
+    _observe(url, ok=True, bytes_=len(html),
+             site_name=(result.get("branding") or {}).get("site_name", ""))
+    return result
+
+
+def _observe(url: str, **kw) -> None:
+    """Fold this visit into the compounding domain lore (best-effort, replay-
+    inert). Isolated so a lore hiccup can never affect a scrape's result."""
+    try:
+        from . import domainlore
+        domainlore.observe(url, **kw)
+    except Exception:
+        pass
+
+
+def _hint(url: str) -> dict:
+    """Learned, purely-additive hints for this domain (empty on any error)."""
+    try:
+        from . import domainlore
+        return domainlore.hint(url)
+    except Exception:
+        return {}
 
 
 def _assemble(url: str, html: str, formats, schema, prompt,
@@ -734,12 +768,19 @@ def map_urls(url: str, limit: int = 200,
 
     # 1) robots.txt -> Sitemap: entries (same-site only)
     sitemaps: list[str] = []
+    # Learned lore (purely additive): a sitemap this domain used before is tried
+    # first. Still same-site-checked and gated below like any other candidate.
+    learned = _hint(url)
+    if learned.get("sitemap_url") \
+            and _same_site(learned["sitemap_url"], base_host, include_subdomains):
+        sitemaps.append(learned["sitemap_url"])
     try:
         robots = _fetch_html(urljoin(root + "/", "robots.txt"))
         for line in robots.splitlines():
             if line.lower().startswith("sitemap:"):
                 sm = line.split(":", 1)[1].strip()
-                if _same_site(sm, base_host, include_subdomains):
+                if _same_site(sm, base_host, include_subdomains) \
+                        and sm not in sitemaps:
                     sitemaps.append(sm)
                 if len(sitemaps) >= _MAP_MAX_SITEMAPS:
                     break
@@ -750,6 +791,7 @@ def map_urls(url: str, limit: int = 200,
 
     # 2) sitemap(s) -> <loc> entries (one level of sitemap-index expansion),
     #    every fetched sitemap same-site and de-duplicated.
+    used_sitemap = ""
     for sm in sitemaps[:_MAP_MAX_SITEMAPS]:
         if sm in seen_sitemaps or len(found) >= limit:
             continue
@@ -759,6 +801,8 @@ def map_urls(url: str, limit: int = 200,
         except Exception:
             continue
         locs = _SITEMAP_LOC_RE.findall(xml)
+        if locs and not used_sitemap:
+            used_sitemap = sm                    # remember the productive sitemap
         _add_locs(locs)
         child_maps = [loc for loc in locs if loc.lower().endswith(".xml")
                       and _same_site(loc, base_host, include_subdomains)]
@@ -783,6 +827,10 @@ def map_urls(url: str, limit: int = 200,
             notes.append("start page unavailable")
 
     urls = sorted(found)[:limit]
+    # Compound the discovery: remember where this domain's sitemap lives so the
+    # next map/crawl of it starts there.
+    if used_sitemap:
+        _observe(url, ok=True, sitemap=used_sitemap)
     return {"url": url, "count": len(urls), "urls": urls, "notes": notes}
 
 
