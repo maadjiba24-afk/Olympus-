@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Keyless-install UX gaps (FEATURE_AUDIT §2.1, §2.2)
+
+The two runtime surfaces the feature audit flagged as broken/partial are closed
+(the only ones it found; the remaining DEFERRED items are deliberate design
+choices or safety non-goals):
+
+- **`olympus scores` is display-only.** It read scores by calling
+  `per_specialist_scores()`, which *ran the paid live benchmark* when nothing was
+  cached and, with no API key, let a raw SDK `TypeError` escape as a traceback — a
+  "show" command doing paid work and crashing. It now reads the committed
+  per-specialist baseline (`evals.load_baseline()` — a file read, `{}` if none,
+  never a model call) and points to `olympus eval` when empty. Help text updated
+  to match (resolves the help-vs-behavior discrepancy §4.3).
+- **`olympus tick` (heartbeat) is quiet on a keyless install.** Every
+  LLM-dependent job used to print a full traceback each tick when no provider key
+  was set. `tick` now checks `firstrun.configured()` once and routes those jobs'
+  failures through a shared `_job_error` helper that logs one line — `"<job>:
+  skipped (no provider key configured)"` — instead, matching the replay
+  self-check's existing guard. Real failures (key present) still get the full
+  traceback; non-LLM jobs are unchanged.
+
+Covered by `tests/test_keyless_ux.py` (5 tests).
+
 ### Testing — Multiprocess race tests import `olympus` in spawned workers
 
 `test_proclock_races` spawns real child processes (`python worker.py` / `python

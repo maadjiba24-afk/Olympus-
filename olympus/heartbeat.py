@@ -22,10 +22,27 @@ def _due(state: dict, key: str, interval: int, now: float) -> bool:
     return now - state.get(key, 0.0) >= interval
 
 
+def _job_error(label: str, configured: bool) -> str:
+    """Failure line for an LLM-dependent heartbeat job. On a keyless install the
+    provider SDK raises before any network call, so every such job fails the same
+    way each tick — collapse that expected no-key failure into one quiet line
+    instead of a full traceback per job (FEATURE_AUDIT §2.2), matching the
+    replay self-check's `firstrun.configured()` guard. A real failure with a key
+    present still gets the full traceback."""
+    if not configured:
+        return f"{label}: skipped (no provider key configured)"
+    return f"{label} failed:\n" + traceback.format_exc()
+
+
 def tick(state: dict, now: float | None = None) -> list[str]:
     """Run any due tasks once; return a log of what happened."""
     now = now or time.time()
     log: list[str] = []
+    # Whether any model backend is reachable. The LLM-dependent cadences below
+    # use this (via _job_error) to log a one-line skip instead of a traceback on
+    # a keyless install, rather than each spewing a full auth traceback per tick.
+    from . import firstrun
+    configured = firstrun.configured()
 
     # Upgrade/restart handoff: the previous process journaled what it was in
     # the middle of. Report it once — each subsystem (gateway inflight,
@@ -115,7 +132,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             if pushed:
                 log.append(f"Argus: report pushed to {', '.join(pushed)}.")
         except Exception:
-            log.append("Argus failed:\n" + traceback.format_exc())
+            log.append(_job_error("Argus", configured))
         state["opportunity_scan"] = now
 
     if _due(state, "watchlist", config.WATCHLIST_EVERY, now):
@@ -126,7 +143,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                 orchestrator.watch_and_learn(url)
                 log.append("Mnemosyne: lessons saved to memory/lessons.")
             except Exception:
-                log.append("Mnemosyne failed:\n" + traceback.format_exc())
+                log.append(_job_error("Mnemosyne", configured))
         state["watchlist"] = now
 
     if _due(state, "maintenance", config.MAINTENANCE_EVERY, now):
@@ -158,7 +175,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             # must not turn the heartbeat log into a metronome.
             log += ["Wiki: " + line for line in wiki.dream_all(now)]
         except Exception:
-            log.append("Dreaming failed:\n" + traceback.format_exc())
+            log.append(_job_error("Dreaming", configured))
         state["dreaming"] = now
 
     if config.sleeptime_enabled() and _due(state, "sleeptime",
@@ -170,7 +187,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             from . import reflection
             log += reflection.sleep_cycle().get("log", [])
         except Exception:
-            log.append("Sleep-time reflection failed:\n" + traceback.format_exc())
+            log.append(_job_error("Sleep-time reflection", configured))
         state["sleeptime"] = now
 
     if config.live_eval_enabled() and _due(state, "live_eval",
@@ -179,7 +196,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             from . import liveeval
             log += liveeval.run()
         except Exception:
-            log.append("Live-eval failed:\n" + traceback.format_exc())
+            log.append(_job_error("Live-eval", configured))
         state["live_eval"] = now
 
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
@@ -188,13 +205,13 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             orchestrator.daily_learning()
             log.append("Metis: skills updated; report saved to memory/reports.")
         except Exception:
-            log.append("Metis failed:\n" + traceback.format_exc())
+            log.append(_job_error("Metis", configured))
         # Metis also prunes drifted operator site profiles (Phase 4).
         try:
             from . import operator
             log.append("Operator review: " + operator.review_profiles())
         except Exception:
-            log.append("Operator review failed:\n" + traceback.format_exc())
+            log.append(_job_error("Operator review", configured))
         state["daily_learning"] = now
 
     from . import discovery
@@ -207,7 +224,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append(f"Discovery: {r.get('open_knowledge', 0)} knowledge / "
                        f"{r.get('open_capability', 0)} capability gap(s) open.")
         except Exception:
-            log.append("Discovery failed:\n" + traceback.format_exc())
+            log.append(_job_error("Discovery", configured))
         state["discovery"] = now
 
     if config.TRAIN_EVERY and _due(state, "train", config.TRAIN_EVERY, now):
@@ -216,7 +233,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             orchestrator.train_specialists()
             log.append("Prometheus: training round saved to memory/reports.")
         except Exception:
-            log.append("Training failed:\n" + traceback.format_exc())
+            log.append(_job_error("Training", configured))
         state["train"] = now
 
     from . import curator
@@ -225,7 +242,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         try:
             log.append("Curator: " + curator.curate())
         except Exception:
-            log.append("Curator failed:\n" + traceback.format_exc())
+            log.append(_job_error("Curator", configured))
         state["skill_curation"] = now
 
     from . import evolve
@@ -233,8 +250,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         try:
             log.append(evolve.review())
         except Exception:
-            log.append("Feature-evolution review failed:\n"
-                       + traceback.format_exc())
+            log.append(_job_error("Feature-evolution review", configured))
         state["feature_evolution"] = now
 
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
@@ -246,7 +262,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             if pushed:
                 log.append(f"Prometheus: audit pushed to {', '.join(pushed)}.")
         except Exception:
-            log.append("Prometheus failed:\n" + traceback.format_exc())
+            log.append(_job_error("Prometheus", configured))
         state["evolution_audit"] = now
 
     if config.REPLAY_GATE_EVERY and _due(state, "replay_gate",
