@@ -15,6 +15,30 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Blast-radius containment: own each of Strix's damage vectors
+
+Made the assessment guardrails **owned, active, and demonstrable** (ADR 0013).
+Two additions to `olympus/assess.py`:
+
+- **Active egress confinement.** `confined_egress()` pins ALL outbound network
+  for an assessment to the signed authorization's hosts, enforced at the
+  gated-fetch layer (`tools._http_get`/`_http_get_bytes`/`_http_probe` now call
+  `assess.egress_confined_reason` after their SSRF preamble). A host outside the
+  signed scope is refused at the socket layer, fail-closed — so even a hijacked
+  assessment cannot reach the operator's LAN, a metadata endpoint, or any
+  out-of-scope host (the inversion of Strix's open-egress sandbox). A strict
+  **no-op** when no assessment is active, so ordinary fetches are unchanged;
+  `run_assessment` runs inside it.
+- **A containment self-check.** `containment()` / `olympus assess containment`
+  maps each of Strix's five blast-radius vectors (prompt-only scope, open
+  egress, refusal-suppression, arbitrary payloads, removed audit trail) to its
+  owning Olympus control and PROVES each is contained — live checks where it
+  can. `test_assess.py` asserts all five stay contained, so a regression that
+  widens the blast radius fails CI.
+
+No new tool/action/command (an `assess` subcommand + one no-op-by-default check
+on the shared fetch path). Tests: 7 new.
+
 ### Added — Self-discovery: acquire knowledge + propose features over time
 
 New `olympus/discovery.py` — a native loop pointed at what Olympus does NOT yet

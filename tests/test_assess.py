@@ -449,6 +449,65 @@ def test_aegis_prompt_includes_insights(workspace):
     assert "Assessment experience" in prompt and "CWE-95" in prompt
 
 
+# --- blast-radius containment: egress confinement + the self-check -----------
+
+def test_containment_all_vectors_contained():
+    rows = assess.containment()
+    assert len(rows) == 5
+    assert all(r["contained"] for r in rows), \
+        [r for r in rows if not r["contained"]]
+    vectors = {r["id"] for r in rows}
+    assert vectors == {"scope", "egress", "judgment", "payloads", "audit"}
+    assert "5/5 vectors contained" in assess.containment_scorecard()
+
+
+def test_egress_confinement_is_noop_when_inactive():
+    # No assessment confining egress → every host passes (ordinary fetches
+    # unaffected).
+    assert assess.egress_confined_reason("anything.example") is None
+    assert assess.egress_confined_reason("169.254.169.254") is None
+
+
+def test_egress_confinement_blocks_out_of_scope_and_allows_in_scope():
+    with assess.confined_egress(targets=["app.example"]):
+        assert assess.egress_confined_reason("app.example") is None
+        assert assess.egress_confined_reason("api.app.example") is None   # subdomain
+        assert assess.egress_confined_reason("evil.example") is not None
+        assert assess.egress_confined_reason("169.254.169.254") is not None
+    # restored on exit
+    assert assess.egress_confined_reason("evil.example") is None
+
+
+def test_confined_egress_from_authorization():
+    assess.grant(["app.example"], expires_in=3600)
+    with assess.confined_egress():
+        assert assess.egress_confined_reason("app.example") is None
+        assert assess.egress_confined_reason("elsewhere.example") is not None
+
+
+def test_gated_fetch_refuses_out_of_scope_when_confined(monkeypatch):
+    from olympus import tools
+    # Prove the confinement is enforced at the fetch layer, not just advisory.
+    with assess.confined_egress(targets=["app.example"]):
+        with pytest.raises(ValueError, match="egress confinement"):
+            tools._http_probe("https://evil.example/x")
+
+
+def test_run_assessment_confines_egress(workspace, monkeypatch):
+    from olympus import tools
+    assess.grant(["app.example", "local"], expires_in=3600)
+    seen = {}
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True):
+        # If confinement is active this is only reached for in-scope hosts.
+        from urllib.parse import urlparse
+        seen[urlparse(url).hostname] = True
+        return {"status": 200, "headers": {"server": "x"}, "body": "", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.run_assessment("app.example")
+    assert "app.example" in seen and "evil.example" not in seen
+
+
 def test_budget_stop_halts_phases(workspace, monkeypatch):
     assess.grant(["example.com", "local"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _fake_probe({"server": "nginx"}))

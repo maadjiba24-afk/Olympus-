@@ -390,6 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
         "bench", help="score the engine's detection quality (self-benchmark)")
     as_sub.add_parser(
         "insights", help="show accumulated assessment experience (self-evolving)")
+    as_sub.add_parser(
+        "containment", help="prove each Strix blast-radius vector is contained")
     p_as_run = as_sub.add_parser(
         "run", help="bounded assessment: recon+audit (+whitebox with --source)")
     p_as_run.add_argument("target")
@@ -1663,6 +1665,8 @@ def main(argv: list[str] | None = None) -> int:
             print(assess.bench_scorecard())
         elif sc == "insights":
             print(assess.insights_summary())
+        elif sc == "containment":
+            print(assess.containment_scorecard())
         elif sc == "run":
             try:
                 r = assess.run_assessment(args.target, source_path=args.source,

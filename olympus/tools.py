@@ -644,6 +644,14 @@ def _http_get(url: str, timeout: float = 30,
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
+    # Assessment egress confinement: a NO-OP unless an assessment is confining
+    # egress (assess.confined_egress), in which case a host outside the signed
+    # scope is refused here at the fetch layer — fail-closed, closing Strix's
+    # open-egress blast radius even for a hijacked run.
+    from . import assess as _assess
+    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+    if _conf:
+        raise ValueError(_conf)
     hdrs = {"User-Agent": _UA}
     if headers:
         hdrs.update({str(k): str(v) for k, v in headers.items()})
@@ -668,6 +676,14 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
+    # Assessment egress confinement: a NO-OP unless an assessment is confining
+    # egress (assess.confined_egress), in which case a host outside the signed
+    # scope is refused here at the fetch layer — fail-closed, closing Strix's
+    # open-egress blast radius even for a hijacked run.
+    from . import assess as _assess
+    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+    if _conf:
+        raise ValueError(_conf)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=timeout) as resp:
@@ -693,6 +709,14 @@ def _http_probe(url: str, max_bytes: int = 400_000,
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
+    # Assessment egress confinement: a NO-OP unless an assessment is confining
+    # egress (assess.confined_egress), in which case a host outside the signed
+    # scope is refused here at the fetch layer — fail-closed, closing Strix's
+    # open-egress blast radius even for a hijacked run.
+    from . import assess as _assess
+    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+    if _conf:
+        raise ValueError(_conf)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     if follow_redirects:
         opener = _proxy_opener() if proxied else _pinned_opener()

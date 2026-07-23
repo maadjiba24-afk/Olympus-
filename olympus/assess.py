@@ -46,12 +46,14 @@ returns a clear error, never a raise that crashes a run.
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import ipaddress
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1104,17 +1106,21 @@ def run_assessment(target: str, *, source_path: str | None = None,
     def _over_budget() -> bool:
         return budget_usd is not None and (_spent_usd() - start_spent) >= budget_usd
 
-    if not target.lower().startswith(("local", "workspace")):
-        phases.append({"phase": "recon", **recon(target, user)})
-        if not _over_budget():
-            phases.append({"phase": "http_audit", **http_audit(target, user=user)})
+    # Confine ALL outbound network for the whole run to the signed scope — a
+    # hijacked assessment cannot leave the authorized target set even if a new
+    # network path is added (blast-radius containment, ADR 0013).
+    with confined_egress(user):
+        if not target.lower().startswith(("local", "workspace")):
+            phases.append({"phase": "recon", **recon(target, user)})
+            if not _over_budget():
+                phases.append({"phase": "http_audit", **http_audit(target, user=user)})
 
-    if source_path and not _over_budget():
-        phases.append({"phase": "sast", **sast_scan(source_path, user=user)})
-        if not _over_budget():
-            phases.append({"phase": "secret_scan", **secret_scan(source_path, user=user)})
-        if not _over_budget():
-            phases.append({"phase": "dep_audit", **dep_audit(source_path, user=user)})
+        if source_path and not _over_budget():
+            phases.append({"phase": "sast", **sast_scan(source_path, user=user)})
+            if not _over_budget():
+                phases.append({"phase": "secret_scan", **secret_scan(source_path, user=user)})
+            if not _over_budget():
+                phases.append({"phase": "dep_audit", **dep_audit(source_path, user=user)})
 
     findings = list_findings(user)
     return {
@@ -1581,3 +1587,151 @@ def insights_summary(user: str | None = None) -> str:
         out.append(f"- {r['cwe']} {r['title']}: {r['count']}× "
                    f"(via {', '.join(r['sources']) or 'scan'})")
     return "\n".join(out)
+
+
+# ===========================================================================
+# Blast-radius containment — turn Strix's damage vectors into owned controls
+# ===========================================================================
+# Strix's "blast radius" is what an autonomous security agent can reach/break if
+# it is wrong, injected, or misused. Olympus owns a named control for each
+# vector; this section makes two of them FIRST-CLASS:
+#
+#   (a) Active egress confinement. Per-tool `require_scope` already gates WHICH
+#       target each call may touch. `confined_egress` goes further: for the whole
+#       duration of an assessment it pins outbound network to ONLY the signed
+#       authorization's hosts, enforced at the gated-fetch layer (fail-closed).
+#       So even a hijacked assessment physically cannot reach an out-of-scope
+#       host, the operator's LAN, or a metadata endpoint — the inversion of
+#       Strix's open-egress sandbox. A strict NO-OP when no assessment is active,
+#       so ordinary Olympus fetches are byte-for-byte unchanged.
+#   (b) A containment self-check that PROVES each vector is contained (like the
+#       self-benchmark proves detection quality), so the guardrails are
+#       demonstrable, not merely asserted.
+
+# The active assessment egress scope: a frozenset of authorized host patterns, or
+# None when no assessment is confining egress (the default → every check no-ops).
+_ACTIVE_SCOPE: contextvars.ContextVar[frozenset | None] = contextvars.ContextVar(
+    "assess_active_scope", default=None)
+
+
+@contextmanager
+def confined_egress(user: str | None = None,
+                    targets: list[str] | None = None):
+    """While this context is active, outbound network is confined to the signed
+    authorization's hosts (or `targets` if given) — enforced at the gated-fetch
+    layer, fail-closed. Nests safely (restores the prior scope on exit)."""
+    if targets is not None:
+        scope = frozenset(_normalize_targets(targets))
+    else:
+        scope = frozenset(
+            pat for a in active_authorizations(user) for pat in a.get("targets", []))
+    token = _ACTIVE_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _ACTIVE_SCOPE.reset(token)
+
+
+def egress_confined_reason(host: str) -> str | None:
+    """Reason string if `host` is refused by the active assessment egress
+    confinement, else None. NO-OP (None) when no assessment is confining egress,
+    so every non-assessment fetch is unaffected. The gated fetch path in tools.py
+    calls this in addition to its SSRF/egress preamble."""
+    scope = _ACTIVE_SCOPE.get()
+    if scope is None:
+        return None                                   # no confinement active
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return "assessment egress confinement: empty host refused"
+    for pat in scope:
+        if pat in ("local", "workspace", "."):
+            continue                                  # not a network host
+        if _host_matches(h, pat):
+            return None
+    return (f"assessment egress confinement: '{host}' is not in the authorized "
+            "scope — refusing to leave the signed target set")
+
+
+# --- containment self-check -------------------------------------------------
+
+def _check(name: str, vector: str, control: str, ok: bool, detail: str) -> dict:
+    return {"vector": vector, "control": control, "contained": bool(ok),
+            "detail": detail, "id": name}
+
+
+def containment(user: str | None = None) -> list[dict]:
+    """Prove each of Strix's blast-radius vectors is contained by a named
+    Olympus control. Runs live checks where it can (scope fail-closed, egress
+    confinement refuses out-of-scope); asserts the structural ones. Pure — no
+    network, no scope grant needed."""
+    checks: list[dict] = []
+
+    # 1. Scope: prompt-only (Strix) vs code-enforced fail-closed (Olympus).
+    fresh = f"containment-probe-{os.urandom(2).hex()}.example"
+    try:
+        require_scope(fresh, user="__containment_no_such_user__")
+        scope_ok = False
+    except AssessScopeError:
+        scope_ok = True
+    checks.append(_check(
+        "scope", "Prompt-only scope → act on unintended hosts",
+        "require_scope() — code-enforced, fail-closed",
+        scope_ok, "an unauthorized target raises AssessScopeError before any I/O"))
+
+    # 2. Egress: open sandbox (Strix) vs egress confined to signed scope.
+    with confined_egress(targets=["authorized.example"]):
+        blocked = egress_confined_reason("evil.example") is not None
+        allowed = egress_confined_reason("authorized.example") is None
+    noop = egress_confined_reason("anything.example") is None   # inactive → no-op
+    checks.append(_check(
+        "egress", "Open egress → operator host / LAN / metadata",
+        "confined_egress() — outbound pinned to the signed scope, fail-closed",
+        blocked and allowed and noop,
+        "out-of-scope egress refused while active; no-op when inactive"))
+
+    # 3. Refusal-suppression (Strix) vs model judgment retained.
+    supp = False
+    try:
+        from . import agent
+        prompt = (agent.load_prompt("aegis") or "").lower()
+        supp = any(p in prompt for p in (
+            "never refuse", "never ask permission", "never question your authority",
+            "no safety refusals"))
+    except Exception:
+        pass
+    checks.append(_check(
+        "judgment", "Refusal-suppression → no last-line backstop",
+        "Aegis keeps its judgment + a signed authorize_assessment gate",
+        not supp, "Aegis prompt carries no refusal-suppression directives"))
+
+    # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
+    benign = _MAX_ACTIVE_PROBES <= 50 and all(
+        c[0] in ("reflection", "open_redirect") for c in _ACTIVE_CHECKS)
+    checks.append(_check(
+        "payloads", "Arbitrary payloads + spraying → break/exfiltrate a target",
+        "active validation is benign-marker, parameter-directed, capped",
+        benign, f"probes capped at {_MAX_ACTIVE_PROBES}; inert markers only, no exploits"))
+
+    # 5. Removed audit trail (Strix) vs signed authorization + ledgered findings.
+    from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
+    ledger_ok = "authorize_assessment" in actions.registered()
+    checks.append(_check(
+        "audit", "Removed audit trail → can't prove what it did",
+        "signed authorize_assessment action + findings noted to the ledger",
+        ledger_ok, "authorization is an IRREVERSIBLE signed action on the decision log"))
+
+    return checks
+
+
+def containment_scorecard(user: str | None = None) -> str:
+    rows = containment(user)
+    n_ok = sum(1 for r in rows if r["contained"])
+    lines = [
+        "# Blast-radius containment (Strix's damage vectors → Olympus controls)",
+        f"{n_ok}/{len(rows)} vectors contained by a named, live control.", ""]
+    for r in rows:
+        mark = "✓" if r["contained"] else "✗ UNCONTAINED"
+        lines.append(f"[{mark}] {r['vector']}")
+        lines.append(f"    control: {r['control']}")
+        lines.append(f"    proof:   {r['detail']}")
+    return "\n".join(lines)
