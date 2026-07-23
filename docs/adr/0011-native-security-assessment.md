@@ -128,6 +128,20 @@ everywhere else — Prometheus upgrades a prompt only if a before/after benchmar
 shows no regression, else rolls back. Capability compounds; quality cannot
 silently regress. The benchmark is the engine of the self-evolving moat.
 
+## Decision (h): self-evolution learns only from Olympus's own output
+
+Confirmed findings from Olympus's deterministic producers accrue into durable
+per-CWE knowledge (`assess.knowledge`) that is injected into Aegis's prompt
+(`insights_block`), so assessments sharpen over time — the experience→knowledge
+loop, scoped to security. The safety invariant: **only** findings whose `source`
+is an Olympus producer (`sast`/`http_audit`/`dep_audit`/`secret_scan`/
+`active_validation`) are learned from; a finding an agent recorded via the
+`record_finding` tool (`source="agent"`) is excluded, because its text could
+carry content an injected page steered in. So the self-evolving prompt can never
+be poisoned by ingested external content — the injection boundary (Decision (c))
+extends into the learning loop. Knowledge is CWE-class aggregates only (no target
+data), deduped, replay-inert, and bounded.
+
 ## Capabilities delta
 
 - New modules: `olympus/assess.py` (engine + scope + findings + active

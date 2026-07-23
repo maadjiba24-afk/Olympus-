@@ -379,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_val.add_argument("url", help="in-scope URL with the parameter(s) to test")
     as_sub.add_parser(
         "bench", help="score the engine's detection quality (self-benchmark)")
+    as_sub.add_parser(
+        "insights", help="show accumulated assessment experience (self-evolving)")
     p_as_run = as_sub.add_parser(
         "run", help="bounded assessment: recon+audit (+whitebox with --source)")
     p_as_run.add_argument("target")
@@ -1604,6 +1606,8 @@ def main(argv: list[str] | None = None) -> int:
             print(tools._assess_validate(args.url))
         elif sc == "bench":
             print(assess.bench_scorecard())
+        elif sc == "insights":
+            print(assess.insights_summary())
         elif sc == "run":
             try:
                 r = assess.run_assessment(args.target, source_path=args.source,

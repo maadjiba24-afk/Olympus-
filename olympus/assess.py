@@ -344,6 +344,12 @@ def record_finding(finding: Finding | dict, user: str | None = None) -> dict:
                      severity=f.severity, location=f.location)
     except Exception:
         pass
+    # Self-evolution: a finding from one of Olympus's OWN deterministic
+    # scanners/validators accrues into durable assessment knowledge (see
+    # _learn_from_finding). Agent-authored findings (source="agent") are excluded
+    # so nothing an injected page steered into a finding can reach Aegis's prompt.
+    if not dup:
+        _learn_from_finding(rec, user)
     out = dict(rec)
     out["duplicate"] = dup
     return out
@@ -1253,3 +1259,121 @@ def bench_scorecard() -> str:
         lines.append(f"- [{flag}] {s['name']}: expected {s['expected'] or '(clean)'} "
                      f"→ detected {s['detected'] or '(none)'}")
     return "\n".join(lines)
+
+
+# ===========================================================================
+# Assessment experience — durable, self-sharpening knowledge (the memory moat)
+# ===========================================================================
+# The genuine "gets stronger over time" loop: every weakness Olympus's OWN
+# scanners/validators confirm accrues into a compact knowledge record, and that
+# record is injected into Aegis's system prompt (specialists._extra_context), so
+# future assessments PRIORITISE the classes most often present. It is the
+# experience→knowledge→better-future-performance cycle Metis runs for the whole
+# council, scoped to security assessment.
+#
+# Safety: only findings whose `source` is one of Olympus's deterministic
+# producers are learned from — NEVER a finding an agent recorded via the
+# record_finding tool (source="agent"), whose text could carry content an
+# injected page steered in. So nothing untrusted can reach the self-evolving
+# prompt. Knowledge is CWE-class aggregates (name + count + method), replay-inert,
+# and bounded.
+
+_MAX_KNOWLEDGE_CWES = 50
+_MAX_KNOWLEDGE_FPS = 200          # per-CWE fingerprint set for dedup (bounded)
+_LEARN_SOURCES = frozenset({"sast", "http_audit", "dep_audit", "secret_scan",
+                            "active_validation"})
+
+
+def _replaying() -> bool:
+    return os.environ.get("OLYMPUS_REPLAY", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _knowledge_path(user: str) -> Path:
+    return _store_dir(user) / "knowledge.json"
+
+
+def _load_knowledge(user: str) -> dict:
+    try:
+        data = json.loads(_knowledge_path(user).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _learn_from_finding(rec: dict, user: str | None = None) -> None:
+    """Accrue a confirmed, Olympus-produced finding into durable knowledge.
+    No-op during replay, for agent-authored findings, or without a CWE — so the
+    self-evolving prompt only ever reflects Olympus's own deterministic output.
+    Best-effort: any failure is swallowed (learning must never break a scan)."""
+    try:
+        if _replaying() or rec.get("source") not in _LEARN_SOURCES:
+            return
+        cwe = rec.get("cwe") or ""
+        if not cwe:
+            return
+        user = _user(user)
+        know = _load_knowledge(user)
+        entry = know.get(cwe) or {
+            "cwe": cwe, "title": rec.get("title", ""),
+            "severity": rec.get("severity", ""), "count": 0,
+            "sources": [], "fingerprints": []}
+        fp = rec.get("id") or ""
+        if fp and fp in entry["fingerprints"]:
+            return                                    # already counted
+        if fp:
+            entry["fingerprints"] = (entry["fingerprints"] + [fp])[-_MAX_KNOWLEDGE_FPS:]
+        entry["count"] = int(entry.get("count", 0)) + 1
+        src = rec.get("source", "")
+        if src and src not in entry["sources"]:
+            entry["sources"].append(src)
+        entry["title"] = entry.get("title") or rec.get("title", "")
+        know[cwe] = entry
+        if len(know) > _MAX_KNOWLEDGE_CWES:           # keep the most-seen classes
+            know = dict(sorted(know.items(),
+                               key=lambda kv: kv[1].get("count", 0),
+                               reverse=True)[:_MAX_KNOWLEDGE_CWES])
+        _atomic_write(_knowledge_path(user), json.dumps(know, indent=2))
+    except Exception:
+        pass
+
+
+def knowledge(user: str | None = None) -> list[dict]:
+    """Accumulated assessment knowledge, most-confirmed class first."""
+    know = _load_knowledge(_user(user))
+    rows = [{"cwe": v.get("cwe", k), "title": v.get("title", ""),
+             "severity": v.get("severity", ""), "count": int(v.get("count", 0)),
+             "sources": list(v.get("sources", []))}
+            for k, v in know.items()]
+    return sorted(rows, key=lambda r: -r["count"])
+
+
+def insights_block(user: str | None = None, limit: int = 12) -> str:
+    """A compact 'what you've confirmed before' block for Aegis's prompt — the
+    self-sharpening context. Empty until Olympus has confirmed something, so a
+    fresh install carries no block. CWE-class aggregates only (no target data)."""
+    rows = knowledge(user)[:max(1, limit)]
+    if not rows:
+        return ""
+    lines = ["\n\n## Assessment experience (self-evolving — what you've confirmed "
+             "before)\nPrioritise checking for the weakness classes you have most "
+             "often confirmed on authorized assessments:"]
+    for r in rows:
+        methods = ", ".join(r["sources"]) or "scan"
+        lines.append(f"- {r['cwe']} — {r['title']} ({r['count']}×, via {methods})")
+    lines.append("Use this as a prior to focus recon/validation; it never widens "
+                 "scope (scope is still the signed authorization list).")
+    return "\n".join(lines)
+
+
+def insights_summary(user: str | None = None) -> str:
+    rows = knowledge(user)
+    if not rows:
+        return ("No assessment experience yet. Confirmed findings from Olympus's "
+                "own scanners/validators will accrue here and sharpen Aegis over "
+                "time.")
+    out = [f"Assessment experience — {len(rows)} weakness class(es) confirmed:"]
+    for r in rows:
+        out.append(f"- {r['cwe']} {r['title']}: {r['count']}× "
+                   f"(via {', '.join(r['sources']) or 'scan'})")
+    return "\n".join(out)

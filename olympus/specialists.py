@@ -143,10 +143,18 @@ class Specialist:
 
     def _extra_context(self) -> str:
         """Per-specialist prompt context. Angelos gets the user's email
-        writing-style guide so its drafts match the user's voice."""
+        writing-style guide so its drafts match the user's voice; Aegis gets its
+        accumulated assessment experience (the self-evolving moat) so it
+        prioritises the weakness classes Olympus has most often confirmed."""
         if self.key == "angelos":
             from . import emailstyle, memory
             return emailstyle.context_block(memory.current_user())
+        if self.key == "aegis":
+            try:
+                from . import assess, memory
+                return assess.insights_block(memory.current_user())
+            except Exception:
+                return ""
         return ""
 
     def run(self, task: str, settings: config.Settings | None = None,

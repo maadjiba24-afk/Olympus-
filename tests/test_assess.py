@@ -379,6 +379,56 @@ def test_bench_uses_production_detection_logic(workspace):
     assert any(h.cwe == "CWE-95" for h in hits)
 
 
+# --- self-evolution: durable assessment knowledge sharpens Aegis over time ---
+
+def test_findings_accrue_into_knowledge(workspace):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "a.py").write_text("eval(x)\nimport os\nos.system('x' + y)\n")
+    assess.sast_scan(".")
+    cwes = {r["cwe"] for r in assess.knowledge()}
+    assert {"CWE-95", "CWE-78"} <= cwes
+    block = assess.insights_block()
+    assert "Assessment experience" in block and "CWE-95" in block
+
+
+def test_knowledge_does_not_double_count(workspace):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "a.py").write_text("eval(x)\n")
+    assess.sast_scan(".")
+    assess.sast_scan(".")                                   # same finding again
+    row = next(r for r in assess.knowledge() if r["cwe"] == "CWE-95")
+    assert row["count"] == 1                                # deduped by fingerprint
+
+
+def test_agent_findings_are_not_learned():
+    # Injection safety: a finding the agent recorded (source="agent") whose text
+    # could be attacker-steered must NEVER reach the self-evolving prompt.
+    assess.record_finding(assess.Finding(title="steered", cwe="CWE-1337",
+                                         source="agent"))
+    assert all(r["cwe"] != "CWE-1337" for r in assess.knowledge())
+
+
+def test_learning_is_replay_inert(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    monkeypatch.setenv("OLYMPUS_REPLAY", "1")
+    (workspace / "a.py").write_text("eval(x)\n")
+    assess.sast_scan(".")
+    assert assess.knowledge() == []                         # nothing learned in replay
+
+
+def test_insights_block_empty_on_fresh_install():
+    assert assess.insights_block() == ""                    # no experience yet
+
+
+def test_aegis_prompt_includes_insights(workspace):
+    from olympus.specialists import SPECIALISTS
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "a.py").write_text("eval(x)\n")
+    assess.sast_scan(".")
+    prompt = SPECIALISTS["aegis"].system_prompt()
+    assert "Assessment experience" in prompt and "CWE-95" in prompt
+
+
 def test_budget_stop_halts_phases(workspace, monkeypatch):
     assess.grant(["example.com", "local"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _fake_probe({"server": "nginx"}))

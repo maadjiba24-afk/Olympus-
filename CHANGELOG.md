@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aegis assessment experience (the self-evolving memory loop)
+
+Every weakness Olympus's OWN scanners/validators confirm now accrues into a
+compact, durable knowledge record (`assess.knowledge` / `insights_block` /
+`olympus assess insights`), and that record is injected into Aegis's system
+prompt (`specialists._extra_context`) — so future assessments prioritise the
+weakness classes Olympus has most often confirmed. This is the genuine
+experience → knowledge → better-future-performance loop (Metis's daily cycle,
+scoped to security), and the answer to "keeps self evolving so Olympus becomes
+stronger over time": Aegis's prompt literally sharpens as it works.
+
+Safety: only findings from Olympus's deterministic producers (`sast`,
+`http_audit`, `dep_audit`, `secret_scan`, `active_validation`) are learned from
+— NEVER a finding an agent recorded via the `record_finding` tool
+(`source="agent"`), whose text could carry content an injected page steered in,
+so nothing untrusted can reach the self-evolving prompt. Knowledge is CWE-class
+aggregates (name + count + method — no target data), deduped by fingerprint (no
+double-counting across runs), replay-inert, and bounded. No new tool or manifest
+change. Tests: 6 new (84 assess/sarif/threat/envelope/specialist green).
+
 ### Added — Aegis self-benchmark (measured, regression-gated evolution)
 
 Added `assess.bench` / `assess.bench_scorecard` and `olympus assess bench` — a
