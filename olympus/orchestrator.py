@@ -36,7 +36,7 @@ from . import (agent, backend, codegraph, companion, config, connectors,
                memory, playbooks, profile, recall, relgraph, replaystore,
                steering, trace as trace_mod, tools, usage)
 from .specialists import (SPECIALISTS, roster, semantic_roster,
-                          semantic_routing_enabled)
+                          semantic_routing_enabled, semantic_skills_enabled)
 
 ROUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -282,7 +282,7 @@ class Olympus:
     def _light(self) -> config.Settings:
         """Settings for the lightweight stages (route/plan/review). In fast mode
         these run on the pool's fastest model instead of the strongest one."""
-        return (self.pool.fastest() if config.fast_mode()
+        return (self.pool.fastest() if self._fast()
                 else self.pool.for_role("reasoning"))
 
     @staticmethod
@@ -868,7 +868,7 @@ class Olympus:
         a missing double-check is not unverified content (ADR 0005 am. 4)."""
         verified = getattr(self, "_synth_check_source", None)
         if (not verified or not config.synth_check_enabled()
-                or config.fast_mode()):
+                or self._fast()):
             return reply
         try:
             verdict = self._check_synthesis(user_message, verified, reply)
@@ -922,7 +922,7 @@ class Olympus:
         recompose (bounded, honest — the check still runs and is recorded)."""
         verified = getattr(self, "_synth_check_source", None)
         if (not verified or not config.synth_check_enabled()
-                or config.fast_mode()):
+                or self._fast()):
             return None
         try:
             verdict = self._check_synthesis(user_message, verified, joined)
@@ -1000,6 +1000,13 @@ class Olympus:
         # whole agent stack. ThreadPoolExecutor doesn't copy context to workers,
         # so this is set here in the worker, not in _pipeline.
         token = trace_mod.set_current(tr)
+        # Same thread-hop reason as trace above: the dispatch pool starts workers
+        # with a fresh context, so re-publish the replay run scope here or a
+        # specialist's prompt-assembly `frozen_context` (semantic skill index)
+        # would silently skip freezing in record mode while replay still expects
+        # the frozen value — diverging the replay. Harmless in replay (which keys
+        # off the global OLYMPUS_REPLAY env regardless).
+        replaystore.set_run(tr.id)
         from . import interaction, sandbox
         ask_prev = interaction.set_provider(self._ask_provider)
         # Scope this specialist's file writes to its OWN workspace root
@@ -1193,6 +1200,13 @@ class Olympus:
 
         return outputs
 
+    def _fast(self) -> bool:
+        """Effective fast-mode for the current turn. Uses the per-turn value
+        resolved at the top of `_pipeline` (which honours OLYMPUS_FAST=auto);
+        falls back to the global setting outside a pipeline run."""
+        val = getattr(self, "_fast_turn", None)
+        return config.fast_mode() if val is None else val
+
     def _consult(self, outputs: list[tuple[str, str]],
                  tr: "trace_mod.Trace") -> list[tuple[str, str]]:
         """Optional topology-driven cross-check: after the DAG produces every
@@ -1259,6 +1273,11 @@ class Olympus:
         (mode, brief, verified_or_reply)."""
         self._unverified_banner = None  # set by the answer.verify chokepoint
         self._synth_check_source = None  # verified findings for stage 4.5
+        # Resolve fast-mode ONCE per turn so an OLYMPUS_FAST=auto decision is
+        # consistent across every stage of this pipeline (route/plan skip,
+        # review skip, synthesis check). Recomputed each turn; on replay the
+        # env is a concrete 1/0, so this reproduces the recorded value.
+        self._fast_turn = config.fast_mode_for(user_message)
         replaystore.set_run(tr.id)      # scope frozen run-state to this run
         # Record the enforcement mode as run metadata so a replay can reproduce
         # it: a run recorded with contracts ON, replayed with them OFF, would
@@ -1277,7 +1296,7 @@ class Olympus:
         # routes route/plan onto pool.fastest()), so it must be reproduced on
         # replay too — otherwise a fast-recorded run replayed normally (or vice
         # versa) adds/drops decisions and diverges spuriously.
-        tr.meta["fast_mode"] = config.fast_mode()
+        tr.meta["fast_mode"] = self._fast()
         # The interactive tier adds a model call on the direct path, so its
         # on/off state is part of the decision path and must be reproduced on
         # replay (like fast_mode above).
@@ -1293,6 +1312,11 @@ class Olympus:
         # a run recorded with it on, replayed with it off, would hash a different
         # route request. Record it so replay reproduces the same routing path.
         tr.meta["semantic_routing"] = semantic_routing_enabled()
+        # Semantic skills scope each specialist's in-prompt skill index to the
+        # task (task-dependent), so a run recorded with it on, replayed with it
+        # off, would hash a different per-specialist request. Record it so replay
+        # reproduces the same prompt-assembly path.
+        tr.meta["semantic_skills"] = semantic_skills_enabled()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -1377,7 +1401,7 @@ class Olympus:
             verified = raw
             self._record_verify_exempt(tr, "delegate", "router_opt_out")
 
-        if config.fast_mode():
+        if self._fast():
             # Fast mode skips the optional quality-review round-trip entirely.
             tr.event("review.skipped", reason="fast_mode")
             review = {"verdict": "approve", "feedback": "", "retry_specialists": []}
@@ -2198,6 +2222,12 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_semroute = os.environ.get("OLYMPUS_SEMANTIC_ROUTING")
     os.environ["OLYMPUS_SEMANTIC_ROUTING"] = \
         "1" if _meta.get("semantic_routing") else "0"
+    # Semantic skills scope each specialist's in-prompt skill index, so reproduce
+    # the recorded state or a semantic-recorded run replayed without it hashes a
+    # different per-specialist request.
+    prev_semskills = os.environ.get("OLYMPUS_SEMANTIC_SKILLS")
+    os.environ["OLYMPUS_SEMANTIC_SKILLS"] = \
+        "1" if _meta.get("semantic_skills") else "0"
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2230,6 +2260,10 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_SEMANTIC_ROUTING", None)
         else:
             os.environ["OLYMPUS_SEMANTIC_ROUTING"] = prev_semroute
+        if prev_semskills is None:
+            os.environ.pop("OLYMPUS_SEMANTIC_SKILLS", None)
+        else:
+            os.environ["OLYMPUS_SEMANTIC_SKILLS"] = prev_semskills
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

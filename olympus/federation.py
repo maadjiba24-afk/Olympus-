@@ -21,6 +21,12 @@ can collaborate *safely*:
     (`security.sanitize_for_memory`), wrapped as untrusted, and staged as memory
     CANDIDATES — never auto-committed — so cross-instance learning still passes
     Olympus's own gate.
+  * **Capability discovery + multi-peer aggregation** — a pinned peer can fetch a
+    SIGNED capabilities card (roster + skill count, no skill contents) to learn
+    what another instance offers, and `call_peers` fans one task across several
+    trusted peers, collecting each reply as untrusted data. Both reuse the same
+    trust gate, signed envelope, and scrub machinery — deeper collaboration with
+    no new trust surface.
 
 The signing/parsing/dispatch core is PURE and dependency-injected (the inbound
 `ask` and the outbound `fetcher` are parameters), so federation is unit-testable
@@ -315,6 +321,51 @@ def staged_lessons() -> list[dict]:
         return []
 
 
+# --- capability discovery (signed card of what this instance can do) ------
+
+def capabilities_card() -> dict:
+    """A SIGNED summary of what this instance offers, so a peer can route by it:
+    the instance name, its specialist roster (key + scrubbed title), and how many
+    skills it has learned. Skill *contents* are deliberately NOT included — those
+    cross only through the gated lesson sync. Titles are scrubbed because a
+    file-defined agent's title is operator-supplied text."""
+    specs: list[dict] = []
+    try:
+        from . import specialists
+        for s in specialists.SPECIALISTS.values():
+            specs.append({"key": str(s.key),
+                          "title": _scrub(s.title)[:120]})
+    except Exception:
+        specs = []
+    n_skills = 0
+    try:
+        from . import skills
+        n_skills = int(skills.count())
+    except Exception:
+        n_skills = 0
+    return sign_envelope({"kind": "capabilities", "name": _instance_name(),
+                          "specialists": specs, "skills": n_skills,
+                          "at": _now_iso()})
+
+
+def _clean_card(payload: dict) -> dict:
+    """Reduce a peer's capabilities payload to scrubbed, well-typed fields — a
+    peer's roster text is untrusted, so it is sanitised before we return it."""
+    raw_specs = payload.get("specialists")
+    specs: list[dict] = []
+    if isinstance(raw_specs, list):
+        for s in raw_specs[:200]:
+            if isinstance(s, dict):
+                specs.append({"key": _scrub(str(s.get("key", "")))[:64],
+                              "title": _scrub(str(s.get("title", "")))[:120]})
+    try:
+        n_skills = max(0, int(payload.get("skills", 0)))
+    except (TypeError, ValueError):
+        n_skills = 0
+    return {"name": _scrub(str(payload.get("name", "")))[:64],
+            "specialists": specs, "skills": n_skills}
+
+
 # --- outbound (governed, injectable fetcher) -----------------------------
 
 def call_peer(name: str, message: str, *, token: str | None = None,
@@ -361,6 +412,83 @@ def call_peer(name: str, message: str, *, token: str | None = None,
     return security.wrap_untrusted(answer, source="federation-peer")
 
 
+def discover_peer(name: str, *, token: str | None = None, fetcher=None) -> dict:
+    """Ask a pinned peer for its capabilities card and return it as scrubbed,
+    well-typed data. Sends a SIGNED request (so the peer can trust-check us),
+    verifies the reply against the pinned key, and sanitises every text field —
+    a peer's roster is untrusted. Opt-in and egress-gated, exactly like
+    `call_peer`; the peer must be pinned with at least `task` trust and a URL."""
+    if not enabled():
+        raise FederationError("federation is disabled (set OLYMPUS_FEDERATION=1)")
+    peer = get_peer(name)
+    if not peer or not peer.url:
+        raise FederationError(f"unknown or URL-less peer: {name}")
+    if _trust_rank(peer.trust) < _trust_rank("task"):
+        raise FederationError(f"peer {name} is blocked")
+    url = peer.url.rstrip("/") + "/federation/capabilities"
+    reason = security.url_block_reason(url, resolve=False)
+    if reason:
+        raise FederationError(f"egress refused: {reason}")
+    envelope = sign_envelope({"kind": "capabilities_request", "at": _now_iso()})
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    fetch = fetcher or a2a._default_fetch
+    status, body = fetch(url, json.dumps(envelope).encode("utf-8"), headers,
+                         a2a._OUT_TIMEOUT)
+    if int(status) >= 400:
+        raise FederationError(f"peer {name} returned HTTP {status}")
+    try:
+        resp = json.loads(bytes(body)[:a2a._MAX_RESPONSE].decode("utf-8",
+                                                                 "replace"))
+    except (ValueError, json.JSONDecodeError):
+        resp = {}
+    ok, payload = verify_envelope(resp, pin=peer.public_key)
+    if not ok or payload.get("kind") != "capabilities":
+        raise FederationError(f"peer {name}: unverified capabilities reply")
+    card = _clean_card(payload)
+    card["peer"] = peer.name          # the local pinned name, authoritative
+    return card
+
+
+def call_peers(names: list[str], message: str, *, token: str | None = None,
+               fetcher=None) -> list[dict]:
+    """Fan the same task out to several pinned peers and collect their answers.
+
+    Deterministic: peers are queried in the given order and each result is
+    `{"peer": name, "answer": <untrusted-wrapped>}`; a peer that errors yields
+    `{"peer": name, "error": "..."}` instead of aborting the aggregation, so one
+    unreachable peer never sinks the rest. Every answer stays wrapped-untrusted —
+    the caller (the council) treats the federation's replies as data, never
+    instructions. `token` is applied to every peer (per-peer tokens are a future
+    refinement); `fetcher` is injectable for tests."""
+    if not enabled():
+        raise FederationError("federation is disabled (set OLYMPUS_FEDERATION=1)")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for name in names or []:
+        name = (name or "").strip()
+        if not name or name in seen:
+            continue                      # skip blanks + duplicates deterministically
+        seen.add(name)
+        try:
+            answer = call_peer(name, message, token=token, fetcher=fetcher)
+            out.append({"peer": name, "answer": answer})
+        except Exception as err:      # incl. network errors from the fetcher —
+            #                           isolate so one dead peer never aborts the
+            #                           fan-out (best-effort at the net boundary)
+            out.append({"peer": name, "error": str(err) or type(err).__name__})
+    return out
+
+
+def trusted_peer_names(min_trust: str = "task") -> list[str]:
+    """Pinned peers with a URL and at least `min_trust`, sorted by name — the
+    default fan-out set for `call_peers`/`ask-all`."""
+    floor = _trust_rank(min_trust)
+    return sorted(p.name for p in peers()
+                  if p.url and _trust_rank(p.trust) >= floor)
+
+
 # --- inbound dispatcher (pure; ask + auth injected) ----------------------
 
 def _bearer_token() -> str | None:
@@ -399,10 +527,11 @@ def handle_request(method: str, path: str, body: dict, headers: dict,
                    *, ask=None) -> tuple[int, dict]:
     """Route one inbound federation request. Pure + injectable:
 
-      GET  /federation/identity   → public identity card (no auth)
-      POST /federation/handshake  → sign the peer's challenge (no auth; proves us)
-      POST /federation/task       → run a peer task on the council (auth + pinned)
-      POST /federation/lessons    → stage a trusted peer's lessons (auth + signed)
+      GET  /federation/identity      → public identity card (no auth)
+      POST /federation/handshake     → sign the peer's challenge (no auth; proves us)
+      POST /federation/task          → run a peer task on the council (auth + pinned)
+      POST /federation/lessons       → stage a trusted peer's lessons (auth + signed)
+      POST /federation/capabilities  → signed capabilities card (auth + pinned)
 
     `ask(text) -> str` is injected (the council entry) so this is testable with no
     live pipeline. Authenticated routes fail closed without a configured token."""
@@ -421,10 +550,25 @@ def handle_request(method: str, path: str, body: dict, headers: dict,
     # Authenticated routes: gate ONLY the known ones, so a genuinely unknown
     # path 404s (doesn't masquerade as an auth failure).
     if (method, path) not in (("POST", "/federation/task"),
-                              ("POST", "/federation/lessons")):
+                              ("POST", "/federation/lessons"),
+                              ("POST", "/federation/capabilities")):
         return 404, {"error": "unknown federation route"}
     if not _auth_ok(headers):
         return 401, {"error": "federation auth required"}
+
+    if method == "POST" and path == "/federation/capabilities":
+        # Signed by a pinned peer with >= task trust (same gate as a task) — a
+        # peer proves who it is before it can enumerate what we offer.
+        ok, payload = verify_envelope(body or {})
+        pub = str(((body or {}).get("integrity") or {}).get("publicKey") or "")
+        peer = peer_by_key(pub) if ok else None
+        if not ok or not peer or _trust_rank(peer.trust) < _trust_rank("task"):
+            return 403, {"error": "unknown, unsigned, or blocked peer"}
+        if payload.get("kind") != "capabilities_request":
+            return 400, {"error": "not a capabilities request"}
+        if _too_old(payload):
+            return 408, {"error": "capabilities request is stale"}
+        return 200, capabilities_card()
 
     if method == "POST" and path == "/federation/task":
         # Envelope-signed by a pinned peer with >= task trust.

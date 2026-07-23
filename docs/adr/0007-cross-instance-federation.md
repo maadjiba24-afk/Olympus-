@@ -51,9 +51,10 @@ required tier.
   envelope is verified against the pinned key, then returned **wrapped as
   untrusted** — a remote instance's output is never trusted as instructions.
 - The inbound listener refuses to start unless a bearer token is configured, and
-  the authenticated routes (`/federation/task`, `/federation/lessons`) fail
-  closed on a missing/wrong token. The public routes (`/federation/identity`,
-  `/federation/handshake`) carry only public metadata / a proof of our own key.
+  the authenticated routes (`/federation/task`, `/federation/lessons`,
+  `/federation/capabilities`) fail closed on a missing/wrong token. The public
+  routes (`/federation/identity`, `/federation/handshake`) carry only public
+  metadata / a proof of our own key.
 - Inbound task text reaches the council only via `security.wrap_untrusted`, so
   capability separation strips action tools exactly as for web content.
 
@@ -64,6 +65,21 @@ A `trusted` peer's lessons are scrubbed of secrets and PII
 **staged as candidates** for the operator's gate — never auto-committed. Cross-
 instance learning therefore passes the same admission gate as any other memory:
 federation can propose, it can never silently write.
+
+## Decision (e): capability discovery + multi-peer aggregation reuse the same envelope
+
+Deepening federation without widening its trust surface: a pinned peer can POST a
+signed request to `/federation/capabilities` and receive a signed card of what an
+instance offers — its specialist roster (key + scrubbed title) and skill *count*,
+never skill contents (those cross only through the gated lesson sync). The route
+carries the exact same gate as `/federation/task` (auth token + pinned peer with
+≥ `task` trust + signed envelope), and the reply's text fields are scrubbed on
+import because a file-defined agent's title is operator-supplied. `call_peers`
+fans one task across several trusted peers, collecting each reply as
+untrusted-wrapped data and isolating a failing peer (`{"peer", "error"}`) so one
+dead instance never sinks the fan-out. Both are pure additions over the existing
+signed-envelope + trust + scrub primitives — no new crypto, no new trust level,
+no new network defense.
 
 ## Consequences
 

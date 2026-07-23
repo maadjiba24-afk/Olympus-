@@ -232,6 +232,7 @@ def _resolve(project: str, infos: list[dict]) -> dict:
     doc_qual: dict[str, str] = {}
     code_stem: dict[str, list[str]] = {}
     doc_stem: dict[str, list[str]] = {}
+    rel_to_module: dict[str, str] = {}          # file rel_path -> its module_id
     for info in infos:
         is_doc_mod = info.get("lang") == "doc"
         qmap, smap = ((doc_qual, doc_stem) if is_doc_mod
@@ -239,6 +240,8 @@ def _resolve(project: str, infos: list[dict]) -> dict:
         qmap.setdefault(str(info["qual"]).lower(), info["module_id"])
         smap.setdefault(str(info["stem"]).lower(),
                         []).append(info["module_id"])
+        if info.get("module_id"):
+            rel_to_module[info["rel"]] = info["module_id"]
 
     def _resolve_import(target: str, is_doc: bool):
         """(target_id, exact) — exact means a unique full-qualname match
@@ -255,6 +258,23 @@ def _resolve(project: str, infos: list[dict]) -> dict:
         if cands and len(cands) == 1:
             return cands[0], False
         return None, False
+
+    def _narrow_by_qualifier(cands: list, qualifier: str, aliases: dict):
+        """#15: pin a call to a name defined in MANY files down to the single
+        candidate in the module its qualifier names. `memory.save()` with
+        `from . import memory` in scope resolves to `memory.save`, not the other
+        `save`s. Returns that candidate, or None when the qualifier doesn't name
+        a known project module or the narrowing isn't unique (stay honest — a
+        non-unique narrowing falls back to the generic tier rules)."""
+        target = aliases.get(qualifier)
+        if not target:
+            return None
+        tgt_id, _exact = _resolve_import(target, is_doc=False)
+        if not tgt_id:
+            return None
+        narrowed = [c for c in cands
+                    if rel_to_module.get(c["path"]) == tgt_id]
+        return narrowed[0] if len(narrowed) == 1 else None
 
     stats = {"imports": 0, "calls_resolved": 0, "calls_inferred": 0,
              "calls_ambiguous": 0, "calls_skipped": 0, "inherits": 0,
@@ -312,8 +332,31 @@ def _resolve(project: str, infos: list[dict]) -> dict:
                 seen_imports.add(tgt)
                 stats["imports"] += 1
         certain = info.get("lang") == "python"
-        for caller_id, callee in info["calls"]:
+        aliases = info.get("aliases") or {}
+        for call in info["calls"]:
+            caller_id, callee = call[0], call[1]
+            qualifier = call[2] if len(call) > 2 else ""
             cands = func_index.get(str(callee).lower(), [])
+            # #15: a QUALIFIED Python call to a name defined in several/many
+            # files is pinned to the one module its qualifier names → a precise
+            # EXTRACTED edge, where the generic rules below could only emit
+            # AMBIGUOUS or skip. len==1 is left untouched (already EXTRACTED).
+            # Shadow-prone method names (`get`, `update`, `count`, …) are EXCLUDED:
+            # the import-alias map has no scope tracking, so a local var/param that
+            # shadows an imported module name (`def h(store): store.get(k)`) is
+            # indistinguishable from the module — narrowing there would assert a
+            # false-precise 1.0 edge to `store.get` for a plain `dict.get`. For
+            # these names we fall through to the `_SHADOWED` rule below (same-file
+            # only), exactly as an unqualified shadowed call is handled.
+            if (certain and qualifier and len(cands) > 1
+                    and str(callee).lower() not in _SHADOWED):
+                precise = _narrow_by_qualifier(cands, qualifier, aliases)
+                if precise is not None:
+                    if codegraph.add_edge(project, caller_id, "calls",
+                                          precise["id"], tier=codegraph.EXTRACTED,
+                                          confidence=1.0):
+                        stats["calls_resolved"] += 1
+                    continue
             same_file = [c for c in cands if c["path"] == info["rel"]]
             if str(callee).lower() in _SHADOWED:
                 cands = same_file            # cross-file would be noise

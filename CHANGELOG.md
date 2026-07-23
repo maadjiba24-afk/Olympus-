@@ -89,6 +89,62 @@ themselves and get stronger the more they run. Design locked in ADR 0007
 Capability accounting stays truthful: `olympus federation` and `olympus moat`
 are the only new commands (113 → 114); no new tools or agents.
 
+### Added — Two more `DEFERRED.md` closures (code-graph precision, skill retrieval)
+
+Two further deepenings along the same axes, each closing a tracked deferral. No
+new tools or commands — capability accounting is unchanged.
+
+- **Code graph — qualified-call precision (closes #15).** A qualified Python call
+  (`memory.save()`) is now pinned to the exact module its qualifier names via the
+  per-file import-alias map, emitting a precise `EXTRACTED` (confidence 1.0) edge
+  instead of being dropped as ambiguous. So `impact` stops under-reporting and
+  `verify` answers `CONFIRMED`/`REFUTED` where it previously could only say
+  `UNKNOWN` for a name defined in many files. Strictly additive: only narrows
+  `len(cands) > 1` qualified calls; unqualified / unique / unresolved calls are
+  unchanged, and non-unique narrowing falls back to the prior behaviour.
+- **Skills — task-scoped semantic retrieval in the live prompt (closes #3).**
+  `OLYMPUS_SEMANTIC_SKILLS` swaps a specialist's full in-prompt skill index for
+  the top-K skills most relevant to the task (`skills.scoped_index()`, cosine
+  over the existing embedding cache). Opt-in and off by default; engages only
+  once a specialist's library outgrows the prompt; degrades to the full index
+  when embeddings are absent so no skill becomes unreachable (any skill stays
+  loadable by name via `read_skill`). Recorded in trace meta and replay-frozen
+  per specialist on the prompt-assembly path, and surfaced on the `olympus moat`
+  board.
+
+- **Federation — capability discovery + multi-peer aggregation.** A pinned peer
+  can POST a signed request to `/federation/capabilities` and receive a signed
+  card of what an instance offers (specialist roster + skill count, no skill
+  contents), gated by the same pinned-peer + `task`-trust check as a task.
+  `federation.call_peers()` fans one task across several trusted peers and
+  collects each reply as untrusted data, isolating a dead peer so it never sinks
+  the fan-out. New CLI actions `olympus federation capabilities <peer>` and
+  `ask-all <message>` (positional actions — command accounting unchanged). Reuses
+  the existing signed-envelope, trust, scrub, and egress machinery — no new trust
+  surface.
+
+### Fixed
+
+- **Code graph — no false-precise edge on a shadowed method.** Qualifier
+  narrowing now skips shadow-prone method names (`get`, `update`, `count`, …):
+  the import-alias map has no scope tracking, so a local var/param that shadows an
+  imported module name (`def h(store): store.get(k)`) would otherwise assert a
+  false `EXTRACTED`/1.0 edge to `store.get` for a plain `dict.get`. Those names
+  fall through to the same-file-only `_SHADOWED` rule, as before.
+- **Replay — the semantic prompt-shaping paths re-raise `ReplayDivergence`.**
+  `semantic_roster` and the new `_skill_index_for` wrapped `frozen_context` in a
+  broad best-effort `except`; since `ReplayDivergence` subclasses `RuntimeError`
+  it was swallowed, masking a genuine divergence (e.g. a skill library that
+  crossed the size threshold since the recorded run) behind a later request-hash
+  mismatch. Both now re-raise it, matching the orchestrator's frozen-context
+  sites.
+- **Replay — frozen run-state now survives the dispatch thread hop.** The active
+  run scope used by `replaystore.frozen_context` moved from a `threading.local`
+  to a `ContextVar`, and the specialist worker re-publishes it (like the trace
+  contextvar) — so a `frozen_context` call made on a dispatch worker (the new
+  task-scoped skill index) freezes in record mode and reproduces on replay,
+  instead of silently skipping the freeze on workers and diverging.
+
 ## [0.26.0] — 2026-07-22
 
 ### Added — Four native-capability deepenings (verification, adaptation, providers, review)

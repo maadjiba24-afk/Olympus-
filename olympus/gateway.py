@@ -46,6 +46,8 @@ HELP = (
     "/heartbeat add <every> <prompt> — a periodic check that only pings you "
     "when something needs attention (list · drop <id>)\n"
     "/onexit <pid> <prompt> — run a task once when that process exits\n"
+    "/onchange <cmd> :: <prompt> — run a task whenever a command's output "
+    "changes\n"
     "/learn <url or workflow> — distill a reusable skill from it\n"
     "/journey — the timeline of everything Olympus has learned\n"
     "/wiki [show <page>] — the concept pages Olympus maintains about "
@@ -59,6 +61,7 @@ HELP = (
     "/approve <id> · /deny <id> — decide a held command from chat\n"
     "/usage — tokens and cost for this session and today\n"
     "/model [name|auto] — pin this conversation to a model (opus/sonnet/gpt…)\n"
+    "/fast [on|off|auto] — latency mode; auto decides per message\n"
     "/reset — start fresh (keeps a distilled summary of what we covered)\n"
 )
 
@@ -69,7 +72,8 @@ def chunk(text: str, size: int = CHUNK) -> list[str]:
 
 
 # Every chat platform that exposes an ambient notify() for proactive pushes.
-NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal", "ntfy")
+NOTIFY_CHANNELS = ("telegram", "discord", "slack", "signal", "ntfy", "matrix",
+                   "mattermost", "googlechat", "sms")
 
 
 # --- in-flight work journal (session auto-resume) --------------------------
@@ -160,10 +164,13 @@ def notify_all(text: str) -> list[str]:
         d = egress.guard(text, egress.ChannelKind.BROADCAST, user="shared")
         if d.verdict is egress.Verdict.HOLD:
             return []
-    from . import discord, ntfy, signal as signal_gw, slack, telegram
+    from . import (discord, googlechat, matrix, mattermost, ntfy,
+                   signal as signal_gw, slack, sms, telegram)
     fns = {"telegram": telegram.notify, "discord": discord.notify,
            "slack": slack.notify, "signal": signal_gw.notify,
-           "ntfy": ntfy.notify}
+           "ntfy": ntfy.notify, "matrix": matrix.notify,
+           "mattermost": mattermost.notify, "googlechat": googlechat.notify,
+           "sms": sms.notify}
     delivered = []
     for name in NOTIFY_CHANNELS:
         try:
@@ -191,6 +198,39 @@ def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
     return chunk("Steering queue is full; note dropped.")
 
 
+def _set_fast(arg: str) -> str:
+    """Handle `/fast [on|off|auto]`. Instance-wide (fast mode is a process
+    setting, like it is in the CLI/TUI), persisted so it survives a restart.
+    'auto' lets Olympus decide per message: quick asks stay fast, substantial
+    ones get the full council + review."""
+    val = (arg or "").strip().lower()
+    if not val:
+        cur = config.fast_setting()
+        note = {"on": "every reply skips the optional review for lower latency",
+                "off": "every reply gets the full council + review",
+                "auto": "I decide per message — quick asks fast, hard ones full"}
+        return (f"Fast mode is **{cur}** — {note[cur]}.\n"
+                "Change it with /fast on · /fast off · /fast auto")
+    mapping = {"on": "1", "1": "1", "yes": "1", "true": "1",
+               "off": "0", "0": "0", "no": "0", "false": "0",
+               "auto": "auto"}
+    if val not in mapping:
+        return "Usage: /fast [on|off|auto]"
+    stored = mapping[val]
+    os.environ["OLYMPUS_FAST"] = stored
+    try:
+        from . import firstrun
+        firstrun.save_env_value("OLYMPUS_FAST", stored)
+    except Exception:
+        pass                        # env is set for this process regardless
+    setting = config.fast_setting()
+    blurb = {"on": "Fast mode ON — I'll skip the optional review round-trip.",
+             "off": "Fast mode OFF — every reply gets the full council + review.",
+             "auto": "Fast mode AUTO — quick asks stay fast; substantial ones "
+                     "get the full council + review."}
+    return blurb[setting]
+
+
 def reply_for(bots: dict, user_key: str, text: str,
               prefix: str = "ol", uid: str | None = None) -> list[str]:
     """Resolve a user's message to reply chunks, handling slash commands and
@@ -206,6 +246,11 @@ def reply_for(bots: dict, user_key: str, text: str,
     cmd = cmd.lower()
 
     if cmd in ("/start", "/help"):
+        from . import onboarding
+        wid = uid or f"{prefix}-{memory.safe_id(user_key)}"
+        if cmd == "/start" and onboarding.is_new(wid):
+            onboarding.mark_seen(wid)
+            return chunk(onboarding.welcome() + "\n\n" + HELP)
         return chunk(HELP)
     if cmd == "/steer":
         # Fallback for transports that didn't fast-path it; same behavior.
@@ -278,6 +323,8 @@ def reply_for(bots: dict, user_key: str, text: str,
         # pin (or unpin) takes effect on the next message, not next restart.
         bots.pop(uid, None)
         return chunk(reply)
+    if cmd == "/fast":
+        return chunk(_set_fast(arg))
     if cmd == "/profile":
         # View-only: a conversation can see its boundary, never widen it
         # (assignment is operator-side via `olympus restrict`).
@@ -301,6 +348,23 @@ def reply_for(bots: dict, user_key: str, text: str,
             return chunk(str(err))
         return chunk(f"⏳ Watching pid {job.watch_pid} — when it exits I'll "
                      f"run: {prompt.strip()}")
+    if cmd == "/onchange":
+        from . import scheduler
+        watch, _, prompt = arg.strip().partition("::")
+        if not watch.strip() or not prompt.strip():
+            return chunk("Usage: /onchange <command> :: <what to do on change>\n"
+                         "e.g. /onchange git -C ~/repo log -1 :: summarize the "
+                         "new commit")
+        channel = {"tg": "telegram", "dc": "discord",
+                   "sl": "slack", "sg": "signal"}.get(uid.split("-", 1)[0], "")
+        try:
+            job = scheduler.add_on_change(
+                f"onchange-{memory.safe_id(watch)[:16]}", watch.strip(),
+                prompt.strip(), user=uid, deliver_to=channel)
+        except ValueError as err:
+            return chunk(str(err))
+        return chunk(f"👁 Watching `{job.watch_cmd}` — when its output changes "
+                     f"I'll run: {prompt.strip()}")
     if cmd == "/heartbeat":
         from . import agentbeat
         sub, _, rest = arg.strip().partition(" ")

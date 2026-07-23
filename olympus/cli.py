@@ -388,6 +388,10 @@ def build_parser() -> argparse.ArgumentParser:
                          metavar="PID",
                          help="event-driven: run once when this process exits "
                               "(the interval argument is ignored)")
+    p_sched.add_argument("--on-change", default="", dest="on_change_cmd",
+                         metavar="CMD",
+                         help="change-driven: run whenever this command's "
+                              "output changes (the interval argument is ignored)")
     p_goal = sub.add_parser("goal", help="standing goals with completion "
                                          "contracts (worked by the heartbeat)")
     p_goal.add_argument("action", nargs="?", default="list",
@@ -473,14 +477,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_fed = sub.add_parser(
         "federation",
         help="cross-instance federation (signed, opt-in): show identity, "
-             "pin/list/remove peers, call a peer, serve the listener, or list "
+             "pin/list/remove peers, call a peer, discover a peer's "
+             "capabilities, ask all peers, serve the listener, or list "
              "staged peer lessons")
     p_fed.add_argument(
         "action", nargs="?", default="identity",
         choices=["identity", "add-peer", "peers", "remove-peer", "call",
-                 "serve", "lessons"])
+                 "capabilities", "ask-all", "serve", "lessons"])
     p_fed.add_argument("name", nargs="?", default=None,
-                       help="peer name (add-peer/remove-peer/call)")
+                       help="peer name (add-peer/remove-peer/call/capabilities) "
+                            "or message (ask-all)")
     p_fed.add_argument("value", nargs="?", default=None,
                        help="pubkey (add-peer) or message (call)")
     p_fed.add_argument("--url", default="", help="peer base URL (add-peer)")
@@ -530,7 +536,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
     sub.add_parser("scores", help="show per-specialist benchmark scores")
-    sub.add_parser("models", help="show the model pool and role assignments")
+    p_models = sub.add_parser("models",
+                              help="show the model pool and role assignments")
+    p_models.add_argument("action", nargs="?", default="show",
+                          choices=["show", "discover"],
+                          help="'discover' lists the models your configured "
+                               "key can reach (live)")
     sub.add_parser("contrib", help="show the cross-model contribution queue size")
     p_usage = sub.add_parser("usage", help="show estimated token/cost spend")
     p_usage.add_argument("--days", type=int, default=7)
@@ -567,6 +578,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_lim.add_argument("n", nargs="?", type=int, help="max per day (0 = off)")
 
     sub.add_parser("connectors", help="list configured MCP servers and plugins")
+    p_plugin = sub.add_parser(
+        "plugin", help="install/verify third-party tool plugins with pinned "
+                       "provenance (deny-by-default; hash-checked)")
+    p_plugin.add_argument("action", nargs="?", default="list",
+                          choices=["install", "list", "verify", "remove"])
+    p_plugin.add_argument("source", nargs="?", default="",
+                          help="install: file path or https URL; remove: name")
+    p_plugin.add_argument("--sha256", default="",
+                          help="pinned SHA-256 the code must match")
+    p_plugin.add_argument("--name", default="", help="override the module name")
+    p_plugin.add_argument("--allow-unpinned", action="store_true",
+                          help="install a local file without a pinned hash "
+                               "(you accept the risk)")
     p_mcp = sub.add_parser("add-mcp", help="add an MCP server connector")
     p_mcp.add_argument("name")
     p_mcp.add_argument("url")
@@ -584,6 +608,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8484)
 
+    sub.add_parser("matrix", help="run the Matrix channel "
+                                  "(needs MATRIX_HOMESERVER + MATRIX_ACCESS_TOKEN)")
     sub.add_parser("telegram", help="run the Telegram gateway "
                                     "(needs TELEGRAM_BOT_TOKEN)")
     p_gw = sub.add_parser(
@@ -723,6 +749,19 @@ def build_parser() -> argparse.ArgumentParser:
                                         "(needs SLACK_* env vars)")
     p_sl.add_argument("--host", default="0.0.0.0")
     p_sl.add_argument("--port", type=int, default=8487)
+
+    p_mm = sub.add_parser("mattermost", help="serve the Mattermost outgoing-"
+                          "webhook endpoint (needs MATTERMOST_OUTGOING_TOKEN)")
+    p_mm.add_argument("--host", default="0.0.0.0")
+    p_mm.add_argument("--port", type=int, default=8489)
+    p_gc = sub.add_parser("googlechat", help="serve the Google Chat app "
+                          "endpoint (needs GOOGLECHAT_VERIFY_TOKEN)")
+    p_gc.add_argument("--host", default="0.0.0.0")
+    p_gc.add_argument("--port", type=int, default=8490)
+    p_sms = sub.add_parser("sms", help="serve the SMS channel over Twilio's "
+                           "webhook (needs TWILIO_AUTH_TOKEN)")
+    p_sms.add_argument("--host", default="0.0.0.0")
+    p_sms.add_argument("--port", type=int, default=8491)
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
                                   "(needs SIGNAL_* env vars)")
@@ -1656,6 +1695,28 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(federation.call_peer(args.name, args.value,
                                                token=args.token))
+            elif act == "capabilities":
+                if not args.name:
+                    print("Usage: olympus federation capabilities <peer-name> "
+                          "[--token TOKEN]")
+                else:
+                    card = federation.discover_peer(args.name, token=args.token)
+                    print(_json.dumps(card, indent=2))
+            elif act == "ask-all":
+                if not args.name:
+                    print("Usage: olympus federation ask-all <message> "
+                          "[--token TOKEN]")
+                else:
+                    # `name` carries the message here (ask-all takes no peer).
+                    targets = federation.trusted_peer_names()
+                    if not targets:
+                        print("No pinned peers with a URL to ask.")
+                    for r in federation.call_peers(targets, args.name,
+                                                   token=args.token):
+                        if "error" in r:
+                            print(f"- [{r['peer']}] refused: {r['error']}")
+                        else:
+                            print(f"- [{r['peer']}] {r['answer']}")
             elif act == "serve":
                 from . import config
                 def _ask(text: str) -> str:
@@ -1710,7 +1771,28 @@ def main(argv: list[str] | None = None) -> int:
         print(orchestrator.train_specialists(focus=args.focus))
     elif args.command == "models":
         from . import config
-        print(config.ModelPool.from_env().assignment())
+        if getattr(args, "action", "show") == "discover":
+            from . import providers
+            settings = config.Settings.from_env()
+            if not settings.usable():
+                print("No usable model credentials configured. "
+                      "Run `olympus setup`.")
+                return 1
+            found = providers.discover_for_settings(settings)
+            if not found:
+                print(f"No models discovered for {settings.provider}"
+                      f"{'/' + settings.base_url if settings.base_url else ''} "
+                      "(the provider may not expose a model list, or the key "
+                      "lacks access).")
+            else:
+                print(f"{len(found)} model(s) reachable with the configured "
+                      f"{settings.provider} credentials:")
+                for mid in found:
+                    print(f"  {mid}")
+                print("\nAdd any of these to your pool via OLYMPUS_MODELS "
+                      "or `olympus setup model`.")
+        else:
+            print(config.ModelPool.from_env().assignment())
     elif args.command in ("actions", "approve", "reject", "edit", "undo",
                           "autonomy", "earned-autonomy", "grant", "revoke",
                           "limit"):
@@ -2051,6 +2133,45 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "connectors":
         from . import connectors
         print(connectors.summary())
+    elif args.command == "plugin":
+        from . import pluginstore
+        if args.action == "install":
+            if not args.source:
+                print("Usage: olympus plugin install <file|https-url> "
+                      "--sha256 <hash>")
+                return 1
+            try:
+                res = pluginstore.install(
+                    args.source, sha256=args.sha256, name=args.name,
+                    allow_unpinned=args.allow_unpinned)
+            except ValueError as err:
+                print(f"Refused: {err}")
+                return 1
+            print(f"✓ Installed '{res['name']}' (sha256 {res['sha256'][:16]}…). "
+                  "It loads on the next run.")
+        elif args.action == "list":
+            items = pluginstore.list_installed()
+            if not items:
+                print("No installed plugins. "
+                      "Add one: olympus plugin install <src> --sha256 <hash>")
+            for it in items:
+                print(f"  {it['name']}  ({it['sha256'][:16]}…)  "
+                      f"from {it['source']}  @ {it['installed_at']}")
+        elif args.action == "verify":
+            rows = pluginstore.verify()
+            if not rows:
+                print("No installed plugins to verify.")
+            for r in rows:
+                mark = "✓" if r["status"] == "ok" else "⚠"
+                print(f"  {mark} {r['name']}: {r['status']}")
+            if any(r["status"] != "ok" for r in rows):
+                return 1
+        elif args.action == "remove":
+            if not args.source:
+                print("Usage: olympus plugin remove <name>")
+                return 1
+            print("Removed." if pluginstore.remove(args.source)
+                  else "No such installed plugin.")
     elif args.command == "add-mcp":
         from . import connectors
         specialists = ([s.strip() for s in args.specialists.split(",")]
@@ -2129,6 +2250,16 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 print(f"Scheduled '{job.name}' to run once when pid "
                       f"{job.watch_pid} exits.")
+            elif args.on_change_cmd:
+                try:
+                    job = scheduler.add_on_change(
+                        args.name, args.on_change_cmd, prompt,
+                        deliver_to=args.deliver_to, user="cli")
+                except ValueError as err:
+                    print(err)
+                    return 1
+                print(f"Scheduled '{job.name}' to run when the output of "
+                      f"`{job.watch_cmd}` changes.")
             else:
                 job = scheduler.add(args.name, args.interval, prompt,
                                     deliver_to=args.deliver_to, user="cli")
@@ -2203,6 +2334,30 @@ def main(argv: list[str] | None = None) -> int:
             telegram.run_bot()
         except KeyboardInterrupt:
             print("\nTelegram gateway stopped.")
+    elif args.command == "matrix":
+        from . import matrix
+        try:
+            matrix.run_bot()
+        except KeyboardInterrupt:
+            print("\nMatrix gateway stopped.")
+    elif args.command == "mattermost":
+        from . import mattermost
+        try:
+            mattermost.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nMattermost channel stopped.")
+    elif args.command == "googlechat":
+        from . import googlechat
+        try:
+            googlechat.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nGoogle Chat channel stopped.")
+    elif args.command == "sms":
+        from . import sms
+        try:
+            sms.run_server(args.host, args.port)
+        except KeyboardInterrupt:
+            print("\nSMS channel stopped.")
     elif args.command == "gateway":
         from . import gateway
         if args.gw_status:

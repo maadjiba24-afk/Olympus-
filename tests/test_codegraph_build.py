@@ -184,3 +184,109 @@ def test_oracle_still_confirms_and_refutes_python(tmp_path):
         "CONFIRMED"
     assert codegraph.verify_claim("p", "helper calls entry")["verdict"] == \
         "REFUTED"
+
+
+# --- #15: qualified-call precision ---------------------------------------
+
+def _node(project, label, path_suffix):
+    for n in codegraph.nodes(project):
+        if n["label"] == label and str(n["path"]).endswith(path_suffix):
+            return n
+    return None
+
+
+def test_qualified_call_pins_to_the_named_module(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "memory.py").write_text("def save():\n    pass\n")
+    (root / "store.py").write_text("def save():\n    pass\n")
+    (root / "caller.py").write_text(
+        "import memory\nimport store\n\ndef run():\n    memory.save()\n")
+    codegraph_build.build("p", root)
+
+    run = _node("p", "run", "caller.py")
+    mem_save = _node("p", "save", "memory.py")
+    store_save = _node("p", "save", "store.py")
+    edges = codegraph.edges("p")
+    to_mem = [e for e in edges if e["src"] == run["id"]
+              and e["dst"] == mem_save["id"] and e["rel"] == "calls"]
+    to_store = [e for e in edges if e["src"] == run["id"]
+                and e["dst"] == store_save["id"] and e["rel"] == "calls"]
+    # pinned to the module the qualifier names, as ground truth
+    assert to_mem and to_mem[0]["tier"] == codegraph.EXTRACTED
+    assert not to_store                       # the other save() is not linked
+
+
+def test_qualified_call_resolves_a_name_defined_in_many_files(tmp_path):
+    # `save` defined in 5 modules (> _MAX_AMBIGUOUS) → previously skipped
+    # entirely (no edge). With the qualifier it now resolves precisely.
+    root = tmp_path / "proj"
+    root.mkdir()
+    for m in ("memory", "store", "cache", "disk", "vault"):
+        (root / f"{m}.py").write_text("def save():\n    pass\n")
+    (root / "caller.py").write_text(
+        "import vault\n\ndef run():\n    vault.save()\n")
+    codegraph_build.build("p", root)
+
+    run = _node("p", "run", "caller.py")
+    vault_save = _node("p", "save", "vault.py")
+    to_vault = [e for e in codegraph.edges("p") if e["src"] == run["id"]
+                and e["dst"] == vault_save["id"] and e["rel"] == "calls"]
+    assert to_vault and to_vault[0]["tier"] == codegraph.EXTRACTED
+
+
+def test_oracle_confirms_a_qualified_call(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "memory.py").write_text("def save():\n    pass\n")
+    (root / "store.py").write_text("def save():\n    pass\n")
+    (root / "caller.py").write_text(
+        "import memory\n\ndef run():\n    memory.save()\n")
+    codegraph_build.build("p", root)
+    # Was UNKNOWN before (ambiguous save); now CONFIRMED via the precise edge.
+    assert codegraph.verify_claim("p", "run calls save")["verdict"] == "CONFIRMED"
+
+
+def test_from_import_alias_narrows(tmp_path):
+    # `from . import memory` style (package-relative) also feeds the alias map.
+    root = tmp_path / "proj"
+    root.mkdir()
+    pkg = root / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "memory.py").write_text("def save():\n    pass\n")
+    (pkg / "store.py").write_text("def save():\n    pass\n")
+    (pkg / "caller.py").write_text(
+        "from pkg import memory\n\ndef run():\n    memory.save()\n")
+    codegraph_build.build("p", root)
+    run = _node("p", "run", "caller.py")
+    mem_save = _node("p", "save", "memory.py")
+    to_mem = [e for e in codegraph.edges("p") if e["src"] == run["id"]
+              and e["dst"] == mem_save["id"] and e["rel"] == "calls"]
+    assert to_mem and to_mem[0]["tier"] == codegraph.EXTRACTED
+
+
+def test_qualifier_does_not_false_pin_a_shadowed_method(tmp_path):
+    # A local PARAMETER `store` shadows the imported module `store`; the alias
+    # map has no scope tracking, so a naive narrowing would pin the plain
+    # `store.get(k)` (a dict-like .get) to `store.get` as a 1.0 EXTRACTED edge.
+    # `get` is a shadow-prone name → narrowing must be skipped, and `_SHADOWED`
+    # then restricts `get` to same-file (here: no same-file def → no edge).
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "store.py").write_text("def get():\n    pass\n")
+    (root / "cache.py").write_text("def get():\n    pass\n")   # 2nd def → ambiguous
+    (root / "caller.py").write_text(
+        "from . import store\n\n"
+        "def handle(store):\n    store.get('k')\n")
+    codegraph_build.build("p", root)
+
+    handle = _node("p", "handle", "caller.py")
+    store_get = _node("p", "get", "store.py")
+    bad = [e for e in codegraph.edges("p") if e["src"] == handle["id"]
+           and e["dst"] == store_get["id"] and e["rel"] == "calls"]
+    assert not bad                       # no false-precise edge to store.get
+    # And no EXTRACTED/1.0 edge to ANY `get` was fabricated from the qualifier.
+    cache_get = _node("p", "get", "cache.py")
+    assert not [e for e in codegraph.edges("p") if e["src"] == handle["id"]
+                and e["dst"] == cache_get["id"]]
