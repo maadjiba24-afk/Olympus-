@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 114 tools in
+Olympus exposes a **finite, named** tool surface — the 123 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -77,6 +77,15 @@ surface. So the surface and its threat model can't drift apart.
 | `web_diff` | Diff a page's markdown against a prior snapshot | ingests untrusted | Fetch via `_http_get`; content only compared (difflib), never executed; diff output wrapped | SSRF — gated; injected content — only diffed and wrapped, never obeyed |
 | `web_monitor_add` | Register a URL to watch for changes | first-party write | Records to Olympus's own store only — NO fetch here (the gated fetch happens later in `webmonitor.run_due`); the URL is literal-checked with `url_block_reason` up front; watch count capped (≤50) | Adding an internal URL — refused up front; the scheduled check is opt-in (`OLYMPUS_WEB_MONITOR`), gated, and off during replay |
 | `web_monitor_list` | List the URLs you're watching | first-party read | Read-only over Olympus's own watch store | None significant (own state) |
+| `assess_scope` | Show active, signed assessment authorizations | first-party read | Read-only over Olympus's own authorization store; agents cannot grant scope (operator-only via the `authorize_assessment` action) | Self-authorization — impossible: no grant tool is exposed; scope is a code-checked, ledger-recorded fact |
+| `assess_recon` | Fingerprint an AUTHORIZED target (status, server/tech headers, missing security headers) | ingests untrusted | `require_scope()` fails closed unless the target is in an active grant; single gated, IP-pinned `_http_probe` GET (SSRF/egress/secret-exfil preamble, no payloads); output wrapped, actuators stripped | Out-of-scope reach — refused in code before any I/O; SSRF/rebinding — pinned; injected response steering scope — wrapped, and the grant list is the only scope |
+| `assess_http_audit` | Audit an AUTHORIZED target's HTTP security headers / cookie flags / CORS | ingests untrusted | Scope-enforced like `assess_recon`; one gated GET; findings carry computed CVSS; output wrapped | Out-of-scope reach — refused; SSRF — gated/pinned; injected content — wrapped |
+| `assess_sast` | Pattern SAST over workspace-confined source (sinks → CWE+CVSS) | first-party read | `require_scope('local')` required; files confined via `sandbox._confine` (no traversal); read-only; bounded file count/size | Arbitrary-file read — refused by `_confine`; running without consent — refused by `require_scope` |
+| `assess_secrets` | Scan workspace-confined source for hardcoded credentials (CWE-798) | first-party read | Scope-required; `_confine`-bounded; evidence REDACTED via `security.anonymize` before storage | Report becoming an exfil channel — matched secrets are redacted; traversal — refused by `_confine` |
+| `assess_deps` | Audit requirements.txt / package.json against the bundled advisory index | first-party read | Scope-required; `_confine`-bounded; offline/deterministic (no network) | Traversal — refused by `_confine`; no SSRF surface (no fetch) |
+| `record_finding` | Record a validated finding (severity COMPUTED from a CVSS vector; deduped) | first-party write | Writes only Olympus's own findings store; capped (≤1000); an own-state write like `add_todo` | Finding spam — capped and deduped by fingerprint; no external effect |
+| `list_findings` | List recorded findings as a Markdown report | first-party read | Read-only over Olympus's own findings store | None significant (own state) |
+| `export_findings` | Export findings as markdown / json / SARIF 2.1.0 | first-party read | Read-only over Olympus's own findings store; deterministic serialization | None significant (own state) |
 | `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |

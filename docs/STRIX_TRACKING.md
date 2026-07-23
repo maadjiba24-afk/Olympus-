@@ -8,6 +8,10 @@ here** — this is competitive/inspiration analysis only, read from a shallow
 clone.
 
 - **Last checked:** 2026-07-23 (commit `7e02b8d`, `main`, PyPI `strix-agent` 1.3.1)
+- **Adoption status:** ✅ **ABSORBED** as the native **Aegis Assessment** suite
+  (`olympus/assess.py` + `olympus/sarif.py`, ADR 0011). Strix's capability
+  surface is now native — with every weakness in §2 inverted into a structural
+  strength. See §5 for the mapping.
 - **What it is:** an open-source (Apache-2.0) "AI hacker" — an autonomous
   offensive-security agent that runs recon, scanning, exploitation, and PoC
   validation against apps you own, then files vulnerability reports with CVSS,
@@ -378,3 +382,32 @@ SARIF/CVSS reporting, an HTTP-capture audit proxy, and a USD budget stop —
 while pointedly **not** importing Strix's security model, which is the precise
 thing Olympus's egress-gated, capability-profiled, untrusted-wrapping,
 ledger-backed spine is built to do better.
+
+---
+
+## 5. Adoption — what shipped natively (ADR 0011)
+
+Implemented as the **Aegis Assessment** suite (`olympus/assess.py`,
+`olympus/sarif.py`; `olympus assess` CLI; Aegis specialist upgrade;
+`authorize_assessment` action; 9 tools; `tests/test_assess.py` +
+`tests/test_sarif.py`). Each Strix weakness became a structural strength:
+
+| Strix capability / weakness | Native Olympus form (the moat inversion) |
+|---|---|
+| Multi-agent recon → scan → report | `assess.run_assessment` + Aegis driving `assess_recon`/`assess_http_audit`/`assess_sast`/`assess_secrets`/`assess_deps` |
+| **Prompt-only scope** (§2.1) | **Scope enforced in code**: `require_scope()` fails closed against a signed grant; out-of-scope hosts refused before any I/O |
+| **Refusal-suppression prompt** (§2.2) | **Signed `authorize_assessment` action** (human-approved, revocable, ledger-recorded); agents cannot self-authorize; model judgment retained |
+| **No injection defense** (§2.3) | Target fetches via the IP-pinned `tools._http_probe`; `assess_recon`/`assess_http_audit` are INGESTION → `wrap_untrusted` + actuators stripped |
+| Source-aware SAST | `assess_sast` — sink patterns → CWE + CVSS, workspace-confined |
+| Secret detection | `assess_secrets` — CWE-798, evidence **redacted** so a report can't leak the secret |
+| Dependency-CVE scan | `assess_deps` — offline bundled advisory index (extensible via `OLYMPUS_ASSESS_ADVISORIES`) |
+| PoC-mandatory CVSS + SARIF + dedup | `record_finding` (severity **computed** from a CVSS 3.1 vector) + `export_findings` (SARIF 2.1.0) + fingerprint dedup + ledger note (the audit trail Strix removed) |
+| USD budget stop | `run_assessment(budget_usd=…)` — delta-spend stop halts later phases |
+| SARIF for CI | `olympus assess run --sarif out.sarif` / `export_findings sarif` |
+
+**Deliberately NOT absorbed** (see ADR 0011 + `DEFERRED.md`): prompt-level scope,
+the refusal-suppression prompt, autonomous arbitrary-target exploitation / payload
+spraying, the Docker Kali sandbox with raw-socket caps + host-gateway,
+`agent-browser` in-page exploitation, telemetry-on-by-default, and the OSS email
+wall. Heavy infra (a live CVE feed, a full Caido-grade capture proxy, the
+25-file offensive skills library) is tracked as deferred.

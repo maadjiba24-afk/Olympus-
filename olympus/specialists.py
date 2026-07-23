@@ -209,9 +209,25 @@ SPECIALISTS: dict[str, Specialist] = {
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
-            description="Defensive security: hardening, threat awareness, secure "
-                        "coding, privacy, incident response guidance.",
+            description="Defensive security AND authorized assessment of your "
+                        "OWN assets: hardening, secure coding, privacy, incident "
+                        "response, PLUS consent-gated recon, HTTP security-header "
+                        "audit, source SAST, and secret / dependency scanning "
+                        "that produce CVSS-scored, SARIF-exportable findings. "
+                        "Assessment scope is enforced in code — Aegis can only "
+                        "assess targets the operator has explicitly authorized.",
             web=True,
+            # The assessment suite (native Strix-absorption; olympus/assess.py):
+            # recon/http_audit fetch the target (INGESTION — capability
+            # separation strips any actuator from the run), while the source
+            # scanners and findings-store verbs read local source or Olympus's
+            # own findings store (TRUSTED). Aegis holds NO authorize tool — it
+            # cannot self-authorize; the operator grants scope via the
+            # authorize_assessment action.
+            extra_tools=("assess_scope", "assess_recon", "assess_http_audit",
+                         "assess_sast", "assess_secrets", "assess_deps",
+                         "record_finding", "list_findings", "export_findings",
+                         "read_file", "list_dir", "grep_files", "glob_files"),
         ),
         Specialist(
             key="iris", name="Iris", title="Social Network Assistant",

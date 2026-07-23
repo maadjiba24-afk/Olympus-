@@ -15,6 +15,41 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Native "Aegis Assessment" suite (Strix absorbed as a moat)
+
+Absorbed [Strix](https://github.com/usestrix/strix)'s security-assessment
+capability surface as native Olympus capabilities — turning each of its
+weaknesses into a structural strength (design locked in ADR 0011, analysis in
+`docs/STRIX_TRACKING.md`). New modules `olympus/assess.py` (code-enforced scope,
+recon, HTTP security-header audit, source SAST, secret + dependency scanning,
+findings model with dedup + orchestration under a USD budget stop) and
+`olympus/sarif.py` (pure-Python CVSS 3.1 scoring + SARIF 2.1.0 export), wired as
+**9 new tools** (123 total), **1 new action** (25 total), and **1 new CLI
+command group** (126 total):
+
+- Tools: `assess_recon`, `assess_http_audit` (ingestion, gated + wrapped);
+  `assess_scope`, `assess_sast`, `assess_secrets`, `assess_deps`,
+  `record_finding`, `list_findings`, `export_findings` (own/local, trusted).
+- Action: `authorize_assessment` (IRREVERSIBLE, revocable) — the signed,
+  human-approved, ledger-recorded scope grant.
+- CLI: `olympus assess`
+  (authorize/scope/revoke/recon/audit/sast/secrets/deps/run/report/clear).
+- Aegis upgraded from defense-advice-only to defense **plus** authorized
+  assessment of the operator's own assets (holds the assess + source-read
+  tools; still holds no actuators).
+
+The moat inversions: **scope enforced in code** (`require_scope()` fails closed
+against a signed grant — not a prompt); **a signed authorization** instead of
+Strix's refusal-suppression (agents cannot self-authorize); **untrusted target
+content isolated structurally** (recon/audit fetch via the IP-pinned
+`tools._http_probe`, INGESTION-classified → wrapped + actuators stripped);
+**findings with CVSS computed from a vector** + SARIF 2.1.0 + fingerprint dedup +
+a ledger note (the audit trail Strix removed); **secret evidence redacted** so a
+report can't leak the secret. Pure-stdlib — no new dependencies. Tests:
+`tests/test_assess.py`, `tests/test_sarif.py` (49 new). THREAT_MODEL.md,
+`capabilities.json`, and README markers updated; the tool classification stays
+complete + disjoint (envelope fail-closed).
+
 ### Added — Native "Web Context" suite (Firecrawl absorbed as a moat)
 
 Absorbed [Firecrawl](https://github.com/firecrawl/firecrawl)'s full web-data

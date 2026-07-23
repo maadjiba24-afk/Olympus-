@@ -287,6 +287,47 @@ def _authorize_payment_execute(p: dict) -> dict:
             "note": "Authorization recorded; NO payment rail — no money moved."}
 
 
+# --- authorize_assessment: the signed scope grant (Strix absorption, ADR 0011) -
+# Strix's system prompt orders the model to "never ask permission." Olympus does
+# the inverse: an assessment can only run against a target the operator
+# authorized HERE, on the approval spine — a human-signed, ledger-recorded fact.
+# The grant is what makes assess.require_scope() pass; without it every
+# assessment tool fails closed. IRREVERSIBLE so it never auto-runs; undo revokes.
+
+def _authorize_assessment_preview(p: dict) -> str:
+    targets = ", ".join(p.get("targets") or []) or "(none)"
+    hours = int(p.get("expires_in", 24 * 3600)) // 3600
+    return (
+        "Authorize a SECURITY ASSESSMENT of your own asset(s):\n"
+        f"  Targets: {targets}\n"
+        f"  Valid for: {hours}h\n"
+        f"  Note: {p.get('note', '') or '(none)'}\n"
+        "  This records a signed, revocable authorization that lets Aegis run "
+        "recon / security-header audit / SAST / secret + dependency scans "
+        "against ONLY these targets. Scope is then enforced in code — nothing "
+        "outside this list can be assessed. Only authorize assets you own or "
+        "have explicit written permission to test.")
+
+
+def _authorize_assessment_execute(p: dict) -> dict:
+    from . import assess
+    rec = assess.grant(
+        p.get("targets") or [],
+        expires_in=float(p.get("expires_in", 24 * 3600)),
+        note=str(p.get("note", "")),
+        approved_by=str(p.get("_user", "operator")),
+        user=p.get("_user"))
+    return {"authorization_id": rec["id"], "targets": rec["targets"],
+            "expires": rec["expires"], "_user": p.get("_user")}
+
+
+def _authorize_assessment_undo(result: dict) -> str:
+    from . import assess
+    ok = assess.revoke(result.get("authorization_id", ""),
+                       user=result.get("_user"))
+    return "authorization revoked" if ok else "authorization already gone"
+
+
 def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
@@ -377,6 +418,18 @@ def register_builtins() -> None:
         undo=_write_document_undo,
         description="Create or overwrite a document in the user's workspace "
                     "(reversible)."))
+    # Authorized-assessment scope grant (Strix absorption, ADR 0011).
+    # IRREVERSIBLE so it always needs explicit human approval and never
+    # auto-runs; undo revokes the grant. This signed, ledger-recorded action is
+    # the ONLY way an assessment becomes in-scope — the code-enforced inversion
+    # of Strix's prompt-level "you are already authorized".
+    actions.register(actions.ActionType(
+        name="authorize_assessment", risk_class=actions.IRREVERSIBLE,
+        scope="assess.authorize", preview=_authorize_assessment_preview,
+        execute=_authorize_assessment_execute, undo=_authorize_assessment_undo,
+        description="Authorize a bounded, revocable security assessment of your "
+                    "own asset(s) — the signed scope grant Aegis's assessment "
+                    "tools enforce in code."))
     # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
     from . import operator
     operator.register_operator_actions()

@@ -113,7 +113,16 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # scrape/crawl stay served by browse_page/crawl_site,
                              # already ingestion-classified above.)
                              "web_map", "web_batch_scrape", "web_extract",
-                             "generate_llmstxt", "parse_document", "web_diff"})
+                             "generate_llmstxt", "parse_document", "web_diff",
+                             # Aegis Assessment (olympus/assess.py): recon and
+                             # the HTTP audit fetch an attacker-controlled target
+                             # (via the gated tools._http_probe) — untrusted
+                             # external content, so their output is enveloped and
+                             # action tools are stripped from any run holding
+                             # them. The local scanners (sast/secrets/deps) and
+                             # the findings-store verbs read only local source or
+                             # Olympus's own store and are TRUSTED below.
+                             "assess_recon", "assess_http_audit"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
@@ -158,6 +167,15 @@ TRUSTED_TOOLS = frozenset({
     # add_todo / list_todos. The scheduled CHECK that does fetch lives in the
     # heartbeat (webmonitor.run_due), not in a tool.
     "web_monitor_add", "web_monitor_list",
+    # Aegis Assessment (olympus/assess.py): these read only local source
+    # (sast/secrets/deps, workspace-confined) or Olympus's OWN findings/scope
+    # store (an action-result / own-state read, like list_todos). They ingest no
+    # external content, so they skip the envelope. The two target-fetching verbs
+    # (assess_recon/assess_http_audit) are INGESTION above. record_finding is the
+    # agent WRITING its own validated finding into Olympus's store — own state,
+    # not ingested content — so it is trusted like add_todo.
+    "assess_scope", "assess_sast", "assess_secrets", "assess_deps",
+    "record_finding", "list_findings", "export_findings",
 })
 
 _ENVELOPE_HEADER = (
