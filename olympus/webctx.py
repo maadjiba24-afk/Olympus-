@@ -542,20 +542,27 @@ _DEFAULT_FORMATS = ("markdown", "links", "metadata")
 def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
            schema: dict | None = None, prompt: str = "",
            attributes: list | None = None, actions: list | None = None,
-           mobile: bool = False, location: str = "") -> dict[str, Any]:
+           mobile: bool | None = None, location: str = "") -> dict[str, Any]:
     """Scrape one URL. `formats` any of: markdown, html (cleaned), rawHtml,
-    links, images, metadata, branding, summary, json, attributes. `schema`+`json`
-    runs verified extraction; `attributes` reads selector/attribute pairs. With
-    `actions`, the page is driven through the governed browser harness first
-    (click/scroll/type/wait — never ungoverned JS). `mobile`/`location` set the
-    request's device/language hints. Returns a dict; a blocked/failed fetch
-    returns {'error': ...}. Content that reaches a model is wrapped untrusted."""
+    links, images, metadata, branding, jsonld, feeds, summary, json, attributes.
+    `schema`+`json` runs verified extraction; `attributes` reads
+    selector/attribute pairs. With `actions`, the page is driven through the
+    governed browser harness first (click/scroll/type/wait — never ungoverned
+    JS). `mobile` (None = auto: apply the learned per-domain bias) / `location`
+    set the request's device/language hints. Returns a dict; a blocked/failed
+    fetch returns {'error': ...}. Content that reaches a model is wrapped."""
     # Interactive path: pre-actions require a real (governed) browser.
     if actions:
         return _scrape_with_actions(url, actions, formats, schema, prompt,
                                     attributes)
+    # Auto-apply learned config: when the caller didn't specify `mobile`, use
+    # the per-domain bias the corpus has earned (>=2 wins). Purely additive —
+    # an explicit True/False from the caller always wins.
+    use_mobile = mobile
+    if use_mobile is None:
+        use_mobile = bool(_hint(url).get("prefer_mobile"))
     try:
-        html = _fetch_html(url, mobile=mobile, location=location)
+        html = _fetch_html(url, mobile=use_mobile, location=location)
     except ValueError as err:                       # SSRF/egress/secret-exfil
         _observe(url, ok=False, blocked=True)
         return {"url": url, "error": f"blocked: {err}"}
@@ -564,7 +571,7 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
         return {"url": url, "error": f"fetch failed: {str(err)[:200]}"}
     page = parse_page(html, base_url=url)           # parse once, reuse for signals
     result = _assemble(url, html, formats, schema, prompt, attributes, page=page)
-    _observe(url, ok=True, bytes_=len(html),
+    _observe(url, ok=True, bytes_=len(html), used_mobile=bool(use_mobile),
              site_name=(result.get("branding") or {}).get("site_name", ""),
              has_jsonld=bool(page["jsonld"]),
              feed_url=page["feeds"][0] if page["feeds"] else "")
@@ -1102,6 +1109,11 @@ def extract(source: str | list[str], schema: dict, prompt: str = "",
             result["verification_flags"] = flags[:8]
     except Exception:
         result["verified"] = None            # check could not run; never claim ok
+    # Learn extraction quality per domain (single-URL source only): the corpus
+    # then knows which domains yield trustworthy structured data.
+    if isinstance(source, str) and source.startswith(("http://", "https://")) \
+            and result.get("verified") is not None:
+        _observe(source, ok=True, verified=result["verified"])
     return result
 
 

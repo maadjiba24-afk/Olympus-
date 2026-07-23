@@ -1883,7 +1883,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     # browse_page/crawl_site remain the quick readers; web_scrape is the
     # full-featured scrape (formats/actions/mobile/location/attributes).
     "web_scrape": lambda url, formats=None, schema=None, prompt="",
-        attributes=None, actions=None, mobile=False, location="":
+        attributes=None, actions=None, mobile=None, location="":
         _web_scrape(url, formats, schema, prompt, attributes, actions,
                     mobile, location),
     "web_map": lambda url, limit=200, include_subdomains=False:
@@ -2575,7 +2575,7 @@ def _webctx():
 
 def _web_scrape(url: str, formats: list | None = None, schema: dict | None = None,
                 prompt: str = "", attributes: list | None = None,
-                actions: list | None = None, mobile: bool = False,
+                actions: list | None = None, mobile: bool | None = None,
                 location: str = "") -> str:
     """Advanced scrape: multi-format, structured extraction, in-page actions,
     device/locale hints. (browse_page remains the quick markdown+links reader.)"""

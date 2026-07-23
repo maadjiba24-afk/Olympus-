@@ -40,6 +40,12 @@ a data network effect a copier starts at zero:
   action-profile candidate), or fetching poorly (try mobile/proxy). Each
   standing pattern is surfaced once (deduped), saved as a lesson, and notified —
   evidence-backed feature proposals, not autonomous code-gen.
+- **Closed learn→apply loop** — `scrape(mobile=None)` (the new default) auto-
+  applies the per-domain bias the corpus has *earned*: a domain where a mobile
+  fetch repeatedly beat the desktop baseline is scraped mobile-first next time,
+  no prompting. Purely additive (an explicit `mobile=True/False` always wins),
+  and the win is learned from real byte-gain. Extraction quality (verify
+  confirmed/flagged) is now recorded per domain too.
 
 Internal capabilities + new formats (tool/command counts unchanged). New tests:
 `test_domainlore.py`, `test_webreflect.py`, plus jsonld/feed coverage.

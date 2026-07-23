@@ -1488,7 +1488,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.formats or args.mobile or args.location:
             from . import tools
-            out = tools._web_scrape(args.url, args.formats, mobile=args.mobile,
+            # --mobile forces it; otherwise None = auto (learned per-domain bias)
+            out = tools._web_scrape(args.url, args.formats,
+                                    mobile=True if args.mobile else None,
                                     location=args.location)
         else:
             from . import media

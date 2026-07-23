@@ -120,7 +120,7 @@ def observe(url: str, *, ok: bool = True, blocked: bool = False,
             actions_helped: bool = False, mobile_helped: bool = False,
             verified: bool | None = None, site_name: str = "",
             has_jsonld: bool = False, feed_url: str = "",
-            now: float | None = None) -> None:
+            used_mobile: bool = False, now: float | None = None) -> None:
     """Fold one visit's result into the domain's lore. Best-effort: never raises
     out of a scrape. Also records the ok/fail outcome into the self-tuner."""
     if not enabled():
@@ -146,10 +146,15 @@ def observe(url: str, *, ok: bool = True, blocked: bool = False,
                 r.successes += 1
             else:
                 r.failures += 1
+            old_avg = r.avg_bytes
             if bytes_ > 0:
                 # running mean over successful fetches
                 n = max(1, r.successes)
                 r.avg_bytes = r.avg_bytes + (bytes_ - r.avg_bytes) / n
+            # Learn that mobile helps this domain: a mobile fetch that beats the
+            # domain's established baseline by a clear margin is a real win.
+            if used_mobile and old_avg > 0 and bytes_ > 1.2 * old_avg:
+                r.mobile_helped += 1
             if sitemap:
                 r.sitemap_url = sitemap[:_STR_CAP]
             if robots_disallow:

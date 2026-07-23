@@ -110,3 +110,54 @@ def test_evolve_exposes_webctx_tunable():
     from olympus import evolve
     t = evolve.current("webctx", "fetch_timeout")
     assert 6 <= t <= 20                                 # self-tuned within bounds
+
+
+# --- iter 3: closed learn -> apply loop -------------------------------------
+
+def test_learns_mobile_win_from_byte_gain(lore):
+    domainlore.observe("https://m.io/", ok=True, bytes_=100)          # baseline
+    domainlore.observe("https://m.io/", ok=True, bytes_=1000, used_mobile=True)
+    assert domainlore.known("https://m.io/").mobile_helped == 1        # 10x > 1.2x
+    # a mobile fetch that does NOT beat the baseline is not counted as a win
+    domainlore.observe("https://m.io/", ok=True, bytes_=110, used_mobile=True)
+    assert domainlore.known("https://m.io/").mobile_helped == 1
+
+
+def test_prefer_mobile_needs_two_wins_then_hints(lore):
+    for _ in range(2):
+        domainlore.observe("https://m.io/", ok=True, bytes_=100)
+        domainlore.observe("https://m.io/", ok=True, bytes_=1000, used_mobile=True)
+    assert domainlore.known("https://m.io/").mobile_helped >= 2
+    assert domainlore.hint("https://m.io/").get("prefer_mobile") is True
+
+
+def test_scrape_auto_applies_learned_mobile(lore, monkeypatch):
+    from olympus import webctx, tools
+    seen = []
+
+    def fake(u, timeout=30, headers=None):
+        seen.append("iPhone" in (headers or {}).get("User-Agent", ""))
+        return "<h1>x</h1>"
+    monkeypatch.setattr(tools, "_http_get", fake)
+    # pre-seed the learned bias, then scrape with mobile unset (None = auto)
+    for _ in range(2):
+        domainlore.observe("https://m.io/", ok=True, bytes_=100)
+        domainlore.observe("https://m.io/", ok=True, bytes_=1000, used_mobile=True)
+    seen.clear()
+    webctx.scrape("https://m.io/", formats=("markdown",))     # mobile None → auto
+    assert seen[-1] is True                                   # applied learned mobile
+
+
+def test_explicit_mobile_false_overrides_learned_bias(lore, monkeypatch):
+    from olympus import webctx, tools
+    seen = []
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda u, timeout=30, headers=None:
+                        seen.append("iPhone" in (headers or {}).get("User-Agent", ""))
+                        or "<h1>x</h1>")
+    for _ in range(2):
+        domainlore.observe("https://m.io/", ok=True, bytes_=100)
+        domainlore.observe("https://m.io/", ok=True, bytes_=1000, used_mobile=True)
+    seen.clear()
+    webctx.scrape("https://m.io/", formats=("markdown",), mobile=False)  # explicit
+    assert seen[-1] is False                                  # caller's choice wins
