@@ -358,6 +358,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon_rm.add_argument("id")
     mon_sub.add_parser("run", help="run all due checks now (one pass)")
 
+    sub.add_parser("webknowledge",
+                   help="what Olympus has learned about the web (domain lore + "
+                        "discoveries)")
+
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
 
@@ -1557,6 +1561,32 @@ def main(argv: list[str] | None = None) -> int:
                   "Nothing due (or OLYMPUS_WEB_MONITOR is off).")
         else:
             print(webmonitor.list_text(user))
+    elif args.command == "webknowledge":
+        from . import domainlore, webreflect
+        print(domainlore.report())
+        rows = domainlore.top(15)
+        if rows:
+            print("\nMost-visited domains:")
+            for r in rows:
+                bits = []
+                if r.sitemap_url:
+                    bits.append("sitemap")
+                if r.has_jsonld:
+                    bits.append("json-ld")
+                if r.feed_url:
+                    bits.append("feed")
+                if r.mobile_helped >= 2:
+                    bits.append("mobile+")
+                if r.robots_disallow:
+                    bits.append("no-crawl")
+                tag = f"  [{', '.join(bits)}]" if bits else ""
+                ok = f"{int(r.successes / max(1, r.scrapes) * 100)}%"
+                print(f"  {r.domain:32} {r.scrapes:4} visit(s), {ok} ok{tag}")
+        disc = webreflect.discoveries()
+        if disc:
+            print("\nDiscoveries (evidence-backed proposals):")
+            for d in disc:
+                print(f"  [{d['kind']}] {d['title']}")
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
     elif args.command == "audit":

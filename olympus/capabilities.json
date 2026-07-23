@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 125,
+    "count": 126,
     "names": [
       "a2a",
       "actions",
@@ -171,6 +171,7 @@
       "watch",
       "web",
       "webhook",
+      "webknowledge",
       "whatsapp",
       "wiki",
       "witness-pubkey"

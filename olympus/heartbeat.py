@@ -143,6 +143,10 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             if idx.get("vacuumed"):
                 log.append(f"Search index: pruned {idx['orphans']} orphaned + "
                            f"{idx['aged']} aged conversation(s); vacuumed.")
+            from . import domainlore
+            stale = domainlore.prune(config.RETAIN_DAYS, now)
+            if stale:
+                log.append(f"Web knowledge: pruned {stale} stale domain(s).")
         except Exception:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now

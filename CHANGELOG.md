@@ -46,8 +46,16 @@ a data network effect a copier starts at zero:
   no prompting. Purely additive (an explicit `mobile=True/False` always wins),
   and the win is learned from real byte-gain. Extraction quality (verify
   confirmed/flagged) is now recorded per domain too.
+- **Operator surface + federation** — new `olympus webknowledge` command prints
+  the corpus report, the most-visited domains, and the live discoveries; the
+  `web_context` row on `olympus moat` shows lore stats and the tuned knob.
+  Discoveries ride the existing signed/scrubbed **lessons federation** seam, so
+  web knowledge compounds across a fleet without widening the trust surface.
+  Corpus hygiene: the heartbeat maintenance sweep now prunes domains unseen
+  within the retention window (`domainlore.prune`), and the store is bounded and
+  corrupt-quarantining. Documented in `docs/WEB_CONTEXT.md`.
 
-Internal capabilities + new formats (tool/command counts unchanged). New tests:
+Internal capabilities + new formats + one new command. New tests:
 `test_domainlore.py`, `test_webreflect.py`, plus jsonld/feed coverage.
 
 ### Added — Web Context: the previously-declined Firecrawl features, built native

@@ -238,6 +238,37 @@ def stats() -> dict:
             "success_rate": round(ok / total, 3) if total else 0.0}
 
 
+def top(n: int = 15) -> list["DomainRecord"]:
+    """The most-visited domains, for the CLI view (deterministic order)."""
+    try:
+        records = list(_load().values())
+    except Exception:
+        return []
+    return sorted(records, key=lambda r: (-r.scrapes, r.domain))[:max(1, n)]
+
+
+def prune(retain_days: int = 120, now: float | None = None) -> int:
+    """Drop domains not seen within `retain_days` — corpus hygiene, run from the
+    heartbeat's maintenance sweep. Returns the number removed. Inert under
+    replay / when disabled."""
+    if not enabled():
+        return 0
+    now = now or time.time()
+    cutoff = now - max(1, retain_days) * 86400
+    removed = 0
+    try:
+        with _mutex():
+            records = _load()
+            keep = {d: r for d, r in records.items()
+                    if r.last_seen >= cutoff or r.last_seen == 0.0}
+            removed = len(records) - len(keep)
+            if removed:
+                _save(keep)
+    except Exception:
+        return 0
+    return removed
+
+
 def report() -> str:
     s = stats()
     if not s.get("domains"):
