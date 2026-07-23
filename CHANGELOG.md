@@ -15,6 +15,22 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Docs — Competitive analysis: alibaba/page-agent (analysis-only)
+
+Added `docs/PAGE_AGENT_TRACKING.md`, a complete feature/capability inventory and
+security/design critique of [alibaba/page-agent](https://github.com/alibaba/page-agent)
+(the zero-install in-page GUI agent, npm 1.12.2), mapped to Olympus's own
+browser harness and web-context suite. Verdict: **nothing adopted** — Page
+Agent's in-page DOM-automation surface is already matched or exceeded by
+`olympus/browser.py` (numbered element map, index/selector/AX targeting, shadow
++ cross-origin iframe traversal, self-healing selectors, provenance-scored
+skills), while its distribution model (page-origin sharing, `eval()` JS tool,
+unauthenticated localhost MCP socket behind a reusable `window.confirm()`,
+unredacted page HTML to a third-party LLM) is a deliberate Olympus non-goal. A
+short watchlist of ergonomic/robustness ideas (LLM malformed-response
+auto-repair, "new element since last step" delta, geometry-aware scroll hints,
+human-click hit-testing) is recorded but unbuilt.
+
 ### Added — Three deferred capabilities built native (DEFERRED #12/#13/#11)
 
 Closes three `DEFERRED.md` items as first-class, tested, hardened capabilities.
