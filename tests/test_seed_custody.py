@@ -36,6 +36,7 @@ def _clean_custody_env(monkeypatch):
 
 # --- 1. file-based acquisition -----------------------------------------------
 
+@pytest.mark.requires_crypto
 def test_seed_file_configures_production_posture(tmp_path, monkeypatch):
     p = _write_seed(tmp_path, "  file-held-secret \n")   # stripped on read
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED_FILE", str(p))
@@ -92,6 +93,7 @@ def _run_cli(argv, capsys):
     return (rc or 0), out.out, out.err
 
 
+@pytest.mark.requires_crypto
 def test_keygen_writes_0600_and_prints_matching_pubkey(tmp_path, monkeypatch,
                                                        capsys):
     out_path = tmp_path / "creds" / "signing_seed"     # parent dirs created
@@ -154,6 +156,7 @@ def test_sovereign_boot_allows_keygen_itself(monkeypatch, tmp_path, capsys):
     assert rc == 0
 
 
+@pytest.mark.requires_crypto
 def test_sovereign_configured_seed_boots_and_signs(tmp_path, monkeypatch,
                                                    capsys):
     p = _write_seed(tmp_path)
@@ -164,6 +167,7 @@ def test_sovereign_configured_seed_boots_and_signs(tmp_path, monkeypatch,
     assert witness.sign(b"x")                          # no raise
 
 
+@pytest.mark.requires_crypto
 def test_sovereign_escape_hatch_proceeds_with_loud_warning(monkeypatch, capsys,
                                                            caplog):
     monkeypatch.setenv("OLYMPUS_SOVEREIGN", "1")
@@ -178,6 +182,7 @@ def test_sovereign_escape_hatch_proceeds_with_loud_warning(monkeypatch, capsys,
 
 # --- 4. multi-key pinning (rotation overlap) ------------------------------------
 
+@pytest.mark.requires_crypto
 def test_manifest_signed_with_second_pinned_key_verifies(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "rotation-seed-B")
     manifest = witness.build_manifest()
@@ -229,6 +234,7 @@ def test_seed_file_is_never_backed_up(tmp_path, monkeypatch, capsys):
 
 # --- 6. regression: unconfigured, non-sovereign = today's behavior --------------
 
+@pytest.mark.requires_crypto
 def test_unconfigured_nonsovereign_dev_behavior_intact(tmp_path, monkeypatch,
                                                        capsys):
     assert witness.is_default_seed() is True

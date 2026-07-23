@@ -556,11 +556,10 @@ def test_get_and_set_cookies_roundtrip(monkeypatch):
         browser.set_transport_factory(None)
 
 
+@pytest.mark.requires_crypto
 def test_save_and_restore_auth_via_vault(monkeypatch):
-    from olympus import memory, operator, vault
+    from olympus import memory, operator
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-test-passphrase")
-    if not vault.available():
-        pytest.skip("vault crypto backend unavailable")
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")

@@ -196,10 +196,9 @@ def test_delete_unknown_category_raises():
 
 # --- 5. optional at-rest encryption reuses vault.py ----------------------
 
+@pytest.mark.requires_crypto
 def test_encrypted_export_roundtrips_with_vault_key(tmp_path, monkeypatch):
-    from olympus import vault
-    if not vault._HAVE_CRYPTO:
-        pytest.skip("cryptography backend not available")
+    from olympus import vault  # noqa: F401  (module presence asserted by the marker)
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-stable-secret")
 
     before = _seed("erin")
@@ -216,10 +215,8 @@ def test_encrypted_export_roundtrips_with_vault_key(tmp_path, monkeypatch):
     assert _snapshot(memory._memory_roots("erin")) == before
 
 
+@pytest.mark.requires_crypto
 def test_encrypted_export_fails_clearly_without_key(tmp_path, monkeypatch):
-    from olympus import vault
-    if not vault._HAVE_CRYPTO:
-        pytest.skip("cryptography backend not available")
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "key-one")
     _seed("frank")
     archive = tmp_path / "frank.enc"

@@ -15,17 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Fixed — `test_exfil_scan` skips gracefully without a working crypto backend
+### Testing — Crypto-dependent tests degrade gracefully and consistently
 
-`test_vault_secrets_are_detected` stored a secret through the vault, which needs a
-functional `cryptography` Fernet backend — an optional dependency that can also be
-*present but broken* (a missing `_cffi_backend` / panicking native lib sets the
-vault's `_HAVE_CRYPTO=False` too). In such an environment the test errored instead
-of skipping. It now skips via the vault's own `available()` predicate — mirroring
-the module's documented graceful-degradation contract and the browser-smoke tests'
-skip-without-a-browser pattern — so a minimal or crypto-broken environment stays
-green. Where the backend works (e.g. GitHub CI) the test runs and asserts exactly
-as before.
+`cryptography` is a required dependency, so in any correctly-provisioned
+environment (CI, normal dev) the vault (Fernet) and signing (Ed25519) tests run in
+full. But the native backend can be *present yet broken* — a missing
+`_cffi_backend` or a panicking build makes the `vault`/`witness` modules set their
+own `_HAVE_CRYPTO=False` and refuse to encrypt/sign. In that defective environment
+20 tests across `test_backup`, `test_opconfig`, `test_secretref`,
+`test_seed_custody`, `test_exfil_scan`, `test_memory_contract`, and `test_browser`
+errored in a way that looked like a code regression, and the few pre-existing
+guards were inconsistent (a mix of the private `vault._HAVE_CRYPTO` and the public
+`vault.available()`, most tests guarding not at all).
+
+Replaced that ad-hoc mix with a single shared gate: a `requires_crypto` pytest
+marker (registered in `tests/conftest.py`) whose collection hook skips the marked
+tests — with one clear reason — only when the cryptography native backend is
+non-functional. Applied to every affected test and used to normalize the existing
+inline guards. Where the backend works (e.g. GitHub CI) every test runs and asserts
+exactly as before; a minimal or crypto-broken environment now reports honest skips
+instead of a wall of confusing errors. No production code changed.
 
 ### Fixed — Resilient local-Chrome launch (browser-smoke CI reliability)
 
