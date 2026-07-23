@@ -15,6 +15,21 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aegis self-benchmark (measured, regression-gated evolution)
+
+Added `assess.bench` / `assess.bench_scorecard` and `olympus assess bench` — a
+self-benchmark that scores the assessment engine's detection (precision / recall
+/ F1) against a labeled corpus of known-vulnerable and known-clean fixtures,
+scored on the EXACT production detection logic (`_sast_findings_for_text`, the
+dependency matcher — refactored out of `sast_scan` so the score can't drift from
+what really runs). This is the spine that makes the self-evolving loop safe:
+capability can grow over time (new checks/rules), but detection quality cannot
+silently regress — `tests/test_assess.py` asserts a quality floor (recall 1.0,
+precision ≥ 0.9), so a change that misses a known bug or fires on clean code
+fails CI. Mirrors Olympus's benchmark-gated prompt-upgrade philosophy (Prometheus
+rolls back a regression). Pure — no scope/network/memory; no new tool or manifest
+change. Tests: 3 new. Current score: 8 samples, precision/recall/F1 = 1.0.
+
 ### Added — Aegis active validation (scope-locked, benign confirmation)
 
 Added `assess_validate` (10th assess tool, 124 total; `olympus assess validate`)

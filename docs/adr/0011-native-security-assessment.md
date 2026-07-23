@@ -116,6 +116,18 @@ This is *stronger than Strix* on the axis that matters — deployable confirmati
 with a real proof — precisely because it refuses arbitrary-target exploitation,
 payload spraying, and open egress. Those remain declined (see "NOT absorbed").
 
+## Decision (g): evolution is measured and regression-gated
+
+The suite is designed to grow over time (new active checks, new SAST rules, a
+richer advisory index). To make that growth *safe* rather than a slow drift into
+false positives or missed bugs, `assess.bench` scores the engine against a
+labeled corpus (known-vulnerable + known-clean fixtures) using the EXACT
+production detection logic, and `test_assess.py` asserts a quality floor
+(recall 1.0, precision ≥ 0.9). This is the same discipline Olympus applies
+everywhere else — Prometheus upgrades a prompt only if a before/after benchmark
+shows no regression, else rolls back. Capability compounds; quality cannot
+silently regress. The benchmark is the engine of the self-evolving moat.
+
 ## Capabilities delta
 
 - New modules: `olympus/assess.py` (engine + scope + findings + active

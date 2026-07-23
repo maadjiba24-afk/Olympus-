@@ -350,6 +350,35 @@ def test_open_redirect_probe_does_not_follow(monkeypatch):
     assert False in seen_follow
 
 
+# --- self-benchmark: measured, regression-gated evolution -------------------
+
+def test_bench_meets_quality_floor():
+    r = assess.bench()
+    # The regression gate: the engine must detect EVERY known-vulnerable fixture
+    # (no false negatives) and stay clean on the clean fixtures (high precision).
+    assert r["samples"] >= 8
+    assert r["fn"] == 0, r["per_sample"]                    # misses nothing known
+    assert r["recall"] == 1.0
+    assert r["precision"] >= 0.9, r["per_sample"]
+    assert r["f1"] >= 0.9
+
+
+def test_bench_is_pure_no_scope_needed():
+    # bench() is Olympus measuring itself — it needs no authorization and touches
+    # no network/memory, so it can run in CI unconditionally.
+    r = assess.bench()
+    assert isinstance(r["per_sample"], list) and r["per_sample"]
+    assert "self-benchmark" in assess.bench_scorecard().lower()
+
+
+def test_bench_uses_production_detection_logic(workspace):
+    # The corpus is scored on the same _sast_findings_for_text the real scanner
+    # uses, so the score can't drift from what production does. Prove the shared
+    # helper detects a known sink.
+    hits = assess._sast_findings_for_text("eval(x)\n", ".py", "f.py")
+    assert any(h.cwe == "CWE-95" for h in hits)
+
+
 def test_budget_stop_halts_phases(workspace, monkeypatch):
     assess.grant(["example.com", "local"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _fake_probe({"server": "nginx"}))

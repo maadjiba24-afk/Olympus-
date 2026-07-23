@@ -655,6 +655,30 @@ def _iter_source_files(root: Path):
         yield path
 
 
+def _sast_findings_for_text(text: str, suffix: str,
+                            location_prefix: str) -> list[Finding]:
+    """Apply the SAST rule set to one source string. Shared by `sast_scan`
+    (per file) and `bench` (per fixture) so the benchmark measures EXACTLY the
+    detection logic that runs in production — the score can't drift from reality."""
+    out: list[Finding] = []
+    suffix = (suffix or "").lower()
+    for i, line in enumerate(text.splitlines(), 1):
+        if len(line) > 2000:
+            continue
+        for rule in _SAST_RULES:
+            if rule.suffixes and suffix not in rule.suffixes:
+                continue
+            if rule.pattern.search(line):
+                out.append(Finding(
+                    title=rule.title, severity=rule.severity, cwe=rule.cwe,
+                    cvss_vector=rule.vector,
+                    location=f"{location_prefix}:{i}" if location_prefix else f"line {i}",
+                    evidence=line.strip()[:_MAX_EVIDENCE],
+                    remediation=rule.remediation, confidence="medium",
+                    source="sast"))
+    return out
+
+
 def sast_scan(path: str = ".", record: bool = True,
               user: str | None = None) -> dict[str, Any]:
     """Pattern-based SAST over a workspace-confined source tree. Requires an
@@ -681,20 +705,7 @@ def sast_scan(path: str = ".", record: bool = True,
             continue
         scanned += 1
         rel = _rel(fpath, scan_root)
-        lines = text.splitlines()
-        for i, line in enumerate(lines, 1):
-            if len(line) > 2000:
-                continue
-            for rule in _SAST_RULES:
-                if rule.suffixes and fpath.suffix.lower() not in rule.suffixes:
-                    continue
-                if rule.pattern.search(line):
-                    findings.append(Finding(
-                        title=rule.title, severity=rule.severity, cwe=rule.cwe,
-                        cvss_vector=rule.vector, location=f"{rel}:{i}",
-                        evidence=line.strip()[:_MAX_EVIDENCE],
-                        remediation=rule.remediation, confidence="medium",
-                        source="sast"))
+        findings.extend(_sast_findings_for_text(text, fpath.suffix, rel))
     stored = [record_finding(f, user) for f in findings] if record else \
         [asdict(f) for f in findings]
     return {"path": str(path), "files_scanned": scanned,
@@ -1131,3 +1142,114 @@ def validate(url: str, user: str | None = None) -> dict[str, Any]:
     stored = [record_finding(f, user) for f in findings]
     return {"url": url, "params_tested": len(params), "probes": probes,
             "log": log, "findings": stored, "count": len(stored)}
+
+
+# ===========================================================================
+# Self-benchmark — measured, regression-gated evolution (the moat's engine)
+# ===========================================================================
+# Olympus improves the way it improves everything else: measured, with a
+# regression gate (Prometheus upgrades a prompt only if a before/after benchmark
+# shows no regression, else rolls back). The assessment engine gets the same
+# spine — a labeled corpus scored on the EXACT production detection logic
+# (`_sast_findings_for_text`, the dep matcher), so precision/recall are real and
+# every rule/check added over time is measured. `test_assess.py` asserts a
+# quality floor, so a change that misses a known bug or fires on clean code fails
+# CI. This is what makes the self-evolving loop safe: capability can grow, but
+# detection quality cannot silently regress.
+
+_BENCH_CORPUS: tuple[dict, ...] = (
+    {"name": "py_sinks", "kind": "sast", "suffix": ".py",
+     "expected": {"CWE-78", "CWE-95", "CWE-502", "CWE-327", "CWE-295", "CWE-89"},
+     "text": (
+         "import os, pickle, hashlib, requests\n"
+         "os.system('ping ' + host)\n"
+         "eval(user_code)\n"
+         "data = pickle.loads(blob)\n"
+         "h = hashlib.md5(pw).hexdigest()\n"
+         "requests.get(url, verify=False)\n"
+         "cur.execute(f'SELECT * FROM t WHERE id={uid}')\n")},
+    {"name": "js_sinks", "kind": "sast", "suffix": ".js",
+     "expected": {"CWE-79", "CWE-78"},
+     "text": ("el.innerHTML = userInput;\n"
+              "child_process.exec(cmd);\n")},
+    {"name": "py_ssti_debug", "kind": "sast", "suffix": ".py",
+     "expected": {"CWE-1336", "CWE-489"},
+     "text": ("render_template_string(tpl)\n"
+              "app.run(debug=True)\n")},
+    {"name": "py_clean", "kind": "sast", "suffix": ".py", "expected": set(),
+     "text": ("import subprocess, json, hashlib, yaml\n"
+              "subprocess.run(['ls', '-l'])\n"
+              "obj = json.loads(payload)\n"
+              "h = hashlib.sha256(pw).hexdigest()\n"
+              "cfg = yaml.safe_load(stream)\n")},
+    {"name": "js_clean", "kind": "sast", "suffix": ".js", "expected": set(),
+     "text": ("el.textContent = userInput;\n"
+              "const x = JSON.parse(data);\n")},
+    {"name": "deps_py_vuln", "kind": "deps", "ecosystem": "pypi",
+     "expected": {"CWE-20", "CWE-200"},
+     "text": "pyyaml==5.1\nrequests==2.20.0\n"},
+    {"name": "deps_npm_vuln", "kind": "deps", "ecosystem": "npm",
+     "expected": {"CWE-77", "CWE-1321"},
+     "text": '{"dependencies": {"lodash": "4.17.0", "minimist": "1.2.0"}}'},
+    {"name": "deps_py_clean", "kind": "deps", "ecosystem": "pypi",
+     "expected": set(), "text": "pyyaml==6.0.1\nrequests==2.31.0\n"},
+)
+
+
+def _dep_cwes_for_text(text: str, ecosystem: str) -> set[str]:
+    advisories = _load_advisories()
+    deps = _parse_package_json(text) if ecosystem == "npm" else _parse_requirements(text)
+    out: set[str] = set()
+    for pkg, ver in deps:
+        for spec, _adv, cwe, _sev, _note in advisories.get(ecosystem, {}).get(pkg, []):
+            if _spec_matches(ver, spec):
+                out.add(cwe)
+    return out
+
+
+def bench() -> dict[str, Any]:
+    """Score the engine's detection against the labeled corpus. Pure (no scope,
+    network, or memory) — Olympus measuring itself. Returns precision / recall /
+    F1 plus per-sample TP/FP/FN, so a rule change that regresses is visible and
+    caught by the test-suite floor."""
+    tp = fp = fn = 0
+    per_sample: list[dict] = []
+    for s in _BENCH_CORPUS:
+        expected: set[str] = set(s["expected"])
+        if s["kind"] == "sast":
+            detected = {f.cwe for f in _sast_findings_for_text(s["text"],
+                                                               s["suffix"], "")}
+        elif s["kind"] == "deps":
+            detected = _dep_cwes_for_text(s["text"], s.get("ecosystem", "pypi"))
+        else:
+            detected = set()
+        stp, sfp, sfn = (len(detected & expected), len(detected - expected),
+                         len(expected - detected))
+        tp += stp
+        fp += sfp
+        fn += sfn
+        per_sample.append({"name": s["name"], "expected": sorted(expected),
+                           "detected": sorted(detected),
+                           "tp": stp, "fp": sfp, "fn": sfn})
+    precision = tp / (tp + fp) if (tp + fp) else 1.0
+    recall = tp / (tp + fn) if (tp + fn) else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    return {"samples": len(_BENCH_CORPUS), "tp": tp, "fp": fp, "fn": fn,
+            "precision": round(precision, 3), "recall": round(recall, 3),
+            "f1": round(f1, 3), "per_sample": per_sample}
+
+
+def bench_scorecard() -> str:
+    r = bench()
+    lines = [
+        "# Aegis Assessment self-benchmark",
+        f"{r['samples']} labeled sample(s) · precision {r['precision']} · "
+        f"recall {r['recall']} · F1 {r['f1']}",
+        f"true-pos {r['tp']} · false-pos {r['fp']} · false-neg {r['fn']}",
+        "",
+    ]
+    for s in r["per_sample"]:
+        flag = "ok" if (s["fp"] == 0 and s["fn"] == 0) else "MISS"
+        lines.append(f"- [{flag}] {s['name']}: expected {s['expected'] or '(clean)'} "
+                     f"→ detected {s['detected'] or '(none)'}")
+    return "\n".join(lines)
