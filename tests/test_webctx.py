@@ -66,7 +66,7 @@ def test_to_markdown_builds_table_with_header_separator():
 # --- scrape: gated, error-safe ---------------------------------------------
 
 def test_scrape_blocked_url_returns_error_never_raises(monkeypatch):
-    def blocked(url):
+    def blocked(url, timeout=30):
         raise ValueError("refusing internal host 169.254.169.254")
     monkeypatch.setattr(tools, "_http_get", blocked)
     r = webctx.scrape("http://169.254.169.254/latest/meta-data/")
@@ -75,7 +75,7 @@ def test_scrape_blocked_url_returns_error_never_raises(monkeypatch):
 
 def test_scrape_returns_clean_markdown_and_links(monkeypatch):
     monkeypatch.setattr(tools, "_http_get",
-                        lambda url: "<h1>Hi</h1><a href='https://x.com'>x</a>")
+                        lambda url, timeout=30: "<h1>Hi</h1><a href='https://x.com'>x</a>")
     r = webctx.scrape("https://site.com", formats=("markdown", "links"))
     assert "# Hi" in r["markdown"]
     assert "https://x.com" in r["links"]
@@ -84,7 +84,7 @@ def test_scrape_returns_clean_markdown_and_links(monkeypatch):
 # --- map: sitemap + robots + dedup + sort + same-domain --------------------
 
 def _fake_web(pages):
-    def _get(url):
+    def _get(url, timeout=30):
         if url not in pages:
             raise ValueError(f"404 {url}")
         return pages[url]
@@ -111,7 +111,7 @@ def test_map_urls_reads_sitemap_and_is_deterministic(monkeypatch):
 def test_crawl_gates_every_hop_and_bounds(monkeypatch):
     seen = []
 
-    def _get(url):
+    def _get(url, timeout=30):
         seen.append(url)
         if url == "https://s.test/":
             return ('<a href="https://s.test/a">a</a>'
@@ -159,7 +159,7 @@ class _FakeBackend:
 
 def test_extract_wraps_content_and_verifies(monkeypatch):
     monkeypatch.setattr(tools, "_http_get",
-                        lambda url: "<p>Company: Acme</p>")
+                        lambda url, timeout=30: "<p>Company: Acme</p>")
     be = _FakeBackend()
     r = webctx.extract("https://co.test/", {"type": "object",
                        "properties": {"name": {"type": "string"}}},
@@ -174,7 +174,7 @@ def test_extract_wraps_content_and_verifies(monkeypatch):
 
 
 def test_extract_verify_can_flag_unsupported(monkeypatch):
-    monkeypatch.setattr(tools, "_http_get", lambda url: "<p>nothing useful</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>nothing useful</p>")
 
     class Be(_FakeBackend):
         def complete_json(self, settings, system, messages, schema, effort="high"):
@@ -191,12 +191,12 @@ def test_extract_verify_can_flag_unsupported(monkeypatch):
 # --- diff -------------------------------------------------------------------
 
 def test_diff_detects_change_and_hashes(monkeypatch):
-    monkeypatch.setattr(tools, "_http_get", lambda url: "<p>version two</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>version two</p>")
     base = webctx.diff("https://s.test/")              # no previous → baseline
     assert base["changed"] is True and base["current_hash"]
     same = webctx.diff("https://s.test/", base["current_markdown"])
     assert same["changed"] is False
-    monkeypatch.setattr(tools, "_http_get", lambda url: "<p>version three</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>version three</p>")
     moved = webctx.diff("https://s.test/", base["current_markdown"])
     assert moved["changed"] is True and "version three" in moved["diff"]
 
@@ -204,7 +204,7 @@ def test_diff_detects_change_and_hashes(monkeypatch):
 # --- parse_document: SSRF + path-traversal refusals ------------------------
 
 def test_parse_document_refuses_internal_url(monkeypatch):
-    def blocked(url, max_bytes=0):
+    def blocked(url, max_bytes=0, timeout=30):
         raise ValueError("refusing internal host")
     monkeypatch.setattr(tools, "_http_get_bytes", blocked)
     r = webctx.parse_document("http://169.254.169.254/secret.pdf")
@@ -227,7 +227,7 @@ def test_parse_document_missing_extra_is_graceful(monkeypatch, tmp_path):
         if name == "pypdf":
             raise ImportError("no pypdf")
         return real_import(name, *a, **k)
-    monkeypatch.setattr(tools, "_http_get_bytes", lambda url, max_bytes=0: b"%PDF-1.4 fake")
+    monkeypatch.setattr(tools, "_http_get_bytes", lambda url, max_bytes=0, timeout=30: b"%PDF-1.4 fake")
     monkeypatch.setattr(builtins, "__import__", no_pypdf)
     r = webctx.parse_document("https://s.test/doc.pdf")
     assert r["kind"] == "pdf" and "docs" in r["text"]   # points at the [docs] extra
@@ -263,3 +263,80 @@ def test_web_tools_trigger_action_stripping():
     # external-ingesting, so security.filter_tools drops action tools from it.
     defs = [{"name": "web_extract"}, {"name": "send_email"}]
     assert security.loadout_ingests_external(defs) is True
+
+
+# --- hardening: parser DoS resistance --------------------------------------
+
+@pytest.mark.parametrize("html,label", [
+    ("<ul>" * 50000 + "<li>x</li>" * 50000, "nested-list indent bomb"),
+    ("<tr>" + "<th>a</th>" * 3000 + "</tr>" * 40000, "table-separator bomb"),
+    ("<pre>" + " " * 399000 + "Z</pre>", "pre whitespace bomb"),
+])
+def test_to_markdown_bounds_adversarial_output(html, label):
+    # A ~400 KB hostile page must not amplify into gigabytes of markdown or spin
+    # the CPU: output is capped and pathological input finishes quickly.
+    import time
+    t = time.time()
+    md, _, _ = webctx.to_markdown(html)
+    assert time.time() - t < 3.0, f"{label} too slow"
+    assert len(md) <= webctx._MARKDOWN_CAP + 100      # bounded (+truncation marker)
+
+
+def test_to_markdown_caps_link_count():
+    html = "".join(f"<a href='https://a.b/{i}'>x</a>" for i in range(5000))
+    _, links, _ = webctx.to_markdown(html)
+    assert len(links) <= webctx._MAX_LINKS
+
+
+def test_to_markdown_recovers_from_unclosed_anchor():
+    # An unclosed <a> must not swallow the rest of the page.
+    md, _, _ = webctx.to_markdown("<p><a href='https://x'>link<p>body text here")
+    assert "body text here" in md
+
+
+# --- hardening: port allowlist ---------------------------------------------
+
+@pytest.mark.parametrize("url,ok", [
+    ("https://host/", True), ("http://host:8080/", True),
+    ("http://host:22/", False), ("http://host:6379/", False),
+    ("http://host:5432/x", False),
+])
+def test_port_allowlist(url, ok):
+    assert webctx._port_allowed(url) is ok
+
+
+def test_scrape_refuses_nonweb_port(monkeypatch):
+    # Even a public host on :22 is refused before any socket is opened.
+    called = []
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30: called.append(url) or "x")
+    r = webctx.scrape("http://public-host:6379/")
+    assert "error" in r and not called                 # never reached the fetch
+
+
+# --- hardening: host normalization (shared security guard) -----------------
+
+@pytest.mark.parametrize("host", [
+    "localhost", "LOCALHOST", "localhost.", "metadata.",
+    "foo.localhost", "anything.LocalHost.",
+])
+def test_blocked_hostname_normalization(host):
+    assert security._is_blocked_hostname(host) is True
+
+
+def test_blocked_hostname_allows_public():
+    assert security._is_blocked_hostname("example.com") is False
+    assert security._is_blocked_hostname("notlocalhost.com") is False
+
+
+# --- hardening: extract tolerates non-dict model output --------------------
+
+def test_extract_non_dict_result_does_not_raise(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>data</p>")
+
+    class Be:
+        def complete_json(self, *a, **k):
+            return ["not", "a", "dict"]                # lenient provider quirk
+    r = webctx.extract("https://co.test/", {"type": "object"},
+                       pool=_FakePool(), backend=Be())
+    assert r["found"] is False and "error" in r        # graceful, no AttributeError

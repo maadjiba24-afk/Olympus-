@@ -15,6 +15,40 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Harden the Web Context suite against adversarial input
+
+A four-dimension hardening pass (parser DoS, resource bounds, SSRF
+defense-in-depth, extraction/monitor robustness) on `webctx`/`webmonitor`:
+
+- **Parser (`to_markdown`) DoS.** Fixed two quadratic-output amplifiers a 400 KB
+  page could exploit — nested-list indent multiplication (`<ul>`×N) and a
+  `</tr>` that re-emitted the table separator with stale cell state — plus a
+  quadratic-backtracking whitespace `re.sub` (a `<pre>` space-run took seconds).
+  Added a running output-byte guard, capped list depth / link count / title, and
+  recover from unclosed `<a>`/`<title>` instead of swallowing the page. Hostile
+  inputs that previously OOM'd or spun the CPU now finish in milliseconds,
+  bounded to the markdown cap.
+- **SSRF defense-in-depth.** Web-context fetches are restricted to ordinary web
+  ports (80/443/8080/8443) so the suite can't be turned into a port-prober;
+  `map_urls` now only fetches *same-site* sitemaps (a hostile `robots.txt` can't
+  point us at third parties) with a visited-set and early-exit; `crawl` honors
+  `robots.txt` Disallow (fetched through the gate) and bounds its BFS frontier;
+  the shared host blocklist is normalized (`*.localhost`, trailing-dot, case);
+  and the redirect ceiling is made explicit (5).
+- **Resource bounds.** Bulk fetches use a tight socket timeout (slow-drip
+  defense); `diff` caps the previous snapshot and line count before `difflib`;
+  `parse_document` early-exits accumulation, bounds pages/paragraphs, and
+  decrypts empty-password PDFs — so a compression-bombed document can't exhaust
+  memory or hang the worker.
+- **Robustness.** `extract` tolerates a non-object model result instead of
+  crashing the tool and caps the extracted object size; `web_extract`'s `verify`
+  now respects `OLYMPUS_WEB_EXTRACT_VERIFY`; the change-monitor no longer holds
+  its store lock across network I/O (a slow site could freeze `add`/`remove`),
+  quarantines a corrupt store instead of silently wiping it, backs off and
+  auto-pauses permanently-failing monitors, and surfaces dropped change alerts.
+
+25 hardening tests added (`test_webctx.py`, `test_webmonitor.py`).
+
 ### Added — Native "Web Context" suite (Firecrawl absorbed as a moat)
 
 Absorbed [Firecrawl](https://github.com/firecrawl/firecrawl)'s full web-data

@@ -26,7 +26,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields
 from typing import Callable
 
 from . import config
@@ -34,6 +34,9 @@ from . import config
 MAX_MONITORS = 50                 # per install — a bound, not an ambition
 _MIN_INTERVAL = 15 * 60           # 15 min floor; a watcher can't hammer a site
 _SNAPSHOT_CAP = 40_000            # stored markdown per monitor
+
+
+_MAX_FAILS = 20                   # consecutive errors before a monitor auto-pauses
 
 
 @dataclass
@@ -48,6 +51,7 @@ class Monitor:
     last_markdown: str = ""
     active: bool = True
     changes: int = 0
+    fails: int = 0                # consecutive check failures (for back-off)
 
 
 def _path():
@@ -59,9 +63,28 @@ def _load() -> list[Monitor]:
     if not p.exists():
         return []
     try:
-        return [Monitor(**d) for d in json.loads(p.read_text(encoding="utf-8"))]
-    except (json.JSONDecodeError, TypeError, OSError):
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # A whole-file corruption is NOT a torn read: quarantine it instead of
+        # letting the next _save silently clobber the user's whole watchlist.
+        try:
+            p.replace(p.with_name(p.name + ".corrupt"))
+        except OSError:
+            pass
         return []
+    if not isinstance(raw, list):
+        return []
+    # Decode per-record so ONE bad/old-schema entry can't collapse the whole
+    # list to [] (which the next _save would then persist as data loss).
+    known = {f.name for f in fields(Monitor)}
+    out: list[Monitor] = []
+    for d in raw:
+        if isinstance(d, dict):
+            try:
+                out.append(Monitor(**{k: v for k, v in d.items() if k in known}))
+            except TypeError:
+                continue
+    return out
 
 
 def _save(monitors: list[Monitor]) -> None:
@@ -87,13 +110,6 @@ def enabled() -> bool:
         return False
     return os.environ.get("OLYMPUS_WEB_MONITOR", "").strip().lower() in (
         "1", "true", "yes", "on")
-
-
-def _every() -> int:
-    try:
-        return max(60, int(os.environ.get("OLYMPUS_WEB_MONITOR_EVERY", "900")))
-    except ValueError:
-        return 900
 
 
 # --- CRUD ------------------------------------------------------------------
@@ -185,44 +201,88 @@ def run_due(now: float | None = None,
     if notify is None:
         from . import gateway
         notify = gateway.notify_all
+
+    # Phase 1 — under the lock, pick the due monitors and snapshot just the
+    # fields the check needs, then RELEASE the lock. Network I/O must never run
+    # while the store mutex is held (one slow/hostile site would otherwise
+    # freeze add/remove and every other run_due for minutes).
+    with _mutex():
+        due = [(m.id, m.url, m.last_hash, m.last_markdown)
+               for m in _load()
+               if m.active and (now - m.last_checked) >= _effective_interval(m)]
+    if not due:
+        return []
+
+    # Phase 2 — fetch + diff + notify with NO lock held. Accumulate per-id
+    # updates to merge back afterward.
     out: list[str] = []
-    changed_any = False
+    updates: dict[str, dict] = {}
+    for mid, url, last_hash, last_markdown in due:
+        upd: dict = {"last_checked": now, "fail": False}
+        try:
+            d = webctx.diff(url, last_markdown)
+        except Exception as err:
+            out.append(f"monitor {mid} {url}: check failed ({str(err)[:80]})")
+            upd["fail"] = True
+            updates[mid] = upd
+            continue
+        if d.get("error"):
+            out.append(f"monitor {mid} {url}: {d['error']}")
+            upd["fail"] = True
+            updates[mid] = upd
+            continue
+        new_hash = d.get("current_hash", "")
+        if new_hash != last_hash:
+            upd["last_hash"] = new_hash
+            upd["last_markdown"] = (d.get("current_markdown", "") or "")[:_SNAPSHOT_CAP]
+            if last_hash:                          # had a baseline → real change
+                upd["changed"] = True
+                # Neutralize any ``` in attacker-controlled page text so it can't
+                # break out of the code fence in the operator's chat client.
+                snippet = (d.get("diff") or "")[:1500].replace("```", "`​``")
+                out.append(f"monitor {mid} {url}: CHANGED")
+                try:
+                    notify(f"🔔 Page changed: {url}\n\n```diff\n{snippet}\n```")
+                except Exception as err:
+                    # Surface the dropped alert rather than swallowing it; the
+                    # hash still advances so we don't re-notify in a storm.
+                    out.append(f"monitor {mid} {url}: change alert NOT delivered "
+                               f"({str(err)[:60]})")
+            else:
+                out.append(f"monitor {mid} {url}: baseline captured")
+        updates[mid] = upd
+
+    # Phase 3 — re-acquire, reload, and merge by id (so a concurrent add/remove
+    # during phase 2 is never lost or resurrected), then persist once.
     with _mutex():
         monitors = _load()
         for m in monitors:
-            if not m.active or (now - m.last_checked) < m.interval:
+            upd = updates.get(m.id)
+            if upd is None:
                 continue
-            try:
-                d = webctx.diff(m.url, m.last_markdown)
-            except Exception as err:
-                out.append(f"monitor {m.id} {m.url}: check failed ({str(err)[:80]})")
-                m.last_checked = now
-                changed_any = True
-                continue
-            m.last_checked = now
-            changed_any = True
-            if d.get("error"):
-                out.append(f"monitor {m.id} {m.url}: {d['error']}")
-                continue
-            new_hash = d.get("current_hash", "")
-            had_baseline = bool(m.last_hash)
-            if new_hash != m.last_hash:
-                m.last_hash = new_hash
-                m.last_markdown = (d.get("current_markdown", "") or "")[:_SNAPSHOT_CAP]
-                if had_baseline:
-                    m.changes += 1
-                    # Neutralize any ``` in attacker-controlled page text so it
-                    # can't break out of the code fence in the operator's chat
-                    # client (cosmetic; the content reaches a person, not a model).
-                    snippet = (d.get("diff") or "")[:1500].replace("```", "`​``")
-                    out.append(f"monitor {m.id} {m.url}: CHANGED")
-                    try:
-                        notify(f"🔔 Page changed: {m.url}\n\n"
-                               f"```diff\n{snippet}\n```")
-                    except Exception:
-                        pass
-                else:
-                    out.append(f"monitor {m.id} {m.url}: baseline captured")
-        if changed_any:
-            _save(monitors)
+            m.last_checked = upd["last_checked"]
+            if upd["fail"]:
+                m.fails += 1
+                if m.fails >= _MAX_FAILS and m.active:
+                    m.active = False               # auto-pause a dead monitor
+                    out.append(f"monitor {m.id} {m.url}: paused after "
+                               f"{m.fails} consecutive failures")
+            else:
+                m.fails = 0
+            if "last_hash" in upd:
+                m.last_hash = upd["last_hash"]
+            if "last_markdown" in upd:
+                m.last_markdown = upd["last_markdown"]
+            if upd.get("changed"):
+                m.changes += 1
+        _save(monitors)
     return out
+
+
+def _effective_interval(m: "Monitor") -> float:
+    """A monitor's check cadence, widened (exponential, capped 8×) while it is
+    failing so a permanently-broken URL stops burning cycles before it hits the
+    auto-pause threshold."""
+    if not m.fails:
+        return m.interval
+    return m.interval * min(8, 2 ** min(m.fails, 3))

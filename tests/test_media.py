@@ -269,7 +269,7 @@ def test_whatsapp_voice_note_becomes_text():
 
 def _fake_web(pages):
     """Return an _http_get stand-in serving a fixed {url: html} map."""
-    def _get(url):
+    def _get(url, timeout=30):
         if url not in pages:
             raise ValueError(f"404 {url}")
         return pages[url]

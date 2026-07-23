@@ -515,7 +515,14 @@ def _proxied(url: str) -> bool:
 class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
     """Re-validate every 3xx hop against the SSRF/egress gate — a public URL
     that 302-redirects to an internal host must not be followed. The resolve
-    check is skipped for proxied hops (the proxy is the egress control point)."""
+    check is skipped for proxied hops (the proxy is the egress control point).
+
+    An explicit low redirect ceiling makes the bound self-documenting instead of
+    relying on urllib's inherited default — each hop is SSRF-re-checked, but a
+    long chain is still latency/resource amplification (contrast the
+    maxRedirections:5000 the Firecrawl analysis criticized)."""
+
+    max_redirections = 5
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         reason = security.url_block_reason(newurl, resolve=not _proxied(newurl))
@@ -590,7 +597,7 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
 _HTTP_TEXT_CAP = 10_000_000
 
 
-def _http_get(url: str) -> str:
+def _http_get(url: str, timeout: float = 30) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
     initial request and every redirect; on a DIRECT connection also pins the
     socket to the validated IP (defeating DNS rebinding), while a PROXIED
@@ -598,7 +605,9 @@ def _http_get(url: str) -> str:
     control point). Also refuses a URL that carries a stored secret (raw or
     encoded) — the classic injection exfil channel. The body read is size-capped
     (`_HTTP_TEXT_CAP`) so a hostile origin can't stream unbounded bytes into
-    memory. Raises ValueError if blocked."""
+    memory. `timeout` (seconds) is the per-socket-operation timeout; bulk
+    callers (crawl/map/batch) pass a tighter value than the 30 s default so a
+    slow-drip origin can't hang the worker. Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -608,12 +617,13 @@ def _http_get(url: str) -> str:
         raise ValueError(reason)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
-    with opener.open(req, timeout=30) as resp:
+    with opener.open(req, timeout=timeout) as resp:
         return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
             "utf-8", errors="replace")
 
 
-def _http_get_bytes(url: str, max_bytes: int = 12_000_000) -> bytes:
+def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
+                    timeout: float = 30) -> bytes:
     """The binary sibling of `_http_get`: identical SSRF/egress/secret-exfil
     preamble and the same pinned/proxied openers (so DNS-rebinding and internal
     hosts are refused the same way), but returns raw bytes with a hard size cap.
@@ -628,7 +638,7 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000) -> bytes:
         raise ValueError(reason)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
-    with opener.open(req, timeout=30) as resp:
+    with opener.open(req, timeout=timeout) as resp:
         return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
 
 

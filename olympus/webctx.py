@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import re
 from html.parser import HTMLParser
@@ -51,11 +52,34 @@ _MARKDOWN_CAP = 40_000            # markdown returned per page
 _CRAWL_MAX_DEPTH = 3
 _CRAWL_MAX_PAGES = 25
 _CRAWL_BYTE_CAP = 400_000
+_CRAWL_FRONTIER_CAP = 5_000       # queued links ceiling — a link-farm page can't
+                                  # balloon the BFS frontier before dequeue
 _MAP_MAX_URLS = 500
+_MAP_MAX_SITEMAPS = 5             # sitemaps (and child sitemaps) fetched per map
 _BATCH_MAX_URLS = 25
 _EXTRACT_MAX_SOURCES = 10
+_EXTRACT_DATA_CAP = 200_000       # serialized extracted-object ceiling
 _LLMSTXT_MAX_URLS = 30
 _DOC_BYTE_CAP = 12_000_000        # 12 MB, matched to Firecrawl's parse cap
+_DOC_MAX_UNITS = 5_000            # PDF pages / DOCX paragraphs iterated (early-exit)
+_MAX_DIFF_LINES = 20_000          # lines diffed per side (difflib is ~O(N×M))
+
+# Parser hardening bounds — a 400 KB page must not amplify into gigabytes of
+# markdown (quadratic list-indent / table-separator vectors) or an unbounded
+# link/title. All are deterministic (count/byte based), so replay stays stable.
+_OUT_HARD_CAP = 4 * _MARKDOWN_CAP  # running emitted-byte ceiling; _emit no-ops past it
+_MAX_LIST_DEPTH = 12               # indent multiplier cap (kills nested-<ul> blowup)
+_MAX_LINKS = 2_000                 # links collected per page
+_MAX_TITLE = 2_000                 # <title> length
+
+# Bulk web-context fetches use a tighter socket timeout than the 30 s default so
+# a slow-drip origin (slowloris) can't hang a crawl/map/batch worker for long.
+_FETCH_TIMEOUT = 12
+# Only ordinary web ports — IP-pinning proves the target is public, but that
+# doesn't stop a "web data API" being turned into a port-prober against public
+# third parties (:22/:6379/:5432). The webhook actuator (custom ports) is a
+# separate, non-webctx path and is unaffected.
+_ALLOWED_PORTS = frozenset({80, 443, 8080, 8443})
 
 
 # ===========================================================================
@@ -66,6 +90,10 @@ _DROP = {"script", "style", "noscript", "template", "svg",
          "nav", "footer", "aside", "form", "button", "iframe"}
 _HEADING = {"h1": "# ", "h2": "## ", "h3": "### ", "h4": "#### ",
             "h5": "##### ", "h6": "###### "}
+# Block/structural tags that terminate an open inline anchor or <title>.
+_BLOCK_TAGS = {"p", "div", "section", "article", "main", "header", "footer",
+               "blockquote", "ul", "ol", "li", "pre", "hr", "table", "tr",
+               "h1", "h2", "h3", "h4", "h5", "h6"}
 
 
 class _MarkdownExtractor(HTMLParser):
@@ -88,15 +116,40 @@ class _MarkdownExtractor(HTMLParser):
         self._in_pre = 0
         self._title = ""
         self._in_title = False
+        self._in_row = False
         self._row_is_header = False
         self._row_cells = 0
+        self._out_len = 0
+        self.truncated = False
 
     def _emit(self, text: str) -> None:
+        # Running output-byte guard: once the emitted total passes the hard cap,
+        # every further emit is a no-op. This neutralizes the quadratic
+        # list-indent and table-separator amplifiers (and any future one) by
+        # bounding PEAK memory, not just the final slice.
+        if self._out_len >= _OUT_HARD_CAP:
+            self.truncated = True
+            return
         self.out.append(text)
+        self._out_len += len(text)
 
     def _newblock(self) -> None:
         if self.out and self.out[-1] != "\n\n":
-            self.out.append("\n\n")
+            self._emit("\n\n")
+
+    def _close_open_link(self) -> None:
+        """Flush a still-open <a> (unclosed anchor) so its text isn't swallowed
+        and following content lands back in the body."""
+        if self._in_link:
+            text = "".join(self._link_text).strip()
+            href = self._pending_href or ""
+            self._in_link = False
+            self._pending_href = None
+            self._link_text = []
+            if text and href:
+                self._emit(f"[{text}]({href})")
+            elif text:
+                self._emit(text)
 
     def handle_starttag(self, tag, attrs):
         if tag in _DROP:
@@ -104,6 +157,11 @@ class _MarkdownExtractor(HTMLParser):
             return
         if self._drop_depth:
             return
+        # A structural/block tag ends any still-open inline anchor or <title>
+        # (unclosed <a>/<title> would otherwise swallow the rest of the page).
+        if tag in _BLOCK_TAGS:
+            self._close_open_link()
+            self._in_title = False
         ad = dict(attrs)
         if tag == "title":
             self._in_title = True
@@ -127,7 +185,10 @@ class _MarkdownExtractor(HTMLParser):
             self._ol_counters.append(0)
             self._newblock()
         elif tag == "li":
-            indent = "  " * max(0, len(self._list_stack) - 1)
+            # Cap the indent multiplier so deeply/maliciously nested lists can't
+            # make each <li> emit a huge indent string (quadratic blowup).
+            depth = min(max(0, len(self._list_stack) - 1), _MAX_LIST_DEPTH)
+            indent = "  " * depth
             # Defensive: only touch the ordered-list counter when the stack top
             # is an "ol" AND a counter exists — mismatched/broken nesting can
             # otherwise desync the two (see the matched-pop in handle_endtag).
@@ -151,6 +212,7 @@ class _MarkdownExtractor(HTMLParser):
         elif tag in ("em", "i"):
             self._emit("*")
         elif tag == "a":
+            self._close_open_link()          # flush a prior unclosed <a>
             href = ad.get("href", "")
             if href and self.base_url:
                 href = urljoin(self.base_url, href)
@@ -158,13 +220,15 @@ class _MarkdownExtractor(HTMLParser):
             self._in_link = True
             self._link_text = []
             if href and href.startswith(("http://", "https://")) \
-                    and href not in self._seen_links:
+                    and href not in self._seen_links \
+                    and len(self.links) < _MAX_LINKS:
                 self._seen_links.add(href)
                 self.links.append(href)
         elif tag == "tr":
+            self._in_row = True
             self._row_is_header = False
             self._row_cells = 0
-        elif tag in ("td", "th"):
+        elif tag in ("td", "th") and self._in_row:
             if tag == "th":
                 self._row_is_header = True
             self._row_cells += 1
@@ -218,61 +282,99 @@ class _MarkdownExtractor(HTMLParser):
         elif tag in ("em", "i"):
             self._emit("*")
         elif tag == "a" and self._in_link:
-            text = "".join(self._link_text).strip()
-            href = self._pending_href or ""
-            self._in_link = False
-            self._pending_href = None
-            if text and href:
-                self._emit(f"[{text}]({href})")
-            elif text:
-                self._emit(text)
-        elif tag == "tr":
+            self._close_open_link()
+        elif tag == "tr" and self._in_row:
             self._emit(" |\n")
             if self._row_is_header and self._row_cells:
                 self._emit("| " + " | ".join(["---"] * self._row_cells) + " |\n")
+            # Reset row state HERE, not only on the next <tr> open — otherwise a
+            # stray/repeated </tr> re-emits the header separator with the stale
+            # cell count, a quadratic-output amplifier.
+            self._in_row = False
+            self._row_is_header = False
+            self._row_cells = 0
 
     def handle_data(self, data):
         if self._drop_depth:
             return
         if self._in_title:
-            self._title += data
+            if len(self._title) < _MAX_TITLE:      # bound the title accumulation
+                self._title += data
             return
         if self._in_pre:
             self._emit(data)
             return
         if self._in_link:
-            self._link_text.append(data)
+            if self._out_len < _OUT_HARD_CAP:       # bound swallowed link text
+                self._link_text.append(data)
             return
         self._emit(re.sub(r"[ \t\r\n]+", " ", data))
 
 
 def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
     """Convert HTML to clean markdown. Returns (markdown, absolute_links, title).
-    Pure, deterministic, dependency-free."""
+    Pure, deterministic, dependency-free. Robust against hostile HTML: the input
+    is self-capped, output is bounded during accumulation, and a truncation of
+    an over-large or malformed page is signalled inline."""
     parser = _MarkdownExtractor(base_url)
     try:
-        parser.feed(html or "")
+        # Self-cap the input even if a caller forgot to — the only backstop
+        # against amplification is the byte bound, and to_markdown is public.
+        parser.feed((html or "")[:_PAGE_BYTE_CAP])
         parser.close()
     except Exception:
         # A malformed document yields whatever we parsed so far, never a raise.
         pass
-    md = "".join(parser.out)
-    md = re.sub(r"[ \t]+\n", "\n", md)
+    # Slice to the cap BEFORE the whitespace passes. Strip trailing whitespace
+    # line-by-line (linear) rather than with `[ \t]+\n` — that regex backtracks
+    # quadratically on a long space run not ended by a newline (a `<pre>` bomb),
+    # and `\n{3,}` is safe (no absent-delimiter backtracking).
+    md = "".join(parser.out)[:_MARKDOWN_CAP]
+    md = "\n".join(line.rstrip() for line in md.split("\n"))
     md = re.sub(r"\n{3,}", "\n\n", md)
-    return md.strip()[:_MARKDOWN_CAP], parser.links, parser._title.strip()
+    md = md.strip()
+    if parser.truncated and md:
+        md += "\n\n[content truncated]"
+    return md, parser.links, parser._title.strip()[:_MAX_TITLE]
 
 
 # ===========================================================================
 # Gated fetch seam — the ONLY way this module reaches the network
 # ===========================================================================
 
+def _port_allowed(url: str) -> bool:
+    """Web-context fetches only reach ordinary web ports. IP-pinning proves the
+    target is public but doesn't stop the suite being used to probe :22/:6379 on
+    arbitrary public hosts."""
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is None:
+        return parsed.scheme in ("http", "https")
+    return port in _ALLOWED_PORTS
+
+
 def _fetch_html(url: str) -> str:
-    """Fetch a page through the SSRF/egress-gated, rebinding-pinned path. Raises
-    ValueError (blocked) or urllib errors (network); callers convert to a clean
-    error string. Byte-capped."""
+    """Fetch a page through the SSRF/egress-gated, rebinding-pinned path with a
+    port allowlist and a tight socket timeout. Raises ValueError (blocked) or
+    urllib errors (network); callers convert to a clean error string. Byte-capped."""
     from . import tools
-    html = tools._http_get(url)
+    if not _port_allowed(url):
+        raise ValueError(f"refusing non-web port for {urlparse(url).netloc}")
+    html = tools._http_get(url, timeout=_FETCH_TIMEOUT)
     return html[:_PAGE_BYTE_CAP]
+
+
+def _clamp(value, default: int, hi: int, lo: int = 1) -> int:
+    """Coerce a caller-supplied count into [lo, hi], tolerating a non-numeric
+    value (models often emit numbers as strings / junk) instead of raising."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
 
 
 def _host(url: str) -> str:
@@ -341,58 +443,73 @@ def map_urls(url: str, limit: int = 200,
              include_subdomains: bool = False) -> dict[str, Any]:
     """Discover URLs under a site: robots.txt sitemaps + sitemap.xml <loc>s +
     one hop of on-page links. Deterministic (sorted, deduped, capped). Every
-    fetch is gated."""
-    limit = max(1, min(_MAP_MAX_URLS, int(limit or 200)))
+    fetch is gated, and every sitemap fetched must itself be same-site (so a
+    hostile robots.txt can't point us at arbitrary third-party URLs)."""
+    limit = _clamp(limit, 200, _MAP_MAX_URLS)
     base_host = _host(url)
     root = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}"
     found: set[str] = set()
+    seen_sitemaps: set[str] = set()
     notes: list[str] = []
 
-    # 1) robots.txt -> Sitemap: entries
-    sitemaps: list[str] = []
-    try:
-        robots = _fetch_html(urljoin(root + "/", "robots.txt"))
-        for line in robots.splitlines():
-            if line.lower().startswith("sitemap:"):
-                sitemaps.append(line.split(":", 1)[1].strip())
-    except Exception:
-        notes.append("robots.txt unavailable")
-    if not sitemaps:
-        sitemaps.append(urljoin(root + "/", "sitemap.xml"))
-
-    # 2) sitemap(s) -> <loc> entries (one level of sitemap-index expansion)
-    for sm in sitemaps[:5]:
-        try:
-            xml = _fetch_html(sm)
-        except Exception:
-            continue
-        locs = _SITEMAP_LOC_RE.findall(xml)
-        # A sitemap index points at more sitemaps; expand one level.
-        child_maps = [loc for loc in locs if loc.lower().endswith(".xml")]
+    def _add_locs(locs: list[str]) -> None:
         for loc in locs:
             if loc.lower().endswith(".xml"):
                 continue
             if _same_site(loc, base_host, include_subdomains):
                 found.add(loc)
-        for cm in child_maps[:5]:
+                if len(found) >= limit:        # early-exit: never accumulate far
+                    return                     # beyond what we'll return
+
+    # 1) robots.txt -> Sitemap: entries (same-site only)
+    sitemaps: list[str] = []
+    try:
+        robots = _fetch_html(urljoin(root + "/", "robots.txt"))
+        for line in robots.splitlines():
+            if line.lower().startswith("sitemap:"):
+                sm = line.split(":", 1)[1].strip()
+                if _same_site(sm, base_host, include_subdomains):
+                    sitemaps.append(sm)
+                if len(sitemaps) >= _MAP_MAX_SITEMAPS:
+                    break
+    except Exception:
+        notes.append("robots.txt unavailable")
+    if not sitemaps:
+        sitemaps.append(urljoin(root + "/", "sitemap.xml"))
+
+    # 2) sitemap(s) -> <loc> entries (one level of sitemap-index expansion),
+    #    every fetched sitemap same-site and de-duplicated.
+    for sm in sitemaps[:_MAP_MAX_SITEMAPS]:
+        if sm in seen_sitemaps or len(found) >= limit:
+            continue
+        seen_sitemaps.add(sm)
+        try:
+            xml = _fetch_html(sm)
+        except Exception:
+            continue
+        locs = _SITEMAP_LOC_RE.findall(xml)
+        _add_locs(locs)
+        child_maps = [loc for loc in locs if loc.lower().endswith(".xml")
+                      and _same_site(loc, base_host, include_subdomains)]
+        for cm in child_maps[:_MAP_MAX_SITEMAPS]:
+            if cm in seen_sitemaps or len(found) >= limit:
+                continue
+            seen_sitemaps.add(cm)
             try:
-                cxml = _fetch_html(cm)
+                _add_locs(_SITEMAP_LOC_RE.findall(_fetch_html(cm)))
             except Exception:
                 continue
-            for loc in _SITEMAP_LOC_RE.findall(cxml):
-                if not loc.lower().endswith(".xml") and \
-                        _same_site(loc, base_host, include_subdomains):
-                    found.add(loc)
 
     # 3) one hop of on-page links
-    try:
-        html = _fetch_html(url)
-        _, links, _ = to_markdown(html, base_url=url)
-        for link in links:
-            if _same_site(link, base_host, include_subdomains):
-                found.add(link)
-    except Exception:
-        notes.append("start page unavailable")
+    if len(found) < limit:
+        try:
+            html = _fetch_html(url)
+            _, links, _ = to_markdown(html, base_url=url)
+            for link in links:
+                if _same_site(link, base_host, include_subdomains):
+                    found.add(link)
+        except Exception:
+            notes.append("start page unavailable")
 
     urls = sorted(found)[:limit]
     return {"url": url, "count": len(urls), "urls": urls, "notes": notes}
@@ -407,24 +524,22 @@ def crawl(url: str, depth: int = 1, max_pages: int = 10,
           same_domain: bool = True,
           formats: tuple[str, ...] = ("markdown",)) -> dict[str, Any]:
     """Recursively crawl from `url`, returning clean markdown per page. Bounded
-    by depth (<=3), page count (<=25) and aggregate bytes. `include`/`exclude`
-    are glob-ish substrings/patterns on the URL path. Every hop is gated."""
+    by depth (<=3), page count (<=25), aggregate bytes and a frontier ceiling.
+    `include`/`exclude` are glob-ish substrings/patterns on the URL.
+    robots.txt Disallow is honored (fetched through the gate); every hop is gated."""
     import fnmatch
-    try:
-        depth = max(0, min(_CRAWL_MAX_DEPTH, int(depth)))
-    except (TypeError, ValueError):
-        depth = 1
-    try:
-        max_pages = max(1, min(_CRAWL_MAX_PAGES, int(max_pages)))
-    except (TypeError, ValueError):
-        max_pages = 10
+    depth = _clamp(depth, 1, _CRAWL_MAX_DEPTH, lo=0)
+    max_pages = _clamp(max_pages, 10, _CRAWL_MAX_PAGES)
     include = include or []
     exclude = exclude or []
     base_host = _host(url)
+    robots = _robots_checker(url) if same_domain else None
 
     def _allowed(link: str) -> bool:
         if same_domain and not _same_site(link, base_host):
             return False
+        if robots is not None and not robots(link):
+            return False                          # robots.txt Disallow
         if exclude and any(fnmatch.fnmatch(link, p) or p in link for p in exclude):
             return False
         if include and not any(fnmatch.fnmatch(link, p) or p in link
@@ -459,14 +574,35 @@ def crawl(url: str, depth: int = 1, max_pages: int = 10,
         if "links" in formats:
             page["links"] = links
         pages.append(page)
-        if d < depth:
+        if d < depth and len(frontier) < _CRAWL_FRONTIER_CAP:
             for link in links:
+                if len(frontier) >= _CRAWL_FRONTIER_CAP:
+                    break                          # bound the BFS queue growth
                 if link not in visited and _allowed(link):
                     frontier.append((link, d + 1))
 
     return {"url": url, "pages": pages, "count": len(pages),
             "truncated": truncated or bool(frontier),
             "depth": depth, "same_domain": same_domain}
+
+
+def _robots_checker(url: str):
+    """Return a `can_fetch(link) -> bool` for the site's robots.txt, fetched
+    through the GATED path (never RobotFileParser.read(), which would open its
+    own un-gated socket). Fails OPEN (allow all) when robots.txt is absent or
+    unreadable — an absent robots.txt means unrestricted crawling."""
+    from urllib.robotparser import RobotFileParser
+    root = f"{urlparse(url).scheme or 'https'}://{urlparse(url).netloc}"
+    try:
+        text = _fetch_html(urljoin(root + "/", "robots.txt"))
+    except Exception:
+        return None                               # no robots.txt → allow all
+    rp = RobotFileParser()
+    try:
+        rp.parse(text.splitlines())
+    except Exception:
+        return None
+    return lambda link: rp.can_fetch("*", link)
 
 
 # ===========================================================================
@@ -549,7 +685,7 @@ def extract(source: str | list[str], schema: dict, prompt: str = "",
             blocks.append(security.wrap_untrusted(md[:_MARKDOWN_CAP], source=str(s)))
         raw_for_verify = "\n\n".join(raw_parts)[:_MARKDOWN_CAP]
 
-    user_schema = schema or {"type": "object"}
+    user_schema = schema if isinstance(schema, dict) and schema else {"type": "object"}
     wrapper = dict(_EXTRACT_SCHEMA_WRAPPER)
     wrapper["properties"] = dict(wrapper["properties"])
     wrapper["properties"]["data"] = user_schema
@@ -568,7 +704,16 @@ def extract(source: str | list[str], schema: dict, prompt: str = "",
     except Exception as err:
         return {"error": f"extraction failed: {str(err)[:150]}"}
 
-    result: dict[str, Any] = {"data": got.get("data", {}),
+    # A lenient (openai-compat/local) provider can return a top-level array or
+    # scalar despite the schema; guard so `.get` can't raise out of the tool.
+    if not isinstance(got, dict):
+        return {"data": {}, "found": False,
+                "error": "extraction returned a non-object result"}
+    data = got.get("data", {})
+    if _oversize(data):                          # bound a hostile huge object
+        return {"data": {}, "found": False,
+                "error": "extracted object exceeds the size limit"}
+    result: dict[str, Any] = {"data": data,
                               "found": bool(got.get("found", False))}
     if not verify or not result["found"]:
         return result
@@ -584,13 +729,24 @@ def extract(source: str | list[str], schema: dict, prompt: str = "",
               "\n\nFor each value, is it supported by the source? Flag any "
               "value the source does not actually state."}],
             _VERIFY_SCHEMA, effort="low")
+        if not isinstance(check, dict):
+            raise ValueError("verify returned a non-object result")
         result["verified"] = bool(check.get("supported", False))
-        flags = check.get("flags") or []
+        flags = check.get("flags") if isinstance(check.get("flags"), list) else []
         if flags:
             result["verification_flags"] = flags[:8]
     except Exception:
         result["verified"] = None            # check could not run; never claim ok
     return result
+
+
+def _oversize(obj) -> bool:
+    """True if a serialized object exceeds the extracted-data ceiling. Guards a
+    model that returns a pathologically large structure into a frozen tool result."""
+    try:
+        return len(json.dumps(obj, default=str)) > _EXTRACT_DATA_CAP
+    except (TypeError, ValueError):
+        return False
 
 
 def _summarize(markdown: str, url: str) -> str:
@@ -619,7 +775,7 @@ def generate_llmstxt(url: str, max_urls: int = 20) -> dict[str, str]:
     """Build llms.txt (title + one-line summaries) and llms-full.txt (full
     markdown) for a site. Maps the site, scrapes the top pages, summarizes each
     (wrapped untrusted). Bounded by max_urls."""
-    max_urls = max(1, min(_LLMSTXT_MAX_URLS, int(max_urls or 20)))
+    max_urls = _clamp(max_urls, 20, _LLMSTXT_MAX_URLS)
     mp = map_urls(url, limit=max_urls)
     targets = mp.get("urls") or [url]
     root_md, _, root_title = "", [], ""
@@ -663,12 +819,16 @@ def diff(url: str, previous_markdown: str = "") -> dict[str, Any]:
         return {"url": url, "error": f"fetch failed: {str(err)[:150]}"}
     current, _, _ = to_markdown(html, base_url=url)
     cur_hash = content_hash(current)
-    prev = previous_markdown or ""
+    # Cap the caller-supplied previous snapshot (the public API accepts any
+    # string) and the line count on both sides before difflib — SequenceMatcher
+    # is ~O(N×M), so many short lines are a CPU vector.
+    prev = (previous_markdown or "")[:_MARKDOWN_CAP]
     changed = content_hash(prev) != cur_hash if prev else True
     unified = ""
     if prev:
         unified = "\n".join(difflib.unified_diff(
-            prev.splitlines(), current.splitlines(),
+            prev.splitlines()[:_MAX_DIFF_LINES],
+            current.splitlines()[:_MAX_DIFF_LINES],
             fromfile="previous", tofile="current", lineterm=""))[:20_000]
     return {"url": url, "changed": changed, "current_hash": cur_hash,
             "diff": unified, "current_markdown": current}
@@ -719,9 +879,12 @@ def parse_document(path_or_url: str) -> dict[str, Any]:
 
 def _fetch_bytes(url: str) -> bytes:
     """Byte fetch through the canonical gated seam (SSRF/egress/rebinding-pin +
-    secret-exfil refusal + size cap) — no second socket path in this module."""
+    secret-exfil refusal + size cap) — no second socket path in this module.
+    Same port allowlist and tight timeout as the text path."""
     from . import tools
-    return tools._http_get_bytes(url, _DOC_BYTE_CAP)
+    if not _port_allowed(url):
+        raise ValueError(f"refusing non-web port for {urlparse(url).netloc}")
+    return tools._http_get_bytes(url, _DOC_BYTE_CAP, timeout=_FETCH_TIMEOUT)
 
 
 def _parse_pdf(data: bytes) -> str:
@@ -733,7 +896,26 @@ def _parse_pdf(data: bytes) -> str:
                 "pip install 'olympus-council[docs]')")
     try:
         reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join((p.extract_text() or "") for p in reader.pages)[:_MARKDOWN_CAP]
+        try:
+            if reader.is_encrypted:
+                reader.decrypt("")           # empty-password PDFs are common
+        except Exception:
+            pass
+        # Early-exit accumulation: a compression-bombed PDF can decompress to
+        # gigabytes of text; stop as soon as we have enough for the cap and
+        # never iterate more than a bounded number of pages.
+        parts: list[str] = []
+        total = 0
+        for i, page in enumerate(reader.pages):
+            if i >= _DOC_MAX_UNITS or total >= _MARKDOWN_CAP:
+                break
+            try:
+                t = page.extract_text() or ""
+            except Exception:
+                continue
+            parts.append(t)
+            total += len(t)
+        return "\n\n".join(parts)[:_MARKDOWN_CAP]
     except Exception as err:
         return f"(PDF parse error: {str(err)[:150]})"
 
@@ -747,7 +929,14 @@ def _parse_docx(data: bytes) -> str:
                 "pip install 'olympus-council[docs]')")
     try:
         doc = docx.Document(io.BytesIO(data))
-        return "\n".join(p.text for p in doc.paragraphs)[:_MARKDOWN_CAP]
+        parts: list[str] = []
+        total = 0
+        for i, p in enumerate(doc.paragraphs):
+            if i >= _DOC_MAX_UNITS or total >= _MARKDOWN_CAP:
+                break
+            parts.append(p.text)
+            total += len(p.text)
+        return "\n".join(parts)[:_MARKDOWN_CAP]
     except Exception as err:
         return f"(DOCX parse error: {str(err)[:150]})"
 

@@ -105,6 +105,96 @@ def test_run_due_no_notify_when_unchanged(store, monkeypatch):
     assert notes == []
 
 
+# --- hardening: store resilience & failure handling ------------------------
+
+def test_corrupt_store_is_quarantined_not_wiped(store):
+    webmonitor.add("u1", "https://ex.com/x")
+    p = webmonitor._path()
+    p.write_text("{ this is not valid json", encoding="utf-8")   # corrupt it
+    assert webmonitor._load() == []                    # decodes to empty...
+    assert p.with_name(p.name + ".corrupt").exists()   # ...but the bytes are kept
+    # a subsequent save can't have clobbered the quarantined copy
+    assert "not valid json" in p.with_name(p.name + ".corrupt").read_text()
+
+
+def test_load_skips_one_bad_record_keeps_the_rest(store):
+    import json
+    good = {"id": "a1", "user": "u1", "url": "https://ex.com/a"}
+    bad = {"id": "b2"}                                  # missing required fields
+    webmonitor._path().write_text(json.dumps([good, {"nonsense": 1}, bad]),
+                                  encoding="utf-8")
+    loaded = webmonitor._load()
+    ids = {m.id for m in loaded}
+    assert "a1" in ids                                 # the good record survived
+
+
+def test_unknown_field_in_record_is_ignored(store):
+    import json
+    rec = {"id": "a1", "user": "u1", "url": "https://ex.com/a",
+           "future_field_from_a_newer_version": 42}
+    webmonitor._path().write_text(json.dumps([rec]), encoding="utf-8")
+    loaded = webmonitor._load()
+    assert len(loaded) == 1 and loaded[0].id == "a1"   # forward-compatible
+
+
+def test_failing_monitor_backs_off_and_auto_pauses(store, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
+    webmonitor.add("u1", "https://ex.com/x", interval=1)
+    from olympus import webctx
+    monkeypatch.setattr(webctx, "diff",
+                        lambda url, prev: {"error": "fetch failed"})
+    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: None)
+    # Drive many failing cycles; the effective interval widens, so advance time
+    # generously each round to keep it due.
+    t = 1000
+    for _ in range(webmonitor._MAX_FAILS + 2):
+        t += 10_000_000
+        webmonitor.run_due(now=t)
+    m = webmonitor.list_for("u1")[0]
+    assert m.active is False                            # auto-paused after _MAX_FAILS
+    assert m.fails >= webmonitor._MAX_FAILS
+
+
+def test_run_due_does_not_hold_lock_across_fetch(store, monkeypatch):
+    # While run_due is doing its (mocked) network work, add() must still be able
+    # to acquire the store lock — i.e. the lock is NOT held across the fetch.
+    monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
+    webmonitor.add("u1", "https://ex.com/x", interval=1)
+    from olympus import webctx
+
+    acquired = {"ok": False}
+
+    def diff_that_touches_store(url, prev):
+        # Simulate a concurrent add() during the fetch phase: it must not block.
+        webmonitor.add("u2", "https://ex.com/y")
+        acquired["ok"] = True
+        return {"changed": True, "current_hash": "h1",
+                "current_markdown": "v1", "diff": ""}
+    monkeypatch.setattr(webctx, "diff", diff_that_touches_store)
+    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: None)
+    webmonitor.run_due(now=1000)
+    assert acquired["ok"]                               # add() ran mid-fetch, no deadlock
+    assert any(m.url == "https://ex.com/y" for m in webmonitor.list_for("u2"))
+
+
+def test_notify_failure_is_surfaced(store, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
+    webmonitor.add("u1", "https://ex.com/x", interval=1)
+    from olympus import webctx
+    hashes = iter(["h1", "h2"])
+    monkeypatch.setattr(webctx, "diff",
+                        lambda url, prev: {"changed": True,
+                                           "current_hash": next(hashes),
+                                           "current_markdown": "v", "diff": "d"})
+
+    def boom(_t):
+        raise RuntimeError("gateway down")
+    monkeypatch.setattr("olympus.gateway.notify_all", boom)
+    webmonitor.run_due(now=1000)                        # baseline
+    log = webmonitor.run_due(now=2000)                  # change → notify raises
+    assert any("NOT delivered" in ln for ln in log)     # surfaced, not swallowed
+
+
 # --- classification ---------------------------------------------------------
 
 def test_monitor_tools_are_trusted():
