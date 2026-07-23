@@ -152,12 +152,37 @@ FakeTransport gains a scriptable landing probe (`__OLY_CLICK__`) and a
 trusted-coordinate path, the obscured fallback (no blind click fired), journaling,
 and the missing-element error.
 
-## Decision (d): default-on pre-prompt redaction seam — PLANNED
+## Decision (d): default-on pre-prompt secret redaction — SHIPPED
 
-Invert page-agent's biggest risk (unredacted page HTML → LLM, opt-in hook only):
-a **default-on** `security.sanitize_for_prompt` applied in the browser/webctx
-observe path, symmetric to the existing `sanitize_for_memory`. What page-agent
-leaves to the user, Olympus enforces in code. (Watchlist §3.5.)
+Page Agent's biggest risk: it streams cleaned page HTML to the LLM every step and
+its own privacy doc admits the cleaning "does not guarantee removal of sensitive
+information" — redaction is left to an opt-in `transformPageContent` regex hook
+that most integrators never set. The inversion is the moat: what page-agent
+leaves to the user, Olympus enforces in code, on by default.
+
+New `security.sanitize_for_prompt(text, *, redact_pii=None)`:
+
+- **Secrets — always redacted.** Private-key PEM blocks (the *whole* block, key
+  material and all — a new `_PEM_BLOCK_RE`, stronger than the header-only regex
+  the memory path uses), JWTs, API-key-shaped tokens, and credentials embedded in
+  URLs. Idempotent and structure-preserving (labeled placeholders, never
+  deletion), so surrounding text stays task-usable.
+- **PII — gated.** Emails / phone numbers / long id numbers redact only under
+  `OLYMPUS_REDACT_PII`, because redacting them unconditionally would break
+  legitimate "read the contact details" tasks. A privacy-strict deployment flips
+  one flag; the dangerous class (secrets) needs no flag.
+
+**The chokepoint.** `wrap_untrusted` — the fail-closed envelope every piece of
+untrusted content passes through before a model prompt — now runs
+`sanitize_for_prompt` on the body. Because `should_wrap` is fail-closed (even an
+*unregistered* ingesting tool still wraps), redaction is fail-closed too: a new
+ingesting tool nobody classified is still both wrapped and secret-redacted. This
+single seam covers browser reads, `webctx` scrape/crawl/extract, `web_fetch`,
+and every connector data plugin at once. As defense-in-depth, `browser.read` /
+`html` / `read_ax` / `console_logs` also redact at the source, so the raw method
+never emits a secret even outside the wrap path. 14 new tests
+(`tests/test_prompt_redaction.py`); the whole wrap-dependent suite (270 cases)
+passes unchanged.
 
 ## Decision (e): governed `/llms.txt` consumption — PLANNED
 

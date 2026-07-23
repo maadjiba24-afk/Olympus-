@@ -15,7 +15,7 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(c))
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(d))
 
 Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
 capability surface as native Olympus features, each built on the security spine
@@ -64,6 +64,23 @@ with the corresponding page-agent weakness inverted into a structural strength
   banner can be dismissed first. Page-agent silently clicks whatever is on top;
   Olympus makes the hit-test a safety guard. Four new tests in
   `tests/test_browser.py`.
+
+### Security — Default-on pre-prompt secret redaction (ADR 0014 (d), §3.5)
+
+Inverts page-agent's biggest risk (it streams cleaned page HTML to the LLM with
+redaction left to an opt-in hook its own docs say "does not guarantee removal of
+sensitive information"). New `security.sanitize_for_prompt` redacts secrets —
+whole private-key PEM blocks (key material, not just the header — new
+`_PEM_BLOCK_RE`), JWTs, API-key-shaped tokens, and credentials embedded in URLs —
+by **default, in code**, from untrusted content before it reaches a model prompt;
+PII (emails/phones/long numbers) is gated behind `OLYMPUS_REDACT_PII` so ordinary
+"read the contact details" tasks aren't broken. It is wired into `wrap_untrusted`
+— the fail-closed envelope every untrusted content passes through — so redaction
+is fail-closed too (an unregistered ingesting tool is still wrapped AND
+redacted), covering browser reads, `webctx`, and `web_fetch` in one seam;
+`browser.read`/`html`/`read_ax`/`console_logs` also redact at the source as
+defense-in-depth. Idempotent and structure-preserving. 14 new tests
+(`tests/test_prompt_redaction.py`).
 
 Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
 page* (origin sharing), `eval()` of model code in a live origin, an

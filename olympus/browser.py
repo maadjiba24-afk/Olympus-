@@ -1254,7 +1254,10 @@ class BrowserSession:
         else:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
-        return (text or "")[:_TEXT_LIMIT]
+        # Redact secrets from page text before it can reach a model prompt
+        # (default-on; ADR 0014 (d)). Defense-in-depth: the tool layer also
+        # redacts via wrap_untrusted, but the raw method must never emit a secret.
+        return security.sanitize_for_prompt((text or "")[:_TEXT_LIMIT])
 
     def html(self) -> str:
         """The current page's serialized HTML (post-render / post-action), for a
@@ -1263,7 +1266,8 @@ class BrowserSession:
         self.ingested_untrusted = True
         if self._blocked_landing():
             return ""
-        return (self._eval("document.documentElement.outerHTML") or "")[:_HTML_LIMIT]
+        raw = (self._eval("document.documentElement.outerHTML") or "")[:_HTML_LIMIT]
+        return security.sanitize_for_prompt(raw)
 
     def read_ax(self, limit: int = 0) -> str:
         """Perceive the page through its ACCESSIBILITY TREE (CDP
@@ -1303,7 +1307,7 @@ class BrowserSession:
                 break
         if not lines:
             return "(no labelled accessibility nodes on this page)"
-        return "\n".join(lines)[:_TEXT_LIMIT]
+        return security.sanitize_for_prompt("\n".join(lines)[:_TEXT_LIMIT])
 
     def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
@@ -1392,7 +1396,7 @@ class BrowserSession:
             level = str(m.get("level", "log"))[:12]
             text = str(m.get("text", ""))[:_LABEL_MAX * 4]
             out.append(f"[{level}] {text}")
-        return "\n".join(out)[:_TEXT_LIMIT]
+        return security.sanitize_for_prompt("\n".join(out)[:_TEXT_LIMIT])
 
     @staticmethod
     def _clip_from(raw: str) -> dict | None:

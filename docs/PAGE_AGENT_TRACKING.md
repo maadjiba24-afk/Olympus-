@@ -34,7 +34,14 @@ clone.
       refuses a blind coordinate click when an overlay obscures the point,
       dispatching to the intended element and flagging the obstruction instead of
       clicking whatever is on top. `tests/test_browser.py`.
-    - §3.5 default-on pre-prompt redaction → ADR 0014 (d), planned.
+    - **§3.5 — default-on pre-prompt secret redaction → SHIPPED** as
+      `security.sanitize_for_prompt`, wired into the `wrap_untrusted` chokepoint
+      (ADR 0014 (d)): secrets (whole PEM key blocks, JWTs, API-key-shaped tokens,
+      URL creds) are redacted by default, in code, from every piece of untrusted
+      content before it reaches a model — covering browser reads, `webctx`, and
+      `web_fetch` at once; PII redaction is one flag (`OLYMPUS_REDACT_PII`). What
+      page-agent leaves to an opt-in hook, Olympus enforces fail-closed.
+      `tests/test_prompt_redaction.py`.
     - §3.6 governed `/llms.txt` consumption → ADR 0014 (e), planned.
   The four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
 - **What it is:** a client-side, **zero-install in-page GUI agent** — "one
