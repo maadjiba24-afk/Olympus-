@@ -50,7 +50,7 @@ def test_import_requires_trusted_peer():
 
 
 @needs_crypto
-def test_import_stages_never_auto_applies(tmp_path, monkeypatch):
+def test_import_stages_never_auto_applies():
     # Build a bundle as if from a peer (self-signed; pin our own key as trusted).
     federation.add_peer("peer", federation.public_key(), trust="trusted")
     domainlore.observe("https://shared.co/a", ok=True, bytes_=1000,
@@ -58,10 +58,12 @@ def test_import_stages_never_auto_applies(tmp_path, monkeypatch):
     domainlore.observe("https://shared.co/b", ok=True, bytes_=1000)
     env = federation.export_domainlore(min_visits=2)
 
-    # Import into a FRESH corpus (simulate the receiving instance).
-    fresh = tmp_path / "recv"
-    fresh.mkdir()
-    monkeypatch.setattr(config, "MEMORY_DIR", fresh)
+    # Simulate a fresh receiver: drop the LIVE corpus so the shared domain isn't
+    # already known, while keeping the pinned peer (its registry lives under the
+    # store, not the domainlore file — so we must NOT relocate MEMORY_DIR here).
+    (config.MEMORY_DIR / "domainlore.json").unlink()
+    assert domainlore.known("https://shared.co/x") is None
+
     res = federation.import_domainlore(env)
     assert res["staged"] >= 1 and res["from"] == "peer"
     # staged, NOT live
