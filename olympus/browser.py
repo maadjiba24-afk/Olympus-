@@ -54,6 +54,7 @@ from . import config, security
 
 # Hardening limits.
 _TEXT_LIMIT = 20_000          # max chars of page text returned to the model
+_HTML_LIMIT = 400_000         # max chars of serialized page HTML returned
 _LEDGER_MAX = 2_000           # bounded CDP-call ledger (circular)
 _RECV_TIMEOUT = 30.0          # per-CDP-call deadline on the real transport
 _WS_MAX_FRAME = 16 * 1024 * 1024   # cap a single CDP message (anti-OOM)
@@ -1129,6 +1130,15 @@ class BrowserSession:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
         return (text or "")[:_TEXT_LIMIT]
+
+    def html(self) -> str:
+        """The current page's serialized HTML (post-render / post-action), for a
+        structured scrape of a JS-driven page. Untrusted external content, same
+        as read(); SSRF landing is re-checked. Byte-capped."""
+        self.ingested_untrusted = True
+        if self._blocked_landing():
+            return ""
+        return (self._eval("document.documentElement.outerHTML") or "")[:_HTML_LIMIT]
 
     def read_ax(self, limit: int = 0) -> str:
         """Perceive the page through its ACCESSIBILITY TREE (CDP

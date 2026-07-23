@@ -15,6 +15,155 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Web context: learned action-profiles, fleet lore sharing, build proposals
+
+Three self-evolution extensions turn the web-context corpus into a deeper moat
+(ADR 0009/0010 addendum), all under the absorbed-capability contract (opt-in for
+autonomy, replay-inert, bounded, additive-only, own tests):
+
+- **Learned per-domain action-profiles.** `domainlore` now remembers the exact
+  *safe action profile* (the scroll/expand/click steps) that beat a domain's byte
+  baseline — not just that interaction helped. With `OLYMPUS_WEB_AUTO_ACTIONS=1`,
+  a plain `scrape` of that domain auto-replays the earned profile through the
+  governed browser harness (no manual `actions` argument). Every step is
+  re-validated against the safe-verb allowlist on use; an explicit `actions=`
+  (including `[]`) always wins; inert under replay.
+- **Operator-gated fleet lore sharing.** `federation` gains `export_domainlore`/
+  `import_domainlore` and a signed `/federation/domainlore` route, mirroring the
+  lesson-sync guarantees (signed, `trusted`-only, secrets/PII scrubbed). Imported
+  per-domain facts *stage* in the corpus and are folded into the live corpus only
+  by the operator's explicit merge — purely additive, never overwriting local
+  truth, never relaxing a fetch gate. New CLI: `olympus webknowledge --share
+  <peer>` / `--staged` / `--merge`.
+- **Auto-drafted build proposals.** New `webproposals` module turns a
+  proposal-kind discovery into a full, evidence-backed build proposal (motivation,
+  cited domains, concrete change, safety posture, acceptance criteria) queued for
+  the operator to accept/decline/mark built — surfaced on `olympus webknowledge
+  --proposals` and the moat board. Explicitly *not* a code generator: it drafts a
+  reviewable engineering artifact, never a behavior change.
+
+New tests: `test_domainlore_share.py`, `test_webproposals.py`,
+`test_federation_lore.py`, plus action-profile auto-apply coverage in
+`test_webctx.py`. No new tools/commands (new CLI flags on `webknowledge`).
+
+Adversarial hardening of the three seams:
+- Auto-applied learned profiles are now **best-effort**: if the profile can't run
+  (no browser, nav/interaction error) the scrape falls back to a plain fetch
+  instead of failing — enabling the flag can't break a scrape a plain fetch would
+  have handled. An *explicit* `actions=` still surfaces its error.
+- Shared/merged **domains** are validated as bare hostnames (rejecting paths,
+  spaces, control chars, userinfo, single-label hosts) so a peer can't pollute
+  the corpus with malformed keys.
+- Action-profiles are **structurally sanitized at rest** — bounded step count and
+  field sizes, well-formed steps only, whole-step drop-to-fit (never a
+  string-sliced, invalid-JSON dump). Verb safety stays enforced authoritatively
+  at use (`_ACTION_VERBS`). Federation shares the profile structurally rather than
+  running a whole-string PII scrub that would mangle valid JSON.
+
+### Added — Self-evolving web context: knowledge, discovery, self-tuning
+
+The absorbed web-context system now compounds and discovers over time inside
+Olympus's evolve/moat spine (ADR 0009), so it gets stronger the more it runs —
+a data network effect a copier starts at zero:
+
+- **`domainlore`** — a per-domain learned-knowledge corpus. Every scrape/map
+  folds durable facts (sitemap location, robots posture, interaction/mobile
+  wins, page size, brand, JSON-LD/feed exposure, fetch success) into a store and
+  feeds them back as *purely-additive* hints to the next visit (a known sitemap
+  is tried first) — never relaxing a safety gate. Opt-outable, replay-inert,
+  bounded, corrupt-store-quarantining. Recorded on the moat board.
+- **Self-tuning** — new evolve knob `webctx.fetch_timeout`; domainlore records
+  ok/fail from every visit, so the heartbeat reviewer lengthens the fetch
+  timeout when fetches keep failing (bounded).
+- **New deterministic, LLM-free formats** — `jsonld` (parses
+  `<script type="application/ld+json">` structured data) and `feeds` (RSS/Atom
+  discovery), on `web_scrape`. A capability Olympus *discovered it should have*
+  from the data it observed.
+- **`webreflect`** — an opt-in heartbeat routine that turns the accumulated
+  corpus into *discoveries*: domains exposing JSON-LD (use the free format),
+  publishing feeds (watch instead of re-scrape), needing interaction (a default
+  action-profile candidate), or fetching poorly (try mobile/proxy). Each
+  standing pattern is surfaced once (deduped), saved as a lesson, and notified —
+  evidence-backed feature proposals, not autonomous code-gen.
+- **Closed learn→apply loop** — `scrape(mobile=None)` (the new default) auto-
+  applies the per-domain bias the corpus has *earned*: a domain where a mobile
+  fetch repeatedly beat the desktop baseline is scraped mobile-first next time,
+  no prompting. Purely additive (an explicit `mobile=True/False` always wins),
+  and the win is learned from real byte-gain. Extraction quality (verify
+  confirmed/flagged) is now recorded per domain too.
+- **Operator surface + federation** — new `olympus webknowledge` command prints
+  the corpus report, the most-visited domains, and the live discoveries; the
+  `web_context` row on `olympus moat` shows lore stats and the tuned knob.
+  Discoveries ride the existing signed/scrubbed **lessons federation** seam, so
+  web knowledge compounds across a fleet without widening the trust surface.
+  Corpus hygiene: the heartbeat maintenance sweep now prunes domains unseen
+  within the retention window (`domainlore.prune`), and the store is bounded and
+  corrupt-quarantining. Documented in `docs/WEB_CONTEXT.md`.
+
+Internal capabilities + new formats + one new command. New tests:
+`test_domainlore.py`, `test_webreflect.py`, plus jsonld/feed coverage.
+
+### Added — Web Context: the previously-declined Firecrawl features, built native
+
+The Firecrawl capabilities ADR 0010 had declined are now first-class — built in
+Olympus's idioms, without importing the anti-patterns:
+
+- **New scrape formats** on a new `web_scrape` tool (the advanced sibling of the
+  quick `browse_page` reader): `images` (all `<img>`/og image URLs, absolute),
+  `branding` (site name, theme color, favicon, social image, description),
+  `html` (cleaned) vs `rawHtml` (as-fetched), and `attributes` (selector →
+  attribute pairs, with a pure-stdlib `tag/.class/#id` selector). All parsed in
+  one deterministic pass; no new dependency.
+- **JSON change-tracking mode** — `web_diff`/`web_monitor_add` accept a `schema`
+  and structurally diff the *extracted object* (which fields changed), alongside
+  the existing git-diff text mode. `webmonitor` persists per-monitor JSON state.
+- **`mobile` / `location` hints** — a mobile User-Agent and an `Accept-Language`
+  from a country/locale, threaded through the gated fetch. (A rotating
+  residential/geo *proxy mesh* is hosted infrastructure, not code — set
+  `HTTPS_PROXY`/`PROXY_SERVER` to route through your own egress.)
+- **In-scrape actions** — `web_scrape(actions=[…])` drives the page through the
+  **governed** browser harness (click/scroll/type/wait) before scraping, with a
+  new `BrowserSession.html()` accessor. Actuation stays SSRF-gated, ledgered, and
+  capability-separated; **`executeJavascript` is rejected, not run** — Olympus
+  does not expose ungoverned JS eval. Degrades cleanly when no browser is present.
+
+New tool `web_scrape` (115 total). Tests, threat-model row, and capability
+counts updated.
+
+### Security — Harden the Web Context suite against adversarial input
+
+A four-dimension hardening pass (parser DoS, resource bounds, SSRF
+defense-in-depth, extraction/monitor robustness) on `webctx`/`webmonitor`:
+
+- **Parser (`to_markdown`) DoS.** Fixed two quadratic-output amplifiers a 400 KB
+  page could exploit — nested-list indent multiplication (`<ul>`×N) and a
+  `</tr>` that re-emitted the table separator with stale cell state — plus a
+  quadratic-backtracking whitespace `re.sub` (a `<pre>` space-run took seconds).
+  Added a running output-byte guard, capped list depth / link count / title, and
+  recover from unclosed `<a>`/`<title>` instead of swallowing the page. Hostile
+  inputs that previously OOM'd or spun the CPU now finish in milliseconds,
+  bounded to the markdown cap.
+- **SSRF defense-in-depth.** Web-context fetches are restricted to ordinary web
+  ports (80/443/8080/8443) so the suite can't be turned into a port-prober;
+  `map_urls` now only fetches *same-site* sitemaps (a hostile `robots.txt` can't
+  point us at third parties) with a visited-set and early-exit; `crawl` honors
+  `robots.txt` Disallow (fetched through the gate) and bounds its BFS frontier;
+  the shared host blocklist is normalized (`*.localhost`, trailing-dot, case);
+  and the redirect ceiling is made explicit (5).
+- **Resource bounds.** Bulk fetches use a tight socket timeout (slow-drip
+  defense); `diff` caps the previous snapshot and line count before `difflib`;
+  `parse_document` early-exits accumulation, bounds pages/paragraphs, and
+  decrypts empty-password PDFs — so a compression-bombed document can't exhaust
+  memory or hang the worker.
+- **Robustness.** `extract` tolerates a non-object model result instead of
+  crashing the tool and caps the extracted object size; `web_extract`'s `verify`
+  now respects `OLYMPUS_WEB_EXTRACT_VERIFY`; the change-monitor no longer holds
+  its store lock across network I/O (a slow site could freeze `add`/`remove`),
+  quarantines a corrupt store instead of silently wiping it, backs off and
+  auto-pauses permanently-failing monitors, and surfaces dropped change alerts.
+
+25 hardening tests added (`test_webctx.py`, `test_webmonitor.py`).
+
 ### Added — Native "Web Context" suite (Firecrawl absorbed as a moat)
 
 Absorbed [Firecrawl](https://github.com/firecrawl/firecrawl)'s full web-data

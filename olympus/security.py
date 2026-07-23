@@ -112,8 +112,9 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # only Olympus's own store and are TRUSTED below.
                              # scrape/crawl stay served by browse_page/crawl_site,
                              # already ingestion-classified above.)
-                             "web_map", "web_batch_scrape", "web_extract",
-                             "generate_llmstxt", "parse_document", "web_diff"})
+                             "web_scrape", "web_map", "web_batch_scrape",
+                             "web_extract", "generate_llmstxt",
+                             "parse_document", "web_diff"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
@@ -480,6 +481,24 @@ _BLOCKED_HOSTNAMES = frozenset({
 })
 
 
+def _normalize_host(host: str) -> str:
+    """Casefold and strip a single trailing dot (`metadata.` == `metadata`,
+    `LOCALHOST` == `localhost`) so the name blocklist can't be walked past with
+    a FQDN-style trailing dot or letter case."""
+    return (host or "").strip().rstrip(".").lower()
+
+
+def _is_blocked_hostname(host: str) -> bool:
+    """True if `host` names an internal/metadata service by NAME (independent of
+    resolution). Catches the exact blocklist plus any `*.localhost` label, after
+    trailing-dot/case normalization. This is the only guard on the proxy path
+    (resolve=False) and at monitor-add time, so it must not be case/dot-fragile;
+    the direct path additionally validates the resolved IP."""
+    h = _normalize_host(host)
+    return bool(h) and (h in _BLOCKED_HOSTNAMES or h == "localhost"
+                        or h.endswith(".localhost"))
+
+
 def _ip_is_public(ip: "ipaddress._BaseAddress") -> bool:
     """A routable, non-internal address: not loopback / private / link-local /
     reserved / multicast / unspecified. Covers the cloud metadata endpoints
@@ -503,7 +522,7 @@ def resolve_pinned_ip(host: str, port: int) -> str:
     """
     if not host:
         raise ValueError("URL has no host")
-    if host.lower() in _BLOCKED_HOSTNAMES:
+    if _is_blocked_hostname(host):
         raise ValueError(f"refusing to fetch an internal host ({host})")
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
@@ -559,7 +578,7 @@ def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
     host = parsed.hostname
     if not host:
         return "URL has no host"
-    if host.lower() in _BLOCKED_HOSTNAMES:
+    if _is_blocked_hostname(host):
         return f"refusing to fetch an internal host ({host})"
     if resolve:
         port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)

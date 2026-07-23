@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 125,
+    "count": 126,
     "names": [
       "a2a",
       "actions",
@@ -171,6 +171,7 @@
       "watch",
       "web",
       "webhook",
+      "webknowledge",
       "whatsapp",
       "wiki",
       "witness-pubkey"
@@ -178,7 +179,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 114,
+    "count": 115,
     "names": [
       "add_todo",
       "analyze_image",
@@ -292,6 +293,7 @@
       "web_map",
       "web_monitor_add",
       "web_monitor_list",
+      "web_scrape",
       "web_search",
       "write_document"
     ]
