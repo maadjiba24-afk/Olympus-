@@ -169,6 +169,94 @@ def test_dep_audit_clean_when_current(workspace):
     assert assess.dep_audit(".")["count"] == 0
 
 
+# --- live CVE feed (OSV.dev): opt-in, cached, deduped, offline-first ---------
+
+def _osv_post(vulns_by_pkg):
+    def _post(url, payload, timeout=20, max_bytes=4_000_000):
+        name = payload["package"]["name"]
+        return {"vulns": vulns_by_pkg.get(name, [])}
+    return _post
+
+
+def test_osv_disabled_by_default(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("foolib==0.1\n")
+    monkeypatch.delenv("OLYMPUS_ASSESS_OSV", raising=False)
+    from olympus import tools
+    calls = []
+    monkeypatch.setattr(tools, "_http_post_json",
+                        lambda *a, **k: calls.append(1) or {"vulns": []})
+    r = assess.dep_audit(".")
+    assert r.get("osv") is False and calls == []           # no network by default
+
+
+def test_osv_merges_and_dedups(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("pyyaml==5.1\nfoolib==0.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    monkeypatch.setattr(tools, "_http_post_json", _osv_post({
+        "foolib": [{"id": "GHSA-x", "aliases": ["CVE-2024-9999"], "summary": "RCE",
+                    "severity": [{"type": "CVSS_V3",
+                                  "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+                    "database_specific": {"cwe_ids": ["CWE-94"]}}],
+        # pyyaml OSV reports the SAME CVE as the bundled index → must dedup
+        "pyyaml": [{"id": "z", "aliases": ["CVE-2020-14343"], "summary": "dup"}]}))
+    r = assess.dep_audit(".")
+    assert r["count"] == 2                                  # bundled pyyaml + OSV foolib, deduped
+    foolib = next(f for f in r["findings"] if "foolib" in f["title"])
+    assert foolib["cwe"] == "CWE-94" and foolib["cvss_score"] == 9.8
+
+
+def test_osv_caches(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("foolib==0.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    calls = []
+
+    def _post(url, payload, timeout=20, max_bytes=4_000_000):
+        calls.append(1)
+        return {"vulns": []}
+    monkeypatch.setattr(tools, "_http_post_json", _post)
+    assess.dep_audit(".")
+    assess.dep_audit(".")
+    assert len(calls) == 1                                  # second audit hits cache
+
+
+def test_osv_degrades_on_error(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("pyyaml==5.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    monkeypatch.setattr(tools, "_http_post_json",
+                        lambda *a, **k: {"_error": "network down"})
+    r = assess.dep_audit(".")                               # never raises
+    assert r["count"] == 1                                  # bundled index still works
+
+
+def test_osv_off_during_replay(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    monkeypatch.setenv("OLYMPUS_REPLAY", "1")
+    assert assess._osv_enabled() is False
+
+
+def test_confinement_permits_osv_infra_not_targets():
+    with assess.confined_egress(targets=["app.example"]):
+        assert assess.egress_confined_reason("api.osv.dev") is None   # trusted infra
+        assert assess.egress_confined_reason("127.0.0.1") is None     # loopback
+        assert assess.egress_confined_reason("evil.example") is not None  # still blocked
+
+
+def test_http_post_json_refuses_secret_in_body(monkeypatch):
+    from olympus import tools
+    monkeypatch.setenv("MY_SECRET_TOKEN", "supersecretvalue1234567890")
+    with pytest.raises(ValueError, match="secret"):
+        tools._http_post_json("https://api.osv.dev/v1/query",
+                              {"leak": "supersecretvalue1234567890"})
+
+
 # --- findings: computed severity, dedup, export -----------------------------
 
 def test_record_finding_computes_severity_from_vector():

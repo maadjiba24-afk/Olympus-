@@ -690,6 +690,41 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
         return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
 
 
+def _http_post_json(url: str, payload: dict, timeout: float = 20,
+                    max_bytes: int = 4_000_000) -> dict[str, Any]:
+    """POST a JSON body and parse a JSON response, through the SAME gated seam as
+    `_http_get` (SSRF/egress/rebinding-pin + assessment egress confinement) — the
+    canonical gated POST. Additionally scans the OUTBOUND BODY for a stored
+    secret (a POST can exfiltrate in the body, not just the URL) and refuses it.
+    Returns the parsed object; raises ValueError if blocked; returns
+    {'_error': ...} on a network/parse failure so callers degrade gracefully."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    for probe in (url, body.decode("utf-8", "replace")):
+        leak = security.secret_exfil_reason(probe)   # URL and body, before I/O
+        if leak:
+            raise ValueError(f"blocked: {leak}")
+    proxied = _proxied(url)
+    reason = security.url_block_reason(url, resolve=not proxied)
+    if reason:
+        raise ValueError(reason)
+    from . import assess as _assess
+    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+    if _conf:
+        raise ValueError(_conf)
+    req = _urlreq.Request(url, data=body, method="POST", headers={
+        "User-Agent": _UA, "Content-Type": "application/json",
+        "Accept": "application/json"})
+    opener = _proxy_opener() if proxied else _pinned_opener()
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:                               # includes JSONDecodeError
+        return {"_error": "invalid JSON response"}
+    except Exception as err:                         # network / HTTP error
+        return {"_error": str(err)[:200]}
+
+
 def _http_probe(url: str, max_bytes: int = 400_000,
                 follow_redirects: bool = True) -> dict[str, Any]:
     """Gated fetch that also returns the RESPONSE HEADERS and status — the

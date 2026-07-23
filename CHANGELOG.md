@@ -15,6 +15,20 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Live CVE feed for dependency auditing (OSV.dev, opt-in)
+
+`assess_deps` now ALSO queries the live **OSV.dev** feed when the operator opts
+in (`OLYMPUS_ASSESS_OSV`), merging live advisories with the bundled index
+(deduped by CVE, CVSS computed from the OSV vector). Closes `DEFERRED #17`.
+Hardened: each query goes through a new gated `tools._http_post_json` — the
+canonical gated POST, with `_http_get`'s SSRF/rebinding-pin + assessment
+egress-confinement preamble **plus an outbound-body secret-exfil scan** (a POST
+can leak in the body, not just the URL). The confinement permits only the
+trusted `api.osv.dev` infra host (not target-adjacent hosts). Results are cached
+with a 24 h TTL (bounded); any failure degrades silently to the bundled index
+(offline-first preserved); off during replay. Default behaviour is unchanged
+(bundled index) unless opted in. No new tool/action/command. Tests: 7 new.
+
 ### Added — Blast-radius containment: own each of Strix's damage vectors
 
 Made the assessment guardrails **owned, active, and demonstrable** (ADR 0013).

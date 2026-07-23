@@ -1024,12 +1024,102 @@ def _parse_package_json(text: str) -> list[tuple[str, str]]:
     return out
 
 
+# --- live CVE feed (OSV.dev) — opt-in, cached, gated, offline-first -----------
+# Bundled advisories are the default (offline + deterministic). When an operator
+# opts in (OLYMPUS_ASSESS_OSV), dep_audit ALSO queries OSV.dev for each declared
+# package/version, MERGING live results with the bundled index. Every query goes
+# through the gated tools._http_post_json (SSRF-pinned, confinement permits the
+# trusted api.osv.dev infra); results are cached with a TTL so repeat audits are
+# cheap; any failure degrades silently to the bundled index. Off during replay.
+
+_OSV_TTL = 24 * 3600
+_OSV_MAX_DEPS = 60              # cap live lookups per audit (bounded egress)
+_OSV_ECOSYSTEM = {"pypi": "PyPI", "npm": "npm"}
+
+
+def _osv_enabled() -> bool:
+    if _replaying():
+        return False
+    return os.environ.get("OLYMPUS_ASSESS_OSV", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _osv_cache_path(user: str) -> Path:
+    return _store_dir(user) / "osv_cache.json"
+
+
+def _osv_cache_load(user: str) -> dict:
+    try:
+        data = json.loads(_osv_cache_path(user).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _osv_parse_vuln(v: dict) -> dict:
+    """Pull the fields we report from an OSV vuln object (defensive — OSV's
+    shape varies by advisory source)."""
+    aliases = v.get("aliases") or []
+    ident = next((a for a in aliases if str(a).startswith("CVE-")),
+                 v.get("id", "?"))
+    vector = ""
+    for s in v.get("severity") or []:
+        if str(s.get("type", "")).upper().startswith("CVSS_V3"):
+            vector = str(s.get("score", ""))
+            break
+    dbs = v.get("database_specific") or {}
+    cwes = dbs.get("cwe_ids") or []
+    cwe = str(cwes[0]) if cwes else ""
+    score, sev_from_vec = sarif.score_or_none(vector)
+    severity = (sev_from_vec or dbs.get("severity") or "high").lower()
+    if severity not in ("critical", "high", "medium", "low", "info"):
+        severity = "medium"
+    return {"id": str(ident), "cwe": cwe, "cvss_vector": vector,
+            "severity": severity, "summary": str(v.get("summary", ""))[:200]}
+
+
+def _osv_lookup(ecosystem: str, pkg: str, version: str,
+                user: str | None = None) -> list[dict]:
+    """Cached OSV.dev lookup for one package/version. Returns parsed vuln dicts;
+    [] on any failure (offline-first). Never raises."""
+    user = _user(user)
+    osv_eco = _OSV_ECOSYSTEM.get(ecosystem)
+    if not osv_eco or not pkg or not version:
+        return []
+    key = f"{ecosystem}:{pkg}:{version}"
+    cache = _osv_cache_load(user)
+    ent = cache.get(key)
+    if isinstance(ent, dict) and (_now() - ent.get("ts", 0)) < _OSV_TTL:
+        return ent.get("vulns", [])
+    try:
+        from . import tools
+        resp = tools._http_post_json(
+            "https://api.osv.dev/v1/query",
+            {"version": version, "package": {"name": pkg, "ecosystem": osv_eco}})
+    except Exception:
+        return ent.get("vulns", []) if isinstance(ent, dict) else []
+    if not isinstance(resp, dict) or resp.get("_error"):
+        return ent.get("vulns", []) if isinstance(ent, dict) else []
+    vulns = [_osv_parse_vuln(v) for v in (resp.get("vulns") or [])
+             if isinstance(v, dict)]
+    cache[key] = {"ts": _now(), "vulns": vulns}
+    try:
+        if len(cache) > 5000:                         # bound the cache
+            cache = dict(sorted(cache.items(),
+                                key=lambda kv: kv[1].get("ts", 0),
+                                reverse=True)[:5000])
+        _atomic_write(_osv_cache_path(user), json.dumps(cache))
+    except Exception:
+        pass
+    return vulns
+
+
 def dep_audit(path: str = ".", record: bool = True,
               user: str | None = None) -> dict[str, Any]:
     """Audit declared dependencies (requirements.txt / package.json) against the
-    bundled advisory index. Offline, deterministic, scope-gated, workspace-
-    confined. Absorbs Strix's dependency-CVE scan without a live network feed
-    (an operator can point OLYMPUS_ASSESS_ADVISORIES at a richer index)."""
+    bundled advisory index — and, when OLYMPUS_ASSESS_OSV is set, the live
+    OSV.dev feed too (cached, gated, offline-first). Scope-gated, workspace-
+    confined. Absorbs Strix's dependency-CVE scan."""
     require_scope("local", user)
     from . import sandbox
     try:
@@ -1058,12 +1148,16 @@ def dep_audit(path: str = ".", record: bool = True,
                 "error": "no requirements.txt or package.json found"}
 
     advisories = _load_advisories()
+    osv_on = _osv_enabled()
     findings: list[Finding] = []
+    osv_queried = 0
     for eco, name, text in manifests:
         deps = _parse_package_json(text) if eco == "npm" else _parse_requirements(text)
         for pkg, version in deps:
+            seen_ids: set[str] = set()
             for spec, adv_id, cwe, sev, note in advisories.get(eco, {}).get(pkg, []):
                 if _spec_matches(version, spec):
+                    seen_ids.add(adv_id)
                     findings.append(Finding(
                         title=f"Vulnerable dependency: {pkg} {version} ({adv_id})",
                         severity=sev, cwe=cwe,
@@ -1071,10 +1165,24 @@ def dep_audit(path: str = ".", record: bool = True,
                         evidence=f"{pkg}=={version} matches {spec}: {note}",
                         remediation=f"Upgrade {pkg} past {spec.lstrip('<=')}.",
                         confidence="high", source="dep_audit"))
+            # Live OSV feed (opt-in, bounded, deduped against the bundled index).
+            if osv_on and osv_queried < _OSV_MAX_DEPS:
+                osv_queried += 1
+                for v in _osv_lookup(eco, pkg, version, user):
+                    if v["id"] in seen_ids:
+                        continue
+                    seen_ids.add(v["id"])
+                    findings.append(Finding(
+                        title=f"Vulnerable dependency: {pkg} {version} ({v['id']})",
+                        severity=v["severity"], cwe=v["cwe"],
+                        cvss_vector=v["cvss_vector"], location=f"{name}",
+                        evidence=f"OSV.dev: {v['summary'] or v['id']}",
+                        remediation=f"Upgrade {pkg}; see advisory {v['id']}.",
+                        confidence="high", source="dep_audit"))
     stored = [record_finding(f, user) for f in findings] if record else \
         [asdict(f) for f in findings]
     return {"path": str(path), "manifests": [m[1] for m in manifests],
-            "findings": stored, "count": len(stored)}
+            "findings": stored, "count": len(stored), "osv": osv_on}
 
 
 # ===========================================================================
@@ -1632,17 +1740,28 @@ def confined_egress(user: str | None = None,
         _ACTIVE_SCOPE.reset(token)
 
 
+# Trusted advisory/infrastructure hosts that confinement always permits: they
+# are Olympus's OWN dependency-vulnerability feed, NOT a target's LAN / metadata
+# endpoint / out-of-scope host — so allowing them does not widen the blast
+# radius the confinement contains (a hijacked run still cannot reach the
+# operator's network or an arbitrary target). Kept tiny and explicit.
+_CONFINEMENT_INFRA_ALLOW = frozenset({"api.osv.dev"})
+
+
 def egress_confined_reason(host: str) -> str | None:
     """Reason string if `host` is refused by the active assessment egress
     confinement, else None. NO-OP (None) when no assessment is confining egress,
     so every non-assessment fetch is unaffected. The gated fetch path in tools.py
-    calls this in addition to its SSRF/egress preamble."""
+    calls this in addition to its SSRF/egress preamble. Loopback and a tiny set
+    of trusted advisory-infra hosts are always permitted (see above)."""
     scope = _ACTIVE_SCOPE.get()
     if scope is None:
         return None                                   # no confinement active
     h = (host or "").strip().lower().strip("[]")
     if not h:
         return "assessment egress confinement: empty host refused"
+    if security._host_is_loopback(h) or h in _CONFINEMENT_INFRA_ALLOW:
+        return None                                   # trusted infra, not a target
     for pat in scope:
         if pat in ("local", "workspace", "."):
             continue                                  # not a network host
