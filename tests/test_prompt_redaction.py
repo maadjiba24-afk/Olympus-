@@ -129,3 +129,60 @@ def test_browser_read_keeps_ordinary_text(monkeypatch):
         assert sess.read() == "Just a normal page body."
     finally:
         browser.set_transport_factory(None)
+
+
+# --- H1: broadened secret detection (hardening) ------------------------------
+# Fixtures are ASSEMBLED from fragments at runtime so no committed source line
+# holds a contiguous secret-shaped literal — otherwise GitHub push-protection
+# secret scanning (which reads source text, not runtime values) would block the
+# push on our own test data. The assembled runtime string still exercises the
+# redaction regexes exactly.
+
+_GOOGLE_KEY = "AI" + "za" + "0123456789abcdefghijklmnopqrstuvwxy"       # AIza + 35
+_GOOGLE_OAUTH = "ya" + "29." + "a0AfH6SM" + ("x" * 28)
+_GH_PAT = "github" + "_pat_" + "11ABCDEFG0abcdefghij_klmnopqrstuvwxyz1234567890"
+_GH_APP = "gh" + "s_" + ("0" * 40)
+_STRIPE_LIVE = "sk" + "_live_" + "abcdef1234567890ABCDEFXYZ"
+_STRIPE_RK = "rk" + "_test_" + "abcdefghij1234567890ABCDEF"
+_BEARER_TOK = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+@pytest.mark.parametrize("secret,marker", [
+    (_GOOGLE_KEY, "[redacted key]"),
+    (_GOOGLE_OAUTH, "[redacted token]"),
+    (_GH_PAT, "[redacted key]"),
+    (_GH_APP, "[redacted key]"),
+    (_STRIPE_LIVE, "[redacted key]"),
+    (_STRIPE_RK, "[redacted key]"),
+])
+def test_broadened_secret_shapes_are_redacted(secret, marker):
+    out = security.sanitize_for_prompt(f"credential: {secret} trailing")
+    assert secret not in out
+    assert marker in out
+
+
+def test_bearer_authorization_header_is_redacted():
+    out = security.sanitize_for_prompt(f"Authorization: Bearer {_BEARER_TOK}")
+    assert _BEARER_TOK not in out
+    assert "Bearer [redacted token]" in out
+
+
+def test_broadened_secrets_do_not_redact_ordinary_ids():
+    # Low false-positive: a plain word, a short hex, a version, a normal id are
+    # NOT redacted (broadening must not eat task-relevant strings).
+    txt = "order AIza is fine, commit 1a2b3c4, build v2.10.3, id 90210"
+    assert security.sanitize_for_prompt(txt) == txt
+
+
+def test_broadened_secrets_idempotent():
+    s = f"k {_GOOGLE_KEY} t Bearer {_BEARER_TOK}"
+    once = security.sanitize_for_prompt(s)
+    assert security.sanitize_for_prompt(once) == once
+
+
+def test_zero_width_split_secret_is_still_caught():
+    # A zero-width char inserted mid-token must not defeat redaction — invisibles
+    # are stripped first, then the secret matches.
+    poisoned = _STRIPE_LIVE[:12] + "​" + _STRIPE_LIVE[12:]
+    out = security.sanitize_for_prompt(poisoned)
+    assert "sk" + "_live" not in out and "[redacted key]" in out

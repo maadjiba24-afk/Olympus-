@@ -631,3 +631,33 @@ def test_web_llms_txt_content_is_secret_redacted_when_wrapped(monkeypatch):
     wrapped = security.wrap_untrusted(raw, source="web_llms_txt")
     assert "sk-abcDEF123456ghiJKL789" not in wrapped
     assert "[redacted key]" in wrapped
+
+
+# --- H4: llms.txt cache TTL + bound (hardening) ------------------------------
+
+def test_fetch_llmstxt_cache_expires_after_ttl(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    hits = {"n": 0}
+
+    def _get(url, timeout=30, headers=None):
+        hits["n"] += 1
+        return "# guide\n- x\n"
+
+    monkeypatch.setattr(tools, "_http_get", _get)
+    webctx.fetch_llmstxt("https://ttl.example")
+    assert hits["n"] == 1
+    # force the single cached entry to look older than the TTL
+    origin = "https://ttl.example"
+    ts, result = webctx._llmstxt_cache[origin]
+    webctx._llmstxt_cache[origin] = (ts - webctx._LLMSTXT_TTL - 1, result)
+    webctx.fetch_llmstxt("https://ttl.example")
+    assert hits["n"] == 2                              # refetched after expiry
+
+
+def test_fetch_llmstxt_cache_is_bounded(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "# g\n")
+    for i in range(webctx._LLMSTXT_CACHE_MAX + 25):
+        webctx.fetch_llmstxt(f"https://site{i}.example")
+    assert len(webctx._llmstxt_cache) <= webctx._LLMSTXT_CACHE_MAX

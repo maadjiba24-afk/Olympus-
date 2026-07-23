@@ -98,6 +98,27 @@ All five borrowable watchlist items (§3.1–§3.6) are now native Olympus
 capabilities; ADR 0014 is complete and `docs/PAGE_AGENT_TRACKING.md` is marked
 ABSORBED.
 
+### Security/Hardened — Adversarial hardening pass over the absorption (ADR 0014 (f))
+
+A self-review of decisions (a)–(e) closed five weak spots:
+
+- **Broader secret redaction.** `sanitize_for_prompt` now also catches Google API
+  keys / OAuth tokens, GitHub app tokens + fine-grained PATs, Stripe live/test
+  keys, hyphenated Slack tokens, and `Authorization: Bearer …` headers — distinct
+  provider shapes only (no blind high-entropy matching that would eat a hash or id
+  the user asked about).
+- **observe() label redaction.** `browser_observe` is an ACTION tool (not wrapped),
+  so `observe()` now secret-redacts each element label at the source — closing the
+  one path a page secret could reach the model unredacted.
+- **observe() perception is one atomic eval.** Geometry + scrollables now come from
+  a single `Runtime.evaluate` (they could previously disagree if the page scrolled
+  between two evals); the delta baseline reuses the already-resolved landed URL
+  (one fewer round-trip, no TOCTOU); the scrollable DOM walk is node-bounded.
+- **llms.txt cache** gained a TTL (a 404 no longer sticks process-wide) and an
+  entry bound with oldest-eviction.
+- Adversarial tests for each (incl. a zero-width split-token evasion, secret-in
+  -label, single-eval perception, cache expiry/bound).
+
 Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
 page* (origin sharing), `eval()` of model code in a live origin, an
 unauthenticated localhost control socket behind a reusable dialog, and sending

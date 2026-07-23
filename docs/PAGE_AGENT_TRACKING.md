@@ -48,8 +48,12 @@ clone.
       rebinding-pinned `_http_get`, port-allowlisted, capped, cached per origin,
       and wrapped + secret-redacted — every layer page-agent's raw `fetch()`
       skips. `tests/test_webctx.py`.
-  **All five borrowable watchlist items are now native (ADR 0014 complete).** The
-  four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
+  **All five borrowable watchlist items are now native (ADR 0014 complete).**
+  A follow-up **hardening pass (ADR 0014 (f))** then closed five self-review weak
+  spots: broader secret shapes (Google/GitHub-PAT/Stripe/Slack/Bearer), redacting
+  secrets in `observe()` labels (the unwrapped-actuator gap), a single atomic
+  perception eval + landed-URL reuse in `observe()`, and a TTL + bound on the
+  llms.txt cache. The four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
 - **What it is:** a client-side, **zero-install in-page GUI agent** — "one
   script gives any web page its own AI agent." Drop a `<script>` tag (or `npm
   install page-agent`) and the page gains a natural-language agent that reads its

@@ -1320,3 +1320,45 @@ def test_click_missing_element_errors_and_is_not_journaled(monkeypatch):
         assert sess.learned_steps() == ""
     finally:
         browser.set_transport_factory(None)
+
+
+# --- H2/H3: observe() hardening (secret-in-label; atomic perception) ----------
+
+def test_observe_redacts_secret_in_element_label(monkeypatch):
+    # browser_observe is an ACTION tool (not wrapped), so a secret in a label
+    # must be redacted at the source. The secret is assembled from fragments so
+    # no source line holds a contiguous secret literal (push-protection scanning).
+    secret = "sk" + "_live_" + "abcdef1234567890ABCDEF"
+    try:
+        sess = _harness_session(monkeypatch, elements=[
+            {"t": "input:text", "n": f"token {secret}", "s": "#t"}])
+        obs = sess.observe()
+        assert secret not in obs
+        assert "[redacted key]" in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_perception_is_one_atomic_eval(monkeypatch):
+    # Geometry + scrollables come from a SINGLE perception eval (not two), so
+    # they can't disagree on scroll position.
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 720, "pw": 1280, "ph": 3000,
+                            "sx": 0, "sy": 100}
+        sess._t.scrollables = [{"s": "#feed", "db": 500, "rr": 0}]
+        # count the perception evals during observe()
+        before = [c for c in sess._t.calls
+                  if c["method"] == "Runtime.evaluate"
+                  and "__OLY_PERCEPT__" in c["params"].get("expression", "")]
+        obs = sess.observe()
+        after = [c for c in sess._t.calls
+                 if c["method"] == "Runtime.evaluate"
+                 and "__OLY_PERCEPT__" in c["params"].get("expression", "")]
+        assert len(after) - len(before) == 1          # exactly one perception eval
+        # sy=100, max_scroll=3000-720=2280 → 100 above, 2180 below, 4%
+        assert "at 4%" in obs and "2180px below" in obs
+        assert '- "#feed" (500px below)' in obs
+    finally:
+        browser.set_transport_factory(None)

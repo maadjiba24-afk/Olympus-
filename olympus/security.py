@@ -338,6 +338,22 @@ _LONGNUM = re.compile(r"\b\d{6,}\b")            # ids, card/account numbers
 _URL_CRED = re.compile(r"https?://[^\s/@]+:[^\s/@]+@")  # creds in URLs
 _KEYISH = re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs]|AKIA)[-_A-Za-z0-9]{8,}\b")
 
+# High-value provider token shapes that `_KEYISH` does not cover, for the
+# prompt-redaction path only (kept out of `anonymize`/memory to avoid changing
+# that behavior). Each is a DISTINCTIVE, low-false-positive shape — a real
+# credential leaks in one of these forms, but ordinary prose/ids do not match —
+# so we never fall back to blind high-entropy matching that would redact a hash
+# or id the user actually asked about. (label, regex, replacement).
+_EXTRA_SECRET_RES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[redacted key]"),         # Google API key
+    (re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}\b"), "[redacted token]"),    # Google OAuth
+    (re.compile(r"\b(?:ghu|ghs|ghr)_[0-9A-Za-z]{36,}\b"), "[redacted key]"),  # GitHub app tokens
+    (re.compile(r"\bgithub_pat_[0-9A-Za-z_]{22,}\b"), "[redacted key]"),  # GitHub fine-grained PAT
+    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b"), "[redacted key]"),  # Stripe
+    (re.compile(r"\bxox[baprse]-[0-9A-Za-z-]{10,}\b"), "[redacted token]"),  # Slack (hyphenated)
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "Bearer [redacted token]"),  # Authorization header
+)
+
 
 def anonymize(text: str) -> str:
     """Strip obvious PII/secrets before content can enter the SHARED pool.
@@ -386,6 +402,8 @@ def sanitize_for_prompt(text: str, *, redact_pii: bool | None = None) -> str:
     text = _JWT_RE.sub("[redacted token]", text)
     text = _KEYISH.sub("[redacted key]", text)
     text = _URL_CRED.sub("https://[redacted-credentials]@", text)
+    for rx, repl in _EXTRA_SECRET_RES:
+        text = rx.sub(repl, text)
     if redact_pii is None:
         import os
         redact_pii = (os.environ.get("OLYMPUS_REDACT_PII", "")

@@ -179,14 +179,18 @@ _CHECKPOINT_JS = (
 _CHECKPOINT_KINDS = ("captcha", "otp", "step_up", "none")
 
 _SCROLLABLE_MAX = 8           # max scrollable regions surfaced by observe()
+_SCROLL_WALK_MAX = 4000       # cap DOM nodes examined for scrollables (anti-O(page))
 
-# Page geometry for the observe() header — how much of the page is off-screen, so
-# the model can decide to scroll instead of guessing. One Runtime.evaluate,
-# returns a compact JSON of viewport / page / scroll dims. The __OLY_GEOM__ marker
-# lets the offline transport route it. Pure measurement — no page text, so it is
-# not an ingestion surface. Fails soft to '' (→ header omitted) on any error.
-_GEOMETRY_JS = (
-    "(function(){/*__OLY_GEOM__*/try{"
+# Scroll affordances for observe() — page geometry (how much is off-screen) AND
+# the scrollable containers — in ONE Runtime.evaluate, so both are measured at the
+# SAME instant (a separate geometry eval and scrollables eval could disagree if
+# the page scrolls between them). Returns {geom:{vw,vh,pw,ph,sx,sy}, scroll:[{s,
+# db,rr}]}. Uses __olySel (auto-injected by _prep). The scrollable walk is bounded
+# to _SCROLL_WALK_MAX nodes examined and _SCROLLABLE_MAX emitted, so a huge DOM
+# can't make perception O(page). Pure measurement — no page text, not an ingestion
+# surface. __OLY_PERCEPT__ routes it offline; fails soft to '' (→ omitted).
+_PERCEPTION_JS = (
+    "(function(){/*__OLY_PERCEPT__*/try{"
     "var de=document.documentElement,b=document.body;"
     "var vw=window.innerWidth||de.clientWidth||0;"
     "var vh=window.innerHeight||de.clientHeight||0;"
@@ -194,21 +198,10 @@ _GEOMETRY_JS = (
     "var ph=Math.max(de?de.scrollHeight:0,b?b.scrollHeight:0);"
     "var sx=window.scrollX||de.scrollLeft||0;"
     "var sy=window.scrollY||de.scrollTop||0;"
-    "return JSON.stringify({vw:vw,vh:vh,pw:pw,ph:ph,sx:sx,sy:sy});"
-    "}catch(e){return '';}})()"
-)
-
-# Scrollable CONTAINERS on the page (overflow auto/scroll with real overflow),
-# each as a durable selector + remaining down/right px, so the model can scroll
-# the RIGHT region (a chat pane, a virtualized list) via act(scroll, selector=…)
-# instead of only the document. Uses __olySel (auto-injected by _prep). Bounded
-# to _SCROLLABLE_MAX; skips tiny boxes. The __OLY_SCROLL__ marker routes it
-# offline. No page text — not an ingestion surface. Fails soft to ''.
-_SCROLLABLES_JS = (
-    "(function(){/*__OLY_SCROLL__*/try{"
-    "var out=[],all=document.querySelectorAll('*');"
-    "for(var i=0;i<all.length&&out.length<KMAX;i++){var e=all[i];var st;"
-    "try{st=window.getComputedStyle(e);}catch(x){continue;}"
+    "var geom={vw:vw,vh:vh,pw:pw,ph:ph,sx:sx,sy:sy};"
+    "var out=[],all=document.querySelectorAll('*'),seen=0;"
+    "for(var i=0;i<all.length&&out.length<KMAX&&seen<WALKMAX;i++){var e=all[i];seen++;"
+    "var st;try{st=window.getComputedStyle(e);}catch(x){continue;}"
     "var oy=st.overflowY,ox=st.overflowX;"
     "var dy=(oy==='auto'||oy==='scroll')?(e.scrollHeight-e.clientHeight):0;"
     "var dx=(ox==='auto'||ox==='scroll')?(e.scrollWidth-e.clientWidth):0;"
@@ -216,8 +209,8 @@ _SCROLLABLES_JS = (
     "var r=e.getBoundingClientRect();if(r.width<40||r.height<40)continue;"
     "out.push({s:__olySel(e),db:Math.max(0,dy-(e.scrollTop||0)),"
     "rr:Math.max(0,dx-(e.scrollLeft||0))});}"
-    "return JSON.stringify(out);}catch(e){return '';}})()"
-).replace("KMAX", str(_SCROLLABLE_MAX))
+    "return JSON.stringify({geom:geom,scroll:out});}catch(e){return '';}})()"
+).replace("KMAX", str(_SCROLLABLE_MAX)).replace("WALKMAX", str(_SCROLL_WALK_MAX))
 
 
 def _click_probe_js(selector: str) -> str:
@@ -424,12 +417,12 @@ class FakeTransport:
                 return {"result": {"value": json.dumps(lst)}}
             # observe() scroll affordances — checked BEFORE the __olyq branch
             # (the scrollables script carries __olyq via the injected deep helper).
-            if "__OLY_GEOM__" in expr:            # geometry header, or '' → omit
-                return {"result": {"value": json.dumps(self.geometry)
-                                   if self.geometry is not None else ""}}
-            if "__OLY_SCROLL__" in expr:          # scrollable regions, or '' → omit
-                return {"result": {"value": json.dumps(self.scrollables)
-                                   if self.scrollables is not None else ""}}
+            if "__OLY_PERCEPT__" in expr:         # geometry + scrollables, or '' → omit
+                if self.geometry is None and self.scrollables is None:
+                    return {"result": {"value": ""}}
+                return {"result": {"value": json.dumps(
+                    {"geom": self.geometry or {},
+                     "scroll": self.scrollables or []})}}
             if "__OLY_CLICK__" in expr:           # click landing probe
                 sel = self._matched_selector(expr)
                 if sel is None:
@@ -943,6 +936,10 @@ class BrowserSession:
         # marking; see docs/PAGE_AGENT_TRACKING.md §3.2 / ADR 0014 (b).
         self._prev_observe_sels: set[str] = set()
         self._prev_observe_url: str = ""
+        # Last URL resolved by _blocked_landing() — reused by observe() for the
+        # delta baseline instead of a second _current_url() eval (one fewer CDP
+        # round-trip, and no TOCTOU between the landing check and the delta URL).
+        self._landed_url: str = ""
 
     def _apply_subresource_gate(self) -> None:
         """Install the network-layer block on sub-resource requests to SSRF
@@ -1008,6 +1005,7 @@ class BrowserSession:
         navigation can move the tab onto an internal host before we read it.
         Returns a reason if the current page must not be exposed, else None."""
         href = self._current_url()
+        self._landed_url = href or ""      # reused by observe()'s delta baseline
         if not href or href.startswith("about:"):
             return None
         return security.url_block_reason(href)
@@ -1428,7 +1426,9 @@ class BrowserSession:
         # observe() on this same URL. On a fresh page (URL changed or first look)
         # nothing is marked — a navigation replaces the whole set, so "new" would
         # be noise. Marked elements get a `*` prefix (page-agent's `*[` idiom).
-        cur_url = self._current_url()
+        # Reuse the URL _observe_raw() already resolved via _blocked_landing()
+        # (no extra eval, and no TOCTOU between the landing check and the delta).
+        cur_url = self._landed_url
         cur_sels = {str(it.get("s") or "") for it in items if it.get("s")}
         same_page = bool(self._prev_observe_url) and cur_url == self._prev_observe_url
         new_sels = (cur_sels - self._prev_observe_sels) if same_page else set()
@@ -1437,7 +1437,13 @@ class BrowserSession:
 
         lines = []
         for it in items:
-            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            # observe() is an ACTION tool (browser_observe) and is NOT wrapped by
+            # the ingestion path, so redact secrets in the label HERE — a token
+            # sitting in an element's text/value is never a useful control
+            # identifier, and this closes the one path a page secret could reach
+            # the model unredacted (ADR 0014 (d) hardening).
+            name = security.sanitize_for_prompt(
+                str(it.get("n") or "").strip())[:_LABEL_MAX]
             label = f' "{name}"' if name else ""
             sel = str(it.get("s") or "")
             mark = "*" if (sel and sel in new_sels) else ""
@@ -1446,21 +1452,32 @@ class BrowserSession:
 
         # Scroll affordances: a geometry header (how much is off-screen) and any
         # scrollable containers, so the model scrolls the right region instead of
-        # guessing. Both fail soft — omitted entirely if the page can't report
-        # them — so perception never regresses to worse than the bare map.
-        header = self._geometry_line()
-        footer = self._scrollables_block()
+        # guessing. ONE eval measures both atomically; both fail soft — omitted
+        # entirely if the page can't report them — so perception never regresses
+        # to worse than the bare map.
+        geom, scroll = self._perception()
+        header = self._geometry_line(geom)
+        footer = self._scrollables_block(scroll)
         parts = [p for p in (header, body, footer) if p]
         return "\n".join(parts)
 
-    def _geometry_line(self) -> str:
-        """One-line page geometry for observe(): viewport, page size, and how much
-        is above/below the fold. '' on any read failure (header simply omitted)."""
+    def _perception(self) -> tuple[dict, list]:
+        """One eval returning (geometry dict, scrollables list) measured at the
+        same instant. ({}, []) on any read failure (affordances simply omitted)."""
         try:
-            geo = json.loads(self._eval(_GEOMETRY_JS) or "")
+            data = json.loads(self._eval(_PERCEPTION_JS) or "")
         except (json.JSONDecodeError, TypeError, ValueError):
-            return ""
-        if not isinstance(geo, dict):
+            return {}, []
+        if not isinstance(data, dict):
+            return {}, []
+        geom = data.get("geom") if isinstance(data.get("geom"), dict) else {}
+        scroll = data.get("scroll") if isinstance(data.get("scroll"), list) else []
+        return geom, scroll
+
+    def _geometry_line(self, geo: dict) -> str:
+        """One-line page geometry for observe(): viewport, page size, and how much
+        is above/below the fold. '' when geometry is unavailable (header omitted)."""
+        if not isinstance(geo, dict) or not geo:
             return ""
         try:
             vw, vh = int(geo["vw"]), int(geo["vh"])
@@ -1479,14 +1496,9 @@ class BrowserSession:
         return (f"Page {pw}x{ph}, viewport {vw}x{vh} at {pct}% "
                 f"({above}px above, {below}px below - scroll to see more)")
 
-    def _scrollables_block(self) -> str:
+    def _scrollables_block(self, regions: list) -> str:
         """A short list of scrollable containers (durable selector + remaining
-        px), so the model can scroll a specific region. '' when there are none or
-        the read fails."""
-        try:
-            regions = json.loads(self._eval(_SCROLLABLES_JS) or "")
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return ""
+        px), so the model can scroll a specific region. '' when there are none."""
         if not isinstance(regions, list) or not regions:
             return ""
         rows = []

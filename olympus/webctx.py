@@ -1248,10 +1248,33 @@ def generate_llmstxt(url: str, max_urls: int = 20) -> dict[str, str]:
 
 
 # Per-origin cache of a fetched /llms.txt, so a task that touches a site many
-# times pays one governed round-trip. Process-local and unbounded-key but
-# small (one short string per origin visited); cleared on process exit.
+# times pays one governed round-trip. Bounded (LRU-ish) and TTL'd so a negative
+# (404) result doesn't stick for the whole process — a site that later publishes
+# an llms.txt is picked up after the TTL — and the map can't grow without limit.
 _LLMSTXT_CONSUME_CAP = 8000        # chars of a site's own llms.txt we ingest
-_llmstxt_cache: dict[str, dict] = {}
+_LLMSTXT_TTL = 600.0               # seconds a cached result stays fresh
+_LLMSTXT_CACHE_MAX = 256           # max distinct origins cached
+_llmstxt_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _llmstxt_cache_get(origin: str, now: float) -> dict | None:
+    ent = _llmstxt_cache.get(origin)
+    if ent is None:
+        return None
+    ts, result = ent
+    if now - ts > _LLMSTXT_TTL:
+        _llmstxt_cache.pop(origin, None)      # expired — force a refetch
+        return None
+    return result
+
+
+def _llmstxt_cache_put(origin: str, result: dict, now: float) -> None:
+    # Evict the oldest entry when full (simple bound; the set of origins a task
+    # touches is small, so exact LRU isn't worth the bookkeeping).
+    if origin not in _llmstxt_cache and len(_llmstxt_cache) >= _LLMSTXT_CACHE_MAX:
+        oldest = min(_llmstxt_cache, key=lambda k: _llmstxt_cache[k][0])
+        _llmstxt_cache.pop(oldest, None)
+    _llmstxt_cache[origin] = (now, result)
 
 
 def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
@@ -1280,8 +1303,11 @@ def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
         return {"origin": "", "url": url, "found": False, "llmstxt": "",
                 "cached": False, "error": "invalid url"}
 
-    if origin in _llmstxt_cache:
-        return {**_llmstxt_cache[origin], "cached": True}
+    import time
+    now = time.monotonic()
+    hit = _llmstxt_cache_get(origin, now)
+    if hit is not None:
+        return {**hit, "cached": True}
 
     endpoint = f"{origin}/llms.txt"
     cap = _clamp(max_chars, _LLMSTXT_CONSUME_CAP, _LLMSTXT_CONSUME_CAP, lo=200)
@@ -1299,7 +1325,7 @@ def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
         # degrade to "not found", never raise. The reason is bounded.
         result = {"origin": origin, "url": endpoint, "found": False,
                   "llmstxt": "", "error": str(err)[:120]}
-    _llmstxt_cache[origin] = result
+    _llmstxt_cache_put(origin, result, now)
     return {**result, "cached": False}
 
 

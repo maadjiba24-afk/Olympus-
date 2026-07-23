@@ -208,12 +208,45 @@ Every layer that page-agent skips — SSRF/egress gate, rebinding pin, port
 allowlist, untrusted envelope, secret redaction, threat-model binding — is
 present here. Seven new tests (`tests/test_webctx.py`).
 
-## Status: program complete
+## Decision (f): hardening pass over the absorbed capabilities — SHIPPED
+
+An adversarial self-review of decisions (a)–(e) surfaced five weak spots, each
+now closed:
+
+- **(H1) Broader secret detection.** `sanitize_for_prompt` gained a
+  low-false-positive `_EXTRA_SECRET_RES` set — Google API keys (`AIza…`) and
+  OAuth (`ya29.…`), GitHub app tokens (`ghu_/ghs_/ghr_`) and fine-grained PATs
+  (`github_pat_…`), Stripe live/test keys, hyphenated Slack tokens, and
+  `Authorization: Bearer …` headers — beyond the original `sk-/pk-/ghp/xox/AKIA`
+  shapes. Deliberately *no* blind high-entropy matching (it would redact a hash
+  or id the user asked about); only distinctive provider shapes.
+- **(H2) The observe() unwrapped-actuator gap.** `browser_observe` is an ACTION
+  tool and is *not* run through `wrap_untrusted`, so a secret sitting in an
+  element label could reach the model unredacted. `observe()` now
+  `sanitize_for_prompt`s each label at the source (a token is never a useful
+  control identifier), closing the one path decision (d) didn't cover.
+- **(H3) observe() round-trips + a measurement race.** Geometry and scrollables
+  were two separate evals that could disagree if the page scrolled between them;
+  they're now one `_PERCEPTION_JS` eval measured atomically. The delta baseline
+  reuses the URL `_blocked_landing()` already resolved (`self._landed_url`)
+  instead of a second `_current_url()` — one fewer CDP round-trip and no TOCTOU.
+  The scrollable DOM walk is bounded (`_SCROLL_WALK_MAX`) so a huge page can't
+  make perception O(page).
+- **(H4) llms.txt cache.** `fetch_llmstxt`'s per-origin cache gained a TTL (a 404
+  no longer sticks for the whole process — a site that later publishes an
+  llms.txt is picked up) and an entry bound with oldest-eviction (can't grow
+  without limit).
+- **(H5) Adversarial tests** for each: broadened-secret shapes + a zero-width
+  split-token evasion, secret-in-label, single-atomic-perception-eval, and cache
+  expiry/bound.
+
+## Status: program complete + hardened
 
 All five borrowable watchlist items (§3.1, §3.2/§3.3, §3.4, §3.5, §3.6) are now
 native Olympus capabilities, each on the security spine with page-agent's
-corresponding weakness inverted. The four non-goals below remain the fixed
-boundary. Nothing further from page-agent is planned for absorption.
+corresponding weakness inverted, and each hardened per decision (f). The four
+non-goals below remain the fixed boundary. Nothing further from page-agent is
+planned for absorption.
 
 ## NOT absorbed (deliberate non-goals)
 
