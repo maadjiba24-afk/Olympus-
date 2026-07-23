@@ -830,17 +830,30 @@ def _chrome_args(binary: str, port: int, user_data_dir: str,
 _launched: Any = None      # (Popen, base_url) of a browser we started
 
 
-def launch_local(headless: bool = False, timeout: float = 20.0) -> str:
+def launch_local(headless: bool = False, timeout: float | None = None) -> str:
     """Launch a local Chrome with remote debugging and return its DevTools HTTP
     base. Reuses an already-launched one. Best-effort: raises BrowserUnavailable
-    if no binary is found or DevTools never comes up."""
+    if no binary is found or DevTools never comes up.
+
+    The startup wait defaults to 45s (cold/loaded CI runners can be slow to bring
+    up the DevTools endpoint) and is tunable via OLYMPUS_BROWSER_LAUNCH_TIMEOUT.
+    If the Chrome process dies during the wait we fail FAST with its exit code and
+    a tail of its stderr, instead of blocking the full timeout on a blind poll —
+    so a real launch failure (missing --no-sandbox, missing libs) is diagnosable,
+    not an opaque "never responded"."""
     global _launched
     if _launched is not None and _launched[0].poll() is None:
         return _launched[1]
+    import os
     import subprocess
     import tempfile
     import time as _time
     import urllib.request
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("OLYMPUS_BROWSER_LAUNCH_TIMEOUT", "45"))
+        except (TypeError, ValueError):
+            timeout = 45.0
     binary = _find_chrome()
     if not binary:
         raise BrowserUnavailable(
@@ -848,20 +861,44 @@ def launch_local(headless: bool = False, timeout: float = 20.0) -> str:
             "OLYMPUS_BROWSER_BIN")
     port = _free_port()
     profile = tempfile.mkdtemp(prefix="olympus-browser-")
+    # Capture Chrome's stderr so a startup crash is diagnosable (delete=False so
+    # it survives the Popen; small, and left behind like the profile dir).
+    err_log = tempfile.NamedTemporaryFile(
+        prefix="olympus-browser-", suffix=".log", delete=False)
     proc = subprocess.Popen(_chrome_args(binary, port, profile, headless),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=err_log)
     base = f"http://127.0.0.1:{port}"
     deadline = _time.monotonic() + timeout
+    crashed = False
     while _time.monotonic() < deadline:
+        if proc.poll() is not None:        # Chrome exited — stop waiting the full timeout
+            crashed = True
+            break
         try:
             with urllib.request.urlopen(base + "/json/version", timeout=2) as r:
                 if r.status == 200:
                     _launched = (proc, base)
+                    err_log.close()
                     return base
         except Exception:
             _time.sleep(0.2)
-    proc.terminate()
-    raise BrowserUnavailable("launched Chrome but its DevTools never responded")
+    if not crashed:
+        proc.terminate()
+    detail = ""
+    try:
+        err_log.flush()
+        err_log.close()
+        with open(err_log.name, "r", errors="replace") as fh:
+            tail = fh.read()[-400:].strip()
+        if tail:
+            detail = f" — chrome stderr: {tail}"
+    except Exception:
+        pass
+    code = proc.poll()
+    reason = (f"process exited with code {code}" if code is not None
+              else f"process alive but DevTools silent after {timeout:.0f}s")
+    raise BrowserUnavailable(
+        f"launched Chrome but its DevTools never responded ({reason}){detail}")
 
 
 def _autolaunch_enabled() -> bool:

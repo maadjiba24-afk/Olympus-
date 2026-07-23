@@ -15,6 +15,17 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Resilient local-Chrome launch (browser-smoke CI reliability)
+
+`browser.launch_local` waited a fixed 20s for Chrome's DevTools endpoint, then
+failed opaquely — flaky on cold/loaded CI runners where DevTools comes up slowly
+(the `browser-smoke` job's `test_browser_real.py` intermittently errored with
+"launched Chrome but its DevTools never responded"). The wait now defaults to 45s
+and is tunable via `OLYMPUS_BROWSER_LAUNCH_TIMEOUT`; if the Chrome process dies
+during the wait it fails FAST with the exit code and a tail of Chrome's stderr,
+so a genuine launch failure (missing `--no-sandbox`, missing libs) is diagnosable
+instead of a blind timeout. No behavior change to the CDP path itself.
+
 ### Added — Absorb Page Agent's capabilities natively (ADR 0014, complete: (a)–(e))
 
 Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
