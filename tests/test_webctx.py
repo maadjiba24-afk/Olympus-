@@ -43,6 +43,19 @@ def test_to_markdown_injection_text_is_inert_data():
     assert "ignore all previous instructions" in md    # preserved verbatim, not obeyed
 
 
+@pytest.mark.parametrize("html", [
+    "<ol><ul></ol><li>after</li>",                     # mismatched close
+    "<ol><li>a<ul><li>b</ol><li>c",                     # closed in wrong order
+    "</ul></ol><li>x",                                  # closes with no open list
+    "<ol>" * 50 + "<li>deep",                           # deep nesting
+])
+def test_to_markdown_survives_malformed_lists(html):
+    # A desync between _list_stack and _ol_counters used to throw IndexError
+    # (swallowed by the blanket except), silently dropping the rest of the page.
+    md, _, _ = webctx.to_markdown(html)
+    assert "after" in md or "c" in md or "x" in md or "deep" in md  # tail survives
+
+
 def test_to_markdown_builds_table_with_header_separator():
     md, _, _ = webctx.to_markdown(
         "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>")

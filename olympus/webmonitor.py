@@ -211,7 +211,10 @@ def run_due(now: float | None = None,
                 m.last_markdown = (d.get("current_markdown", "") or "")[:_SNAPSHOT_CAP]
                 if had_baseline:
                     m.changes += 1
-                    snippet = (d.get("diff") or "")[:1500]
+                    # Neutralize any ``` in attacker-controlled page text so it
+                    # can't break out of the code fence in the operator's chat
+                    # client (cosmetic; the content reaches a person, not a model).
+                    snippet = (d.get("diff") or "")[:1500].replace("```", "`​``")
                     out.append(f"monitor {m.id} {m.url}: CHANGED")
                     try:
                         notify(f"🔔 Page changed: {m.url}\n\n"

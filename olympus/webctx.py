@@ -128,7 +128,11 @@ class _MarkdownExtractor(HTMLParser):
             self._newblock()
         elif tag == "li":
             indent = "  " * max(0, len(self._list_stack) - 1)
-            if self._list_stack and self._list_stack[-1] == "ol":
+            # Defensive: only touch the ordered-list counter when the stack top
+            # is an "ol" AND a counter exists — mismatched/broken nesting can
+            # otherwise desync the two (see the matched-pop in handle_endtag).
+            if (self._list_stack and self._list_stack[-1] == "ol"
+                    and self._ol_counters):
                 self._ol_counters[-1] += 1
                 marker = f"{self._ol_counters[-1]}. "
             else:
@@ -190,16 +194,18 @@ class _MarkdownExtractor(HTMLParser):
         elif tag in ("p", "div", "section", "article", "main", "header",
                      "blockquote"):
             self._newblock()
-        elif tag == "ul" and self._list_stack:
-            self._list_stack.pop()
-            if not self._list_stack:
-                self._newblock()
-        elif tag == "ol" and self._list_stack:
-            self._list_stack.pop()
-            if self._ol_counters:
-                self._ol_counters.pop()
-            if not self._list_stack:
-                self._newblock()
+        elif tag in ("ul", "ol") and self._list_stack:
+            # Pop ONLY when the stack top matches this close tag, and keep
+            # `_ol_counters` in lockstep with the "ol" entries. Popping
+            # unconditionally (as before) let mismatched nesting like
+            # `<ol><ul></ol><li>` pop the wrong element and empty the counter,
+            # crashing the next <li> with IndexError — which the blanket
+            # try/except swallowed, silently truncating the rest of the page.
+            if self._list_stack[-1] == tag:
+                if self._list_stack.pop() == "ol" and self._ol_counters:
+                    self._ol_counters.pop()
+                if not self._list_stack:
+                    self._newblock()
         elif tag == "pre":
             if self._in_pre:
                 self._in_pre -= 1
@@ -680,8 +686,7 @@ def parse_document(path_or_url: str) -> dict[str, Any]:
     is_url = path_or_url.startswith(("http://", "https://"))
     if is_url:
         try:
-            from . import tools
-            data = _fetch_bytes(path_or_url)
+            data = _fetch_bytes(path_or_url)          # gated + size-capped
         except Exception as err:
             return {"source": path_or_url, "error": f"fetch failed: {str(err)[:150]}"}
         name = urlparse(path_or_url).path.lower()
@@ -692,7 +697,10 @@ def parse_document(path_or_url: str) -> dict[str, Any]:
         except Exception as err:
             return {"source": path_or_url, "error": f"path refused: {str(err)[:150]}"}
         try:
-            data = target.read_bytes()[:_DOC_BYTE_CAP]
+            # Bounded read: never buffer more than the cap even for a huge local
+            # file (the URL branch is already capped inside _fetch_bytes).
+            with target.open("rb") as fh:
+                data = fh.read(_DOC_BYTE_CAP + 1)[:_DOC_BYTE_CAP]
         except Exception as err:
             return {"source": path_or_url, "error": f"read failed: {str(err)[:150]}"}
         name = str(target).lower()

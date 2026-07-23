@@ -583,14 +583,22 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
     return _urlreq.build_opener(_SafeRedirectHandler())
 
 
+# Hard ceiling on a single text fetch's body. Generous (any real HTML page is
+# far smaller) but bounded, so a hostile origin streaming a multi-gigabyte body
+# can't OOM the process before a downstream per-page slice runs. The binary
+# sibling below takes its cap as an argument; this is the text default.
+_HTTP_TEXT_CAP = 10_000_000
+
+
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
     initial request and every redirect; on a DIRECT connection also pins the
     socket to the validated IP (defeating DNS rebinding), while a PROXIED
     connection routes through the configured HTTP(S) proxy (which is the egress
     control point). Also refuses a URL that carries a stored secret (raw or
-    encoded) — the classic injection exfil channel. Raises ValueError if
-    blocked."""
+    encoded) — the classic injection exfil channel. The body read is size-capped
+    (`_HTTP_TEXT_CAP`) so a hostile origin can't stream unbounded bytes into
+    memory. Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -601,7 +609,8 @@ def _http_get(url: str) -> str:
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
+            "utf-8", errors="replace")
 
 
 def _http_get_bytes(url: str, max_bytes: int = 12_000_000) -> bytes:
@@ -1860,7 +1869,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "web_map": lambda url, limit=200, include_subdomains=False:
         _web_map(url, limit, include_subdomains),
     "web_batch_scrape": lambda urls, formats=None: _web_batch_scrape(urls, formats),
-    "web_extract": lambda source, schema, prompt="", verify=True:
+    "web_extract": lambda source, schema, prompt="", verify=None:
         _web_extract(source, schema, prompt, verify),
     "generate_llmstxt": lambda url, max_urls=20: _generate_llmstxt(url, max_urls),
     "parse_document": lambda source: _parse_document(source),
@@ -2562,7 +2571,9 @@ def _web_batch_scrape(urls: list, formats: list | None = None) -> str:
     return f"Batch scraped {len(results)} URL(s).\n\n" + "\n\n---\n\n".join(parts)
 
 
-def _web_extract(source, schema: dict, prompt: str = "", verify: bool = True) -> str:
+def _web_extract(source, schema: dict, prompt: str = "", verify=None) -> str:
+    # verify=None → webctx.extract consults OLYMPUS_WEB_EXTRACT_VERIFY (on by
+    # default); the model can still force it off by passing verify=false.
     r = _webctx().extract(source, schema, prompt=prompt, verify=verify)
     if r.get("error"):
         return f"Error extracting: {r['error']}"
