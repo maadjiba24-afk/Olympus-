@@ -200,3 +200,27 @@ def test_notify_failure_is_surfaced(store, monkeypatch):
 def test_monitor_tools_are_trusted():
     for name in ("web_monitor_add", "web_monitor_list"):
         assert name in security.TRUSTED_TOOLS
+
+
+def test_monitor_json_mode_tracks_structured_change(store, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
+    webmonitor.add("u1", "https://shop/x", interval=1,
+                   schema={"type": "object"})
+    notes = []
+    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: notes.append(t))
+    from olympus import webctx
+    # first check: price 9 (baseline, no alert); second: price 10 (alert)
+    seq = iter([{"mode": "json", "changed": True, "current_json": {"price": 9},
+                 "changed_fields": [], "current_hash": "h1"},
+                {"mode": "json", "changed": True, "current_json": {"price": 10},
+                 "changed_fields": [{"field": "price", "change": "changed",
+                                     "from": 9, "to": 10}], "current_hash": "h2"}])
+    monkeypatch.setattr(webctx, "diff",
+                        lambda url, schema=None, previous_json=None: next(seq))
+    log1 = webmonitor.run_due(now=1000)
+    assert any("baseline" in ln for ln in log1) and notes == []
+    log2 = webmonitor.run_due(now=2000)
+    assert any("CHANGED" in ln for ln in log2) and len(notes) == 1
+    assert "price" in notes[0]
+    m = webmonitor.list_for("u1")[0]
+    assert m.changes == 1 and m.schema                   # json mode persisted

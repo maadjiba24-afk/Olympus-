@@ -15,6 +15,33 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Web Context: the previously-declined Firecrawl features, built native
+
+The Firecrawl capabilities ADR 0010 had declined are now first-class — built in
+Olympus's idioms, without importing the anti-patterns:
+
+- **New scrape formats** on a new `web_scrape` tool (the advanced sibling of the
+  quick `browse_page` reader): `images` (all `<img>`/og image URLs, absolute),
+  `branding` (site name, theme color, favicon, social image, description),
+  `html` (cleaned) vs `rawHtml` (as-fetched), and `attributes` (selector →
+  attribute pairs, with a pure-stdlib `tag/.class/#id` selector). All parsed in
+  one deterministic pass; no new dependency.
+- **JSON change-tracking mode** — `web_diff`/`web_monitor_add` accept a `schema`
+  and structurally diff the *extracted object* (which fields changed), alongside
+  the existing git-diff text mode. `webmonitor` persists per-monitor JSON state.
+- **`mobile` / `location` hints** — a mobile User-Agent and an `Accept-Language`
+  from a country/locale, threaded through the gated fetch. (A rotating
+  residential/geo *proxy mesh* is hosted infrastructure, not code — set
+  `HTTPS_PROXY`/`PROXY_SERVER` to route through your own egress.)
+- **In-scrape actions** — `web_scrape(actions=[…])` drives the page through the
+  **governed** browser harness (click/scroll/type/wait) before scraping, with a
+  new `BrowserSession.html()` accessor. Actuation stays SSRF-gated, ledgered, and
+  capability-separated; **`executeJavascript` is rejected, not run** — Olympus
+  does not expose ungoverned JS eval. Degrades cleanly when no browser is present.
+
+New tool `web_scrape` (115 total). Tests, threat-model row, and capability
+counts updated.
+
 ### Security — Harden the Web Context suite against adversarial input
 
 A four-dimension hardening pass (parser DoS, resource bounds, SSRF

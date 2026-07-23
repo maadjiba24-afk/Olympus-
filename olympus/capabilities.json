@@ -178,7 +178,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 114,
+    "count": 115,
     "names": [
       "add_todo",
       "analyze_image",
@@ -292,6 +292,7 @@
       "web_map",
       "web_monitor_add",
       "web_monitor_list",
+      "web_scrape",
       "web_search",
       "write_document"
     ]

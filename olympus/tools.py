@@ -597,7 +597,8 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
 _HTTP_TEXT_CAP = 10_000_000
 
 
-def _http_get(url: str, timeout: float = 30) -> str:
+def _http_get(url: str, timeout: float = 30,
+              headers: dict | None = None) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
     initial request and every redirect; on a DIRECT connection also pins the
     socket to the validated IP (defeating DNS rebinding), while a PROXIED
@@ -607,7 +608,9 @@ def _http_get(url: str, timeout: float = 30) -> str:
     (`_HTTP_TEXT_CAP`) so a hostile origin can't stream unbounded bytes into
     memory. `timeout` (seconds) is the per-socket-operation timeout; bulk
     callers (crawl/map/batch) pass a tighter value than the 30 s default so a
-    slow-drip origin can't hang the worker. Raises ValueError if blocked."""
+    slow-drip origin can't hang the worker. `headers` overlays extra request
+    headers (e.g. a mobile User-Agent / Accept-Language) on the default UA.
+    Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -615,7 +618,10 @@ def _http_get(url: str, timeout: float = 30) -> str:
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    hdrs = {"User-Agent": _UA}
+    if headers:
+        hdrs.update({str(k): str(v) for k, v in headers.items()})
+    req = _urlreq.Request(url, headers=hdrs)
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=timeout) as resp:
         return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
@@ -1873,9 +1879,13 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True,
         include=None, exclude=None:
         _media().crawl_site(url, depth, max_pages, same_domain, include, exclude),
-    # Web Context suite (native Firecrawl-absorption; olympus/webctx.py). The
-    # scrape/crawl surface is served by the upgraded browse_page/crawl_site above
-    # (now webctx-backed clean markdown); these add the genuinely-new verbs.
+    # Web Context suite (native Firecrawl-absorption; olympus/webctx.py).
+    # browse_page/crawl_site remain the quick readers; web_scrape is the
+    # full-featured scrape (formats/actions/mobile/location/attributes).
+    "web_scrape": lambda url, formats=None, schema=None, prompt="",
+        attributes=None, actions=None, mobile=False, location="":
+        _web_scrape(url, formats, schema, prompt, attributes, actions,
+                    mobile, location),
     "web_map": lambda url, limit=200, include_subdomains=False:
         _web_map(url, limit, include_subdomains),
     "web_batch_scrape": lambda urls, formats=None: _web_batch_scrape(urls, formats),
@@ -1883,9 +1893,10 @@ HANDLERS: dict[str, Callable[..., str]] = {
         _web_extract(source, schema, prompt, verify),
     "generate_llmstxt": lambda url, max_urls=20: _generate_llmstxt(url, max_urls),
     "parse_document": lambda source: _parse_document(source),
-    "web_diff": lambda url, previous_markdown="": _web_diff(url, previous_markdown),
-    "web_monitor_add": lambda url, interval_minutes=60:
-        _web_monitor_add(url, interval_minutes),
+    "web_diff": lambda url, previous_markdown="", schema=None, previous_json=None:
+        _web_diff(url, previous_markdown, schema, previous_json),
+    "web_monitor_add": lambda url, interval_minutes=60, schema=None:
+        _web_monitor_add(url, interval_minutes, schema),
     "web_monitor_list": lambda: _web_monitor_list(),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
@@ -2562,6 +2573,44 @@ def _webctx():
     return webctx
 
 
+def _web_scrape(url: str, formats: list | None = None, schema: dict | None = None,
+                prompt: str = "", attributes: list | None = None,
+                actions: list | None = None, mobile: bool = False,
+                location: str = "") -> str:
+    """Advanced scrape: multi-format, structured extraction, in-page actions,
+    device/locale hints. (browse_page remains the quick markdown+links reader.)"""
+    fmts = tuple(formats) if formats else ("markdown", "links", "metadata")
+    r = _webctx().scrape(url, formats=fmts, schema=schema, prompt=prompt,
+                         attributes=attributes, actions=actions,
+                         mobile=mobile, location=location)
+    if r.get("error"):
+        return f"Error scraping {url}: {r['error']}"
+    out = [f"# {(r.get('metadata') or {}).get('title') or url}", f"<{url}>", ""]
+    if r.get("actions_run"):
+        out.append(f"_actions: {', '.join(r['actions_run'])}_")
+    if r.get("actions_rejected"):
+        out.append(f"_rejected (ungoverned): {', '.join(r['actions_rejected'])}_")
+    if r.get("markdown"):
+        out += ["", r["markdown"]]
+    if r.get("summary"):
+        out += ["", "## Summary", r["summary"]]
+    if r.get("json"):
+        out += ["", "## Structured", json.dumps(r["json"], indent=2)[:8000]]
+    if r.get("branding"):
+        out += ["", "## Branding", json.dumps(r["branding"], indent=2)]
+    if r.get("images"):
+        out += ["", "## Images", *[f"- {u}" for u in r["images"][:60]]]
+    if r.get("attributes"):
+        out += ["", "## Attributes", json.dumps(r["attributes"], indent=2)[:4000]]
+    if r.get("links"):
+        out += ["", "## Links", *[f"- {u}" for u in r["links"][:60]]]
+    if r.get("html"):
+        out += ["", "## HTML (cleaned, truncated)", r["html"][:4000]]
+    if r.get("rawHtml"):
+        out += ["", "## Raw HTML (truncated)", r["rawHtml"][:4000]]
+    return "\n".join(out)
+
+
 def _web_map(url: str, limit: int = 200, include_subdomains: bool = False) -> str:
     r = _webctx().map_urls(url, limit=limit, include_subdomains=include_subdomains)
     notes = f" ({'; '.join(r['notes'])})" if r.get("notes") else ""
@@ -2619,7 +2668,21 @@ def _parse_document(source: str) -> str:
     return f"# {source} ({r['kind']})\n\n{r.get('text', '')}"
 
 
-def _web_diff(url: str, previous_markdown: str = "") -> str:
+def _web_diff(url: str, previous_markdown: str = "",
+              schema: dict | None = None, previous_json: dict | None = None) -> str:
+    # json mode: structural diff of extracted data (schema given); else git-diff.
+    if schema:
+        r = _webctx().diff(url, schema=schema, previous_json=previous_json or {})
+        if r.get("error"):
+            return f"Error diffing {url}: {r['error']}"
+        if not previous_json:
+            return (f"Baseline captured for {url} (json mode). Pass this object "
+                    "back as previous_json next time.\n\n"
+                    + json.dumps(r["current_json"], indent=2)[:8000])
+        if not r["changed"]:
+            return f"No structured change at {url}."
+        return (f"CHANGED (json): {url}\n\n"
+                + json.dumps(r["changed_fields"], indent=2)[:8000])
     r = _webctx().diff(url, previous_markdown)
     if r.get("error"):
         return f"Error diffing {url}: {r['error']}"
@@ -2633,16 +2696,57 @@ def _web_diff(url: str, previous_markdown: str = "") -> str:
             f"```diff\n{r['diff']}\n```")
 
 
-def _web_monitor_add(url: str, interval_minutes: int = 60) -> str:
+def _web_monitor_add(url: str, interval_minutes: int = 60,
+                     schema: dict | None = None) -> str:
     from . import webmonitor
     return webmonitor.add(memory.current_user(), url,
-                          interval=int(interval_minutes) * 60)
+                          interval=int(interval_minutes) * 60, schema=schema)
 
 
 def _web_monitor_list() -> str:
     from . import webmonitor
     return webmonitor.list_text(memory.current_user())
 
+
+WEB_SCRAPE = {
+    "name": "web_scrape",
+    "description": (
+        "Advanced single-URL scrape with selectable formats and options — the "
+        "full-featured sibling of the quick browse_page reader. Formats: "
+        "markdown, html (cleaned), rawHtml, links, images, metadata, branding "
+        "(site name/theme/favicon/social image), summary, json (schema "
+        "extraction), attributes (selector+attribute pairs). `actions` drives "
+        "the page through the governed browser harness first "
+        "(click/scroll/type/wait — never ungoverned JS). `mobile`/`location` set "
+        "device and language hints. Every fetch is SSRF/egress-gated and content "
+        "is treated as untrusted."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "formats": {"type": "array", "items": {"type": "string"},
+                        "description": "markdown|html|rawHtml|links|images|"
+                                       "metadata|branding|summary|json|attributes"},
+            "schema": {"type": "object",
+                       "description": "JSON schema for the `json` format."},
+            "prompt": {"type": "string", "description": "Focus for summary/json."},
+            "attributes": {"type": "array", "items": {"type": "object"},
+                           "description": "For the `attributes` format: "
+                                          "[{selector, attribute}] (selector "
+                                          "supports tag/.class/#id)."},
+            "actions": {"type": "array", "items": {"type": "object"},
+                        "description": "Pre-scrape steps, e.g. "
+                                       "[{type:'click',selector:'#more'},"
+                                       "{type:'wait',value:'1'}]. Needs the "
+                                       "browser harness."},
+            "mobile": {"type": "boolean", "description": "Send a mobile User-Agent."},
+            "location": {"type": "string",
+                         "description": "Country/locale hint, e.g. 'de' or 'en-GB'."},
+        },
+        "required": ["url"],
+    },
+}
 
 WEB_MAP = {
     "name": "web_map",
@@ -2751,8 +2855,13 @@ WEB_DIFF = {
         "properties": {
             "url": {"type": "string"},
             "previous_markdown": {"type": "string",
-                                  "description": "Prior snapshot; empty to just "
-                                                 "capture a baseline."},
+                                  "description": "Prior snapshot (git-diff mode); "
+                                                 "empty to capture a baseline."},
+            "schema": {"type": "object",
+                       "description": "Switches to JSON mode: extract this schema "
+                                      "and structurally-diff the object."},
+            "previous_json": {"type": "object",
+                              "description": "Prior extracted object (JSON mode)."},
         },
         "required": ["url"],
     },
@@ -2763,7 +2872,8 @@ WEB_MONITOR_ADD = {
     "description": (
         "Watch a URL for changes on a schedule. The heartbeat re-checks it and "
         "notifies you when the page changes (needs OLYMPUS_WEB_MONITOR enabled). "
-        "Records the watch only — no fetch happens here."
+        "Records the watch only — no fetch happens here. With `schema`, the "
+        "monitor tracks structured JSON changes instead of raw text."
     ),
     "input_schema": {
         "type": "object",
@@ -2771,6 +2881,9 @@ WEB_MONITOR_ADD = {
             "url": {"type": "string"},
             "interval_minutes": {"type": "integer",
                                  "description": "Check cadence (>=15, default 60)."},
+            "schema": {"type": "object",
+                       "description": "Optional JSON schema for structured "
+                                      "(json-mode) change tracking."},
         },
         "required": ["url"],
     },
@@ -3725,6 +3838,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
     "crawl_site": CRAWL_SITE,
+    "web_scrape": WEB_SCRAPE,
     "web_map": WEB_MAP,
     "web_batch_scrape": WEB_BATCH_SCRAPE,
     "web_extract": WEB_EXTRACT,

@@ -107,6 +107,9 @@ class _MarkdownExtractor(HTMLParser):
         self.out: list[str] = []
         self.links: list[str] = []
         self._seen_links: set[str] = set()
+        self.images: list[str] = []           # <img> sources (absolute, deduped)
+        self._seen_images: set[str] = set()
+        self.meta: dict[str, str] = {}        # <meta name/property> + <link rel>
         self._drop_depth = 0
         self._list_stack: list[str] = []
         self._ol_counters: list[int] = []
@@ -137,6 +140,18 @@ class _MarkdownExtractor(HTMLParser):
         if self.out and self.out[-1] != "\n\n":
             self._emit("\n\n")
 
+    def _collect_image(self, ad: dict) -> None:
+        src = ad.get("src") or ad.get("data-src") or ""
+        if not src and ad.get("srcset"):
+            # srcset: take the first candidate URL
+            src = ad["srcset"].split(",")[0].strip().split(" ")[0]
+        if src and self.base_url:
+            src = urljoin(self.base_url, src)
+        if src.startswith(("http://", "https://")) \
+                and src not in self._seen_images and len(self.images) < _MAX_LINKS:
+            self._seen_images.add(src)
+            self.images.append(src)
+
     def _close_open_link(self) -> None:
         """Flush a still-open <a> (unclosed anchor) so its text isn't swallowed
         and following content lands back in the body."""
@@ -163,6 +178,26 @@ class _MarkdownExtractor(HTMLParser):
             self._close_open_link()
             self._in_title = False
         ad = dict(attrs)
+        # Void/metadata tags: collect for the images/branding formats, emit no md.
+        if tag == "img":
+            self._collect_image(ad)
+            return
+        if tag == "meta":
+            key = (ad.get("name") or ad.get("property") or "").strip().lower()
+            content = ad.get("content")
+            if key and content and key not in self.meta and len(self.meta) < 200:
+                if "image" in key and self.base_url:     # og:image etc. -> absolute
+                    content = urljoin(self.base_url, content)
+                self.meta[key] = content[:500]
+            return
+        if tag == "link":
+            rel = (ad.get("rel") or "").strip().lower()
+            href = ad.get("href")
+            if rel and href and ("link:" + rel) not in self.meta \
+                    and len(self.meta) < 200:
+                self.meta["link:" + rel] = (urljoin(self.base_url, href)
+                                            if self.base_url else href)[:500]
+            return
         if tag == "title":
             self._in_title = True
         elif tag in _HEADING:
@@ -237,7 +272,9 @@ class _MarkdownExtractor(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         if self._drop_depth:
             return
-        if tag == "br":
+        if tag in ("img", "meta", "link"):
+            self.handle_starttag(tag, attrs)     # self-closing metadata/void tags
+        elif tag == "br":
             self._emit("  \n")
         elif tag == "hr":
             self._newblock()
@@ -311,15 +348,15 @@ class _MarkdownExtractor(HTMLParser):
         self._emit(re.sub(r"[ \t\r\n]+", " ", data))
 
 
-def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
-    """Convert HTML to clean markdown. Returns (markdown, absolute_links, title).
-    Pure, deterministic, dependency-free. Robust against hostile HTML: the input
-    is self-capped, output is bounded during accumulation, and a truncation of
-    an over-large or malformed page is signalled inline."""
+def parse_page(html: str, base_url: str = "") -> dict[str, Any]:
+    """Parse HTML once into everything the scrape formats need: markdown, links,
+    title, images, and head metadata. Pure, deterministic, dependency-free, and
+    robust against hostile HTML (self-capped input, bounded output, inline
+    truncation signal)."""
     parser = _MarkdownExtractor(base_url)
     try:
         # Self-cap the input even if a caller forgot to — the only backstop
-        # against amplification is the byte bound, and to_markdown is public.
+        # against amplification is the byte bound, and this is public.
         parser.feed((html or "")[:_PAGE_BYTE_CAP])
         parser.close()
     except Exception:
@@ -335,7 +372,35 @@ def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
     md = md.strip()
     if parser.truncated and md:
         md += "\n\n[content truncated]"
-    return md, parser.links, parser._title.strip()[:_MAX_TITLE]
+    return {"markdown": md, "links": parser.links,
+            "title": parser._title.strip()[:_MAX_TITLE],
+            "images": parser.images, "meta": parser.meta}
+
+
+def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
+    """Convert HTML to clean markdown. Returns (markdown, absolute_links, title).
+    Thin back-compat wrapper over `parse_page`."""
+    p = parse_page(html, base_url)
+    return p["markdown"], p["links"], p["title"]
+
+
+def branding_of(meta: dict[str, str], title: str) -> dict[str, str]:
+    """Derive brand signals from head metadata: site name, theme color, favicon,
+    social preview image, description. Firecrawl's `branding` format, pure-Python."""
+    def pick(*keys: str) -> str:
+        for k in keys:
+            if meta.get(k):
+                return meta[k]
+        return ""
+    out = {
+        "site_name": pick("og:site_name", "application-name", "twitter:site") or title,
+        "title": pick("og:title", "twitter:title") or title,
+        "description": pick("description", "og:description", "twitter:description"),
+        "theme_color": pick("theme-color", "msapplication-tilecolor"),
+        "favicon": pick("link:icon", "link:shortcut icon", "link:apple-touch-icon"),
+        "image": pick("og:image", "twitter:image", "twitter:image:src"),
+    }
+    return {k: v for k, v in out.items() if v}
 
 
 # ===========================================================================
@@ -356,14 +421,42 @@ def _port_allowed(url: str) -> bool:
     return port in _ALLOWED_PORTS
 
 
-def _fetch_html(url: str) -> str:
+# A representative mobile UA (iPhone Safari) for `mobile=True` — a header hint,
+# not full device emulation (that needs the governed browser harness).
+_MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+              "Mobile/15E148 Safari/604.1")
+
+# Rough country -> Accept-Language for `location`. Server-side geo/lang hint; a
+# rotating residential/geo proxy MESH is hosted infrastructure, not code — set
+# HTTPS_PROXY / PROXY_SERVER to route through your own egress if you need it.
+_LOCALE = {"us": "en-US", "gb": "en-GB", "uk": "en-GB", "de": "de-DE",
+           "fr": "fr-FR", "es": "es-ES", "it": "it-IT", "jp": "ja-JP",
+           "cn": "zh-CN", "br": "pt-BR", "in": "en-IN", "ca": "en-CA",
+           "au": "en-AU", "nl": "nl-NL", "ru": "ru-RU", "kr": "ko-KR"}
+
+
+def _device_headers(mobile: bool, location: str) -> dict:
+    hdrs: dict = {}
+    if mobile:
+        hdrs["User-Agent"] = _MOBILE_UA
+    loc = (location or "").strip().lower()
+    if loc:
+        lang = _LOCALE.get(loc, loc if "-" in loc else f"{loc}-{loc.upper()}")
+        hdrs["Accept-Language"] = f"{lang},{lang.split('-')[0]};q=0.9"
+    return hdrs
+
+
+def _fetch_html(url: str, mobile: bool = False, location: str = "") -> str:
     """Fetch a page through the SSRF/egress-gated, rebinding-pinned path with a
-    port allowlist and a tight socket timeout. Raises ValueError (blocked) or
-    urllib errors (network); callers convert to a clean error string. Byte-capped."""
+    port allowlist and a tight socket timeout. `mobile`/`location` add device and
+    language request hints. Raises ValueError (blocked) or urllib errors
+    (network); callers convert to a clean error string. Byte-capped."""
     from . import tools
     if not _port_allowed(url):
         raise ValueError(f"refusing non-web port for {urlparse(url).netloc}")
-    html = tools._http_get(url, timeout=_FETCH_TIMEOUT)
+    headers = _device_headers(mobile, location) or None
+    html = tools._http_get(url, timeout=_FETCH_TIMEOUT, headers=headers)
     return html[:_PAGE_BYTE_CAP]
 
 
@@ -400,36 +493,214 @@ _DEFAULT_FORMATS = ("markdown", "links", "metadata")
 
 
 def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
-           schema: dict | None = None, prompt: str = "") -> dict[str, Any]:
-    """Scrape one URL. `formats` any of: markdown, html, links, metadata,
-    summary, json. `schema`+`json` runs verified extraction. Returns a dict; on a
-    blocked/failed fetch returns {'error': ...}. Content that reaches a model
-    (summary/json) is wrapped untrusted first."""
+           schema: dict | None = None, prompt: str = "",
+           attributes: list | None = None, actions: list | None = None,
+           mobile: bool = False, location: str = "") -> dict[str, Any]:
+    """Scrape one URL. `formats` any of: markdown, html (cleaned), rawHtml,
+    links, images, metadata, branding, summary, json, attributes. `schema`+`json`
+    runs verified extraction; `attributes` reads selector/attribute pairs. With
+    `actions`, the page is driven through the governed browser harness first
+    (click/scroll/type/wait — never ungoverned JS). `mobile`/`location` set the
+    request's device/language hints. Returns a dict; a blocked/failed fetch
+    returns {'error': ...}. Content that reaches a model is wrapped untrusted."""
+    # Interactive path: pre-actions require a real (governed) browser.
+    if actions:
+        return _scrape_with_actions(url, actions, formats, schema, prompt,
+                                    attributes)
     try:
-        html = _fetch_html(url)
+        html = _fetch_html(url, mobile=mobile, location=location)
     except ValueError as err:                       # SSRF/egress/secret-exfil
         return {"url": url, "error": f"blocked: {err}"}
     except Exception as err:
         return {"url": url, "error": f"fetch failed: {str(err)[:200]}"}
+    return _assemble(url, html, formats, schema, prompt, attributes)
 
-    md, links, title = to_markdown(html, base_url=url)
+
+def _assemble(url: str, html: str, formats, schema, prompt,
+              attributes) -> dict[str, Any]:
+    """Build the requested formats from already-fetched HTML (shared by the
+    plain and interactive scrape paths)."""
+    page = parse_page(html, base_url=url)
+    md = page["markdown"]
     result: dict[str, Any] = {"url": url}
     fmts = set(formats or _DEFAULT_FORMATS)
     if "markdown" in fmts:
         result["markdown"] = md
     if "html" in fmts:
-        result["html"] = html
+        result["html"] = _clean_html(html)          # cleaned (script/style out)
+    if "rawHtml" in fmts:
+        result["rawHtml"] = html                     # exactly as fetched
     if "links" in fmts:
-        result["links"] = links
+        result["links"] = page["links"]
+    if "images" in fmts:
+        result["images"] = page["images"]
     if "metadata" in fmts:
-        result["metadata"] = {"title": title, "url": url,
-                              "source_bytes": len(html)}
+        result["metadata"] = {"title": page["title"], "url": url,
+                              "source_bytes": len(html), **page["meta"]}
+    if "branding" in fmts:
+        result["branding"] = branding_of(page["meta"], page["title"])
+    if "attributes" in fmts:
+        result["attributes"] = _extract_attributes(html, attributes or [], url)
     if "summary" in fmts:
         result["summary"] = _summarize(md, url)
     if "json" in fmts or schema:
         result["json"] = extract(url, schema or {"type": "object"},
                                  prompt=prompt, _markdown=md)
     return result
+
+
+# Interactive-scrape verbs allowed BEFORE reading a page. Deliberately excludes
+# `executeJavascript`: Olympus routes browser actuation only through the
+# governed harness (SSRF-gated navigation, ledgered CDP, capability separation)
+# and never exposes ungoverned JS eval — the exact anti-pattern the Firecrawl
+# analysis flagged. Unknown/rejected verbs are reported, not silently run.
+_ACTION_VERBS = {"click", "scroll", "type", "write", "press", "hover",
+                 "select", "wait", "wait_for", "back"}
+
+
+def _scrape_with_actions(url: str, actions: list, formats, schema, prompt,
+                         attributes) -> dict[str, Any]:
+    """Drive the page through the governed browser harness (click/scroll/type/
+    wait) and then scrape the resulting HTML. The session is the harness's own
+    (SSRF-gated navigation, sub-resource gate, replayable ledger); only the safe
+    verbs above run. Degrades to a clear message when no browser is available."""
+    try:
+        from . import browser
+    except Exception:
+        return {"url": url, "error": "actions require the browser harness"}
+    try:
+        session = browser.session()
+    except Exception as err:
+        return {"url": url,
+                "error": f"browser unavailable ({str(err)[:120]}); install "
+                         "olympus-council[browser] and a Chrome, or drop actions"}
+    steps_run: list[str] = []
+    rejected: list[str] = []
+    try:
+        opened = session.open(url)                   # SSRF-gated navigation
+        if isinstance(opened, str) and opened.startswith("Error:"):
+            return {"url": url, "error": opened}
+        for act in (actions or [])[:25]:             # bounded action list
+            if not isinstance(act, dict):
+                continue
+            verb = str(act.get("type") or act.get("action") or "").strip().lower()
+            if verb == "write":
+                verb = "type"
+            if verb not in _ACTION_VERBS:
+                rejected.append(verb or "(empty)")
+                continue
+            res = session.act(
+                verb,
+                selector=str(act.get("selector", "")),
+                text=str(act.get("text", "")),
+                key=str(act.get("key", "")),
+                value=str(act.get("value", "")),
+                x=int(act.get("x", 0) or 0),
+                y=int(act.get("y", 0) or 0))
+            steps_run.append(f"{verb}: {str(res)[:60]}")
+        html = session.html() or ""
+        if not html:                                 # transport gave no HTML
+            import html as _htmlmod
+            html = f"<body>{_htmlmod.escape(session.read())}</body>"
+    except Exception as err:
+        return {"url": url, "error": f"interactive scrape failed: {str(err)[:150]}"}
+    result = _assemble(url, html, formats, schema, prompt, attributes)
+    result["actions_run"] = steps_run
+    if rejected:
+        result["actions_rejected"] = rejected        # e.g. executeJavascript
+    return result
+
+
+_SCRIPT_STYLE_RE = re.compile(
+    r"(?is)<(script|style|noscript|template|svg)\b.*?</\1>")
+_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+
+
+def _clean_html(html: str) -> str:
+    """A lightweight 'cleaned HTML' — the raw document with script/style/svg
+    blocks and comments removed. Firecrawl's `html` (vs `rawHtml`) format, done
+    with bounded regexes over the already byte-capped input."""
+    html = _SCRIPT_STYLE_RE.sub("", html or "")
+    html = _COMMENT_RE.sub("", html)
+    return html[:_PAGE_BYTE_CAP]
+
+
+_MAX_ATTR_VALUES = 500            # per selector — bound a link-farm page
+
+
+class _AttributeExtractor(HTMLParser):
+    """Collect an attribute's value from every element matching a simple
+    selector. Supports `tag`, `.class`, `#id`, and `tag.class` / `tag#id` — a
+    deterministic pure-stdlib subset of CSS, enough for the `attributes` format
+    without a full selector engine."""
+
+    def __init__(self, selectors: list[tuple], base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        # each: (tag_or_'', class_or_'', id_or_'', attribute, out_list)
+        self.rules = selectors
+        self.results: dict[int, list[str]] = {i: [] for i in range(len(selectors))}
+
+    def handle_starttag(self, tag, attrs):
+        ad = dict(attrs)
+        classes = (ad.get("class") or "").split()
+        el_id = ad.get("id") or ""
+        for i, (want_tag, want_cls, want_id, attr) in enumerate(self.rules):
+            if want_tag and want_tag != tag:
+                continue
+            if want_cls and want_cls not in classes:
+                continue
+            if want_id and want_id != el_id:
+                continue
+            val = ad.get(attr)
+            if val is None:
+                continue
+            if attr in ("href", "src") and self.base_url:
+                val = urljoin(self.base_url, val)
+            if len(self.results[i]) < _MAX_ATTR_VALUES:
+                self.results[i].append(val)
+
+
+def _parse_selector(sel: str) -> tuple:
+    """`a.button` -> ('a','button',''); `#main` -> ('','','main')."""
+    sel = (sel or "").strip()
+    tag, cls, el_id = "", "", ""
+    m = re.match(r"([a-zA-Z0-9]*)", sel)
+    if m:
+        tag = m.group(1)
+        sel = sel[m.end():]
+    for tok in re.findall(r"([.#][A-Za-z0-9_-]+)", sel):
+        if tok[0] == ".":
+            cls = tok[1:]
+        else:
+            el_id = tok[1:]
+    return tag, cls, el_id
+
+
+def _extract_attributes(html: str, selectors: list, base_url: str = "") -> list:
+    """Return [{selector, attribute, values:[...]}] for each requested
+    selector/attribute pair. `selectors` is a list of {'selector','attribute'}."""
+    rules, meta = [], []
+    for spec in (selectors or [])[:50]:
+        if not isinstance(spec, dict):
+            continue
+        sel = str(spec.get("selector", "")).strip()
+        attr = str(spec.get("attribute", "")).strip()
+        if not sel or not attr:
+            continue
+        t, c, i = _parse_selector(sel)
+        rules.append((t, c, i, attr))
+        meta.append((sel, attr))
+    if not rules:
+        return []
+    p = _AttributeExtractor(rules, base_url)
+    try:
+        p.feed((html or "")[:_PAGE_BYTE_CAP])
+        p.close()
+    except Exception:
+        pass
+    return [{"selector": meta[i][0], "attribute": meta[i][1],
+             "values": p.results[i]} for i in range(len(rules))]
 
 
 # ===========================================================================
@@ -809,10 +1080,20 @@ def content_hash(markdown: str) -> str:
     return hashlib.sha256(markdown.encode("utf-8", "replace")).hexdigest()
 
 
-def diff(url: str, previous_markdown: str = "") -> dict[str, Any]:
-    """Fetch the current page as markdown and diff it against a previous
-    snapshot. Returns the unified diff, change flag, and current hash. The fetch
-    is gated; content is only compared, never executed."""
+def diff(url: str, previous_markdown: str = "",
+         schema: dict | None = None, previous_json: dict | None = None,
+         **extract_kw) -> dict[str, Any]:
+    """Detect change on a page. Two modes, mirroring Firecrawl:
+
+    * **git-diff** (default): fetch the page as markdown and unified-diff it
+      against `previous_markdown`.
+    * **json** (`schema` given): extract structured data against the schema and
+      structurally diff it against `previous_json`, reporting which fields
+      changed — a semantic diff that ignores cosmetic markup churn.
+
+    The fetch is gated; content is only compared, never executed."""
+    if schema:
+        return _diff_json(url, schema, previous_json or {}, extract_kw)
     try:
         html = _fetch_html(url)
     except Exception as err:
@@ -830,8 +1111,42 @@ def diff(url: str, previous_markdown: str = "") -> dict[str, Any]:
             prev.splitlines()[:_MAX_DIFF_LINES],
             current.splitlines()[:_MAX_DIFF_LINES],
             fromfile="previous", tofile="current", lineterm=""))[:20_000]
-    return {"url": url, "changed": changed, "current_hash": cur_hash,
-            "diff": unified, "current_markdown": current}
+    return {"url": url, "mode": "git-diff", "changed": changed,
+            "current_hash": cur_hash, "diff": unified,
+            "current_markdown": current}
+
+
+def _diff_json(url: str, schema: dict, previous_json: dict,
+               extract_kw: dict) -> dict[str, Any]:
+    ext = extract(url, schema, **extract_kw)          # gated fetch + wrapped
+    if ext.get("error"):
+        return {"url": url, "mode": "json", "error": ext["error"]}
+    current = ext.get("data", {}) or {}
+    changed_fields = _object_diff(previous_json or {}, current)
+    return {"url": url, "mode": "json",
+            "changed": bool(changed_fields) if previous_json else True,
+            "changed_fields": changed_fields, "current_json": current,
+            "current_hash": content_hash(json.dumps(current, sort_keys=True,
+                                                    default=str))}
+
+
+def _object_diff(old, new, path: str = "") -> list[dict]:
+    """Deterministic structural diff of two JSON-able values. Returns a sorted
+    list of {field, change, from, to} for added / removed / changed leaves."""
+    out: list[dict] = []
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in sorted(set(old) | set(new), key=str):
+            sub = f"{path}.{key}" if path else str(key)
+            if key not in old:
+                out.append({"field": sub, "change": "added", "to": new[key]})
+            elif key not in new:
+                out.append({"field": sub, "change": "removed", "from": old[key]})
+            else:
+                out.extend(_object_diff(old[key], new[key], sub))
+    elif old != new:
+        out.append({"field": path or "(root)", "change": "changed",
+                    "from": old, "to": new})
+    return out[:200]
 
 
 # ===========================================================================

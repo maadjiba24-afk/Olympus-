@@ -310,7 +310,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_scrape = sub.add_parser(
         "scrape", help="scrape a URL to clean markdown (+links)")
     p_scrape.add_argument("url")
-    p_scrape.add_argument("--out", default=None, help="write markdown to a file")
+    p_scrape.add_argument("--format", dest="formats", action="append",
+                          help="markdown|html|rawHtml|links|images|metadata|"
+                               "branding|summary|json (repeatable)")
+    p_scrape.add_argument("--mobile", action="store_true",
+                          help="send a mobile User-Agent")
+    p_scrape.add_argument("--location", default="",
+                          help="country/locale hint, e.g. de or en-GB")
+    p_scrape.add_argument("--out", default=None, help="write output to a file")
 
     p_crawl = sub.add_parser(
         "crawl", help="recursively crawl a site into clean markdown")
@@ -344,6 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon_add.add_argument("url")
     p_mon_add.add_argument("--every", type=int, default=60,
                            help="check cadence in minutes (>=15)")
+    p_mon_add.add_argument("--schema", default=None,
+                           help="JSON schema string → track structured changes")
     mon_sub.add_parser("list", help="list watched URLs")
     p_mon_rm = mon_sub.add_parser("remove", help="stop watching")
     p_mon_rm.add_argument("id")
@@ -1477,8 +1486,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "scrape":
         if not firstrun.ensure_ready():
             return 1
-        from . import media
-        out = media.browse_page(args.url)
+        if args.formats or args.mobile or args.location:
+            from . import tools
+            out = tools._web_scrape(args.url, args.formats, mobile=args.mobile,
+                                    location=args.location)
+        else:
+            from . import media
+            out = media.browse_page(args.url)          # quick default
         print(out)
         if args.out:
             from pathlib import Path
@@ -1523,7 +1537,16 @@ def main(argv: list[str] | None = None) -> int:
         from . import webmonitor
         user = memory.current_user()
         if args.monitor_cmd == "add":
-            print(webmonitor.add(user, args.url, interval=args.every * 60))
+            schema = None
+            if getattr(args, "schema", None):
+                import json as _json
+                try:
+                    schema = _json.loads(args.schema)
+                except _json.JSONDecodeError:
+                    print("--schema must be valid JSON.", file=sys.stderr)
+                    return 1
+            print(webmonitor.add(user, args.url, interval=args.every * 60,
+                                 schema=schema))
         elif args.monitor_cmd == "remove":
             print(webmonitor.remove(user, args.id))
         elif args.monitor_cmd == "run":

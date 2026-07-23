@@ -66,7 +66,7 @@ def test_to_markdown_builds_table_with_header_separator():
 # --- scrape: gated, error-safe ---------------------------------------------
 
 def test_scrape_blocked_url_returns_error_never_raises(monkeypatch):
-    def blocked(url, timeout=30):
+    def blocked(url, timeout=30, headers=None):
         raise ValueError("refusing internal host 169.254.169.254")
     monkeypatch.setattr(tools, "_http_get", blocked)
     r = webctx.scrape("http://169.254.169.254/latest/meta-data/")
@@ -75,7 +75,7 @@ def test_scrape_blocked_url_returns_error_never_raises(monkeypatch):
 
 def test_scrape_returns_clean_markdown_and_links(monkeypatch):
     monkeypatch.setattr(tools, "_http_get",
-                        lambda url, timeout=30: "<h1>Hi</h1><a href='https://x.com'>x</a>")
+                        lambda url, timeout=30, headers=None: "<h1>Hi</h1><a href='https://x.com'>x</a>")
     r = webctx.scrape("https://site.com", formats=("markdown", "links"))
     assert "# Hi" in r["markdown"]
     assert "https://x.com" in r["links"]
@@ -84,7 +84,7 @@ def test_scrape_returns_clean_markdown_and_links(monkeypatch):
 # --- map: sitemap + robots + dedup + sort + same-domain --------------------
 
 def _fake_web(pages):
-    def _get(url, timeout=30):
+    def _get(url, timeout=30, headers=None):
         if url not in pages:
             raise ValueError(f"404 {url}")
         return pages[url]
@@ -111,7 +111,7 @@ def test_map_urls_reads_sitemap_and_is_deterministic(monkeypatch):
 def test_crawl_gates_every_hop_and_bounds(monkeypatch):
     seen = []
 
-    def _get(url, timeout=30):
+    def _get(url, timeout=30, headers=None):
         seen.append(url)
         if url == "https://s.test/":
             return ('<a href="https://s.test/a">a</a>'
@@ -159,7 +159,7 @@ class _FakeBackend:
 
 def test_extract_wraps_content_and_verifies(monkeypatch):
     monkeypatch.setattr(tools, "_http_get",
-                        lambda url, timeout=30: "<p>Company: Acme</p>")
+                        lambda url, timeout=30, headers=None: "<p>Company: Acme</p>")
     be = _FakeBackend()
     r = webctx.extract("https://co.test/", {"type": "object",
                        "properties": {"name": {"type": "string"}}},
@@ -174,7 +174,7 @@ def test_extract_wraps_content_and_verifies(monkeypatch):
 
 
 def test_extract_verify_can_flag_unsupported(monkeypatch):
-    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>nothing useful</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30, headers=None: "<p>nothing useful</p>")
 
     class Be(_FakeBackend):
         def complete_json(self, settings, system, messages, schema, effort="high"):
@@ -191,12 +191,12 @@ def test_extract_verify_can_flag_unsupported(monkeypatch):
 # --- diff -------------------------------------------------------------------
 
 def test_diff_detects_change_and_hashes(monkeypatch):
-    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>version two</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30, headers=None: "<p>version two</p>")
     base = webctx.diff("https://s.test/")              # no previous → baseline
     assert base["changed"] is True and base["current_hash"]
     same = webctx.diff("https://s.test/", base["current_markdown"])
     assert same["changed"] is False
-    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>version three</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30, headers=None: "<p>version three</p>")
     moved = webctx.diff("https://s.test/", base["current_markdown"])
     assert moved["changed"] is True and "version three" in moved["diff"]
 
@@ -309,7 +309,7 @@ def test_scrape_refuses_nonweb_port(monkeypatch):
     # Even a public host on :22 is refused before any socket is opened.
     called = []
     monkeypatch.setattr(tools, "_http_get",
-                        lambda url, timeout=30: called.append(url) or "x")
+                        lambda url, timeout=30, headers=None: called.append(url) or "x")
     r = webctx.scrape("http://public-host:6379/")
     assert "error" in r and not called                 # never reached the fetch
 
@@ -332,7 +332,7 @@ def test_blocked_hostname_allows_public():
 # --- hardening: extract tolerates non-dict model output --------------------
 
 def test_extract_non_dict_result_does_not_raise(monkeypatch):
-    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30: "<p>data</p>")
+    monkeypatch.setattr(tools, "_http_get", lambda url, timeout=30, headers=None: "<p>data</p>")
 
     class Be:
         def complete_json(self, *a, **k):
@@ -340,3 +340,112 @@ def test_extract_non_dict_result_does_not_raise(monkeypatch):
     r = webctx.extract("https://co.test/", {"type": "object"},
                        pool=_FakePool(), backend=Be())
     assert r["found"] is False and "error" in r        # graceful, no AttributeError
+
+
+# --- new formats: images, branding, rawHtml, html(cleaned), attributes ------
+
+_RICH = ("<html><head><title>Acme</title>"
+         "<meta name='theme-color' content='#f00'>"
+         "<meta property='og:site_name' content='Acme Inc'>"
+         "<meta property='og:image' content='/logo.png'>"
+         "<link rel='icon' href='/fav.ico'>"
+         "<style>x{}</style></head><body><h1>Hi</h1>"
+         "<img src='/a.png'><img src='https://cdn/b.jpg'>"
+         "<a class='btn' href='/go'>Go</a><a class='btn' href='/stop'>Stop</a>"
+         "<script>evil()</script></body></html>")
+
+
+def test_scrape_images_format(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: _RICH)
+    r = webctx.scrape("https://ex.com/", formats=("images",))
+    assert r["images"] == ["https://ex.com/a.png", "https://cdn/b.jpg"]
+
+
+def test_scrape_branding_format(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: _RICH)
+    b = webctx.scrape("https://ex.com/", formats=("branding",))["branding"]
+    assert b["site_name"] == "Acme Inc" and b["theme_color"] == "#f00"
+    assert b["favicon"] == "https://ex.com/fav.ico"
+    assert b["image"] == "https://ex.com/logo.png"          # og:image resolved absolute
+
+
+def test_scrape_raw_vs_cleaned_html(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: _RICH)
+    r = webctx.scrape("https://ex.com/", formats=("html", "rawHtml"))
+    assert "<script" in r["rawHtml"] and "<style" in r["rawHtml"]   # raw keeps them
+    assert "<script" not in r["html"] and "<style" not in r["html"]  # cleaned strips
+
+
+def test_scrape_attributes_format(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: _RICH)
+    r = webctx.scrape("https://ex.com/", formats=("attributes",),
+                      attributes=[{"selector": "a.btn", "attribute": "href"}])
+    vals = r["attributes"][0]["values"]
+    assert vals == ["https://ex.com/go", "https://ex.com/stop"]
+
+
+# --- device / locale hints --------------------------------------------------
+
+def test_mobile_and_location_headers_are_sent(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda u, timeout=30, headers=None: seen.update(headers or {}) or "<h1>x</h1>")
+    webctx.scrape("https://ex.com/", formats=("markdown",), mobile=True, location="de")
+    assert "iPhone" in seen.get("User-Agent", "")
+    assert seen.get("Accept-Language", "").startswith("de-DE")
+
+
+# --- json change-tracking mode ----------------------------------------------
+
+def test_diff_json_mode_detects_field_change(monkeypatch):
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: "<p>x</p>")
+
+    class Be:
+        def complete_json(self, st, sy, m, sc, effort="high"):
+            if "supported" in sc.get("properties", {}):
+                return {"supported": True, "flags": []}
+            return {"data": {"price": 10, "stock": "in"}, "found": True}
+    monkeypatch.setattr("olympus.backend.complete_json", Be().complete_json)
+    monkeypatch.setattr("olympus.config.ModelPool.from_env",
+                        staticmethod(lambda: _FakePool()))
+    d = webctx.diff("https://shop/", schema={"type": "object"},
+                    previous_json={"price": 9, "stock": "in"})
+    assert d["mode"] == "json" and d["changed"] is True
+    changed = {f["field"]: (f.get("from"), f.get("to")) for f in d["changed_fields"]}
+    assert changed == {"price": (9, 10)}                 # only price changed
+
+
+def test_object_diff_add_remove_change():
+    out = webctx._object_diff({"a": 1, "b": 2}, {"a": 1, "b": 3, "c": 4})
+    kinds = {f["field"]: f["change"] for f in out}
+    assert kinds == {"b": "changed", "c": "added"}
+
+
+# --- in-scrape actions via the governed browser harness (FakeTransport) ------
+
+def test_scrape_with_actions_drives_governed_harness(monkeypatch):
+    from olympus import browser
+    # Allow the fake host through the governed nav gate (SSRF is tested
+    # separately); we're asserting the actions plumbing + JS rejection here.
+    monkeypatch.setattr("olympus.security.url_block_reason",
+                        lambda u, resolve=True: None)
+    pages = {"https://app/": {"title": "App", "text": "loaded after click"}}
+    browser.set_transport_factory(lambda: browser.FakeTransport(pages))
+    try:
+        r = webctx.scrape("https://app/", formats=("markdown",),
+                          actions=[{"type": "click", "selector": "#more"},
+                                   {"type": "executeJavascript", "script": "alert(1)"}])
+        assert "loaded after click" in r.get("markdown", "")
+        assert r.get("actions_run")                      # click ran through the harness
+        assert "executejavascript" in [a.lower() for a in r.get("actions_rejected", [])]
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_scrape_actions_degrade_without_browser(monkeypatch):
+    from olympus import webctx as _w
+    def boom():
+        raise RuntimeError("no chrome")
+    monkeypatch.setattr("olympus.browser.session", boom)
+    r = _w.scrape("https://app/", actions=[{"type": "click", "selector": "#x"}])
+    assert "error" in r and "browser" in r["error"].lower()

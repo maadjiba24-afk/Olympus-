@@ -52,6 +52,8 @@ class Monitor:
     active: bool = True
     changes: int = 0
     fails: int = 0                # consecutive check failures (for back-off)
+    schema: str = ""             # JSON-encoded schema → json (structured) mode
+    last_json: str = ""          # last extracted object (json mode), JSON-encoded
 
 
 def _path():
@@ -114,11 +116,14 @@ def enabled() -> bool:
 
 # --- CRUD ------------------------------------------------------------------
 
-def add(user: str, url: str, interval: int = 3600) -> str:
+def add(user: str, url: str, interval: int = 3600,
+        schema: dict | None = None) -> str:
     """Register a URL to watch. Does NOT fetch here (the heartbeat establishes
     the baseline on its first due check) — so this is an action confirmation,
-    not an ingestion. An obviously-internal URL is refused up front."""
+    not an ingestion. An obviously-internal URL is refused up front. With
+    `schema`, the monitor tracks structured (JSON-mode) change instead of text."""
     import ipaddress
+    import json as _json
     from urllib.parse import urlparse
     from . import security
     url = (url or "").strip()
@@ -150,8 +155,14 @@ def add(user: str, url: str, interval: int = 3600) -> str:
         for m in monitors:
             if m.user == user and m.url == url and m.active:
                 return f"Already watching {url} (monitor {m.id})."
+        schema_str = ""
+        if isinstance(schema, dict) and schema:
+            try:
+                schema_str = _json.dumps(schema)[:20_000]
+            except (TypeError, ValueError):
+                schema_str = ""
         mon = Monitor(id=uuid.uuid4().hex[:8], user=user, url=url,
-                      interval=interval, created=time.time())
+                      interval=interval, created=time.time(), schema=schema_str)
         monitors.append(mon)
         _save(monitors)
     on = "" if enabled() else (" NOTE: scheduled checks are OFF until "
@@ -202,12 +213,16 @@ def run_due(now: float | None = None,
         from . import gateway
         notify = gateway.notify_all
 
+    import json as _json
+
     # Phase 1 — under the lock, pick the due monitors and snapshot just the
     # fields the check needs, then RELEASE the lock. Network I/O must never run
     # while the store mutex is held (one slow/hostile site would otherwise
     # freeze add/remove and every other run_due for minutes).
     with _mutex():
-        due = [(m.id, m.url, m.last_hash, m.last_markdown)
+        due = [{"id": m.id, "url": m.url, "last_hash": m.last_hash,
+                "last_markdown": m.last_markdown, "schema": m.schema,
+                "last_json": m.last_json}
                for m in _load()
                if m.active and (now - m.last_checked) >= _effective_interval(m)]
     if not due:
@@ -217,10 +232,17 @@ def run_due(now: float | None = None,
     # updates to merge back afterward.
     out: list[str] = []
     updates: dict[str, dict] = {}
-    for mid, url, last_hash, last_markdown in due:
+    for mon in due:
+        mid, url = mon["id"], mon["url"]
         upd: dict = {"last_checked": now, "fail": False}
+        json_mode = bool(mon["schema"])
         try:
-            d = webctx.diff(url, last_markdown)
+            if json_mode:
+                schema = _json.loads(mon["schema"])
+                prev = _json.loads(mon["last_json"] or "null")
+                d = webctx.diff(url, schema=schema, previous_json=prev)
+            else:
+                d = webctx.diff(url, mon["last_markdown"])
         except Exception as err:
             out.append(f"monitor {mid} {url}: check failed ({str(err)[:80]})")
             upd["fail"] = True
@@ -232,17 +254,23 @@ def run_due(now: float | None = None,
             updates[mid] = upd
             continue
         new_hash = d.get("current_hash", "")
-        if new_hash != last_hash:
+        if new_hash != mon["last_hash"]:
             upd["last_hash"] = new_hash
-            upd["last_markdown"] = (d.get("current_markdown", "") or "")[:_SNAPSHOT_CAP]
-            if last_hash:                          # had a baseline → real change
+            had_baseline = bool(mon["last_hash"])
+            if json_mode:
+                upd["last_json"] = _json.dumps(d.get("current_json", {}))[:_SNAPSHOT_CAP]
+                detail = _json.dumps(d.get("changed_fields", []))[:1500]
+            else:
+                upd["last_markdown"] = (d.get("current_markdown", "") or "")[:_SNAPSHOT_CAP]
+                detail = (d.get("diff") or "")[:1500]
+            if had_baseline:
                 upd["changed"] = True
                 # Neutralize any ``` in attacker-controlled page text so it can't
                 # break out of the code fence in the operator's chat client.
-                snippet = (d.get("diff") or "")[:1500].replace("```", "`​``")
+                snippet = detail.replace("```", "`​``")
                 out.append(f"monitor {mid} {url}: CHANGED")
                 try:
-                    notify(f"🔔 Page changed: {url}\n\n```diff\n{snippet}\n```")
+                    notify(f"🔔 Page changed: {url}\n\n```\n{snippet}\n```")
                 except Exception as err:
                     # Surface the dropped alert rather than swallowing it; the
                     # hash still advances so we don't re-notify in a storm.
@@ -273,6 +301,8 @@ def run_due(now: float | None = None,
                 m.last_hash = upd["last_hash"]
             if "last_markdown" in upd:
                 m.last_markdown = upd["last_markdown"]
+            if "last_json" in upd:
+                m.last_json = upd["last_json"]
             if upd.get("changed"):
                 m.changes += 1
         _save(monitors)

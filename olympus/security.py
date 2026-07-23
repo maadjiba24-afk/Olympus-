@@ -112,8 +112,9 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # only Olympus's own store and are TRUSTED below.
                              # scrape/crawl stay served by browse_page/crawl_site,
                              # already ingestion-classified above.)
-                             "web_map", "web_batch_scrape", "web_extract",
-                             "generate_llmstxt", "parse_document", "web_diff"})
+                             "web_scrape", "web_map", "web_batch_scrape",
+                             "web_extract", "generate_llmstxt",
+                             "parse_document", "web_diff"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
