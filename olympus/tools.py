@@ -693,13 +693,16 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
 
 
 def _http_post_json(url: str, payload: dict, timeout: float = 20,
-                    max_bytes: int = 4_000_000) -> dict[str, Any]:
+                    max_bytes: int = 4_000_000, headers: dict | None = None
+                    ) -> dict[str, Any]:
     """POST a JSON body and parse a JSON response, through the SAME gated seam as
     `_http_get` (SSRF/egress/rebinding-pin + assessment egress confinement) — the
     canonical gated POST. Additionally scans the OUTBOUND BODY for a stored
     secret (a POST can exfiltrate in the body, not just the URL) and refuses it.
-    Returns the parsed object; raises ValueError if blocked; returns
-    {'_error': ...} on a network/parse failure so callers degrade gracefully."""
+    `headers` overlays extra request headers (e.g. an Authorization bearer for the
+    Daytona workspace API) on the JSON defaults. Returns the parsed object; raises
+    ValueError if blocked; returns {'_error': ...} on a network/parse failure so
+    callers degrade gracefully."""
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     for probe in (url, body.decode("utf-8", "replace")):
         leak = security.secret_exfil_reason(probe)   # URL and body, before I/O
@@ -712,9 +715,11 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20,
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    req = _urlreq.Request(url, data=body, method="POST", headers={
-        "User-Agent": _UA, "Content-Type": "application/json",
-        "Accept": "application/json"})
+    hdrs = {"User-Agent": _UA, "Content-Type": "application/json",
+            "Accept": "application/json"}
+    if headers:
+        hdrs.update({str(k): str(v) for k, v in headers.items()})
+    req = _urlreq.Request(url, data=body, method="POST", headers=hdrs)
     opener = _proxy_opener() if proxied else _pinned_opener()
     try:
         with opener.open(req, timeout=timeout) as resp:

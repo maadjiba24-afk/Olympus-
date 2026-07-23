@@ -46,6 +46,7 @@ sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsi
 mcp = ["mcp>=1.5.0"]               # olympus/mcp_client.py — native stdio/SSE MCP client
 graphdb = ["neo4j>=5.0", "falkordb>=1.0"]  # codegraph_export — live graph-DB pushes
 docs = ["pypdf>=4.0", "python-docx>=1.0"]  # olympus/webctx.py — PDF/DOCX parsing
+bedrock = ["boto3>=1.34"]          # olympus/bedrock_converse.py — non-Claude Bedrock (Titan/Llama/Mistral) Converse API
 # CI-only test tooling (NOT shipped runtime deps): the packages that let the
 # opt-in integration tests actually run instead of self-skipping — `openai`
 # drives the OpenAI-compatible server test, `websockets` the real-Chromium CDP
@@ -53,7 +54,8 @@ docs = ["pypdf>=4.0", "python-docx>=1.0"]  # olympus/webctx.py — PDF/DOCX pars
 # guard. CI installs `.[test]` so this list is the single source of truth.
 test = ["pytest", "openai", "websockets>=12.0", "mcp>=1.5.0", "pyyaml>=6.0"]
 all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0", "mcp>=1.5.0",
-       "neo4j>=5.0", "falkordb>=1.0", "pypdf>=4.0", "python-docx>=1.0"]
+       "neo4j>=5.0", "falkordb>=1.0", "pypdf>=4.0", "python-docx>=1.0",
+       "boto3>=1.34"]
 
 [project.urls]
 Homepage = "https://github.com/maadjiba24-afk/Olympus-"

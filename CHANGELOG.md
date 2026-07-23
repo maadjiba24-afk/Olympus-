@@ -15,6 +15,41 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Three deferred capabilities built native (DEFERRED #12/#13/#11)
+
+Closes three `DEFERRED.md` items as first-class, tested, hardened capabilities.
+Each is opt-in where it touches the network, egress-gated, fail-closed, and
+injectable-tested; no change to the three required dependencies.
+
+- **Native inbound A2A server** (#12). `a2a_server.py` serves the public agent
+  card and a bearer-authenticated, fail-closed `POST /a2a/task` that funnels the
+  task text (wrapped untrusted) to the council — a text funnel, never a tool/
+  actuation surface. Opt-in (`OLYMPUS_A2A_SERVER`); `olympus a2a serve`.
+- **Native Bedrock Converse for non-Claude models** (#13). `bedrock_converse.py`
+  drives Bedrock's Converse API for Titan/Nova/Llama/Mistral/Cohere; `backend`
+  routes to it when a Bedrock model isn't Claude. boto3 is a lazy `[bedrock]`
+  extra, so the required-dependency footprint is unchanged.
+- **Daytona remote-execution backend** (#11). `OLYMPUS_EXEC_BACKEND=daytona`
+  submits the (cmdguard-checked) command to a Daytona workspace API over the
+  gated `tools._http_post_json` (which also scans the outbound body for secrets)
+  and maps the reply into the standard `Result`. The security gate runs first;
+  no new dependency. `tools._http_post_json` gained an optional `headers` arg for
+  the bearer.
+
+Deliberately still declined (safety-line items, ADR 0011 / `DEFERRED.md`):
+weaponized/arbitrary-target exploitation (#16), raw-socket scanner sandbox (#18),
+persistent unconfined shell (#14).
+
+### Security
+
+- **OSV → trusted-tool injection (fix).** `assess_deps` is a `TRUSTED_TOOL` (its
+  result reaches the model unwrapped), but the OSV feed put external,
+  attacker-influenceable text (`summary`/`id`/`cwe`/CVSS vector) into finding
+  evidence — a prompt-injection channel. `_osv_parse_vuln` now neutralizes every
+  OSV-derived string at the source: the summary is injection-defanged
+  (`sanitize_for_memory`), and the id/cwe/vector are restricted to their safe
+  charset/shape.
+
 ### Added — MCP surfacing: governed read-only Aegis + discovery over the council server
 
 The `olympus mcp-serve` server now exposes three **read/prepare-only** tools, so

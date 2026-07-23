@@ -1096,24 +1096,34 @@ def _osv_cache_load(user: str) -> dict:
 
 def _osv_parse_vuln(v: dict) -> dict:
     """Pull the fields we report from an OSV vuln object (defensive — OSV's
-    shape varies by advisory source)."""
+    shape varies by advisory source).
+
+    OSV text is EXTERNAL and attacker-influenceable, but `assess_deps` is a
+    TRUSTED tool (its result reaches the model unwrapped — the static index was
+    first-party). So every OSV-derived string is neutralized HERE at the source:
+    id/cwe/vector are restricted to their safe charset/shape and the free-text
+    summary is injection-defanged (`sanitize_for_memory`) — closing a
+    prompt-injection channel into a trusted finding."""
     aliases = v.get("aliases") or []
     ident = next((a for a in aliases if str(a).startswith("CVE-")),
                  v.get("id", "?"))
+    ident = re.sub(r"[^A-Za-z0-9:._-]", "", str(ident))[:64] or "?"
     vector = ""
     for s in v.get("severity") or []:
         if str(s.get("type", "")).upper().startswith("CVSS_V3"):
-            vector = str(s.get("score", ""))
+            vector = re.sub(r"[^A-Za-z0-9:./]", "", str(s.get("score", "")))[:128]
             break
     dbs = v.get("database_specific") or {}
     cwes = dbs.get("cwe_ids") or []
-    cwe = str(cwes[0]) if cwes else ""
+    cwe_m = re.search(r"CWE-\d+", str(cwes[0]).upper()) if cwes else None
+    cwe = cwe_m.group(0) if cwe_m else ""
     score, sev_from_vec = sarif.score_or_none(vector)
     severity = (sev_from_vec or dbs.get("severity") or "high").lower()
     if severity not in ("critical", "high", "medium", "low", "info"):
         severity = "medium"
-    return {"id": str(ident), "cwe": cwe, "cvss_vector": vector,
-            "severity": severity, "summary": str(v.get("summary", ""))[:200]}
+    summary = security.sanitize_for_memory(str(v.get("summary", "")))[:200]
+    return {"id": ident, "cwe": cwe, "cvss_vector": vector,
+            "severity": severity, "summary": summary}
 
 
 def _osv_lookup(ecosystem: str, pkg: str, version: str,
