@@ -27,7 +27,13 @@ clone.
       (pages above/below, % scrolled), and a bounded list of scrollable containers
       with remaining distance — all pure measurement, fail-soft, no ingestion
       surface. `tests/test_browser.py`.
-    - §3.4 human-fidelity click + landing hit-test → ADR 0014 (c), planned.
+    - **§3.4 — human-fidelity click + landing hit-test → SHIPPED** in
+      `browser.act('click')` (ADR 0014 (c)): a scroll-to-center +
+      `elementFromPoint` probe drives a **trusted** coordinate CDP click on a clear
+      point (stronger than page-agent's untrusted dispatch), and — the inversion —
+      refuses a blind coordinate click when an overlay obscures the point,
+      dispatching to the intended element and flagging the obstruction instead of
+      clicking whatever is on top. `tests/test_browser.py`.
     - §3.5 default-on pre-prompt redaction → ADR 0014 (d), planned.
     - §3.6 governed `/llms.txt` consumption → ADR 0014 (e), planned.
   The four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").

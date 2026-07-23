@@ -1261,3 +1261,62 @@ def test_observe_scroll_affordances_absent_by_default(monkeypatch):
         assert obs == '[0] button "Go"'
     finally:
         browser.set_transport_factory(None)
+
+
+# --- human-fidelity click + landing hit-test (ADR 0014 (c); PAGE_AGENT §3.4) ---
+
+def _mouse_events(sess, kind=None):
+    evs = [c for c in sess._t.calls if c["method"] == "Input.dispatchMouseEvent"]
+    if kind:
+        evs = [c for c in evs if c["params"].get("type") == kind]
+    return evs
+
+
+def test_clear_click_fires_trusted_coordinate_events_at_probed_point(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        out = sess.act("click", selector="#buy")
+        assert out == "Clicked #buy."                 # no obstruction note
+        press = _mouse_events(sess, "mousePressed")
+        rel = _mouse_events(sess, "mouseReleased")
+        # trusted CDP click at the probed landing point (FakeTransport: 50,35)
+        assert press and press[-1]["params"]["x"] == 50
+        assert press[-1]["params"]["y"] == 35
+        assert rel and rel[-1]["params"]["button"] == "left"
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_obscured_click_refuses_blind_coordinate_click_and_flags_it(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        sess._t.click_obstructed = True               # an overlay covers the point
+        out = sess.act("click", selector="#buy")
+        assert out.startswith("Clicked #buy.")
+        assert "obscured" in out and "overlay" in out
+        # crucially: NO blind coordinate click was fired at the obscured point —
+        # we dispatched to the intended element instead (page-agent would have
+        # clicked whatever was on top).
+        assert _mouse_events(sess, "mousePressed") == []
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_obscured_click_still_journals_as_a_landed_step(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        sess._t.click_obstructed = True
+        sess.act("click", selector="#buy")
+        assert "click" in sess.learned_steps().lower()
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_click_missing_element_errors_and_is_not_journaled(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)          # nothing present
+        out = sess.act("click", selector="#nope")
+        assert out.startswith("Error:")
+        assert sess.learned_steps() == ""
+    finally:
+        browser.set_transport_factory(None)

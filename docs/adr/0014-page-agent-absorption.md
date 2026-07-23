@@ -116,11 +116,41 @@ also backs self-healing), so healing is unaffected; `observe_frame` (the governe
 cross-origin path) stays a plain map by design. Covered by six new cases in
 `tests/test_browser.py`.
 
-## Decision (c): human-fidelity click + landing hit-test — PLANNED
+## Decision (c): human-fidelity click + landing hit-test as a GUARD — SHIPPED
 
-Audit `browser.act('click')` against page-agent's full spec-ordered pointer/mouse
-sequence and its `elementFromPoint` deepest-target hit-test, so clicks survive
-invisible overlays. (Watchlist §3.4.)
+Page Agent scrolls the target to view, computes its center, and dispatches a
+full spec-ordered pointer/mouse sequence — then uses `elementFromPoint` to
+retarget to whatever element is actually on top (matching real browser event
+targeting). The hit-test is the valuable idea; the *silent retarget* is a risk:
+an overlay, cookie banner, or interstitial covering the button means page-agent
+clicks the overlay.
+
+`browser.act('click', selector=…)` previously fired a bare `e.click()` (untrusted,
+single event, no scroll, no hit-test). It now:
+
+1. **Probes** (`_click_probe_js`): resolves the element, scrolls it to center,
+   computes the click point, and runs `elementFromPoint` to decide whether that
+   point is **obscured** — i.e. the topmost element there is neither the target,
+   an ancestor, nor a descendant of it (a foreign overlay), or the point isn't
+   hittable at all.
+2. **Clear point → a TRUSTED, coordinate-accurate CDP click** (`Input.dispatch
+   MouseEvent` mouseMoved→Pressed→Released at the probed point). This is
+   *stronger* than page-agent's untrusted in-page `dispatchEvent` (`isTrusted`
+   true → drives handlers that ignore synthetic events), and it lands exactly
+   where the hit-test verified.
+3. **Obscured / off-view → the inversion.** Olympus does **not** fire a blind
+   coordinate click (which would hit the overlay). It dispatches a faithful
+   pointer→mouse→click sequence straight to the *intended* element
+   (`_dispatch_click_js`) and returns a note that the point was obscured so the
+   operator/model can dismiss the modal first. Where page-agent clicks whatever
+   is on top, Olympus actuates the observed control and surfaces the obstruction.
+
+So Olympus takes page-agent's hit-test and makes it a **safety guard** rather than
+a hijack surface, while upgrading the happy path from untrusted to trusted input.
+FakeTransport gains a scriptable landing probe (`__OLY_CLICK__`) and a
+`click_obstructed` switch; four new tests in `tests/test_browser.py` cover the
+trusted-coordinate path, the obscured fallback (no blind click fired), journaling,
+and the missing-element error.
 
 ## Decision (d): default-on pre-prompt redaction seam — PLANNED
 

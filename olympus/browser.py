@@ -219,6 +219,53 @@ _SCROLLABLES_JS = (
     "return JSON.stringify(out);}catch(e){return '';}})()"
 ).replace("KMAX", str(_SCROLLABLE_MAX))
 
+
+def _click_probe_js(selector: str) -> str:
+    """Resolve the element, scroll it to center, and report its click point plus
+    whether that point is OBSCURED by an unrelated element (an overlay / cookie
+    banner / modal intercepting the hit). Absorbs page-agent's elementFromPoint
+    landing hit-test — but as a *guard*, not a silent retarget (ADR 0014 (c)).
+    __OLY_CLICK__ routes it offline. Returns JSON {found,cx,cy,obstructed,tag}."""
+    sel = json.dumps(selector)
+    return (
+        "(function(){/*__OLY_CLICK__*/var e=__olyq(" + sel + ");"
+        "if(!e)return JSON.stringify({found:false});"
+        "try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}"
+        "var r=e.getBoundingClientRect();"
+        "var cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "var top=null;try{top=document.elementFromPoint(cx,cy);}catch(x){}"
+        # Obscured when the topmost element at the point is neither the target,
+        # an ancestor of it, nor a descendant of it (i.e. a foreign overlay), or
+        # when the point isn't hittable at all (off-view / null).
+        "var obstructed=!top||(top!==e&&!e.contains(top)&&!top.contains(e));"
+        "return JSON.stringify({found:true,cx:Math.round(cx),cy:Math.round(cy),"
+        "obstructed:obstructed,tag:(e.tagName||'').toLowerCase()});})()"
+    )
+
+
+def _dispatch_click_js(selector: str) -> str:
+    """A faithful in-page click sequence on the INTENDED element (spec-ordered
+    pointer→mouse events + focus + native click for the default action). Used
+    only on the obscured/off-view fallback, so we actuate the observed control
+    directly instead of firing a blind coordinate click that would land on the
+    overlay. __OLY_CLICKDISPATCH__ routes it offline. Returns bool."""
+    sel = json.dumps(selector)
+    return (
+        "(function(){/*__OLY_CLICKDISPATCH__*/var e=__olyq(" + sel + ");"
+        "if(!e)return false;var r=e.getBoundingClientRect();"
+        "var cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "var po={bubbles:true,cancelable:true,clientX:cx,clientY:cy,pointerType:'mouse'};"
+        "var mo={bubbles:true,cancelable:true,clientX:cx,clientY:cy,button:0};"
+        "try{e.dispatchEvent(new PointerEvent('pointerover',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mouseover',mo));"
+        "try{e.dispatchEvent(new PointerEvent('pointerdown',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mousedown',mo));"
+        "try{if(e.focus)e.focus();}catch(x){}"
+        "try{e.dispatchEvent(new PointerEvent('pointerup',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mouseup',mo));"
+        "try{e.click();}catch(x){}return true;})()"
+    )
+
 # --- transport -----------------------------------------------------------
 
 
@@ -267,12 +314,16 @@ class FakeTransport:
                  console: list[dict] | None = None,
                  geometry: dict | None = None,
                  scrollables: list[dict] | None = None,
+                 click_obstructed: bool = False,
                  pdf_b64: str = "JVBERi0xLjQK") -> None:
         # Scriptable observe() scroll affordances. None → the eval returns ''
         # (the graceful-omit path, which is what every plain observe() test
         # exercises); set them to drive the geometry header / scrollable list.
         self.geometry = geometry
         self.scrollables = scrollables
+        # Whether the click landing probe reports the click point as obscured by
+        # an overlay — drives the obstructed-click fallback path in act('click').
+        self.click_obstructed = click_obstructed
         # Scriptable Accessibility.getFullAXTree nodes (role/name/value/ignored).
         self.ax_nodes = ax_nodes or []
         # Console messages the page has "emitted" (level/text) — what a real
@@ -379,6 +430,15 @@ class FakeTransport:
             if "__OLY_SCROLL__" in expr:          # scrollable regions, or '' → omit
                 return {"result": {"value": json.dumps(self.scrollables)
                                    if self.scrollables is not None else ""}}
+            if "__OLY_CLICK__" in expr:           # click landing probe
+                sel = self._matched_selector(expr)
+                if sel is None:
+                    return {"result": {"value": json.dumps({"found": False})}}
+                return {"result": {"value": json.dumps(
+                    {"found": True, "cx": 50, "cy": 35,
+                     "obstructed": self.click_obstructed, "tag": "button"})}}
+            if "__OLY_CLICKDISPATCH__" in expr:   # direct targeted dispatch
+                return {"result": {"value": self._matched_selector(expr) is not None}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
                 if "getBoundingClientRect" in expr:   # element screenshot clip
@@ -1640,15 +1700,41 @@ class BrowserSession:
 
         if action == "click":
             if selector:
-                ok = self._eval_bool(
-                    f"(function(){{var e=__olyq("
-                    f"{json.dumps(selector)});if(e){{e.click();return true;}}"
-                    f"return false;}})()")
-                if not ok:
+                # Probe first: resolve + scroll to center + hit-test the landing
+                # point. Absorbs page-agent's elementFromPoint check, but as a
+                # GUARD (ADR 0014 (c)): when the point is clear we fire a TRUSTED,
+                # coordinate-accurate CDP click (stronger than page-agent's
+                # untrusted in-page dispatch); when an overlay obscures the point
+                # we refuse the blind coordinate click (it would hit the overlay)
+                # and instead dispatch straight to the intended element, flagging
+                # the obstruction so the operator can dismiss the modal first.
+                try:
+                    probe = json.loads(self._eval(_click_probe_js(selector)) or "")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    probe = {}
+                if not isinstance(probe, dict) or not probe.get("found"):
                     return f"Error: no element for {selector}."
+                cx, cy = probe.get("cx"), probe.get("cy")
+                clear = (not probe.get("obstructed")
+                         and isinstance(cx, (int, float))
+                         and isinstance(cy, (int, float)))
+                note = ""
+                if clear:
+                    self._call("Input.dispatchMouseEvent", type="mouseMoved",
+                               x=cx, y=cy)
+                    self._call("Input.dispatchMouseEvent", type="mousePressed",
+                               x=cx, y=cy, button="left", clickCount=1)
+                    self._call("Input.dispatchMouseEvent", type="mouseReleased",
+                               x=cx, y=cy, button="left", clickCount=1)
+                else:
+                    if not self._eval_bool(_dispatch_click_js(selector)):
+                        return f"Error: no element for {selector}."
+                    note = (" (click point was obscured or off-screen; dispatched "
+                            "directly to the element — an overlay/cookie banner "
+                            "may need dismissing first)")
                 self._journal_step(f"click {target}")
                 self._recipe_step("click", selector)
-                return f"Clicked {selector}."
+                return f"Clicked {selector}.{note}"
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
             self._call("Input.dispatchMouseEvent", type="mouseReleased",

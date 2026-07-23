@@ -15,7 +15,7 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(b))
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(c))
 
 Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
 capability surface as native Olympus features, each built on the security spine
@@ -51,6 +51,18 @@ with the corresponding page-agent weakness inverted into a structural strength
   existing browser suite passes unchanged). Delta/geometry live only on the
   model-facing `observe()`, not `_observe_raw`, so self-healing is unaffected;
   `observe_frame` stays a plain map by design. Six new tests in
+  `tests/test_browser.py`.
+
+- **Human-fidelity click + landing hit-test as a guard** (§3.4, decision (c)).
+  `browser.act('click', selector=…)` now probes the target — resolve, scroll to
+  center, `elementFromPoint` — before acting. On a clear point it fires a
+  **trusted**, coordinate-accurate CDP click (mouseMoved→Pressed→Released),
+  stronger than page-agent's untrusted in-page dispatch. On an obscured or
+  off-screen point it does **not** fire a blind coordinate click (which would hit
+  the covering overlay); it dispatches a faithful pointer→mouse→click sequence to
+  the *intended* element and flags that the point was obscured so a modal/cookie
+  banner can be dismissed first. Page-agent silently clicks whatever is on top;
+  Olympus makes the hit-test a safety guard. Four new tests in
   `tests/test_browser.py`.
 
 Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
