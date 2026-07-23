@@ -155,13 +155,30 @@ def run_due(now: float | None = None,
             memory.save("lessons", "web discoveries", body)
         except Exception:
             pass
+        # Turn proposal-kind discoveries into auto-drafted, human-actionable
+        # build proposals (idempotent; deduped by discovery key). Drafting the
+        # *current* set — not just the fresh ones — lets a pattern that predates
+        # this feature still get a proposal, while the store's own dedup keeps it
+        # from re-drafting.
+        drafted: list = []
+        try:
+            from . import webproposals
+            drafted = webproposals.draft_from_discoveries(found, now)
+        except Exception:
+            drafted = []
         if notify is None:
             from . import gateway
             notify = gateway.notify_all
+        note = "🔎 Web-context discoveries:\n\n" + body
+        if drafted:
+            note += ("\n\nDrafted " + str(len(drafted)) + " build proposal(s) — "
+                     "review with `olympus webknowledge --proposals`.")
         try:
-            notify("🔎 Web-context discoveries:\n\n" + body)
+            notify(note)
         except Exception:
             pass
-        return [f"web reflection: {d['title']}" for d in fresh]
+        out = [f"web reflection: {d['title']}" for d in fresh]
+        out += [f"build proposal drafted: {p.title}" for p in drafted]
+        return out
     except Exception:
         return []

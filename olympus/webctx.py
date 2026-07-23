@@ -551,6 +551,15 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
     JS). `mobile` (None = auto: apply the learned per-domain bias) / `location`
     set the request's device/language hints. Returns a dict; a blocked/failed
     fetch returns {'error': ...}. Content that reaches a model is wrapped."""
+    # Auto-apply a learned action profile: when the caller passed no `actions`
+    # at all (None, not an explicit empty list) AND opted into auto-interaction,
+    # replay the safe profile this domain earned (>=2 wins). Purely additive —
+    # an explicit `actions=` (including `[]` to force none) always wins — and
+    # every step is re-validated against the safe-verb allowlist before it runs.
+    if actions is None and _auto_actions_enabled():
+        learned = _hint(url).get("action_profile")
+        if isinstance(learned, list) and learned:
+            actions = learned
     # Interactive path: pre-actions require a real (governed) browser.
     if actions:
         return _scrape_with_actions(url, actions, formats, schema, prompt,
@@ -576,6 +585,19 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
              has_jsonld=bool(page["jsonld"]),
              feed_url=page["feeds"][0] if page["feeds"] else "")
     return result
+
+
+def _auto_actions_enabled() -> bool:
+    """Whether a *learned* action profile may be auto-applied on a plain scrape.
+    Auto-driving a browser is a real autonomous behavior, so it is OPT-IN
+    (`OLYMPUS_WEB_AUTO_ACTIONS`, default off) per the absorbed-capability
+    contract (ADR 0008). Inert under replay — a learned profile must not diverge
+    a frozen run."""
+    import os
+    if os.environ.get("OLYMPUS_REPLAY"):
+        return False
+    return os.environ.get("OLYMPUS_WEB_AUTO_ACTIONS", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _observe(url: str, **kw) -> None:
@@ -663,6 +685,7 @@ def _scrape_with_actions(url: str, actions: list, formats, schema, prompt,
                          "olympus-council[browser] and a Chrome, or drop actions"}
     steps_run: list[str] = []
     rejected: list[str] = []
+    applied: list[dict] = []                         # the safe steps we actually ran
     try:
         opened = session.open(url)                   # SSRF-gated navigation
         if isinstance(opened, str) and opened.startswith("Error:"):
@@ -685,6 +708,7 @@ def _scrape_with_actions(url: str, actions: list, formats, schema, prompt,
                 x=int(act.get("x", 0) or 0),
                 y=int(act.get("y", 0) or 0))
             steps_run.append(f"{verb}: {str(res)[:60]}")
+            applied.append(_normalize_step(verb, act))
         html = session.html() or ""
         if not html:                                 # transport gave no HTML
             import html as _htmlmod
@@ -695,7 +719,43 @@ def _scrape_with_actions(url: str, actions: list, formats, schema, prompt,
     result["actions_run"] = steps_run
     if rejected:
         result["actions_rejected"] = rejected        # e.g. executeJavascript
+    # Fold the interaction into the corpus: if this actioned fetch beat the
+    # domain's byte baseline, domainlore learns interaction helps here AND
+    # remembers the exact safe profile so it can be auto-applied next time.
+    if applied:
+        _observe(url, ok=True, bytes_=len(html), used_actions=True,
+                 action_profile=_serialize_profile(applied))
     return result
+
+
+def _normalize_step(verb: str, act: dict) -> dict:
+    """Reduce one safe action to a compact, replayable dict (only non-empty
+    fields), so a learned profile stays small and re-validatable."""
+    step: dict[str, Any] = {"type": verb}
+    for k in ("selector", "text", "key", "value"):
+        v = str(act.get(k, "")).strip()
+        if v:
+            step[k] = v[:200]
+    for k in ("x", "y"):
+        try:
+            n = int(act.get(k, 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            step[k] = n
+    return step
+
+
+def _serialize_profile(steps: list[dict]) -> str:
+    """JSON of the safe action profile, bounded in step count and size."""
+    try:
+        return json.dumps(steps[:_MAX_PROFILE_STEPS])[:_PROFILE_JSON_CAP]
+    except (TypeError, ValueError):
+        return ""
+
+
+_MAX_PROFILE_STEPS = 12
+_PROFILE_JSON_CAP = 1200
 
 
 _SCRIPT_STYLE_RE = re.compile(

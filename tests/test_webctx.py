@@ -451,6 +451,47 @@ def test_scrape_actions_degrade_without_browser(monkeypatch):
     assert "error" in r and "browser" in r["error"].lower()
 
 
+def test_learned_action_profile_auto_applies_when_opted_in(monkeypatch, tmp_path):
+    """A domain that earned an action profile is auto-actioned on a plain scrape
+    — but ONLY when OLYMPUS_WEB_AUTO_ACTIONS is on, and an explicit `actions=[]`
+    still overrides."""
+    from olympus import browser, config, domainlore
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.delenv("OLYMPUS_REPLAY", raising=False)
+    monkeypatch.delenv("OLYMPUS_WEB_LORE", raising=False)
+    monkeypatch.setattr("olympus.security.url_block_reason",
+                        lambda u, resolve=True: None)
+    # Teach the corpus a profile for this domain (>=2 wins).
+    import json as _json
+    prof = _json.dumps([{"type": "click", "selector": "#more"}])
+    for _ in range(2):
+        domainlore.observe("https://app/", ok=True,
+                           actions_helped=True, action_profile=prof)
+    assert domainlore.hint("https://app/").get("action_profile")
+
+    pages = {"https://app/": {"title": "App", "text": "loaded after click"}}
+    browser.set_transport_factory(lambda: browser.FakeTransport(pages))
+    try:
+        # opted OUT (default): no auto actions, plain fetch path (no harness)
+        monkeypatch.delenv("OLYMPUS_WEB_AUTO_ACTIONS", raising=False)
+        monkeypatch.setattr(tools, "_http_get",
+                            lambda u, timeout=30, headers=None: "<body>plain</body>")
+        r_off = webctx.scrape("https://app/", formats=("markdown",))
+        assert "actions_run" not in r_off
+
+        # opted IN: the learned profile drives the governed harness
+        monkeypatch.setenv("OLYMPUS_WEB_AUTO_ACTIONS", "1")
+        r_on = webctx.scrape("https://app/", formats=("markdown",))
+        assert r_on.get("actions_run")                 # profile auto-applied
+        assert "loaded after click" in r_on.get("markdown", "")
+
+        # explicit empty actions always wins — no harness even when opted in
+        r_none = webctx.scrape("https://app/", formats=("markdown",), actions=[])
+        assert "actions_run" not in r_none
+    finally:
+        browser.set_transport_factory(None)
+
+
 # --- structured-data signals: JSON-LD + feeds (iter 2) ----------------------
 
 def test_scrape_extracts_jsonld_llm_free(monkeypatch):

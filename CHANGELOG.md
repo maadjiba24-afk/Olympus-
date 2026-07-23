@@ -15,6 +15,37 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Web context: learned action-profiles, fleet lore sharing, build proposals
+
+Three self-evolution extensions turn the web-context corpus into a deeper moat
+(ADR 0009/0010 addendum), all under the absorbed-capability contract (opt-in for
+autonomy, replay-inert, bounded, additive-only, own tests):
+
+- **Learned per-domain action-profiles.** `domainlore` now remembers the exact
+  *safe action profile* (the scroll/expand/click steps) that beat a domain's byte
+  baseline — not just that interaction helped. With `OLYMPUS_WEB_AUTO_ACTIONS=1`,
+  a plain `scrape` of that domain auto-replays the earned profile through the
+  governed browser harness (no manual `actions` argument). Every step is
+  re-validated against the safe-verb allowlist on use; an explicit `actions=`
+  (including `[]`) always wins; inert under replay.
+- **Operator-gated fleet lore sharing.** `federation` gains `export_domainlore`/
+  `import_domainlore` and a signed `/federation/domainlore` route, mirroring the
+  lesson-sync guarantees (signed, `trusted`-only, secrets/PII scrubbed). Imported
+  per-domain facts *stage* in the corpus and are folded into the live corpus only
+  by the operator's explicit merge — purely additive, never overwriting local
+  truth, never relaxing a fetch gate. New CLI: `olympus webknowledge --share
+  <peer>` / `--staged` / `--merge`.
+- **Auto-drafted build proposals.** New `webproposals` module turns a
+  proposal-kind discovery into a full, evidence-backed build proposal (motivation,
+  cited domains, concrete change, safety posture, acceptance criteria) queued for
+  the operator to accept/decline/mark built — surfaced on `olympus webknowledge
+  --proposals` and the moat board. Explicitly *not* a code generator: it drafts a
+  reviewable engineering artifact, never a behavior change.
+
+New tests: `test_domainlore_share.py`, `test_webproposals.py`,
+`test_federation_lore.py`, plus action-profile auto-apply coverage in
+`test_webctx.py`. No new tools/commands (new CLI flags on `webknowledge`).
+
 ### Added — Self-evolving web context: knowledge, discovery, self-tuning
 
 The absorbed web-context system now compounds and discovers over time inside

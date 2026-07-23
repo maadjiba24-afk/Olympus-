@@ -12,8 +12,9 @@ time.
 |---|---|
 | `olympus/webctx.py` | The library: `scrape` (many formats), `map_urls`, `crawl`, `batch_scrape`, `extract` (verified), `generate_llmstxt`, `diff` (git + json modes), `parse_document` (PDF/DOCX), `to_markdown`/`parse_page`. |
 | `olympus/webmonitor.py` | Opt-in scheduled change-monitoring (text + json modes), off the replay hot path. |
-| `olympus/domainlore.py` | The compounding per-domain knowledge corpus. |
+| `olympus/domainlore.py` | The compounding per-domain knowledge corpus — including learned **action-profiles** and the operator-gated **fleet-share** staging. |
 | `olympus/webreflect.py` | The discovery routine — turns the corpus into feature proposals. |
+| `olympus/webproposals.py` | Turns proposal-kind discoveries into **auto-drafted build proposals** staged for a human. |
 
 **Tools:** `web_scrape` (formats: markdown, html, rawHtml, links, images,
 metadata, branding, **jsonld**, **feeds**, summary, json, attributes; plus
@@ -61,6 +62,33 @@ The `jsonld`/`feeds` formats are themselves a product of loop 3 in miniature:
 the analysis showed the web publishes structured data Olympus wasn't reading, so
 it now reads it deterministically, LLM-free.
 
+### Three ways the loops now close harder
+
+- **Learned action-profiles (loop 1 → behavior).** When an *actioned* scrape
+  beats a domain's byte baseline, the corpus doesn't just count that interaction
+  helped — it remembers the exact **safe action profile** (the scroll/expand/
+  click steps) that won. With `OLYMPUS_WEB_AUTO_ACTIONS=1` a plain `scrape` of
+  that domain replays the earned profile automatically through the governed
+  harness — no manual `actions` argument. Opt-in, replay-inert, and every step
+  is re-validated against the safe-verb allowlist on use; an explicit `actions=`
+  (including `[]` to force none) always wins.
+- **Fleet-shared raw lore (loop 1 → federation).** Beyond sharing *discoveries*
+  as lessons, a `trusted` peer's **raw per-domain facts** — sitemap, feed, robots
+  posture, mobile/action biases and the safe profile — now cross the federation
+  wire (signed, scrubbed of secrets/PII). They land as **candidates in a staging
+  area** and are folded into the live corpus only by the operator's explicit
+  `webknowledge --merge`. The merge is *purely additive*: it fills gaps and
+  OR-s in booleans but never overwrites local truth (visit/byte counts) and never
+  relaxes a gate. A whole fleet's crawl experience compounds into each node,
+  behind one human gate.
+- **Auto-drafted build proposals (loop 3 → engineering queue).** A proposal-kind
+  discovery (a cohort needing interaction, a cohort fetching poorly) is now
+  drafted into a full **build proposal** — motivation, cited evidence, a concrete
+  change in Olympus's idioms, its safety posture, and acceptance criteria —
+  queued for the operator to accept / decline / mark built. Still *not* a code
+  generator: it produces a reviewable engineering artifact, never self-modifying
+  behavior.
+
 ## Safety & determinism
 
 - **Opt-in autonomy.** The corpus (`OLYMPUS_WEB_LORE`, default on — pure
@@ -77,16 +105,30 @@ it now reads it deterministically, LLM-free.
 
 ## Fleet-wide compounding
 
-Discoveries are saved as lessons, so they ride the existing **federation** seam:
-a `trusted` peer's lessons are signed, scrubbed of secrets/PII, and *staged for
-the operator's gate* — never auto-committed. Web knowledge thus compounds across
-a fleet without widening the trust surface. (Sharing the raw per-domain lore
-itself — sitemaps, biases — is a deliberate future step behind the same gate.)
+Two seams now carry web knowledge across a fleet, both signed, scrubbed, and
+operator-gated:
+
+1. **Discoveries as lessons.** A `trusted` peer's lessons are signed, scrubbed of
+   secrets/PII, and staged for the operator's gate — never auto-committed.
+2. **Raw domain lore.** `olympus webknowledge --share <peer>` pushes this node's
+   scrubbed per-domain facts to a `trusted` peer over `/federation/domainlore`;
+   the receiver stages them and its operator runs `--merge` to fold them in
+   additively. Sharing raw lore requires the *highest* trust level — a `task`
+   peer can call the council but cannot receive the corpus.
+
+Web knowledge thus compounds across a fleet without widening the trust surface:
+every contributed fact is a hint, every fetch is still re-gated, and a human
+approves the merge.
 
 ## Operator view
 
 ```
-olympus webknowledge     # corpus report, most-visited domains, live discoveries
-olympus moat             # the self-evolution board (web_context row + tuned knob)
-olympus evolve           # the full self-tuner health/params
+olympus webknowledge               # corpus report, top domains, discoveries, proposals
+olympus webknowledge --proposals   # full auto-drafted build proposals
+olympus webknowledge --accept ID   # record a decision (--accept / --decline / --built)
+olympus webknowledge --share PEER  # push scrubbed domain lore to a trusted peer
+olympus webknowledge --staged      # peer-shared lore awaiting merge
+olympus webknowledge --merge       # fold staged peer lore into the corpus (additive)
+olympus moat                       # the self-evolution board (web_context row + tuned knob)
+olympus evolve                     # the full self-tuner health/params
 ```

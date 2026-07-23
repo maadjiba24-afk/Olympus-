@@ -110,12 +110,15 @@ def status() -> dict:
     # self-tuned fetch knob. A data network effect: the more Olympus scrapes,
     # the more it knows about how to scrape (a copier starts this at zero).
     from . import domainlore
+    from . import webproposals
     caps["web_context"] = {
         "enabled": _safe(domainlore.enabled, False),
         "flag": "OLYMPUS_WEB_LORE",
         "lore": _safe(domainlore.stats, {}) or {},
         "health": health.get("webctx", {}),
         "tuned": tunables.get("webctx.fetch_timeout", {}),
+        "proposals": _safe(webproposals.stats, {}) or {},
+        "staged_lore": len(_safe(domainlore.staged_shared, []) or []),
     }
 
     return {"capabilities": caps}
@@ -196,6 +199,14 @@ def render() -> str:
         lines.append(f"          self-tuned webctx.fetch_timeout = "
                      f"{t.get('current')} [{t.get('lo')}..{t.get('hi')}] "
                      "(lengthens when fetches keep failing)")
+    prop = wc.get("proposals") or {}
+    if prop.get("total"):
+        lines.append(f"          {prop['total']} build proposal(s) drafted "
+                     f"({prop.get('drafted', 0)} awaiting review) — "
+                     "`olympus webknowledge --proposals`")
+    if wc.get("staged_lore"):
+        lines.append(f"          {wc['staged_lore']} peer-shared domain(s) "
+                     "staged for merge — `olympus webknowledge --staged`")
 
     lines += ["", "Enable any with its flag; health/tuning accrue as they run "
               "(see `olympus evolve` for the full self-evolution board)."]
