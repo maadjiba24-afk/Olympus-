@@ -91,6 +91,7 @@ def _verify(argv):
 
 
 # --- 1. production PASS -------------------------------------------------------
+@pytest.mark.requires_crypto
 def test_production_run_verifies_and_exits_zero(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
     monkeypatch.setenv("OLYMPUS_PINNED_PUBKEY", witness.public_key_hex())
@@ -109,6 +110,7 @@ def test_production_run_verifies_and_exits_zero(monkeypatch):
 
 
 # --- 2. default-seed labeling + --require-production teeth --------------------
+@pytest.mark.requires_crypto
 def test_default_seed_is_labeled_and_require_production_fails(monkeypatch):
     monkeypatch.delenv("OLYMPUS_SIGNING_SEED", raising=False)
     monkeypatch.delenv("OLYMPUS_PINNED_PUBKEY", raising=False)
@@ -124,6 +126,7 @@ def test_default_seed_is_labeled_and_require_production_fails(monkeypatch):
     assert "FAIL" in out2 and "default" in out2.lower()
 
 
+@pytest.mark.requires_crypto
 def test_default_seed_log_path_also_labeled(monkeypatch):
     monkeypatch.delenv("OLYMPUS_SIGNING_SEED", raising=False)
     rid = _record_run(monkeypatch)
@@ -154,6 +157,7 @@ def _rewrite_run(run_id, mutate):
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
+@pytest.mark.requires_crypto
 def test_tampered_decision_record_fails(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
     monkeypatch.setenv("OLYMPUS_PINNED_PUBKEY", witness.public_key_hex())
@@ -171,6 +175,7 @@ def test_tampered_decision_record_fails(monkeypatch):
 
 
 # --- 4. tamper a frozen response ---------------------------------------------
+@pytest.mark.requires_crypto
 def test_tampered_frozen_response_fails(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
     monkeypatch.setenv("OLYMPUS_PINNED_PUBKEY", witness.public_key_hex())
@@ -202,6 +207,7 @@ def test_tampered_frozen_response_fails(monkeypatch):
 
 
 # --- 5. wrong key (signature under a key other than the pinned one) ----------
+@pytest.mark.requires_crypto
 def test_wrong_key_is_rejected(monkeypatch):
     # Record signed by seed A.
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
@@ -235,6 +241,7 @@ def _status(base):
         return json.loads(r.read())
 
 
+@pytest.mark.requires_crypto
 def test_api_posture_dev(server, monkeypatch):
     monkeypatch.delenv("OLYMPUS_SIGNING_SEED", raising=False)
     monkeypatch.delenv("OLYMPUS_PINNED_PUBKEY", raising=False)
@@ -248,6 +255,7 @@ def test_api_posture_dev(server, monkeypatch):
     assert "verify --run" in sig["verify_hint"]
 
 
+@pytest.mark.requires_crypto
 def test_api_posture_production(server, monkeypatch):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
     monkeypatch.setenv("OLYMPUS_PINNED_PUBKEY", witness.public_key_hex())
@@ -258,6 +266,7 @@ def test_api_posture_production(server, monkeypatch):
 
 
 # --- 7. custody surface ------------------------------------------------------
+@pytest.mark.requires_crypto
 def test_pubkey_command_prints_key(monkeypatch, capsys):
     monkeypatch.setenv("OLYMPUS_SIGNING_SEED", REAL_SEED)
     rc = cli.main(["pubkey"])
