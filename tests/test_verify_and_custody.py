@@ -178,8 +178,20 @@ def test_tampered_frozen_response_fails(monkeypatch):
 
     responses = sorted((config.MEMORY_DIR / "responses").glob("*.json"))
     assert responses, "expected frozen responses on disk"
-    # Mutate one stored response's text — replay must diverge from the recording.
-    victim = responses[0]
+    # Mutate a CONSUMED response's text — replay must diverge from the recording.
+    # Tamper a response the signed decision log actually references (the first
+    # orchestration decision — routing), NOT an arbitrary file by name-sort:
+    # a recorded run also freezes responses replay never re-reads (a fail-open
+    # quality review, a speculative call), and tampering one of those correctly
+    # does NOT diverge. Targeting a logged decision's response keeps this test
+    # deterministic regardless of response-hash ordering (which shifts whenever a
+    # specialist's tool loadout changes).
+    run = trace.load_run(rid) or {}
+    consumed = [d.get("model_response_ref") for d in run.get("decisions", [])
+                if d.get("model_response_ref")]
+    assert consumed, "expected the decision log to reference frozen responses"
+    victim = config.MEMORY_DIR / "responses" / f"{consumed[0]}.json"
+    assert victim.exists(), f"referenced response {consumed[0]} not frozen on disk"
     obj = json.loads(victim.read_text(encoding="utf-8"))
     obj["content"] = [{"type": "text", "text": "TAMPERED-RESPONSE"}]
     victim.write_text(json.dumps(obj), encoding="utf-8")
