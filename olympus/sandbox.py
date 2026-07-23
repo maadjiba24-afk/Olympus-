@@ -33,14 +33,18 @@ Backends (`OLYMPUS_EXEC_BACKEND`):
             safety rests on the Action spine approval gate above.
     docker  the same command inside `docker run --rm --network none`, the
             workdir bind-mounted at /work — real isolation for untrusted builds.
-The remaining Hermes backends (ssh / modal / daytona / singularity) are thin
-transports over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
+    daytona remote execution on a Daytona workspace: the cmdguard-checked command
+            is submitted to the workspace toolbox API over the SSRF/egress-gated
+            POST choke (`OLYMPUS_DAYTONA_URL` / `_WORKSPACE` / `_TOKEN`).
+The remaining Hermes backends (ssh / modal / singularity) are thin transports
+over the same `run()` contract; `OLYMPUS_EXEC_DOCKER_IMAGE` and
 `OLYMPUS_EXEC_NETWORK=1` tune the container.
 """
 
 from __future__ import annotations
 
 import contextvars
+import json
 import os
 import re
 import shlex
@@ -280,6 +284,67 @@ def _docker_cmd(command: str, root: Path, timeout: int) -> list[str]:
     return args
 
 
+def _daytona_submit(command: str, timeout: int) -> dict:
+    """Submit a command to the configured Daytona workspace toolbox API and
+    return the parsed JSON response. Routes through the SSRF/egress-gated POST
+    choke (`tools._http_post_json`, which also scans the outbound body for a
+    stored secret). Raises RuntimeError when unconfigured."""
+    base = os.environ.get("OLYMPUS_DAYTONA_URL", "").strip()
+    ws = os.environ.get("OLYMPUS_DAYTONA_WORKSPACE", "").strip()
+    if not base or not ws:
+        raise RuntimeError("daytona backend needs OLYMPUS_DAYTONA_URL and "
+                           "OLYMPUS_DAYTONA_WORKSPACE")
+    token = os.environ.get("OLYMPUS_DAYTONA_TOKEN", "").strip()
+    endpoint = f"{base.rstrip('/')}/workspace/{ws}/toolbox/process/execute"
+    payload = {"command": command, "timeout": int(timeout)}
+    cwd = os.environ.get("OLYMPUS_DAYTONA_CWD", "").strip()
+    if cwd:
+        payload["cwd"] = cwd
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    from . import tools
+    return tools._http_post_json(endpoint, payload, timeout=int(timeout) + 10,
+                                 headers=headers)
+
+
+def _daytona_run(command: str, timeout: int, watch: str | None = None,
+                 submit=None) -> Result:
+    """Run one (already cmdguard-checked) command on a remote Daytona workspace.
+    A THIN remote backend: it submits the command to the workspace API and maps
+    the parsed reply into a Result. `submit(command, timeout) -> dict` is
+    injectable for tests. A broken/unconfigured setup surfaces as ok=False, never
+    a raise — matching the docker/local contract."""
+    submit = submit or _daytona_submit
+    try:
+        data = submit(command, timeout)
+    except ValueError as err:                    # egress/secret-exfil refused
+        return Result(False, 126, f"daytona egress refused: {str(err)[:200]}")
+    except Exception as err:                      # unconfigured / unexpected
+        return Result(False, 127, f"daytona backend error: {str(err)[:200]}")
+    if not isinstance(data, dict):
+        return Result(False, 127, "daytona backend returned no JSON object")
+    if data.get("_error"):                        # network/parse failure (degraded)
+        return Result(False, 127,
+                      f"daytona backend error: {str(data['_error'])[:200]}")
+    try:
+        code = int(data.get("exitCode", data.get("code",
+                   data.get("exit_code", 0))) or 0)
+    except (TypeError, ValueError):
+        code = 0
+    out = str(data.get("result") or data.get("output")
+              or data.get("stdout") or "")
+    watched: tuple[str, ...] = ()
+    if watch:
+        try:
+            pat = re.compile(watch)
+            watched = tuple(ln.rstrip("\n") for ln in out.splitlines()
+                            if pat.search(ln))[:50]
+        except re.error as err:
+            watched = (f"invalid watch pattern: {err}",)
+    if len(out) > OUTPUT_CAP:
+        out = out[:OUTPUT_CAP] + f"\n…[truncated, {len(out)} bytes total]"
+    return Result(code == 0, code, out.strip(), watched)
+
+
 def _kill(proc: subprocess.Popen) -> None:
     """Kill the process (group, where we started one) and reap it."""
     try:
@@ -333,6 +398,10 @@ def run(command: str, *, timeout: int | None = None,
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
     root = _effective_root(root)
     be = (be or backend()).lower()
+    if be == "daytona":
+        # Remote execution on a Daytona workspace: the command already cleared
+        # cmdguard above, so the same fail-closed gate protects the remote box.
+        return _daytona_run(command, timeout, watch)
     if be == "docker":
         argv, shell = _docker_cmd(command, root, timeout), False
     else:

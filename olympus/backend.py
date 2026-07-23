@@ -74,11 +74,24 @@ def _with_failover(settings: config.Settings,
         raise last
 
 
+def _is_bedrock_converse(s: config.Settings) -> bool:
+    """A Bedrock request for a NON-Claude family (Titan/Llama/Mistral/…) — those
+    speak Bedrock's own Converse API, not the Claude-compatible client."""
+    try:
+        from . import bedrock_converse
+        return bedrock_converse.is_converse_model(config.require_model(s))
+    except Exception:
+        return False
+
+
 def _dispatch_text(s: config.Settings, system: str,
                    messages: list[dict[str, Any]], effort: str) -> str:
     if s.provider == "moa":
         from . import moa
         return moa.complete_text(s, system, messages, effort)
+    if s.provider == "bedrock" and _is_bedrock_converse(s):
+        from . import bedrock_converse
+        return bedrock_converse.complete_text(s, system, messages, effort)
     if s.provider in ("anthropic", "bedrock"):
         response = llm.complete(system, messages, settings=s, effort=effort)
         if response.stop_reason == "refusal":
@@ -112,6 +125,10 @@ def complete_json(settings: config.Settings, system: str,
         if s.provider == "moa":
             from . import moa
             return moa.complete_json(s, system, messages, schema, effort)
+        if s.provider == "bedrock" and _is_bedrock_converse(s):
+            from . import bedrock_converse
+            return bedrock_converse.complete_json(s, system, messages, schema,
+                                                  effort)
         if s.provider in ("anthropic", "bedrock"):
             response = llm.complete(system, messages, settings=s,
                                     effort=effort, output_schema=schema)
@@ -152,6 +169,17 @@ def run_agent_counted(settings: config.Settings, system: str, task: str,
         # env key.
         token = config.use_active_settings(s)
         try:
+            if s.provider == "bedrock" and _is_bedrock_converse(s):
+                # Non-Claude Bedrock families use the Converse API, which this
+                # path drives as a single completion (task as the user turn) —
+                # no server-side tool loop for these models, consistent with the
+                # openai-compat fallback. Count is None (the tool-call cap
+                # doesn't apply). Strictly better than the old behavior, which
+                # sent them to the Claude-only client and failed.
+                from . import bedrock_converse
+                msgs = [{"role": "user", "content": task}]
+                return bedrock_converse.complete_text(s, system, msgs,
+                                                      effort), None
             if s.provider in ("anthropic", "bedrock"):
                 return agent.run_agent_counted(system, task, settings=s,
                                                tool_defs=tool_defs,

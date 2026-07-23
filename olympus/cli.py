@@ -390,8 +390,6 @@ def build_parser() -> argparse.ArgumentParser:
         "bench", help="score the engine's detection quality (self-benchmark)")
     as_sub.add_parser(
         "insights", help="show accumulated assessment experience (self-evolving)")
-    as_sub.add_parser(
-        "containment", help="prove each Strix blast-radius vector is contained")
     p_as_run = as_sub.add_parser(
         "run", help="bounded assessment: recon+audit (+whitebox with --source)")
     p_as_run.add_argument("target")
@@ -559,9 +557,11 @@ def build_parser() -> argparse.ArgumentParser:
                                        "instance's A2A agent card, or call "
                                        "another agent (egress-gated, opt-in)")
     p_a2a.add_argument("action", nargs="?", default="card",
-                       choices=["card", "call"])
+                       choices=["card", "call", "serve"])
     p_a2a.add_argument("url", nargs="?", default=None, help="peer task URL (call)")
     p_a2a.add_argument("message", nargs="?", default=None, help="message (call)")
+    p_a2a.add_argument("--host", default="127.0.0.1", help="serve bind host")
+    p_a2a.add_argument("--port", type=int, default=8490, help="serve bind port")
     p_fed = sub.add_parser(
         "federation",
         help="cross-instance federation (signed, opt-in): show identity, "
@@ -1665,8 +1665,6 @@ def main(argv: list[str] | None = None) -> int:
             print(assess.bench_scorecard())
         elif sc == "insights":
             print(assess.insights_summary())
-        elif sc == "containment":
-            print(assess.containment_scorecard())
         elif sc == "run":
             try:
                 r = assess.run_assessment(args.target, source_path=args.source,
@@ -1937,6 +1935,17 @@ def main(argv: list[str] | None = None) -> int:
                     print(a2a.call_agent(args.url, args.message))
                 except a2a.A2AError as err:
                     print(f"Refused: {err}")
+        elif args.action == "serve":
+            from . import a2a_server
+            try:
+                print(f"A2A server on {args.host}:{args.port} "
+                      "(Ctrl-C to stop). Card at /.well-known/agent.json; "
+                      "tasks POST /a2a/task (bearer-authenticated).")
+                a2a_server.run_server(host=args.host, port=args.port)
+            except a2a_server.A2AServerError as err:
+                print(f"Refused: {err}")
+            except KeyboardInterrupt:
+                print("\nA2A server stopped.")
         else:
             print(_json.dumps(a2a.card(), indent=2))
     elif args.command == "federation":
