@@ -1247,6 +1247,88 @@ def generate_llmstxt(url: str, max_urls: int = 20) -> dict[str, str]:
             "url": url, "pages": len(targets[:max_urls])}
 
 
+# Per-origin cache of a fetched /llms.txt, so a task that touches a site many
+# times pays one governed round-trip. Bounded (LRU-ish) and TTL'd so a negative
+# (404) result doesn't stick for the whole process — a site that later publishes
+# an llms.txt is picked up after the TTL — and the map can't grow without limit.
+_LLMSTXT_CONSUME_CAP = 8000        # chars of a site's own llms.txt we ingest
+_LLMSTXT_TTL = 600.0               # seconds a cached result stays fresh
+_LLMSTXT_CACHE_MAX = 256           # max distinct origins cached
+_llmstxt_cache: dict[str, tuple[float, dict]] = {}
+
+
+def _llmstxt_cache_get(origin: str, now: float) -> dict | None:
+    ent = _llmstxt_cache.get(origin)
+    if ent is None:
+        return None
+    ts, result = ent
+    if now - ts > _LLMSTXT_TTL:
+        _llmstxt_cache.pop(origin, None)      # expired — force a refetch
+        return None
+    return result
+
+
+def _llmstxt_cache_put(origin: str, result: dict, now: float) -> None:
+    # Evict the oldest entry when full (simple bound; the set of origins a task
+    # touches is small, so exact LRU isn't worth the bookkeeping).
+    if origin not in _llmstxt_cache and len(_llmstxt_cache) >= _LLMSTXT_CACHE_MAX:
+        oldest = min(_llmstxt_cache, key=lambda k: _llmstxt_cache[k][0])
+        _llmstxt_cache.pop(oldest, None)
+    _llmstxt_cache[origin] = (now, result)
+
+
+def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
+    """CONSUME a site's own ``/llms.txt`` as governed page context — the site's
+    author-curated map/guidance for agents.
+
+    Absorbs page-agent's `experimentalLlmsTxt` (docs/PAGE_AGENT_TRACKING.md §3.6 /
+    ADR 0014 (e)) and inverts its ungoverned fetch: page-agent does a raw
+    `fetch(origin + '/llms.txt')` with no SSRF check, no egress confinement, no
+    secret-exfil scan, and folds the result into the prompt unwrapped. Olympus
+    fetches through the SSRF/egress-gated, DNS-rebinding-pinned `tools._http_get`
+    (same seam as every other web fetch), caps the body, caches per origin, and —
+    because `web_llms_txt` is an INGESTION tool — the returned text is wrapped
+    untrusted AND secret-redacted (ADR 0014 (d)) before any model sees it.
+
+    Returns ``{origin, url, found, llmstxt, cached, error?}``; never raises.
+    """
+    from . import tools
+    try:
+        parts = urlparse(url if "://" in (url or "") else f"https://{url}")
+        origin = f"{parts.scheme}://{parts.netloc}"
+        if not parts.netloc:
+            return {"origin": "", "url": url, "found": False, "llmstxt": "",
+                    "cached": False, "error": "invalid url"}
+    except Exception:
+        return {"origin": "", "url": url, "found": False, "llmstxt": "",
+                "cached": False, "error": "invalid url"}
+
+    import time
+    now = time.monotonic()
+    hit = _llmstxt_cache_get(origin, now)
+    if hit is not None:
+        return {**hit, "cached": True}
+
+    endpoint = f"{origin}/llms.txt"
+    cap = _clamp(max_chars, _LLMSTXT_CONSUME_CAP, _LLMSTXT_CONSUME_CAP, lo=200)
+    result: dict
+    try:
+        if not _port_allowed(endpoint):
+            raise ValueError("non-web port")
+        # Governed fetch: SSRF-pinned + egress-confined + secret-exfil-scanned.
+        text = tools._http_get(endpoint, timeout=min(_fetch_timeout(), 8))
+        body = (text or "").strip()[:cap]
+        result = {"origin": origin, "url": endpoint,
+                  "found": bool(body), "llmstxt": body, "error": ""}
+    except Exception as err:
+        # A missing /llms.txt (404) or any fetch failure is the common case —
+        # degrade to "not found", never raise. The reason is bounded.
+        result = {"origin": origin, "url": endpoint, "found": False,
+                  "llmstxt": "", "error": str(err)[:120]}
+    _llmstxt_cache_put(origin, result, now)
+    return {**result, "cached": False}
+
+
 # ===========================================================================
 # diff — change detection between a previous snapshot and the live page
 # ===========================================================================

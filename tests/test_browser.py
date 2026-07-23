@@ -1167,3 +1167,198 @@ def test_capture_tools_registered_and_classified():
     assert "browser_save_pdf" not in security.ACTION_TOOLS
     # console output is page-controlled → untrusted ingestion
     assert "browser_console" in security.INGESTION_TOOLS
+
+
+# --- perception deltas + scroll geometry (ADR 0014 (b); PAGE_AGENT §3.2/§3.3) --
+
+def test_observe_geometry_header_when_page_overflows(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 720, "pw": 1280, "ph": 3000,
+                            "sx": 0, "sy": 456}
+        obs = sess.observe()
+        # header present, above/below computed, and the element map still there
+        assert obs.startswith("Page 1280x3000, viewport 1280x720")
+        assert "456px above" in obs
+        # max scroll = ph - vh = 2280; below = 2280 - 456 = 1824; 456/2280 = 20%
+        assert "1824px below" in obs
+        assert "at 20%" in obs
+        assert '[0] button "Go"' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_geometry_reports_fits_in_viewport(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 900, "pw": 1280, "ph": 900,
+                            "sx": 0, "sy": 0}
+        obs = sess.observe()
+        assert "fits in viewport" in obs
+        assert "scroll to see more" not in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_lists_scrollable_regions(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.scrollables = [{"s": "#feed", "db": 820, "rr": 0},
+                              {"s": ".carousel", "db": 0, "rr": 300}]
+        obs = sess.observe()
+        assert "Scrollable regions (act: scroll with this selector):" in obs
+        assert '- "#feed" (820px below)' in obs
+        assert '- ".carousel" (300px right)' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_marks_new_elements_since_last_look(monkeypatch):
+    try:
+        els = [{"t": "button", "n": "A", "s": "#a"},
+               {"t": "button", "n": "B", "s": "#b"}]
+        sess = _harness_session(monkeypatch, elements=els)
+        first = sess.observe()
+        assert "*[" not in first                      # first look marks nothing
+
+        # A new control appears (same URL) — only it is flagged new.
+        sess._t.elements = els + [{"t": "input:text", "n": "C", "s": "#c"}]
+        second = sess.observe()
+        assert '*[2] input:text "C"' in second
+        assert '[0] button "A"' in second and "*[0]" not in second
+        assert '[1] button "B"' in second and "*[1]" not in second
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_delta_resets_on_navigation(monkeypatch):
+    try:
+        els = [{"t": "button", "n": "A", "s": "#a"}]
+        sess = _harness_session(monkeypatch, elements=els)
+        sess.observe()                                # baseline on ex.com
+
+        # Navigate: different URL + a fresh element set → nothing marked new,
+        # because "new since last step" is meaningless across a navigation.
+        sess._t._url = "https://ex.com/next"
+        sess._t.elements = [{"t": "button", "n": "Z", "s": "#z"}]
+        obs = sess.observe()
+        assert "*[" not in obs
+        assert '[0] button "Z"' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_scroll_affordances_absent_by_default(monkeypatch):
+    # No scriptable geometry/scrollables → the map is exactly the bare element
+    # list (graceful degradation; perception never regresses).
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        obs = sess.observe()
+        assert obs == '[0] button "Go"'
+    finally:
+        browser.set_transport_factory(None)
+
+
+# --- human-fidelity click + landing hit-test (ADR 0014 (c); PAGE_AGENT §3.4) ---
+
+def _mouse_events(sess, kind=None):
+    evs = [c for c in sess._t.calls if c["method"] == "Input.dispatchMouseEvent"]
+    if kind:
+        evs = [c for c in evs if c["params"].get("type") == kind]
+    return evs
+
+
+def test_clear_click_fires_trusted_coordinate_events_at_probed_point(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        out = sess.act("click", selector="#buy")
+        assert out == "Clicked #buy."                 # no obstruction note
+        press = _mouse_events(sess, "mousePressed")
+        rel = _mouse_events(sess, "mouseReleased")
+        # trusted CDP click at the probed landing point (FakeTransport: 50,35)
+        assert press and press[-1]["params"]["x"] == 50
+        assert press[-1]["params"]["y"] == 35
+        assert rel and rel[-1]["params"]["button"] == "left"
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_obscured_click_refuses_blind_coordinate_click_and_flags_it(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        sess._t.click_obstructed = True               # an overlay covers the point
+        out = sess.act("click", selector="#buy")
+        assert out.startswith("Clicked #buy.")
+        assert "obscured" in out and "overlay" in out
+        # crucially: NO blind coordinate click was fired at the obscured point —
+        # we dispatched to the intended element instead (page-agent would have
+        # clicked whatever was on top).
+        assert _mouse_events(sess, "mousePressed") == []
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_obscured_click_still_journals_as_a_landed_step(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch, present=["#buy"])
+        sess._t.click_obstructed = True
+        sess.act("click", selector="#buy")
+        assert "click" in sess.learned_steps().lower()
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_click_missing_element_errors_and_is_not_journaled(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch)          # nothing present
+        out = sess.act("click", selector="#nope")
+        assert out.startswith("Error:")
+        assert sess.learned_steps() == ""
+    finally:
+        browser.set_transport_factory(None)
+
+
+# --- H2/H3: observe() hardening (secret-in-label; atomic perception) ----------
+
+def test_observe_redacts_secret_in_element_label(monkeypatch):
+    # browser_observe is an ACTION tool (not wrapped), so a secret in a label
+    # must be redacted at the source. The secret is assembled from fragments so
+    # no source line holds a contiguous secret literal (push-protection scanning).
+    secret = "sk" + "_live_" + "abcdef1234567890ABCDEF"
+    try:
+        sess = _harness_session(monkeypatch, elements=[
+            {"t": "input:text", "n": f"token {secret}", "s": "#t"}])
+        obs = sess.observe()
+        assert secret not in obs
+        assert "[redacted key]" in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_perception_is_one_atomic_eval(monkeypatch):
+    # Geometry + scrollables come from a SINGLE perception eval (not two), so
+    # they can't disagree on scroll position.
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 720, "pw": 1280, "ph": 3000,
+                            "sx": 0, "sy": 100}
+        sess._t.scrollables = [{"s": "#feed", "db": 500, "rr": 0}]
+        # count the perception evals during observe()
+        before = [c for c in sess._t.calls
+                  if c["method"] == "Runtime.evaluate"
+                  and "__OLY_PERCEPT__" in c["params"].get("expression", "")]
+        obs = sess.observe()
+        after = [c for c in sess._t.calls
+                 if c["method"] == "Runtime.evaluate"
+                 and "__OLY_PERCEPT__" in c["params"].get("expression", "")]
+        assert len(after) - len(before) == 1          # exactly one perception eval
+        # sy=100, max_scroll=3000-720=2280 → 100 above, 2180 below, 4%
+        assert "at 4%" in obs and "2180px below" in obs
+        assert '- "#feed" (500px below)' in obs
+    finally:
+        browser.set_transport_factory(None)

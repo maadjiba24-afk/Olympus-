@@ -23,10 +23,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from typing import Any
 
-from . import config
+from . import config, toolcall_repair
 
 _MAX_TOKENS_DEFAULT = 4096
 
@@ -143,8 +142,6 @@ def complete_text(settings: config.Settings, system: str,
     return _text_from(resp)
 
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
-
 
 def complete_json(settings: config.Settings, system: str,
                   messages: list[dict], schema: dict, effort: str = "high",
@@ -156,14 +153,9 @@ def complete_json(settings: config.Settings, system: str,
     sys2 = (str(system or "") + "\n\nRespond with ONLY a single valid JSON "
             "object matching the requested schema. No prose, no code fence.")
     text = complete_text(settings, sys2, messages, effort, client=client)
-    try:
-        return json.loads(text)
-    except (ValueError, TypeError):
-        pass
-    m = _JSON_RE.search(text or "")
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except (ValueError, TypeError):
-            pass
+    # Shared brace-balanced recovery (also backs openai_compat + tool-call
+    # repair) — tolerates a fenced or prose-wrapped object and trailing text.
+    obj = toolcall_repair.extract_json_object(text)
+    if obj is not None:
+        return obj
     raise ValueError("Bedrock Converse model did not return parseable JSON")

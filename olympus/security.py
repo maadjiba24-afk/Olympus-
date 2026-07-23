@@ -114,6 +114,10 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # already ingestion-classified above.)
                              "web_scrape", "web_map", "web_batch_scrape",
                              "web_extract", "generate_llmstxt",
+                             # Consuming a site's own /llms.txt folds
+                             # author-controlled text into the prompt — untrusted
+                             # external content, wrapped + secret-redacted.
+                             "web_llms_txt",
                              "parse_document", "web_diff",
                              # Aegis Assessment (olympus/assess.py): recon and
                              # the HTTP audit fetch an attacker-controlled target
@@ -201,8 +205,18 @@ _ENVELOPE_FOOTER = "\n---\n</untrusted_external_content>"
 
 
 def wrap_untrusted(text: str, source: str = "web") -> str:
-    """Wrap fetched content in an explicit untrusted-data envelope."""
+    """Wrap fetched content in an explicit untrusted-data envelope.
+
+    Also the default-on redaction chokepoint (ADR 0014 (d)): every piece of
+    untrusted content that reaches a model prompt passes through
+    `sanitize_for_prompt` here first, so secrets in page/tool content are redacted
+    by default, in code — inverting page-agent's opt-in-only redaction. Because
+    `should_wrap` is fail-closed (an unclassified tool still wraps), redaction is
+    fail-closed too: a new ingesting tool nobody registered is still both wrapped
+    AND secret-redacted.
+    """
     safe_source = re.sub(r"[^a-zA-Z0-9_.:/ -]", "", source)[:120]
+    text = sanitize_for_prompt(text)
     # Neutralize attempts to forge our own closing tag inside the content.
     body = text.replace("</untrusted_external_content>", "<\\/untrusted>")
     return _ENVELOPE_HEADER.format(source=safe_source) + body + _ENVELOPE_FOOTER
@@ -271,6 +285,13 @@ _INVISIBLE_RE = re.compile(
 # a poisoned page that gets an agent to "remember" a key turns memory into an
 # exfiltration channel readable in every future session.
 _PRIVKEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+# Whole-PEM-block match (BEGIN … key material … END). sanitize_for_prompt uses
+# this to redact the key MATERIAL, not just the recognizable header the
+# header-only regex catches — the difference between hiding a label and actually
+# not leaking the key to the model.
+_PEM_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL)
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
                      r"\.[A-Za-z0-9_-]{10,}\b")
 
@@ -317,6 +338,22 @@ _LONGNUM = re.compile(r"\b\d{6,}\b")            # ids, card/account numbers
 _URL_CRED = re.compile(r"https?://[^\s/@]+:[^\s/@]+@")  # creds in URLs
 _KEYISH = re.compile(r"\b(?:sk|pk|ghp|gho|xox[baprs]|AKIA)[-_A-Za-z0-9]{8,}\b")
 
+# High-value provider token shapes that `_KEYISH` does not cover, for the
+# prompt-redaction path only (kept out of `anonymize`/memory to avoid changing
+# that behavior). Each is a DISTINCTIVE, low-false-positive shape — a real
+# credential leaks in one of these forms, but ordinary prose/ids do not match —
+# so we never fall back to blind high-entropy matching that would redact a hash
+# or id the user actually asked about. (label, regex, replacement).
+_EXTRA_SECRET_RES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[redacted key]"),         # Google API key
+    (re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}\b"), "[redacted token]"),    # Google OAuth
+    (re.compile(r"\b(?:ghu|ghs|ghr)_[0-9A-Za-z]{36,}\b"), "[redacted key]"),  # GitHub app tokens
+    (re.compile(r"\bgithub_pat_[0-9A-Za-z_]{22,}\b"), "[redacted key]"),  # GitHub fine-grained PAT
+    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{16,}\b"), "[redacted key]"),  # Stripe
+    (re.compile(r"\bxox[baprse]-[0-9A-Za-z-]{10,}\b"), "[redacted token]"),  # Slack (hyphenated)
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "Bearer [redacted token]"),  # Authorization header
+)
+
 
 def anonymize(text: str) -> str:
     """Strip obvious PII/secrets before content can enter the SHARED pool.
@@ -333,6 +370,48 @@ def anonymize(text: str) -> str:
     text = _EMAIL.sub("[email]", text)
     text = _PHONE.sub("[phone]", text)
     text = _LONGNUM.sub("[number]", text)
+    return text
+
+
+def sanitize_for_prompt(text: str, *, redact_pii: bool | None = None) -> str:
+    """Redact secrets (always) and, when enabled, PII from untrusted page/tool
+    content BEFORE it reaches a model prompt.
+
+    Inverts page-agent's biggest risk (docs/PAGE_AGENT_TRACKING.md §2.1 / ADR
+    0014 (d)): page-agent streams cleaned page HTML to the LLM and its own docs
+    admit the cleaning "does not guarantee removal of sensitive information",
+    leaving redaction to an opt-in regex hook most integrators never set. Olympus
+    redacts the genuinely dangerous class — secrets: private keys, JWTs,
+    API-key-shaped tokens, and credentials embedded in URLs — by DEFAULT, in
+    code, at the ingestion chokepoint (`wrap_untrusted`). PII (emails / phone
+    numbers / long id numbers) is gated behind `OLYMPUS_REDACT_PII`, because
+    redacting it unconditionally would break legitimate "read the contact
+    details" tasks; a privacy-strict deployment flips one flag.
+
+    Idempotent and structure-preserving: redacts in place with a labeled
+    placeholder, never deletes, so surrounding text stays readable and
+    `sanitize_for_prompt(sanitize_for_prompt(x)) == sanitize_for_prompt(x)`.
+    """
+    if not text:
+        return text
+    text = _INVISIBLE_RE.sub("", text)
+    # Full PEM block first (redacts the key material); the header-only regex is a
+    # fallback for a block truncated by an output cap (BEGIN kept, END lost).
+    text = _PEM_BLOCK_RE.sub("[redacted private key]", text)
+    text = _PRIVKEY_RE.sub("[redacted private key]", text)
+    text = _JWT_RE.sub("[redacted token]", text)
+    text = _KEYISH.sub("[redacted key]", text)
+    text = _URL_CRED.sub("https://[redacted-credentials]@", text)
+    for rx, repl in _EXTRA_SECRET_RES:
+        text = rx.sub(repl, text)
+    if redact_pii is None:
+        import os
+        redact_pii = (os.environ.get("OLYMPUS_REDACT_PII", "")
+                      .strip().lower() in ("1", "true", "yes", "on"))
+    if redact_pii:
+        text = _EMAIL.sub("[email]", text)
+        text = _PHONE.sub("[phone]", text)
+        text = _LONGNUM.sub("[number]", text)
     return text
 
 

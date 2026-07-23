@@ -15,6 +15,142 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Resilient local-Chrome launch (browser-smoke CI reliability)
+
+`browser.launch_local` waited a fixed 20s for Chrome's DevTools endpoint, then
+failed opaquely — flaky on cold/loaded CI runners where DevTools comes up slowly
+(the `browser-smoke` job's `test_browser_real.py` intermittently errored with
+"launched Chrome but its DevTools never responded"). The wait now defaults to 45s
+and is tunable via `OLYMPUS_BROWSER_LAUNCH_TIMEOUT`; if the Chrome process dies
+during the wait it fails FAST with the exit code and a tail of Chrome's stderr,
+so a genuine launch failure (missing `--no-sandbox`, missing libs) is diagnosable
+instead of a blind timeout. No behavior change to the CDP path itself.
+
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, complete: (a)–(e))
+
+Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
+capability surface as native Olympus features, each built on the security spine
+with the corresponding page-agent weakness inverted into a structural strength
+(analysis in `docs/PAGE_AGENT_TRACKING.md`, design in ADR 0014).
+
+- **Refusal-safe tool-call repair** (§3.1). New pure module
+  `olympus/toolcall_repair.py` absorbs page-agent's `autoFixer` malformed-tool-call
+  salvage — double-encoded arguments, ```json-fenced / prose-wrapped objects, and
+  a tool call emitted as JSON in `content` with an empty `tool_calls` array — for
+  the weak-model backends (`openai_compat`: Ollama/vLLM/LM Studio/Mistral/DeepSeek/
+  OpenRouter/Gemini; `bedrock_converse`: Titan/Nova/Llama/Mistral/Cohere). Wired
+  into `openai_compat.run_agent`; a shared brace-balanced JSON extractor now backs
+  `openai_compat.extract_json` and `bedrock_converse.complete_json` too (ad-hoc
+  regexes removed). **The inversion:** page-agent's fixer will reconstruct a tool
+  call from *any* content JSON — which can mask a refusal or fake an action from a
+  final answer. `recover_tool_call` fires **only when the content names a tool the
+  model was actually offered**, so a refusal or plain answer is returned untouched
+  as text, never laundered into an action. Pure module, no new dependency; 27
+  tests (`tests/test_toolcall_repair.py`) incl. two `run_agent` integration cases.
+
+- **Perception deltas + scroll geometry in `browser.observe()`** (§3.2/§3.3,
+  decision (b)). The numbered element map now carries two model-useful signals
+  page-agent has and Olympus lacked: a `*[i]` marker on elements that are *new
+  since the last observe()* on the same URL (keyed on the durable `__olySel`
+  selector, so it survives re-indexing; a navigation or the first look marks
+  nothing), a geometry header (`Page WxH, viewport WxH at N% (…px above, …px
+  below)`, or `fits in viewport`), and a bounded list of scrollable containers
+  each as a durable selector + remaining down/right px so the model can scroll a
+  specific pane. Both scroll-affordance reads are pure measurement (no page text
+  — not an ingestion surface) and **fail soft**: any read error omits the
+  header/footer, so `observe()` never degrades below the bare map (the whole
+  existing browser suite passes unchanged). Delta/geometry live only on the
+  model-facing `observe()`, not `_observe_raw`, so self-healing is unaffected;
+  `observe_frame` stays a plain map by design. Six new tests in
+  `tests/test_browser.py`.
+
+- **Human-fidelity click + landing hit-test as a guard** (§3.4, decision (c)).
+  `browser.act('click', selector=…)` now probes the target — resolve, scroll to
+  center, `elementFromPoint` — before acting. On a clear point it fires a
+  **trusted**, coordinate-accurate CDP click (mouseMoved→Pressed→Released),
+  stronger than page-agent's untrusted in-page dispatch. On an obscured or
+  off-screen point it does **not** fire a blind coordinate click (which would hit
+  the covering overlay); it dispatches a faithful pointer→mouse→click sequence to
+  the *intended* element and flags that the point was obscured so a modal/cookie
+  banner can be dismissed first. Page-agent silently clicks whatever is on top;
+  Olympus makes the hit-test a safety guard. Four new tests in
+  `tests/test_browser.py`.
+
+### Security — Default-on pre-prompt secret redaction (ADR 0014 (d), §3.5)
+
+Inverts page-agent's biggest risk (it streams cleaned page HTML to the LLM with
+redaction left to an opt-in hook its own docs say "does not guarantee removal of
+sensitive information"). New `security.sanitize_for_prompt` redacts secrets —
+whole private-key PEM blocks (key material, not just the header — new
+`_PEM_BLOCK_RE`), JWTs, API-key-shaped tokens, and credentials embedded in URLs —
+by **default, in code**, from untrusted content before it reaches a model prompt;
+PII (emails/phones/long numbers) is gated behind `OLYMPUS_REDACT_PII` so ordinary
+"read the contact details" tasks aren't broken. It is wired into `wrap_untrusted`
+— the fail-closed envelope every untrusted content passes through — so redaction
+is fail-closed too (an unregistered ingesting tool is still wrapped AND
+redacted), covering browser reads, `webctx`, and `web_fetch` in one seam;
+`browser.read`/`html`/`read_ax`/`console_logs` also redact at the source as
+defense-in-depth. Idempotent and structure-preserving. 14 new tests
+(`tests/test_prompt_redaction.py`).
+
+- **Governed `/llms.txt` consumption** (§3.6, decision (e) — completes the
+  program). New `webctx.fetch_llmstxt` + the INGESTION tool `web_llms_txt` fetch a
+  site's own author-curated `/llms.txt` as agent context. Page-agent does a raw
+  `fetch(origin + '/llms.txt')` with no SSRF check, no egress confinement, no
+  secret scan, and folds it in unwrapped; Olympus fetches through the
+  SSRF/egress-gated, DNS-rebinding-pinned `_http_get` (port-allowlisted, body
+  capped ≤8k, cached per origin), and because the tool is ingestion-classified its
+  output is wrapped untrusted AND secret-redacted before any model sees it. A
+  missing file degrades to a bounded "not found", never raises. Tool count 126 →
+  127 (threat-model row + capabilities manifest updated). Seven new tests
+  (`tests/test_webctx.py`).
+
+All five borrowable watchlist items (§3.1–§3.6) are now native Olympus
+capabilities; ADR 0014 is complete and `docs/PAGE_AGENT_TRACKING.md` is marked
+ABSORBED.
+
+### Security/Hardened — Adversarial hardening pass over the absorption (ADR 0014 (f))
+
+A self-review of decisions (a)–(e) closed five weak spots:
+
+- **Broader secret redaction.** `sanitize_for_prompt` now also catches Google API
+  keys / OAuth tokens, GitHub app tokens + fine-grained PATs, Stripe live/test
+  keys, hyphenated Slack tokens, and `Authorization: Bearer …` headers — distinct
+  provider shapes only (no blind high-entropy matching that would eat a hash or id
+  the user asked about).
+- **observe() label redaction.** `browser_observe` is an ACTION tool (not wrapped),
+  so `observe()` now secret-redacts each element label at the source — closing the
+  one path a page secret could reach the model unredacted.
+- **observe() perception is one atomic eval.** Geometry + scrollables now come from
+  a single `Runtime.evaluate` (they could previously disagree if the page scrolled
+  between two evals); the delta baseline reuses the already-resolved landed URL
+  (one fewer round-trip, no TOCTOU); the scrollable DOM walk is node-bounded.
+- **llms.txt cache** gained a TTL (a 404 no longer sticks process-wide) and an
+  entry bound with oldest-eviction.
+- Adversarial tests for each (incl. a zero-width split-token evasion, secret-in
+  -label, single-eval perception, cache expiry/bound).
+
+Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
+page* (origin sharing), `eval()` of model code in a live origin, an
+unauthenticated localhost control socket behind a reusable dialog, and sending
+unredacted page HTML to the model behind only an opt-in hook.
+
+### Docs — Competitive analysis: alibaba/page-agent (analysis-only)
+
+Added `docs/PAGE_AGENT_TRACKING.md`, a complete feature/capability inventory and
+security/design critique of [alibaba/page-agent](https://github.com/alibaba/page-agent)
+(the zero-install in-page GUI agent, npm 1.12.2), mapped to Olympus's own
+browser harness and web-context suite. Verdict: **nothing adopted** — Page
+Agent's in-page DOM-automation surface is already matched or exceeded by
+`olympus/browser.py` (numbered element map, index/selector/AX targeting, shadow
++ cross-origin iframe traversal, self-healing selectors, provenance-scored
+skills), while its distribution model (page-origin sharing, `eval()` JS tool,
+unauthenticated localhost MCP socket behind a reusable `window.confirm()`,
+unredacted page HTML to a third-party LLM) is a deliberate Olympus non-goal. A
+short watchlist of ergonomic/robustness ideas (LLM malformed-response
+auto-repair, "new element since last step" delta, geometry-aware scroll hints,
+human-click hit-testing) is recorded but unbuilt.
+
 ### Added — Three deferred capabilities built native (DEFERRED #12/#13/#11)
 
 Closes three `DEFERRED.md` items as first-class, tested, hardened capabilities.

@@ -551,3 +551,113 @@ def test_jsonld_array_and_malformed_are_safe(monkeypatch):
     r = webctx.scrape("https://x/", formats=("jsonld",))
     assert {"a": 1} in r["jsonld"] and {"b": 2} in r["jsonld"]   # list flattened
     # the malformed block is skipped, never raises
+
+
+# --- web_llms_txt: governed CONSUMPTION of a site's own /llms.txt -----------
+# (native Page Agent absorption, ADR 0014 (e); PAGE_AGENT_TRACKING §3.6)
+
+def test_fetch_llmstxt_returns_body_and_caches(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    calls = {"n": 0}
+
+    def _get(url, timeout=30, headers=None):
+        calls["n"] += 1
+        assert url == "https://acme.example/llms.txt"     # fetches the origin's file
+        return "# Acme\n- /docs: the docs\n- /api: the api\n"
+
+    monkeypatch.setattr(tools, "_http_get", _get)
+    r1 = webctx.fetch_llmstxt("https://acme.example/some/deep/page?q=1")
+    assert r1["found"] and "the docs" in r1["llmstxt"] and not r1["cached"]
+    # second call for the same ORIGIN is served from cache (one round-trip)
+    r2 = webctx.fetch_llmstxt("https://acme.example/other")
+    assert r2["cached"] and calls["n"] == 1
+
+
+def test_fetch_llmstxt_missing_degrades_never_raises(monkeypatch):
+    webctx._llmstxt_cache.clear()
+
+    def _get(url, timeout=30, headers=None):
+        raise RuntimeError("HTTP 404")
+
+    monkeypatch.setattr(tools, "_http_get", _get)
+    r = webctx.fetch_llmstxt("https://nope.example")
+    assert r["found"] is False and r["llmstxt"] == "" and "404" in r["error"]
+
+
+def test_fetch_llmstxt_invalid_url_is_safe(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    r = webctx.fetch_llmstxt("not a url")
+    assert r["found"] is False
+
+
+def test_fetch_llmstxt_body_is_capped(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "x" * 50_000)
+    r = webctx.fetch_llmstxt("https://big.example")
+    assert len(r["llmstxt"]) <= webctx._LLMSTXT_CONSUME_CAP
+
+
+def test_web_llms_txt_tool_registered_and_ingestion_classified():
+    # governed as an INGESTION tool → wrapped + secret-redacted before the model
+    assert "web_llms_txt" in tools.HANDLERS
+    assert "web_llms_txt" in security.INGESTION_TOOLS
+    assert security.should_wrap("web_llms_txt")
+    # and it is NOT an actuator (kept in ingesting runs, but no side effects)
+    assert "web_llms_txt" not in security.ACTION_TOOLS
+
+
+def test_web_llms_txt_handler_formats_found_and_missing(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "# Site guide\n- hello\n")
+    out = tools._web_llms_txt("https://ok.example/x")
+    assert "Site guide" in out and "llms.txt from https://ok.example/llms.txt" in out
+
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "")
+    out2 = tools._web_llms_txt("https://empty.example")
+    assert out2.startswith("No llms.txt for")
+
+
+def test_web_llms_txt_content_is_secret_redacted_when_wrapped(monkeypatch):
+    # End-to-end with decision (d): a secret in a site's llms.txt is redacted
+    # once the ingestion output is wrapped for the model.
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "key sk-abcDEF123456ghiJKL789")
+    raw = tools._web_llms_txt("https://leak.example")
+    wrapped = security.wrap_untrusted(raw, source="web_llms_txt")
+    assert "sk-abcDEF123456ghiJKL789" not in wrapped
+    assert "[redacted key]" in wrapped
+
+
+# --- H4: llms.txt cache TTL + bound (hardening) ------------------------------
+
+def test_fetch_llmstxt_cache_expires_after_ttl(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    hits = {"n": 0}
+
+    def _get(url, timeout=30, headers=None):
+        hits["n"] += 1
+        return "# guide\n- x\n"
+
+    monkeypatch.setattr(tools, "_http_get", _get)
+    webctx.fetch_llmstxt("https://ttl.example")
+    assert hits["n"] == 1
+    # force the single cached entry to look older than the TTL
+    origin = "https://ttl.example"
+    ts, result = webctx._llmstxt_cache[origin]
+    webctx._llmstxt_cache[origin] = (ts - webctx._LLMSTXT_TTL - 1, result)
+    webctx.fetch_llmstxt("https://ttl.example")
+    assert hits["n"] == 2                              # refetched after expiry
+
+
+def test_fetch_llmstxt_cache_is_bounded(monkeypatch):
+    webctx._llmstxt_cache.clear()
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda url, timeout=30, headers=None: "# g\n")
+    for i in range(webctx._LLMSTXT_CACHE_MAX + 25):
+        webctx.fetch_llmstxt(f"https://site{i}.example")
+    assert len(webctx._llmstxt_cache) <= webctx._LLMSTXT_CACHE_MAX

@@ -178,6 +178,87 @@ _CHECKPOINT_JS = (
 
 _CHECKPOINT_KINDS = ("captcha", "otp", "step_up", "none")
 
+_SCROLLABLE_MAX = 8           # max scrollable regions surfaced by observe()
+_SCROLL_WALK_MAX = 4000       # cap DOM nodes examined for scrollables (anti-O(page))
+
+# Scroll affordances for observe() — page geometry (how much is off-screen) AND
+# the scrollable containers — in ONE Runtime.evaluate, so both are measured at the
+# SAME instant (a separate geometry eval and scrollables eval could disagree if
+# the page scrolls between them). Returns {geom:{vw,vh,pw,ph,sx,sy}, scroll:[{s,
+# db,rr}]}. Uses __olySel (auto-injected by _prep). The scrollable walk is bounded
+# to _SCROLL_WALK_MAX nodes examined and _SCROLLABLE_MAX emitted, so a huge DOM
+# can't make perception O(page). Pure measurement — no page text, not an ingestion
+# surface. __OLY_PERCEPT__ routes it offline; fails soft to '' (→ omitted).
+_PERCEPTION_JS = (
+    "(function(){/*__OLY_PERCEPT__*/try{"
+    "var de=document.documentElement,b=document.body;"
+    "var vw=window.innerWidth||de.clientWidth||0;"
+    "var vh=window.innerHeight||de.clientHeight||0;"
+    "var pw=Math.max(de?de.scrollWidth:0,b?b.scrollWidth:0);"
+    "var ph=Math.max(de?de.scrollHeight:0,b?b.scrollHeight:0);"
+    "var sx=window.scrollX||de.scrollLeft||0;"
+    "var sy=window.scrollY||de.scrollTop||0;"
+    "var geom={vw:vw,vh:vh,pw:pw,ph:ph,sx:sx,sy:sy};"
+    "var out=[],all=document.querySelectorAll('*'),seen=0;"
+    "for(var i=0;i<all.length&&out.length<KMAX&&seen<WALKMAX;i++){var e=all[i];seen++;"
+    "var st;try{st=window.getComputedStyle(e);}catch(x){continue;}"
+    "var oy=st.overflowY,ox=st.overflowX;"
+    "var dy=(oy==='auto'||oy==='scroll')?(e.scrollHeight-e.clientHeight):0;"
+    "var dx=(ox==='auto'||ox==='scroll')?(e.scrollWidth-e.clientWidth):0;"
+    "if(dy<=8&&dx<=8)continue;"
+    "var r=e.getBoundingClientRect();if(r.width<40||r.height<40)continue;"
+    "out.push({s:__olySel(e),db:Math.max(0,dy-(e.scrollTop||0)),"
+    "rr:Math.max(0,dx-(e.scrollLeft||0))});}"
+    "return JSON.stringify({geom:geom,scroll:out});}catch(e){return '';}})()"
+).replace("KMAX", str(_SCROLLABLE_MAX)).replace("WALKMAX", str(_SCROLL_WALK_MAX))
+
+
+def _click_probe_js(selector: str) -> str:
+    """Resolve the element, scroll it to center, and report its click point plus
+    whether that point is OBSCURED by an unrelated element (an overlay / cookie
+    banner / modal intercepting the hit). Absorbs page-agent's elementFromPoint
+    landing hit-test — but as a *guard*, not a silent retarget (ADR 0014 (c)).
+    __OLY_CLICK__ routes it offline. Returns JSON {found,cx,cy,obstructed,tag}."""
+    sel = json.dumps(selector)
+    return (
+        "(function(){/*__OLY_CLICK__*/var e=__olyq(" + sel + ");"
+        "if(!e)return JSON.stringify({found:false});"
+        "try{e.scrollIntoView({block:'center',inline:'center'});}catch(x){}"
+        "var r=e.getBoundingClientRect();"
+        "var cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "var top=null;try{top=document.elementFromPoint(cx,cy);}catch(x){}"
+        # Obscured when the topmost element at the point is neither the target,
+        # an ancestor of it, nor a descendant of it (i.e. a foreign overlay), or
+        # when the point isn't hittable at all (off-view / null).
+        "var obstructed=!top||(top!==e&&!e.contains(top)&&!top.contains(e));"
+        "return JSON.stringify({found:true,cx:Math.round(cx),cy:Math.round(cy),"
+        "obstructed:obstructed,tag:(e.tagName||'').toLowerCase()});})()"
+    )
+
+
+def _dispatch_click_js(selector: str) -> str:
+    """A faithful in-page click sequence on the INTENDED element (spec-ordered
+    pointer→mouse events + focus + native click for the default action). Used
+    only on the obscured/off-view fallback, so we actuate the observed control
+    directly instead of firing a blind coordinate click that would land on the
+    overlay. __OLY_CLICKDISPATCH__ routes it offline. Returns bool."""
+    sel = json.dumps(selector)
+    return (
+        "(function(){/*__OLY_CLICKDISPATCH__*/var e=__olyq(" + sel + ");"
+        "if(!e)return false;var r=e.getBoundingClientRect();"
+        "var cx=r.left+r.width/2,cy=r.top+r.height/2;"
+        "var po={bubbles:true,cancelable:true,clientX:cx,clientY:cy,pointerType:'mouse'};"
+        "var mo={bubbles:true,cancelable:true,clientX:cx,clientY:cy,button:0};"
+        "try{e.dispatchEvent(new PointerEvent('pointerover',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mouseover',mo));"
+        "try{e.dispatchEvent(new PointerEvent('pointerdown',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mousedown',mo));"
+        "try{if(e.focus)e.focus();}catch(x){}"
+        "try{e.dispatchEvent(new PointerEvent('pointerup',po));}catch(x){}"
+        "e.dispatchEvent(new MouseEvent('mouseup',mo));"
+        "try{e.click();}catch(x){}return true;})()"
+    )
+
 # --- transport -----------------------------------------------------------
 
 
@@ -224,7 +305,18 @@ class FakeTransport:
                  checkpoint: dict | None = None,
                  ax_nodes: list[dict] | None = None,
                  console: list[dict] | None = None,
+                 geometry: dict | None = None,
+                 scrollables: list[dict] | None = None,
+                 click_obstructed: bool = False,
                  pdf_b64: str = "JVBERi0xLjQK") -> None:
+        # Scriptable observe() scroll affordances. None → the eval returns ''
+        # (the graceful-omit path, which is what every plain observe() test
+        # exercises); set them to drive the geometry header / scrollable list.
+        self.geometry = geometry
+        self.scrollables = scrollables
+        # Whether the click landing probe reports the click point as obscured by
+        # an overlay — drives the obstructed-click fallback path in act('click').
+        self.click_obstructed = click_obstructed
         # Scriptable Accessibility.getFullAXTree nodes (role/name/value/ignored).
         self.ax_nodes = ax_nodes or []
         # Console messages the page has "emitted" (level/text) — what a real
@@ -323,6 +415,23 @@ class FakeTransport:
                         "s": e.get("s", f'[data-olympus-idx="{i}"]')}
                        for i, e in enumerate(self.elements)]
                 return {"result": {"value": json.dumps(lst)}}
+            # observe() scroll affordances — checked BEFORE the __olyq branch
+            # (the scrollables script carries __olyq via the injected deep helper).
+            if "__OLY_PERCEPT__" in expr:         # geometry + scrollables, or '' → omit
+                if self.geometry is None and self.scrollables is None:
+                    return {"result": {"value": ""}}
+                return {"result": {"value": json.dumps(
+                    {"geom": self.geometry or {},
+                     "scroll": self.scrollables or []})}}
+            if "__OLY_CLICK__" in expr:           # click landing probe
+                sel = self._matched_selector(expr)
+                if sel is None:
+                    return {"result": {"value": json.dumps({"found": False})}}
+                return {"result": {"value": json.dumps(
+                    {"found": True, "cx": 50, "cy": 35,
+                     "obstructed": self.click_obstructed, "tag": "button"})}}
+            if "__OLY_CLICKDISPATCH__" in expr:   # direct targeted dispatch
+                return {"result": {"value": self._matched_selector(expr) is not None}}
             if "__olyq" in expr:                  # exists / fill / click / read
                 sel = self._matched_selector(expr)
                 if "getBoundingClientRect" in expr:   # element screenshot clip
@@ -721,17 +830,30 @@ def _chrome_args(binary: str, port: int, user_data_dir: str,
 _launched: Any = None      # (Popen, base_url) of a browser we started
 
 
-def launch_local(headless: bool = False, timeout: float = 20.0) -> str:
+def launch_local(headless: bool = False, timeout: float | None = None) -> str:
     """Launch a local Chrome with remote debugging and return its DevTools HTTP
     base. Reuses an already-launched one. Best-effort: raises BrowserUnavailable
-    if no binary is found or DevTools never comes up."""
+    if no binary is found or DevTools never comes up.
+
+    The startup wait defaults to 45s (cold/loaded CI runners can be slow to bring
+    up the DevTools endpoint) and is tunable via OLYMPUS_BROWSER_LAUNCH_TIMEOUT.
+    If the Chrome process dies during the wait we fail FAST with its exit code and
+    a tail of its stderr, instead of blocking the full timeout on a blind poll —
+    so a real launch failure (missing --no-sandbox, missing libs) is diagnosable,
+    not an opaque "never responded"."""
     global _launched
     if _launched is not None and _launched[0].poll() is None:
         return _launched[1]
+    import os
     import subprocess
     import tempfile
     import time as _time
     import urllib.request
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("OLYMPUS_BROWSER_LAUNCH_TIMEOUT", "45"))
+        except (TypeError, ValueError):
+            timeout = 45.0
     binary = _find_chrome()
     if not binary:
         raise BrowserUnavailable(
@@ -739,20 +861,44 @@ def launch_local(headless: bool = False, timeout: float = 20.0) -> str:
             "OLYMPUS_BROWSER_BIN")
     port = _free_port()
     profile = tempfile.mkdtemp(prefix="olympus-browser-")
+    # Capture Chrome's stderr so a startup crash is diagnosable (delete=False so
+    # it survives the Popen; small, and left behind like the profile dir).
+    err_log = tempfile.NamedTemporaryFile(
+        prefix="olympus-browser-", suffix=".log", delete=False)
     proc = subprocess.Popen(_chrome_args(binary, port, profile, headless),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=err_log)
     base = f"http://127.0.0.1:{port}"
     deadline = _time.monotonic() + timeout
+    crashed = False
     while _time.monotonic() < deadline:
+        if proc.poll() is not None:        # Chrome exited — stop waiting the full timeout
+            crashed = True
+            break
         try:
             with urllib.request.urlopen(base + "/json/version", timeout=2) as r:
                 if r.status == 200:
                     _launched = (proc, base)
+                    err_log.close()
                     return base
         except Exception:
             _time.sleep(0.2)
-    proc.terminate()
-    raise BrowserUnavailable("launched Chrome but its DevTools never responded")
+    if not crashed:
+        proc.terminate()
+    detail = ""
+    try:
+        err_log.flush()
+        err_log.close()
+        with open(err_log.name, "r", errors="replace") as fh:
+            tail = fh.read()[-400:].strip()
+        if tail:
+            detail = f" — chrome stderr: {tail}"
+    except Exception:
+        pass
+    code = proc.poll()
+    reason = (f"process exited with code {code}" if code is not None
+              else f"process alive but DevTools silent after {timeout:.0f}s")
+    raise BrowserUnavailable(
+        f"launched Chrome but its DevTools never responded ({reason}){detail}")
 
 
 def _autolaunch_enabled() -> bool:
@@ -818,6 +964,19 @@ class BrowserSession:
         # Whether the sub-resource egress gate has been installed on this
         # target yet (Network.setBlockedURLs persists once set, so apply once).
         self._subres_gated: bool = False
+        # Perception-delta baseline: the durable selectors seen by the PREVIOUS
+        # observe(), plus the URL they were seen on. Lets observe() flag elements
+        # that are NEW since the last look (a *[i] marker) — the strongest signal
+        # that an input/click revealed a suggestion list, dialog, or step — but
+        # only when the URL is unchanged (a navigation replaces the whole set, so
+        # "new" would be meaningless noise). Absorbed from page-agent's `*[`
+        # marking; see docs/PAGE_AGENT_TRACKING.md §3.2 / ADR 0014 (b).
+        self._prev_observe_sels: set[str] = set()
+        self._prev_observe_url: str = ""
+        # Last URL resolved by _blocked_landing() — reused by observe() for the
+        # delta baseline instead of a second _current_url() eval (one fewer CDP
+        # round-trip, and no TOCTOU between the landing check and the delta URL).
+        self._landed_url: str = ""
 
     def _apply_subresource_gate(self) -> None:
         """Install the network-layer block on sub-resource requests to SSRF
@@ -883,6 +1042,7 @@ class BrowserSession:
         navigation can move the tab onto an internal host before we read it.
         Returns a reason if the current page must not be exposed, else None."""
         href = self._current_url()
+        self._landed_url = href or ""      # reused by observe()'s delta baseline
         if not href or href.startswith("about:"):
             return None
         return security.url_block_reason(href)
@@ -1129,7 +1289,10 @@ class BrowserSession:
         else:
             expr = "document.body ? document.body.innerText : ''"
         text = self._eval(expr)
-        return (text or "")[:_TEXT_LIMIT]
+        # Redact secrets from page text before it can reach a model prompt
+        # (default-on; ADR 0014 (d)). Defense-in-depth: the tool layer also
+        # redacts via wrap_untrusted, but the raw method must never emit a secret.
+        return security.sanitize_for_prompt((text or "")[:_TEXT_LIMIT])
 
     def html(self) -> str:
         """The current page's serialized HTML (post-render / post-action), for a
@@ -1138,7 +1301,8 @@ class BrowserSession:
         self.ingested_untrusted = True
         if self._blocked_landing():
             return ""
-        return (self._eval("document.documentElement.outerHTML") or "")[:_HTML_LIMIT]
+        raw = (self._eval("document.documentElement.outerHTML") or "")[:_HTML_LIMIT]
+        return security.sanitize_for_prompt(raw)
 
     def read_ax(self, limit: int = 0) -> str:
         """Perceive the page through its ACCESSIBILITY TREE (CDP
@@ -1178,7 +1342,7 @@ class BrowserSession:
                 break
         if not lines:
             return "(no labelled accessibility nodes on this page)"
-        return "\n".join(lines)[:_TEXT_LIMIT]
+        return security.sanitize_for_prompt("\n".join(lines)[:_TEXT_LIMIT])
 
     def screenshot(self, selector: str = "", full_page: bool = False) -> str:
         """Capture the current page as a base64 PNG (CDP Page.captureScreenshot),
@@ -1267,7 +1431,7 @@ class BrowserSession:
             level = str(m.get("level", "log"))[:12]
             text = str(m.get("text", ""))[:_LABEL_MAX * 4]
             out.append(f"[{level}] {text}")
-        return "\n".join(out)[:_TEXT_LIMIT]
+        return security.sanitize_for_prompt("\n".join(out)[:_TEXT_LIMIT])
 
     @staticmethod
     def _clip_from(raw: str) -> dict | None:
@@ -1294,12 +1458,109 @@ class BrowserSession:
         items = self._observe_raw(limit)
         if items is None:
             return "(could not read the page's interactive elements)"
+
+        # Perception delta: which durable selectors are NEW since the last
+        # observe() on this same URL. On a fresh page (URL changed or first look)
+        # nothing is marked — a navigation replaces the whole set, so "new" would
+        # be noise. Marked elements get a `*` prefix (page-agent's `*[` idiom).
+        # Reuse the URL _observe_raw() already resolved via _blocked_landing()
+        # (no extra eval, and no TOCTOU between the landing check and the delta).
+        cur_url = self._landed_url
+        cur_sels = {str(it.get("s") or "") for it in items if it.get("s")}
+        same_page = bool(self._prev_observe_url) and cur_url == self._prev_observe_url
+        new_sels = (cur_sels - self._prev_observe_sels) if same_page else set()
+        self._prev_observe_sels = cur_sels
+        self._prev_observe_url = cur_url
+
         lines = []
         for it in items:
-            name = str(it.get("n") or "").strip()[:_LABEL_MAX]
+            # observe() is an ACTION tool (browser_observe) and is NOT wrapped by
+            # the ingestion path, so redact secrets in the label HERE — a token
+            # sitting in an element's text/value is never a useful control
+            # identifier, and this closes the one path a page secret could reach
+            # the model unredacted (ADR 0014 (d) hardening).
+            name = security.sanitize_for_prompt(
+                str(it.get("n") or "").strip())[:_LABEL_MAX]
             label = f' "{name}"' if name else ""
-            lines.append(f"[{it.get('i')}] {it.get('t')}{label}")
-        return "\n".join(lines) or "(no interactive elements found)"
+            sel = str(it.get("s") or "")
+            mark = "*" if (sel and sel in new_sels) else ""
+            lines.append(f"{mark}[{it.get('i')}] {it.get('t')}{label}")
+        body = "\n".join(lines) or "(no interactive elements found)"
+
+        # Scroll affordances: a geometry header (how much is off-screen) and any
+        # scrollable containers, so the model scrolls the right region instead of
+        # guessing. ONE eval measures both atomically; both fail soft — omitted
+        # entirely if the page can't report them — so perception never regresses
+        # to worse than the bare map.
+        geom, scroll = self._perception()
+        header = self._geometry_line(geom)
+        footer = self._scrollables_block(scroll)
+        parts = [p for p in (header, body, footer) if p]
+        return "\n".join(parts)
+
+    def _perception(self) -> tuple[dict, list]:
+        """One eval returning (geometry dict, scrollables list) measured at the
+        same instant. ({}, []) on any read failure (affordances simply omitted)."""
+        try:
+            data = json.loads(self._eval(_PERCEPTION_JS) or "")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}, []
+        if not isinstance(data, dict):
+            return {}, []
+        geom = data.get("geom") if isinstance(data.get("geom"), dict) else {}
+        scroll = data.get("scroll") if isinstance(data.get("scroll"), list) else []
+        return geom, scroll
+
+    def _geometry_line(self, geo: dict) -> str:
+        """One-line page geometry for observe(): viewport, page size, and how much
+        is above/below the fold. '' when geometry is unavailable (header omitted)."""
+        if not isinstance(geo, dict) or not geo:
+            return ""
+        try:
+            vw, vh = int(geo["vw"]), int(geo["vh"])
+            pw, ph = int(geo["pw"]), int(geo["ph"])
+            sy = int(geo.get("sy", 0))
+        except (KeyError, TypeError, ValueError):
+            return ""
+        if vw <= 0 or vh <= 0:
+            return ""
+        max_scroll = max(0, ph - vh)
+        if max_scroll <= 4:
+            return f"Page {pw}x{ph}, viewport {vw}x{vh} (fits in viewport)"
+        above = max(0, min(sy, max_scroll))
+        below = max(0, max_scroll - above)
+        pct = round(100 * above / max_scroll) if max_scroll else 0
+        return (f"Page {pw}x{ph}, viewport {vw}x{vh} at {pct}% "
+                f"({above}px above, {below}px below - scroll to see more)")
+
+    def _scrollables_block(self, regions: list) -> str:
+        """A short list of scrollable containers (durable selector + remaining
+        px), so the model can scroll a specific region. '' when there are none."""
+        if not isinstance(regions, list) or not regions:
+            return ""
+        rows = []
+        for r in regions[:_SCROLLABLE_MAX]:
+            if not isinstance(r, dict):
+                continue
+            sel = str(r.get("s") or "").strip()
+            if not sel:
+                continue
+            try:
+                db, rr = int(r.get("db", 0)), int(r.get("rr", 0))
+            except (TypeError, ValueError):
+                db, rr = 0, 0
+            dirs = []
+            if db > 8:
+                dirs.append(f"{db}px below")
+            if rr > 8:
+                dirs.append(f"{rr}px right")
+            if not dirs:
+                continue
+            rows.append(f'- "{sel}" ({", ".join(dirs)})')
+        if not rows:
+            return ""
+        head = "Scrollable regions (act: scroll with this selector):"
+        return "\n".join([head, *rows])
 
     def detect_checkpoint(self) -> dict:
         """Detect a human-verification checkpoint on the current page — the moat's
@@ -1492,15 +1753,41 @@ class BrowserSession:
 
         if action == "click":
             if selector:
-                ok = self._eval_bool(
-                    f"(function(){{var e=__olyq("
-                    f"{json.dumps(selector)});if(e){{e.click();return true;}}"
-                    f"return false;}})()")
-                if not ok:
+                # Probe first: resolve + scroll to center + hit-test the landing
+                # point. Absorbs page-agent's elementFromPoint check, but as a
+                # GUARD (ADR 0014 (c)): when the point is clear we fire a TRUSTED,
+                # coordinate-accurate CDP click (stronger than page-agent's
+                # untrusted in-page dispatch); when an overlay obscures the point
+                # we refuse the blind coordinate click (it would hit the overlay)
+                # and instead dispatch straight to the intended element, flagging
+                # the obstruction so the operator can dismiss the modal first.
+                try:
+                    probe = json.loads(self._eval(_click_probe_js(selector)) or "")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    probe = {}
+                if not isinstance(probe, dict) or not probe.get("found"):
                     return f"Error: no element for {selector}."
+                cx, cy = probe.get("cx"), probe.get("cy")
+                clear = (not probe.get("obstructed")
+                         and isinstance(cx, (int, float))
+                         and isinstance(cy, (int, float)))
+                note = ""
+                if clear:
+                    self._call("Input.dispatchMouseEvent", type="mouseMoved",
+                               x=cx, y=cy)
+                    self._call("Input.dispatchMouseEvent", type="mousePressed",
+                               x=cx, y=cy, button="left", clickCount=1)
+                    self._call("Input.dispatchMouseEvent", type="mouseReleased",
+                               x=cx, y=cy, button="left", clickCount=1)
+                else:
+                    if not self._eval_bool(_dispatch_click_js(selector)):
+                        return f"Error: no element for {selector}."
+                    note = (" (click point was obscured or off-screen; dispatched "
+                            "directly to the element — an overlay/cookie banner "
+                            "may need dismissing first)")
                 self._journal_step(f"click {target}")
                 self._recipe_step("click", selector)
-                return f"Clicked {selector}."
+                return f"Clicked {selector}.{note}"
             self._call("Input.dispatchMouseEvent", type="mousePressed",
                        x=x, y=y, button="left", clickCount=1)
             self._call("Input.dispatchMouseEvent", type="mouseReleased",
