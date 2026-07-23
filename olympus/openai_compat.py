@@ -9,14 +9,13 @@ it works even on providers without response_format support.
 from __future__ import annotations
 
 import json
-import re
 import time
 import urllib.error
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
-from . import config, security, tools, usage
+from . import config, security, toolcall_repair, tools, usage
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -229,18 +228,17 @@ def _to_openai_tools(tool_defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def extract_json(text: str) -> dict[str, Any]:
-    """Lenient JSON extraction: tolerate code fences and surrounding prose."""
-    text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start : end + 1])
-        raise
+    """Lenient JSON extraction: tolerate code fences and surrounding prose.
+
+    Delegates to the shared brace-balanced recovery in `toolcall_repair` (which
+    also backs the tool-call repair path), so both structured-output and
+    tool-call recovery share one hardened scanner. Raises `ValueError` when no
+    JSON object can be recovered, preserving the previous contract.
+    """
+    obj = toolcall_repair.extract_json_object(text)
+    if obj is None:
+        raise ValueError("no JSON object found in model response")
+    return obj
 
 
 def complete_text(settings: config.Settings, system: str,
@@ -283,6 +281,10 @@ def run_agent(settings: config.Settings, system: str, task: str,
         {"role": "user", "content": task},
     ]
     payload_tools = _to_openai_tools(tool_defs) if tool_defs else None
+    # Tool names the model is actually offered — the refusal-safety guard for
+    # tool-call recovery: a call is only reconstructed from `content` when it
+    # names one of these (see toolcall_repair.recover_tool_call).
+    known_names = {d["name"] for d in tool_defs} if tool_defs else set()
 
     reasoning = _reasoning_params(settings.model, effort)
     for _ in range(max_iterations):
@@ -292,6 +294,16 @@ def run_agent(settings: config.Settings, system: str, task: str,
         payload.update(reasoning)
         message = _post(settings, payload)["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
+
+        # Weak models sometimes emit the tool call as JSON in `content` with an
+        # empty `tool_calls`. Recover it — but only when it names an offered tool,
+        # so a genuine refusal or final answer stays text (never faked into an
+        # action). No tools offered → nothing to recover.
+        if not tool_calls and payload_tools:
+            recovered = toolcall_repair.recover_tool_call(
+                message.get("content") or "", known_names)
+            if recovered is not None:
+                tool_calls = [recovered]
 
         if not tool_calls:
             return (message.get("content") or "").strip()
@@ -305,7 +317,8 @@ def run_agent(settings: config.Settings, system: str, task: str,
             name = call["function"]["name"]
             handler = tools.resolve_handler(name)
             try:
-                args = json.loads(call["function"].get("arguments") or "{}")
+                args = toolcall_repair.repair_arguments(
+                    call["function"].get("arguments"))
                 result = handler(**args) if handler else f"Error: unknown tool {name}"
             except Exception as err:
                 result = f"Error: {err}"

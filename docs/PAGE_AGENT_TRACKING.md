@@ -8,12 +8,24 @@ used here** — this is competitive/inspiration analysis only, read from a shall
 clone.
 
 - **Last checked:** 2026-07-23 (commit `b7401a0`, `main`, npm `page-agent` 1.12.2)
-- **Adoption status:** 🔍 **ANALYSIS ONLY** — nothing adopted. Page Agent's
-  entire capability surface is already matched or exceeded by Olympus's governed
-  browser harness (`olympus/browser.py`) and web-context suite
-  (`olympus/webctx.py`); its *distribution model* (zero-install in-page JS) is a
-  deliberate Olympus non-goal. A small number of ergonomic ideas are on the
-  watchlist (§3).
+- **Adoption status:** 🔄 **ABSORBING** (ADR 0014). Page Agent's entire
+  capability surface is already matched or exceeded by Olympus's governed browser
+  harness (`olympus/browser.py`) and web-context suite (`olympus/webctx.py`), and
+  its *distribution model* (zero-install in-page JS, page-origin sharing) is a
+  deliberate Olympus non-goal. The genuinely additive ergonomics/robustness
+  patterns from the watchlist (§3) are being absorbed natively — each one built on
+  the Olympus spine with the corresponding page-agent weakness inverted into a
+  structural strength:
+    - **§3.1 — resilient tool-call repair → SHIPPED** as `olympus/toolcall_repair.py`
+      (ADR 0014 (a)): wired into `openai_compat.run_agent` + `bedrock_converse`,
+      **refusal-safe by construction** (recovers a call only when the content names
+      an offered tool, so a refusal is never laundered into an action — inverting
+      page-agent's `autoFixer`, which can). `tests/test_toolcall_repair.py`.
+    - §3.2 perception deltas + scroll geometry → ADR 0014 (b), planned.
+    - §3.4 human-fidelity click + landing hit-test → ADR 0014 (c), planned.
+    - §3.5 default-on pre-prompt redaction → ADR 0014 (d), planned.
+    - §3.6 governed `/llms.txt` consumption → ADR 0014 (e), planned.
+  The four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
 - **What it is:** a client-side, **zero-install in-page GUI agent** — "one
   script gives any web page its own AI agent." Drop a `<script>` tag (or `npm
   install page-agent`) and the page gains a natural-language agent that reads its

@@ -15,6 +15,33 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, decision (a))
+
+Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
+capability surface as native Olympus features, each built on the security spine
+with the corresponding page-agent weakness inverted into a structural strength
+(analysis in `docs/PAGE_AGENT_TRACKING.md`, design in ADR 0014).
+
+- **Refusal-safe tool-call repair** (§3.1). New pure module
+  `olympus/toolcall_repair.py` absorbs page-agent's `autoFixer` malformed-tool-call
+  salvage — double-encoded arguments, ```json-fenced / prose-wrapped objects, and
+  a tool call emitted as JSON in `content` with an empty `tool_calls` array — for
+  the weak-model backends (`openai_compat`: Ollama/vLLM/LM Studio/Mistral/DeepSeek/
+  OpenRouter/Gemini; `bedrock_converse`: Titan/Nova/Llama/Mistral/Cohere). Wired
+  into `openai_compat.run_agent`; a shared brace-balanced JSON extractor now backs
+  `openai_compat.extract_json` and `bedrock_converse.complete_json` too (ad-hoc
+  regexes removed). **The inversion:** page-agent's fixer will reconstruct a tool
+  call from *any* content JSON — which can mask a refusal or fake an action from a
+  final answer. `recover_tool_call` fires **only when the content names a tool the
+  model was actually offered**, so a refusal or plain answer is returned untouched
+  as text, never laundered into an action. Pure module, no new dependency; 27
+  tests (`tests/test_toolcall_repair.py`) incl. two `run_agent` integration cases.
+
+Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
+page* (origin sharing), `eval()` of model code in a live origin, an
+unauthenticated localhost control socket behind a reusable dialog, and sending
+unredacted page HTML to the model behind only an opt-in hook.
+
 ### Docs — Competitive analysis: alibaba/page-agent (analysis-only)
 
 Added `docs/PAGE_AGENT_TRACKING.md`, a complete feature/capability inventory and
