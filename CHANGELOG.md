@@ -15,7 +15,7 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Added — Absorb Page Agent's capabilities natively (ADR 0014, decision (a))
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(b))
 
 Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
 capability surface as native Olympus features, each built on the security spine
@@ -36,6 +36,22 @@ with the corresponding page-agent weakness inverted into a structural strength
   model was actually offered**, so a refusal or plain answer is returned untouched
   as text, never laundered into an action. Pure module, no new dependency; 27
   tests (`tests/test_toolcall_repair.py`) incl. two `run_agent` integration cases.
+
+- **Perception deltas + scroll geometry in `browser.observe()`** (§3.2/§3.3,
+  decision (b)). The numbered element map now carries two model-useful signals
+  page-agent has and Olympus lacked: a `*[i]` marker on elements that are *new
+  since the last observe()* on the same URL (keyed on the durable `__olySel`
+  selector, so it survives re-indexing; a navigation or the first look marks
+  nothing), a geometry header (`Page WxH, viewport WxH at N% (…px above, …px
+  below)`, or `fits in viewport`), and a bounded list of scrollable containers
+  each as a durable selector + remaining down/right px so the model can scroll a
+  specific pane. Both scroll-affordance reads are pure measurement (no page text
+  — not an ingestion surface) and **fail soft**: any read error omits the
+  header/footer, so `observe()` never degrades below the bare map (the whole
+  existing browser suite passes unchanged). Delta/geometry live only on the
+  model-facing `observe()`, not `_observe_raw`, so self-healing is unaffected;
+  `observe_frame` stays a plain map by design. Six new tests in
+  `tests/test_browser.py`.
 
 Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
 page* (origin sharing), `eval()` of model code in a live origin, an

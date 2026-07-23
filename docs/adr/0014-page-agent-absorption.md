@@ -85,12 +85,36 @@ pure (no I/O, no logging), adds nothing to the three-dependency footprint, and i
 covered by `tests/test_toolcall_repair.py` (27 cases incl. two `run_agent`
 integration tests: a content-emitted call executes; a refusal never does).
 
-## Decision (b): perception deltas + scroll geometry in `observe()` — PLANNED
+## Decision (b): perception deltas + scroll geometry in `observe()` — SHIPPED
 
-Absorb page-agent's `*[index]` "new since last step" element marking and its
-pages-above/below + `data-scrollable`-container scroll affordances as optional,
-deterministic annotations in `browser.observe()`'s numbered map. (Watchlist §3.2/
-§3.3.)
+Page Agent enriches its element map with two model-useful signals Olympus's
+`observe()` lacked: a `*[` marker on elements that are *new since the last step*
+(the strongest signal that an input revealed a suggestion list / dialog / next
+step), and scroll affordances (pages above/below + `data-scrollable` containers
+with remaining distance) so the model scrolls the *right* region. Both are now
+native, deterministic annotations on `browser.observe()`:
+
+- **Perception delta.** `BrowserSession` remembers the durable selectors from the
+  previous `observe()` and the URL they were seen on. The next `observe()` on the
+  *same* URL prefixes any newly-appeared element with `*` (page-agent's idiom). A
+  navigation (URL change) or the first look marks nothing — a new page replaces
+  the whole set, so "new" would be noise. Keyed on the durable `__olySel`
+  selector, not the ephemeral index, so it survives re-indexing.
+- **Scroll geometry.** A one-line header (`Page WxH, viewport WxH at N%
+  (…px above, …px below)`, or `fits in viewport`) from a single measurement eval
+  (`_GEOMETRY_JS`), plus a bounded list of scrollable containers each as a durable
+  selector + remaining down/right px (`_SCROLLABLES_JS`, ≤ `_SCROLLABLE_MAX`) so
+  the model can `act(scroll, selector=…)` a specific pane.
+
+**Safety / no-regression.** Both scroll-affordance evals are pure measurement (no
+page text — not an ingestion surface) and **fail soft**: any read error omits the
+header/footer, so perception never degrades below the bare map. When the
+transport can't report them, `observe()` returns exactly the previous output
+(verified — the whole existing browser suite passes unchanged). The delta and
+geometry live only on the model-facing `observe()`, not on `_observe_raw` (which
+also backs self-healing), so healing is unaffected; `observe_frame` (the governed
+cross-origin path) stays a plain map by design. Covered by six new cases in
+`tests/test_browser.py`.
 
 ## Decision (c): human-fidelity click + landing hit-test — PLANNED
 

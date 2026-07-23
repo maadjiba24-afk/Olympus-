@@ -1167,3 +1167,97 @@ def test_capture_tools_registered_and_classified():
     assert "browser_save_pdf" not in security.ACTION_TOOLS
     # console output is page-controlled → untrusted ingestion
     assert "browser_console" in security.INGESTION_TOOLS
+
+
+# --- perception deltas + scroll geometry (ADR 0014 (b); PAGE_AGENT §3.2/§3.3) --
+
+def test_observe_geometry_header_when_page_overflows(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 720, "pw": 1280, "ph": 3000,
+                            "sx": 0, "sy": 456}
+        obs = sess.observe()
+        # header present, above/below computed, and the element map still there
+        assert obs.startswith("Page 1280x3000, viewport 1280x720")
+        assert "456px above" in obs
+        # max scroll = ph - vh = 2280; below = 2280 - 456 = 1824; 456/2280 = 20%
+        assert "1824px below" in obs
+        assert "at 20%" in obs
+        assert '[0] button "Go"' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_geometry_reports_fits_in_viewport(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.geometry = {"vw": 1280, "vh": 900, "pw": 1280, "ph": 900,
+                            "sx": 0, "sy": 0}
+        obs = sess.observe()
+        assert "fits in viewport" in obs
+        assert "scroll to see more" not in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_lists_scrollable_regions(monkeypatch):
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        sess._t.scrollables = [{"s": "#feed", "db": 820, "rr": 0},
+                              {"s": ".carousel", "db": 0, "rr": 300}]
+        obs = sess.observe()
+        assert "Scrollable regions (act: scroll with this selector):" in obs
+        assert '- "#feed" (820px below)' in obs
+        assert '- ".carousel" (300px right)' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_marks_new_elements_since_last_look(monkeypatch):
+    try:
+        els = [{"t": "button", "n": "A", "s": "#a"},
+               {"t": "button", "n": "B", "s": "#b"}]
+        sess = _harness_session(monkeypatch, elements=els)
+        first = sess.observe()
+        assert "*[" not in first                      # first look marks nothing
+
+        # A new control appears (same URL) — only it is flagged new.
+        sess._t.elements = els + [{"t": "input:text", "n": "C", "s": "#c"}]
+        second = sess.observe()
+        assert '*[2] input:text "C"' in second
+        assert '[0] button "A"' in second and "*[0]" not in second
+        assert '[1] button "B"' in second and "*[1]" not in second
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_delta_resets_on_navigation(monkeypatch):
+    try:
+        els = [{"t": "button", "n": "A", "s": "#a"}]
+        sess = _harness_session(monkeypatch, elements=els)
+        sess.observe()                                # baseline on ex.com
+
+        # Navigate: different URL + a fresh element set → nothing marked new,
+        # because "new since last step" is meaningless across a navigation.
+        sess._t._url = "https://ex.com/next"
+        sess._t.elements = [{"t": "button", "n": "Z", "s": "#z"}]
+        obs = sess.observe()
+        assert "*[" not in obs
+        assert '[0] button "Z"' in obs
+    finally:
+        browser.set_transport_factory(None)
+
+
+def test_observe_scroll_affordances_absent_by_default(monkeypatch):
+    # No scriptable geometry/scrollables → the map is exactly the bare element
+    # list (graceful degradation; perception never regresses).
+    try:
+        sess = _harness_session(monkeypatch,
+                                elements=[{"t": "button", "n": "Go", "s": "#go"}])
+        obs = sess.observe()
+        assert obs == '[0] button "Go"'
+    finally:
+        browser.set_transport_factory(None)

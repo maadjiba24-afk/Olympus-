@@ -21,7 +21,12 @@ clone.
       **refusal-safe by construction** (recovers a call only when the content names
       an offered tool, so a refusal is never laundered into an action — inverting
       page-agent's `autoFixer`, which can). `tests/test_toolcall_repair.py`.
-    - §3.2 perception deltas + scroll geometry → ADR 0014 (b), planned.
+    - **§3.2/§3.3 — perception deltas + scroll geometry → SHIPPED** in
+      `browser.observe()` (ADR 0014 (b)): a `*[i]` marker on elements new since the
+      last look on the same URL (keyed on the durable selector), a geometry header
+      (pages above/below, % scrolled), and a bounded list of scrollable containers
+      with remaining distance — all pure measurement, fail-soft, no ingestion
+      surface. `tests/test_browser.py`.
     - §3.4 human-fidelity click + landing hit-test → ADR 0014 (c), planned.
     - §3.5 default-on pre-prompt redaction → ADR 0014 (d), planned.
     - §3.6 governed `/llms.txt` consumption → ADR 0014 (e), planned.
