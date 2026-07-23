@@ -707,6 +707,7 @@ class Olympus:
                 fixed = verdict2["unsupported_claims"] or claims
                 self._unverified_banner = _banner_rejected(fixed)
                 tr.event("answer.unverified", reason="reject_after_rework")
+                self._signal_knowledge_gap(brief, fixed, "reject_after_rework", tr)
                 self.report("⚠️ Rework still rejected — shipping with an "
                             "UNVERIFIED banner.")
                 return verified2
@@ -759,6 +760,28 @@ class Olympus:
             "verify.exempt", {"name": "aletheia", "role": "verify"},
             {"mode": mode, "reason": reason}, status="skipped",
             inputs=None, model=None)
+
+    def _signal_knowledge_gap(self, topic: str, claims, reason: str,
+                              tr: "trace_mod.Trace") -> None:
+        """Hands-free discovery signal: when an answer ships UNVERIFIED because
+        the verifier could not support its factual claims, that IS a knowledge
+        gap — record it so discovery can later research it. Opt-in and
+        replay-inert (gated on `discovery.enabled()`), and strictly best-effort:
+        it must never perturb the answer path, so every failure is swallowed."""
+        try:
+            from . import discovery
+            if not discovery.enabled():
+                return
+            topic = " ".join(str(topic or "").split())[:180]
+            if not topic:
+                return
+            picked = [str(c) for c in (claims or []) if str(c).strip()][:5]
+            discovery.note_gap("knowledge", topic,
+                               evidence="; ".join(picked)[:480],
+                               source=f"aletheia:{reason}")
+            tr.event("discovery.gap_noted", reason=reason)
+        except Exception:
+            pass                        # discovery is never load-bearing here
 
     def _interactive_verify(self, user_message: str, reply: str,
                             tr: "trace_mod.Trace") -> str:
@@ -818,6 +841,7 @@ class Olympus:
             {"status": "unsupported", "claims": claims}, status="ok",
             inputs=reply, model=self._light_meta())
         tr.event("direct_verify.bannered", claims=claims)
+        self._signal_knowledge_gap(user_message, claims, "direct_reject", tr)
         self.report("⚠️ The quick reply asserts unverified claims; it will "
                     "carry an UNVERIFIED banner.")
         return f"{_banner_direct(claims)}\n\n{reply}"

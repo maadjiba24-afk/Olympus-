@@ -15,6 +15,19 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Discovery auto-signal: an UNVERIFIED answer becomes a knowledge gap
+
+Closed the loop between verification and self-discovery. When Aletheia ships an
+answer behind an **UNVERIFIED** banner because it could not support the factual
+claims — the council path (`reject_after_rework`) or the quick-reply path
+(`direct_reject`) — the orchestrator now records that as a `knowledge` gap in the
+discovery ledger (`discovery.note_gap`), so the topic is queued for later
+research instead of forgotten. Fully hands-free: no tool call, no extra model
+call. Strictly bounded and safe — gated on `discovery.enabled()` (opt-in
+`OLYMPUS_DISCOVERY`, **off during replay**), best-effort (every failure is
+swallowed, so it can never perturb the answer path), and deduped/capped by the
+existing gap ledger. Tests: 4 new. No new tool/action/command.
+
 ### Added — Detection breadth: C#/Rust SAST + SSTI/header-injection/CORS validation
 
 Widened the Aegis engine's coverage on both the whitebox and the active-
