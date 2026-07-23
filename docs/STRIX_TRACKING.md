@@ -398,6 +398,7 @@ Implemented as the **Aegis Assessment** suite (`olympus/assess.py`,
 | **Prompt-only scope** (§2.1) | **Scope enforced in code**: `require_scope()` fails closed against a signed grant; out-of-scope hosts refused before any I/O |
 | **Refusal-suppression prompt** (§2.2) | **Signed `authorize_assessment` action** (human-approved, revocable, ledger-recorded); agents cannot self-authorize; model judgment retained |
 | **No injection defense** (§2.3) | Target fetches via the IP-pinned `tools._http_probe`; `assess_recon`/`assess_http_audit` are INGESTION → `wrap_untrusted` + actuators stripped |
+| **Exploitation / payload validation** (§2.1–2.2, previously deferred) | `assess_validate` — **benign, scope-locked, non-destructive** active validation (marker-reflection → confirmed XSS surface). Confirms findings like Strix's exploit phase, but parameter-directed (never sprayed), inert-payload (never weaponized), and code-scoped/gated/capped (never arbitrary-target or open-egress). The *deployable* — and therefore stronger — form. Extensible check registry = self-evolving. |
 | Source-aware SAST | `assess_sast` — sink patterns → CWE + CVSS, workspace-confined |
 | Secret detection | `assess_secrets` — CWE-798, evidence **redacted** so a report can't leak the secret |
 | Dependency-CVE scan | `assess_deps` — offline bundled advisory index (extensible via `OLYMPUS_ASSESS_ADVISORIES`) |

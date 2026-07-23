@@ -122,7 +122,13 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # them. The local scanners (sast/secrets/deps) and
                              # the findings-store verbs read only local source or
                              # Olympus's own store and are TRUSTED below.
-                             "assess_recon", "assess_http_audit"})
+                             # assess_validate sends a benign marker to an
+                             # in-scope target and reads the reflected response —
+                             # it fetches attacker-controlled output, so it is
+                             # INGESTION (wrapped + actuators stripped), like
+                             # recon/http_audit.
+                             "assess_recon", "assess_http_audit",
+                             "assess_validate"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or

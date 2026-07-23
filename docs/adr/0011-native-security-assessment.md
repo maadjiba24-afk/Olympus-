@@ -89,28 +89,58 @@ tooling — consistent with Aegis's shield charter. `run_assessment` orchestrate
 the phases under an optional USD budget stop (delta spend), Strix's budget
 feature made structural.
 
+## Decision (f): active validation is benign, scope-locked, and non-destructive
+
+Strix confirms findings by throwing arbitrary / weaponized payloads from an
+open-egress box at arbitrary targets — powerful, but undeployable and unsafe.
+Olympus's `assess.validate` is the *deployable superset*: it upgrades a finding
+from "potential (static)" to "confirmed (observed)" using a BENIGN marker sent
+ONLY to a parameter the operator named, ONLY against a code-authorized target,
+through the SSRF-pinned gated fetch, hard-capped so it can never spray. The first
+check is reflected-input confirmation (a canary + a few special characters →
+detect missing output encoding = an XSS surface); the check set is a registry
+(`_ACTIVE_CHECKS`) extended over time. Every check MUST honour three boundaries,
+which are the line this capability never crosses:
+
+1. **Parameter-directed, never sprayed** — only parameters PRESENT in the
+   caller's URL are tested; names are never guessed or fuzzed.
+2. **Benign, never weaponized** — payloads are inert markers; never a working
+   exploit, shell, or destructive input.
+3. **Scoped, gated, capped** — `require_scope` fails closed, egress is
+   pinned/gated, and the total probe count is bounded (`_MAX_ACTIVE_PROBES`).
+
+This is *stronger than Strix* on the axis that matters — deployable confirmation
+with a real proof — precisely because it refuses arbitrary-target exploitation,
+payload spraying, and open egress. Those remain declined (see "NOT absorbed").
+
 ## Capabilities delta
 
-- New modules: `olympus/assess.py` (engine + scope + findings), `olympus/sarif.py`
-  (CVSS 3.1 + SARIF 2.1.0).
-- 9 new tools (123 total): `assess_recon`, `assess_http_audit` (INGESTION);
-  `assess_scope`, `assess_sast`, `assess_secrets`, `assess_deps`,
-  `record_finding`, `list_findings`, `export_findings` (TRUSTED).
+- New modules: `olympus/assess.py` (engine + scope + findings + active
+  validation), `olympus/sarif.py` (CVSS 3.1 + SARIF 2.1.0).
+- 10 new tools (124 total): `assess_recon`, `assess_http_audit`,
+  `assess_validate` (INGESTION); `assess_scope`, `assess_sast`,
+  `assess_secrets`, `assess_deps`, `record_finding`, `list_findings`,
+  `export_findings` (TRUSTED).
 - 1 new action (25 total): `authorize_assessment` (IRREVERSIBLE, revocable).
 - 1 new command (126 total): `olympus assess`
   (authorize/scope/revoke/recon/audit/sast/secrets/deps/run/report/clear).
 - Aegis upgraded from defense-advice-only to defense + authorized assessment
   (holds the assess tools + source-inspection reads; still no actuators).
-- Tests: `tests/test_assess.py`, `tests/test_sarif.py` (41 new).
+- Tests: `tests/test_assess.py`, `tests/test_sarif.py` (56 new).
 
 ## NOT absorbed (deliberately)
 
 - **Prompt-level scope** and the **refusal-suppression prompt** — replaced by
   code-enforced scope + a signed authorization + retained model judgment.
-- **Autonomous arbitrary-target exploitation / payload spraying**, the Docker
-  Kali sandbox with raw-socket caps + host-gateway, and `agent-browser`
-  in-page exploitation — these are Strix's highest-risk surfaces and conflict
-  with Olympus's defensive, egress-gated posture. See `docs/STRIX_TRACKING.md`.
+- **Autonomous *arbitrary-target* exploitation, payload *spraying*, and the
+  open-egress Kali sandbox** (raw-socket caps + host-gateway, `agent-browser`
+  in-page exploitation, weaponized/destructive payloads) — Strix's highest-risk
+  surfaces, and untargeted attack automation. Declined by design, not by
+  omission: the *value* of a confirmation phase is captured by Decision (f)'s
+  benign, scope-locked, parameter-directed active validation, which is the
+  deployable — and therefore stronger — form. Crossing any of the three
+  boundaries in Decision (f) is the thing this ADR forbids. See
+  `docs/STRIX_TRACKING.md` and `DEFERRED.md` #16/#18.
 - **Telemetry-on-by-default and the OSS email wall** — Olympus stays opt-in.
 - Heavy infra deferred (a live CVE feed, a full Caido-grade capture proxy, the
   25-file offensive skills library) is tracked in `DEFERRED.md`.

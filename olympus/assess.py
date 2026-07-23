@@ -55,7 +55,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import sarif, security
 
@@ -65,6 +65,7 @@ from . import sarif, security
 _MAX_SCAN_FILES = 2000          # source files a whitebox scan will read
 _MAX_FILE_BYTES = 1_000_000     # per-file read cap for SAST/secret scans
 _MAX_FINDINGS = 1000            # stored findings per run
+_MAX_ACTIVE_PROBES = 20         # hard cap on active-validation requests (never a spray)
 _MAX_EVIDENCE = 400            # chars of matched-line evidence kept per finding
 _DEFAULT_EXPIRY = 24 * 3600     # a scope grant lasts a day unless overridden
 _MAX_EXPIRY = 30 * 24 * 3600    # ...and never longer than 30 days
@@ -970,3 +971,130 @@ def run_assessment(target: str, *, source_path: str | None = None,
         "budget_stopped": _over_budget(),
         "spent_usd": round(_spent_usd() - start_spent, 4),
     }
+
+
+# ===========================================================================
+# Active validation — confirm a finding with a BENIGN, scope-locked probe
+# ===========================================================================
+# The moat over Strix: Strix "confirms" by throwing arbitrary/weaponized payloads
+# from an open-egress box at arbitrary targets — powerful but undeployable and
+# unsafe. Olympus confirms with a benign marker sent ONLY to a parameter the
+# operator named, ONLY against a code-authorized target, through the SSRF-pinned
+# gated fetch, hard-capped so it can never spray. It upgrades a finding from
+# "potential (static)" to "confirmed (observed)" — a real proof — while being
+# safe to run unattended. That is *stronger than Strix* on the axis that
+# matters (deployable confirmation), not weaker.
+#
+# Deliberate boundaries (do not cross in any future check):
+#   * Only parameters PRESENT in the caller's URL are tested — never guessed /
+#     fuzzed parameter names, so this is operator-directed, not a spray.
+#   * Payloads are BENIGN markers (a random canary + a few special characters) —
+#     never a working exploit, shell, or destructive input.
+#   * Scope is enforced in code (`require_scope`), egress is pinned/gated, and
+#     the total probe count is capped (`_MAX_ACTIVE_PROBES`).
+# New check functions are added to `_ACTIVE_CHECKS` over time (the self-evolving
+# moat); each MUST honour the three boundaries above.
+
+_CANARY = "olympuscanary"
+
+
+def _set_param(url: str, name: str, value: str) -> str:
+    p = urlparse(url)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    q[name] = value
+    return urlunparse(p._replace(query=urlencode(q)))
+
+
+def _reflection_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send a BENIGN marker (`olympuscanary<rand><">`) into `name` and check
+    whether the special characters come back UNESCAPED — proof that reflected
+    input is not output-encoded (an XSS surface). No script, no exploit: just a
+    marker that confirms missing encoding. Raises ValueError if the fetch is
+    blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    marker = f"{_CANARY}{tok}"
+    payload = marker + '<">'                      # benign special chars, never a tag
+    probe = tools._http_probe(_set_param(url, name, payload))
+    body = probe.get("body", "") or ""
+    if marker not in body:
+        return None, f"param '{name}': not reflected"
+    idx = body.find(marker)
+    window = body[idx: idx + len(payload) + 8]
+    unescaped = ("<" in window and "&lt;" not in window) or \
+                ('"' in window and "&quot;" not in window and "&#34;" not in window)
+    if not unescaped:
+        return None, f"param '{name}': reflected but encoded (safe)"
+    finding = Finding(
+        title="Reflected input without output encoding (XSS surface)",
+        severity="medium", cwe="CWE-79",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+        location=f"{url} [param: {name}]",
+        evidence=f"benign marker reflected unescaped: ...{window[:80]}...",
+        remediation="Context-encode reflected input (HTML-entity-encode <, >, "
+                    "\", '); add a restrictive Content-Security-Policy.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': reflected UNESCAPED — confirmed XSS surface"
+
+
+# The registry — extended over successive loop iterations (self-evolving moat).
+# Every entry is benign, scope-locked, parameter-directed, and capped.
+_ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
+    ("reflection", _reflection_check),
+)
+
+
+def active_check_names() -> list[str]:
+    return [name for name, _ in _ACTIVE_CHECKS]
+
+
+def validate(url: str, user: str | None = None) -> dict[str, Any]:
+    """Actively CONFIRM weaknesses on an AUTHORIZED target using benign, non-
+    destructive probes against the query parameters PRESENT in `url`. Scope is
+    enforced in code; every probe is SSRF-pinned/gated and the total is capped
+    at `_MAX_ACTIVE_PROBES`. This is the deployable, safe superset of Strix's
+    exploitation phase — it proves findings without arbitrary payloads, spraying,
+    or open egress. Records confirmed findings; returns a per-parameter log."""
+    require_scope(url, user)
+    if not str(url).startswith(("http://", "https://")):
+        return {"url": url, "error": "validate needs a full http(s) URL with the "
+                                     "parameter(s) to test, e.g. "
+                                     "https://app.example/search?q=test"}
+    p = urlparse(url)
+    params = list(dict.fromkeys(k for k, _ in parse_qsl(p.query,
+                                                        keep_blank_values=True)))
+    if not params:
+        return {"url": url, "error": "no query parameters to validate — provide a "
+                                     "URL with the parameter(s) to test, e.g. "
+                                     "https://app.example/search?q=test"}
+
+    findings: list[Finding] = []
+    log: list[dict[str, str]] = []
+    probes = 0
+    for name in params:
+        for check_name, fn in _ACTIVE_CHECKS:
+            if probes >= _MAX_ACTIVE_PROBES:
+                log.append({"note": f"probe cap ({_MAX_ACTIVE_PROBES}) reached — "
+                                    "remaining parameters skipped"})
+                break
+            probes += 1
+            try:
+                finding, note = fn(url, name)
+            except ValueError as err:                 # scope / SSRF / blocked
+                log.append({"check": check_name, "param": name,
+                            "note": f"blocked: {err}"})
+                continue
+            except Exception as err:                  # network — never crash a run
+                log.append({"check": check_name, "param": name,
+                            "note": f"probe failed: {str(err)[:120]}"})
+                continue
+            log.append({"check": check_name, "param": name, "note": note})
+            if finding is not None:
+                findings.append(finding)
+        else:
+            continue
+        break
+
+    stored = [record_finding(f, user) for f in findings]
+    return {"url": url, "params_tested": len(params), "probes": probes,
+            "log": log, "findings": stored, "count": len(stored)}

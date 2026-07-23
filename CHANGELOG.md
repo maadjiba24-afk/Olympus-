@@ -15,6 +15,23 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aegis active validation (scope-locked, benign confirmation)
+
+Added `assess_validate` (10th assess tool, 124 total; `olympus assess validate`)
+— a **scope-locked, non-destructive** active-validation layer that upgrades a
+finding from "potential (static)" to "confirmed (observed)". It is the deployable
+superset of Strix's exploitation phase and the moat's answer to "make it stronger
+than Strix": it confirms with a BENIGN marker sent only to a parameter the
+operator named (never guessed/sprayed), only against a code-authorized target,
+through the SSRF-pinned gated fetch, hard-capped (≤20 probes) — so it produces a
+real proof while remaining safe to run unattended. First check: reflected-input
+confirmation (missing output encoding → XSS surface); checks live in an
+extensible registry (`assess._ACTIVE_CHECKS`) that compounds over time. It does
+**not** perform arbitrary-target exploitation, payload spraying, or open-egress
+access — those stay declined (ADR 0011 Decision (f); `DEFERRED.md` #16/#18).
+Tests: 7 new (`tests/test_assess.py`). THREAT_MODEL, capabilities.json, README,
+and ADR 0011 updated.
+
 ### Added — Native "Aegis Assessment" suite (Strix absorbed as a moat)
 
 Absorbed [Strix](https://github.com/usestrix/strix)'s security-assessment

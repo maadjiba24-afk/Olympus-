@@ -374,6 +374,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_sec.add_argument("path", nargs="?", default=".")
     p_as_dep = as_sub.add_parser("deps", help="dependency vulnerability audit")
     p_as_dep.add_argument("path", nargs="?", default=".")
+    p_as_val = as_sub.add_parser(
+        "validate", help="confirm a finding with a benign, scope-locked probe")
+    p_as_val.add_argument("url", help="in-scope URL with the parameter(s) to test")
     p_as_run = as_sub.add_parser(
         "run", help="bounded assessment: recon+audit (+whitebox with --source)")
     p_as_run.add_argument("target")
@@ -1595,6 +1598,8 @@ def main(argv: list[str] | None = None) -> int:
             print(tools._assess_secrets(args.path))
         elif sc == "deps":
             print(tools._assess_deps(args.path))
+        elif sc == "validate":
+            print(tools._assess_validate(args.url))
         elif sc == "run":
             try:
                 r = assess.run_assessment(args.target, source_path=args.source,

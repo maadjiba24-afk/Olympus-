@@ -1921,6 +1921,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "assess_sast": lambda path=".": _assess_sast(path),
     "assess_secrets": lambda path=".": _assess_secrets(path),
     "assess_deps": lambda path=".": _assess_deps(path),
+    "assess_validate": lambda url: _assess_validate(url),
     "record_finding": lambda title, severity="medium", cwe="", cvss_vector="",
         location="", evidence="", remediation="", confidence="medium":
         _record_finding(title, severity, cwe, cvss_vector, location, evidence,
@@ -2906,6 +2907,26 @@ def _assess_deps(path: str = ".") -> str:
     return _fmt_finding_result(f"Dependency audit of {path}", r)
 
 
+def _assess_validate(url: str) -> str:
+    a = _assess()
+    try:
+        r = a.validate(url)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"validate {url}: {r['error']}"
+    lines = [f"# Active validation of {url}",
+             f"Tested {r.get('params_tested', 0)} parameter(s) with "
+             f"{r.get('probes', 0)} benign probe(s):"]
+    for entry in r.get("log", []):
+        lines.append(f"- {entry.get('note', '')}")
+    if r.get("count"):
+        lines.append(f"\n**{r['count']} confirmed finding(s)** recorded.")
+    else:
+        lines.append("\nNo weaknesses confirmed (nothing reflected unescaped).")
+    return "\n".join(lines)
+
+
 def _fmt_finding_result(title: str, r: dict) -> str:
     findings = r.get("findings", [])
     if not findings:
@@ -3026,6 +3047,27 @@ ASSESS_DEPS = {
     "input_schema": {
         "type": "object",
         "properties": {"path": {"type": "string"}},
+    },
+}
+
+ASSESS_VALIDATE = {
+    "name": "assess_validate",
+    "description": (
+        "Actively CONFIRM a weakness on an AUTHORIZED target using BENIGN, "
+        "non-destructive probes — sends a harmless marker into the query "
+        "parameter(s) already present in the URL and checks whether it comes "
+        "back unescaped (a reflected-XSS surface). Never sends exploits, never "
+        "guesses/sprays parameters, never leaves the code-enforced scope; hard-"
+        "capped and SSRF-pinned. Upgrades a finding from potential to confirmed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string",
+                    "description": "In-scope URL WITH the parameter(s) to test, "
+                                   "e.g. https://app.example/search?q=test"},
+        },
+        "required": ["url"],
     },
 }
 
@@ -4036,6 +4078,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "assess_sast": ASSESS_SAST,
     "assess_secrets": ASSESS_SECRETS,
     "assess_deps": ASSESS_DEPS,
+    "assess_validate": ASSESS_VALIDATE,
     "record_finding": RECORD_FINDING,
     "list_findings": LIST_FINDINGS,
     "export_findings": EXPORT_FINDINGS,

@@ -215,6 +215,93 @@ def test_run_assessment_whitebox(workspace, monkeypatch):
     assert r["budget_stopped"] is False
 
 
+# --- active validation: benign, scope-locked, non-destructive ---------------
+
+def _reflect_probe(reflect="raw"):
+    """Fake probe: reflect the 'q' param value raw / encoded / not at all."""
+    from urllib.parse import parse_qsl, urlparse
+
+    def _probe(url, max_bytes=400_000):
+        q = dict(parse_qsl(urlparse(url).query))
+        val = q.get("q", "")
+        if reflect == "raw":
+            body = f"<div>results for {val}</div>"           # unescaped
+        elif reflect == "encoded":
+            enc = val.replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            body = f"<div>results for {enc}</div>"
+        else:
+            body = "<div>no results</div>"                   # not reflected
+        return {"status": 200, "headers": {}, "body": body, "url": url}
+    return _probe
+
+
+def test_validate_scope_gated(monkeypatch):
+    monkeypatch.setattr(tools, "_http_probe", _reflect_probe("raw"))
+    with pytest.raises(assess.AssessScopeError):
+        assess.validate("https://app.example/s?q=x")
+
+
+def test_validate_confirms_unescaped_reflection(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _reflect_probe("raw"))
+    r = assess.validate("https://app.example/s?q=hi")
+    assert r["count"] == 1
+    f = r["findings"][0]
+    assert f["cwe"] == "CWE-79" and f["source"] == "active_validation"
+    assert f["confidence"] == "high"
+
+
+def test_validate_ignores_encoded_and_absent_reflection(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _reflect_probe("encoded"))
+    assert assess.validate("https://app.example/s?q=hi")["count"] == 0
+    monkeypatch.setattr(tools, "_http_probe", _reflect_probe("none"))
+    assert assess.validate("https://app.example/s?q=hi")["count"] == 0
+
+
+def test_validate_only_tests_present_params_no_spray(monkeypatch):
+    # It must never guess/fuzz parameter names — only the ones in the URL.
+    assess.grant(["app.example"], expires_in=3600)
+    seen = []
+
+    def _probe(url, max_bytes=400_000):
+        from urllib.parse import parse_qsl, urlparse
+        seen.extend(k for k, _ in parse_qsl(urlparse(url).query))
+        return {"status": 200, "headers": {}, "body": "x", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.validate("https://app.example/s?q=hi&page=2")
+    # Exactly the two present params were probed — nothing invented.
+    assert set(seen) == {"q", "page"}
+
+
+def test_validate_requires_params_and_is_benign(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    sent = []
+
+    def _probe(url, max_bytes=400_000):
+        sent.append(url)
+        return {"status": 200, "headers": {}, "body": "x", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assert "error" in assess.validate("https://app.example/s")     # no params
+    assert sent == []                                              # no probe sent
+    # The payload is a benign marker, never a script/exploit.
+    assess.validate("https://app.example/s?q=hi")
+    assert sent and "olympuscanary" in sent[0]
+    assert "<script" not in sent[0].lower()
+
+
+def test_validate_out_of_scope_refused(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _reflect_probe("raw"))
+    with pytest.raises(assess.AssessScopeError):
+        assess.validate("https://evil.example/s?q=x")
+
+
+def test_validate_tool_is_ingestion():
+    assert "assess_validate" in security.INGESTION_TOOLS
+    assert security.should_wrap("assess_validate") is True
+
+
 def test_budget_stop_halts_phases(workspace, monkeypatch):
     assess.grant(["example.com", "local"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _fake_probe({"server": "nginx"}))
