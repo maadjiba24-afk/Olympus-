@@ -1959,6 +1959,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         location="", evidence="", remediation="", confidence="medium":
         _record_finding(title, severity, cwe, cvss_vector, location, evidence,
                         remediation, confidence),
+    "note_knowledge_gap": lambda topic, context="": _note_knowledge_gap(topic, context),
     "list_findings": lambda: _list_findings(),
     "export_findings": lambda format="markdown": _export_findings(format),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
@@ -2990,6 +2991,19 @@ def _record_finding(title: str, severity: str = "medium", cwe: str = "",
             f"{rec['title']}")
 
 
+def _note_knowledge_gap(topic: str, context: str = "") -> str:
+    """Record something Olympus should learn — a self-discovery signal. The
+    heartbeat's discovery cycle later researches open knowledge gaps and writes
+    durable wiki pages, so Olympus acquires new knowledge over time."""
+    from . import discovery
+    if not str(topic or "").strip():
+        return "A knowledge gap needs a topic."
+    gap = discovery.note_gap("knowledge", topic, evidence=context, source="agent")
+    return (f"Noted knowledge gap: '{gap['topic']}' (seen {gap['hits']}×). "
+            "Olympus will research and durably learn it on its next discovery "
+            "cycle.")
+
+
 def _list_findings() -> str:
     a = _assess()
     return a.export_findings("markdown")
@@ -3133,6 +3147,27 @@ RECORD_FINDING = {
                            "description": "high/medium/low"},
         },
         "required": ["title"],
+    },
+}
+
+NOTE_KNOWLEDGE_GAP = {
+    "name": "note_knowledge_gap",
+    "description": (
+        "Record something you (or Olympus) don't yet understand well — a topic "
+        "worth learning. Use it when you hit the edge of your knowledge instead "
+        "of guessing. Olympus's discovery cycle later researches open gaps and "
+        "writes durable wiki pages, so it acquires new knowledge over time. "
+        "Records to Olympus's own store only."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string",
+                      "description": "The thing to learn, as a clear phrase."},
+            "context": {"type": "string",
+                        "description": "Optional: why it came up / what's unclear."},
+        },
+        "required": ["topic"],
     },
 }
 
@@ -4115,6 +4150,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "assess_deps": ASSESS_DEPS,
     "assess_validate": ASSESS_VALIDATE,
     "record_finding": RECORD_FINDING,
+    "note_knowledge_gap": NOTE_KNOWLEDGE_GAP,
     "list_findings": LIST_FINDINGS,
     "export_findings": EXPORT_FINDINGS,
     "chart_from_data": CHART_FROM_DATA,

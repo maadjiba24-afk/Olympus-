@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 126,
+    "count": 127,
     "names": [
       "a2a",
       "actions",
@@ -73,6 +73,7 @@
       "curate",
       "dashboard",
       "discord",
+      "discover",
       "distill",
       "docs",
       "doctor",
@@ -180,7 +181,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 124,
+    "count": 125,
     "names": [
       "add_todo",
       "analyze_image",
@@ -247,6 +248,7 @@
       "list_findings",
       "list_source_files",
       "list_todos",
+      "note_knowledge_gap",
       "operator_attest_receipt",
       "operator_attestations",
       "operator_authorize_site",

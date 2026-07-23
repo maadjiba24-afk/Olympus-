@@ -15,6 +15,33 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Self-discovery: acquire knowledge + propose features over time
+
+New `olympus/discovery.py` — a native loop pointed at what Olympus does NOT yet
+know or cannot yet do, closing those gaps over time (ADR 0012). It complements
+the existing "improve what we have" machinery (Prometheus prompts, Metis skills,
+`evolve.py` tunables, wiki dreaming) with a "discover what we're missing" spine:
+
+- **Knowledge gaps → durable knowledge.** A gap ("I don't understand X") is
+  recorded via the new `note_knowledge_gap` tool (Metis/Argus/Prometheus), via
+  friction derivation, or `olympus discover note`. The heartbeat cycle researches
+  open gaps (`research.run`, SSRF-gated + wrapped upstream) and writes the cited
+  result to a durable wiki page. A degraded result ("no usable evidence") is
+  never written as knowledge — the gap stays open and retries.
+- **Capability gaps → feature proposals.** Recurring action friction
+  (`outcomes.insights`) becomes structured proposals on the existing upgrade
+  store (surfaced in the digest and `olympus discover`), for the operator to
+  review — the native, recurring form of the "analyze the landscape → propose
+  what to absorb" pattern that produced the Firecrawl/Strix absorptions. Nothing
+  is auto-built.
+
+1 new tool (125 total): `note_knowledge_gap` (TRUSTED / own-state). 1 new command
+(127 total): `olympus discover` (run/note/gaps/report). Heartbeat cadence
+`DISCOVERY_EVERY`, **opt-in** via `OLYMPUS_DISCOVERY`, replay-inert, bounded.
+Safety: notice-don't-impose (features proposed never applied; knowledge
+sanitized at the memory sink + wrapped upstream). THREAT_MODEL, capabilities.json,
+README, ADR 0012 updated. Tests: `tests/test_discovery.py` (13 new).
+
 ### Added — Aegis detection breadth (5 languages) + a precision fix
 
 Expanded the SAST rule set from Python/JS to **6 languages** — added 21 curated,

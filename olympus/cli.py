@@ -396,6 +396,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_rep.add_argument("--out", default=None)
     as_sub.add_parser("clear", help="clear recorded findings")
 
+    # --- Self-discovery (olympus/discovery.py) ---
+    p_disc = sub.add_parser(
+        "discover", help="self-discovery: acquire knowledge for open gaps and "
+                         "propose new features")
+    disc_sub = p_disc.add_subparsers(dest="discover_cmd")
+    disc_sub.add_parser("run", help="run a discovery cycle now")
+    p_disc_note = disc_sub.add_parser("note", help="record a gap Olympus should close")
+    p_disc_note.add_argument("kind", choices=["knowledge", "capability"])
+    p_disc_note.add_argument("topic")
+    disc_sub.add_parser("gaps", help="list open gaps")
+    disc_sub.add_parser("report", help="show the discovery ledger")
+
     sub.add_parser("scan", help="Argus: scan the web for opportunities now")
     sub.add_parser("audit", help="Prometheus: self-audit and self-upgrade now")
 
@@ -1636,6 +1648,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:
             print(assess.scope_summary())
+    elif args.command == "discover":
+        from . import discovery
+        dc = args.discover_cmd
+        if dc == "note":
+            g = discovery.note_gap(args.kind, args.topic, source="operator-cli")
+            print(f"Noted {args.kind} gap: '{g['topic']}'. Olympus will close it "
+                  "on its next discovery cycle.")
+        elif dc == "gaps":
+            gs = discovery.open_gaps()
+            print("\n".join(f"- [{g['kind']}] {g['topic']} ({g['hits']}×)"
+                            for g in gs) or "No open gaps.")
+        elif dc == "run":
+            if not firstrun.ensure_ready():
+                return 1
+            r = discovery.run()
+            for line in r.get("learned", []) + r.get("proposed", []):
+                print(line)
+            print(f"{r.get('open_knowledge', 0)} knowledge / "
+                  f"{r.get('open_capability', 0)} capability gap(s) still open.")
+        else:
+            print(discovery.report())
     elif args.command == "scan":
         print(orchestrator.opportunity_scan())
     elif args.command == "audit":

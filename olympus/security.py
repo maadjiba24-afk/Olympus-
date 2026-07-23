@@ -182,6 +182,10 @@ TRUSTED_TOOLS = frozenset({
     # not ingested content — so it is trusted like add_todo.
     "assess_scope", "assess_sast", "assess_secrets", "assess_deps",
     "record_finding", "list_findings", "export_findings",
+    # Self-discovery (olympus/discovery.py): records a knowledge gap into
+    # Olympus's OWN discovery ledger — an own-state write like add_todo. No
+    # external fetch (the later research cycle runs in the heartbeat, not here).
+    "note_knowledge_gap",
 })
 
 _ENVELOPE_HEADER = (

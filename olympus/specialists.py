@@ -297,7 +297,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "browser_read", "browser_read_ax", "browser_save_pdf",
                          "browser_console", "browser_screenshot",
                          "browser_act", "browser_skills", "browser_skill_record",
-                         "trigger_research"),
+                         "trigger_research", "note_knowledge_gap"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),
@@ -318,7 +318,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "skills so the whole council gets smarter every day.",
             system=True,
             extra_tools=("create_skill", "gate_skills", "operator_review",
-                         "recent_learning"),
+                         "recent_learning", "note_knowledge_gap"),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",
@@ -342,7 +342,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "codegraph_subgraph", "codegraph_overview",
-                         "propose_site_profile"),
+                         "propose_site_profile", "note_knowledge_gap"),
         ),
         Specialist(
             key="hermes", name="Hermes", title="Operator",

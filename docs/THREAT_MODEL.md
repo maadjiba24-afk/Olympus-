@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 124 tools in
+Olympus exposes a **finite, named** tool surface — the 125 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -85,6 +85,7 @@ surface. So the surface and its threat model can't drift apart.
 | `assess_deps` | Audit requirements.txt / package.json against the bundled advisory index | first-party read | Scope-required; `_confine`-bounded; offline/deterministic (no network) | Traversal — refused by `_confine`; no SSRF surface (no fetch) |
 | `assess_validate` | Confirm a finding on an AUTHORIZED target with benign, non-destructive probes (marker reflection → XSS surface; canary in Location, not followed → open redirect) | ingests untrusted | `require_scope()` fails closed; sends a BENIGN marker (never an exploit) only into parameters ALREADY in the caller's URL (no guessed/sprayed names); gated + IP-pinned `_http_probe`; total probes hard-capped (≤20); output wrapped | Out-of-scope reach — refused in code; payload weaponization — impossible (benign marker only); spraying — capped and parameter-directed; open egress — never (gated/pinned); injected reflection — wrapped |
 | `record_finding` | Record a validated finding (severity COMPUTED from a CVSS vector; deduped) | first-party write | Writes only Olympus's own findings store; capped (≤1000); an own-state write like `add_todo` | Finding spam — capped and deduped by fingerprint; no external effect |
+| `note_knowledge_gap` | Record a topic Olympus should learn (self-discovery signal) | first-party write | Writes only Olympus's own discovery ledger (deduped, bounded); NO fetch here — the later research runs in the heartbeat, egress-gated, and its result is wrapped/sanitized | Gap spam — deduped + bounded; poisoning — the topic is a search seed, not stored knowledge; the researched result is wrapped-untrusted and sanitized at the memory sink |
 | `list_findings` | List recorded findings as a Markdown report | first-party read | Read-only over Olympus's own findings store | None significant (own state) |
 | `export_findings` | Export findings as markdown / json / SARIF 2.1.0 | first-party read | Read-only over Olympus's own findings store; deterministic serialization | None significant (own state) |
 | `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |

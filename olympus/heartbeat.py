@@ -183,6 +183,19 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Operator review failed:\n" + traceback.format_exc())
         state["daily_learning"] = now
 
+    from . import discovery
+    if discovery.enabled() and _due(state, "discovery", config.DISCOVERY_EVERY, now):
+        log.append("Discovery: closing knowledge/capability gaps...")
+        try:
+            r = discovery.run()
+            for line in r.get("learned", []) + r.get("proposed", []):
+                log.append("Discovery: " + line)
+            log.append(f"Discovery: {r.get('open_knowledge', 0)} knowledge / "
+                       f"{r.get('open_capability', 0)} capability gap(s) open.")
+        except Exception:
+            log.append("Discovery failed:\n" + traceback.format_exc())
+        state["discovery"] = now
+
     if config.TRAIN_EVERY and _due(state, "train", config.TRAIN_EVERY, now):
         log.append("Prometheus: training the weakest specialists...")
         try:

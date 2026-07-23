@@ -694,6 +694,9 @@ FEATURE_EVOLUTION_EVERY = int(       # feature health review + safe auto-tune
     os.environ.get("OLYMPUS_FEATURE_EVOLUTION_EVERY", str(24 * 3600)))
 
 DAILY_LEARNING_EVERY = 86400         # Metis distills experience into skills
+# Self-discovery: acquire knowledge for open gaps + propose new features
+# (opt-in via OLYMPUS_DISCOVERY; see olympus/discovery.py).
+DISCOVERY_EVERY = int(os.environ.get("OLYMPUS_DISCOVERY_EVERY", str(86400)))
 # Nightly dreaming: consolidate session memory into wiki concept pages
 # (0 disables).
 DREAM_EVERY = int(os.environ.get("OLYMPUS_DREAM_EVERY", str(86400)))
