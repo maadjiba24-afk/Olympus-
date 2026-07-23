@@ -25,6 +25,7 @@ def mem(tmp_path, monkeypatch):
     return d
 
 
+@pytest.mark.requires_crypto
 def test_roundtrip_encrypted_signed_excludes_replay_cache(mem, tmp_path, monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
     res = backup.create()
@@ -69,6 +70,7 @@ def test_unencrypted_when_no_secret_key(mem, tmp_path, monkeypatch):
     assert out["restored"] == 2                    # still recoverable
 
 
+@pytest.mark.requires_crypto
 def test_tampered_archive_fails_restore(mem, tmp_path, monkeypatch):
     monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)   # plaintext, so we
     res = backup.create()                                     # can flip a byte

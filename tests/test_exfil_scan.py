@@ -39,6 +39,7 @@ def test_short_env_values_are_ignored(monkeypatch):
     assert security.secret_exfil_reason("contains abc somewhere") is None
 
 
+@pytest.mark.requires_crypto
 def test_vault_secrets_are_detected(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "test-master-key")
     from olympus import vault

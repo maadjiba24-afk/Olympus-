@@ -76,13 +76,29 @@ def test_lock_name_is_sanitized():
 
 # --- subprocess race harness ----------------------------------------------
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _child_env() -> dict:
+    """Environment for a spawned worker process: shares this test's MEMORY_DIR,
+    and puts the repo root on PYTHONPATH so `import olympus` resolves in the child
+    even without an editable install. A child is `python worker.py` / `python -c`,
+    whose `sys.path[0]` is the script dir (or cwd for -c), NOT the repo — and
+    conftest's `sys.path` insert only covers the pytest process, not its
+    subprocesses. Harmless where olympus is pip-installed (the path just
+    re-resolves to the same package)."""
+    env = dict(os.environ)
+    env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    env["PYTHONPATH"] = str(_REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
 def _run_workers(tmp_path, script: str, n_workers: int = 2, timeout: int = 90):
     """Run `script` in n_workers real child processes sharing this test's
     MEMORY_DIR (passed via env — config reads OLYMPUS_MEMORY_DIR at import).
     A 'go' file releases all workers at once to maximize contention."""
     config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    env = _child_env()
     env.pop("OLYMPUS_STORE", None)
     path = tmp_path / "worker.py"
     path.write_text(textwrap.dedent(script), encoding="utf-8")
@@ -313,8 +329,7 @@ def test_agentbeat_add_during_run_due_survives(tmp_path):
 
     def slow_runner(beat):
         # While the beat "runs" (no lock held), another PROCESS adds a beat.
-        env = dict(os.environ)
-        env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+        env = _child_env()
         subprocess.run(
             [sys.executable, "-c",
              "from olympus import agentbeat; "
@@ -360,8 +375,7 @@ def test_facts_record_waits_for_peer_instead_of_losing(tmp_path):
     t = threading.Thread(target=holder, daemon=True)
     t.start()
     assert holding.wait(timeout=5)
-    env = dict(os.environ)
-    env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    env = _child_env()
     subprocess.run(
         [sys.executable, "-c",
          "from olympus import facts; "
@@ -430,8 +444,7 @@ def test_kill9_holder_releases_lock_and_state_is_consistent(tmp_path):
     from olympus import goals
     goals.add("shared", "pre-kill goal", "exists before the kill")
 
-    env = dict(os.environ)
-    env["OLYMPUS_MEMORY_DIR"] = str(config.MEMORY_DIR)
+    env = _child_env()
     holder = subprocess.Popen(
         [sys.executable, "-c", (
             "import os, time\n"

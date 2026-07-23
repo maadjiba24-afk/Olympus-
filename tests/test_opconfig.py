@@ -68,6 +68,7 @@ def test_non_secret_goes_to_config_env(monkeypatch):
     assert os.environ["SLACK_NOTIFY_CHANNEL"] == "#ops"
 
 
+@pytest.mark.requires_crypto
 def test_secret_goes_to_vault_never_plaintext(secret_key):
     opconfig.set_value("WHATSAPP_ACCESS_TOKEN", "wa-secret-9911")
     on_disk = firstrun.CONFIG_ENV.read_text() \
@@ -90,6 +91,7 @@ def test_secret_without_vault_key_fails_closed(monkeypatch):
     assert "hunter2" not in on_disk           # no silent plaintext fallback
 
 
+@pytest.mark.requires_crypto
 def test_secret_set_removes_stale_plaintext_copy(secret_key):
     # The setup wizard may have written the token to config.env; storing it
     # from the panel must move ownership to the vault.
@@ -101,6 +103,7 @@ def test_secret_set_removes_stale_plaintext_copy(secret_key):
 
 # --- boot hydration + precedence ------------------------------------------------
 
+@pytest.mark.requires_crypto
 def test_apply_secrets_hydrates_and_env_wins(monkeypatch, secret_key):
     opconfig.set_value("SLACK_BOT_TOKEN", "xoxb-fromvault")
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
@@ -119,6 +122,7 @@ def test_apply_secrets_without_key_is_quiet(monkeypatch):
 
 # --- unset + status -------------------------------------------------------------
 
+@pytest.mark.requires_crypto
 def test_unset_clears_all_stores(monkeypatch, secret_key):
     opconfig.set_value("SMTP_HOST", "smtp.example.com")
     opconfig.set_value("SMTP_PASS", "hunter2-longer")
@@ -129,6 +133,7 @@ def test_unset_clears_all_stores(monkeypatch, secret_key):
     assert "not set" in opconfig.unset("SMTP_FROM")
 
 
+@pytest.mark.requires_crypto
 def test_status_is_honest_and_leak_free(monkeypatch, secret_key):
     opconfig.set_value("TELEGRAM_NOTIFY_CHAT_ID", "777")
     opconfig.set_value("ANTHROPIC_API_KEY", "sk-ant-vaulted-000")
@@ -147,6 +152,7 @@ def test_status_is_honest_and_leak_free(monkeypatch, secret_key):
 
 # --- panel wiring -----------------------------------------------------------------
 
+@pytest.mark.requires_crypto
 def test_snapshot_config_section_leak_free(monkeypatch, secret_key):
     opconfig.set_value("WHATSAPP_APP_SECRET", "meta-shhh-123")
     snap = adminpanel.snapshot()

@@ -3,6 +3,8 @@ the credential choke points; plain values pass through untouched."""
 
 import json
 
+import pytest
+
 from olympus import config, secretref
 
 
@@ -26,6 +28,7 @@ def test_file_ref(tmp_path):
     assert secretref.resolve(f"file:{tmp_path}/missing") == ""
 
 
+@pytest.mark.requires_crypto
 def test_vault_ref_roundtrip(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "test-passphrase")
     ref = secretref.store("openai-main", "sk-from-vault")
@@ -103,6 +106,7 @@ def test_telegram_token_accepts_ref(monkeypatch, tmp_path):
     assert telegram._token() == "123:ABC"
 
 
+@pytest.mark.requires_crypto
 def test_secret_cli_ls_without_key_fails_gracefully(monkeypatch, capsys):
     # A vault that exists but can't be opened (no OLYMPUS_SECRET_KEY) must
     # explain itself, not traceback.
@@ -118,6 +122,7 @@ def test_secret_cli_ls_without_key_fails_gracefully(monkeypatch, capsys):
     assert rc == 1 and "OLYMPUS_SECRET_KEY" in out
 
 
+@pytest.mark.requires_crypto
 def test_secret_cli_roundtrip_with_key(monkeypatch, capsys):
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "k")
     from olympus import cli, secretref

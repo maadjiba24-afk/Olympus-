@@ -15,6 +15,40 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Testing — Multiprocess race tests import `olympus` in spawned workers
+
+`test_proclock_races` spawns real child processes (`python worker.py` / `python
+-c`) to exercise cross-process locking. The children ran `import olympus` but only
+inherited the parent env — so in an environment without an editable install they
+failed with `ModuleNotFoundError: No module named 'olympus'` (a child's
+`sys.path` is its script dir, not the repo, and conftest's `sys.path` insert
+covers only the pytest process). A shared `_child_env()` helper now puts the repo
+root on the workers' `PYTHONPATH`, so the tests run in a bare checkout too;
+harmless where the package is pip-installed. 6 previously-failing race tests now
+pass without an editable install.
+
+### Testing — Crypto-dependent tests degrade gracefully and consistently
+
+`cryptography` is a required dependency, so in any correctly-provisioned
+environment (CI, normal dev) the vault (Fernet) and signing (Ed25519) tests run in
+full. But the native backend can be *present yet broken* — a missing
+`_cffi_backend` or a panicking build makes the `vault`/`witness` modules set their
+own `_HAVE_CRYPTO=False` and refuse to encrypt/sign. In that defective environment
+~26 tests across `test_backup`, `test_opconfig`, `test_secretref`,
+`test_seed_custody`, `test_exfil_scan`, `test_memory_contract`, `test_browser`,
+and `test_verify_and_custody` errored in a way that looked like a code regression,
+and the few pre-existing guards were inconsistent (a mix of the private
+`vault._HAVE_CRYPTO` and the public `vault.available()`, most tests guarding not at
+all).
+
+Replaced that ad-hoc mix with a single shared gate: a `requires_crypto` pytest
+marker (registered in `tests/conftest.py`) whose collection hook skips the marked
+tests — with one clear reason — only when the cryptography native backend is
+non-functional. Applied to every affected test and used to normalize the existing
+inline guards. Where the backend works (e.g. GitHub CI) every test runs and asserts
+exactly as before; a minimal or crypto-broken environment now reports honest skips
+instead of a wall of confusing errors. No production code changed.
+
 ### Fixed — Resilient local-Chrome launch (browser-smoke CI reliability)
 
 `browser.launch_local` waited a fixed 20s for Chrome's DevTools endpoint, then
