@@ -2596,6 +2596,11 @@ def _web_scrape(url: str, formats: list | None = None, schema: dict | None = Non
         out += ["", "## Summary", r["summary"]]
     if r.get("json"):
         out += ["", "## Structured", json.dumps(r["json"], indent=2)[:8000]]
+    if r.get("jsonld"):
+        out += ["", "## JSON-LD (structured, LLM-free)",
+                json.dumps(r["jsonld"], indent=2)[:8000]]
+    if r.get("feeds"):
+        out += ["", "## Feeds", *[f"- {u}" for u in r["feeds"]]]
     if r.get("branding"):
         out += ["", "## Branding", json.dumps(r["branding"], indent=2)]
     if r.get("images"):
@@ -2714,8 +2719,9 @@ WEB_SCRAPE = {
         "Advanced single-URL scrape with selectable formats and options — the "
         "full-featured sibling of the quick browse_page reader. Formats: "
         "markdown, html (cleaned), rawHtml, links, images, metadata, branding "
-        "(site name/theme/favicon/social image), summary, json (schema "
-        "extraction), attributes (selector+attribute pairs). `actions` drives "
+        "(site name/theme/favicon/social image), jsonld (LLM-free structured "
+        "data), feeds (RSS/Atom), summary, json (schema extraction), attributes "
+        "(selector+attribute pairs). `actions` drives "
         "the page through the governed browser harness first "
         "(click/scroll/type/wait — never ungoverned JS). `mobile`/`location` set "
         "device and language hints. Every fetch is SSRF/egress-gated and content "
@@ -2727,7 +2733,8 @@ WEB_SCRAPE = {
             "url": {"type": "string"},
             "formats": {"type": "array", "items": {"type": "string"},
                         "description": "markdown|html|rawHtml|links|images|"
-                                       "metadata|branding|summary|json|attributes"},
+                                       "metadata|branding|jsonld|feeds|summary|"
+                                       "json|attributes"},
             "schema": {"type": "object",
                        "description": "JSON schema for the `json` format."},
             "prompt": {"type": "string", "description": "Focus for summary/json."},

@@ -54,6 +54,8 @@ class DomainRecord:
     verified: int = 0            # extractions the verify role confirmed
     flagged: int = 0             # extractions the verify role flagged
     site_name: str = ""          # from branding (og:site_name)
+    has_jsonld: bool = False     # exposes JSON-LD structured data (LLM-free)
+    feed_url: str = ""           # discovered RSS/Atom feed
 
 
 def _path():
@@ -117,6 +119,7 @@ def observe(url: str, *, ok: bool = True, blocked: bool = False,
             bytes_: int = 0, sitemap: str = "", robots_disallow: bool = False,
             actions_helped: bool = False, mobile_helped: bool = False,
             verified: bool | None = None, site_name: str = "",
+            has_jsonld: bool = False, feed_url: str = "",
             now: float | None = None) -> None:
     """Fold one visit's result into the domain's lore. Best-effort: never raises
     out of a scrape. Also records the ok/fail outcome into the self-tuner."""
@@ -161,6 +164,10 @@ def observe(url: str, *, ok: bool = True, blocked: bool = False,
                 r.flagged += 1
             if site_name and not r.site_name:
                 r.site_name = site_name[:_STR_CAP]
+            if has_jsonld:
+                r.has_jsonld = True
+            if feed_url and not r.feed_url:
+                r.feed_url = feed_url[:_STR_CAP]
             _save(records)
     except Exception:
         return                                   # lore is advisory; never fatal

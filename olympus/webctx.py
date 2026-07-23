@@ -109,6 +109,11 @@ class _MarkdownExtractor(HTMLParser):
         self._seen_links: set[str] = set()
         self.images: list[str] = []           # <img> sources (absolute, deduped)
         self._seen_images: set[str] = set()
+        self.jsonld: list = []                # parsed JSON-LD objects (structured)
+        self._in_jsonld = False
+        self._jsonld_buf: list[str] = []
+        self.feeds: list[str] = []            # RSS/Atom feed URLs (absolute)
+        self._seen_feeds: set[str] = set()
         self.meta: dict[str, str] = {}        # <meta name/property> + <link rel>
         self._drop_depth = 0
         self._list_stack: list[str] = []
@@ -167,6 +172,14 @@ class _MarkdownExtractor(HTMLParser):
                 self._emit(text)
 
     def handle_starttag(self, tag, attrs):
+        # JSON-LD is carried inside a <script type="application/ld+json"> — the
+        # one <script> we DON'T drop: capture its body as structured data.
+        if tag == "script" and not self._drop_depth:
+            ad0 = dict(attrs)
+            if "ld+json" in (ad0.get("type") or "").lower():
+                self._in_jsonld = True
+                self._jsonld_buf = []
+                return
         if tag in _DROP:
             self._drop_depth += 1
             return
@@ -193,10 +206,17 @@ class _MarkdownExtractor(HTMLParser):
         if tag == "link":
             rel = (ad.get("rel") or "").strip().lower()
             href = ad.get("href")
+            typ = (ad.get("type") or "").strip().lower()
             if rel and href and ("link:" + rel) not in self.meta \
                     and len(self.meta) < 200:
                 self.meta["link:" + rel] = (urljoin(self.base_url, href)
                                             if self.base_url else href)[:500]
+            # RSS/Atom feed discovery (rel=alternate + a feed content-type).
+            if href and ("rss" in typ or "atom" in typ) and len(self.feeds) < 20:
+                feed = urljoin(self.base_url, href) if self.base_url else href
+                if feed not in self._seen_feeds:
+                    self._seen_feeds.add(feed)
+                    self.feeds.append(feed)
             return
         if tag == "title":
             self._in_title = True
@@ -282,6 +302,18 @@ class _MarkdownExtractor(HTMLParser):
             self._newblock()
 
     def handle_endtag(self, tag):
+        if tag == "script" and self._in_jsonld:
+            self._in_jsonld = False
+            raw = "".join(self._jsonld_buf).strip()
+            self._jsonld_buf = []
+            if raw and len(self.jsonld) < 50:
+                try:
+                    obj = json.loads(raw)
+                    # a page may embed one object or a list of them
+                    self.jsonld.extend(obj if isinstance(obj, list) else [obj])
+                except (ValueError, RecursionError):
+                    pass
+            return
         if tag in _DROP:
             if self._drop_depth:
                 self._drop_depth -= 1
@@ -332,6 +364,10 @@ class _MarkdownExtractor(HTMLParser):
             self._row_cells = 0
 
     def handle_data(self, data):
+        if self._in_jsonld:
+            if sum(len(s) for s in self._jsonld_buf) < _PAGE_BYTE_CAP:
+                self._jsonld_buf.append(data)
+            return
         if self._drop_depth:
             return
         if self._in_title:
@@ -374,7 +410,8 @@ def parse_page(html: str, base_url: str = "") -> dict[str, Any]:
         md += "\n\n[content truncated]"
     return {"markdown": md, "links": parser.links,
             "title": parser._title.strip()[:_MAX_TITLE],
-            "images": parser.images, "meta": parser.meta}
+            "images": parser.images, "meta": parser.meta,
+            "jsonld": parser.jsonld, "feeds": parser.feeds}
 
 
 def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
@@ -525,9 +562,12 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
     except Exception as err:
         _observe(url, ok=False)
         return {"url": url, "error": f"fetch failed: {str(err)[:200]}"}
-    result = _assemble(url, html, formats, schema, prompt, attributes)
+    page = parse_page(html, base_url=url)           # parse once, reuse for signals
+    result = _assemble(url, html, formats, schema, prompt, attributes, page=page)
     _observe(url, ok=True, bytes_=len(html),
-             site_name=(result.get("branding") or {}).get("site_name", ""))
+             site_name=(result.get("branding") or {}).get("site_name", ""),
+             has_jsonld=bool(page["jsonld"]),
+             feed_url=page["feeds"][0] if page["feeds"] else "")
     return result
 
 
@@ -551,10 +591,12 @@ def _hint(url: str) -> dict:
 
 
 def _assemble(url: str, html: str, formats, schema, prompt,
-              attributes) -> dict[str, Any]:
+              attributes, page: dict | None = None) -> dict[str, Any]:
     """Build the requested formats from already-fetched HTML (shared by the
-    plain and interactive scrape paths)."""
-    page = parse_page(html, base_url=url)
+    plain and interactive scrape paths). `page` may be pre-parsed to avoid a
+    second parse."""
+    if page is None:
+        page = parse_page(html, base_url=url)
     md = page["markdown"]
     result: dict[str, Any] = {"url": url}
     fmts = set(formats or _DEFAULT_FORMATS)
@@ -573,6 +615,10 @@ def _assemble(url: str, html: str, formats, schema, prompt,
                               "source_bytes": len(html), **page["meta"]}
     if "branding" in fmts:
         result["branding"] = branding_of(page["meta"], page["title"])
+    if "jsonld" in fmts:
+        result["jsonld"] = page["jsonld"]        # deterministic structured data
+    if "feeds" in fmts:
+        result["feeds"] = page["feeds"]
     if "attributes" in fmts:
         result["attributes"] = _extract_attributes(html, attributes or [], url)
     if "summary" in fmts:

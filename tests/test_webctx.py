@@ -449,3 +449,31 @@ def test_scrape_actions_degrade_without_browser(monkeypatch):
     monkeypatch.setattr("olympus.browser.session", boom)
     r = _w.scrape("https://app/", actions=[{"type": "click", "selector": "#x"}])
     assert "error" in r and "browser" in r["error"].lower()
+
+
+# --- structured-data signals: JSON-LD + feeds (iter 2) ----------------------
+
+def test_scrape_extracts_jsonld_llm_free(monkeypatch):
+    H = ('<head><script type="application/ld+json">'
+         '{"@type":"Product","name":"Widget"}</script>'
+         '<script>tracker()</script></head><body><h1>W</h1></body>')
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: H)
+    r = webctx.scrape("https://shop/", formats=("markdown", "jsonld"))
+    assert r["jsonld"] == [{"@type": "Product", "name": "Widget"}]
+    assert "tracker" not in r["markdown"]              # ordinary script still dropped
+
+
+def test_scrape_detects_feeds(monkeypatch):
+    H = '<head><link rel="alternate" type="application/rss+xml" href="/f.xml"></head>'
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: H)
+    r = webctx.scrape("https://blog.io/", formats=("feeds",))
+    assert r["feeds"] == ["https://blog.io/f.xml"]
+
+
+def test_jsonld_array_and_malformed_are_safe(monkeypatch):
+    H = ('<script type="application/ld+json">[{"a":1},{"b":2}]</script>'
+         '<script type="application/ld+json">{not valid json</script>')
+    monkeypatch.setattr(tools, "_http_get", lambda u, timeout=30, headers=None: H)
+    r = webctx.scrape("https://x/", formats=("jsonld",))
+    assert {"a": 1} in r["jsonld"] and {"b": 2} in r["jsonld"]   # list flattened
+    # the malformed block is skipped, never raises

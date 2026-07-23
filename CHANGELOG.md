@@ -15,6 +15,35 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Self-evolving web context: knowledge, discovery, self-tuning
+
+The absorbed web-context system now compounds and discovers over time inside
+Olympus's evolve/moat spine (ADR 0009), so it gets stronger the more it runs —
+a data network effect a copier starts at zero:
+
+- **`domainlore`** — a per-domain learned-knowledge corpus. Every scrape/map
+  folds durable facts (sitemap location, robots posture, interaction/mobile
+  wins, page size, brand, JSON-LD/feed exposure, fetch success) into a store and
+  feeds them back as *purely-additive* hints to the next visit (a known sitemap
+  is tried first) — never relaxing a safety gate. Opt-outable, replay-inert,
+  bounded, corrupt-store-quarantining. Recorded on the moat board.
+- **Self-tuning** — new evolve knob `webctx.fetch_timeout`; domainlore records
+  ok/fail from every visit, so the heartbeat reviewer lengthens the fetch
+  timeout when fetches keep failing (bounded).
+- **New deterministic, LLM-free formats** — `jsonld` (parses
+  `<script type="application/ld+json">` structured data) and `feeds` (RSS/Atom
+  discovery), on `web_scrape`. A capability Olympus *discovered it should have*
+  from the data it observed.
+- **`webreflect`** — an opt-in heartbeat routine that turns the accumulated
+  corpus into *discoveries*: domains exposing JSON-LD (use the free format),
+  publishing feeds (watch instead of re-scrape), needing interaction (a default
+  action-profile candidate), or fetching poorly (try mobile/proxy). Each
+  standing pattern is surfaced once (deduped), saved as a lesson, and notified —
+  evidence-backed feature proposals, not autonomous code-gen.
+
+Internal capabilities + new formats (tool/command counts unchanged). New tests:
+`test_domainlore.py`, `test_webreflect.py`, plus jsonld/feed coverage.
+
 ### Added — Web Context: the previously-declined Firecrawl features, built native
 
 The Firecrawl capabilities ADR 0010 had declined are now first-class — built in

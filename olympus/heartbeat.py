@@ -85,6 +85,16 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Web monitor failed:\n" + traceback.format_exc())
 
+    # Web reflection: turn accumulated domain lore into discoveries (new formats
+    # to use, feeds to watch, sites needing interaction). No-op unless
+    # OLYMPUS_WEB_REFLECT is on; surfaces each standing pattern once.
+    try:
+        from . import webreflect
+        for line in webreflect.run_due(now):
+            log.append("WebReflect: " + line)
+    except Exception:
+        log.append("Web reflection failed:\n" + traceback.format_exc())
+
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
     try:
