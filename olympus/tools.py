@@ -583,14 +583,22 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
     return _urlreq.build_opener(_SafeRedirectHandler())
 
 
+# Hard ceiling on a single text fetch's body. Generous (any real HTML page is
+# far smaller) but bounded, so a hostile origin streaming a multi-gigabyte body
+# can't OOM the process before a downstream per-page slice runs. The binary
+# sibling below takes its cap as an argument; this is the text default.
+_HTTP_TEXT_CAP = 10_000_000
+
+
 def _http_get(url: str) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
     initial request and every redirect; on a DIRECT connection also pins the
     socket to the validated IP (defeating DNS rebinding), while a PROXIED
     connection routes through the configured HTTP(S) proxy (which is the egress
     control point). Also refuses a URL that carries a stored secret (raw or
-    encoded) — the classic injection exfil channel. Raises ValueError if
-    blocked."""
+    encoded) — the classic injection exfil channel. The body read is size-capped
+    (`_HTTP_TEXT_CAP`) so a hostile origin can't stream unbounded bytes into
+    memory. Raises ValueError if blocked."""
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -601,7 +609,27 @@ def _http_get(url: str) -> str:
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
+            "utf-8", errors="replace")
+
+
+def _http_get_bytes(url: str, max_bytes: int = 12_000_000) -> bytes:
+    """The binary sibling of `_http_get`: identical SSRF/egress/secret-exfil
+    preamble and the same pinned/proxied openers (so DNS-rebinding and internal
+    hosts are refused the same way), but returns raw bytes with a hard size cap.
+    The single canonical gated byte-fetch — document/media fetchers use THIS
+    rather than opening their own socket. Raises ValueError if blocked."""
+    leak = security.secret_exfil_reason(url)
+    if leak:
+        raise ValueError(f"blocked: {leak}")
+    proxied = _proxied(url)
+    reason = security.url_block_reason(url, resolve=not proxied)
+    if reason:
+        raise ValueError(reason)
+    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    opener = _proxy_opener() if proxied else _pinned_opener()
+    with opener.open(req, timeout=30) as resp:
+        return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
 
 
 def _strip_html(html: str) -> str:
@@ -1832,8 +1860,23 @@ HANDLERS: dict[str, Callable[..., str]] = {
         text, filename),
     "transcribe_audio": lambda path: _media().transcribe_audio(path),
     "browse_page": lambda url: _media().browse_page(url),
-    "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True:
-        _media().crawl_site(url, depth, max_pages, same_domain),
+    "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True,
+        include=None, exclude=None:
+        _media().crawl_site(url, depth, max_pages, same_domain, include, exclude),
+    # Web Context suite (native Firecrawl-absorption; olympus/webctx.py). The
+    # scrape/crawl surface is served by the upgraded browse_page/crawl_site above
+    # (now webctx-backed clean markdown); these add the genuinely-new verbs.
+    "web_map": lambda url, limit=200, include_subdomains=False:
+        _web_map(url, limit, include_subdomains),
+    "web_batch_scrape": lambda urls, formats=None: _web_batch_scrape(urls, formats),
+    "web_extract": lambda source, schema, prompt="", verify=None:
+        _web_extract(source, schema, prompt, verify),
+    "generate_llmstxt": lambda url, max_urls=20: _generate_llmstxt(url, max_urls),
+    "parse_document": lambda source: _parse_document(source),
+    "web_diff": lambda url, previous_markdown="": _web_diff(url, previous_markdown),
+    "web_monitor_add": lambda url, interval_minutes=60:
+        _web_monitor_add(url, interval_minutes),
+    "web_monitor_list": lambda: _web_monitor_list(),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -2472,10 +2515,11 @@ BROWSE_PAGE = {
 CRAWL_SITE = {
     "name": "crawl_site",
     "description": (
-        "Recursively crawl from a starting URL and return a combined text digest "
+        "Recursively crawl from a starting URL and return a clean-markdown digest "
         "of the pages visited — use when one page isn't enough and you need to "
         "read across a section of a site. Bounded by depth, page count and total "
-        "size. Every hop goes through the same safety gate as web_fetch."
+        "size; optional include/exclude glob-filters on the URLs followed. Every "
+        "hop goes through the same safety gate as web_fetch."
     ),
     "input_schema": {
         "type": "object",
@@ -2488,9 +2532,244 @@ CRAWL_SITE = {
             "same_domain": {"type": "boolean",
                             "description": "Only follow links on the same domain "
                                            "(default true)"},
+            "include": {"type": "array", "items": {"type": "string"},
+                        "description": "Only follow URLs matching these globs/substrings"},
+            "exclude": {"type": "array", "items": {"type": "string"},
+                        "description": "Never follow URLs matching these"},
         },
         "required": ["url"],
     },
+}
+
+# === Web Context tools (native Firecrawl-absorption; see olympus/webctx.py) ===
+# Every one of these fetches through tools._http_get (SSRF/egress/rebinding
+# gate) and wraps any model-bound content untrusted. They are INGESTION tools
+# (classified in security.INGESTION_TOOLS) except the two monitor-management
+# verbs, which touch only Olympus's own store.
+
+def _webctx():
+    from . import webctx
+    return webctx
+
+
+def _web_map(url: str, limit: int = 200, include_subdomains: bool = False) -> str:
+    r = _webctx().map_urls(url, limit=limit, include_subdomains=include_subdomains)
+    notes = f" ({'; '.join(r['notes'])})" if r.get("notes") else ""
+    return (f"Discovered {r['count']} URL(s) under {url}{notes}:\n"
+            + "\n".join(f"- {u}" for u in r["urls"]))
+
+
+def _web_batch_scrape(urls: list, formats: list | None = None) -> str:
+    fmts = tuple(formats) if formats else ("markdown",)
+    results = _webctx().batch_scrape(urls, formats=fmts)
+    parts = []
+    for r in results:
+        if r.get("error"):
+            parts.append(f"## {r['url']}\n[error: {r['error']}]")
+        else:
+            parts.append(f"## {r['url']}\n\n{r.get('markdown', '')}")
+    return f"Batch scraped {len(results)} URL(s).\n\n" + "\n\n---\n\n".join(parts)
+
+
+def _web_extract(source, schema: dict, prompt: str = "", verify=None) -> str:
+    # verify=None → webctx.extract consults OLYMPUS_WEB_EXTRACT_VERIFY (on by
+    # default); the model can still force it off by passing verify=false.
+    r = _webctx().extract(source, schema, prompt=prompt, verify=verify)
+    if r.get("error"):
+        return f"Error extracting: {r['error']}"
+    out = ["## Extracted data", json.dumps(r.get("data", {}), indent=2)[:8000]]
+    v = r.get("verified")
+    if v is True:
+        out.append("\n✅ Verified: a second model role confirmed these values "
+                   "against the source.")
+    elif v is False:
+        out.append("\n⚠️ Verification: some values were NOT supported by the "
+                   "source (see flags).")
+    elif v is None and verify:
+        out.append("\n⚠️ Verification could not run — check important values "
+                   "yourself.")
+    for f in r.get("verification_flags", []):
+        out.append(f"  - {f.get('field', '?')}: {f.get('note', '')}")
+    if not r.get("found"):
+        out.append("\n(The source did not clearly support an extraction.)")
+    return "\n".join(out)
+
+
+def _generate_llmstxt(url: str, max_urls: int = 20) -> str:
+    r = _webctx().generate_llmstxt(url, max_urls=max_urls)
+    return (f"# llms.txt for {url} ({r['pages']} page(s))\n\n"
+            f"## llms.txt\n\n{r['llmstxt']}\n\n"
+            f"## llms-full.txt (truncated)\n\n{r['llmsfull'][:12000]}")
+
+
+def _parse_document(source: str) -> str:
+    r = _webctx().parse_document(source)
+    if r.get("error"):
+        return f"Error parsing {source}: {r['error']}"
+    return f"# {source} ({r['kind']})\n\n{r.get('text', '')}"
+
+
+def _web_diff(url: str, previous_markdown: str = "") -> str:
+    r = _webctx().diff(url, previous_markdown)
+    if r.get("error"):
+        return f"Error diffing {url}: {r['error']}"
+    if not previous_markdown:
+        return (f"Baseline captured for {url} (hash {r['current_hash'][:12]}). "
+                "Pass this markdown back as previous_markdown next time to see "
+                "changes.\n\n" + r["current_markdown"][:8000])
+    if not r["changed"]:
+        return f"No change at {url} (hash {r['current_hash'][:12]})."
+    return (f"CHANGED: {url} (new hash {r['current_hash'][:12]}).\n\n"
+            f"```diff\n{r['diff']}\n```")
+
+
+def _web_monitor_add(url: str, interval_minutes: int = 60) -> str:
+    from . import webmonitor
+    return webmonitor.add(memory.current_user(), url,
+                          interval=int(interval_minutes) * 60)
+
+
+def _web_monitor_list() -> str:
+    from . import webmonitor
+    return webmonitor.list_text(memory.current_user())
+
+
+WEB_MAP = {
+    "name": "web_map",
+    "description": (
+        "Discover URLs under a site FAST without a full crawl — reads "
+        "robots.txt sitemaps, sitemap.xml, and one hop of on-page links. "
+        "Returns a deduped, sorted URL list. Use before crawl/extract to pick "
+        "targets. Gated fetches."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "limit": {"type": "integer", "description": "Max URLs (default 200)."},
+            "include_subdomains": {"type": "boolean"},
+        },
+        "required": ["url"],
+    },
+}
+
+WEB_BATCH_SCRAPE = {
+    "name": "web_batch_scrape",
+    "description": (
+        "Scrape many URLs (up to 25) in one call, returning a markdown digest "
+        "per URL. Each URL is independently gated; one failure never aborts the "
+        "batch."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "urls": {"type": "array", "items": {"type": "string"}},
+            "formats": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["urls"],
+    },
+}
+
+WEB_EXTRACT = {
+    "name": "web_extract",
+    "description": (
+        "Extract structured data matching a JSON schema from one or more URLs "
+        "(or raw text). A second model role VERIFIES the extracted values "
+        "against the source and flags anything unsupported — verified "
+        "extraction, not a best guess. Source content is wrapped untrusted "
+        "before it reaches any model."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "source": {"description": "A URL, a list of URLs, or raw text."},
+            "schema": {"type": "object",
+                       "description": "JSON schema of the object to extract."},
+            "prompt": {"type": "string", "description": "Optional extraction focus."},
+            "verify": {"type": "boolean",
+                       "description": "Run the verification pass (default true)."},
+        },
+        "required": ["source", "schema"],
+    },
+}
+
+GENERATE_LLMSTXT = {
+    "name": "generate_llmstxt",
+    "description": (
+        "Generate an llms.txt (site title + one-line page summaries) and "
+        "llms-full.txt (full markdown) for a site by mapping it and "
+        "summarizing its top pages. Gated fetches; summaries run on wrapped "
+        "untrusted content."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "max_urls": {"type": "integer", "description": "Pages to include (default 20)."},
+        },
+        "required": ["url"],
+    },
+}
+
+PARSE_DOCUMENT = {
+    "name": "parse_document",
+    "description": (
+        "Parse a PDF or DOCX into text. A URL is fetched through the gated "
+        "path; a local path is confined to the sandbox workspace (no traversal "
+        "to system files). Needs the optional [docs] extra; without it, says so "
+        "instead of failing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string",
+                       "description": "A PDF/DOCX URL or a workspace file path."},
+        },
+        "required": ["source"],
+    },
+}
+
+WEB_DIFF = {
+    "name": "web_diff",
+    "description": (
+        "Fetch a page as markdown and diff it against a previous snapshot you "
+        "pass in. Returns a unified diff and a change flag — the one-shot form "
+        "of change monitoring. Gated fetch; content only compared, never run."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "previous_markdown": {"type": "string",
+                                  "description": "Prior snapshot; empty to just "
+                                                 "capture a baseline."},
+        },
+        "required": ["url"],
+    },
+}
+
+WEB_MONITOR_ADD = {
+    "name": "web_monitor_add",
+    "description": (
+        "Watch a URL for changes on a schedule. The heartbeat re-checks it and "
+        "notifies you when the page changes (needs OLYMPUS_WEB_MONITOR enabled). "
+        "Records the watch only — no fetch happens here."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string"},
+            "interval_minutes": {"type": "integer",
+                                 "description": "Check cadence (>=15, default 60)."},
+        },
+        "required": ["url"],
+    },
+}
+
+WEB_MONITOR_LIST = {
+    "name": "web_monitor_list",
+    "description": "List the URLs you're watching for changes and their status.",
+    "input_schema": {"type": "object", "properties": {}},
 }
 
 CHART_FROM_DATA = {
@@ -3436,6 +3715,14 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "transcribe_audio": TRANSCRIBE_AUDIO,
     "browse_page": BROWSE_PAGE,
     "crawl_site": CRAWL_SITE,
+    "web_map": WEB_MAP,
+    "web_batch_scrape": WEB_BATCH_SCRAPE,
+    "web_extract": WEB_EXTRACT,
+    "generate_llmstxt": GENERATE_LLMSTXT,
+    "parse_document": PARSE_DOCUMENT,
+    "web_diff": WEB_DIFF,
+    "web_monitor_add": WEB_MONITOR_ADD,
+    "web_monitor_list": WEB_MONITOR_LIST,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

@@ -74,6 +74,17 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     except Exception:
         log.append("Heartbeats failed:\n" + traceback.format_exc())
 
+    # Web change-monitors: check watched pages whose cadence elapsed and notify
+    # on a real change. No-op unless OLYMPUS_WEB_MONITOR is on (and forced off
+    # during replay); each check goes through the SSRF-gated fetch and reports
+    # changed content as untrusted data.
+    try:
+        from . import webmonitor
+        for line in webmonitor.run_due(now):
+            log.append("Monitor: " + line)
+    except Exception:
+        log.append("Web monitor failed:\n" + traceback.format_exc())
+
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
     try:

@@ -150,7 +150,9 @@ def test_http_get_uses_pinned_opener_when_direct(monkeypatch):
 class _FakeResp:
     def __enter__(self): return self
     def __exit__(self, *a): return False
-    def read(self): return b"ok"
+    # Mirror http.client.HTTPResponse.read(amt=None): _http_get now passes a
+    # size cap so a hostile origin can't stream unbounded bytes into memory.
+    def read(self, amt=None): return b"ok"
 
 
 def _fake_opener(used, tag):

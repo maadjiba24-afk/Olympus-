@@ -47,7 +47,7 @@
     ]
   },
   "commands": {
-    "count": 119,
+    "count": 125,
     "names": [
       "a2a",
       "actions",
@@ -67,6 +67,7 @@
       "config",
       "connectors",
       "contrib",
+      "crawl",
       "curate",
       "dashboard",
       "discord",
@@ -82,6 +83,7 @@
       "evolve",
       "explain",
       "export-trajectories",
+      "extract",
       "federation",
       "gallery",
       "gate",
@@ -101,6 +103,8 @@
       "learned",
       "limit",
       "liveeval",
+      "llmstxt",
+      "map",
       "matrix",
       "mattermost",
       "mcp-serve",
@@ -108,6 +112,7 @@
       "moa",
       "moat",
       "models",
+      "monitor",
       "next-wake",
       "notes",
       "operator",
@@ -133,6 +138,7 @@
       "scan",
       "schedule",
       "scores",
+      "scrape",
       "search",
       "secret",
       "serve",
@@ -172,7 +178,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 106,
+    "count": 114,
     "names": [
       "add_todo",
       "analyze_image",
@@ -223,6 +229,7 @@
       "gate_skills",
       "generate_benchmark",
       "generate_image",
+      "generate_llmstxt",
       "glob_files",
       "grep_files",
       "list_dir",
@@ -240,6 +247,7 @@
       "operator_status",
       "operator_trust",
       "operator_verify_receipt",
+      "parse_document",
       "prepare_action",
       "propose_playbook",
       "propose_site_profile",
@@ -277,7 +285,13 @@
       "update_prompt",
       "verify_code_claim",
       "watch_youtube",
+      "web_batch_scrape",
+      "web_diff",
+      "web_extract",
       "web_fetch",
+      "web_map",
+      "web_monitor_add",
+      "web_monitor_list",
       "web_search",
       "write_document"
     ]
