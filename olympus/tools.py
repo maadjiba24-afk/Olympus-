@@ -623,6 +623,18 @@ def _proxy_opener_nofollow() -> "_urlreq.OpenerDirector":
 _HTTP_TEXT_CAP = 10_000_000
 
 
+def _egress_confinement_reason(url: str) -> str:
+    """Assessment egress confinement, evaluated BEFORE any DNS work: a NO-OP
+    unless an assessment is confining egress (`assess.confined_egress`), in which
+    case a host outside the signed scope is refused here at the fetch layer —
+    fail-closed, closing Strix's open-egress blast radius even for a hijacked
+    run. Deliberately checked ahead of the SSRF `url_block_reason` resolve so an
+    out-of-scope host is never even resolved, and the refusal reason is
+    deterministic (the confinement message) whether or not the host resolves."""
+    from . import assess as _assess
+    return _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+
+
 def _http_get(url: str, timeout: float = 30,
               headers: dict | None = None) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
@@ -640,18 +652,13 @@ def _http_get(url: str, timeout: float = 30,
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    # Assessment egress confinement: a NO-OP unless an assessment is confining
-    # egress (assess.confined_egress), in which case a host outside the signed
-    # scope is refused here at the fetch layer — fail-closed, closing Strix's
-    # open-egress blast radius even for a hijacked run.
-    from . import assess as _assess
-    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
-    if _conf:
-        raise ValueError(_conf)
     hdrs = {"User-Agent": _UA}
     if headers:
         hdrs.update({str(k): str(v) for k, v in headers.items()})
@@ -672,18 +679,13 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    # Assessment egress confinement: a NO-OP unless an assessment is confining
-    # egress (assess.confined_egress), in which case a host outside the signed
-    # scope is refused here at the fetch layer — fail-closed, closing Strix's
-    # open-egress blast radius even for a hijacked run.
-    from . import assess as _assess
-    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
-    if _conf:
-        raise ValueError(_conf)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=timeout) as resp:
@@ -703,14 +705,13 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20,
         leak = security.secret_exfil_reason(probe)   # URL and body, before I/O
         if leak:
             raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)           # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    from . import assess as _assess
-    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
-    if _conf:
-        raise ValueError(_conf)
     req = _urlreq.Request(url, data=body, method="POST", headers={
         "User-Agent": _UA, "Content-Type": "application/json",
         "Accept": "application/json"})
@@ -744,18 +745,13 @@ def _http_probe(url: str, max_bytes: int = 400_000,
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    # Assessment egress confinement: a NO-OP unless an assessment is confining
-    # egress (assess.confined_egress), in which case a host outside the signed
-    # scope is refused here at the fetch layer — fail-closed, closing Strix's
-    # open-egress blast radius even for a hijacked run.
-    from . import assess as _assess
-    _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
-    if _conf:
-        raise ValueError(_conf)
     hdrs = {"User-Agent": _UA}
     for k, v in (extra_headers or {}).items():
         k, v = str(k), str(v)
