@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Testing — Multiprocess race tests import `olympus` in spawned workers
+
+`test_proclock_races` spawns real child processes (`python worker.py` / `python
+-c`) to exercise cross-process locking. The children ran `import olympus` but only
+inherited the parent env — so in an environment without an editable install they
+failed with `ModuleNotFoundError: No module named 'olympus'` (a child's
+`sys.path` is its script dir, not the repo, and conftest's `sys.path` insert
+covers only the pytest process). A shared `_child_env()` helper now puts the repo
+root on the workers' `PYTHONPATH`, so the tests run in a bare checkout too;
+harmless where the package is pip-installed. 6 previously-failing race tests now
+pass without an editable install.
+
 ### Testing — Crypto-dependent tests degrade gracefully and consistently
 
 `cryptography` is a required dependency, so in any correctly-provisioned
