@@ -355,12 +355,32 @@ def test_open_redirect_probe_does_not_follow(monkeypatch):
 def test_bench_meets_quality_floor():
     r = assess.bench()
     # The regression gate: the engine must detect EVERY known-vulnerable fixture
-    # (no false negatives) and stay clean on the clean fixtures (high precision).
-    assert r["samples"] >= 8
+    # (no false negatives) and produce ZERO false positives on the clean fixtures
+    # (including comment-only lines). A rule change that regresses either fails here.
+    assert r["samples"] >= 20
     assert r["fn"] == 0, r["per_sample"]                    # misses nothing known
+    assert r["fp"] == 0, r["per_sample"]                    # no noise on clean code
     assert r["recall"] == 1.0
-    assert r["precision"] >= 0.9, r["per_sample"]
-    assert r["f1"] >= 0.9
+    assert r["precision"] == 1.0
+
+
+def test_sast_covers_multiple_languages():
+    # Detection breadth: the rule set spans Python, JS, Go, PHP, Java, Ruby.
+    checks = {
+        ".go": ("cfg := tls.Config{InsecureSkipVerify: true}", "CWE-295"),
+        ".php": ("include($_GET['page']);", "CWE-98"),
+        ".java": ("Runtime.getRuntime().exec(cmd);", "CWE-78"),
+        ".rb": ("obj = Marshal.load(data)", "CWE-502"),
+    }
+    for suffix, (line, cwe) in checks.items():
+        hits = {f.cwe for f in assess._sast_findings_for_text(line, suffix, "f")}
+        assert cwe in hits, (suffix, line, hits)
+
+
+def test_sast_skips_full_line_comments():
+    # A comment that merely names a sink is not a sink (precision guard).
+    assert assess._sast_findings_for_text("# eval(x) is dangerous\n", ".py", "f") == []
+    assert assess._sast_findings_for_text("eval(x)\n", ".py", "f")  # real sink still flagged
 
 
 def test_bench_is_pure_no_scope_needed():

@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aegis detection breadth (5 languages) + a precision fix
+
+Expanded the SAST rule set from Python/JS to **6 languages** — added 21 curated,
+high-signal rules for Go (insecure TLS, shell exec, weak hash, Sprintf-built
+SQL), PHP (eval, shell-with-variable, request-file-inclusion, echoed input,
+unserialize), Java (Runtime.exec, concatenated SQL, ObjectInputStream, weak
+hash), Ruby (eval, interpolated system, Marshal.load, html_safe), and extra
+Python (JWT verify disabled, unfiltered `extractall` path-traversal, Django
+`mark_safe`). Added 7 more dependency advisories (Django/urllib3/werkzeug/
+aiohttp; express/jsonwebtoken/ws). The benchmark corpus grew from 8 to 20 labeled
+samples across all six languages — **precision/recall/F1 = 1.0** (34 true
+positives, zero false positives/negatives).
+
+Also a precision fix surfaced *by* the benchmark loop: pure-comment lines that
+merely name a sink ("# eval(x) is dangerous") are no longer flagged. Found the
+false-positive class, added comment-only clean fixtures to the corpus, fixed the
+scanner, and the benchmark floor now enforces **zero** false positives (was
+≥ 0.9 precision, now == 1.0) — the measured, regression-gated evolution loop
+working as designed. No new tool/command/manifest change. Tests: 3 new.
+
 ### Added — Aegis assessment experience (the self-evolving memory loop)
 
 Every weakness Olympus's OWN scanners/validators confirm now accrues into a

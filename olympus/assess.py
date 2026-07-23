@@ -645,6 +645,125 @@ _SAST_RULES: tuple[_Rule, ...] = (
           "OS command execution (child_process.exec)",
           "Use execFile with an argument array; validate any input.",
           (".js", ".ts")),
+    # --- extra Python ---
+    _rule("py-jwt-noverify", "CWE-347", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"jwt\.decode\([^)]*verify\w*\"?\s*[=:]\s*False",
+          "JWT signature verification disabled",
+          "Never disable JWT signature verification; verify with the expected "
+          "algorithm(s) and key.", (".py",)),
+    _rule("py-tar-extractall", "CWE-22", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+          r"\.extractall\((?![^)]*filter)",
+          "Unfiltered archive extraction (path traversal)",
+          "Pass `filter='data'` (Py3.12+) or validate each member path before "
+          "extraction to prevent '../' escapes.", (".py",)),
+    _rule("py-mark-safe", "CWE-79", "medium",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          r"\bmark_safe\s*\(",
+          "Django mark_safe on possibly-untrusted content (XSS)",
+          "Do not mark_safe user-influenced strings; rely on template "
+          "auto-escaping or sanitize with a vetted library.", (".py",)),
+    # --- Go ---
+    _rule("go-insecure-tls", "CWE-295", "high",
+          "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"InsecureSkipVerify\s*:\s*true",
+          "TLS certificate verification disabled (InsecureSkipVerify)",
+          "Never set InsecureSkipVerify:true in production; fix the trust "
+          "store.", (".go",)),
+    _rule("go-cmd-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"exec\.Command\(\s*\"(?:sh|bash)\"\s*,\s*\"-c\"",
+          "OS command execution via a shell (exec.Command sh -c)",
+          "Invoke the binary directly with an argument slice; never build a "
+          "shell string from input.", (".go",)),
+    _rule("go-weak-hash", "CWE-327", "medium",
+          "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+          r"\b(?:md5|sha1)\.New\s*\(",
+          "Weak hash (MD5/SHA-1)",
+          "Use SHA-256+; for passwords use a KDF (argon2/bcrypt/scrypt).",
+          (".go",)),
+    _rule("go-sql-sprintf", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"\.Query(?:Row|Context)?\(\s*fmt\.Sprintf\(",
+          "SQL query built with fmt.Sprintf (injection)",
+          "Use parameterized queries (`$1`/`?` placeholders), never Sprintf "
+          "into SQL.", (".go",)),
+    # --- PHP ---
+    _rule("php-eval", "CWE-95", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"\beval\s*\(",
+          "Dynamic code execution (eval)",
+          "Avoid eval entirely; use a safe dispatch table.", (".php",)),
+    _rule("php-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"\b(?:system|exec|shell_exec|passthru|popen)\s*\(\s*\$",
+          "OS command execution with a variable argument",
+          "Never pass input to a shell; use escapeshellarg + a fixed command, "
+          "or a safe API.", (".php",)),
+    _rule("php-include-input", "CWE-98", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"\b(?:include|require)(?:_once)?\s*\(?\s*\$_(?:GET|POST|REQUEST)",
+          "File inclusion from request input (LFI/RFI)",
+          "Never include a path from input; map an allowlisted key to a fixed "
+          "file.", (".php",)),
+    _rule("php-echo-input", "CWE-79", "medium",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          r"\becho\s+\$_(?:GET|POST|REQUEST)",
+          "Reflected request input echoed without encoding (XSS)",
+          "Encode with htmlspecialchars() before output.", (".php",)),
+    _rule("php-unserialize", "CWE-502", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"\bunserialize\s*\(\s*\$",
+          "Unsafe deserialization of a variable (unserialize)",
+          "Never unserialize untrusted input; use json_decode.", (".php",)),
+    # --- Java ---
+    _rule("java-runtime-exec", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"Runtime\.getRuntime\(\)\.exec\s*\(",
+          "OS command execution (Runtime.exec)",
+          "Use ProcessBuilder with an argument list and validate input; avoid "
+          "a shell.", (".java",)),
+    _rule("java-sql-concat", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"\.execute(?:Query|Update)?\(\s*\"[^\"]*\"\s*\+",
+          "SQL built by string concatenation (injection)",
+          "Use a PreparedStatement with bound parameters.", (".java",)),
+    _rule("java-deserialize", "CWE-502", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"new\s+ObjectInputStream\s*\(",
+          "Unsafe Java deserialization (ObjectInputStream)",
+          "Avoid native deserialization of untrusted data; use a safe format "
+          "(JSON) or a strict allowlist filter.", (".java",)),
+    _rule("java-weak-hash", "CWE-327", "medium",
+          "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+          r"MessageDigest\.getInstance\(\s*\"(?:MD5|SHA-1)\"",
+          "Weak hash (MD5/SHA-1)",
+          "Use SHA-256+; for passwords use a KDF (argon2/bcrypt/PBKDF2).",
+          (".java",)),
+    # --- Ruby ---
+    _rule("ruby-eval", "CWE-95", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"\b(?:eval|instance_eval|class_eval)\s*\(",
+          "Dynamic code execution (eval)",
+          "Avoid eval on any input; use explicit dispatch.", (".rb",)),
+    _rule("ruby-system-interp", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"(?:system|exec)\s*\(?\s*\"[^\"]*#\{",
+          "OS command with string interpolation",
+          "Pass an argument array (`system('cmd', arg)`); never interpolate "
+          "input into a command string.", (".rb",)),
+    _rule("ruby-marshal", "CWE-502", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"Marshal\.load\s*\(",
+          "Unsafe deserialization (Marshal.load)",
+          "Never Marshal.load untrusted data; use JSON.", (".rb",)),
+    _rule("ruby-html-safe", "CWE-79", "medium",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",
+          r"\.html_safe\b",
+          "Rails html_safe on possibly-untrusted content (XSS)",
+          "Do not html_safe user input; rely on ERB auto-escaping or sanitize.",
+          (".rb",)),
 )
 
 
@@ -670,6 +789,12 @@ def _sast_findings_for_text(text: str, suffix: str,
     suffix = (suffix or "").lower()
     for i, line in enumerate(text.splitlines(), 1):
         if len(line) > 2000:
+            continue
+        # Skip pure-comment lines — a comment that merely NAMES a sink
+        # ("# any other frame eval → benign") is not a sink. This is the cheapest
+        # high-value precision win; mid-line comments are left for a future pass.
+        stripped = line.lstrip()
+        if stripped.startswith(("#", "//", "/*", "* ", "*/", "--")):
             continue
         for rule in _SAST_RULES:
             if rule.suffixes and suffix not in rule.suffixes:
@@ -813,6 +938,14 @@ _BUNDLED_ADVISORIES: dict[str, dict[str, list[tuple]]] = {
                    "Session cookie disclosure via caching proxies")],
         "cryptography": [("<41.0.0", "CVE-2023-38325", "CWE-347", "high",
                           "Malformed certificate parsing issues")],
+        "django": [("<3.2.20", "CVE-2023-36053", "CWE-1333", "high",
+                    "ReDoS in EmailValidator/URLValidator")],
+        "urllib3": [("<1.26.18", "CVE-2023-45803", "CWE-200", "medium",
+                     "Request body leak on redirect after 303")],
+        "werkzeug": [("<2.3.8", "CVE-2023-46136", "CWE-400", "high",
+                      "Resource exhaustion parsing multipart form-data")],
+        "aiohttp": [("<3.9.2", "CVE-2024-23334", "CWE-22", "high",
+                     "Directory traversal via follow_symlinks static routes")],
     },
     "npm": {
         "lodash": [("<4.17.21", "CVE-2021-23337", "CWE-77", "high",
@@ -821,6 +954,12 @@ _BUNDLED_ADVISORIES: dict[str, dict[str, list[tuple]]] = {
                       "Prototype pollution")],
         "axios": [("<1.6.0", "CVE-2023-45857", "CWE-200", "medium",
                    "SSRF / credential leak via absolute URL")],
+        "express": [("<4.19.2", "CVE-2024-29041", "CWE-601", "medium",
+                     "Open redirect via malformed URLs in res.location")],
+        "jsonwebtoken": [("<9.0.0", "CVE-2022-23529", "CWE-347", "high",
+                          "Insecure key handling allows signature bypass")],
+        "ws": [("<8.17.1", "CVE-2024-37890", "CWE-400", "high",
+                "DoS via many HTTP headers")],
     },
 }
 
@@ -1191,6 +1330,14 @@ _BENCH_CORPUS: tuple[dict, ...] = (
     {"name": "js_clean", "kind": "sast", "suffix": ".js", "expected": set(),
      "text": ("el.textContent = userInput;\n"
               "const x = JSON.parse(data);\n")},
+    # Comments that merely NAME a sink must never be flagged (precision guard).
+    {"name": "py_comment_clean", "kind": "sast", "suffix": ".py", "expected": set(),
+     "text": ("# any other frame eval (e.g. document.eval) is benign here\n"
+              "    # os.system('x') would be dangerous, but this is just a note\n"
+              "        # pickle.loads(x) documented for reviewers\n")},
+    {"name": "js_comment_clean", "kind": "sast", "suffix": ".js", "expected": set(),
+     "text": ("// child_process.exec(cmd) would be unsafe; we don't do that\n"
+              "/* innerHTML = x is an XSS sink, documented for reviewers */\n")},
     {"name": "deps_py_vuln", "kind": "deps", "ecosystem": "pypi",
      "expected": {"CWE-20", "CWE-200"},
      "text": "pyyaml==5.1\nrequests==2.20.0\n"},
@@ -1199,6 +1346,63 @@ _BENCH_CORPUS: tuple[dict, ...] = (
      "text": '{"dependencies": {"lodash": "4.17.0", "minimist": "1.2.0"}}'},
     {"name": "deps_py_clean", "kind": "deps", "ecosystem": "pypi",
      "expected": set(), "text": "pyyaml==6.0.1\nrequests==2.31.0\n"},
+    # --- extra Python ---
+    {"name": "py_extra_vuln", "kind": "sast", "suffix": ".py",
+     "expected": {"CWE-347", "CWE-22", "CWE-79"},
+     "text": ('jwt.decode(token, options={"verify_signature": False})\n'
+              "tar.extractall(dest)\n"
+              "return mark_safe(user_bio)\n")},
+    {"name": "py_extra_clean", "kind": "sast", "suffix": ".py", "expected": set(),
+     "text": ('jwt.decode(token, key, algorithms=["HS256"])\n'
+              'tar.extractall(dest, filter="data")\n'
+              "return escape(user_bio)\n")},
+    # --- Go ---
+    {"name": "go_vuln", "kind": "sast", "suffix": ".go",
+     "expected": {"CWE-295", "CWE-78", "CWE-327", "CWE-89"},
+     "text": ("cfg := tls.Config{InsecureSkipVerify: true}\n"
+              'out, _ := exec.Command("sh", "-c", userCmd).Output()\n'
+              "h := md5.New()\n"
+              'rows, _ := db.Query(fmt.Sprintf("SELECT * FROM u WHERE n=%s", x))\n')},
+    {"name": "go_clean", "kind": "sast", "suffix": ".go", "expected": set(),
+     "text": ("cfg := tls.Config{MinVersion: tls.VersionTLS13}\n"
+              'out, _ := exec.Command("ls", "-l").Output()\n'
+              "h := sha256.New()\n"
+              'rows, _ := db.Query("SELECT * FROM u WHERE n = ?", id)\n')},
+    # --- PHP ---
+    {"name": "php_vuln", "kind": "sast", "suffix": ".php",
+     "expected": {"CWE-95", "CWE-78", "CWE-98", "CWE-79", "CWE-502"},
+     "text": ("eval($code);\n"
+              "system($_GET['cmd']);\n"
+              "include($_GET['page']);\n"
+              "echo $_GET['name'];\n"
+              "unserialize($data);\n")},
+    {"name": "php_clean", "kind": "sast", "suffix": ".php", "expected": set(),
+     "text": ("$x = json_decode($data, true);\n"
+              'system("ls -l");\n'
+              'include("header.php");\n'
+              "echo htmlspecialchars($name);\n")},
+    # --- Java ---
+    {"name": "java_vuln", "kind": "sast", "suffix": ".java",
+     "expected": {"CWE-78", "CWE-89", "CWE-502", "CWE-327"},
+     "text": ("Runtime.getRuntime().exec(cmd);\n"
+              'ResultSet rs = stmt.executeQuery("SELECT * FROM u WHERE id=" + id);\n'
+              "ObjectInputStream ois = new ObjectInputStream(in);\n"
+              'MessageDigest md = MessageDigest.getInstance("MD5");\n')},
+    {"name": "java_clean", "kind": "sast", "suffix": ".java", "expected": set(),
+     "text": ('Process p = new ProcessBuilder("ls").start();\n'
+              "ResultSet rs = pstmt.executeQuery();\n"
+              'MessageDigest md = MessageDigest.getInstance("SHA-256");\n')},
+    # --- Ruby ---
+    {"name": "ruby_vuln", "kind": "sast", "suffix": ".rb",
+     "expected": {"CWE-95", "CWE-78", "CWE-502", "CWE-79"},
+     "text": ("eval(params[:code])\n"
+              'system("ping #{host}")\n'
+              "obj = Marshal.load(data)\n"
+              "@bio = user_bio.html_safe\n")},
+    {"name": "ruby_clean", "kind": "sast", "suffix": ".rb", "expected": set(),
+     "text": ("obj = JSON.parse(data)\n"
+              'system("ls", "-l")\n'
+              "@bio = h(user_bio)\n")},
 )
 
 
