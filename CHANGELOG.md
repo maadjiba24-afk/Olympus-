@@ -46,6 +46,20 @@ New tests: `test_domainlore_share.py`, `test_webproposals.py`,
 `test_federation_lore.py`, plus action-profile auto-apply coverage in
 `test_webctx.py`. No new tools/commands (new CLI flags on `webknowledge`).
 
+Adversarial hardening of the three seams:
+- Auto-applied learned profiles are now **best-effort**: if the profile can't run
+  (no browser, nav/interaction error) the scrape falls back to a plain fetch
+  instead of failing — enabling the flag can't break a scrape a plain fetch would
+  have handled. An *explicit* `actions=` still surfaces its error.
+- Shared/merged **domains** are validated as bare hostnames (rejecting paths,
+  spaces, control chars, userinfo, single-label hosts) so a peer can't pollute
+  the corpus with malformed keys.
+- Action-profiles are **structurally sanitized at rest** — bounded step count and
+  field sizes, well-formed steps only, whole-step drop-to-fit (never a
+  string-sliced, invalid-JSON dump). Verb safety stays enforced authoritatively
+  at use (`_ACTION_VERBS`). Federation shares the profile structurally rather than
+  running a whole-string PII scrub that would mangle valid JSON.
+
 ### Added — Self-evolving web context: knowledge, discovery, self-tuning
 
 The absorbed web-context system now compounds and discovers over time inside

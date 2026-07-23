@@ -492,6 +492,39 @@ def test_learned_action_profile_auto_applies_when_opted_in(monkeypatch, tmp_path
         browser.set_transport_factory(None)
 
 
+def test_auto_action_falls_back_to_plain_when_browser_unavailable(monkeypatch,
+                                                                  tmp_path):
+    """Enabling auto-actions must never BREAK a scrape a plain fetch would have
+    handled: if the learned profile can't run (no browser), fall back to plain."""
+    from olympus import config, domainlore
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.delenv("OLYMPUS_REPLAY", raising=False)
+    monkeypatch.delenv("OLYMPUS_WEB_LORE", raising=False)
+    monkeypatch.setenv("OLYMPUS_WEB_AUTO_ACTIONS", "1")
+    import json as _json
+    prof = _json.dumps([{"type": "click", "selector": "#more"}])
+    for _ in range(2):
+        domainlore.observe("https://app/", ok=True,
+                           actions_helped=True, action_profile=prof)
+    # no browser available
+    monkeypatch.setattr("olympus.browser.session",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no chrome")))
+    monkeypatch.setattr(tools, "_http_get",
+                        lambda u, timeout=30, headers=None: "<body>plain content</body>")
+    r = webctx.scrape("https://app/", formats=("markdown",))
+    assert "error" not in r                            # did NOT break
+    assert "plain content" in r.get("markdown", "")    # fell back to plain fetch
+
+
+def test_explicit_actions_keep_their_error(monkeypatch):
+    """An EXPLICIT actions request is not auto-fallback: the caller asked for
+    interaction, so a browser failure surfaces as an error (unchanged behavior)."""
+    monkeypatch.setattr("olympus.browser.session",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no chrome")))
+    r = webctx.scrape("https://app/", actions=[{"type": "click", "selector": "#x"}])
+    assert "error" in r and "browser" in r["error"].lower()
+
+
 # --- structured-data signals: JSON-LD + feeds (iter 2) ----------------------
 
 def test_scrape_extracts_jsonld_llm_free(monkeypatch):

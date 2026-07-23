@@ -334,13 +334,18 @@ def staged_lessons() -> list[dict]:
 # widening the trust surface.
 
 def _scrub_share_row(row: dict) -> dict | None:
-    """Scrub one shareable lore row before it leaves (or as it enters): free-text
-    fields are defanged + PII-stripped; the domain is structurally validated;
-    URLs pass through (a mangled URL simply fails the fetch gate later — safe)."""
+    """Scrub one shareable lore row before it leaves (or as it enters): the
+    free-text `site_name` is defanged + PII-stripped; the domain is validated as
+    a bare hostname; URLs pass through (a mangled URL simply fails the fetch gate
+    later — safe); the action profile is bounded *structurally* (well-formed safe
+    steps only). Verb safety is re-enforced at use, so a whole-string PII scrub —
+    which would mangle the JSON and silently drop legitimate profiles — is the
+    wrong tool here; the structural sanitizer is."""
     if not isinstance(row, dict):
         return None
-    dom = str(row.get("domain", "")).strip().lower()[:200]
-    if not dom or "/" in dom or " " in dom:
+    from . import domainlore
+    dom = str(row.get("domain", "")).strip().lower()[:253]
+    if not domainlore._valid_domain(dom):
         return None
 
     def _cnt(v):
@@ -352,7 +357,8 @@ def _scrub_share_row(row: dict) -> dict | None:
             "sitemap_url": str(row.get("sitemap_url", ""))[:300],
             "feed_url": str(row.get("feed_url", ""))[:300],
             "site_name": _scrub(str(row.get("site_name", "")))[:200],
-            "action_profile": _scrub(str(row.get("action_profile", "")))[:1200],
+            "action_profile": domainlore._sanitize_profile(
+                str(row.get("action_profile", ""))),
             "robots_disallow": bool(row.get("robots_disallow")),
             "has_jsonld": bool(row.get("has_jsonld")),
             "mobile_helped": _cnt(row.get("mobile_helped")),

@@ -120,3 +120,44 @@ def test_sharing_inert_under_replay(lore, monkeypatch):
     monkeypatch.setenv("OLYMPUS_REPLAY", "1")
     assert domainlore.stage_shared([{"domain": "x.co"}], source="p") == 0
     assert domainlore.merge_staged() == 0
+
+
+# --- adversarial hardening --------------------------------------------------
+
+def test_malformed_domains_rejected_at_stage(lore):
+    domainlore.stage_shared([
+        {"domain": "ok.co", "has_jsonld": True},
+        {"domain": "evil.com/../path"},               # path
+        {"domain": "a b.com"},                        # space
+        {"domain": "x.com\ninjected"},                # control char
+        {"domain": "no-dot-host"},                    # single label
+        {"domain": "user@host.com"},                  # userinfo
+        {"domain": "-lead.com"},                      # leading dash
+    ], source="p")
+    staged = domainlore.staged_shared()
+    assert [e["domain"] for e in staged] == ["ok.co"]
+
+
+def test_action_profile_bounded_and_wellformed(lore):
+    import json
+    # an oversized, partly-garbage profile is bounded to well-formed safe steps
+    raw = json.dumps([{"type": "type", "text": "z" * 500} for _ in range(40)]
+                     + [1, 2, {"type": "bad verb!"}])
+    prof = domainlore._sanitize_profile(raw)
+    steps = json.loads(prof)
+    assert isinstance(steps, list) and 0 < len(steps) <= domainlore._MAX_PROFILE_STEPS
+    assert all(isinstance(s, dict) and s["type"] == "type" for s in steps)
+    assert len(prof) <= domainlore._PROFILE_CAP
+
+
+def test_merged_profile_is_sanitized(lore):
+    # a peer shares a huge/garbage profile; after merge it's bounded + well-formed
+    import json
+    payload = json.dumps([{"type": "click", "selector": "s" * 400}] * 30)
+    domainlore.stage_shared([{"domain": "peer.co", "actions_helped": 5,
+                              "action_profile": payload}], source="p")
+    domainlore.merge_staged()
+    r = domainlore.known("https://peer.co/x")
+    steps = json.loads(r.action_profile)
+    assert 0 < len(steps) <= domainlore._MAX_PROFILE_STEPS
+    assert all(len(s.get("selector", "")) <= 200 for s in steps)

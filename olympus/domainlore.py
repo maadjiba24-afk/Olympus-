@@ -79,6 +79,69 @@ def _domain(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
+_PROFILE_STEP_KEYS = ("selector", "text", "key", "value")
+_MAX_PROFILE_STEPS = 12
+
+
+def _valid_domain(dom: str) -> bool:
+    """A hostname we're willing to store as a key: ASCII letters/digits/dot/dash
+    only, dotted, bounded. Rejects paths, spaces, control chars, `@`, schemes —
+    anything that isn't a bare host. A junk key would never match a real lookup,
+    but we refuse it so a peer can't pollute the corpus with display/JSON junk."""
+    if not dom or len(dom) > 253 or "." not in dom:
+        return False
+    if dom[0] in ".-" or dom[-1] in ".-":
+        return False
+    return all(c.isalnum() or c in ".-" for c in dom)
+
+
+def _sanitize_profile(raw) -> str:
+    """Reduce an action-profile (JSON string or list) to well-formed, bounded
+    safe steps and re-serialize. Verb *safety* is enforced authoritatively at USE
+    (webctx `_ACTION_VERBS`); this bounds structure and size AT REST so a stored
+    or peer-merged profile can never carry oversized/garbage payloads. Returns ""
+    if nothing valid survives."""
+    if not raw:
+        return ""
+    try:
+        steps = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(steps, list):
+        return ""
+    clean: list = []
+    for s in steps[:_MAX_PROFILE_STEPS]:
+        if not isinstance(s, dict):
+            continue
+        verb = str(s.get("type", "")).strip().lower()[:32]
+        if not verb or not all(c.isalpha() or c == "_" for c in verb):
+            continue
+        step: dict = {"type": verb}
+        for k in _PROFILE_STEP_KEYS:
+            v = s.get(k)
+            if isinstance(v, str) and v.strip():
+                step[k] = v[:200]
+        for k in ("x", "y"):
+            try:
+                n = int(s.get(k, 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n:
+                step[k] = n
+        clean.append(step)
+    # Serialize within the cap by dropping whole steps — never string-slicing a
+    # JSON dump (which would yield invalid JSON and silently lose the profile).
+    while clean:
+        try:
+            out = json.dumps(clean)
+        except (TypeError, ValueError):
+            return ""
+        if len(out) <= _PROFILE_CAP:
+            return out
+        clean.pop()
+    return ""
+
+
 def _mutex():
     from . import proclock
     return proclock.lock("domainlore")
@@ -165,16 +228,18 @@ def observe(url: str, *, ok: bool = True, blocked: bool = False,
             # so it can be re-applied (purely additive) on the next visit.
             if used_actions and old_avg > 0 and bytes_ > 1.2 * old_avg:
                 r.actions_helped = min(_BIAS_CAP, r.actions_helped + 1)
-                if action_profile:
-                    r.action_profile = action_profile[:_PROFILE_CAP]
+                prof = _sanitize_profile(action_profile)
+                if prof:
+                    r.action_profile = prof
             if sitemap:
                 r.sitemap_url = sitemap[:_STR_CAP]
             if robots_disallow:
                 r.robots_disallow = True
             if actions_helped:
                 r.actions_helped = min(_BIAS_CAP, r.actions_helped + 1)
-                if action_profile:
-                    r.action_profile = action_profile[:_PROFILE_CAP]
+                prof = _sanitize_profile(action_profile)
+                if prof:
+                    r.action_profile = prof
             if mobile_helped:
                 r.mobile_helped = min(_BIAS_CAP, r.mobile_helped + 1)
             if verified is True:
@@ -374,15 +439,9 @@ def _clean_share_row(d: dict) -> dict | None:
     if not isinstance(d, dict):
         return None
     dom = str(d.get("domain", "")).strip().lower()[:_STR_CAP]
-    if not dom or "/" in dom or " " in dom:
+    if not _valid_domain(dom):
         return None
-    profile = str(d.get("action_profile", ""))[:_PROFILE_CAP]
-    if profile:
-        try:                                     # keep only valid JSON lists
-            if not isinstance(json.loads(profile), list):
-                profile = ""
-        except (ValueError, TypeError):
-            profile = ""
+    profile = _sanitize_profile(str(d.get("action_profile", "")))
 
     def _cnt(v):
         try:

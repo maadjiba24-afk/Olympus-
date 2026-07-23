@@ -93,6 +93,18 @@ def test_route_recognized_and_auth_gated():
 
 def test_scrub_row_structural_validation():
     assert federation._scrub_share_row({"domain": "ex.com/x"}) is None   # path
+    assert federation._scrub_share_row({"domain": "no-dot"}) is None     # 1 label
     assert federation._scrub_share_row({"nope": 1}) is None              # no domain
     good = federation._scrub_share_row({"domain": "Ex.COM", "mobile_helped": 3})
     assert good["domain"] == "ex.com" and good["mobile_helped"] == 3
+
+
+def test_scrub_keeps_valid_action_profile_across_the_wire():
+    # A structural sanitizer preserves a legitimate profile (a whole-string PII
+    # scrub would mangle the JSON and silently drop it).
+    import json
+    row = federation._scrub_share_row(
+        {"domain": "shop.co",
+         "action_profile": json.dumps([{"type": "click", "selector": "#more"}])})
+    steps = json.loads(row["action_profile"])
+    assert steps == [{"type": "click", "selector": "#more"}]

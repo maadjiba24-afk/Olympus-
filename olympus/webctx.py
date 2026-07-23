@@ -556,14 +556,22 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
     # replay the safe profile this domain earned (>=2 wins). Purely additive —
     # an explicit `actions=` (including `[]` to force none) always wins — and
     # every step is re-validated against the safe-verb allowlist before it runs.
+    auto_actions = False
     if actions is None and _auto_actions_enabled():
         learned = _hint(url).get("action_profile")
         if isinstance(learned, list) and learned:
             actions = learned
+            auto_actions = True
     # Interactive path: pre-actions require a real (governed) browser.
     if actions:
-        return _scrape_with_actions(url, actions, formats, schema, prompt,
-                                    attributes)
+        res = _scrape_with_actions(url, actions, formats, schema, prompt,
+                                   attributes)
+        # A *learned* profile is best-effort enhancement: if it couldn't run (no
+        # browser, nav/interaction error), fall back to a plain fetch rather than
+        # failing a scrape a plain fetch would have handled. An EXPLICIT actions
+        # request keeps its error — the caller asked for interaction.
+        if not (auto_actions and "error" in res):
+            return res
     # Auto-apply learned config: when the caller didn't specify `mobile`, use
     # the per-domain bias the corpus has earned (>=2 wins). Purely additive —
     # an explicit True/False from the caller always wins.
@@ -747,15 +755,16 @@ def _normalize_step(verb: str, act: dict) -> dict:
 
 
 def _serialize_profile(steps: list[dict]) -> str:
-    """JSON of the safe action profile, bounded in step count and size."""
+    """JSON of the safe action profile. `domainlore._sanitize_profile` bounds the
+    step count and total size at rest (dropping whole steps to fit), so here we
+    only need a valid dump — never a string-sliced one."""
     try:
-        return json.dumps(steps[:_MAX_PROFILE_STEPS])[:_PROFILE_JSON_CAP]
+        return json.dumps(steps[:_MAX_PROFILE_STEPS])
     except (TypeError, ValueError):
         return ""
 
 
 _MAX_PROFILE_STEPS = 12
-_PROFILE_JSON_CAP = 1200
 
 
 _SCRIPT_STYLE_RE = re.compile(
