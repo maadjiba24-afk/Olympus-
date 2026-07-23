@@ -28,17 +28,21 @@ jobs:
       # from the SAME lock; no per-version lock files, no unpinned installs.
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
-      # `pytest` is the runner; `openai` and `pyyaml` are CI-only TEST tooling
-      # (not shipped dependencies). Without them these tests self-skip, leaving
-      # coverage dark:
+      # The `test` extra is CI-only TEST tooling (not shipped dependencies) —
+      # the single source of truth lives in pyproject `[project.optional-
+      # dependencies].test`. Without it these tests self-skip, leaving coverage
+      # dark:
       #   * openai — the client tests/test_openai_endpoint.py uses to drive the
       #     OpenAI-compatible server.
       #   * pyyaml — required by the ABC drift guard (tests/test_abc.py,
       #     test_abc_surface.py) that pins behavioral_contracts.yaml against the
       #     embedded _DEFAULT_CONTRACTS mirror; without it a drift between the
       #     human-readable YAML and the authoritative embedded dict ships
-      #     uncaught. (Same de-darking pattern as build/twine/cyclonedx/playwright.)
-      - run: pip install pytest openai pyyaml
+      #     uncaught.
+      #   * mcp — the native MCP client integration (tests/test_mcp_integration.py).
+      #   * websockets — the CDP transport, exercised by the browser-smoke job.
+      # (Same de-darking pattern as build/twine/cyclonedx/playwright.)
+      - run: pip install -e '.[test]'
       # Refuse pre-release (alpha/beta/rc/dev) dependencies.
       - run: python scripts/check_no_prerelease.py requirements.lock
       - run: python -m compileall -q olympus
@@ -129,3 +133,26 @@ jobs:
           OLYMPUS_BROWSER_REAL: "1"
           OLYMPUS_BROWSER_SMOKE: "1"
         run: pytest -q tests/test_browser_real.py tests/test_browser_smoke.py
+
+  docker-sandbox:
+    # The default `test` job has no Docker daemon, so the sandbox-hardening
+    # integration tests (tests/test_sandbox_docker_integration.py) self-skip
+    # there — they only unit-check the argv, never that the flags change
+    # container behaviour at runtime. GitHub-hosted ubuntu runners ship a
+    # running Docker engine with unrestricted registry access, so this job
+    # actually exercises the docker backend end-to-end (cap-drop ALL,
+    # no-new-privileges, --network none) on every push/PR. A regression that
+    # weakens the sandbox fails the build here instead of skipping silently.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - run: pip install pytest
+      # Prove the daemon is up and can fetch the base image the probe uses.
+      - run: docker info >/dev/null && docker pull python:3.11-slim
+      - name: Run the docker sandbox-hardening integration tests
+        run: pytest -q tests/test_sandbox_docker_integration.py
