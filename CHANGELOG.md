@@ -22,11 +22,12 @@ environment (CI, normal dev) the vault (Fernet) and signing (Ed25519) tests run 
 full. But the native backend can be *present yet broken* — a missing
 `_cffi_backend` or a panicking build makes the `vault`/`witness` modules set their
 own `_HAVE_CRYPTO=False` and refuse to encrypt/sign. In that defective environment
-20 tests across `test_backup`, `test_opconfig`, `test_secretref`,
-`test_seed_custody`, `test_exfil_scan`, `test_memory_contract`, and `test_browser`
-errored in a way that looked like a code regression, and the few pre-existing
-guards were inconsistent (a mix of the private `vault._HAVE_CRYPTO` and the public
-`vault.available()`, most tests guarding not at all).
+~26 tests across `test_backup`, `test_opconfig`, `test_secretref`,
+`test_seed_custody`, `test_exfil_scan`, `test_memory_contract`, `test_browser`,
+and `test_verify_and_custody` errored in a way that looked like a code regression,
+and the few pre-existing guards were inconsistent (a mix of the private
+`vault._HAVE_CRYPTO` and the public `vault.available()`, most tests guarding not at
+all).
 
 Replaced that ad-hoc mix with a single shared gate: a `requires_crypto` pytest
 marker (registered in `tests/conftest.py`) whose collection hook skips the marked
