@@ -28,6 +28,12 @@ surface. So the surface and its threat model can't drift apart.
   (web pages, emails, transcripts) is treated as untrusted and wrapped/sanitized
   (`security.should_wrap`, `security.sanitize_for_memory`) so injection-shaped
   text can't poison memory or hijack the agent.
+- **Assessment egress is confined to the signed scope.** During an authorized
+  security assessment (`assess.confined_egress`, ADR 0013) all outbound network
+  is pinned to the authorization's hosts at the gated-fetch layer, fail-closed —
+  so even a hijacked assessment cannot reach an out-of-scope host, the operator's
+  LAN, or a metadata endpoint. A no-op outside an assessment. `olympus assess
+  containment` proves each blast-radius vector is contained.
 
 ## Trust boundaries
 

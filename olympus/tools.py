@@ -623,6 +623,18 @@ def _proxy_opener_nofollow() -> "_urlreq.OpenerDirector":
 _HTTP_TEXT_CAP = 10_000_000
 
 
+def _egress_confinement_reason(url: str) -> str:
+    """Assessment egress confinement, evaluated BEFORE any DNS work: a NO-OP
+    unless an assessment is confining egress (`assess.confined_egress`), in which
+    case a host outside the signed scope is refused here at the fetch layer —
+    fail-closed, closing Strix's open-egress blast radius even for a hijacked
+    run. Deliberately checked ahead of the SSRF `url_block_reason` resolve so an
+    out-of-scope host is never even resolved, and the refusal reason is
+    deterministic (the confinement message) whether or not the host resolves."""
+    from . import assess as _assess
+    return _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
+
+
 def _http_get(url: str, timeout: float = 30,
               headers: dict | None = None) -> str:
     """Fetch a URL as text, refusing internal/metadata hosts (SSRF) on the
@@ -640,6 +652,9 @@ def _http_get(url: str, timeout: float = 30,
     leak = security.secret_exfil_reason(url)     # before DNS work: no I/O
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
@@ -664,6 +679,9 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
@@ -674,8 +692,43 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
         return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
 
 
+def _http_post_json(url: str, payload: dict, timeout: float = 20,
+                    max_bytes: int = 4_000_000) -> dict[str, Any]:
+    """POST a JSON body and parse a JSON response, through the SAME gated seam as
+    `_http_get` (SSRF/egress/rebinding-pin + assessment egress confinement) — the
+    canonical gated POST. Additionally scans the OUTBOUND BODY for a stored
+    secret (a POST can exfiltrate in the body, not just the URL) and refuses it.
+    Returns the parsed object; raises ValueError if blocked; returns
+    {'_error': ...} on a network/parse failure so callers degrade gracefully."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    for probe in (url, body.decode("utf-8", "replace")):
+        leak = security.secret_exfil_reason(probe)   # URL and body, before I/O
+        if leak:
+            raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)           # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
+    proxied = _proxied(url)
+    reason = security.url_block_reason(url, resolve=not proxied)
+    if reason:
+        raise ValueError(reason)
+    req = _urlreq.Request(url, data=body, method="POST", headers={
+        "User-Agent": _UA, "Content-Type": "application/json",
+        "Accept": "application/json"})
+    opener = _proxy_opener() if proxied else _pinned_opener()
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:                               # includes JSONDecodeError
+        return {"_error": "invalid JSON response"}
+    except Exception as err:                         # network / HTTP error
+        return {"_error": str(err)[:200]}
+
+
 def _http_probe(url: str, max_bytes: int = 400_000,
-                follow_redirects: bool = True) -> dict[str, Any]:
+                follow_redirects: bool = True,
+                extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """Gated fetch that also returns the RESPONSE HEADERS and status — the
     canonical seam for security-header inspection (olympus/assess.py). Shares
     `_http_get`'s exact SSRF/egress/secret-exfil preamble and the same
@@ -683,17 +736,29 @@ def _http_probe(url: str, max_bytes: int = 400_000,
     audit is as rebinding-safe as any other fetch. With `follow_redirects=False`
     the first 3xx is captured (not followed) so a caller can read its Location
     header without a second request — used by the open-redirect validation check.
-    Never raises for a network error: returns {'error': ...}; a blocked URL
-    raises ValueError like the siblings. Header keys are lower-cased; the body is
-    size-capped."""
+    `extra_headers` merges a FEW benign, check-controlled request headers (e.g. an
+    `Origin:` for the CORS origin-reflection validation) over the default
+    User-Agent; any header whose name or value carries a CR/LF is dropped so the
+    probe itself can never be used to split a request. Never raises for a network
+    error: returns {'error': ...}; a blocked URL raises ValueError like the
+    siblings. Header keys are lower-cased; the body is size-capped."""
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
+    conf = _egress_confinement_reason(url)       # before DNS work: no I/O
+    if conf:
+        raise ValueError(conf)
     proxied = _proxied(url)
     reason = security.url_block_reason(url, resolve=not proxied)
     if reason:
         raise ValueError(reason)
-    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    hdrs = {"User-Agent": _UA}
+    for k, v in (extra_headers or {}).items():
+        k, v = str(k), str(v)
+        if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
+            continue                      # never let a caller split the request
+        hdrs[k] = v
+    req = _urlreq.Request(url, headers=hdrs)
     if follow_redirects:
         opener = _proxy_opener() if proxied else _pinned_opener()
     else:

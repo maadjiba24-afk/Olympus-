@@ -18,10 +18,18 @@ Exposed tools:
   olympus_codegraph_impact reverse-dependency analysis for a symbol (read-only)
   olympus_codegraph_report god nodes / communities / surprises (read-only)
   olympus_verify_code_claim CONFIRMED/REFUTED/UNKNOWN for a structural claim
+  olympus_assess_report    the ledgered security findings (markdown/json/SARIF)
+  olympus_assess_scorecard the Aegis self-benchmark + blast-radius containment proof
+  olympus_discover_report  the self-discovery ledger (open gaps + feature proposals)
 
 The workspace tools are **read-only** and scoped to `OLYMPUS_MCP_USER` (default
 the shared namespace): a caller on the other end of the pipe can read what that
 user has, and nothing more — no write, no actuator ever crosses this boundary.
+The Aegis/discovery surfaces are **read/prepare only** by the same rule: they
+export already-recorded findings and pure self-scorecards, and never grant a
+scope, run a scan, or make a network request from an MCP caller (an assessment
+still requires a signed, in-process authorization — it cannot be initiated
+across this boundary).
 
 **Authentication.** Stdio-local by default (the OS process boundary is the trust
 boundary, so no token). The moment the server is EXPOSED beyond stdio
@@ -226,6 +234,34 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["claim"],
         },
     },
+    # Aegis / discovery reads. Read/prepare only: exported findings and pure
+    # self-scorecards — never a scope grant, a scan, or a network call.
+    {
+        "name": "olympus_assess_report",
+        "description": ("Export the Aegis security assessment's ledgered "
+                        "findings as markdown (default), json, or SARIF 2.1.0 "
+                        "(GitHub code-scanning compatible). Read-only — reports "
+                        "already-recorded findings, never runs a scan."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"format": {"type": "string",
+                                      "enum": ["markdown", "json", "sarif"]}},
+        },
+    },
+    {
+        "name": "olympus_assess_scorecard",
+        "description": ("The Aegis self-benchmark (precision/recall/F1 over a "
+                        "labeled corpus) plus the blast-radius containment proof "
+                        "(each of Strix's damage vectors mapped to an owned "
+                        "control). Pure — no scope, network, or scan."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "olympus_discover_report",
+        "description": ("The self-discovery ledger: open knowledge/capability "
+                        "gaps and filed feature proposals. Read-only."),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 _CG_PROJECT_ENV = "OLYMPUS_MCP_CODEGRAPH_PROJECT"
@@ -283,6 +319,31 @@ def _workspace_tool(name: str, args: dict) -> str:
         return todos.render_list(user)
     if name == "olympus_recall_memory":
         return memory.search(str(args.get("query", "")), limit=8)
+    raise KeyError(name)
+
+
+def _governed_tool(name: str, args: dict) -> str:
+    """Read/prepare-only Aegis + discovery surfaces, scoped to the exposed user.
+    Governed by the same boundary as the workspace tools: export already-recorded
+    findings and pure self-scorecards ONLY. It never grants a scope, runs a scan,
+    or makes a network call — an assessment still requires a signed, in-process
+    authorization that cannot be initiated across the MCP boundary."""
+    from . import memory
+    user = _mcp_user()
+    memory.set_user(user)
+    if name == "olympus_assess_report":
+        from . import assess
+        fmt = str(args.get("format", "markdown")).strip().lower()
+        if fmt not in ("markdown", "json", "sarif"):
+            fmt = "markdown"
+        return assess.export_findings(fmt, user=user)
+    if name == "olympus_assess_scorecard":
+        from . import assess
+        return (assess.bench_scorecard() + "\n\n"
+                + assess.containment_scorecard(user=user))
+    if name == "olympus_discover_report":
+        from . import discovery
+        return discovery.report(user=user)
     raise KeyError(name)
 
 
@@ -358,6 +419,9 @@ def handle_message(msg: dict, ask: Callable[[str], str] | None = None,
                           "olympus_codegraph_report",
                           "olympus_verify_code_claim"):
                 text = _codegraph_tool(name, args)
+            elif name in ("olympus_assess_report", "olympus_assess_scorecard",
+                          "olympus_discover_report"):
+                text = _governed_tool(name, args)
             else:
                 return _error(rid, -32602, f"unknown tool '{name}'")
         except Exception as err:

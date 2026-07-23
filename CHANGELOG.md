@@ -15,6 +15,105 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — MCP surfacing: governed read-only Aegis + discovery over the council server
+
+The `olympus mcp-serve` server now exposes three **read/prepare-only** tools, so
+an MCP client (Claude Desktop, an IDE, another agent) can consume the assessment
+and discovery output without ever crossing the actuation boundary:
+
+- `olympus_assess_report` — export the ledgered findings as markdown / json /
+  SARIF 2.1.0, scoped to `OLYMPUS_MCP_USER`.
+- `olympus_assess_scorecard` — the Aegis self-benchmark (precision/recall/F1)
+  plus the blast-radius containment proof. Pure — no scope, network, or scan.
+- `olympus_discover_report` — the self-discovery ledger (open gaps + proposals).
+
+Governed by the same rule as the workspace tools: **no write, no actuator, no
+network** crosses the pipe. An assessment still requires a signed, in-process
+authorization — grant-scope / recon / audit / validate / run are deliberately
+NOT exposed and cannot be initiated across the MCP boundary (a test asserts the
+exclusion). Tests: 6 new.
+
+### Added — Discovery auto-signal: an UNVERIFIED answer becomes a knowledge gap
+
+Closed the loop between verification and self-discovery. When Aletheia ships an
+answer behind an **UNVERIFIED** banner because it could not support the factual
+claims — the council path (`reject_after_rework`) or the quick-reply path
+(`direct_reject`) — the orchestrator now records that as a `knowledge` gap in the
+discovery ledger (`discovery.note_gap`), so the topic is queued for later
+research instead of forgotten. Fully hands-free: no tool call, no extra model
+call. Strictly bounded and safe — gated on `discovery.enabled()` (opt-in
+`OLYMPUS_DISCOVERY`, **off during replay**), best-effort (every failure is
+swallowed, so it can never perturb the answer path), and deduped/capped by the
+existing gap ledger. Tests: 4 new. No new tool/action/command.
+
+### Added — Detection breadth: C#/Rust SAST + SSTI/header-injection/CORS validation
+
+Widened the Aegis engine's coverage on both the whitebox and the active-
+confirmation surface, all **benchmark-gated** so quality cannot regress:
+
+- **SAST**: six new sink rules — C# SQL concatenation (CWE-89), shell
+  `Process.Start` (CWE-78), `BinaryFormatter` deserialization (CWE-502), weak
+  MD5/SHA-1 (CWE-327); Rust `Command sh -c` (CWE-78) and `format!`-built SQL
+  (CWE-89). The labeled `_BENCH_CORPUS` grew a vuln + clean sample per language
+  (24 samples total); precision / recall / F1 stay **1.0** (0 false positives),
+  the floor `test_assess.py` enforces in CI.
+- **Active validation** (benign, scope-locked, parameter-directed, capped): three
+  new checks join the self-evolving registry —
+  - **SSTI** (CWE-1336): sends a random arithmetic `{{a*b}}` and confirms only if
+    the engine *evaluated* it to the product (pure arithmetic — no code, shell,
+    or data access).
+  - **HTTP response-header injection / CRLF** (CWE-113): injects an inert
+    `X-Olympus-Canary-<tok>: 1` header via a URL-encoded CRLF and confirms only
+    if it reflects into the response headers.
+  - **CORS origin reflection** (CWE-942): sends an arbitrary `.invalid` `Origin`
+    and confirms only if the app echoes it into `Access-Control-Allow-Origin`
+    (high severity when `Allow-Credentials: true`).
+
+  `tools._http_probe` gained a CR/LF-filtered `extra_headers` seam (used by the
+  CORS Origin probe — it can never be turned into a request-splitting primitive).
+  The active-probe cap rose 20→40 (still ≤50, so the containment scorecard's
+  "no spraying" vector stays proven), and the containment allowlist now names all
+  five benign checks. Tests: 10 new (all checks confirm-and-only-confirm, plus a
+  containment re-proof).
+
+### Added — Live CVE feed for dependency auditing (OSV.dev, opt-in)
+
+`assess_deps` now ALSO queries the live **OSV.dev** feed when the operator opts
+in (`OLYMPUS_ASSESS_OSV`), merging live advisories with the bundled index
+(deduped by CVE, CVSS computed from the OSV vector). Closes `DEFERRED #17`.
+Hardened: each query goes through a new gated `tools._http_post_json` — the
+canonical gated POST, with `_http_get`'s SSRF/rebinding-pin + assessment
+egress-confinement preamble **plus an outbound-body secret-exfil scan** (a POST
+can leak in the body, not just the URL). The confinement permits only the
+trusted `api.osv.dev` infra host (not target-adjacent hosts). Results are cached
+with a 24 h TTL (bounded); any failure degrades silently to the bundled index
+(offline-first preserved); off during replay. Default behaviour is unchanged
+(bundled index) unless opted in. No new tool/action/command. Tests: 7 new.
+
+### Added — Blast-radius containment: own each of Strix's damage vectors
+
+Made the assessment guardrails **owned, active, and demonstrable** (ADR 0013).
+Two additions to `olympus/assess.py`:
+
+- **Active egress confinement.** `confined_egress()` pins ALL outbound network
+  for an assessment to the signed authorization's hosts, enforced at the
+  gated-fetch layer (`tools._http_get`/`_http_get_bytes`/`_http_probe` now call
+  `assess.egress_confined_reason` after their SSRF preamble). A host outside the
+  signed scope is refused at the socket layer, fail-closed — so even a hijacked
+  assessment cannot reach the operator's LAN, a metadata endpoint, or any
+  out-of-scope host (the inversion of Strix's open-egress sandbox). A strict
+  **no-op** when no assessment is active, so ordinary fetches are unchanged;
+  `run_assessment` runs inside it.
+- **A containment self-check.** `containment()` / `olympus assess containment`
+  maps each of Strix's five blast-radius vectors (prompt-only scope, open
+  egress, refusal-suppression, arbitrary payloads, removed audit trail) to its
+  owning Olympus control and PROVES each is contained — live checks where it
+  can. `test_assess.py` asserts all five stay contained, so a regression that
+  widens the blast radius fails CI.
+
+No new tool/action/command (an `assess` subcommand + one no-op-by-default check
+on the shared fetch path). Tests: 7 new.
+
 ### Added — Self-discovery: acquire knowledge + propose features over time
 
 New `olympus/discovery.py` — a native loop pointed at what Olympus does NOT yet

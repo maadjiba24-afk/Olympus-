@@ -169,6 +169,94 @@ def test_dep_audit_clean_when_current(workspace):
     assert assess.dep_audit(".")["count"] == 0
 
 
+# --- live CVE feed (OSV.dev): opt-in, cached, deduped, offline-first ---------
+
+def _osv_post(vulns_by_pkg):
+    def _post(url, payload, timeout=20, max_bytes=4_000_000):
+        name = payload["package"]["name"]
+        return {"vulns": vulns_by_pkg.get(name, [])}
+    return _post
+
+
+def test_osv_disabled_by_default(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("foolib==0.1\n")
+    monkeypatch.delenv("OLYMPUS_ASSESS_OSV", raising=False)
+    from olympus import tools
+    calls = []
+    monkeypatch.setattr(tools, "_http_post_json",
+                        lambda *a, **k: calls.append(1) or {"vulns": []})
+    r = assess.dep_audit(".")
+    assert r.get("osv") is False and calls == []           # no network by default
+
+
+def test_osv_merges_and_dedups(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("pyyaml==5.1\nfoolib==0.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    monkeypatch.setattr(tools, "_http_post_json", _osv_post({
+        "foolib": [{"id": "GHSA-x", "aliases": ["CVE-2024-9999"], "summary": "RCE",
+                    "severity": [{"type": "CVSS_V3",
+                                  "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}],
+                    "database_specific": {"cwe_ids": ["CWE-94"]}}],
+        # pyyaml OSV reports the SAME CVE as the bundled index → must dedup
+        "pyyaml": [{"id": "z", "aliases": ["CVE-2020-14343"], "summary": "dup"}]}))
+    r = assess.dep_audit(".")
+    assert r["count"] == 2                                  # bundled pyyaml + OSV foolib, deduped
+    foolib = next(f for f in r["findings"] if "foolib" in f["title"])
+    assert foolib["cwe"] == "CWE-94" and foolib["cvss_score"] == 9.8
+
+
+def test_osv_caches(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("foolib==0.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    calls = []
+
+    def _post(url, payload, timeout=20, max_bytes=4_000_000):
+        calls.append(1)
+        return {"vulns": []}
+    monkeypatch.setattr(tools, "_http_post_json", _post)
+    assess.dep_audit(".")
+    assess.dep_audit(".")
+    assert len(calls) == 1                                  # second audit hits cache
+
+
+def test_osv_degrades_on_error(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    (workspace / "requirements.txt").write_text("pyyaml==5.1\n")
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    from olympus import tools
+    monkeypatch.setattr(tools, "_http_post_json",
+                        lambda *a, **k: {"_error": "network down"})
+    r = assess.dep_audit(".")                               # never raises
+    assert r["count"] == 1                                  # bundled index still works
+
+
+def test_osv_off_during_replay(workspace, monkeypatch):
+    assess.grant(["local"], expires_in=3600)
+    monkeypatch.setenv("OLYMPUS_ASSESS_OSV", "1")
+    monkeypatch.setenv("OLYMPUS_REPLAY", "1")
+    assert assess._osv_enabled() is False
+
+
+def test_confinement_permits_osv_infra_not_targets():
+    with assess.confined_egress(targets=["app.example"]):
+        assert assess.egress_confined_reason("api.osv.dev") is None   # trusted infra
+        assert assess.egress_confined_reason("127.0.0.1") is None     # loopback
+        assert assess.egress_confined_reason("evil.example") is not None  # still blocked
+
+
+def test_http_post_json_refuses_secret_in_body(monkeypatch):
+    from olympus import tools
+    monkeypatch.setenv("MY_SECRET_TOKEN", "supersecretvalue1234567890")
+    with pytest.raises(ValueError, match="secret"):
+        tools._http_post_json("https://api.osv.dev/v1/query",
+                              {"leak": "supersecretvalue1234567890"})
+
+
 # --- findings: computed severity, dedup, export -----------------------------
 
 def test_record_finding_computes_severity_from_vector():
@@ -329,6 +417,140 @@ def test_validate_confirms_open_redirect(monkeypatch):
     assert r["findings"][0]["cwe"] == "CWE-601"
 
 
+# --- detection breadth: SSTI / header-injection / CORS (all benign) ----------
+
+def _ssti_probe(evaluate: bool):
+    """Fake probe: evaluate the `{{a*b}}` in the reflected value, or reflect it
+    literally (safe)."""
+    import re
+    from urllib.parse import parse_qsl, urlparse
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        val = dict(parse_qsl(urlparse(url).query)).get("q", "")
+        if evaluate:
+            def _mul(m):
+                return str(int(m.group(1)) * int(m.group(2)))
+            val = re.sub(r"\{\{(\d+)\*(\d+)\}\}", _mul, val)   # engine executes it
+        return {"status": 200, "headers": {}, "body": f"<p>{val}</p>", "url": url}
+    return _probe
+
+
+def test_validate_confirms_ssti(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _ssti_probe(evaluate=True))
+    r = assess.validate("https://app.example/render?q=hi")
+    ssti = [f for f in r["findings"] if f["cwe"] == "CWE-1336"]
+    assert len(ssti) == 1 and ssti[0]["source"] == "active_validation"
+    assert ssti[0]["severity"] == "high"
+
+
+def test_ssti_ignores_literal_reflection(monkeypatch):
+    # Braces reflected verbatim (not evaluated) must never be flagged as SSTI.
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _ssti_probe(evaluate=False))
+    r = assess.validate("https://app.example/render?q=hi")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-1336"] == []
+
+
+def _headerinj_probe(vulnerable: bool):
+    """Fake probe: a vulnerable server URL-decodes the value into a response
+    header (the injected canary appears); a safe one strips CR/LF."""
+    from urllib.parse import parse_qsl, unquote, urlparse
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        raw = urlparse(url).query
+        val = dict(parse_qsl(raw)).get("q", "")
+        headers = {"content-type": "text/html"}
+        if vulnerable:
+            decoded = unquote(dict(parse_qsl(raw, keep_blank_values=True)).get("q", val))
+            for line in decoded.splitlines()[1:]:         # split on the CRLF
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+        return {"status": 200, "headers": headers, "body": "", "url": url}
+    return _probe
+
+
+def test_validate_confirms_header_injection(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _headerinj_probe(vulnerable=True))
+    r = assess.validate("https://app.example/set?q=hi")
+    inj = [f for f in r["findings"] if f["cwe"] == "CWE-113"]
+    assert len(inj) == 1 and inj[0]["severity"] == "high"
+
+
+def test_header_injection_safe_when_stripped(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _headerinj_probe(vulnerable=False))
+    r = assess.validate("https://app.example/set?q=hi")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-113"] == []
+
+
+def _cors_probe(reflect: bool, creds: bool):
+    """Fake probe: reflect the request Origin into ACAO (optionally with
+    credentials), or don't."""
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        headers = {"content-type": "text/html"}
+        origin = (extra_headers or {}).get("Origin", "")
+        if reflect and origin:
+            headers["access-control-allow-origin"] = origin
+            if creds:
+                headers["access-control-allow-credentials"] = "true"
+        return {"status": 200, "headers": headers, "body": "", "url": url}
+    return _probe
+
+
+def test_validate_confirms_cors_with_credentials(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=True, creds=True))
+    r = assess.validate("https://app.example/api?id=1")
+    cors = [f for f in r["findings"] if f["cwe"] == "CWE-942"]
+    assert len(cors) == 1                       # per-param repeats dedup to one
+    assert cors[0]["severity"] == "high"
+
+
+def test_validate_cors_medium_without_credentials(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=True, creds=False))
+    r = assess.validate("https://app.example/api?id=1")
+    cors = [f for f in r["findings"] if f["cwe"] == "CWE-942"]
+    assert len(cors) == 1 and cors[0]["severity"] == "medium"
+
+
+def test_cors_safe_when_origin_not_reflected(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=False, creds=False))
+    r = assess.validate("https://app.example/api?id=1")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-942"] == []
+
+
+def test_active_check_registry_has_breadth():
+    # The self-evolving moat compounds: new benign checks joined the registry.
+    assert set(assess.active_check_names()) >= {
+        "reflection", "open_redirect", "ssti", "header_injection", "cors"}
+
+
+def test_new_active_checks_are_benign_and_contained():
+    # The containment scorecard must still prove the payloads vector (no
+    # spraying/exploits) with the enlarged registry.
+    payloads = [c for c in assess.containment() if c["id"] == "payloads"]
+    assert payloads and payloads[0]["contained"] is True
+
+
+def test_sast_breadth_csharp_and_rust():
+    # C# and Rust sinks are detected; clean equivalents are not (precision).
+    cs = assess._sast_findings_for_text(
+        'var c = new SqlCommand("SELECT * FROM u WHERE n=" + n, conn);\n'
+        "var f = new BinaryFormatter();\n", ".cs", "x.cs")
+    assert {f.cwe for f in cs} >= {"CWE-89", "CWE-502"}
+    rust = assess._sast_findings_for_text(
+        'Command::new("sh").arg("-c").arg(cmd).output();\n', ".rs", "x.rs")
+    assert {f.cwe for f in rust} >= {"CWE-78"}
+    clean = assess._sast_findings_for_text(
+        'var c = new SqlCommand("SELECT * FROM u WHERE n=@n", conn);\n', ".cs", "x.cs")
+    assert clean == []
+
+
 def test_validate_ignores_safe_redirect(monkeypatch):
     assess.grant(["app.example"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _redirect_probe("safe_redirect"))
@@ -447,6 +669,65 @@ def test_aegis_prompt_includes_insights(workspace):
     assess.sast_scan(".")
     prompt = SPECIALISTS["aegis"].system_prompt()
     assert "Assessment experience" in prompt and "CWE-95" in prompt
+
+
+# --- blast-radius containment: egress confinement + the self-check -----------
+
+def test_containment_all_vectors_contained():
+    rows = assess.containment()
+    assert len(rows) == 5
+    assert all(r["contained"] for r in rows), \
+        [r for r in rows if not r["contained"]]
+    vectors = {r["id"] for r in rows}
+    assert vectors == {"scope", "egress", "judgment", "payloads", "audit"}
+    assert "5/5 vectors contained" in assess.containment_scorecard()
+
+
+def test_egress_confinement_is_noop_when_inactive():
+    # No assessment confining egress → every host passes (ordinary fetches
+    # unaffected).
+    assert assess.egress_confined_reason("anything.example") is None
+    assert assess.egress_confined_reason("169.254.169.254") is None
+
+
+def test_egress_confinement_blocks_out_of_scope_and_allows_in_scope():
+    with assess.confined_egress(targets=["app.example"]):
+        assert assess.egress_confined_reason("app.example") is None
+        assert assess.egress_confined_reason("api.app.example") is None   # subdomain
+        assert assess.egress_confined_reason("evil.example") is not None
+        assert assess.egress_confined_reason("169.254.169.254") is not None
+    # restored on exit
+    assert assess.egress_confined_reason("evil.example") is None
+
+
+def test_confined_egress_from_authorization():
+    assess.grant(["app.example"], expires_in=3600)
+    with assess.confined_egress():
+        assert assess.egress_confined_reason("app.example") is None
+        assert assess.egress_confined_reason("elsewhere.example") is not None
+
+
+def test_gated_fetch_refuses_out_of_scope_when_confined(monkeypatch):
+    from olympus import tools
+    # Prove the confinement is enforced at the fetch layer, not just advisory.
+    with assess.confined_egress(targets=["app.example"]):
+        with pytest.raises(ValueError, match="egress confinement"):
+            tools._http_probe("https://evil.example/x")
+
+
+def test_run_assessment_confines_egress(workspace, monkeypatch):
+    from olympus import tools
+    assess.grant(["app.example", "local"], expires_in=3600)
+    seen = {}
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True):
+        # If confinement is active this is only reached for in-scope hosts.
+        from urllib.parse import urlparse
+        seen[urlparse(url).hostname] = True
+        return {"status": 200, "headers": {"server": "x"}, "body": "", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.run_assessment("app.example")
+    assert "app.example" in seen and "evil.example" not in seen
 
 
 def test_budget_stop_halts_phases(workspace, monkeypatch):

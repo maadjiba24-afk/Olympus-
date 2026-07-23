@@ -135,3 +135,59 @@ def test_note_knowledge_gap_tool():
     out = tools.HANDLERS["note_knowledge_gap"]("how OAuth PKCE works", "user asked")
     assert "Noted knowledge gap" in out
     assert len(discovery.open_gaps(kind="knowledge")) == 1
+
+
+# --- hands-free auto-signal: UNVERIFIED answer -> knowledge gap --------------
+
+class _FakeTrace:
+    def __init__(self):
+        self.events = []
+
+    def event(self, name, **kw):
+        self.events.append((name, kw))
+
+
+def _orch():
+    # Uninitialized instance: _signal_knowledge_gap touches no other attrs.
+    from olympus.orchestrator import Olympus
+    return object.__new__(Olympus)
+
+
+def test_unverified_answer_signals_knowledge_gap(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_DISCOVERY", "1")
+    monkeypatch.delenv("OLYMPUS_REPLAY", raising=False)
+    tr = _FakeTrace()
+    _orch()._signal_knowledge_gap(
+        "How does QUIC congestion control work?",
+        ["QUIC uses BBR by default"], "reject_after_rework", tr)
+    gaps = discovery.open_gaps(kind="knowledge")
+    assert any("quic congestion" in g["topic"] for g in gaps)
+    g = next(g for g in gaps if "quic congestion" in g["topic"])
+    assert g["source"] == "aletheia:reject_after_rework"
+    assert "BBR" in g["evidence"]
+    assert ("discovery.gap_noted", {"reason": "reject_after_rework"}) in tr.events
+
+
+def test_auto_signal_is_opt_in(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_DISCOVERY", raising=False)   # discovery OFF
+    tr = _FakeTrace()
+    _orch()._signal_knowledge_gap("some topic", ["a claim"], "direct_reject", tr)
+    assert discovery.open_gaps(kind="knowledge") == []       # nothing recorded
+    assert tr.events == []
+
+
+def test_auto_signal_is_replay_inert(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_DISCOVERY", "1")
+    monkeypatch.setenv("OLYMPUS_REPLAY", "1")                 # replay wins
+    _orch()._signal_knowledge_gap("some topic", ["a claim"], "direct_reject",
+                                  _FakeTrace())
+    assert discovery.open_gaps(kind="knowledge") == []
+
+
+def test_auto_signal_never_raises(monkeypatch):
+    # Even if discovery blows up, the answer path must not see an exception.
+    monkeypatch.setenv("OLYMPUS_DISCOVERY", "1")
+    monkeypatch.setattr(discovery, "note_gap",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    _orch()._signal_knowledge_gap("t", ["c"], "reject_after_rework", _FakeTrace())
+    # No exception propagated — the swallow held.

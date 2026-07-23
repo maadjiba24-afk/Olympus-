@@ -155,7 +155,21 @@ data), deduped, replay-inert, and bounded.
   (authorize/scope/revoke/recon/audit/sast/secrets/deps/run/report/clear).
 - Aegis upgraded from defense-advice-only to defense + authorized assessment
   (holds the assess tools + source-inspection reads; still no actuators).
-- Tests: `tests/test_assess.py`, `tests/test_sarif.py` (56 new).
+- MCP surface (`olympus mcp-serve`): three **read/prepare-only** tools —
+  `olympus_assess_report` (findings as markdown/json/SARIF), `olympus_assess_
+  scorecard` (self-benchmark + containment proof), `olympus_discover_report`.
+  Governed by the workspace-tool boundary: no scope grant, scan, or network
+  crosses the pipe; an assessment can only be initiated by a signed, in-process
+  authorization. (MCP tools are not counted in the HANDLERS manifest.)
+- Tests: `tests/test_assess.py`, `tests/test_sarif.py`, `tests/test_mcp_server.py`
+  (56 + later hardening additions).
+
+> Follow-ups landed after the initial ADR (see CHANGELOG *Unreleased*): live
+> OSV.dev CVE feed for `assess_deps` (DEFERRED #17 CLOSED), blast-radius
+> containment (ADR 0013), C#/Rust SAST + SSTI/CRLF/CORS active validation, the
+> hands-free UNVERIFIED→knowledge-gap discovery signal, and this MCP surface —
+> each benchmark-/containment-gated so detection quality and the guardrails
+> cannot silently regress.
 
 ## NOT absorbed (deliberately)
 

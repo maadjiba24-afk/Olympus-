@@ -46,12 +46,14 @@ returns a clear error, never a raise that crashes a run.
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import ipaddress
 import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,7 +67,7 @@ from . import sarif, security
 _MAX_SCAN_FILES = 2000          # source files a whitebox scan will read
 _MAX_FILE_BYTES = 1_000_000     # per-file read cap for SAST/secret scans
 _MAX_FINDINGS = 1000            # stored findings per run
-_MAX_ACTIVE_PROBES = 20         # hard cap on active-validation requests (never a spray)
+_MAX_ACTIVE_PROBES = 40         # hard cap on active-validation requests (never a spray)
 _MAX_EVIDENCE = 400            # chars of matched-line evidence kept per finding
 _DEFAULT_EXPIRY = 24 * 3600     # a scope grant lasts a day unless overridden
 _MAX_EXPIRY = 30 * 24 * 3600    # ...and never longer than 30 days
@@ -764,6 +766,44 @@ _SAST_RULES: tuple[_Rule, ...] = (
           "Rails html_safe on possibly-untrusted content (XSS)",
           "Do not html_safe user input; rely on ERB auto-escaping or sanitize.",
           (".rb",)),
+    # --- C# / .NET ---
+    _rule("cs-sql-concat", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"new\s+SqlCommand\s*\(\s*(?:\$?\"[^\"]*\"\s*\+|\$\"[^\"]*\{)",
+          "SQL command built by string concatenation / interpolation (injection)",
+          "Use parameterized queries: add SqlParameter values, never concatenate "
+          "or interpolate input into the SQL text.", (".cs",)),
+    _rule("cs-process-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"Process\.Start\s*\(\s*\"(?:cmd(?:\.exe)?|/bin/sh|bash|powershell)\b",
+          "OS command execution via a shell (Process.Start)",
+          "Invoke the target binary directly with an argument list; never launch "
+          "a shell with an input-built command string.", (".cs",)),
+    _rule("cs-binaryformatter", "CWE-502", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"new\s+BinaryFormatter\s*\(",
+          "Unsafe deserialization (BinaryFormatter)",
+          "BinaryFormatter is insecure and deprecated; use System.Text.Json or a "
+          "contract serializer over trusted data only.", (".cs",)),
+    _rule("cs-weak-hash", "CWE-327", "medium",
+          "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+          r"(?:MD5|SHA1)\.Create\s*\(",
+          "Weak hash (MD5/SHA-1)",
+          "Use SHA-256+; for passwords use a KDF (PBKDF2/Argon2/bcrypt).",
+          (".cs",)),
+    # --- Rust ---
+    _rule("rust-command-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"Command::new\s*\(\s*\"(?:sh|bash)\"\s*\)[^;]*\.arg\s*\(\s*\"-c\"",
+          "OS command execution via a shell (Command sh -c)",
+          "Invoke the binary directly with .args([...]); never build a shell "
+          "string from input.", (".rs",)),
+    _rule("rust-sql-format", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"(?:query|query_as|execute)\s*\(\s*&?\s*format!\s*\(",
+          "SQL query built with format! (injection)",
+          "Use bound parameters (sqlx `?`/`$1` binds); never format! input into "
+          "SQL text.", (".rs",)),
 )
 
 
@@ -1022,12 +1062,102 @@ def _parse_package_json(text: str) -> list[tuple[str, str]]:
     return out
 
 
+# --- live CVE feed (OSV.dev) — opt-in, cached, gated, offline-first -----------
+# Bundled advisories are the default (offline + deterministic). When an operator
+# opts in (OLYMPUS_ASSESS_OSV), dep_audit ALSO queries OSV.dev for each declared
+# package/version, MERGING live results with the bundled index. Every query goes
+# through the gated tools._http_post_json (SSRF-pinned, confinement permits the
+# trusted api.osv.dev infra); results are cached with a TTL so repeat audits are
+# cheap; any failure degrades silently to the bundled index. Off during replay.
+
+_OSV_TTL = 24 * 3600
+_OSV_MAX_DEPS = 60              # cap live lookups per audit (bounded egress)
+_OSV_ECOSYSTEM = {"pypi": "PyPI", "npm": "npm"}
+
+
+def _osv_enabled() -> bool:
+    if _replaying():
+        return False
+    return os.environ.get("OLYMPUS_ASSESS_OSV", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _osv_cache_path(user: str) -> Path:
+    return _store_dir(user) / "osv_cache.json"
+
+
+def _osv_cache_load(user: str) -> dict:
+    try:
+        data = json.loads(_osv_cache_path(user).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _osv_parse_vuln(v: dict) -> dict:
+    """Pull the fields we report from an OSV vuln object (defensive — OSV's
+    shape varies by advisory source)."""
+    aliases = v.get("aliases") or []
+    ident = next((a for a in aliases if str(a).startswith("CVE-")),
+                 v.get("id", "?"))
+    vector = ""
+    for s in v.get("severity") or []:
+        if str(s.get("type", "")).upper().startswith("CVSS_V3"):
+            vector = str(s.get("score", ""))
+            break
+    dbs = v.get("database_specific") or {}
+    cwes = dbs.get("cwe_ids") or []
+    cwe = str(cwes[0]) if cwes else ""
+    score, sev_from_vec = sarif.score_or_none(vector)
+    severity = (sev_from_vec or dbs.get("severity") or "high").lower()
+    if severity not in ("critical", "high", "medium", "low", "info"):
+        severity = "medium"
+    return {"id": str(ident), "cwe": cwe, "cvss_vector": vector,
+            "severity": severity, "summary": str(v.get("summary", ""))[:200]}
+
+
+def _osv_lookup(ecosystem: str, pkg: str, version: str,
+                user: str | None = None) -> list[dict]:
+    """Cached OSV.dev lookup for one package/version. Returns parsed vuln dicts;
+    [] on any failure (offline-first). Never raises."""
+    user = _user(user)
+    osv_eco = _OSV_ECOSYSTEM.get(ecosystem)
+    if not osv_eco or not pkg or not version:
+        return []
+    key = f"{ecosystem}:{pkg}:{version}"
+    cache = _osv_cache_load(user)
+    ent = cache.get(key)
+    if isinstance(ent, dict) and (_now() - ent.get("ts", 0)) < _OSV_TTL:
+        return ent.get("vulns", [])
+    try:
+        from . import tools
+        resp = tools._http_post_json(
+            "https://api.osv.dev/v1/query",
+            {"version": version, "package": {"name": pkg, "ecosystem": osv_eco}})
+    except Exception:
+        return ent.get("vulns", []) if isinstance(ent, dict) else []
+    if not isinstance(resp, dict) or resp.get("_error"):
+        return ent.get("vulns", []) if isinstance(ent, dict) else []
+    vulns = [_osv_parse_vuln(v) for v in (resp.get("vulns") or [])
+             if isinstance(v, dict)]
+    cache[key] = {"ts": _now(), "vulns": vulns}
+    try:
+        if len(cache) > 5000:                         # bound the cache
+            cache = dict(sorted(cache.items(),
+                                key=lambda kv: kv[1].get("ts", 0),
+                                reverse=True)[:5000])
+        _atomic_write(_osv_cache_path(user), json.dumps(cache))
+    except Exception:
+        pass
+    return vulns
+
+
 def dep_audit(path: str = ".", record: bool = True,
               user: str | None = None) -> dict[str, Any]:
     """Audit declared dependencies (requirements.txt / package.json) against the
-    bundled advisory index. Offline, deterministic, scope-gated, workspace-
-    confined. Absorbs Strix's dependency-CVE scan without a live network feed
-    (an operator can point OLYMPUS_ASSESS_ADVISORIES at a richer index)."""
+    bundled advisory index — and, when OLYMPUS_ASSESS_OSV is set, the live
+    OSV.dev feed too (cached, gated, offline-first). Scope-gated, workspace-
+    confined. Absorbs Strix's dependency-CVE scan."""
     require_scope("local", user)
     from . import sandbox
     try:
@@ -1056,12 +1186,16 @@ def dep_audit(path: str = ".", record: bool = True,
                 "error": "no requirements.txt or package.json found"}
 
     advisories = _load_advisories()
+    osv_on = _osv_enabled()
     findings: list[Finding] = []
+    osv_queried = 0
     for eco, name, text in manifests:
         deps = _parse_package_json(text) if eco == "npm" else _parse_requirements(text)
         for pkg, version in deps:
+            seen_ids: set[str] = set()
             for spec, adv_id, cwe, sev, note in advisories.get(eco, {}).get(pkg, []):
                 if _spec_matches(version, spec):
+                    seen_ids.add(adv_id)
                     findings.append(Finding(
                         title=f"Vulnerable dependency: {pkg} {version} ({adv_id})",
                         severity=sev, cwe=cwe,
@@ -1069,10 +1203,24 @@ def dep_audit(path: str = ".", record: bool = True,
                         evidence=f"{pkg}=={version} matches {spec}: {note}",
                         remediation=f"Upgrade {pkg} past {spec.lstrip('<=')}.",
                         confidence="high", source="dep_audit"))
+            # Live OSV feed (opt-in, bounded, deduped against the bundled index).
+            if osv_on and osv_queried < _OSV_MAX_DEPS:
+                osv_queried += 1
+                for v in _osv_lookup(eco, pkg, version, user):
+                    if v["id"] in seen_ids:
+                        continue
+                    seen_ids.add(v["id"])
+                    findings.append(Finding(
+                        title=f"Vulnerable dependency: {pkg} {version} ({v['id']})",
+                        severity=v["severity"], cwe=v["cwe"],
+                        cvss_vector=v["cvss_vector"], location=f"{name}",
+                        evidence=f"OSV.dev: {v['summary'] or v['id']}",
+                        remediation=f"Upgrade {pkg}; see advisory {v['id']}.",
+                        confidence="high", source="dep_audit"))
     stored = [record_finding(f, user) for f in findings] if record else \
         [asdict(f) for f in findings]
     return {"path": str(path), "manifests": [m[1] for m in manifests],
-            "findings": stored, "count": len(stored)}
+            "findings": stored, "count": len(stored), "osv": osv_on}
 
 
 # ===========================================================================
@@ -1104,17 +1252,21 @@ def run_assessment(target: str, *, source_path: str | None = None,
     def _over_budget() -> bool:
         return budget_usd is not None and (_spent_usd() - start_spent) >= budget_usd
 
-    if not target.lower().startswith(("local", "workspace")):
-        phases.append({"phase": "recon", **recon(target, user)})
-        if not _over_budget():
-            phases.append({"phase": "http_audit", **http_audit(target, user=user)})
+    # Confine ALL outbound network for the whole run to the signed scope — a
+    # hijacked assessment cannot leave the authorized target set even if a new
+    # network path is added (blast-radius containment, ADR 0013).
+    with confined_egress(user):
+        if not target.lower().startswith(("local", "workspace")):
+            phases.append({"phase": "recon", **recon(target, user)})
+            if not _over_budget():
+                phases.append({"phase": "http_audit", **http_audit(target, user=user)})
 
-    if source_path and not _over_budget():
-        phases.append({"phase": "sast", **sast_scan(source_path, user=user)})
-        if not _over_budget():
-            phases.append({"phase": "secret_scan", **secret_scan(source_path, user=user)})
-        if not _over_budget():
-            phases.append({"phase": "dep_audit", **dep_audit(source_path, user=user)})
+        if source_path and not _over_budget():
+            phases.append({"phase": "sast", **sast_scan(source_path, user=user)})
+            if not _over_budget():
+                phases.append({"phase": "secret_scan", **secret_scan(source_path, user=user)})
+            if not _over_budget():
+                phases.append({"phase": "dep_audit", **dep_audit(source_path, user=user)})
 
     findings = list_findings(user)
     return {
@@ -1225,11 +1377,116 @@ def _open_redirect_check(url: str, name: str) -> tuple["Finding | None", str]:
     return None, f"param '{name}': no redirect"
 
 
+def _ssti_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send a BENIGN arithmetic template expression (`{{a*b}}`, random factors)
+    into `name`. If the response contains the PRODUCT where our braces were — and
+    the braces are gone — the template engine EVALUATED the expression: a
+    server-side template injection surface (CWE-1336). It is pure arithmetic:
+    no code, no shell, no data access — just proof the engine executed input.
+    Targets `{{ }}` engines (Jinja2/Twig/Nunjucks/Handlebars/Angular). Raises
+    ValueError if the fetch is blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    a = 900 + (int(tok[:2], 16) % 90)         # distinctive 3-digit factors
+    b = 900 + (int(tok[2:4], 16) % 90)
+    product = str(a * b)
+    marker = f"{_CANARY}{tok}"
+    literal = f"{a}*{b}"
+    payload = f"{marker}{{{{{literal}}}}}"     # e.g. olympuscanaryAB{{931*907}}
+    probe = tools._http_probe(_set_param(url, name, payload))
+    body = probe.get("body", "") or ""
+    if marker not in body:
+        return None, f"param '{name}': not reflected"
+    idx = body.find(marker)
+    window = body[idx: idx + len(payload) + 16]
+    if product in window and "{{" not in window and literal not in window:
+        finding = Finding(
+            title="Server-side template injection (expression evaluated)",
+            severity="high", cwe="CWE-1336",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+            location=f"{url} [param: {name}]",
+            evidence=f"benign expression {{{{{literal}}}}} evaluated to {product}",
+            remediation="Never build a template from request input. Render fixed "
+                        "templates with auto-escaped variables; sandbox or remove "
+                        "the expression engine on the input path.",
+            confidence="high", source="active_validation")
+        return finding, f"param '{name}': SSTI CONFIRMED ({literal} -> {product})"
+    return None, f"param '{name}': not evaluated (reflected literally / not at all)"
+
+
+def _header_injection_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Put a BENIGN CRLF + a unique marker header into `name`'s value. If the
+    server URL-decodes it into the response headers, our `X-Olympus-Canary-<tok>`
+    header appears on the response — proof of CRLF response-header injection
+    (CWE-113). The injected header is inert (`: 1`); no cache-poisoning or
+    smuggling payload is ever sent. Read WITHOUT following redirects so the
+    split header on the immediate response is visible. Raises ValueError if
+    blocked."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    hdr = f"x-olympus-canary-{tok}"
+    payload = f"{_CANARY}{tok}\r\n{hdr}: 1"     # _set_param URL-encodes the CRLF
+    probe = tools._http_probe(_set_param(url, name, payload), follow_redirects=False)
+    headers = probe.get("headers", {}) or {}
+    if hdr in headers:
+        finding = Finding(
+            title="HTTP response-header injection (CRLF)",
+            severity="high", cwe="CWE-113",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N",
+            location=f"{url} [param: {name}]",
+            evidence=f"injected header '{hdr}' reflected into the response",
+            remediation="Strip CR/LF from any value written into a response "
+                        "header; use a framework API that rejects control "
+                        "characters in header values.",
+            confidence="high", source="active_validation")
+        return finding, f"param '{name}': header injection CONFIRMED ({hdr} echoed)"
+    return None, f"param '{name}': no CRLF header injection"
+
+
+def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send an arbitrary off-site `Origin:` and see if the app REFLECTS it into
+    `Access-Control-Allow-Origin` — meaning any site can read authenticated
+    responses (CWE-942), critical if `Access-Control-Allow-Credentials: true`.
+    Benign: one GET with a canary `.invalid` Origin, nothing written. This check
+    is URL-level (independent of `name`); `record_finding` dedups the per-param
+    repeats to a single finding. Raises ValueError if blocked."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    origin = f"https://olympus-canary-{tok}.evil.invalid"
+    probe = tools._http_probe(url, extra_headers={"Origin": origin})
+    headers = probe.get("headers", {}) or {}
+    acao = (headers.get("access-control-allow-origin", "") or "").strip()
+    creds = (headers.get("access-control-allow-credentials", "") or "").strip().lower()
+    if acao == origin:                          # arbitrary origin reflected
+        with_creds = creds == "true"
+        finding = Finding(
+            title="CORS misconfiguration (arbitrary Origin reflected"
+                  + (" with credentials)" if with_creds else ")"),
+            severity="high" if with_creds else "medium",
+            cwe="CWE-942",
+            cvss_vector=("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N"
+                         if with_creds else
+                         "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"),
+            location=f"{url} [CORS]",
+            evidence=f"Origin {origin} reflected in Access-Control-Allow-Origin"
+                     + (" with Allow-Credentials: true" if with_creds else ""),
+            remediation="Never reflect the request Origin. Allowlist trusted "
+                        "origins explicitly and only send Allow-Credentials to "
+                        "them.",
+            confidence="high", source="active_validation")
+        note = f"CORS origin reflection CONFIRMED" + (" + credentials" if with_creds else "")
+        return finding, note
+    return None, "Origin not reflected (safe)"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("reflection", _reflection_check),
     ("open_redirect", _open_redirect_check),
+    ("ssti", _ssti_check),
+    ("header_injection", _header_injection_check),
+    ("cors", _cors_check),
 )
 
 
@@ -1403,6 +1660,25 @@ _BENCH_CORPUS: tuple[dict, ...] = (
      "text": ("obj = JSON.parse(data)\n"
               'system("ls", "-l")\n'
               "@bio = h(user_bio)\n")},
+    # --- C# / .NET ---
+    {"name": "cs_vuln", "kind": "sast", "suffix": ".cs",
+     "expected": {"CWE-89", "CWE-78", "CWE-502", "CWE-327"},
+     "text": ('var cmd = new SqlCommand("SELECT * FROM u WHERE n=" + name, conn);\n'
+              'Process.Start("cmd.exe", "/c " + userArg);\n'
+              "var fmt = new BinaryFormatter();\n"
+              "var md = MD5.Create();\n")},
+    {"name": "cs_clean", "kind": "sast", "suffix": ".cs", "expected": set(),
+     "text": ('var cmd = new SqlCommand("SELECT * FROM u WHERE n=@n", conn);\n'
+              'Process.Start("mytool", args);\n'
+              "var md = SHA256.Create();\n")},
+    # --- Rust ---
+    {"name": "rust_vuln", "kind": "sast", "suffix": ".rs",
+     "expected": {"CWE-78", "CWE-89"},
+     "text": ('let out = Command::new("sh").arg("-c").arg(user_cmd).output();\n'
+              'let rows = sqlx::query(&format!("SELECT * FROM u WHERE n={}", n));\n')},
+    {"name": "rust_clean", "kind": "sast", "suffix": ".rs", "expected": set(),
+     "text": ('let out = Command::new("ls").args(["-l"]).output();\n'
+              'let rows = sqlx::query("SELECT * FROM u WHERE n = ?").bind(n);\n')},
 )
 
 
@@ -1581,3 +1857,167 @@ def insights_summary(user: str | None = None) -> str:
         out.append(f"- {r['cwe']} {r['title']}: {r['count']}× "
                    f"(via {', '.join(r['sources']) or 'scan'})")
     return "\n".join(out)
+
+
+# ===========================================================================
+# Blast-radius containment — turn Strix's damage vectors into owned controls
+# ===========================================================================
+# Strix's "blast radius" is what an autonomous security agent can reach/break if
+# it is wrong, injected, or misused. Olympus owns a named control for each
+# vector; this section makes two of them FIRST-CLASS:
+#
+#   (a) Active egress confinement. Per-tool `require_scope` already gates WHICH
+#       target each call may touch. `confined_egress` goes further: for the whole
+#       duration of an assessment it pins outbound network to ONLY the signed
+#       authorization's hosts, enforced at the gated-fetch layer (fail-closed).
+#       So even a hijacked assessment physically cannot reach an out-of-scope
+#       host, the operator's LAN, or a metadata endpoint — the inversion of
+#       Strix's open-egress sandbox. A strict NO-OP when no assessment is active,
+#       so ordinary Olympus fetches are byte-for-byte unchanged.
+#   (b) A containment self-check that PROVES each vector is contained (like the
+#       self-benchmark proves detection quality), so the guardrails are
+#       demonstrable, not merely asserted.
+
+# The active assessment egress scope: a frozenset of authorized host patterns, or
+# None when no assessment is confining egress (the default → every check no-ops).
+_ACTIVE_SCOPE: contextvars.ContextVar[frozenset | None] = contextvars.ContextVar(
+    "assess_active_scope", default=None)
+
+
+@contextmanager
+def confined_egress(user: str | None = None,
+                    targets: list[str] | None = None):
+    """While this context is active, outbound network is confined to the signed
+    authorization's hosts (or `targets` if given) — enforced at the gated-fetch
+    layer, fail-closed. Nests safely (restores the prior scope on exit)."""
+    if targets is not None:
+        scope = frozenset(_normalize_targets(targets))
+    else:
+        scope = frozenset(
+            pat for a in active_authorizations(user) for pat in a.get("targets", []))
+    token = _ACTIVE_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _ACTIVE_SCOPE.reset(token)
+
+
+# Trusted advisory/infrastructure hosts that confinement always permits: they
+# are Olympus's OWN dependency-vulnerability feed, NOT a target's LAN / metadata
+# endpoint / out-of-scope host — so allowing them does not widen the blast
+# radius the confinement contains (a hijacked run still cannot reach the
+# operator's network or an arbitrary target). Kept tiny and explicit.
+_CONFINEMENT_INFRA_ALLOW = frozenset({"api.osv.dev"})
+
+
+def egress_confined_reason(host: str) -> str | None:
+    """Reason string if `host` is refused by the active assessment egress
+    confinement, else None. NO-OP (None) when no assessment is confining egress,
+    so every non-assessment fetch is unaffected. The gated fetch path in tools.py
+    calls this in addition to its SSRF/egress preamble. Loopback and a tiny set
+    of trusted advisory-infra hosts are always permitted (see above)."""
+    scope = _ACTIVE_SCOPE.get()
+    if scope is None:
+        return None                                   # no confinement active
+    h = (host or "").strip().lower().strip("[]")
+    if not h:
+        return "assessment egress confinement: empty host refused"
+    if security._host_is_loopback(h) or h in _CONFINEMENT_INFRA_ALLOW:
+        return None                                   # trusted infra, not a target
+    for pat in scope:
+        if pat in ("local", "workspace", "."):
+            continue                                  # not a network host
+        if _host_matches(h, pat):
+            return None
+    return (f"assessment egress confinement: '{host}' is not in the authorized "
+            "scope — refusing to leave the signed target set")
+
+
+# --- containment self-check -------------------------------------------------
+
+def _check(name: str, vector: str, control: str, ok: bool, detail: str) -> dict:
+    return {"vector": vector, "control": control, "contained": bool(ok),
+            "detail": detail, "id": name}
+
+
+def containment(user: str | None = None) -> list[dict]:
+    """Prove each of Strix's blast-radius vectors is contained by a named
+    Olympus control. Runs live checks where it can (scope fail-closed, egress
+    confinement refuses out-of-scope); asserts the structural ones. Pure — no
+    network, no scope grant needed."""
+    checks: list[dict] = []
+
+    # 1. Scope: prompt-only (Strix) vs code-enforced fail-closed (Olympus).
+    fresh = f"containment-probe-{os.urandom(2).hex()}.example"
+    try:
+        require_scope(fresh, user="__containment_no_such_user__")
+        scope_ok = False
+    except AssessScopeError:
+        scope_ok = True
+    checks.append(_check(
+        "scope", "Prompt-only scope → act on unintended hosts",
+        "require_scope() — code-enforced, fail-closed",
+        scope_ok, "an unauthorized target raises AssessScopeError before any I/O"))
+
+    # 2. Egress: open sandbox (Strix) vs egress confined to signed scope.
+    with confined_egress(targets=["authorized.example"]):
+        blocked = egress_confined_reason("evil.example") is not None
+        allowed = egress_confined_reason("authorized.example") is None
+    noop = egress_confined_reason("anything.example") is None   # inactive → no-op
+    checks.append(_check(
+        "egress", "Open egress → operator host / LAN / metadata",
+        "confined_egress() — outbound pinned to the signed scope, fail-closed",
+        blocked and allowed and noop,
+        "out-of-scope egress refused while active; no-op when inactive"))
+
+    # 3. Refusal-suppression (Strix) vs model judgment retained.
+    supp = False
+    try:
+        from . import agent
+        prompt = (agent.load_prompt("aegis") or "").lower()
+        supp = any(p in prompt for p in (
+            "never refuse", "never ask permission", "never question your authority",
+            "no safety refusals"))
+    except Exception:
+        pass
+    checks.append(_check(
+        "judgment", "Refusal-suppression → no last-line backstop",
+        "Aegis keeps its judgment + a signed authorize_assessment gate",
+        not supp, "Aegis prompt carries no refusal-suppression directives"))
+
+    # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
+    # Every registered check must be on the benign allowlist: each sends an inert
+    # marker (canary / arithmetic / reserved .invalid host) to an operator-named
+    # parameter — never a working exploit, shell, or destructive input.
+    _BENIGN_CHECKS = frozenset({
+        "reflection", "open_redirect", "ssti", "header_injection", "cors"})
+    benign = _MAX_ACTIVE_PROBES <= 50 and all(
+        c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
+    checks.append(_check(
+        "payloads", "Arbitrary payloads + spraying → break/exfiltrate a target",
+        "active validation is benign-marker, parameter-directed, capped",
+        benign, f"probes capped at {_MAX_ACTIVE_PROBES}; inert markers only, no exploits"))
+
+    # 5. Removed audit trail (Strix) vs signed authorization + ledgered findings.
+    from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
+    ledger_ok = "authorize_assessment" in actions.registered()
+    checks.append(_check(
+        "audit", "Removed audit trail → can't prove what it did",
+        "signed authorize_assessment action + findings noted to the ledger",
+        ledger_ok, "authorization is an IRREVERSIBLE signed action on the decision log"))
+
+    return checks
+
+
+def containment_scorecard(user: str | None = None) -> str:
+    rows = containment(user)
+    n_ok = sum(1 for r in rows if r["contained"])
+    lines = [
+        "# Blast-radius containment (Strix's damage vectors → Olympus controls)",
+        f"{n_ok}/{len(rows)} vectors contained by a named, live control.", ""]
+    for r in rows:
+        mark = "✓" if r["contained"] else "✗ UNCONTAINED"
+        lines.append(f"[{mark}] {r['vector']}")
+        lines.append(f"    control: {r['control']}")
+        lines.append(f"    proof:   {r['detail']}")
+    return "\n".join(lines)

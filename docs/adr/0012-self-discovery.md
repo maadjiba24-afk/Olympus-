@@ -32,6 +32,17 @@ page. A **degraded** research result (no provider / "no usable evidence") is
 never written as knowledge — the gap stays open and retries next cycle. So
 Olympus acquires new knowledge over time, and only *real* knowledge is retained.
 
+**(a′) Hands-free signal from verification.** Knowledge gaps no longer depend on
+an agent remembering to call `note_knowledge_gap`. When Aletheia ships an answer
+behind an UNVERIFIED banner because it could not support the factual claims (the
+council `reject_after_rework` path or the quick-reply `direct_reject` path), the
+orchestrator records the question as a `knowledge` gap automatically
+(`_signal_knowledge_gap` → `discovery.note_gap`). It is best-effort (all failures
+swallowed — never load-bearing on the answer path), opt-in and replay-inert
+(gated on `discovery.enabled()`), and adds no extra tool or model call. So the
+verifier's "I couldn't back this up" becomes a research target the next cycle
+closes — the gap ledger fills itself from real friction.
+
 **(b) Capability gaps → feature proposals.** Recurring action friction
 (`outcomes.insights`) is derived into capability-gap candidates deterministically
 (no model call); each is filed as a structured proposal on the existing upgrade
@@ -64,7 +75,8 @@ Firecrawl (ADR 0010) and Strix (ADR 0011) absorptions.
   Argus, and Prometheus.
 - 1 new command (127 total): `olympus discover` (run / note / gaps / report).
 - Heartbeat cadence `DISCOVERY_EVERY` (opt-in via `OLYMPUS_DISCOVERY`).
-- Tests: `tests/test_discovery.py` (13).
+- Tests: `tests/test_discovery.py` (17, incl. the hands-free UNVERIFIED→gap
+  auto-signal: opt-in, replay-inert, never-raises).
 
 ## NOT in scope (deliberately)
 
