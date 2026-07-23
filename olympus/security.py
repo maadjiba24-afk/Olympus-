@@ -114,7 +114,22 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # already ingestion-classified above.)
                              "web_scrape", "web_map", "web_batch_scrape",
                              "web_extract", "generate_llmstxt",
-                             "parse_document", "web_diff"})
+                             "parse_document", "web_diff",
+                             # Aegis Assessment (olympus/assess.py): recon and
+                             # the HTTP audit fetch an attacker-controlled target
+                             # (via the gated tools._http_probe) — untrusted
+                             # external content, so their output is enveloped and
+                             # action tools are stripped from any run holding
+                             # them. The local scanners (sast/secrets/deps) and
+                             # the findings-store verbs read only local source or
+                             # Olympus's own store and are TRUSTED below.
+                             # assess_validate sends a benign marker to an
+                             # in-scope target and reads the reflected response —
+                             # it fetches attacker-controlled output, so it is
+                             # INGESTION (wrapped + actuators stripped), like
+                             # recon/http_audit.
+                             "assess_recon", "assess_http_audit",
+                             "assess_validate"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
@@ -159,6 +174,19 @@ TRUSTED_TOOLS = frozenset({
     # add_todo / list_todos. The scheduled CHECK that does fetch lives in the
     # heartbeat (webmonitor.run_due), not in a tool.
     "web_monitor_add", "web_monitor_list",
+    # Aegis Assessment (olympus/assess.py): these read only local source
+    # (sast/secrets/deps, workspace-confined) or Olympus's OWN findings/scope
+    # store (an action-result / own-state read, like list_todos). They ingest no
+    # external content, so they skip the envelope. The two target-fetching verbs
+    # (assess_recon/assess_http_audit) are INGESTION above. record_finding is the
+    # agent WRITING its own validated finding into Olympus's store — own state,
+    # not ingested content — so it is trusted like add_todo.
+    "assess_scope", "assess_sast", "assess_secrets", "assess_deps",
+    "record_finding", "list_findings", "export_findings",
+    # Self-discovery (olympus/discovery.py): records a knowledge gap into
+    # Olympus's OWN discovery ledger — an own-state write like add_todo. No
+    # external fetch (the later research cycle runs in the heartbeat, not here).
+    "note_knowledge_gap",
 })
 
 _ENVELOPE_HEADER = (

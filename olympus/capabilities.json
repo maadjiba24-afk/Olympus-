@@ -1,7 +1,8 @@
 {
   "actions": {
-    "count": 24,
+    "count": 25,
     "names": [
+      "authorize_assessment",
       "authorize_payment",
       "browser_operate",
       "browser_operate_financial",
@@ -47,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 126,
+    "count": 128,
     "names": [
       "a2a",
       "actions",
@@ -55,6 +56,7 @@
       "agenda",
       "approve",
       "ask",
+      "assess",
       "audit",
       "autonomy",
       "backup",
@@ -71,6 +73,7 @@
       "curate",
       "dashboard",
       "discord",
+      "discover",
       "distill",
       "docs",
       "doctor",
@@ -179,11 +182,18 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 115,
+    "count": 126,
     "names": [
       "add_todo",
       "analyze_image",
       "ask_user",
+      "assess_deps",
+      "assess_http_audit",
+      "assess_recon",
+      "assess_sast",
+      "assess_scope",
+      "assess_secrets",
+      "assess_validate",
       "browse_page",
       "browser_act",
       "browser_attest_human",
@@ -226,6 +236,7 @@
       "current_time",
       "edit_file",
       "edit_image",
+      "export_findings",
       "gate_prompt",
       "gate_skills",
       "generate_benchmark",
@@ -235,8 +246,10 @@
       "grep_files",
       "list_dir",
       "list_documents",
+      "list_findings",
       "list_source_files",
       "list_todos",
+      "note_knowledge_gap",
       "operator_attest_receipt",
       "operator_attestations",
       "operator_authorize_site",
@@ -264,6 +277,7 @@
       "recall_fact",
       "recall_memory",
       "recent_learning",
+      "record_finding",
       "refresh_email_style",
       "restore_prompt",
       "run_benchmark",

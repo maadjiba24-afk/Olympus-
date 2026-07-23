@@ -590,6 +590,32 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
     return _urlreq.build_opener(_SafeRedirectHandler())
 
 
+class _NoFollowRedirectHandler(_urlreq.HTTPRedirectHandler):
+    """Do NOT follow a 3xx — the redirect surfaces (as a response or an
+    HTTPError) so the caller can inspect the Location header without a second
+    request ever leaving the box. Used by the open-redirect validation check:
+    the whole point is to READ where the app WANTS to send us, never to go
+    there. Declining the redirect also means the benign canary target is never
+    actually fetched (no egress to it)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _pinned_opener_nofollow() -> "_urlreq.OpenerDirector":
+    """`_pinned_opener` twin that captures the first 3xx instead of following it
+    (IP-pinning + SSRF gate on the initial request are unchanged)."""
+    return _urlreq.build_opener(_PinnedHTTPHandler(),
+                                _PinnedHTTPSHandler(
+                                    context=_ssl.create_default_context()),
+                                _NoFollowRedirectHandler())
+
+
+def _proxy_opener_nofollow() -> "_urlreq.OpenerDirector":
+    """`_proxy_opener` twin that captures the first 3xx instead of following."""
+    return _urlreq.build_opener(_NoFollowRedirectHandler())
+
+
 # Hard ceiling on a single text fetch's body. Generous (any real HTML page is
 # far smaller) but bounded, so a hostile origin streaming a multi-gigabyte body
 # can't OOM the process before a downstream per-page slice runs. The binary
@@ -646,6 +672,50 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
     opener = _proxy_opener() if proxied else _pinned_opener()
     with opener.open(req, timeout=timeout) as resp:
         return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
+
+
+def _http_probe(url: str, max_bytes: int = 400_000,
+                follow_redirects: bool = True) -> dict[str, Any]:
+    """Gated fetch that also returns the RESPONSE HEADERS and status — the
+    canonical seam for security-header inspection (olympus/assess.py). Shares
+    `_http_get`'s exact SSRF/egress/secret-exfil preamble and the same
+    pinned/proxied openers (no second socket path in the codebase), so a header
+    audit is as rebinding-safe as any other fetch. With `follow_redirects=False`
+    the first 3xx is captured (not followed) so a caller can read its Location
+    header without a second request — used by the open-redirect validation check.
+    Never raises for a network error: returns {'error': ...}; a blocked URL
+    raises ValueError like the siblings. Header keys are lower-cased; the body is
+    size-capped."""
+    leak = security.secret_exfil_reason(url)
+    if leak:
+        raise ValueError(f"blocked: {leak}")
+    proxied = _proxied(url)
+    reason = security.url_block_reason(url, resolve=not proxied)
+    if reason:
+        raise ValueError(reason)
+    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    if follow_redirects:
+        opener = _proxy_opener() if proxied else _pinned_opener()
+    else:
+        opener = _proxy_opener_nofollow() if proxied else _pinned_opener_nofollow()
+    try:
+        with opener.open(req, timeout=30) as resp:
+            headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+            body = resp.read(max(1, int(max_bytes)) + 1)[:max_bytes].decode(
+                "utf-8", errors="replace")
+            status = getattr(resp, "status", None) or resp.getcode()
+            return {"status": int(status), "headers": headers, "body": body,
+                    "url": resp.geturl()}
+    except _urlerr.HTTPError as err:        # a 4xx/5xx still carries headers
+        try:
+            headers = {str(k).lower(): str(v) for k, v in err.headers.items()}
+        except Exception:
+            headers = {}
+        return {"status": int(err.code), "headers": headers, "body": "",
+                "url": url, "error": f"HTTP {err.code}"}
+    except Exception as err:
+        return {"status": None, "headers": {}, "body": "", "url": url,
+                "error": str(err)[:200]}
 
 
 def _strip_html(html: str) -> str:
@@ -1898,6 +1968,21 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "web_monitor_add": lambda url, interval_minutes=60, schema=None:
         _web_monitor_add(url, interval_minutes, schema),
     "web_monitor_list": lambda: _web_monitor_list(),
+    # Aegis Assessment suite (native Strix-absorption; olympus/assess.py).
+    "assess_scope": lambda: _assess_scope(),
+    "assess_recon": lambda target: _assess_recon(target),
+    "assess_http_audit": lambda target: _assess_http_audit(target),
+    "assess_sast": lambda path=".": _assess_sast(path),
+    "assess_secrets": lambda path=".": _assess_secrets(path),
+    "assess_deps": lambda path=".": _assess_deps(path),
+    "assess_validate": lambda url: _assess_validate(url),
+    "record_finding": lambda title, severity="medium", cwe="", cvss_vector="",
+        location="", evidence="", remediation="", confidence="medium":
+        _record_finding(title, severity, cwe, cvss_vector, location, evidence,
+                        remediation, confidence),
+    "note_knowledge_gap": lambda topic, context="": _note_knowledge_gap(topic, context),
+    "list_findings": lambda: _list_findings(),
+    "export_findings": lambda format="markdown": _export_findings(format),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -2902,6 +2987,340 @@ WEB_MONITOR_LIST = {
     "input_schema": {"type": "object", "properties": {}},
 }
 
+# === Aegis Assessment tools (native Strix-absorption; see olympus/assess.py) ===
+# Authorized, evidence-producing security assessment. Scope is enforced IN CODE:
+# every target-touching tool fails closed against a signed authorize_assessment
+# grant (agents cannot self-authorize). recon/http_audit fetch through the gated
+# tools._http_probe path and are INGESTION-classified; the source scanners and
+# findings tools read/write only local source + Olympus's own findings store and
+# are TRUSTED. Findings carry a computed CVSS score and export as SARIF 2.1.0.
+
+def _assess():
+    from . import assess
+    return assess
+
+
+def _assess_scope_reason(err: Exception) -> str:
+    return f"Assessment refused: {err}"
+
+
+def _assess_scope() -> str:
+    return _assess().scope_summary()
+
+
+def _assess_recon(target: str) -> str:
+    a = _assess()
+    try:
+        r = a.recon(target)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"recon {target}: {r['error']}"
+    sh = r.get("security_headers", {})
+    missing = [h for h, present in sh.items() if not present]
+    return (f"# Recon: {target}\n"
+            f"- URL: {r.get('url')} (status {r.get('status')})\n"
+            f"- Title: {r.get('title') or '(none)'}\n"
+            f"- Server: {r.get('server') or '(unset)'}\n"
+            f"- Technologies: {', '.join(r.get('technologies') or []) or '(none)'}\n"
+            f"- Missing security headers: {', '.join(missing) or 'none'}")
+
+
+def _assess_http_audit(target: str) -> str:
+    a = _assess()
+    try:
+        r = a.http_audit(target)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"http_audit {target}: {r['error']}"
+    return _fmt_finding_result(f"HTTP audit of {r.get('url', target)}", r)
+
+
+def _assess_sast(path: str = ".") -> str:
+    a = _assess()
+    try:
+        r = a.sast_scan(path)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"sast_scan {path}: {r['error']}"
+    return _fmt_finding_result(
+        f"SAST scan of {path} ({r.get('files_scanned', 0)} file(s))", r)
+
+
+def _assess_secrets(path: str = ".") -> str:
+    a = _assess()
+    try:
+        r = a.secret_scan(path)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"secret_scan {path}: {r['error']}"
+    return _fmt_finding_result(f"Secret scan of {path}", r)
+
+
+def _assess_deps(path: str = ".") -> str:
+    a = _assess()
+    try:
+        r = a.dep_audit(path)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"dep_audit {path}: {r['error']}"
+    return _fmt_finding_result(f"Dependency audit of {path}", r)
+
+
+def _assess_validate(url: str) -> str:
+    a = _assess()
+    try:
+        r = a.validate(url)
+    except a.AssessScopeError as err:
+        return _assess_scope_reason(err)
+    if r.get("error"):
+        return f"validate {url}: {r['error']}"
+    lines = [f"# Active validation of {url}",
+             f"Tested {r.get('params_tested', 0)} parameter(s) with "
+             f"{r.get('probes', 0)} benign probe(s):"]
+    for entry in r.get("log", []):
+        lines.append(f"- {entry.get('note', '')}")
+    if r.get("count"):
+        lines.append(f"\n**{r['count']} confirmed finding(s)** recorded.")
+    else:
+        lines.append("\nNo weaknesses confirmed (nothing reflected unescaped).")
+    return "\n".join(lines)
+
+
+def _fmt_finding_result(title: str, r: dict) -> str:
+    findings = r.get("findings", [])
+    if not findings:
+        return f"# {title}\n\nNo findings."
+    lines = [f"# {title}", "", f"{r.get('count', len(findings))} finding(s):"]
+    for f in findings[:50]:
+        score = f.get("cvss_score")
+        loc = f.get("location", "")
+        lines.append(f"- **{f.get('severity', '?')}** "
+                     f"(CVSS {score}, {f.get('cwe', '?')}) {f.get('title', '')}"
+                     + (f" — `{loc}`" if loc else ""))
+    return "\n".join(lines)
+
+
+def _record_finding(title: str, severity: str = "medium", cwe: str = "",
+                    cvss_vector: str = "", location: str = "", evidence: str = "",
+                    remediation: str = "", confidence: str = "medium") -> str:
+    a = _assess()
+    rec = a.record_finding(a.Finding(
+        title=title, severity=severity, cwe=cwe, cvss_vector=cvss_vector,
+        location=location, evidence=evidence, remediation=remediation,
+        confidence=confidence, source="agent"))
+    if rec.get("error"):
+        return f"Could not record finding: {rec['error']}"
+    verb = "Updated" if rec.get("duplicate") else "Recorded"
+    return (f"{verb} finding `{rec['id']}`: {rec['severity']} "
+            f"(CVSS {rec.get('cvss_score')}, {rec.get('cwe') or 'no CWE'}) — "
+            f"{rec['title']}")
+
+
+def _note_knowledge_gap(topic: str, context: str = "") -> str:
+    """Record something Olympus should learn — a self-discovery signal. The
+    heartbeat's discovery cycle later researches open knowledge gaps and writes
+    durable wiki pages, so Olympus acquires new knowledge over time."""
+    from . import discovery
+    if not str(topic or "").strip():
+        return "A knowledge gap needs a topic."
+    gap = discovery.note_gap("knowledge", topic, evidence=context, source="agent")
+    return (f"Noted knowledge gap: '{gap['topic']}' (seen {gap['hits']}×). "
+            "Olympus will research and durably learn it on its next discovery "
+            "cycle.")
+
+
+def _list_findings() -> str:
+    a = _assess()
+    return a.export_findings("markdown")
+
+
+def _export_findings(fmt: str = "markdown") -> str:
+    return _assess().export_findings(fmt)
+
+
+ASSESS_SCOPE = {
+    "name": "assess_scope",
+    "description": (
+        "Show the active, signed assessment authorizations (which targets you "
+        "may assess and until when). Assessment scope is enforced IN CODE: no "
+        "authorization means nothing can be recon'd/audited. You CANNOT authorize "
+        "a target yourself — the operator does that via the authorize_assessment "
+        "action / `olympus assess authorize`."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+ASSESS_RECON = {
+    "name": "assess_recon",
+    "description": (
+        "Fingerprint an AUTHORIZED target: reachability, status, server/tech "
+        "headers, page title, and which security headers are missing. One gated, "
+        "IP-pinned GET — non-intrusive, no payloads. Fails closed if the target "
+        "is not within an active authorization."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"target": {"type": "string",
+                                  "description": "A URL, host, or IP in scope."}},
+        "required": ["target"],
+    },
+}
+
+ASSESS_HTTP_AUDIT = {
+    "name": "assess_http_audit",
+    "description": (
+        "Audit an AUTHORIZED target's HTTP security posture (HSTS, CSP, "
+        "X-Content-Type-Options, cookie Secure/HttpOnly flags, permissive CORS) "
+        "and record findings with CVSS scores. Deterministic, non-intrusive, "
+        "scope-enforced."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"target": {"type": "string"}},
+        "required": ["target"],
+    },
+}
+
+ASSESS_SAST = {
+    "name": "assess_sast",
+    "description": (
+        "Run pattern-based SAST over workspace-confined source, flagging "
+        "dangerous sinks (eval/exec, shell=True, unsafe deserialization, "
+        "string-built SQL, weak crypto, SSTI, DOM XSS) mapped to CWE + CVSS. "
+        "Requires an active authorization; never escapes the workspace root."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string",
+                                "description": "Workspace path (default '.')."}},
+    },
+}
+
+ASSESS_SECRETS = {
+    "name": "assess_secrets",
+    "description": (
+        "Scan workspace-confined source for hardcoded credentials (API keys, "
+        "private keys, tokens; CWE-798). Evidence is redacted so the finding "
+        "never leaks the secret itself. Scope-enforced."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+    },
+}
+
+ASSESS_DEPS = {
+    "name": "assess_deps",
+    "description": (
+        "Audit declared dependencies (requirements.txt / package.json) against "
+        "the bundled advisory index for known-vulnerable versions. Offline, "
+        "deterministic, scope-enforced."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+    },
+}
+
+ASSESS_VALIDATE = {
+    "name": "assess_validate",
+    "description": (
+        "Actively CONFIRM a weakness on an AUTHORIZED target using BENIGN, "
+        "non-destructive probes — sends a harmless marker into the query "
+        "parameter(s) already present in the URL and checks the response: "
+        "unescaped reflection (a reflected-XSS surface) and unvalidated "
+        "redirects (open redirect, read from the Location header without "
+        "following it). Never sends exploits, never guesses/sprays parameters, "
+        "never leaves the code-enforced scope; hard-capped and SSRF-pinned. "
+        "Upgrades a finding from potential to confirmed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string",
+                    "description": "In-scope URL WITH the parameter(s) to test, "
+                                   "e.g. https://app.example/search?q=test"},
+        },
+        "required": ["url"],
+    },
+}
+
+RECORD_FINDING = {
+    "name": "record_finding",
+    "description": (
+        "Record a security finding you validated, with a CWE and a CVSS 3.1 "
+        "vector (severity is COMPUTED from the vector, not asserted). Deduped by "
+        "CWE+location+title. Provide concrete evidence and remediation — a "
+        "finding without evidence is not a finding."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "severity": {"type": "string",
+                         "description": "critical/high/medium/low/info "
+                                        "(overridden by cvss_vector when given)."},
+            "cwe": {"type": "string", "description": "e.g. CWE-89"},
+            "cvss_vector": {"type": "string",
+                            "description": "CVSS:3.1/AV:.../... — severity is "
+                                           "computed from this."},
+            "location": {"type": "string", "description": "file:line or URL"},
+            "evidence": {"type": "string",
+                         "description": "The observed proof (redact secrets)."},
+            "remediation": {"type": "string"},
+            "confidence": {"type": "string",
+                           "description": "high/medium/low"},
+        },
+        "required": ["title"],
+    },
+}
+
+NOTE_KNOWLEDGE_GAP = {
+    "name": "note_knowledge_gap",
+    "description": (
+        "Record something you (or Olympus) don't yet understand well — a topic "
+        "worth learning. Use it when you hit the edge of your knowledge instead "
+        "of guessing. Olympus's discovery cycle later researches open gaps and "
+        "writes durable wiki pages, so it acquires new knowledge over time. "
+        "Records to Olympus's own store only."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string",
+                      "description": "The thing to learn, as a clear phrase."},
+            "context": {"type": "string",
+                        "description": "Optional: why it came up / what's unclear."},
+        },
+        "required": ["topic"],
+    },
+}
+
+LIST_FINDINGS = {
+    "name": "list_findings",
+    "description": ("List all recorded assessment findings as a Markdown report, "
+                    "ordered by CVSS score."),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+EXPORT_FINDINGS = {
+    "name": "export_findings",
+    "description": (
+        "Export recorded findings as `markdown`, `json`, or `sarif` (SARIF "
+        "2.1.0, GitHub code-scanning compatible for CI upload)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"format": {"type": "string",
+                                  "description": "markdown | json | sarif"}},
+    },
+}
+
 CHART_FROM_DATA = {
     "name": "chart_from_data",
     "description": (
@@ -3854,6 +4273,17 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "web_diff": WEB_DIFF,
     "web_monitor_add": WEB_MONITOR_ADD,
     "web_monitor_list": WEB_MONITOR_LIST,
+    "assess_scope": ASSESS_SCOPE,
+    "assess_recon": ASSESS_RECON,
+    "assess_http_audit": ASSESS_HTTP_AUDIT,
+    "assess_sast": ASSESS_SAST,
+    "assess_secrets": ASSESS_SECRETS,
+    "assess_deps": ASSESS_DEPS,
+    "assess_validate": ASSESS_VALIDATE,
+    "record_finding": RECORD_FINDING,
+    "note_knowledge_gap": NOTE_KNOWLEDGE_GAP,
+    "list_findings": LIST_FINDINGS,
+    "export_findings": EXPORT_FINDINGS,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

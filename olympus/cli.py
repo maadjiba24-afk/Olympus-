@@ -358,6 +358,65 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon_rm.add_argument("id")
     mon_sub.add_parser("run", help="run all due checks now (one pass)")
 
+    # --- Aegis Assessment suite (native Strix-absorption; olympus/assess.py) ---
+    p_as = sub.add_parser(
+        "assess", help="authorized security assessment (Aegis): scope-in-code, "
+                       "recon/audit/SAST/secrets/deps, CVSS+SARIF findings")
+    as_sub = p_as.add_subparsers(dest="assess_cmd")
+    p_as_auth = as_sub.add_parser(
+        "authorize", help="authorize assessment of a target you own")
+    p_as_auth.add_argument("targets", nargs="+",
+                           help="URL(s)/host(s)/'local' to authorize")
+    p_as_auth.add_argument("--hours", type=float, default=24,
+                           help="authorization lifetime in hours (default 24)")
+    p_as_auth.add_argument("--note", default="")
+    as_sub.add_parser("scope", help="show active assessment authorizations")
+    p_as_rev = as_sub.add_parser("revoke", help="revoke an authorization by id")
+    p_as_rev.add_argument("id")
+    p_as_recon = as_sub.add_parser("recon", help="fingerprint an authorized target")
+    p_as_recon.add_argument("target")
+    p_as_audit = as_sub.add_parser("audit", help="HTTP security-header audit")
+    p_as_audit.add_argument("target")
+    p_as_sast = as_sub.add_parser("sast", help="source SAST scan (workspace)")
+    p_as_sast.add_argument("path", nargs="?", default=".")
+    p_as_sec = as_sub.add_parser("secrets", help="hardcoded-secret scan (workspace)")
+    p_as_sec.add_argument("path", nargs="?", default=".")
+    p_as_dep = as_sub.add_parser("deps", help="dependency vulnerability audit")
+    p_as_dep.add_argument("path", nargs="?", default=".")
+    p_as_val = as_sub.add_parser(
+        "validate", help="confirm a finding with a benign, scope-locked probe")
+    p_as_val.add_argument("url", help="in-scope URL with the parameter(s) to test")
+    as_sub.add_parser(
+        "bench", help="score the engine's detection quality (self-benchmark)")
+    as_sub.add_parser(
+        "insights", help="show accumulated assessment experience (self-evolving)")
+    p_as_run = as_sub.add_parser(
+        "run", help="bounded assessment: recon+audit (+whitebox with --source)")
+    p_as_run.add_argument("target")
+    p_as_run.add_argument("--source", default=None,
+                          help="workspace path for SAST/secret/dep scans")
+    p_as_run.add_argument("--budget", type=float, default=None,
+                          help="USD budget stop")
+    p_as_run.add_argument("--sarif", default=None,
+                          help="write SARIF 2.1.0 findings to this file")
+    p_as_rep = as_sub.add_parser("report", help="show/export recorded findings")
+    p_as_rep.add_argument("--format", default="markdown",
+                          help="markdown | json | sarif")
+    p_as_rep.add_argument("--out", default=None)
+    as_sub.add_parser("clear", help="clear recorded findings")
+
+    # --- Self-discovery (olympus/discovery.py) ---
+    p_disc = sub.add_parser(
+        "discover", help="self-discovery: acquire knowledge for open gaps and "
+                         "propose new features")
+    disc_sub = p_disc.add_subparsers(dest="discover_cmd")
+    disc_sub.add_parser("run", help="run a discovery cycle now")
+    p_disc_note = disc_sub.add_parser("note", help="record a gap Olympus should close")
+    p_disc_note.add_argument("kind", choices=["knowledge", "capability"])
+    p_disc_note.add_argument("topic")
+    disc_sub.add_parser("gaps", help="list open gaps")
+    disc_sub.add_parser("report", help="show the discovery ledger")
+
     p_wk = sub.add_parser("webknowledge",
                           help="what Olympus has learned about the web (domain "
                                "lore + discoveries + build proposals)")
@@ -1575,6 +1634,84 @@ def main(argv: list[str] | None = None) -> int:
                   "Nothing due (or OLYMPUS_WEB_MONITOR is off).")
         else:
             print(webmonitor.list_text(user))
+    elif args.command == "assess":
+        from . import assess, tools
+        sc = args.assess_cmd
+        if sc == "authorize":
+            rec = assess.grant(args.targets, expires_in=args.hours * 3600,
+                               note=args.note, approved_by="operator-cli")
+            print(f"Authorized {', '.join(rec['targets'])} → {rec['id']} "
+                  f"(valid {args.hours:g}h). Scope is now enforced in code; only "
+                  "these targets can be assessed.")
+        elif sc == "scope":
+            print(assess.scope_summary())
+        elif sc == "revoke":
+            print("Revoked." if assess.revoke(args.id) else "No such authorization.")
+        elif sc == "recon":
+            print(tools._assess_recon(args.target))
+        elif sc == "audit":
+            print(tools._assess_http_audit(args.target))
+        elif sc == "sast":
+            print(tools._assess_sast(args.path))
+        elif sc == "secrets":
+            print(tools._assess_secrets(args.path))
+        elif sc == "deps":
+            print(tools._assess_deps(args.path))
+        elif sc == "validate":
+            print(tools._assess_validate(args.url))
+        elif sc == "bench":
+            print(assess.bench_scorecard())
+        elif sc == "insights":
+            print(assess.insights_summary())
+        elif sc == "run":
+            try:
+                r = assess.run_assessment(args.target, source_path=args.source,
+                                          budget_usd=args.budget)
+            except assess.AssessScopeError as err:
+                print(err, file=sys.stderr)
+                return 1
+            print(f"Assessment of {args.target}: phases {', '.join(r['phases'])}; "
+                  f"{r['total_findings']} finding(s)"
+                  + (" [budget stop]" if r.get("budget_stopped") else "") + ".")
+            print()
+            print(assess.export_findings("markdown"))
+            if args.sarif:
+                from pathlib import Path
+                Path(args.sarif).write_text(assess.export_findings("sarif"),
+                                            encoding="utf-8")
+                print(f"\n[SARIF written to {args.sarif}]", file=sys.stderr)
+        elif sc == "report":
+            out = assess.export_findings(args.format)
+            print(out)
+            if args.out:
+                from pathlib import Path
+                Path(args.out).write_text(out, encoding="utf-8")
+                print(f"\n[written to {args.out}]", file=sys.stderr)
+        elif sc == "clear":
+            print(f"Cleared {assess.clear_findings()} finding(s).")
+        else:
+            print(assess.scope_summary())
+    elif args.command == "discover":
+        from . import discovery
+        dc = args.discover_cmd
+        if dc == "note":
+            g = discovery.note_gap(args.kind, args.topic, source="operator-cli")
+            print(f"Noted {args.kind} gap: '{g['topic']}'. Olympus will close it "
+                  "on its next discovery cycle.")
+        elif dc == "gaps":
+            gs = discovery.open_gaps()
+            print("\n".join(f"- [{g['kind']}] {g['topic']} ({g['hits']}×)"
+                            for g in gs) or "No open gaps.")
+        elif dc == "run":
+            if not firstrun.ensure_ready():
+                return 1
+            r = discovery.run()
+            for line in r.get("learned", []) + r.get("proposed", []):
+                print(line)
+            print(f"{r.get('open_knowledge', 0)} knowledge / "
+                  f"{r.get('open_capability', 0)} capability gap(s) still open.")
+        else:
+            print(discovery.report())
     elif args.command == "webknowledge":
         import os
         from . import domainlore, webproposals, webreflect

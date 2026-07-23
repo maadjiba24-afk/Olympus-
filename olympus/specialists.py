@@ -143,10 +143,18 @@ class Specialist:
 
     def _extra_context(self) -> str:
         """Per-specialist prompt context. Angelos gets the user's email
-        writing-style guide so its drafts match the user's voice."""
+        writing-style guide so its drafts match the user's voice; Aegis gets its
+        accumulated assessment experience (the self-evolving moat) so it
+        prioritises the weakness classes Olympus has most often confirmed."""
         if self.key == "angelos":
             from . import emailstyle, memory
             return emailstyle.context_block(memory.current_user())
+        if self.key == "aegis":
+            try:
+                from . import assess, memory
+                return assess.insights_block(memory.current_user())
+            except Exception:
+                return ""
         return ""
 
     def run(self, task: str, settings: config.Settings | None = None,
@@ -209,9 +217,26 @@ SPECIALISTS: dict[str, Specialist] = {
         ),
         Specialist(
             key="aegis", name="Aegis", title="Cybersecurity Specialist",
-            description="Defensive security: hardening, threat awareness, secure "
-                        "coding, privacy, incident response guidance.",
+            description="Defensive security AND authorized assessment of your "
+                        "OWN assets: hardening, secure coding, privacy, incident "
+                        "response, PLUS consent-gated recon, HTTP security-header "
+                        "audit, source SAST, and secret / dependency scanning "
+                        "that produce CVSS-scored, SARIF-exportable findings. "
+                        "Assessment scope is enforced in code — Aegis can only "
+                        "assess targets the operator has explicitly authorized.",
             web=True,
+            # The assessment suite (native Strix-absorption; olympus/assess.py):
+            # recon/http_audit fetch the target (INGESTION — capability
+            # separation strips any actuator from the run), while the source
+            # scanners and findings-store verbs read local source or Olympus's
+            # own findings store (TRUSTED). Aegis holds NO authorize tool — it
+            # cannot self-authorize; the operator grants scope via the
+            # authorize_assessment action.
+            extra_tools=("assess_scope", "assess_recon", "assess_http_audit",
+                         "assess_sast", "assess_secrets", "assess_deps",
+                         "assess_validate",
+                         "record_finding", "list_findings", "export_findings",
+                         "read_file", "list_dir", "grep_files", "glob_files"),
         ),
         Specialist(
             key="iris", name="Iris", title="Social Network Assistant",
@@ -272,7 +297,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "browser_read", "browser_read_ax", "browser_save_pdf",
                          "browser_console", "browser_screenshot",
                          "browser_act", "browser_skills", "browser_skill_record",
-                         "trigger_research"),
+                         "trigger_research", "note_knowledge_gap"),
             # Safety ceiling on a runaway scan loop (well above a normal scan).
             # Enforced only when contracts are enabled (off by default).
             contract=contracts.OutputContract(max_tool_calls=24),
@@ -293,7 +318,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "skills so the whole council gets smarter every day.",
             system=True,
             extra_tools=("create_skill", "gate_skills", "operator_review",
-                         "recent_learning"),
+                         "recent_learning", "note_knowledge_gap"),
         ),
         Specialist(
             key="prometheus", name="Prometheus", title="Evolution Specialist",
@@ -317,7 +342,7 @@ SPECIALISTS: dict[str, Specialist] = {
                          "query_codegraph", "codegraph_neighbors",
                          "codegraph_impact", "codegraph_path",
                          "codegraph_subgraph", "codegraph_overview",
-                         "propose_site_profile"),
+                         "propose_site_profile", "note_knowledge_gap"),
         ),
         Specialist(
             key="hermes", name="Hermes", title="Operator",

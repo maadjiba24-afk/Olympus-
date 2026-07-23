@@ -15,6 +15,143 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Self-discovery: acquire knowledge + propose features over time
+
+New `olympus/discovery.py` — a native loop pointed at what Olympus does NOT yet
+know or cannot yet do, closing those gaps over time (ADR 0012). It complements
+the existing "improve what we have" machinery (Prometheus prompts, Metis skills,
+`evolve.py` tunables, wiki dreaming) with a "discover what we're missing" spine:
+
+- **Knowledge gaps → durable knowledge.** A gap ("I don't understand X") is
+  recorded via the new `note_knowledge_gap` tool (Metis/Argus/Prometheus), via
+  friction derivation, or `olympus discover note`. The heartbeat cycle researches
+  open gaps (`research.run`, SSRF-gated + wrapped upstream) and writes the cited
+  result to a durable wiki page. A degraded result ("no usable evidence") is
+  never written as knowledge — the gap stays open and retries.
+- **Capability gaps → feature proposals.** Recurring action friction
+  (`outcomes.insights`) becomes structured proposals on the existing upgrade
+  store (surfaced in the digest and `olympus discover`), for the operator to
+  review — the native, recurring form of the "analyze the landscape → propose
+  what to absorb" pattern that produced the Firecrawl/Strix absorptions. Nothing
+  is auto-built.
+
+1 new tool (125 total): `note_knowledge_gap` (TRUSTED / own-state). 1 new command
+(127 total): `olympus discover` (run/note/gaps/report). Heartbeat cadence
+`DISCOVERY_EVERY`, **opt-in** via `OLYMPUS_DISCOVERY`, replay-inert, bounded.
+Safety: notice-don't-impose (features proposed never applied; knowledge
+sanitized at the memory sink + wrapped upstream). THREAT_MODEL, capabilities.json,
+README, ADR 0012 updated. Tests: `tests/test_discovery.py` (13 new).
+
+### Added — Aegis detection breadth (5 languages) + a precision fix
+
+Expanded the SAST rule set from Python/JS to **6 languages** — added 21 curated,
+high-signal rules for Go (insecure TLS, shell exec, weak hash, Sprintf-built
+SQL), PHP (eval, shell-with-variable, request-file-inclusion, echoed input,
+unserialize), Java (Runtime.exec, concatenated SQL, ObjectInputStream, weak
+hash), Ruby (eval, interpolated system, Marshal.load, html_safe), and extra
+Python (JWT verify disabled, unfiltered `extractall` path-traversal, Django
+`mark_safe`). Added 7 more dependency advisories (Django/urllib3/werkzeug/
+aiohttp; express/jsonwebtoken/ws). The benchmark corpus grew from 8 to 20 labeled
+samples across all six languages — **precision/recall/F1 = 1.0** (34 true
+positives, zero false positives/negatives).
+
+Also a precision fix surfaced *by* the benchmark loop: pure-comment lines that
+merely name a sink ("# eval(x) is dangerous") are no longer flagged. Found the
+false-positive class, added comment-only clean fixtures to the corpus, fixed the
+scanner, and the benchmark floor now enforces **zero** false positives (was
+≥ 0.9 precision, now == 1.0) — the measured, regression-gated evolution loop
+working as designed. No new tool/command/manifest change. Tests: 3 new.
+
+### Added — Aegis assessment experience (the self-evolving memory loop)
+
+Every weakness Olympus's OWN scanners/validators confirm now accrues into a
+compact, durable knowledge record (`assess.knowledge` / `insights_block` /
+`olympus assess insights`), and that record is injected into Aegis's system
+prompt (`specialists._extra_context`) — so future assessments prioritise the
+weakness classes Olympus has most often confirmed. This is the genuine
+experience → knowledge → better-future-performance loop (Metis's daily cycle,
+scoped to security), and the answer to "keeps self evolving so Olympus becomes
+stronger over time": Aegis's prompt literally sharpens as it works.
+
+Safety: only findings from Olympus's deterministic producers (`sast`,
+`http_audit`, `dep_audit`, `secret_scan`, `active_validation`) are learned from
+— NEVER a finding an agent recorded via the `record_finding` tool
+(`source="agent"`), whose text could carry content an injected page steered in,
+so nothing untrusted can reach the self-evolving prompt. Knowledge is CWE-class
+aggregates (name + count + method — no target data), deduped by fingerprint (no
+double-counting across runs), replay-inert, and bounded. No new tool or manifest
+change. Tests: 6 new (84 assess/sarif/threat/envelope/specialist green).
+
+### Added — Aegis self-benchmark (measured, regression-gated evolution)
+
+Added `assess.bench` / `assess.bench_scorecard` and `olympus assess bench` — a
+self-benchmark that scores the assessment engine's detection (precision / recall
+/ F1) against a labeled corpus of known-vulnerable and known-clean fixtures,
+scored on the EXACT production detection logic (`_sast_findings_for_text`, the
+dependency matcher — refactored out of `sast_scan` so the score can't drift from
+what really runs). This is the spine that makes the self-evolving loop safe:
+capability can grow over time (new checks/rules), but detection quality cannot
+silently regress — `tests/test_assess.py` asserts a quality floor (recall 1.0,
+precision ≥ 0.9), so a change that misses a known bug or fires on clean code
+fails CI. Mirrors Olympus's benchmark-gated prompt-upgrade philosophy (Prometheus
+rolls back a regression). Pure — no scope/network/memory; no new tool or manifest
+change. Tests: 3 new. Current score: 8 samples, precision/recall/F1 = 1.0.
+
+### Added — Aegis active validation (scope-locked, benign confirmation)
+
+Added `assess_validate` (10th assess tool, 124 total; `olympus assess validate`)
+— a **scope-locked, non-destructive** active-validation layer that upgrades a
+finding from "potential (static)" to "confirmed (observed)". It is the deployable
+superset of Strix's exploitation phase and the moat's answer to "make it stronger
+than Strix": it confirms with a BENIGN marker sent only to a parameter the
+operator named (never guessed/sprayed), only against a code-authorized target,
+through the SSRF-pinned gated fetch, hard-capped (≤20 probes) — so it produces a
+real proof while remaining safe to run unattended. Checks live in an extensible
+registry (`assess._ACTIVE_CHECKS`) that compounds over time — currently
+reflected-input confirmation (missing output encoding → XSS surface) and open
+redirect (a benign canary read from the `Location` header *without following it*,
+so the canary is never actually requested). Adding a check needs no new tool,
+command, or manifest change — the self-evolving moat by design. It does
+**not** perform arbitrary-target exploitation, payload spraying, or open-egress
+access — those stay declined (ADR 0011 Decision (f); `DEFERRED.md` #16/#18).
+Tests: 7 new (`tests/test_assess.py`). THREAT_MODEL, capabilities.json, README,
+and ADR 0011 updated.
+
+### Added — Native "Aegis Assessment" suite (Strix absorbed as a moat)
+
+Absorbed [Strix](https://github.com/usestrix/strix)'s security-assessment
+capability surface as native Olympus capabilities — turning each of its
+weaknesses into a structural strength (design locked in ADR 0011, analysis in
+`docs/STRIX_TRACKING.md`). New modules `olympus/assess.py` (code-enforced scope,
+recon, HTTP security-header audit, source SAST, secret + dependency scanning,
+findings model with dedup + orchestration under a USD budget stop) and
+`olympus/sarif.py` (pure-Python CVSS 3.1 scoring + SARIF 2.1.0 export), wired as
+**9 new tools** (123 total), **1 new action** (25 total), and **1 new CLI
+command group** (126 total):
+
+- Tools: `assess_recon`, `assess_http_audit` (ingestion, gated + wrapped);
+  `assess_scope`, `assess_sast`, `assess_secrets`, `assess_deps`,
+  `record_finding`, `list_findings`, `export_findings` (own/local, trusted).
+- Action: `authorize_assessment` (IRREVERSIBLE, revocable) — the signed,
+  human-approved, ledger-recorded scope grant.
+- CLI: `olympus assess`
+  (authorize/scope/revoke/recon/audit/sast/secrets/deps/run/report/clear).
+- Aegis upgraded from defense-advice-only to defense **plus** authorized
+  assessment of the operator's own assets (holds the assess + source-read
+  tools; still holds no actuators).
+
+The moat inversions: **scope enforced in code** (`require_scope()` fails closed
+against a signed grant — not a prompt); **a signed authorization** instead of
+Strix's refusal-suppression (agents cannot self-authorize); **untrusted target
+content isolated structurally** (recon/audit fetch via the IP-pinned
+`tools._http_probe`, INGESTION-classified → wrapped + actuators stripped);
+**findings with CVSS computed from a vector** + SARIF 2.1.0 + fingerprint dedup +
+a ledger note (the audit trail Strix removed); **secret evidence redacted** so a
+report can't leak the secret. Pure-stdlib — no new dependencies. Tests:
+`tests/test_assess.py`, `tests/test_sarif.py` (49 new). THREAT_MODEL.md,
+`capabilities.json`, and README markers updated; the tool classification stays
+complete + disjoint (envelope fail-closed).
+
 ### Added — Web context: learned action-profiles, fleet lore sharing, build proposals
 
 Three self-evolution extensions turn the web-context corpus into a deeper moat
