@@ -302,6 +302,54 @@ def test_validate_tool_is_ingestion():
     assert security.should_wrap("assess_validate") is True
 
 
+def test_active_check_registry_extensible():
+    # The self-evolving moat: checks live in a registry that compounds.
+    assert set(assess.active_check_names()) >= {"reflection", "open_redirect"}
+
+
+def _redirect_probe(kind):
+    """Fake probe respecting follow_redirects=False for the open-redirect check."""
+    def _probe(url, max_bytes=400_000, follow_redirects=True):
+        from urllib.parse import parse_qsl, urlparse
+        q = dict(parse_qsl(urlparse(url).query))
+        canary = next((v for v in q.values() if "olympus-canary" in v), "")
+        if kind == "open" and canary:
+            return {"status": 302, "headers": {"location": canary}, "body": "", "url": url}
+        if kind == "safe_redirect" and canary:
+            return {"status": 302, "headers": {"location": "/home"}, "body": "", "url": url}
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    return _probe
+
+
+def test_validate_confirms_open_redirect(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _redirect_probe("open"))
+    r = assess.validate("https://app.example/go?next=/home")
+    assert r["count"] == 1
+    assert r["findings"][0]["cwe"] == "CWE-601"
+
+
+def test_validate_ignores_safe_redirect(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _redirect_probe("safe_redirect"))
+    assert assess.validate("https://app.example/go?next=/home")["count"] == 0
+
+
+def test_open_redirect_probe_does_not_follow(monkeypatch):
+    # The canary target (.invalid) must never actually be requested — the check
+    # reads the Location header with follow_redirects=False.
+    assess.grant(["app.example"], expires_in=3600)
+    seen_follow = []
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True):
+        seen_follow.append(follow_redirects)
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.validate("https://app.example/go?next=/x")
+    # The open-redirect check must call with follow_redirects=False.
+    assert False in seen_follow
+
+
 def test_budget_stop_halts_phases(workspace, monkeypatch):
     assess.grant(["example.com", "local"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _fake_probe({"server": "nginx"}))

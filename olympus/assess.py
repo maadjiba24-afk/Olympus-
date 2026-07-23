@@ -1037,10 +1037,43 @@ def _reflection_check(url: str, name: str) -> tuple["Finding | None", str]:
     return finding, f"param '{name}': reflected UNESCAPED — confirmed XSS surface"
 
 
+def _open_redirect_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Set `name` to a BENIGN off-site canary host and read the Location header
+    WITHOUT following the redirect. If the app echoes the canary host into
+    Location, it will redirect a user to attacker-controlled input — an open
+    redirect (CWE-601). The `.invalid` TLD is reserved and never resolves, and
+    the redirect is never followed, so no request ever reaches the canary: this
+    reads where the app WANTS to send us, it never goes there. Raises ValueError
+    if blocked."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    canary_host = f"olympus-canary-{tok}.invalid"
+    target = f"https://{canary_host}/"
+    probe = tools._http_probe(_set_param(url, name, target), follow_redirects=False)
+    status = probe.get("status")
+    location = (probe.get("headers", {}) or {}).get("location", "") or ""
+    if isinstance(status, int) and 300 <= status < 400 and canary_host in location:
+        finding = Finding(
+            title="Open redirect (unvalidated redirect target)",
+            severity="medium", cwe="CWE-601",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N",
+            location=f"{url} [param: {name}]",
+            evidence=f"benign canary redirected to: {location[:120]}",
+            remediation="Never redirect to a raw request parameter. Allowlist "
+                        "internal paths, or map an opaque key to a known "
+                        "destination server-side.",
+            confidence="high", source="active_validation")
+        return finding, f"param '{name}': open redirect CONFIRMED (Location -> canary)"
+    if isinstance(status, int) and 300 <= status < 400:
+        return None, f"param '{name}': redirects, but not to our input (safe)"
+    return None, f"param '{name}': no redirect"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("reflection", _reflection_check),
+    ("open_redirect", _open_redirect_check),
 )
 
 

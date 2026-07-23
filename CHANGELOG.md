@@ -24,9 +24,12 @@ superset of Strix's exploitation phase and the moat's answer to "make it stronge
 than Strix": it confirms with a BENIGN marker sent only to a parameter the
 operator named (never guessed/sprayed), only against a code-authorized target,
 through the SSRF-pinned gated fetch, hard-capped (≤20 probes) — so it produces a
-real proof while remaining safe to run unattended. First check: reflected-input
-confirmation (missing output encoding → XSS surface); checks live in an
-extensible registry (`assess._ACTIVE_CHECKS`) that compounds over time. It does
+real proof while remaining safe to run unattended. Checks live in an extensible
+registry (`assess._ACTIVE_CHECKS`) that compounds over time — currently
+reflected-input confirmation (missing output encoding → XSS surface) and open
+redirect (a benign canary read from the `Location` header *without following it*,
+so the canary is never actually requested). Adding a check needs no new tool,
+command, or manifest change — the self-evolving moat by design. It does
 **not** perform arbitrary-target exploitation, payload spraying, or open-egress
 access — those stay declined (ADR 0011 Decision (f); `DEFERRED.md` #16/#18).
 Tests: 7 new (`tests/test_assess.py`). THREAT_MODEL, capabilities.json, README,

@@ -583,6 +583,32 @@ def _proxy_opener() -> "_urlreq.OpenerDirector":
     return _urlreq.build_opener(_SafeRedirectHandler())
 
 
+class _NoFollowRedirectHandler(_urlreq.HTTPRedirectHandler):
+    """Do NOT follow a 3xx — the redirect surfaces (as a response or an
+    HTTPError) so the caller can inspect the Location header without a second
+    request ever leaving the box. Used by the open-redirect validation check:
+    the whole point is to READ where the app WANTS to send us, never to go
+    there. Declining the redirect also means the benign canary target is never
+    actually fetched (no egress to it)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _pinned_opener_nofollow() -> "_urlreq.OpenerDirector":
+    """`_pinned_opener` twin that captures the first 3xx instead of following it
+    (IP-pinning + SSRF gate on the initial request are unchanged)."""
+    return _urlreq.build_opener(_PinnedHTTPHandler(),
+                                _PinnedHTTPSHandler(
+                                    context=_ssl.create_default_context()),
+                                _NoFollowRedirectHandler())
+
+
+def _proxy_opener_nofollow() -> "_urlreq.OpenerDirector":
+    """`_proxy_opener` twin that captures the first 3xx instead of following."""
+    return _urlreq.build_opener(_NoFollowRedirectHandler())
+
+
 # Hard ceiling on a single text fetch's body. Generous (any real HTML page is
 # far smaller) but bounded, so a hostile origin streaming a multi-gigabyte body
 # can't OOM the process before a downstream per-page slice runs. The binary
@@ -632,14 +658,18 @@ def _http_get_bytes(url: str, max_bytes: int = 12_000_000) -> bytes:
         return resp.read(max(1, int(max_bytes)) + 1)[:max_bytes]
 
 
-def _http_probe(url: str, max_bytes: int = 400_000) -> dict[str, Any]:
+def _http_probe(url: str, max_bytes: int = 400_000,
+                follow_redirects: bool = True) -> dict[str, Any]:
     """Gated fetch that also returns the RESPONSE HEADERS and status — the
     canonical seam for security-header inspection (olympus/assess.py). Shares
     `_http_get`'s exact SSRF/egress/secret-exfil preamble and the same
     pinned/proxied openers (no second socket path in the codebase), so a header
-    audit is as rebinding-safe as any other fetch. Never raises for a network
-    error: returns {'error': ...}; a blocked URL raises ValueError like the
-    siblings. Header keys are lower-cased; the body is size-capped."""
+    audit is as rebinding-safe as any other fetch. With `follow_redirects=False`
+    the first 3xx is captured (not followed) so a caller can read its Location
+    header without a second request — used by the open-redirect validation check.
+    Never raises for a network error: returns {'error': ...}; a blocked URL
+    raises ValueError like the siblings. Header keys are lower-cased; the body is
+    size-capped."""
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -648,7 +678,10 @@ def _http_probe(url: str, max_bytes: int = 400_000) -> dict[str, Any]:
     if reason:
         raise ValueError(reason)
     req = _urlreq.Request(url, headers={"User-Agent": _UA})
-    opener = _proxy_opener() if proxied else _pinned_opener()
+    if follow_redirects:
+        opener = _proxy_opener() if proxied else _pinned_opener()
+    else:
+        opener = _proxy_opener_nofollow() if proxied else _pinned_opener_nofollow()
     try:
         with opener.open(req, timeout=30) as resp:
             headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
@@ -3055,10 +3088,12 @@ ASSESS_VALIDATE = {
     "description": (
         "Actively CONFIRM a weakness on an AUTHORIZED target using BENIGN, "
         "non-destructive probes — sends a harmless marker into the query "
-        "parameter(s) already present in the URL and checks whether it comes "
-        "back unescaped (a reflected-XSS surface). Never sends exploits, never "
-        "guesses/sprays parameters, never leaves the code-enforced scope; hard-"
-        "capped and SSRF-pinned. Upgrades a finding from potential to confirmed."
+        "parameter(s) already present in the URL and checks the response: "
+        "unescaped reflection (a reflected-XSS surface) and unvalidated "
+        "redirects (open redirect, read from the Location header without "
+        "following it). Never sends exploits, never guesses/sprays parameters, "
+        "never leaves the code-enforced scope; hard-capped and SSRF-pinned. "
+        "Upgrades a finding from potential to confirmed."
     ),
     "input_schema": {
         "type": "object",

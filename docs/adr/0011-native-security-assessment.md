@@ -96,10 +96,13 @@ open-egress box at arbitrary targets — powerful, but undeployable and unsafe.
 Olympus's `assess.validate` is the *deployable superset*: it upgrades a finding
 from "potential (static)" to "confirmed (observed)" using a BENIGN marker sent
 ONLY to a parameter the operator named, ONLY against a code-authorized target,
-through the SSRF-pinned gated fetch, hard-capped so it can never spray. The first
-check is reflected-input confirmation (a canary + a few special characters →
-detect missing output encoding = an XSS surface); the check set is a registry
-(`_ACTIVE_CHECKS`) extended over time. Every check MUST honour three boundaries,
+through the SSRF-pinned gated fetch, hard-capped so it can never spray. The checks
+are a registry (`_ACTIVE_CHECKS`) extended over time: reflected-input
+confirmation (a canary + a few special characters → detect missing output
+encoding = an XSS surface) and open-redirect confirmation (a benign canary host
+read from the `Location` header *without following the redirect*, so the canary
+is never actually requested → CWE-601). Adding a check needs no new tool,
+command, or manifest change — capability compounds inside the fixed surface. Every check MUST honour three boundaries,
 which are the line this capability never crosses:
 
 1. **Parameter-directed, never sprayed** — only parameters PRESENT in the
