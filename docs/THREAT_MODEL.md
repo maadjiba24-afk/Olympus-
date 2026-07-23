@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 126 tools in
+Olympus exposes a **finite, named** tool surface — the 127 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -80,6 +80,7 @@ surface. So the surface and its threat model can't drift apart.
 | `web_batch_scrape` | Scrape a list of URLs (≤25) into markdown | ingests untrusted | Each URL independently gated via `webctx.scrape`→`_http_get`; per-list and per-page bounds; output wrapped | SSRF / cost runaway — every URL re-gated, list hard-capped; injected content wrapped |
 | `web_extract` | Verified schema-guided extraction from URLs/text | ingests untrusted | Sources fetched via `_http_get`; content `wrap_untrusted`-enveloped before EVERY model hop (extract + verify); a second `verify` pool role re-checks values; source count capped (≤10) | Prompt injection via page content — structurally enveloped on every hop and actuators stripped (INGESTION); hallucinated values — flagged by the verify role |
 | `generate_llmstxt` | Build llms.txt/llms-full.txt for a site | ingests untrusted | Maps + scrapes via `_http_get`; summaries run on `wrap_untrusted` content; page count capped (≤30); output wrapped | SSRF / injection via mapped pages — each fetch gated, summary input enveloped |
+| `web_llms_txt` | Fetch a site's OWN /llms.txt as governed context | ingests untrusted | One fetch of `{origin}/llms.txt` via the SSRF/egress-gated, rebinding-pinned `_http_get`; port-allowlisted; body capped (≤8k) and cached per origin; output wrapped + secret-redacted | SSRF via a crafted origin — gated + pinned; injection via author-controlled llms.txt — enveloped and actuators stripped (INGESTION); a missing file degrades to a bounded "not found", never raises |
 | `parse_document` | Parse a PDF/DOCX (URL or workspace path) to text | ingests untrusted | URL bytes via the gated `_http_get_bytes` (SSRF/egress/pin + size cap); local paths confined to the workspace via `sandbox._confine` (no `/etc` traversal); optional `[docs]` extra, graceful-degrade; output wrapped | SSRF via a document URL — gated; arbitrary-file read via a local path — refused by `_confine`; injected document text — wrapped |
 | `web_diff` | Diff a page's markdown against a prior snapshot | ingests untrusted | Fetch via `_http_get`; content only compared (difflib), never executed; diff output wrapped | SSRF — gated; injected content — only diffed and wrapped, never obeyed |
 | `web_monitor_add` | Register a URL to watch for changes | first-party write | Records to Olympus's own store only — NO fetch here (the gated fetch happens later in `webmonitor.run_due`); the URL is literal-checked with `url_block_reason` up front; watch count capped (≤50) | Adding an internal URL — refused up front; the scheduled check is opt-in (`OLYMPUS_WEB_MONITOR`), gated, and off during replay |

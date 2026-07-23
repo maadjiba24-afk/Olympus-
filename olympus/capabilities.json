@@ -182,7 +182,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 126,
+    "count": 127,
     "names": [
       "add_todo",
       "analyze_image",
@@ -304,6 +304,7 @@
       "web_diff",
       "web_extract",
       "web_fetch",
+      "web_llms_txt",
       "web_map",
       "web_monitor_add",
       "web_monitor_list",

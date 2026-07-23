@@ -15,7 +15,7 @@ carries a migration note here.
 
 ## [Unreleased]
 
-### Added — Absorb Page Agent's capabilities natively (ADR 0014, decisions (a)–(d))
+### Added — Absorb Page Agent's capabilities natively (ADR 0014, complete: (a)–(e))
 
 Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
 capability surface as native Olympus features, each built on the security spine
@@ -81,6 +81,22 @@ redacted), covering browser reads, `webctx`, and `web_fetch` in one seam;
 `browser.read`/`html`/`read_ax`/`console_logs` also redact at the source as
 defense-in-depth. Idempotent and structure-preserving. 14 new tests
 (`tests/test_prompt_redaction.py`).
+
+- **Governed `/llms.txt` consumption** (§3.6, decision (e) — completes the
+  program). New `webctx.fetch_llmstxt` + the INGESTION tool `web_llms_txt` fetch a
+  site's own author-curated `/llms.txt` as agent context. Page-agent does a raw
+  `fetch(origin + '/llms.txt')` with no SSRF check, no egress confinement, no
+  secret scan, and folds it in unwrapped; Olympus fetches through the
+  SSRF/egress-gated, DNS-rebinding-pinned `_http_get` (port-allowlisted, body
+  capped ≤8k, cached per origin), and because the tool is ingestion-classified its
+  output is wrapped untrusted AND secret-redacted before any model sees it. A
+  missing file degrades to a bounded "not found", never raises. Tool count 126 →
+  127 (threat-model row + capabilities manifest updated). Seven new tests
+  (`tests/test_webctx.py`).
+
+All five borrowable watchlist items (§3.1–§3.6) are now native Olympus
+capabilities; ADR 0014 is complete and `docs/PAGE_AGENT_TRACKING.md` is marked
+ABSORBED.
 
 Deliberately still declined (ADR 0014 "NOT absorbed"): running the agent *as the
 page* (origin sharing), `eval()` of model code in a live origin, an

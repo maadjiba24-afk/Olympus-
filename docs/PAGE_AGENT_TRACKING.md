@@ -8,7 +8,7 @@ used here** — this is competitive/inspiration analysis only, read from a shall
 clone.
 
 - **Last checked:** 2026-07-23 (commit `b7401a0`, `main`, npm `page-agent` 1.12.2)
-- **Adoption status:** 🔄 **ABSORBING** (ADR 0014). Page Agent's entire
+- **Adoption status:** ✅ **ABSORBED** (ADR 0014, complete). Page Agent's entire
   capability surface is already matched or exceeded by Olympus's governed browser
   harness (`olympus/browser.py`) and web-context suite (`olympus/webctx.py`), and
   its *distribution model* (zero-install in-page JS, page-origin sharing) is a
@@ -42,8 +42,14 @@ clone.
       `web_fetch` at once; PII redaction is one flag (`OLYMPUS_REDACT_PII`). What
       page-agent leaves to an opt-in hook, Olympus enforces fail-closed.
       `tests/test_prompt_redaction.py`.
-    - §3.6 governed `/llms.txt` consumption → ADR 0014 (e), planned.
-  The four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
+    - **§3.6 — governed `/llms.txt` consumption → SHIPPED** as
+      `webctx.fetch_llmstxt` + the INGESTION tool `web_llms_txt` (ADR 0014 (e)):
+      fetches a site's own `/llms.txt` through the SSRF/egress-gated,
+      rebinding-pinned `_http_get`, port-allowlisted, capped, cached per origin,
+      and wrapped + secret-redacted — every layer page-agent's raw `fetch()`
+      skips. `tests/test_webctx.py`.
+  **All five borrowable watchlist items are now native (ADR 0014 complete).** The
+  four non-goals in §5 stay declined (ADR 0014 "NOT absorbed").
 - **What it is:** a client-side, **zero-install in-page GUI agent** — "one
   script gives any web page its own AI agent." Drop a `<script>` tag (or `npm
   install page-agent`) and the page gains a natural-language agent that reads its

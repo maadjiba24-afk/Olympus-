@@ -2032,6 +2032,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "web_extract": lambda source, schema, prompt="", verify=None:
         _web_extract(source, schema, prompt, verify),
     "generate_llmstxt": lambda url, max_urls=20: _generate_llmstxt(url, max_urls),
+    "web_llms_txt": lambda url: _web_llms_txt(url),
     "parse_document": lambda source: _parse_document(source),
     "web_diff": lambda url, previous_markdown="", schema=None, previous_json=None:
         _web_diff(url, previous_markdown, schema, previous_json),
@@ -2821,6 +2822,15 @@ def _generate_llmstxt(url: str, max_urls: int = 20) -> str:
             f"## llms-full.txt (truncated)\n\n{r['llmsfull'][:12000]}")
 
 
+def _web_llms_txt(url: str) -> str:
+    r = _webctx().fetch_llmstxt(url)
+    if not r.get("found"):
+        why = r.get("error") or "no /llms.txt at this origin"
+        return f"No llms.txt for {r.get('origin') or url} ({why})."
+    cached = " (cached)" if r.get("cached") else ""
+    return (f"# llms.txt from {r['url']}{cached}\n\n{r['llmstxt']}")
+
+
 def _parse_document(source: str) -> str:
     r = _webctx().parse_document(source)
     if r.get("error"):
@@ -2982,6 +2992,27 @@ GENERATE_LLMSTXT = {
         "properties": {
             "url": {"type": "string"},
             "max_urls": {"type": "integer", "description": "Pages to include (default 20)."},
+        },
+        "required": ["url"],
+    },
+}
+
+WEB_LLMS_TXT = {
+    "name": "web_llms_txt",
+    "description": (
+        "Fetch a site's OWN /llms.txt — the author-curated map/guidance a site "
+        "publishes for AI agents — as governed context for the current origin. "
+        "Use it before navigating an unfamiliar site to learn its structure and "
+        "intended flows. The fetch is SSRF/egress-gated and rebinding-pinned, the "
+        "body is capped and cached per origin, and the returned text is wrapped "
+        "untrusted and secret-redacted. Returns a 'no llms.txt' note if the site "
+        "doesn't publish one."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string",
+                    "description": "Any URL on the site; its origin's /llms.txt is fetched."},
         },
         "required": ["url"],
     },
@@ -4339,6 +4370,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "web_batch_scrape": WEB_BATCH_SCRAPE,
     "web_extract": WEB_EXTRACT,
     "generate_llmstxt": GENERATE_LLMSTXT,
+    "web_llms_txt": WEB_LLMS_TXT,
     "parse_document": PARSE_DOCUMENT,
     "web_diff": WEB_DIFF,
     "web_monitor_add": WEB_MONITOR_ADD,

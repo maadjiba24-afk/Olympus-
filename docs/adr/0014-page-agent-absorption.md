@@ -1,6 +1,6 @@
 # ADR 0014: Absorb Page Agent's capabilities natively (in-page GUI-agent surface)
 
-Status: accepted (in progress — decisions land per capability)
+Status: accepted (complete — all five decisions shipped)
 Date: 2026-07-23
 
 ## Context
@@ -184,11 +184,36 @@ never emits a secret even outside the wrap path. 14 new tests
 (`tests/test_prompt_redaction.py`); the whole wrap-dependent suite (270 cases)
 passes unchanged.
 
-## Decision (e): governed `/llms.txt` consumption — PLANNED
+## Decision (e): governed `/llms.txt` consumption — SHIPPED
 
-Olympus already *produces* `llms.txt` (`generate_llmstxt`); add governed
-*consumption* as page context via `webctx`/`domainlore`, egress-gated,
-SSRF-checked, truncated, cached. (Watchlist §3.6.)
+Page Agent's `experimentalLlmsTxt` fetches `{origin}/llms.txt` — a site's
+author-curated guidance for agents — with a raw `fetch()` (no SSRF check, no
+egress confinement, no secret scan) and folds it into the prompt unwrapped.
+Olympus already *produces* `llms.txt` (`generate_llmstxt`); this adds the
+*consumption* side, governed:
+
+- New `webctx.fetch_llmstxt(url)` fetches `{origin}/llms.txt` through the same
+  SSRF/egress-gated, DNS-rebinding-pinned `tools._http_get` every other web fetch
+  uses, port-allowlisted, body-capped (≤8k), and cached per origin (one
+  round-trip per site per process). A missing file degrades to a bounded "not
+  found" — never raises.
+- New INGESTION tool `web_llms_txt` (handler + schema + `INGESTION_TOOLS`
+  classification + THREAT_MODEL.md row + capabilities manifest). Because it is
+  ingestion-classified, its output is **wrapped untrusted AND secret-redacted**
+  (decision (d)) before any model sees it — so author-controlled llms.txt text
+  can't inject or smuggle a secret, and actuators are stripped from any run that
+  reads it.
+
+Every layer that page-agent skips — SSRF/egress gate, rebinding pin, port
+allowlist, untrusted envelope, secret redaction, threat-model binding — is
+present here. Seven new tests (`tests/test_webctx.py`).
+
+## Status: program complete
+
+All five borrowable watchlist items (§3.1, §3.2/§3.3, §3.4, §3.5, §3.6) are now
+native Olympus capabilities, each on the security spine with page-agent's
+corresponding weakness inverted. The four non-goals below remain the fixed
+boundary. Nothing further from page-agent is planned for absorption.
 
 ## NOT absorbed (deliberate non-goals)
 

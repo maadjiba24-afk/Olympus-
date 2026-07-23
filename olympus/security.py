@@ -114,6 +114,10 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # already ingestion-classified above.)
                              "web_scrape", "web_map", "web_batch_scrape",
                              "web_extract", "generate_llmstxt",
+                             # Consuming a site's own /llms.txt folds
+                             # author-controlled text into the prompt — untrusted
+                             # external content, wrapped + secret-redacted.
+                             "web_llms_txt",
                              "parse_document", "web_diff",
                              # Aegis Assessment (olympus/assess.py): recon and
                              # the HTTP audit fetch an attacker-controlled target
