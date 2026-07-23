@@ -726,7 +726,8 @@ def _http_post_json(url: str, payload: dict, timeout: float = 20,
 
 
 def _http_probe(url: str, max_bytes: int = 400_000,
-                follow_redirects: bool = True) -> dict[str, Any]:
+                follow_redirects: bool = True,
+                extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """Gated fetch that also returns the RESPONSE HEADERS and status — the
     canonical seam for security-header inspection (olympus/assess.py). Shares
     `_http_get`'s exact SSRF/egress/secret-exfil preamble and the same
@@ -734,9 +735,12 @@ def _http_probe(url: str, max_bytes: int = 400_000,
     audit is as rebinding-safe as any other fetch. With `follow_redirects=False`
     the first 3xx is captured (not followed) so a caller can read its Location
     header without a second request — used by the open-redirect validation check.
-    Never raises for a network error: returns {'error': ...}; a blocked URL
-    raises ValueError like the siblings. Header keys are lower-cased; the body is
-    size-capped."""
+    `extra_headers` merges a FEW benign, check-controlled request headers (e.g. an
+    `Origin:` for the CORS origin-reflection validation) over the default
+    User-Agent; any header whose name or value carries a CR/LF is dropped so the
+    probe itself can never be used to split a request. Never raises for a network
+    error: returns {'error': ...}; a blocked URL raises ValueError like the
+    siblings. Header keys are lower-cased; the body is size-capped."""
     leak = security.secret_exfil_reason(url)
     if leak:
         raise ValueError(f"blocked: {leak}")
@@ -752,7 +756,13 @@ def _http_probe(url: str, max_bytes: int = 400_000,
     _conf = _assess.egress_confined_reason(_urlreq.urlparse(url).hostname or "")
     if _conf:
         raise ValueError(_conf)
-    req = _urlreq.Request(url, headers={"User-Agent": _UA})
+    hdrs = {"User-Agent": _UA}
+    for k, v in (extra_headers or {}).items():
+        k, v = str(k), str(v)
+        if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
+            continue                      # never let a caller split the request
+        hdrs[k] = v
+    req = _urlreq.Request(url, headers=hdrs)
     if follow_redirects:
         opener = _proxy_opener() if proxied else _pinned_opener()
     else:

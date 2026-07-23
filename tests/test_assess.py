@@ -417,6 +417,140 @@ def test_validate_confirms_open_redirect(monkeypatch):
     assert r["findings"][0]["cwe"] == "CWE-601"
 
 
+# --- detection breadth: SSTI / header-injection / CORS (all benign) ----------
+
+def _ssti_probe(evaluate: bool):
+    """Fake probe: evaluate the `{{a*b}}` in the reflected value, or reflect it
+    literally (safe)."""
+    import re
+    from urllib.parse import parse_qsl, urlparse
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        val = dict(parse_qsl(urlparse(url).query)).get("q", "")
+        if evaluate:
+            def _mul(m):
+                return str(int(m.group(1)) * int(m.group(2)))
+            val = re.sub(r"\{\{(\d+)\*(\d+)\}\}", _mul, val)   # engine executes it
+        return {"status": 200, "headers": {}, "body": f"<p>{val}</p>", "url": url}
+    return _probe
+
+
+def test_validate_confirms_ssti(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _ssti_probe(evaluate=True))
+    r = assess.validate("https://app.example/render?q=hi")
+    ssti = [f for f in r["findings"] if f["cwe"] == "CWE-1336"]
+    assert len(ssti) == 1 and ssti[0]["source"] == "active_validation"
+    assert ssti[0]["severity"] == "high"
+
+
+def test_ssti_ignores_literal_reflection(monkeypatch):
+    # Braces reflected verbatim (not evaluated) must never be flagged as SSTI.
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _ssti_probe(evaluate=False))
+    r = assess.validate("https://app.example/render?q=hi")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-1336"] == []
+
+
+def _headerinj_probe(vulnerable: bool):
+    """Fake probe: a vulnerable server URL-decodes the value into a response
+    header (the injected canary appears); a safe one strips CR/LF."""
+    from urllib.parse import parse_qsl, unquote, urlparse
+
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        raw = urlparse(url).query
+        val = dict(parse_qsl(raw)).get("q", "")
+        headers = {"content-type": "text/html"}
+        if vulnerable:
+            decoded = unquote(dict(parse_qsl(raw, keep_blank_values=True)).get("q", val))
+            for line in decoded.splitlines()[1:]:         # split on the CRLF
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+        return {"status": 200, "headers": headers, "body": "", "url": url}
+    return _probe
+
+
+def test_validate_confirms_header_injection(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _headerinj_probe(vulnerable=True))
+    r = assess.validate("https://app.example/set?q=hi")
+    inj = [f for f in r["findings"] if f["cwe"] == "CWE-113"]
+    assert len(inj) == 1 and inj[0]["severity"] == "high"
+
+
+def test_header_injection_safe_when_stripped(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _headerinj_probe(vulnerable=False))
+    r = assess.validate("https://app.example/set?q=hi")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-113"] == []
+
+
+def _cors_probe(reflect: bool, creds: bool):
+    """Fake probe: reflect the request Origin into ACAO (optionally with
+    credentials), or don't."""
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        headers = {"content-type": "text/html"}
+        origin = (extra_headers or {}).get("Origin", "")
+        if reflect and origin:
+            headers["access-control-allow-origin"] = origin
+            if creds:
+                headers["access-control-allow-credentials"] = "true"
+        return {"status": 200, "headers": headers, "body": "", "url": url}
+    return _probe
+
+
+def test_validate_confirms_cors_with_credentials(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=True, creds=True))
+    r = assess.validate("https://app.example/api?id=1")
+    cors = [f for f in r["findings"] if f["cwe"] == "CWE-942"]
+    assert len(cors) == 1                       # per-param repeats dedup to one
+    assert cors[0]["severity"] == "high"
+
+
+def test_validate_cors_medium_without_credentials(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=True, creds=False))
+    r = assess.validate("https://app.example/api?id=1")
+    cors = [f for f in r["findings"] if f["cwe"] == "CWE-942"]
+    assert len(cors) == 1 and cors[0]["severity"] == "medium"
+
+
+def test_cors_safe_when_origin_not_reflected(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _cors_probe(reflect=False, creds=False))
+    r = assess.validate("https://app.example/api?id=1")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-942"] == []
+
+
+def test_active_check_registry_has_breadth():
+    # The self-evolving moat compounds: new benign checks joined the registry.
+    assert set(assess.active_check_names()) >= {
+        "reflection", "open_redirect", "ssti", "header_injection", "cors"}
+
+
+def test_new_active_checks_are_benign_and_contained():
+    # The containment scorecard must still prove the payloads vector (no
+    # spraying/exploits) with the enlarged registry.
+    payloads = [c for c in assess.containment() if c["id"] == "payloads"]
+    assert payloads and payloads[0]["contained"] is True
+
+
+def test_sast_breadth_csharp_and_rust():
+    # C# and Rust sinks are detected; clean equivalents are not (precision).
+    cs = assess._sast_findings_for_text(
+        'var c = new SqlCommand("SELECT * FROM u WHERE n=" + n, conn);\n'
+        "var f = new BinaryFormatter();\n", ".cs", "x.cs")
+    assert {f.cwe for f in cs} >= {"CWE-89", "CWE-502"}
+    rust = assess._sast_findings_for_text(
+        'Command::new("sh").arg("-c").arg(cmd).output();\n', ".rs", "x.rs")
+    assert {f.cwe for f in rust} >= {"CWE-78"}
+    clean = assess._sast_findings_for_text(
+        'var c = new SqlCommand("SELECT * FROM u WHERE n=@n", conn);\n', ".cs", "x.cs")
+    assert clean == []
+
+
 def test_validate_ignores_safe_redirect(monkeypatch):
     assess.grant(["app.example"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _redirect_probe("safe_redirect"))

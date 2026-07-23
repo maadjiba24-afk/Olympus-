@@ -67,7 +67,7 @@ from . import sarif, security
 _MAX_SCAN_FILES = 2000          # source files a whitebox scan will read
 _MAX_FILE_BYTES = 1_000_000     # per-file read cap for SAST/secret scans
 _MAX_FINDINGS = 1000            # stored findings per run
-_MAX_ACTIVE_PROBES = 20         # hard cap on active-validation requests (never a spray)
+_MAX_ACTIVE_PROBES = 40         # hard cap on active-validation requests (never a spray)
 _MAX_EVIDENCE = 400            # chars of matched-line evidence kept per finding
 _DEFAULT_EXPIRY = 24 * 3600     # a scope grant lasts a day unless overridden
 _MAX_EXPIRY = 30 * 24 * 3600    # ...and never longer than 30 days
@@ -766,6 +766,44 @@ _SAST_RULES: tuple[_Rule, ...] = (
           "Rails html_safe on possibly-untrusted content (XSS)",
           "Do not html_safe user input; rely on ERB auto-escaping or sanitize.",
           (".rb",)),
+    # --- C# / .NET ---
+    _rule("cs-sql-concat", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"new\s+SqlCommand\s*\(\s*(?:\$?\"[^\"]*\"\s*\+|\$\"[^\"]*\{)",
+          "SQL command built by string concatenation / interpolation (injection)",
+          "Use parameterized queries: add SqlParameter values, never concatenate "
+          "or interpolate input into the SQL text.", (".cs",)),
+    _rule("cs-process-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"Process\.Start\s*\(\s*\"(?:cmd(?:\.exe)?|/bin/sh|bash|powershell)\b",
+          "OS command execution via a shell (Process.Start)",
+          "Invoke the target binary directly with an argument list; never launch "
+          "a shell with an input-built command string.", (".cs",)),
+    _rule("cs-binaryformatter", "CWE-502", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          r"new\s+BinaryFormatter\s*\(",
+          "Unsafe deserialization (BinaryFormatter)",
+          "BinaryFormatter is insecure and deprecated; use System.Text.Json or a "
+          "contract serializer over trusted data only.", (".cs",)),
+    _rule("cs-weak-hash", "CWE-327", "medium",
+          "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+          r"(?:MD5|SHA1)\.Create\s*\(",
+          "Weak hash (MD5/SHA-1)",
+          "Use SHA-256+; for passwords use a KDF (PBKDF2/Argon2/bcrypt).",
+          (".cs",)),
+    # --- Rust ---
+    _rule("rust-command-shell", "CWE-78", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+          r"Command::new\s*\(\s*\"(?:sh|bash)\"\s*\)[^;]*\.arg\s*\(\s*\"-c\"",
+          "OS command execution via a shell (Command sh -c)",
+          "Invoke the binary directly with .args([...]); never build a shell "
+          "string from input.", (".rs",)),
+    _rule("rust-sql-format", "CWE-89", "high",
+          "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+          r"(?:query|query_as|execute)\s*\(\s*&?\s*format!\s*\(",
+          "SQL query built with format! (injection)",
+          "Use bound parameters (sqlx `?`/`$1` binds); never format! input into "
+          "SQL text.", (".rs",)),
 )
 
 
@@ -1339,11 +1377,116 @@ def _open_redirect_check(url: str, name: str) -> tuple["Finding | None", str]:
     return None, f"param '{name}': no redirect"
 
 
+def _ssti_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send a BENIGN arithmetic template expression (`{{a*b}}`, random factors)
+    into `name`. If the response contains the PRODUCT where our braces were — and
+    the braces are gone — the template engine EVALUATED the expression: a
+    server-side template injection surface (CWE-1336). It is pure arithmetic:
+    no code, no shell, no data access — just proof the engine executed input.
+    Targets `{{ }}` engines (Jinja2/Twig/Nunjucks/Handlebars/Angular). Raises
+    ValueError if the fetch is blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    a = 900 + (int(tok[:2], 16) % 90)         # distinctive 3-digit factors
+    b = 900 + (int(tok[2:4], 16) % 90)
+    product = str(a * b)
+    marker = f"{_CANARY}{tok}"
+    literal = f"{a}*{b}"
+    payload = f"{marker}{{{{{literal}}}}}"     # e.g. olympuscanaryAB{{931*907}}
+    probe = tools._http_probe(_set_param(url, name, payload))
+    body = probe.get("body", "") or ""
+    if marker not in body:
+        return None, f"param '{name}': not reflected"
+    idx = body.find(marker)
+    window = body[idx: idx + len(payload) + 16]
+    if product in window and "{{" not in window and literal not in window:
+        finding = Finding(
+            title="Server-side template injection (expression evaluated)",
+            severity="high", cwe="CWE-1336",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+            location=f"{url} [param: {name}]",
+            evidence=f"benign expression {{{{{literal}}}}} evaluated to {product}",
+            remediation="Never build a template from request input. Render fixed "
+                        "templates with auto-escaped variables; sandbox or remove "
+                        "the expression engine on the input path.",
+            confidence="high", source="active_validation")
+        return finding, f"param '{name}': SSTI CONFIRMED ({literal} -> {product})"
+    return None, f"param '{name}': not evaluated (reflected literally / not at all)"
+
+
+def _header_injection_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Put a BENIGN CRLF + a unique marker header into `name`'s value. If the
+    server URL-decodes it into the response headers, our `X-Olympus-Canary-<tok>`
+    header appears on the response — proof of CRLF response-header injection
+    (CWE-113). The injected header is inert (`: 1`); no cache-poisoning or
+    smuggling payload is ever sent. Read WITHOUT following redirects so the
+    split header on the immediate response is visible. Raises ValueError if
+    blocked."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    hdr = f"x-olympus-canary-{tok}"
+    payload = f"{_CANARY}{tok}\r\n{hdr}: 1"     # _set_param URL-encodes the CRLF
+    probe = tools._http_probe(_set_param(url, name, payload), follow_redirects=False)
+    headers = probe.get("headers", {}) or {}
+    if hdr in headers:
+        finding = Finding(
+            title="HTTP response-header injection (CRLF)",
+            severity="high", cwe="CWE-113",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:H/A:N",
+            location=f"{url} [param: {name}]",
+            evidence=f"injected header '{hdr}' reflected into the response",
+            remediation="Strip CR/LF from any value written into a response "
+                        "header; use a framework API that rejects control "
+                        "characters in header values.",
+            confidence="high", source="active_validation")
+        return finding, f"param '{name}': header injection CONFIRMED ({hdr} echoed)"
+    return None, f"param '{name}': no CRLF header injection"
+
+
+def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send an arbitrary off-site `Origin:` and see if the app REFLECTS it into
+    `Access-Control-Allow-Origin` — meaning any site can read authenticated
+    responses (CWE-942), critical if `Access-Control-Allow-Credentials: true`.
+    Benign: one GET with a canary `.invalid` Origin, nothing written. This check
+    is URL-level (independent of `name`); `record_finding` dedups the per-param
+    repeats to a single finding. Raises ValueError if blocked."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    origin = f"https://olympus-canary-{tok}.evil.invalid"
+    probe = tools._http_probe(url, extra_headers={"Origin": origin})
+    headers = probe.get("headers", {}) or {}
+    acao = (headers.get("access-control-allow-origin", "") or "").strip()
+    creds = (headers.get("access-control-allow-credentials", "") or "").strip().lower()
+    if acao == origin:                          # arbitrary origin reflected
+        with_creds = creds == "true"
+        finding = Finding(
+            title="CORS misconfiguration (arbitrary Origin reflected"
+                  + (" with credentials)" if with_creds else ")"),
+            severity="high" if with_creds else "medium",
+            cwe="CWE-942",
+            cvss_vector=("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N"
+                         if with_creds else
+                         "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:N/A:N"),
+            location=f"{url} [CORS]",
+            evidence=f"Origin {origin} reflected in Access-Control-Allow-Origin"
+                     + (" with Allow-Credentials: true" if with_creds else ""),
+            remediation="Never reflect the request Origin. Allowlist trusted "
+                        "origins explicitly and only send Allow-Credentials to "
+                        "them.",
+            confidence="high", source="active_validation")
+        note = f"CORS origin reflection CONFIRMED" + (" + credentials" if with_creds else "")
+        return finding, note
+    return None, "Origin not reflected (safe)"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("reflection", _reflection_check),
     ("open_redirect", _open_redirect_check),
+    ("ssti", _ssti_check),
+    ("header_injection", _header_injection_check),
+    ("cors", _cors_check),
 )
 
 
@@ -1517,6 +1660,25 @@ _BENCH_CORPUS: tuple[dict, ...] = (
      "text": ("obj = JSON.parse(data)\n"
               'system("ls", "-l")\n'
               "@bio = h(user_bio)\n")},
+    # --- C# / .NET ---
+    {"name": "cs_vuln", "kind": "sast", "suffix": ".cs",
+     "expected": {"CWE-89", "CWE-78", "CWE-502", "CWE-327"},
+     "text": ('var cmd = new SqlCommand("SELECT * FROM u WHERE n=" + name, conn);\n'
+              'Process.Start("cmd.exe", "/c " + userArg);\n'
+              "var fmt = new BinaryFormatter();\n"
+              "var md = MD5.Create();\n")},
+    {"name": "cs_clean", "kind": "sast", "suffix": ".cs", "expected": set(),
+     "text": ('var cmd = new SqlCommand("SELECT * FROM u WHERE n=@n", conn);\n'
+              'Process.Start("mytool", args);\n'
+              "var md = SHA256.Create();\n")},
+    # --- Rust ---
+    {"name": "rust_vuln", "kind": "sast", "suffix": ".rs",
+     "expected": {"CWE-78", "CWE-89"},
+     "text": ('let out = Command::new("sh").arg("-c").arg(user_cmd).output();\n'
+              'let rows = sqlx::query(&format!("SELECT * FROM u WHERE n={}", n));\n')},
+    {"name": "rust_clean", "kind": "sast", "suffix": ".rs", "expected": set(),
+     "text": ('let out = Command::new("ls").args(["-l"]).output();\n'
+              'let rows = sqlx::query("SELECT * FROM u WHERE n = ?").bind(n);\n')},
 )
 
 
@@ -1824,8 +1986,13 @@ def containment(user: str | None = None) -> list[dict]:
         not supp, "Aegis prompt carries no refusal-suppression directives"))
 
     # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
+    # Every registered check must be on the benign allowlist: each sends an inert
+    # marker (canary / arithmetic / reserved .invalid host) to an operator-named
+    # parameter — never a working exploit, shell, or destructive input.
+    _BENIGN_CHECKS = frozenset({
+        "reflection", "open_redirect", "ssti", "header_injection", "cors"})
     benign = _MAX_ACTIVE_PROBES <= 50 and all(
-        c[0] in ("reflection", "open_redirect") for c in _ACTIVE_CHECKS)
+        c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
     checks.append(_check(
         "payloads", "Arbitrary payloads + spraying → break/exfiltrate a target",
         "active validation is benign-marker, parameter-directed, capped",

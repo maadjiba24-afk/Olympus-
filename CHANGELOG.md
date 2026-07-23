@@ -15,6 +15,36 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Detection breadth: C#/Rust SAST + SSTI/header-injection/CORS validation
+
+Widened the Aegis engine's coverage on both the whitebox and the active-
+confirmation surface, all **benchmark-gated** so quality cannot regress:
+
+- **SAST**: six new sink rules — C# SQL concatenation (CWE-89), shell
+  `Process.Start` (CWE-78), `BinaryFormatter` deserialization (CWE-502), weak
+  MD5/SHA-1 (CWE-327); Rust `Command sh -c` (CWE-78) and `format!`-built SQL
+  (CWE-89). The labeled `_BENCH_CORPUS` grew a vuln + clean sample per language
+  (24 samples total); precision / recall / F1 stay **1.0** (0 false positives),
+  the floor `test_assess.py` enforces in CI.
+- **Active validation** (benign, scope-locked, parameter-directed, capped): three
+  new checks join the self-evolving registry —
+  - **SSTI** (CWE-1336): sends a random arithmetic `{{a*b}}` and confirms only if
+    the engine *evaluated* it to the product (pure arithmetic — no code, shell,
+    or data access).
+  - **HTTP response-header injection / CRLF** (CWE-113): injects an inert
+    `X-Olympus-Canary-<tok>: 1` header via a URL-encoded CRLF and confirms only
+    if it reflects into the response headers.
+  - **CORS origin reflection** (CWE-942): sends an arbitrary `.invalid` `Origin`
+    and confirms only if the app echoes it into `Access-Control-Allow-Origin`
+    (high severity when `Allow-Credentials: true`).
+
+  `tools._http_probe` gained a CR/LF-filtered `extra_headers` seam (used by the
+  CORS Origin probe — it can never be turned into a request-splitting primitive).
+  The active-probe cap rose 20→40 (still ≤50, so the containment scorecard's
+  "no spraying" vector stays proven), and the containment allowlist now names all
+  five benign checks. Tests: 10 new (all checks confirm-and-only-confirm, plus a
+  containment re-proof).
+
 ### Added — Live CVE feed for dependency auditing (OSV.dev, opt-in)
 
 `assess_deps` now ALSO queries the live **OSV.dev** feed when the operator opts
