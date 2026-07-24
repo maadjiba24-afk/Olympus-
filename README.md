@@ -588,6 +588,26 @@ stronger the more they run — watch the board with `olympus moat`:
   untrusted data. Drive it from the CLI: `olympus federation identity | add-peer |
   peers | call | capabilities | ask-all | serve | lessons`.
 
+### Other tuning knobs
+
+A few cadence / lifetime / routing knobs read from the environment, with their
+defaults:
+
+- **`OLYMPUS_DREAM_EVERY`** (default `86400`, i.e. daily) — seconds between the
+  heartbeat's memory-consolidation ("dreaming") passes that turn accumulated
+  lore into wiki pages.
+- **`OLYMPUS_JOB_RESUME_AFTER`** (default `3600`) — seconds after which a
+  scheduled job whose process was interrupted mid-run is considered resumable on
+  the next heartbeat (the update-handoff path).
+- **`OLYMPUS_PAIR_TTL`** (default `600`) — seconds a chat **pairing code** stays
+  valid before it expires (`olympus pair <channel>`).
+- **`OLYMPUS_ROLE_FALLBACKS`** — explicit per-role model failover order as JSON,
+  e.g. `{"coding":["opus","haiku"]}`; when set for a role it wins over the
+  default strongest-for-role ordering.
+- **`OLYMPUS_CHANNEL_PROFILE`** — the default capability profile applied to chat
+  conversations (e.g. `guest` / `reader` / `full`) unless a specific conversation
+  is restricted with `olympus restrict`; unset means `full`.
+
 ### Connectors: MCP servers & custom plugins
 
 Olympus connects to external tools and data two ways, both governed by the
