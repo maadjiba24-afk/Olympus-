@@ -528,7 +528,7 @@ def test_active_check_registry_has_breadth():
     # The self-evolving moat compounds: new benign checks joined the registry.
     assert set(assess.active_check_names()) >= {
         "reflection", "open_redirect", "ssti", "header_injection", "cors",
-        "sql_error", "error_disclosure"}
+        "sql_error", "error_disclosure", "path_traversal"}
 
 
 def test_new_active_checks_are_benign_and_contained():
@@ -869,3 +869,85 @@ def test_import_sarif_needs_no_scope_and_runs_no_tool(monkeypatch):
 def test_import_sarif_tool_is_ingestion():
     assert "assess_import_sarif" in security.INGESTION_TOOLS
     assert security.should_wrap("assess_import_sarif") is True
+
+
+# --- path-traversal surface (benign, error-based) ----------------------------
+
+def test_validate_confirms_path_traversal_surface(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        # a vulnerable file-serving endpoint leaks a filesystem "no such file"
+        return {"status": 404, "headers": {},
+                "body": "Error: No such file or directory: olympus-canary-x.nope",
+                "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    r = assess.validate("https://app.example/download?file=readme")
+    pt = [f for f in r["findings"] if f["cwe"] == "CWE-22"]
+    assert len(pt) == 1 and pt[0]["source"] == "active_validation"
+
+
+def test_path_traversal_safe_when_no_fs_error(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", lambda *a, **k: {
+        "status": 200, "headers": {}, "body": "<html>ok</html>", "url": a[0]})
+    r = assess.validate("https://app.example/download?file=readme")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-22"] == []
+
+
+def test_path_traversal_probe_targets_a_nonexistent_canary(monkeypatch):
+    # The traversal must point at a NONEXISTENT canary — never a real file.
+    assess.grant(["app.example"], expires_in=3600)
+    seen = []
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        from urllib.parse import parse_qsl, urlparse
+        seen.extend(v for _, v in parse_qsl(urlparse(url).query))
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.validate("https://app.example/download?file=x")
+    trav = [v for v in seen if "olympus-canary" in v and ".." in v]
+    assert trav                                       # the traversal probe ran
+    for v in trav:
+        assert ".nope" in v                           # a canary that cannot exist
+        for real in ("/etc/passwd", "/etc/shadow", "win.ini", "boot.ini"):
+            assert real not in v.lower()              # never a real sensitive file
+
+
+# --- authenticated assessment: auth headers thread through every probe -------
+
+def test_auth_session_threads_cookie_into_probes(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    seen_headers = []
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        seen_headers.append(extra_headers or {})
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    with assess.auth_session({"Cookie": "session=secret"}):
+        assess.validate("https://app.example/search?q=x")
+    assert any(h.get("Cookie") == "session=secret" for h in seen_headers)
+
+
+def test_auth_session_merges_with_explicit_headers(monkeypatch):
+    # The CORS check passes its own Origin header; the session cookie must merge,
+    # not clobber it.
+    assess.grant(["app.example"], expires_in=3600)
+    seen = []
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        seen.append(extra_headers or {})
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    with assess.auth_session({"Cookie": "s=1"}):
+        assess.validate("https://app.example/api?id=1")
+    both = [h for h in seen if "Origin" in h and h.get("Cookie") == "s=1"]
+    assert both                                       # cookie + Origin coexist
+
+
+def test_auth_session_resets_after_context(monkeypatch):
+    seen = []
+    monkeypatch.setattr(tools, "_http_probe", lambda url, **k:
+                        seen.append(k.get("extra_headers")) or
+                        {"status": 200, "headers": {}, "body": "ok", "url": url})
+    assess.grant(["app.example"], expires_in=3600)
+    with assess.auth_session({"Cookie": "s=1"}):
+        pass
+    assess.validate("https://app.example/search?q=x")
+    assert all(not (h or {}).get("Cookie") for h in seen)   # no leak after exit

@@ -486,7 +486,7 @@ def recon(target: str, user: str | None = None) -> dict[str, Any]:
     url = target if target.startswith(("http://", "https://")) else f"https://{target}"
     from . import tools
     try:
-        probe = tools._http_probe(url)
+        probe = _probe(url)
     except ValueError as err:
         return {"target": target, "error": f"blocked: {err}"}
     if probe.get("error") and not probe.get("headers"):
@@ -561,7 +561,7 @@ def http_audit(target: str, record: bool = True,
     url = target if target.startswith(("http://", "https://")) else f"https://{target}"
     from . import tools
     try:
-        probe = tools._http_probe(url)
+        probe = _probe(url)
     except ValueError as err:
         return {"target": target, "error": f"blocked: {err}"}
     headers = probe.get("headers", {})
@@ -1366,6 +1366,40 @@ def run_assessment(target: str, *, source_path: str | None = None,
 
 _CANARY = "olympuscanary"
 
+# Optional authenticated-session headers (e.g. a Cookie) threaded through every
+# assessment probe, so self-assessment can reach BEHIND a login on your own local
+# app. Contextvar-scoped (set by `auth_session`, reset on exit) so it never
+# leaks; CR/LF-bearing values are dropped by `_http_probe` itself.
+_ACTIVE_AUTH: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "assess_auth_headers", default=None)
+
+
+@contextmanager
+def auth_session(headers: dict | None):
+    """While active, merge `headers` (e.g. {'Cookie': 'session=…'}) into every
+    assessment probe — how a self-assessment authenticates to your local app."""
+    token = _ACTIVE_AUTH.set(dict(headers) if headers else None)
+    try:
+        yield
+    finally:
+        _ACTIVE_AUTH.reset(token)
+
+
+def _probe(url: str, *, extra_headers: dict | None = None, **kw):
+    """`tools._http_probe` with the active auth-session headers merged in. An
+    explicit `extra_headers` (e.g. the CORS `Origin`) wins over the session.
+    Only forwards `extra_headers` when there's something to send, so the call
+    shape is unchanged when no auth session and no explicit header are in play."""
+    from . import tools
+    auth = _ACTIVE_AUTH.get()
+    if auth:
+        merged = dict(auth)
+        merged.update(extra_headers or {})
+        extra_headers = merged
+    if extra_headers is not None:
+        kw["extra_headers"] = extra_headers
+    return tools._http_probe(url, **kw)
+
 
 def _set_param(url: str, name: str, value: str) -> str:
     p = urlparse(url)
@@ -1384,7 +1418,7 @@ def _reflection_check(url: str, name: str) -> tuple["Finding | None", str]:
     tok = os.urandom(4).hex()
     marker = f"{_CANARY}{tok}"
     payload = marker + '<">'                      # benign special chars, never a tag
-    probe = tools._http_probe(_set_param(url, name, payload))
+    probe = _probe(_set_param(url, name, payload))
     body = probe.get("body", "") or ""
     if marker not in body:
         return None, f"param '{name}': not reflected"
@@ -1418,7 +1452,7 @@ def _open_redirect_check(url: str, name: str) -> tuple["Finding | None", str]:
     tok = os.urandom(4).hex()
     canary_host = f"olympus-canary-{tok}.invalid"
     target = f"https://{canary_host}/"
-    probe = tools._http_probe(_set_param(url, name, target), follow_redirects=False)
+    probe = _probe(_set_param(url, name, target), follow_redirects=False)
     status = probe.get("status")
     location = (probe.get("headers", {}) or {}).get("location", "") or ""
     if isinstance(status, int) and 300 <= status < 400 and canary_host in location:
@@ -1454,7 +1488,7 @@ def _ssti_check(url: str, name: str) -> tuple["Finding | None", str]:
     marker = f"{_CANARY}{tok}"
     literal = f"{a}*{b}"
     payload = f"{marker}{{{{{literal}}}}}"     # e.g. olympuscanaryAB{{931*907}}
-    probe = tools._http_probe(_set_param(url, name, payload))
+    probe = _probe(_set_param(url, name, payload))
     body = probe.get("body", "") or ""
     if marker not in body:
         return None, f"param '{name}': not reflected"
@@ -1487,7 +1521,7 @@ def _header_injection_check(url: str, name: str) -> tuple["Finding | None", str]
     tok = os.urandom(4).hex()
     hdr = f"x-olympus-canary-{tok}"
     payload = f"{_CANARY}{tok}\r\n{hdr}: 1"     # _set_param URL-encodes the CRLF
-    probe = tools._http_probe(_set_param(url, name, payload), follow_redirects=False)
+    probe = _probe(_set_param(url, name, payload), follow_redirects=False)
     headers = probe.get("headers", {}) or {}
     if hdr in headers:
         finding = Finding(
@@ -1514,7 +1548,7 @@ def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
     from . import tools
     tok = os.urandom(4).hex()
     origin = f"https://olympus-canary-{tok}.evil.invalid"
-    probe = tools._http_probe(url, extra_headers={"Origin": origin})
+    probe = _probe(url, extra_headers={"Origin": origin})
     headers = probe.get("headers", {}) or {}
     acao = (headers.get("access-control-allow-origin", "") or "").strip()
     creds = (headers.get("access-control-allow-credentials", "") or "").strip().lower()
@@ -1573,6 +1607,51 @@ _ERROR_DISCLOSURE_SIGNATURES: tuple[str, ...] = (
 )
 
 
+# Filesystem-error signatures: the input reached a file open with a bad path.
+# We prove the SURFACE with a NONEXISTENT canary path — never a real file
+# (no /etc/passwd, no secrets), so nothing sensitive is ever read or returned.
+_FS_ERROR_SIGNATURES: tuple[str, ...] = (
+    "no such file or directory",                     # POSIX / many langs
+    "failed to open stream",                         # PHP
+    "errno 2", "enoent",                             # Node / libc
+    "system.io.filenotfoundexception",               # .NET
+    "java.io.filenotfoundexception",                 # Java
+    "filenotfounderror", "ioerror: [errno 2]",        # Python
+    "invalid path", "illegalpath",
+)
+
+
+def _path_traversal_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Confirm a path-traversal SURFACE by DETECTION only: set `name` to a
+    traversal sequence pointing at a NONEXISTENT canary filename, then match a
+    filesystem 'no such file' error. Because the target path does not exist,
+    nothing is ever read — this proves the parameter reaches a file open with
+    attacker-influenced path, without disclosing any real file. Raises ValueError
+    if blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    # ../ repeated, then a canary file that cannot exist → forces a benign ENOENT.
+    payload = "../../../../" + f"olympus-canary-{tok}.nope"
+    probe = _probe(_set_param(url, name, payload))
+    body = (probe.get("body", "") or "").lower()
+    hit = next((s for s in _FS_ERROR_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no filesystem-path error (safe)"
+    finding = Finding(
+        title="Path traversal surface (user input reaches a filesystem path)",
+        severity="high", cwe="CWE-22",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        location=f"{url} [param: {name}]",
+        evidence=f"traversal to a nonexistent canary surfaced a file error: "
+                 f"'…{hit}…'",
+        remediation="Never build a filesystem path from request input. Resolve "
+                    "to a fixed base dir and reject any path that escapes it "
+                    "(canonicalize, then verify the prefix); prefer an opaque id "
+                    "mapped to a known file server-side.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': path-traversal surface CONFIRMED"
+
+
 def _error_probe(url: str, name: str) -> tuple[str, int | None]:
     """Send `name`'s value with ONE trailing single-quote (an inert boundary
     char, like the reflection check's `<">`) and return (lower-cased body,
@@ -1583,7 +1662,7 @@ def _error_probe(url: str, name: str) -> tuple[str, int | None]:
     from . import tools
     tok = os.urandom(4).hex()
     payload = f"{_CANARY}{tok}'"                       # canary marker + one quote
-    probe = tools._http_probe(_set_param(url, name, payload))
+    probe = _probe(_set_param(url, name, payload))
     return (probe.get("body", "") or "").lower(), probe.get("status")
 
 
@@ -1641,6 +1720,7 @@ _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("cors", _cors_check),
     ("sql_error", _sql_error_check),
     ("error_disclosure", _error_disclosure_check),
+    ("path_traversal", _path_traversal_check),
 )
 
 
@@ -2147,7 +2227,7 @@ def containment(user: str | None = None) -> list[dict]:
     # SURFACE (a parse error / leaked stack trace); they extract no data.
     _BENIGN_CHECKS = frozenset({
         "reflection", "open_redirect", "ssti", "header_injection", "cors",
-        "sql_error", "error_disclosure"})
+        "sql_error", "error_disclosure", "path_traversal"})
     benign = _MAX_ACTIVE_PROBES <= 50 and all(
         c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
     checks.append(_check(

@@ -96,7 +96,6 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
     """Bounded same-origin crawl from `base_url`. Returns distinct param-bearing
     URLs (query strings + GET-form inputs synthesized as params) to validate.
     Every fetch is loopback-confined by the caller's allowance."""
-    from . import tools
     seen: set[str] = set()
     queue: list[str] = [_strip_fragment(base_url)]
     param_urls: dict[str, str] = {}      # canonical (path+sorted params) -> url
@@ -116,8 +115,9 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
         seen.add(url)
         _remember_params(url)
         try:
-            probe = tools._http_probe(url, max_bytes=300_000,
-                                      follow_redirects=True)
+            # via assess._probe so the auth session (if any) reaches behind-login
+            # pages during discovery, exactly as it does during validation.
+            probe = assess._probe(url, max_bytes=300_000, follow_redirects=True)
         except ValueError:
             continue                     # blocked (shouldn't happen for loopback)
         body = probe.get("body", "") or ""
@@ -149,7 +149,8 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
 
 
 def selfassess(base_url: str, *, source_path: str | None = None,
-               max_pages: int = _MAX_PAGES, user: str | None = None) -> dict[str, Any]:
+               cookie: str | None = None, max_pages: int = _MAX_PAGES,
+               user: str | None = None) -> dict[str, Any]:
     """Attack YOUR OWN local app end-to-end and report its vulnerabilities.
 
     `base_url` must be a loopback URL (the app you built, running locally). Runs
@@ -157,13 +158,18 @@ def selfassess(base_url: str, *, source_path: str | None = None,
     validation across every discovered parameter, plus SAST/secret/dependency
     scans of `source_path` when given. Returns a structured report; findings are
     recorded to the store (CVSS-scored, dedup'd, SARIF-exportable). Refuses any
-    non-loopback target."""
+    non-loopback target.
+
+    `cookie` (optional): a session cookie for YOUR local app (e.g.
+    "session=abc123"), so the crawl and validation reach BEHIND a login — how you
+    tell Olympus to test authenticated pages of the app you built."""
     if not is_local_target(base_url):
         return {"refused": True, "error": _LOCAL_ONLY, "base_url": base_url}
 
     p = urlparse(base_url)
     host = (p.hostname or "").lower()
     port = p.port or (443 if p.scheme.lower() == "https" else 80)
+    auth_headers = {"Cookie": cookie} if cookie else None
 
     # Authorize the loopback target (self-owned) and confine egress to it, so even
     # a hijacked crawl cannot leave the local app. The SSRF loopback allowance is
@@ -171,31 +177,31 @@ def selfassess(base_url: str, *, source_path: str | None = None,
     assess.grant([host], note="self-assessment (local app)")
     phases: list[str] = []
     crawl_urls: list[str] = []
-    try:
-        with security.allow_local_target(host, port), \
-                assess.confined_egress(user, targets=[host]):
+    with security.allow_local_target(host, port), \
+            assess.confined_egress(user, targets=[host]), \
+            assess.auth_session(auth_headers):
+        if auth_headers:
+            phases.append("authenticated")
+        try:
+            assess.recon(base_url, user)
+            phases.append("recon")
+        except Exception:
+            pass
+        try:
+            assess.http_audit(base_url, user=user)
+            phases.append("http_audit")
+        except Exception:
+            pass
+        crawl_urls = _discover(base_url, max_pages)
+        phases.append(f"crawl({len(crawl_urls)} param URLs)")
+        validated = 0
+        for url in crawl_urls:
             try:
-                assess.recon(base_url, user)
-                phases.append("recon")
+                assess.validate(url, user)
+                validated += 1
             except Exception:
-                pass
-            try:
-                assess.http_audit(base_url, user=user)
-                phases.append("http_audit")
-            except Exception:
-                pass
-            crawl_urls = _discover(base_url, max_pages)
-            phases.append(f"crawl({len(crawl_urls)} param URLs)")
-            validated = 0
-            for url in crawl_urls:
-                try:
-                    assess.validate(url, user)
-                    validated += 1
-                except Exception:
-                    continue
-            phases.append(f"validate({validated})")
-    finally:
-        pass
+                continue
+        phases.append(f"validate({validated})")
 
     # Whitebox scans run on local source — no network, no allowance needed.
     if source_path:

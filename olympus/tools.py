@@ -2071,8 +2071,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_findings": lambda: _list_findings(),
     "export_findings": lambda format="markdown": _export_findings(format),
     "assess_import_sarif": lambda source: _assess_import_sarif(source),
-    "assess_selfassess": lambda base_url, source_path="":
-        _assess_selfassess(base_url, source_path),
+    "assess_selfassess": lambda base_url, source_path="", cookie="":
+        _assess_selfassess(base_url, source_path, cookie),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -3269,10 +3269,12 @@ def _assess_import_sarif(source: str) -> str:
     return _json.dumps(out, indent=2, sort_keys=True)
 
 
-def _assess_selfassess(base_url: str, source_path: str = "") -> str:
+def _assess_selfassess(base_url: str, source_path: str = "",
+                       cookie: str = "") -> str:
     import json as _json
     from . import selfassess
-    out = selfassess.selfassess(base_url, source_path=source_path or None)
+    out = selfassess.selfassess(base_url, source_path=source_path or None,
+                                cookie=cookie or None)
     # Keep the tool payload compact: summary + findings, not the whole crawl.
     return _json.dumps({k: v for k, v in out.items() if k != "findings"}
                        | {"findings": out.get("findings", [])},
@@ -3497,6 +3499,9 @@ ASSESS_SELFASSESS = {
                          "description": "loopback URL of your local app"},
             "source_path": {"type": "string",
                             "description": "optional workspace path for whitebox scans"},
+            "cookie": {"type": "string",
+                       "description": "optional session cookie for YOUR local app "
+                                      "(e.g. 'session=…') to test authenticated pages"},
         },
         "required": ["base_url"],
     },

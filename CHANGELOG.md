@@ -15,6 +15,25 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Self-assessment completeness: authenticated crawling + path-traversal check
+
+Rounds out the local self-assessment capability:
+
+- **Authenticated self-assessment.** `assess_selfassess` / `olympus assess
+  selfassess` now take an optional `--cookie` (a session cookie for YOUR local
+  app), threaded through recon, the crawl, and every validation probe via a new
+  `assess.auth_session()` — so Olympus can test the **behind-login** pages of the
+  app you built, not just the public ones. The cookie is contextvar-scoped (reset
+  on exit, never leaks) and CR/LF-stripped by the probe layer; still loopback-only.
+- **Path-traversal surface check (CWE-22).** A new benign active-validation check
+  joins the suite: it sends a traversal sequence to a **nonexistent canary**
+  filename and matches a filesystem "no such file" error — proving the parameter
+  reaches a file open **without ever reading a real file** (no `/etc/passwd`, no
+  secrets). On the `_BENIGN_CHECKS` allowlist like the rest.
+
+7 new tests. No new dependency; tool/command counts unchanged.
+
+
 ### Added — Self-assessment: Olympus attacks the app YOU built, locally
 
 When you create an app or site in Olympus and run it **locally**, Aegis can now

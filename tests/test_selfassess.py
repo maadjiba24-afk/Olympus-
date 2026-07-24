@@ -136,3 +136,17 @@ def test_crawl_stays_same_origin_including_port():
     assert selfassess._same_origin("http://127.0.0.1:9999/x", base) is False
     assert selfassess._same_origin("http://localhost:8000/x", base) is False
     assert selfassess._same_origin("https://127.0.0.1:8000/x", base) is False
+
+
+def test_selfassess_threads_cookie_to_probes(monkeypatch):
+    # An authenticated self-assessment: the cookie reaches the crawl + validation
+    # probes so behind-login pages are tested.
+    seen = []
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        seen.append((extra_headers or {}).get("Cookie"))
+        return {"status": 200, "headers": {"content-type": "text/html"},
+                "body": '<a href="/x?q=1">x</a>', "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    out = selfassess.selfassess("http://127.0.0.1:8000/", cookie="session=abc")
+    assert "authenticated" in out["phases"]
+    assert any(c == "session=abc" for c in seen)      # cookie reached the probes

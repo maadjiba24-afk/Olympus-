@@ -413,6 +413,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_self.add_argument("url", help="loopback URL, e.g. http://127.0.0.1:8000")
     p_as_self.add_argument("--source", default=None,
                            help="optional workspace path for SAST/secret/dep scans")
+    p_as_self.add_argument("--cookie", default=None,
+                           help="session cookie for your local app to test "
+                                "authenticated pages (e.g. 'session=…')")
     as_sub.add_parser("clear", help="clear recorded findings")
 
     # --- Self-discovery (olympus/discovery.py) ---
@@ -1746,7 +1749,8 @@ def main(argv: list[str] | None = None) -> int:
                   + (f" — {out['note']}" if out.get("note") else "") + ".")
         elif sc == "selfassess":
             from . import selfassess as _sa
-            out = _sa.selfassess(args.url, source_path=args.source)
+            out = _sa.selfassess(args.url, source_path=args.source,
+                                 cookie=args.cookie)
             if out.get("refused"):
                 print(out["error"], file=sys.stderr)
                 return 1
