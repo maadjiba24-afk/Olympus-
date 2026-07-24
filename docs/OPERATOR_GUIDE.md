@@ -96,3 +96,31 @@ export OLYMPUS_BROWSER_CDP_URL=...      # attach to a Chrome you already run
 
 `olympus operator disable` stops the operator (authorizations are kept for next
 time). To also drop the capability entirely: `olympus revoke browser.operate`.
+
+## OS-level computer use (screen + mouse + keyboard)
+
+Hermes operates *web* sites through the browser. If you want Olympus to drive the
+**whole desktop** — screenshot the screen, move/click the mouse, type, launch a
+program — that is a separate, more powerful, and more dangerous capability, so it
+is **off by default and takes two deliberate switches**:
+
+```bash
+export OLYMPUS_COMPUTER_USE=1                 # 1) allow the capability
+export OLYMPUS_COMPUTER_USE_ACTUATOR=native   # 2) install the native actuator
+```
+
+The **native actuator** drives the OS through native command-line tools — no new
+Python dependency — so install the ones for your platform:
+
+- **Linux (X11):** `xdotool` plus a screenshot tool (`scrot`, `maim`,
+  `gnome-screenshot`, or ImageMagick's `import`).
+- **macOS:** `cliclick` (`brew install cliclick`); `screencapture` is built in.
+- **Windows:** PowerShell (built in).
+
+Check it's live with `olympus doctor` — the **computer use** line reports *off*,
+*enabled but no actuator*, or *active (native actuator)*, and names any missing
+tool. Every computer-use action still flows through the **same safety gates** as
+everything else: it is IRREVERSIBLE-risk so it **never auto-executes** (each one
+needs your explicit approval), a launched command is `cmdguard`-checked, typed
+text is scanned for secrets, and every actuation is a signed audit record. Unset
+either switch to turn it back off.
