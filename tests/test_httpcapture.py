@@ -141,6 +141,24 @@ def test_http_get_hook_captures_when_enabled(monkeypatch):
     assert recs[0]["status"] == 200 and recs[0]["elapsed_ms"] is not None
 
 
+def test_http_get_survives_capture_failure(monkeypatch):
+    # A blowing-up capture hook must NEVER break the governed fetch it observes.
+    _on(monkeypatch)
+    monkeypatch.setattr(security, "secret_exfil_reason", lambda *a, **k: None)
+    monkeypatch.setattr(tools, "_egress_confinement_reason", lambda u: None)
+    monkeypatch.setattr(security, "url_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(tools, "_proxied", lambda u: False)
+    monkeypatch.setattr(tools, "_pinned_opener",
+                        lambda: type("O", (), {"open": lambda self, req, timeout=None:
+                                               _FakeResp("payload")})())
+
+    def boom(*a, **k):
+        raise RuntimeError("capture store on fire")
+    monkeypatch.setattr(httpcapture, "record", boom)
+    # fetch still returns the body; the exception is swallowed by the hook guard
+    assert tools._http_get("https://ex.com/") == "payload"
+
+
 def test_http_get_does_not_capture_when_disabled(monkeypatch):
     # capture off (default) → the governed fetch still works, nothing stored
     monkeypatch.setattr(security, "secret_exfil_reason", lambda *a, **k: None)

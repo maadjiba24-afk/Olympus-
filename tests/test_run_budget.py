@@ -87,6 +87,22 @@ def test_run_one_first_specialist_always_runs(monkeypatch):
     assert tr.meta["budget_baseline"] == 500.0                # baseline captured
 
 
+def test_run_one_no_cap_takes_no_baseline_snapshot(monkeypatch):
+    """Default (no cap): the guard short-circuits on the cheap env read and never
+    calls the disk-reading today_spend() — no budget_baseline is written."""
+    monkeypatch.delenv("OLYMPUS_RUN_BUDGET_USD", raising=False)
+    monkeypatch.delenv("OLYMPUS_REPLAY", raising=False)
+    _stub_run_counted(monkeypatch)
+
+    def _boom():
+        raise AssertionError("today_spend() must not run when no cap is set")
+    monkeypatch.setattr(usage, "today_spend", _boom)
+    bot = orchestrator.Olympus(user="runbudget")
+    tr = trace_mod.Trace("t")
+    assert bot._run_one("plutus", "go", tr) == "output[plutus]"
+    assert "budget_baseline" not in tr.meta
+
+
 def test_run_one_gated_off_during_replay(monkeypatch):
     """A replayed run must re-dispatch exactly what it recorded — a live-spend
     STOP would diverge it, so the ceiling is inert under OLYMPUS_REPLAY."""

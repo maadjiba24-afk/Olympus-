@@ -670,13 +670,18 @@ def _http_get(url: str, timeout: float = 30,
         body = resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
             "utf-8", errors="replace")
         # Opt-in HTTP capture (default off): record this ALREADY-governed fetch
-        # for operator inspection/replay. Best-effort — never breaks the fetch.
-        from . import httpcapture
-        if httpcapture.enabled():
-            httpcapture.record(
-                "GET", url, hdrs, getattr(resp, "status", None), body,
-                elapsed_ms=(time.time() - _t0) * 1000,
-                resp_headers=dict(getattr(resp, "headers", {}) or {}))
+        # for operator inspection/replay. Best-effort — the whole hook (import,
+        # gate check, and record) is guarded so an observability feature can
+        # never break the fetch it observes.
+        try:
+            from . import httpcapture
+            if httpcapture.enabled():
+                httpcapture.record(
+                    "GET", url, hdrs, getattr(resp, "status", None), body,
+                    elapsed_ms=(time.time() - _t0) * 1000,
+                    resp_headers=dict(getattr(resp, "headers", {}) or {}))
+        except Exception:
+            pass
         return body
 
 

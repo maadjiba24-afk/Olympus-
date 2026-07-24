@@ -1025,9 +1025,13 @@ class Olympus:
         # the run's spend); the check is a soft "stop starting" line like the
         # daily guard. Gated OFF during replay: a replayed run must re-dispatch
         # exactly what it recorded — a live-spend STOP would diverge it.
-        if not replaystore.replaying():
-            baseline = tr.meta.setdefault("budget_baseline", usage.today_spend())
-            over = usage.run_over_budget(baseline)
+        # The run_budget() env read is cheap and short-circuits the whole block
+        # when no cap is set (the default), so the disk-reading today_spend()
+        # snapshot is only taken when an operator has actually armed a per-run cap.
+        if usage.run_budget() > 0 and not replaystore.replaying():
+            if "budget_baseline" not in tr.meta:
+                tr.meta["budget_baseline"] = usage.today_spend()
+            over = usage.run_over_budget(tr.meta["budget_baseline"])
             if over is not None:
                 tr.event("run.budget_stopped", specialist=key,
                          over_usd=round(over, 4), limit=usage.run_budget())
