@@ -132,3 +132,67 @@ def test_sarif_missing_vector_omits_security_severity():
     rule = sarif.to_sarif([f])["runs"][0]["tool"]["driver"]["rules"][0]
     assert "security-severity" not in rule["properties"]
     assert "external/cwe/cwe-200" in rule["properties"]["tags"]
+
+
+# --- SARIF ingestion (from_sarif — the inverse of to_sarif) -----------------
+
+def test_from_sarif_roundtrips_our_own_export():
+    # A finding exported by to_sarif re-parses back to the same core fields.
+    findings = [_finding()]
+    doc = sarif.to_sarif(findings)
+    back = sarif.from_sarif(doc)
+    assert len(back) == 1
+    f = back[0]
+    assert f["cwe"] == "CWE-89"
+    assert f["severity"] == "critical"                 # from security-severity 9.8
+    assert f["location"] == "app.py:42"
+    assert f["cvss_vector"] == findings[0]["cvss_vector"]  # carried in properties
+    assert f["source"].startswith("imported:")
+
+
+def test_from_sarif_parses_third_party_shape():
+    # A GitHub-style SARIF from another tool (no cvss vector, cwe only in tags).
+    doc = {
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {"name": "semgrep", "rules": [{
+                "id": "py.sqli",
+                "name": "SQL injection",
+                "shortDescription": {"text": "SQL injection"},
+                "properties": {"tags": ["security", "external/cwe/cwe-89"],
+                               "security-severity": "8.8"},
+                "help": {"text": "Use parameterized queries."},
+            }]}},
+            "results": [{
+                "ruleId": "py.sqli",
+                "level": "error",
+                "message": {"text": "tainted input into execute()"},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": "db.py"},
+                    "region": {"startLine": 7}}}],
+            }],
+        }],
+    }
+    out = sarif.from_sarif(doc)
+    assert len(out) == 1
+    f = out[0]
+    assert f["cwe"] == "CWE-89"
+    assert f["severity"] == "high"                     # 8.8 → High band
+    assert f["location"] == "db.py:7"
+    assert f["remediation"] == "Use parameterized queries."
+    assert f["source"] == "imported:semgrep"
+
+
+def test_from_sarif_level_fallback_without_security_severity():
+    doc = {"runs": [{"tool": {"driver": {"name": "t", "rules": []}},
+                     "results": [{"ruleId": "r", "level": "warning",
+                                  "message": {"text": "m"}}]}]}
+    assert sarif.from_sarif(doc)[0]["severity"] == "medium"   # warning → medium
+
+
+def test_from_sarif_is_total_on_malformed_input():
+    # Never raises on junk — returns [] or skips malformed runs/results.
+    assert sarif.from_sarif({}) == []
+    assert sarif.from_sarif({"runs": "nope"}) == []
+    assert sarif.from_sarif({"runs": [{"results": ["bad", 3, None]}]}) == []
+    assert sarif.from_sarif("not a dict") == []

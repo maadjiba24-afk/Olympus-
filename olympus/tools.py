@@ -2070,6 +2070,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "note_knowledge_gap": lambda topic, context="": _note_knowledge_gap(topic, context),
     "list_findings": lambda: _list_findings(),
     "export_findings": lambda format="markdown": _export_findings(format),
+    "assess_import_sarif": lambda source: _assess_import_sarif(source),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -3260,6 +3261,12 @@ def _export_findings(fmt: str = "markdown") -> str:
     return _assess().export_findings(fmt)
 
 
+def _assess_import_sarif(source: str) -> str:
+    import json as _json
+    out = _assess().import_sarif(source)
+    return _json.dumps(out, indent=2, sort_keys=True)
+
+
 ASSESS_SCOPE = {
     "name": "assess_scope",
     "description": (
@@ -3435,6 +3442,25 @@ EXPORT_FINDINGS = {
         "type": "object",
         "properties": {"format": {"type": "string",
                                   "description": "markdown | json | sarif"}},
+    },
+}
+
+ASSESS_IMPORT_SARIF = {
+    "name": "assess_import_sarif",
+    "description": (
+        "Ingest a THIRD-PARTY tool's SARIF 2.1.0 output (semgrep, trivy, codeql, "
+        "gitleaks, grype, …) into the findings store, so an operator's existing "
+        "scanners flow into the same CVSS/dedup/export pipeline. Olympus does NOT "
+        "run the tool and opens no network egress — the operator runs their "
+        "scanner, this absorbs the standard output (secret-redacted, size-capped, "
+        "deduped like native findings). `source` is a local SARIF file path or "
+        "the raw SARIF text."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"source": {"type": "string",
+                                  "description": "SARIF file path or raw SARIF JSON"}},
+        "required": ["source"],
     },
 }
 
@@ -4402,6 +4428,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "note_knowledge_gap": NOTE_KNOWLEDGE_GAP,
     "list_findings": LIST_FINDINGS,
     "export_findings": EXPORT_FINDINGS,
+    "assess_import_sarif": ASSESS_IMPORT_SARIF,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

@@ -403,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_rep.add_argument("--format", default="markdown",
                           help="markdown | json | sarif")
     p_as_rep.add_argument("--out", default=None)
+    p_as_imp = as_sub.add_parser(
+        "import-sarif", help="ingest a third-party tool's SARIF findings "
+                             "(semgrep/trivy/codeql/…); Olympus runs no tool")
+    p_as_imp.add_argument("file", help="path to a SARIF 2.1.0 file")
     as_sub.add_parser("clear", help="clear recorded findings")
 
     # --- Self-discovery (olympus/discovery.py) ---
@@ -1727,6 +1731,13 @@ def main(argv: list[str] | None = None) -> int:
                 from pathlib import Path
                 Path(args.out).write_text(out, encoding="utf-8")
                 print(f"\n[written to {args.out}]", file=sys.stderr)
+        elif sc == "import-sarif":
+            out = assess.import_sarif(args.file)
+            if out.get("error"):
+                print(f"Import failed: {out['error']}", file=sys.stderr)
+                return 1
+            print(f"Imported {out['imported']} finding(s) from SARIF"
+                  + (f" — {out['note']}" if out.get("note") else "") + ".")
         elif sc == "clear":
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:

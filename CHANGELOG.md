@@ -15,6 +15,31 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — SARIF ingestion: absorb any third-party scanner's findings (DEFERRED #18, safe half)
+
+The safe, governed form of "integrate external scanners": Aegis can now ingest a
+THIRD-PARTY tool's **SARIF 2.1.0** output (semgrep, trivy, codeql, gitleaks,
+grype, …) into its findings store — so an operator's existing scanners flow into
+the same CVSS / dedup / export pipeline. The dangerous half of #18 (running raw-
+socket scanners in an open-egress NET_RAW box) stays deliberately unbuilt: Olympus
+**runs no tool and opens no egress** — the operator runs their scanner, Olympus
+absorbs the standard output.
+
+- **`sarif.from_sarif()`** — the pure, total inverse of the exporter: maps SARIF
+  results back to Olympus finding dicts (severity from the rule's numeric
+  `security-severity` → CVSS band, else the SARIF level; CWE from
+  `external/cwe/cwe-N` tags or a CWE-shaped rule name; location, evidence,
+  remediation). Never raises on malformed input.
+- **`assess.import_sarif()`** — governed ingest: the document is UNTRUSTED
+  external data, so it is size-capped (8 MB), result-count-capped (5000), and
+  every stored text field is secret-redacted (`security.sanitize_for_prompt`)
+  before it lands; findings dedup by fingerprint exactly like native ones. A bad
+  document returns an error dict, never raises.
+- **`assess_import_sarif`** tool (Aegis; classified INGESTION so its result is
+  wrapped untrusted) and **`olympus assess import-sarif <file>`** CLI. Tool count
+  127 → 128; bound in `docs/THREAT_MODEL.md`. 11 tests; no new dependency.
+
+
 ### Changed — Skill-admission gate hardened: margin + reproduction (DEFERRED #1)
 
 The self-evolving skill loop admitted a provisional skill on a single-trial

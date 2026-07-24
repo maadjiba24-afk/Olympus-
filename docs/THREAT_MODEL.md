@@ -1,6 +1,6 @@
 # Threat model
 
-Olympus exposes a **finite, named** tool surface — the 127 tools in
+Olympus exposes a **finite, named** tool surface — the 128 tools in
 `tools.HANDLERS` — not a sprawl of hundreds of auto-registered tools. That makes
 a real threat model tractable: every tool is listed below with its capability,
 trust boundary, deny-first default, and the abuse case it's designed against.
@@ -96,6 +96,7 @@ surface. So the surface and its threat model can't drift apart.
 | `note_knowledge_gap` | Record a topic Olympus should learn (self-discovery signal) | first-party write | Writes only Olympus's own discovery ledger (deduped, bounded); NO fetch here — the later research runs in the heartbeat, egress-gated, and its result is wrapped/sanitized | Gap spam — deduped + bounded; poisoning — the topic is a search seed, not stored knowledge; the researched result is wrapped-untrusted and sanitized at the memory sink |
 | `list_findings` | List recorded findings as a Markdown report | first-party read | Read-only over Olympus's own findings store | None significant (own state) |
 | `export_findings` | Export findings as markdown / json / SARIF 2.1.0 | first-party read | Read-only over Olympus's own findings store; deterministic serialization | None significant (own state) |
+| `assess_import_sarif` | Ingest a THIRD-PARTY tool's SARIF 2.1.0 output (semgrep/trivy/codeql/…) into the findings store | ingests untrusted | Olympus runs NO tool and opens NO egress — it only parses an operator-supplied document; input size-capped (≤8MB) and result-count-capped (≤5000); every stored text field secret-redacted (`sanitize_for_prompt`); findings deduped by fingerprint like native ones; output wrapped | Malicious SARIF content (payload/secret/injection in a finding's evidence or title) — redacted on the way in and the result is wrapped-untrusted; oversized/malformed document — capped and fails to an error dict, never raises; no fetch/exec, so no SSRF/actuation surface |
 | `analyze_image` | Describe / answer about an image (URL or workspace file) via a vision model | ingests untrusted | Output treated as untrusted and wrapped; workspace files path-confined via `_confine`; size-capped; needs a media API key | Injected instructions inside an image (text-in-image) or a hostile URL — result is enveloped by `should_wrap`; SSRF limited to the provider's own fetch |
 | `browser_open` | Navigate the attached browser to a URL | ingests untrusted | SSRF + egress allowlist gate (`url_block_reason`); output wrapped | Internal-host/metadata reach + injected page — gated and wrapped |
 | `browser_read` | Read text from the current browser page | ingests untrusted | Output treated as untrusted; wrapped | Injected page content steering the agent — wrapped, not trusted |

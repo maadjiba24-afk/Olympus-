@@ -800,3 +800,72 @@ def test_budget_stop_halts_phases(workspace, monkeypatch):
     r = assess.run_assessment("example.com", source_path=".", budget_usd=1.0)
     assert r["budget_stopped"] is True
     assert r["phases"] == ["recon"]                            # stops after first check
+
+
+# --- SARIF ingestion: assess.import_sarif (governed absorb, no tool run) ------
+
+def _sarif_text(evidence="tainted input into execute()"):
+    import json as _json
+    return _json.dumps({
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {"name": "semgrep", "rules": [{
+                "id": "py.sqli", "name": "SQLi",
+                "shortDescription": {"text": "SQL injection"},
+                "properties": {"tags": ["security", "external/cwe/cwe-89"],
+                               "security-severity": "9.8"},
+                "help": {"text": "Use parameterized queries."}}]}},
+            "results": [{
+                "ruleId": "py.sqli", "level": "error",
+                "message": {"text": evidence},
+                "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": "db.py"},
+                    "region": {"startLine": 7}}}]}]}]})
+
+
+def test_import_sarif_absorbs_third_party_findings():
+    r = assess.import_sarif(_sarif_text())
+    assert r["imported"] == 1
+    f = assess.list_findings()[0]
+    assert f["cwe"] == "CWE-89" and f["severity"] == "critical"
+    assert f["source"] == "imported:semgrep"
+    # No CVSS vector in third-party SARIF (only security-severity → label), so
+    # record_finding scores from the label midpoint (critical = 9.0).
+    assert f["cvss_score"] == 9.0
+
+
+def test_import_sarif_reads_a_file(tmp_path):
+    p = tmp_path / "scan.sarif"
+    p.write_text(_sarif_text(), encoding="utf-8")
+    assert assess.import_sarif(str(p))["imported"] == 1
+
+
+def test_import_sarif_redacts_secrets_in_evidence():
+    secret = "sk" + "_live_" + "abcdef1234567890ABCDEF"
+    assess.import_sarif(_sarif_text(evidence=f"leaked key {secret} here"))
+    f = assess.list_findings()[0]
+    assert secret not in f["evidence"]                  # redacted on the way in
+
+
+def test_import_sarif_dedups_by_fingerprint():
+    assess.import_sarif(_sarif_text())
+    assess.import_sarif(_sarif_text())                  # same finding again
+    assert len(assess.list_findings()) == 1             # deduped, not doubled
+
+
+def test_import_sarif_bad_json_is_safe():
+    out = assess.import_sarif("{not valid sarif")
+    assert out["imported"] == 0 and "error" in out
+    assert assess.list_findings() == []
+
+
+def test_import_sarif_needs_no_scope_and_runs_no_tool(monkeypatch):
+    # Ingestion opens no socket: even with the probe path blown up, it works.
+    monkeypatch.setattr(tools, "_http_probe",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no fetch")))
+    assert assess.import_sarif(_sarif_text())["imported"] == 1
+
+
+def test_import_sarif_tool_is_ingestion():
+    assert "assess_import_sarif" in security.INGESTION_TOOLS
+    assert security.should_wrap("assess_import_sarif") is True

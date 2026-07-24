@@ -370,6 +370,57 @@ def clear_findings(user: str | None = None) -> int:
     return n
 
 
+_MAX_SARIF_BYTES = 8 * 1024 * 1024     # cap on an ingested SARIF document
+_MAX_IMPORT_FINDINGS = 5000            # cap on results absorbed in one import
+
+
+def import_sarif(source: str, user: str | None = None) -> dict[str, Any]:
+    """Absorb a THIRD-PARTY tool's SARIF 2.1.0 output into the findings store, so
+    an operator's own scanners (semgrep/trivy/codeql/gitleaks/grype/…) flow into
+    the same CVSS/dedup/export pipeline. Olympus NEVER runs the tool and opens no
+    egress — the operator runs their scanner, this ingests the standard output.
+
+    `source` is a local file path OR the raw SARIF text. The document is UNTRUSTED
+    external data: size-capped, result-count-capped, and every stored text field
+    is secret-redacted (`security.sanitize_for_prompt`) before it lands. Findings
+    dedup by fingerprint exactly like native ones. Never raises: a bad document
+    returns an error dict."""
+    from . import security
+    text = source
+    try:
+        p = Path(source)
+        if len(source) < 4096 and p.is_file():
+            if p.stat().st_size > _MAX_SARIF_BYTES:
+                return {"error": f"SARIF file exceeds the "
+                        f"{_MAX_SARIF_BYTES // (1024*1024)}MB cap", "imported": 0}
+            text = p.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        text = source
+    if len(text) > _MAX_SARIF_BYTES:
+        return {"error": "SARIF input exceeds the size cap", "imported": 0}
+    try:
+        doc = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as err:
+        return {"error": f"not valid JSON/SARIF: {str(err)[:120]}", "imported": 0}
+
+    parsed = sarif.from_sarif(doc)
+    capped = len(parsed) > _MAX_IMPORT_FINDINGS
+    stored = []
+    for fd in parsed[:_MAX_IMPORT_FINDINGS]:
+        # Redact every text field a finding carries — the SARIF came from outside
+        # and its strings (evidence, titles) may embed a secret or an injection.
+        for key in ("title", "evidence", "remediation", "location", "source"):
+            if fd.get(key):
+                fd[key] = security.sanitize_for_prompt(str(fd[key]))
+        stored.append(record_finding(fd, user))
+    out: dict[str, Any] = {"imported": len(stored), "findings": stored,
+                           "runs": len(doc.get("runs") or []) if isinstance(doc, dict) else 0}
+    if capped:
+        out["note"] = (f"capped at {_MAX_IMPORT_FINDINGS} findings; "
+                       f"{len(parsed) - _MAX_IMPORT_FINDINGS} more were dropped")
+    return out
+
+
 def export_findings(fmt: str = "markdown", user: str | None = None) -> str:
     """Export stored findings as `markdown`, `json`, or `sarif` (SARIF 2.1.0,
     GitHub code-scanning compatible)."""

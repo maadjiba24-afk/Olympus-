@@ -254,3 +254,101 @@ def to_sarif(findings: list[dict], *, tool_name: str = "Olympus Aegis",
 
 def to_sarif_json(findings: list[dict], **kwargs: Any) -> str:
     return json.dumps(to_sarif(findings, **kwargs), indent=2, sort_keys=True) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# SARIF 2.1.0 ingestion (the inverse of to_sarif)
+# ---------------------------------------------------------------------------
+# Absorb a THIRD-PARTY tool's SARIF output (semgrep, trivy, codeql, gitleaks,
+# grype, …) into Olympus's finding shape, so an operator's existing scanners flow
+# into the same findings store / CVSS / export pipeline — WITHOUT Olympus running
+# those tools or opening any network egress (the deferred scanner-box risk is
+# never taken; the operator runs their tool, Olympus ingests the standard
+# output). Pure and total: malformed structure is skipped, never raised.
+
+
+def _cwe_from_rule(rule: dict) -> str:
+    """Recover `CWE-N` from a rule: our own `external/cwe/cwe-N` tag, a CWE-shaped
+    name, or a `cwe` property. '' when the tool carries no CWE."""
+    tags = (rule.get("properties") or {}).get("tags") or []
+    for t in tags:
+        m = re.search(r"cwe[/-](\d+)", str(t), re.IGNORECASE)
+        if m:
+            return f"CWE-{m.group(1)}"
+    for cand in (rule.get("name"), (rule.get("properties") or {}).get("cwe")):
+        m = _CWE_RE.search(str(cand or ""))
+        if m:
+            return f"CWE-{m.group(1)}"
+    return ""
+
+
+# level → Olympus severity when no numeric security-severity is present.
+_LEVEL_SEVERITY = {"error": "high", "warning": "medium", "note": "low",
+                   "none": "info"}
+
+
+def _severity_from_result(result: dict, rule: dict) -> str:
+    """Prefer the numeric `security-severity` (→ CVSS band); else the SARIF
+    level; else 'medium'. Always a lowercase Olympus label."""
+    ss = (rule.get("properties") or {}).get("security-severity")
+    if ss is not None:
+        try:
+            return severity_of(float(ss)).lower()
+        except (TypeError, ValueError):
+            pass
+    lvl = str(result.get("level") or rule.get("defaultConfiguration", {})
+              .get("level") or "").strip().lower()
+    return _LEVEL_SEVERITY.get(lvl, "medium")
+
+
+def _location_of(result: dict) -> str:
+    """`uri` or `uri:line` from the first physicalLocation, or ''."""
+    locs = result.get("locations") or []
+    if not locs:
+        return ""
+    phys = (locs[0] or {}).get("physicalLocation") or {}
+    uri = str((phys.get("artifactLocation") or {}).get("uri") or "").strip()
+    if not uri:
+        return ""
+    line = (phys.get("region") or {}).get("startLine")
+    return f"{uri}:{int(line)}" if isinstance(line, int) else uri
+
+
+def from_sarif(doc: dict, *, default_source: str = "imported") -> list[dict]:
+    """Parse a SARIF 2.1.0 document into Olympus finding dicts (unstored, unsanitized
+    — the caller redacts + records). Total: any malformed run/result is skipped.
+
+    Each result maps to {title, severity, cwe, cvss_vector, location, evidence,
+    remediation, confidence, source}. Severity comes from the rule's numeric
+    `security-severity` when present (CVSS band), else the SARIF level."""
+    out: list[dict] = []
+    if not isinstance(doc, dict):
+        return out
+    for run in (doc.get("runs") or []):
+        if not isinstance(run, dict):
+            continue
+        driver = ((run.get("tool") or {}).get("driver") or {})
+        tool_name = str(driver.get("name") or default_source).strip() or default_source
+        rules = {str(r.get("id")): r for r in (driver.get("rules") or [])
+                 if isinstance(r, dict) and r.get("id") is not None}
+        for result in (run.get("results") or []):
+            if not isinstance(result, dict):
+                continue
+            rid = str(result.get("ruleId") or "")
+            rule = rules.get(rid, {})
+            msg = str((result.get("message") or {}).get("text") or "").strip()
+            title = str((rule.get("shortDescription") or {}).get("text")
+                        or rid or msg or "imported finding").strip()
+            props = result.get("properties") or {}
+            out.append({
+                "title": title[:300],
+                "severity": _severity_from_result(result, rule),
+                "cwe": _cwe_from_rule(rule) or str(props.get("cwe") or ""),
+                "cvss_vector": str(props.get("cvssVector") or ""),
+                "location": _location_of(result)[:400],
+                "evidence": (msg or title)[:2000],
+                "remediation": str((rule.get("help") or {}).get("text") or "")[:2000],
+                "confidence": str(props.get("confidence") or "medium"),
+                "source": f"imported:{tool_name}"[:80],
+            })
+    return out

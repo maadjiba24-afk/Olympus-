@@ -133,7 +133,12 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # INGESTION (wrapped + actuators stripped), like
                              # recon/http_audit.
                              "assess_recon", "assess_http_audit",
-                             "assess_validate"})
+                             "assess_validate",
+                             # assess_import_sarif absorbs a THIRD-PARTY tool's
+                             # SARIF output — external content (its evidence /
+                             # titles may embed an attacker-influenced payload),
+                             # so the ingest result is wrapped untrusted too.
+                             "assess_import_sarif"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
