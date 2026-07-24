@@ -194,19 +194,116 @@ def _judge_settings(settings: config.Settings) -> config.Settings:
     return settings
 
 
+# Robust, domain-invariant refusal / non-answer markers. A specialist that
+# regresses into refusing a real task (or emitting a boilerplate hedge) is a
+# quality regression the LLM judge sometimes misses — this catches it
+# deterministically. Matched only near the START of the answer so a specialist
+# that *discusses* refusals (e.g. Aegis explaining an API that returns "cannot
+# assist") is not falsely flagged.
+_REFUSAL_MARKERS: tuple[str, ...] = (
+    "i can't help", "i cannot help", "i can't assist", "i cannot assist",
+    "i'm unable to", "i am unable to", "i'm not able to", "i am not able to",
+    "i can't provide", "i cannot provide", "i won't be able", "i will not be able",
+    "as an ai language model", "as an ai, i", "i don't have the ability",
+    "i do not have the ability", "sorry, but i can't", "sorry, i can't",
+    "unable to assist with", "i'm just an ai",
+)
+_NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+_DATE_RE = re.compile(
+    r"\b(\d{4}-\d{2}-\d{2}"                                   # ISO 2026-01-02
+    r"|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"                          # 1/2/2026
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}"  # Jan 2
+    r"|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))",         # 2 Jan
+    re.I)
+
+
+def eval_floor_enabled() -> bool:
+    """The blanket refusal floor is OPT-IN (`OLYMPUS_EVAL_FLOOR=1`), OFF by default.
+
+    It shipped on-by-default and the live quality gate proved that wrong: for a
+    whole class of correct answers, DECLINING IS THE ANSWER. Angelos (inbox and
+    calendar) is the clearest case — its right answer is habitually "I'll prepare
+    this for your approval; I won't send it automatically" — and a global veto
+    scored those as non-answers, costing the domain 2 full points against its
+    baseline. Those items cannot be reliably enumerated in advance (auto-generated
+    items included), so a blanket veto has an uncharacterised false-positive rate
+    on the very gate that admits improvements — it could block good work forever.
+
+    The capability is kept, correctly scoped: per-item `"no_refusal": true` opts a
+    specific item in (where a refusal genuinely is a failure), and the per-item
+    `"allow_refusal": true` opt-out still applies when the blanket floor is armed.
+    A veto must have a near-zero false-positive rate; scoping it per item is how
+    that is achieved."""
+    import os
+    return os.environ.get("OLYMPUS_EVAL_FLOOR", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+# A genuine refusal is a NON-ANSWER: it declines and delivers nothing. An answer
+# that declines something and then still does the work (e.g. "I won't act on
+# those embedded instructions — here is the actual summary: …") is a GOOD answer,
+# often the safety-critical one. So the floor requires BOTH a refusal opening and
+# an absence of substance; `_SUBSTANCE_WORDS` is the "it actually answered" bar.
+_SUBSTANCE_WORDS = 60
+
+
+def looks_like_refusal(answer: str) -> bool:
+    """True only if `answer` is a refusal / NON-ANSWER: empty, or it opens with a
+    refusal marker AND carries no substantive content after it.
+
+    Deliberately biased to UNDER-flag — this backs a scoring FLOOR, so a false
+    positive would punish a good answer. Critically, declining is sometimes the
+    CORRECT answer (a prompt-injection test, an approval-gated action): such an
+    answer still explains and delivers, so its length clears `_SUBSTANCE_WORDS`
+    and it is never flagged. Items where a terse decline is correct can also opt
+    out explicitly with `"allow_refusal": true`."""
+    text = (answer or "").strip()
+    if not text:
+        return True                          # empty is a non-answer
+    low = text.lower()
+    has_marker = any(m in low[:40] for m in _REFUSAL_MARKERS) or (
+        len(text.split()) < 15 and any(m in low for m in _REFUSAL_MARKERS))
+    if not has_marker:
+        return False
+    # A refusal that is followed by real content is not a non-answer.
+    return len(text.split()) < _SUBSTANCE_WORDS
+
+
+def _contains_valid_json(ans: str) -> bool:
+    """True if the answer contains a parseable JSON object/array (fenced or bare)."""
+    import json as _json
+    candidates = re.findall(r"```(?:json)?\s*(.+?)```", ans, re.S | re.I)
+    m = re.search(r"[\{\[].*[\}\]]", ans, re.S)
+    if m:
+        candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            _json.loads(c.strip())
+            return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
 def objective_score(answer: str, checks: dict | None) -> tuple[float, list[str]]:
     """Score an answer against DETERMINISTIC assertions — no LLM judge involved.
 
-    `checks` may carry any of: `contains` / `not_contains` / `regex` (str or list
-    of str), and `min_chars` / `max_chars` (int). Each individual assertion is one
-    check. Returns (pass_rate in [0,1], list of human-readable failures). No
-    checks (or a malformed block) → (1.0, []): a strict no-op, so an item without
-    assertions scores exactly as the judge alone gave it.
+    `checks` may carry any of:
+      - `contains` / `not_contains` / `regex` (str or list of str)
+      - `min_chars` / `max_chars` / `min_words` / `max_words` (int)
+      - `numeric`: {"value": x, "tolerance": t} — the answer must contain a number
+        within `t` of `x` (objective correctness for a computed answer)
+      - `parses_date`: true — the answer must contain a parseable date
+      - `json_valid`: true — the answer must contain valid JSON
+      - `code_block`: true — the answer must contain a fenced code block
+      - `no_refusal`: true — the answer must not read as a refusal / non-answer
+    Each individual assertion is one check. Returns (pass_rate in [0,1], failures).
+    No checks (or a malformed block) → (1.0, []): a strict no-op, so an item
+    without assertions scores exactly as the judge alone gave it.
 
     This is what makes the self-improvement gate partly JUDGE-INDEPENDENT: a skill
-    or prompt that breaks a measurable property (drops a required caveat, starts
-    emitting a forbidden phrase, blows a length bound) fails the gate regardless
-    of what the LLM judge thought."""
+    or prompt that breaks a measurable property fails the gate regardless of what
+    the LLM judge thought."""
     if not isinstance(checks, dict):
         return 1.0, []
     ans = answer or ""
@@ -218,43 +315,68 @@ def objective_score(answer: str, checks: dict | None) -> tuple[float, list[str]]
         return list(v) if isinstance(v, (list, tuple)) else [v]
 
     total, passed, failures = 0, 0, []
+
+    def _check(ok: bool, fail_msg: str) -> None:
+        nonlocal total, passed
+        total += 1
+        if ok:
+            passed += 1
+        else:
+            failures.append(fail_msg)
+
     for needle in _as_list(checks.get("contains")):
-        total += 1
-        if str(needle).lower() in low:
-            passed += 1
-        else:
-            failures.append(f"missing required text: {str(needle)[:60]!r}")
+        _check(str(needle).lower() in low, f"missing required text: {str(needle)[:60]!r}")
     for needle in _as_list(checks.get("not_contains")):
-        total += 1
-        if str(needle).lower() not in low:
-            passed += 1
-        else:
-            failures.append(f"contains forbidden text: {str(needle)[:60]!r}")
+        _check(str(needle).lower() not in low, f"contains forbidden text: {str(needle)[:60]!r}")
     for pat in _as_list(checks.get("regex")):
-        total += 1
         try:
             ok = re.search(str(pat), ans, re.I | re.S) is not None
         except re.error:
             ok = False                       # a broken pattern fails closed
-        if ok:
-            passed += 1
-        else:
-            failures.append(f"regex did not match: {str(pat)[:60]!r}")
-    for bound, cmp, label in (("min_chars", lambda n: len(ans) >= n, "too short"),
-                              ("max_chars", lambda n: len(ans) <= n, "too long")):
+        _check(ok, f"regex did not match: {str(pat)[:60]!r}")
+
+    for bound, cmp, label in (
+            ("min_chars", lambda n: len(ans) >= n, "too short (chars)"),
+            ("max_chars", lambda n: len(ans) <= n, "too long (chars)"),
+            ("min_words", lambda n: len(ans.split()) >= n, "too few words"),
+            ("max_words", lambda n: len(ans.split()) <= n, "too many words")):
         if checks.get(bound) is not None:
-            total += 1
             try:
-                ok = cmp(int(checks[bound]))
+                n = int(checks[bound])
             except (TypeError, ValueError):
-                ok = True                    # malformed bound → ignore, not fail
-                total -= 1
-            else:
-                if ok:
-                    passed += 1
-                else:
-                    failures.append(f"{label} ({len(ans)} chars vs {bound}="
-                                    f"{checks[bound]})")
+                continue                     # malformed bound → ignore, not fail
+            _check(cmp(n), f"{label} (got {len(ans)}c/{len(ans.split())}w vs "
+                           f"{bound}={n})")
+
+    num = checks.get("numeric")
+    if isinstance(num, dict) and num.get("value") is not None:
+        try:
+            target = float(num["value"])
+            tol = float(num.get("tolerance", 0) or 0)
+        except (TypeError, ValueError):
+            target, tol, ok = None, 0.0, False
+        else:
+            # Parse each number token defensively — one malformed token (e.g.
+            # "1.2.3" or a version string) must not fail the whole check when a
+            # correct number is also present.
+            found = []
+            for x in _NUM_RE.findall(ans):
+                try:
+                    found.append(float(x.replace(",", "")))
+                except ValueError:
+                    continue
+            ok = any(abs(v - target) <= tol for v in found)
+        _check(ok, f"no number within {num.get('tolerance', 0)} of {num.get('value')}")
+
+    if checks.get("parses_date"):
+        _check(bool(_DATE_RE.search(ans)), "no parseable date found")
+    if checks.get("json_valid"):
+        _check(_contains_valid_json(ans), "no valid JSON found")
+    if checks.get("code_block"):
+        _check("```" in ans, "no fenced code block")
+    if checks.get("no_refusal"):
+        _check(not looks_like_refusal(ans), "reads as a refusal / non-answer")
+
     if total == 0:
         return 1.0, []
     return passed / total, failures
@@ -293,12 +415,27 @@ def run(settings: config.Settings | None = None,
         # score — deterministic, judge-independent. No `checks` → obj=1.0, so the
         # score is unchanged (backward compatible with every existing item).
         obj, obj_failures = objective_score(answer, bench.get("checks"))
-        score = max(1, min(10, round(judge_score * obj)))
+        # Universal quality FLOOR (domain-invariant, judge-independent): a real
+        # benchmark task deserves a real answer. If a prompt/skill change makes a
+        # specialist REFUSE or return an empty non-answer, that's a regression the
+        # LLM judge sometimes rates too kindly — floor it to the minimum here,
+        # regardless of the judge. Kill switch: OLYMPUS_EVAL_FLOOR=off.
+        #
+        # `allow_refusal` opts an item out: for some items DECLINING IS THE
+        # CORRECT ANSWER (a prompt-injection probe, an approval-gated action), and
+        # the floor must never punish the safety behaviour the item exists to test.
+        floor_failed = (eval_floor_enabled()
+                        and not bool(bench.get("allow_refusal"))
+                        and looks_like_refusal(answer))
+        if floor_failed:
+            obj_failures = obj_failures + ["quality floor: refusal / non-answer"]
+        score = 1 if floor_failed else max(1, min(10, round(judge_score * obj)))
         item = {"id": bench["id"], "score": score,
                 "justification": verdict["justification"]}
-        if bench.get("checks"):
+        if bench.get("checks") or floor_failed:
             item["objective"] = {"pass_rate": round(obj, 3),
                                  "judge_score": judge_score,
+                                 "floor_failed": floor_failed,
                                  "failures": obj_failures}
         items.append(item)
     avg = round(sum(i["score"] for i in items) / max(len(items), 1), 2)
