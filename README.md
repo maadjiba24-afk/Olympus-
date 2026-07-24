@@ -36,7 +36,8 @@ over breadth.
 > and security logic; AI-output quality is measured separately by
 > `olympus eval` / `olympus scores`, not by `pytest`. Install with the
 > one-liner below, type `olympus`, and you're chatting; `olympus scores` shows
-> each specialist's measured quality.
+> each specialist's measured quality. To run the suite yourself, see
+> [docs/TESTING.md](docs/TESTING.md) (`./scripts/dev-setup.sh` then `pytest -q`).
 
 ## Install
 

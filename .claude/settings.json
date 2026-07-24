@@ -7,5 +7,17 @@
   "env": {
     "OLYMPUS_MODEL": "claude-opus-4-8",
     "OLYMPUS_MODELS": "[{\"provider\":\"anthropic\",\"model\":\"claude-sonnet-5\",\"api_key\":\"env:ANTHROPIC_API_KEY\"}]"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
   }
 }
