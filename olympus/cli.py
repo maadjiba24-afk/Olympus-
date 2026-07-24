@@ -407,6 +407,12 @@ def build_parser() -> argparse.ArgumentParser:
         "import-sarif", help="ingest a third-party tool's SARIF findings "
                              "(semgrep/trivy/codeql/…); Olympus runs no tool")
     p_as_imp.add_argument("file", help="path to a SARIF 2.1.0 file")
+    p_as_self = as_sub.add_parser(
+        "selfassess", help="attack YOUR OWN local app (loopback URL) to find "
+                           "its vulnerabilities: crawl + benign active validation")
+    p_as_self.add_argument("url", help="loopback URL, e.g. http://127.0.0.1:8000")
+    p_as_self.add_argument("--source", default=None,
+                           help="optional workspace path for SAST/secret/dep scans")
     as_sub.add_parser("clear", help="clear recorded findings")
 
     # --- Self-discovery (olympus/discovery.py) ---
@@ -1738,6 +1744,18 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Imported {out['imported']} finding(s) from SARIF"
                   + (f" — {out['note']}" if out.get("note") else "") + ".")
+        elif sc == "selfassess":
+            from . import selfassess as _sa
+            out = _sa.selfassess(args.url, source_path=args.source)
+            if out.get("refused"):
+                print(out["error"], file=sys.stderr)
+                return 1
+            sev = ", ".join(f"{n} {s}" for s, n in sorted(out["by_severity"].items()))
+            print(f"Self-assessment of {args.url}: phases "
+                  f"{', '.join(out['phases'])}; {out['total_findings']} "
+                  f"finding(s){' (' + sev + ')' if sev else ''}.")
+            print()
+            print(assess.export_findings("markdown"))
         elif sc == "clear":
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:

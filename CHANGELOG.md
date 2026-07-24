@@ -15,6 +15,43 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Self-assessment: Olympus attacks the app YOU built, locally
+
+When you create an app or site in Olympus and run it **locally**, Aegis can now
+attack it end-to-end to find its vulnerabilities — the DAST loop you'd run
+against your own dev server, made native. `assess_selfassess` /
+`olympus assess selfassess <loopback-url> [--source path]` drives recon +
+HTTP-header audit + a bounded same-origin **crawl** that discovers
+endpoints/parameters + the benign active-validation suite (XSS/SSTI/open-redirect/
+CRLF/CORS/SQLi-surface/error-disclosure) across everything it finds, plus optional
+SAST/secret/dependency scans of the source — producing the usual CVSS-scored,
+SARIF-exportable findings.
+
+The line that keeps this **yours, not a weapon**:
+
+- **Loopback-only, enforced in code.** The target MUST be a loopback host or it
+  is refused. The one SSRF exception — `security.allow_local_target` — can be
+  armed *only* for a loopback host (a routable/internal host raises at set time),
+  matches an exact `host:port`, is contextvar-scoped (reset on exit), and the pin
+  still requires the target to *resolve* to loopback (so a name rebinding to a
+  public IP is refused). It is **structurally incapable** of reaching a third
+  party, the operator's LAN, or a metadata endpoint.
+- **Confirmation, not weaponization.** Every check confirms a weakness with an
+  inert marker (the same benign markers as `assess_validate`) — it proves WHERE
+  the hole is without dumping data, dropping a shell, or persisting. No
+  data-exfiltration / RCE / persistence primitives are added.
+- **Bounded + audited.** The crawl is page-capped (≤40), each validation is
+  probe-capped, egress is confined to the target for the run, and every finding
+  is ledgered.
+
+New module `olympus/selfassess.py`; `assess_selfassess` tool (Aegis, INGESTION →
+wrapped untrusted; tool count 128 → 129, bound in `docs/THREAT_MODEL.md`). 18
+tests, incl. the SSRF-allowance safety invariants (routable/internal targets
+always refused, exact host:port, rebind-to-public refused, resets on exit). No
+new dependency. The dangerous residue of #16/#18 — arbitrary-target exploitation
+and open-egress raw-socket scanner boxes — stays deliberately unbuilt.
+
+
 ### Added — SARIF ingestion: absorb any third-party scanner's findings (DEFERRED #18, safe half)
 
 The safe, governed form of "integrate external scanners": Aegis can now ingest a

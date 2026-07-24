@@ -2071,6 +2071,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "list_findings": lambda: _list_findings(),
     "export_findings": lambda format="markdown": _export_findings(format),
     "assess_import_sarif": lambda source: _assess_import_sarif(source),
+    "assess_selfassess": lambda base_url, source_path="":
+        _assess_selfassess(base_url, source_path),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -3267,6 +3269,16 @@ def _assess_import_sarif(source: str) -> str:
     return _json.dumps(out, indent=2, sort_keys=True)
 
 
+def _assess_selfassess(base_url: str, source_path: str = "") -> str:
+    import json as _json
+    from . import selfassess
+    out = selfassess.selfassess(base_url, source_path=source_path or None)
+    # Keep the tool payload compact: summary + findings, not the whole crawl.
+    return _json.dumps({k: v for k, v in out.items() if k != "findings"}
+                       | {"findings": out.get("findings", [])},
+                       indent=2, sort_keys=True, default=str)
+
+
 ASSESS_SCOPE = {
     "name": "assess_scope",
     "description": (
@@ -3461,6 +3473,32 @@ ASSESS_IMPORT_SARIF = {
         "properties": {"source": {"type": "string",
                                   "description": "SARIF file path or raw SARIF JSON"}},
         "required": ["source"],
+    },
+}
+
+ASSESS_SELFASSESS = {
+    "name": "assess_selfassess",
+    "description": (
+        "Attack an app the USER built and runs LOCALLY, to find its "
+        "vulnerabilities. `base_url` MUST be a loopback URL (http://127.0.0.1:PORT "
+        "or http://localhost:PORT) — the app on this machine; any other target is "
+        "refused (that needs an explicit signed authorization via `assess run`). "
+        "Runs recon + HTTP-header audit + a bounded same-origin crawl that "
+        "discovers endpoints/parameters + benign active validation (XSS/SSTI/open-"
+        "redirect/CRLF/CORS/SQLi-surface/error-disclosure) across everything found, "
+        "plus SAST/secret/dependency scans of `source_path` when given. Confirms "
+        "WHERE the holes are with inert markers — never dumps data or drops a "
+        "shell. Findings are CVSS-scored and SARIF-exportable."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "base_url": {"type": "string",
+                         "description": "loopback URL of your local app"},
+            "source_path": {"type": "string",
+                            "description": "optional workspace path for whitebox scans"},
+        },
+        "required": ["base_url"],
     },
 }
 
@@ -4429,6 +4467,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "list_findings": LIST_FINDINGS,
     "export_findings": EXPORT_FINDINGS,
     "assess_import_sarif": ASSESS_IMPORT_SARIF,
+    "assess_selfassess": ASSESS_SELFASSESS,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

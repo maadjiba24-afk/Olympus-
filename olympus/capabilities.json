@@ -184,7 +184,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 128,
+    "count": 129,
     "names": [
       "add_todo",
       "analyze_image",
@@ -196,6 +196,7 @@
       "assess_sast",
       "assess_scope",
       "assess_secrets",
+      "assess_selfassess",
       "assess_validate",
       "browse_page",
       "browser_act",
