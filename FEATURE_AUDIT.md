@@ -56,7 +56,18 @@ Statuses: IMPLEMENTED / PARTIAL / STUB / BROKEN / UNWIRED / MISSING.
 
 ## 2. Broken / Partial detail
 
-### 2.1 BROKEN: `olympus scores` without cached scores and no API key
+### 2.1 ~~BROKEN~~ FIXED: `olympus scores` without cached scores and no API key
+
+**Fixed.** `scores` is now display-only: it reads the committed per-specialist
+baseline via `evals.load_baseline()` (a file read — `{}` if none, never a model
+call, never a raise) and, when empty, points the user to `olympus eval`. It no
+longer calls `per_specialist_scores()`, so a "show" command can neither trigger
+paid work nor crash with a raw SDK `TypeError` on a keyless install. The `scores`
+help text now says "show the saved … baseline (run `olympus eval` to compute
+fresh scores)", so help and behavior agree (resolves discrepancy §4.3). Covered by
+`tests/test_keyless_ux.py`. Original report:
+
+
 ```
 $ olympus scores
 ...
@@ -78,7 +89,18 @@ auth_token, or credentials to be set. ..."
   print the standard no-key hint, or make `scores` display-only ("no scores
   yet — run `olympus eval`").
 
-### 2.2 PARTIAL (by design, but noisy): `olympus tick` with no key
+### 2.2 ~~PARTIAL~~ FIXED: `olympus tick` with no key
+
+**Fixed.** `heartbeat.tick` computes `firstrun.configured()` once and routes every
+LLM-dependent job's failure through a shared `_job_error(label, configured)`
+helper: on a keyless install (where the provider SDK raises before any network
+call) each such job logs one quiet line — `"<job>: skipped (no provider key
+configured)"` — instead of a full traceback per job per tick, matching the replay
+self-check's existing guard. Real failures (key present) still get the full
+traceback, and non-LLM jobs (handoff/scheduler/operator/maintenance/…) are
+unchanged. Covered by `tests/test_keyless_ux.py`. Original report:
+
+
 ```
 [tick] Argus: scanning the world for opportunities...
 [tick] Argus failed:
@@ -113,7 +135,7 @@ No other BROKEN/PARTIAL surfaces were found on the tested paths.
 |---|---|---|
 | 1 | `OLYMPUS_DREAM_EVERY`, `OLYMPUS_JOB_RESUME_AFTER`, `OLYMPUS_PAIR_TTL` are read by code but documented nowhere in README/docs (only module docstrings) | Low — add to README env-var section |
 | 2 | `OLYMPUS_ROLE_FALLBACKS` and `OLYMPUS_CHANNEL_PROFILE` are documented only in `docs/OPENCLAW_TRACKING.md` (an analysis doc), not in user-facing README/docs | Low |
-| 3 | `olympus scores` help says "show per-specialist benchmark scores" but it may *run* the benchmark (cost + crash, §2.1) — help text and behavior disagree | Medium — same fix as §2.1 |
+| 3 | ~~`olympus scores` help says "show per-specialist benchmark scores" but it may *run* the benchmark~~ **RESOLVED** — `scores` is display-only and its help now says so (§2.1) | — |
 | 4 | README capability counts: **consistent** (gate green) — no discrepancy | — |
 | 5 | `docs/THREAT_MODEL.md` ↔ live tool surface: **consistent** (binding check passes) | — |
 

@@ -623,7 +623,8 @@ def build_parser() -> argparse.ArgumentParser:
                                            "Prometheus strengthen the weakest")
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
-    sub.add_parser("scores", help="show per-specialist benchmark scores")
+    sub.add_parser("scores", help="show the saved per-specialist benchmark "
+                   "baseline (run `olympus eval` to compute fresh scores)")
     p_models = sub.add_parser("models",
                               help="show the model pool and role assignments")
     p_models.add_argument("action", nargs="?", default="show",
@@ -2407,10 +2408,22 @@ def main(argv: list[str] | None = None) -> int:
               "stands. Replay always uses the recorded decisions.)")
     elif args.command == "scores":
         from . import evals
-        scores = evals.per_specialist_scores()
+        # Display-only: read the committed per-specialist baseline. A "show"
+        # command must never trigger the paid live benchmark (that is what
+        # `olympus eval` is for) nor crash on a keyless install. The previous
+        # version called per_specialist_scores(), which ran real model calls and,
+        # with no key, let a raw SDK TypeError escape as a traceback
+        # (FEATURE_AUDIT §2.1). load_baseline() only reads a file: {} if none,
+        # never a model call, never a raise.
+        scores = evals.load_baseline()
         if not scores:
-            print("No scores (benchmark unavailable — set ANTHROPIC_API_KEY).")
+            print("No saved scores yet — run `olympus eval` to run the "
+                  "benchmark and record per-specialist scores.")
         else:
+            meta = evals.load_baseline_meta()
+            note = ", ".join(str(meta[k]) for k in ("model", "date")
+                             if meta.get(k))
+            print(f"Per-specialist quality baseline{f' ({note})' if note else ''}:")
             for s, sc in sorted(scores.items(), key=lambda kv: kv[1]):
                 print(f"  {s}: {sc}/10")
     elif args.command == "contrib":
