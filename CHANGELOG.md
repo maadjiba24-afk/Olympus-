@@ -24,11 +24,17 @@ deterministic `checks`) into a real **per-domain** judge-independent grader:
   (`{value, tolerance}` — a computed answer must contain the right number),
   `parses_date`, `json_valid`, `min_words`/`max_words`, `code_block`, and
   `no_refusal`. So far more answer properties are gradeable with no model call.
-- **A universal quality FLOOR** (`OLYMPUS_EVAL_FLOOR`, on by default): every
-  benchmark answer is checked deterministically for a refusal / empty non-answer
-  and floored to the minimum score if it is one — regardless of what the judge
-  said. `looks_like_refusal()` is start-anchored and deliberately UNDER-flags, so
-  it never penalises a substantive answer (even one that quotes a refusal later).
+- **An opt-in refusal FLOOR** (`OLYMPUS_EVAL_FLOOR=1`, **off by default**): when
+  armed, an answer that is a refusal / empty non-answer is floored to the minimum
+  regardless of the judge. `looks_like_refusal()` requires a NON-answer — a
+  refusal opening *and* no substance after it — so an answer that declines and
+  then still delivers is never flagged; `"allow_refusal": true` opts an item out.
+  It ships **off** because the live quality gate proved a blanket veto wrong: for
+  a whole class of correct answers DECLINING IS THE ANSWER (Angelos's right answer
+  is habitually "I'll prepare this for your approval; I won't send it
+  automatically"), such items can't be enumerated in advance, and a veto with an
+  uncharacterised false-positive rate on the admission gate could block good work.
+  Scoped per item (`"no_refusal": true`) it keeps the value without the risk.
 - **Seeded per-domain objective checks**: 26 of the 50 built-in benchmark items
   now carry robust, domain-appropriate `checks` (dollar figures + the decisive
   concept for Plutus; real code + the key fix for Hephaestus; a parseable

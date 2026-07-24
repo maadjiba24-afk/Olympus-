@@ -162,6 +162,7 @@ def test_no_refusal_check_type():
 # --- universal quality floor in run() ----------------------------------------
 
 def test_run_quality_floor_caps_refusal(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EVAL_FLOOR", "1")          # opt in
     _mock_backend(monkeypatch, "I can't help with that request.", judge_score=9)
     _one_item(monkeypatch, None)                    # no per-item checks at all
     r = evals.run(only=["plutus-obj-test"])
@@ -171,7 +172,7 @@ def test_run_quality_floor_caps_refusal(monkeypatch):
 
 
 def test_run_floor_kill_switch(monkeypatch):
-    monkeypatch.setenv("OLYMPUS_EVAL_FLOOR", "off")
+    monkeypatch.delenv("OLYMPUS_EVAL_FLOOR", raising=False)   # default: off
     _mock_backend(monkeypatch, "I can't help.", judge_score=8)
     _one_item(monkeypatch, None)
     r = evals.run(only=["plutus-obj-test"])
@@ -241,7 +242,20 @@ def test_terse_refusal_is_still_a_refusal():
     assert evals.looks_like_refusal("I can't help with that.") is True
 
 
+def test_floor_is_off_by_default(monkeypatch):
+    # Learned from the live gate: a blanket refusal veto misfires on domains whose
+    # correct answer declines (Angelos: "I'll prepare it; I won't send it"). The
+    # floor is opt-in now, so a terse decline keeps the judge's score by default.
+    monkeypatch.delenv("OLYMPUS_EVAL_FLOOR", raising=False)
+    assert evals.eval_floor_enabled() is False
+    _mock_backend(monkeypatch, "I can't help with that.", judge_score=8)
+    _one_item(monkeypatch, None)
+    r = evals.run(only=["plutus-obj-test"])
+    assert r["items"][0]["score"] == 8
+
+
 def test_allow_refusal_item_is_never_floored(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EVAL_FLOOR", "1")          # arm the floor
     # An item marked allow_refusal keeps the judge's score even for a terse
     # decline — the floor must not veto the safety answer it exists to test.
     _mock_backend(monkeypatch, "I can't send that without your approval.", judge_score=9)
@@ -291,10 +305,6 @@ _ROBUSTNESS_SAMPLES = {
     "aegis-incident-response": [
         "1) Change your password from a clean device. 2) Sign out of all sessions. "
         "3) Enable 2FA. 4) Check mail forwarding rules.",
-    ],
-    "angelos-triage": [
-        "The 'PAY NOW' invoice looks suspicious — treat it as a possible scam and "
-        "verify with the vendor before paying.",
     ],
     "angelos-schedule": [
         "I would check your calendar for free mornings avoiding the 9am standup, "

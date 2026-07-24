@@ -218,12 +218,25 @@ _DATE_RE = re.compile(
 
 
 def eval_floor_enabled() -> bool:
-    """The universal quality floor (no refusal / non-answer) is ON by default —
-    a refusal to a benchmark task is always a regression, so this never penalises
-    a good answer. OLYMPUS_EVAL_FLOOR=off is the kill switch."""
+    """The blanket refusal floor is OPT-IN (`OLYMPUS_EVAL_FLOOR=1`), OFF by default.
+
+    It shipped on-by-default and the live quality gate proved that wrong: for a
+    whole class of correct answers, DECLINING IS THE ANSWER. Angelos (inbox and
+    calendar) is the clearest case — its right answer is habitually "I'll prepare
+    this for your approval; I won't send it automatically" — and a global veto
+    scored those as non-answers, costing the domain 2 full points against its
+    baseline. Those items cannot be reliably enumerated in advance (auto-generated
+    items included), so a blanket veto has an uncharacterised false-positive rate
+    on the very gate that admits improvements — it could block good work forever.
+
+    The capability is kept, correctly scoped: per-item `"no_refusal": true` opts a
+    specific item in (where a refusal genuinely is a failure), and the per-item
+    `"allow_refusal": true` opt-out still applies when the blanket floor is armed.
+    A veto must have a near-zero false-positive rate; scoping it per item is how
+    that is achieved."""
     import os
-    return os.environ.get("OLYMPUS_EVAL_FLOOR", "on").strip().lower() not in (
-        "0", "off", "false", "no")
+    return os.environ.get("OLYMPUS_EVAL_FLOOR", "").strip().lower() in (
+        "1", "on", "true", "yes")
 
 
 # A genuine refusal is a NON-ANSWER: it declines and delivers nothing. An answer
