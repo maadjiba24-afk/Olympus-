@@ -126,3 +126,13 @@ def test_selfassess_grants_scope_for_the_local_target(monkeypatch):
     monkeypatch.setattr(tools, "_http_probe", _vuln_app_probe())
     selfassess.selfassess("http://127.0.0.1:8000/")
     assert assess.in_scope("127.0.0.1") is True       # auto-authorized the app
+
+
+def test_crawl_stays_same_origin_including_port():
+    # A crafted link to ANOTHER local port is not same-origin → not crawled
+    # (and the allowance would refuse it anyway). Host+port must both match.
+    base = "http://127.0.0.1:8000/"
+    assert selfassess._same_origin("http://127.0.0.1:8000/x", base) is True
+    assert selfassess._same_origin("http://127.0.0.1:9999/x", base) is False
+    assert selfassess._same_origin("http://localhost:8000/x", base) is False
+    assert selfassess._same_origin("https://127.0.0.1:8000/x", base) is False

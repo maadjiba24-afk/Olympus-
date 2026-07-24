@@ -36,7 +36,6 @@ from . import assess, security
 # Bounds — a self-assessment is thorough but never unbounded.
 _MAX_PAGES = 40                 # pages fetched during the discovery crawl
 _MAX_VALIDATE = 60              # distinct param-bearing URLs actively validated
-_CRAWL_TIMEOUT = 8             # per-page fetch timeout (seconds)
 
 _LOCAL_ONLY = (
     "self-assessment targets YOUR OWN app running locally "
@@ -60,16 +59,37 @@ def is_local_target(url: str) -> bool:
             and security._host_is_loopback(p.hostname or ""))
 
 
-def _same_host(a: str, b: str) -> bool:
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """(scheme, host, port) or None if unparseable."""
     try:
-        return (urlparse(a).hostname or "").lower() == (urlparse(b).hostname or "").lower()
+        p = urlparse(url)
     except ValueError:
-        return False
+        return None
+    host = (p.hostname or "").lower()
+    if not host:
+        return None
+    scheme = p.scheme.lower()
+    try:
+        port = p.port or (443 if scheme == "https" else 80)
+    except ValueError:                          # malformed port
+        return None
+    return (scheme, host, port)
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """Strict same-origin: scheme + host + PORT. Comparing the port too keeps the
+    crawl on the exact app under test and refuses a crafted link that would make
+    the crawler probe another local port (the allowance blocks it anyway)."""
+    oa, ob = _origin(a), _origin(b)
+    return oa is not None and oa == ob
 
 
 def _strip_fragment(url: str) -> str:
-    p = urlparse(url)
-    return urlunparse(p._replace(fragment=""))
+    try:
+        p = urlparse(url)
+        return urlunparse(p._replace(fragment=""))
+    except ValueError:
+        return url
 
 
 def _discover(base_url: str, max_pages: int) -> list[str]:
@@ -91,7 +111,7 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
 
     while queue and len(seen) < max_pages:
         url = queue.pop(0)
-        if url in seen or not _same_host(url, base_url):
+        if url in seen or not _same_origin(url, base_url):
             continue
         seen.add(url)
         _remember_params(url)
@@ -108,7 +128,7 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
             if raw.lower().startswith(("mailto:", "javascript:", "tel:", "data:")):
                 continue
             nxt = _strip_fragment(urljoin(url, raw))
-            if _same_host(nxt, base_url):
+            if _same_origin(nxt, base_url):
                 _remember_params(nxt)
                 if nxt not in seen and len(seen) + len(queue) < max_pages * 2:
                     queue.append(nxt)
@@ -119,7 +139,7 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
                 continue
             m = _ACTION_RE.search(form)
             action = urljoin(url, m.group(1)) if (m and m.group(1)) else url
-            if not _same_host(action, base_url):
+            if not _same_origin(action, base_url):
                 continue
             fields = list(dict.fromkeys(names))[:8]      # de-dup, cap
             q = "&".join(f"{n}=test" for n in fields)
