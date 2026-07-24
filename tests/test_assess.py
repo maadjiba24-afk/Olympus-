@@ -527,7 +527,8 @@ def test_cors_safe_when_origin_not_reflected(monkeypatch):
 def test_active_check_registry_has_breadth():
     # The self-evolving moat compounds: new benign checks joined the registry.
     assert set(assess.active_check_names()) >= {
-        "reflection", "open_redirect", "ssti", "header_injection", "cors"}
+        "reflection", "open_redirect", "ssti", "header_injection", "cors",
+        "sql_error", "error_disclosure"}
 
 
 def test_new_active_checks_are_benign_and_contained():
@@ -555,6 +556,65 @@ def test_validate_ignores_safe_redirect(monkeypatch):
     assess.grant(["app.example"], expires_in=3600)
     monkeypatch.setattr(tools, "_http_probe", _redirect_probe("safe_redirect"))
     assert assess.validate("https://app.example/go?next=/home")["count"] == 0
+
+
+# --- SQL-injection surface + verbose-error disclosure (both benign) ----------
+
+def _error_body_probe(body: str):
+    """Fake probe returning a fixed body for the single-quote error probes."""
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        return {"status": 500, "headers": {}, "body": body, "url": url}
+    return _probe
+
+
+def test_validate_confirms_sql_injection_surface(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _error_body_probe(
+        "Warning: You have an error in your SQL syntax near \"'\" at line 1"))
+    r = assess.validate("https://app.example/item?id=1")
+    sqli = [f for f in r["findings"] if f["cwe"] == "CWE-89"]
+    # severity is derived from the CVSS vector (9.8 = critical for SQLi)
+    assert len(sqli) == 1 and sqli[0]["severity"] == "critical"
+    assert sqli[0]["source"] == "active_validation"
+
+
+def test_validate_confirms_verbose_error_disclosure(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _error_body_probe(
+        "Traceback (most recent call last):\n  File app.py line 10\nKeyError"))
+    r = assess.validate("https://app.example/item?id=1")
+    disc = [f for f in r["findings"] if f["cwe"] == "CWE-209"]
+    assert len(disc) == 1 and disc[0]["severity"] == "medium"
+
+
+def test_error_checks_safe_on_clean_response(monkeypatch):
+    # A normal 200 with no error signatures must never flag SQLi or disclosure.
+    assess.grant(["app.example"], expires_in=3600)
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        return {"status": 200, "headers": {}, "body": "<p>results for you</p>",
+                "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    r = assess.validate("https://app.example/item?id=1")
+    assert [f for f in r["findings"] if f["cwe"] in ("CWE-89", "CWE-209")] == []
+
+
+def test_sql_probe_is_a_single_benign_quote(monkeypatch):
+    # The SQL/disclosure probes must send exactly ONE trailing quote (an inert
+    # boundary char) — never a UNION, comment, or stacked-query payload.
+    assess.grant(["app.example"], expires_in=3600)
+    seen = []
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        from urllib.parse import parse_qsl, urlparse
+        seen.extend(v for _, v in parse_qsl(urlparse(url).query))
+        return {"status": 200, "headers": {}, "body": "ok", "url": url}
+    monkeypatch.setattr(tools, "_http_probe", _probe)
+    assess.validate("https://app.example/item?id=1")
+    quoted = [v for v in seen if v.endswith("'")]
+    assert quoted                                   # the quote probe ran
+    for v in quoted:
+        assert v.count("'") == 1                    # exactly one quote, nothing more
+        for bad in ("union", "select", "--", "/*", ";", " or "):
+            assert bad not in v.lower()             # never an exploit payload
 
 
 def test_open_redirect_probe_does_not_follow(monkeypatch):

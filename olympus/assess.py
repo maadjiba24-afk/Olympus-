@@ -1489,6 +1489,97 @@ def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
     return None, "Origin not reflected (safe)"
 
 
+# High-precision, DB-specific SQL parse-error signatures. Matching one of these
+# proves the value crossed into a query context unescaped — the SQL-injection
+# SURFACE — without ever extracting a row. Kept specific (engine + "syntax"/
+# quote wording) so a page that merely contains the word "sql" never matches.
+_SQL_ERROR_SIGNATURES: tuple[str, ...] = (
+    "you have an error in your sql syntax",          # MySQL / MariaDB
+    "warning: mysqli", "warning: mysql_", "mysql_fetch",
+    "unclosed quotation mark after the character string",  # MSSQL
+    "incorrect syntax near",                         # MSSQL
+    "quoted string not properly terminated",         # Oracle
+    "ora-00933", "ora-01756", "ora-00920",           # Oracle
+    "syntax error at or near",                       # PostgreSQL
+    "pg::syntaxerror", "psycopg2.errors",            # PostgreSQL drivers
+    "sqlite3.operationalerror", "sqlitesyntaxerror", "near \"'\": syntax error",
+    "sqlstate[",                                     # PDO / JDBC
+    "odbc sql server driver",
+)
+
+# Framework verbose-error / interactive-debugger signatures (CWE-209). These
+# mean the app leaked its internals — stack frames, source, or a live debugger.
+_ERROR_DISCLOSURE_SIGNATURES: tuple[str, ...] = (
+    "traceback (most recent call last)",             # Python
+    "werkzeug/debugger", "werkzeug.debug", "the console is locked",  # Flask
+    "you're seeing this error because you have debug = true",        # Django
+    "django.core.exceptions", "exception value:",    # Django
+    "at com.", "at org.", "javax.servlet",           # Java stack frames
+    "system.web.httpexception", "asp.net is configured to show",     # ASP.NET
+    "microsoft ole db provider",
+    "fatal error:", "stack trace:",                  # PHP / generic
+    "actioncontroller::", "rails.application",        # Rails
+)
+
+
+def _error_probe(url: str, name: str) -> tuple[str, int | None]:
+    """Send `name`'s value with ONE trailing single-quote (an inert boundary
+    char, like the reflection check's `<">`) and return (lower-cased body,
+    status). A quote is the minimal, non-destructive probe that surfaces a
+    string-context parse error: it can only cause a SELECT-side syntax error
+    (read path), never completes a write, and extracts nothing. Raises
+    ValueError if the fetch is blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    payload = f"{_CANARY}{tok}'"                       # canary marker + one quote
+    probe = tools._http_probe(_set_param(url, name, payload))
+    return (probe.get("body", "") or "").lower(), probe.get("status")
+
+
+def _sql_error_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Confirm a SQL-injection SURFACE by DETECTION only: a single benign quote,
+    then match a DB-specific parse-error signature. No UNION, no boolean/time
+    extraction, no data pulled — this proves the parameter reaches a query
+    unescaped, nothing more. Raises ValueError if blocked (scope/SSRF)."""
+    body, _ = _error_probe(url, name)
+    hit = next((s for s in _SQL_ERROR_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no SQL error signature (safe)"
+    finding = Finding(
+        title="SQL injection surface (database parse error on a benign quote)",
+        severity="critical", cwe="CWE-89",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        location=f"{url} [param: {name}]",
+        evidence=f"DB parse error surfaced by a single quote: '…{hit}…'",
+        remediation="Use parameterized queries / prepared statements; never "
+                    "build SQL by string concatenation. Disable verbose DB "
+                    "errors in production.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': SQL injection surface CONFIRMED (error-based)"
+
+
+def _error_disclosure_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Detect verbose-error / stack-trace disclosure (CWE-209): the same inert
+    boundary quote, then match a framework stack-trace or interactive-debugger
+    signature in the response. Purely observational — it reads what the app
+    volunteered about its internals. Raises ValueError if blocked."""
+    body, status = _error_probe(url, name)
+    hit = next((s for s in _ERROR_DISCLOSURE_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no verbose-error disclosure (safe)"
+    finding = Finding(
+        title="Verbose error / stack-trace disclosure",
+        severity="medium", cwe="CWE-209",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        location=f"{url} [param: {name}]",
+        evidence=f"internal error detail leaked (status {status}): '…{hit}…'",
+        remediation="Return generic error pages to clients; log details "
+                    "server-side only. Disable debug mode and framework "
+                    "interactive debuggers in production.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': verbose-error disclosure CONFIRMED"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
@@ -1497,6 +1588,8 @@ _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("ssti", _ssti_check),
     ("header_injection", _header_injection_check),
     ("cors", _cors_check),
+    ("sql_error", _sql_error_check),
+    ("error_disclosure", _error_disclosure_check),
 )
 
 
@@ -1997,10 +2090,13 @@ def containment(user: str | None = None) -> list[dict]:
 
     # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
     # Every registered check must be on the benign allowlist: each sends an inert
-    # marker (canary / arithmetic / reserved .invalid host) to an operator-named
-    # parameter — never a working exploit, shell, or destructive input.
+    # marker (canary / arithmetic / reserved .invalid host) or a single benign
+    # boundary character to an operator-named parameter — never a working exploit,
+    # shell, spray, or destructive input. The error-based checks confirm a
+    # SURFACE (a parse error / leaked stack trace); they extract no data.
     _BENIGN_CHECKS = frozenset({
-        "reflection", "open_redirect", "ssti", "header_injection", "cors"})
+        "reflection", "open_redirect", "ssti", "header_injection", "cors",
+        "sql_error", "error_disclosure"})
     benign = _MAX_ACTIVE_PROBES <= 50 and all(
         c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
     checks.append(_check(
