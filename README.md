@@ -737,7 +737,11 @@ anything to do with Olympus charging you (it never does; you bring your own key)
   spend reaches $5, instead of silently running your bill up. Spending money is
   itself irreversible, so the same principle that gates sending an email gates
   spending a dollar. The browser action panel shows today's spend against the
-  cap, and turns amber when it's reached.
+  cap, and turns amber when it's reached. Set **`OLYMPUS_RUN_BUDGET_USD`** to
+  also cap a *single* council run: once one question's own fan-out adds that
+  many dollars, Olympus stops dispatching further specialists (degrading each
+  gracefully, so you still get the work already done) — so one pathological run
+  can't drain the whole daily budget. `0` (the default) means no per-run cap.
 - **Action rate limits.** A daily cap on how many times each action type may
   actually *execute*, so even fast-clicked approvals (or an injected agent)
   can't flood your contacts. Irreversible actions default to a generous runaway

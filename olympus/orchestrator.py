@@ -1018,6 +1018,25 @@ class Olympus:
         method safely across the dispatch ThreadPoolExecutor.
         """
         memory.set_user(self.user)  # worker threads get their own context
+        # Per-run spend ceiling (OLYMPUS_RUN_BUDGET_USD): stop dispatching NEW
+        # specialists once this single run has added its per-run budget, so one
+        # pathological fan-out can't drain the whole daily budget. The baseline
+        # is snapshotted on the first specialist of the run (so its own delta is
+        # the run's spend); the check is a soft "stop starting" line like the
+        # daily guard. Gated OFF during replay: a replayed run must re-dispatch
+        # exactly what it recorded — a live-spend STOP would diverge it.
+        if not replaystore.replaying():
+            baseline = tr.meta.setdefault("budget_baseline", usage.today_spend())
+            over = usage.run_over_budget(baseline)
+            if over is not None:
+                tr.event("run.budget_stopped", specialist=key,
+                         over_usd=round(over, 4), limit=usage.run_budget())
+                self.report(
+                    f"💸 Per-run budget reached (${usage.run_budget():.2f}); "
+                    f"skipping {SPECIALISTS[key].name} to protect your bill.")
+                return (f"[Skipped {SPECIALISTS[key].name} — this run reached its "
+                        f"per-run spend ceiling. Treat this part as missing and "
+                        f"answer from the other specialists.]")
         # Publish the run's Trace for this worker thread so deep actuators (the
         # egress gateway, called inside the specialist's tool loop) can record
         # into the current run's signed log without threading `tr` through the

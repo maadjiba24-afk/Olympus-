@@ -15,6 +15,27 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Per-run spend ceiling (`OLYMPUS_RUN_BUDGET_USD`)
+
+A second spend guard alongside the daily budget. The daily budget is a
+floor-of-the-day line checked at run entry; this caps a **single** council run.
+Once one question's own fan-out adds `OLYMPUS_RUN_BUDGET_USD` dollars, the
+orchestrator stops dispatching further specialists — so one pathological or
+prompt-injected run can't drain the whole daily budget.
+
+- **Enforced at the single funnel** (`orchestrator._run_one`): the run snapshots
+  its spend baseline on its first specialist, and each subsequent specialist is
+  gated on the run's own delta. Over the ceiling → that specialist degrades to
+  the same typed "treat this part as missing" placeholder the failure-isolation
+  path already returns, so verify/synthesis still complete on the work done.
+- **Replay-safe.** Gated OFF under `OLYMPUS_REPLAY`: a replayed run must
+  re-dispatch exactly what it recorded, so a live-spend STOP never diverges it.
+  The first specialist of a run is never starved (its own delta is 0).
+- `0` (the default) means no per-run cap; the daily budget is unchanged. New
+  `config.run_budget_usd()` / `usage.run_budget()` / `usage.run_over_budget()`;
+  7 tests (`tests/test_run_budget.py`).
+
+
 ### Added — Opt-in HTTP capture / replay store (the safe Caido form)
 
 A new observability primitive: when `OLYMPUS_HTTP_CAPTURE=1`, every governed

@@ -685,6 +685,18 @@ MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
 # runtime with `olympus budget <amount>`, which takes precedence.
 DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET", "0") or 0)
 
+
+# Per-run spend ceiling: max estimated USD a SINGLE council run may add before
+# the fan-out stops dispatching new specialists (0 = no cap, the default). The
+# daily budget is a floor-of-the-day guard; this is the "no single question runs
+# away" guard, so one pathological fan-out can't drain the whole daily budget.
+# Read live (not frozen at import) so replay_run can restore the recorded value.
+def run_budget_usd() -> float:
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_RUN_BUDGET_USD", "0") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
 # Heartbeat cadence (seconds).
 HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
