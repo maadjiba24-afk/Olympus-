@@ -107,3 +107,105 @@ def test_run_no_checks_is_unchanged(monkeypatch):
     r = evals.run(only=["plutus-obj-test"])
     assert r["items"][0]["score"] == 7
     assert "objective" not in r["items"][0]
+
+
+# --- richer objective check types --------------------------------------------
+
+def test_numeric_within_and_outside_tolerance():
+    assert evals.objective_score("the payment is $1,432.86/mo",
+                                 {"numeric": {"value": 1432.86, "tolerance": 0.5}})[0] == 1.0
+    assert evals.objective_score("about 1500",
+                                 {"numeric": {"value": 1432.86, "tolerance": 0.5}})[0] == 0.0
+    # malformed numeric block fails that check (no crash)
+    assert evals.objective_score("x", {"numeric": {"value": "NaNish"}})[0] == 0.0
+
+
+def test_parses_date():
+    for good in ("your appointment is 2026-03-14", "let's meet on 3/14/2026",
+                 "how about Mar 14", "the 14 Mar deadline"):
+        assert evals.objective_score(good, {"parses_date": True})[0] == 1.0
+    assert evals.objective_score("no date at all here", {"parses_date": True})[0] == 0.0
+
+
+def test_json_valid():
+    assert evals.objective_score('```json\n{"a": 1}\n```', {"json_valid": True})[0] == 1.0
+    assert evals.objective_score('result: [1, 2, 3] done', {"json_valid": True})[0] == 1.0
+    assert evals.objective_score("not json {oops", {"json_valid": True})[0] == 0.0
+
+
+def test_word_bounds_and_code_block():
+    assert evals.objective_score("one two three four five", {"min_words": 3})[0] == 1.0
+    assert evals.objective_score("too short", {"min_words": 5})[0] == 0.0
+    assert evals.objective_score("```py\nx=1\n```", {"code_block": True})[0] == 1.0
+    assert evals.objective_score("no code here", {"code_block": True})[0] == 0.0
+
+
+# --- refusal detection (robust, start-anchored) ------------------------------
+
+def test_looks_like_refusal():
+    assert evals.looks_like_refusal("I can't help with that.") is True
+    assert evals.looks_like_refusal("   ") is True                 # empty non-answer
+    assert evals.looks_like_refusal("As an AI language model, I ...") is True
+    # a substantive answer that merely QUOTES a refusal later is NOT a refusal
+    body = ("Here's how the API behaves: on an unauthorized call it returns the "
+            "string 'I cannot assist'. You should handle that by ...")
+    assert evals.looks_like_refusal(body) is False
+
+
+def test_no_refusal_check_type():
+    assert evals.objective_score("Sure — here is the plan: step 1 ...",
+                                 {"no_refusal": True})[0] == 1.0
+    assert evals.objective_score("I'm unable to help with that.",
+                                 {"no_refusal": True})[0] == 0.0
+
+
+# --- universal quality floor in run() ----------------------------------------
+
+def test_run_quality_floor_caps_refusal(monkeypatch):
+    _mock_backend(monkeypatch, "I can't help with that request.", judge_score=9)
+    _one_item(monkeypatch, None)                    # no per-item checks at all
+    r = evals.run(only=["plutus-obj-test"])
+    it = r["items"][0]
+    assert it["score"] == 1                          # floored, judge ignored
+    assert it["objective"]["floor_failed"] is True
+
+
+def test_run_floor_kill_switch(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EVAL_FLOOR", "off")
+    _mock_backend(monkeypatch, "I can't help.", judge_score=8)
+    _one_item(monkeypatch, None)
+    r = evals.run(only=["plutus-obj-test"])
+    assert r["items"][0]["score"] == 8              # floor disabled → judge stands
+
+
+def test_run_floor_leaves_good_answers_untouched(monkeypatch):
+    _mock_backend(monkeypatch, "Here is a thorough, correct answer.", judge_score=7)
+    _one_item(monkeypatch, None)
+    r = evals.run(only=["plutus-obj-test"])
+    assert r["items"][0]["score"] == 7              # not a refusal → unchanged
+    assert "objective" not in r["items"][0]
+
+
+# --- built-in corpus: per-domain objective coverage --------------------------
+
+def test_builtin_benchmarks_have_per_domain_objective_coverage():
+    # Every user-facing specialist domain has at least one objectively-graded
+    # item, so the gate is partly judge-independent for every domain.
+    items = evals.load_benchmarks()
+    with_checks = {i["specialist"] for i in items if i.get("checks")}
+    missing = [sp for sp in evals.USER_FACING if sp not in with_checks]
+    assert not missing, f"domains without objective checks: {missing}"
+
+
+def test_builtin_benchmark_checks_are_valid():
+    import re as _re
+    known = {"contains", "not_contains", "regex", "min_chars", "max_chars",
+             "min_words", "max_words", "numeric", "parses_date", "json_valid",
+             "code_block", "no_refusal"}
+    for i in evals.load_benchmarks():
+        ch = i.get("checks")
+        if not ch:
+            continue
+        assert set(ch) <= known, (i["id"], set(ch) - known)   # only known keys
+        for pat in (ch.get("regex") or []):
+            _re.compile(pat)                                    # every regex compiles

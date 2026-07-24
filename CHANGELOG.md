@@ -15,6 +15,34 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Objective per-domain benchmarks: the self-improvement gate goes judge-independent
+
+Extends the objective-assertion layer (which already caps the LLM judge with
+deterministic `checks`) into a real **per-domain** judge-independent grader:
+
+- **Richer objective check types** in `evals.objective_score()`: `numeric`
+  (`{value, tolerance}` — a computed answer must contain the right number),
+  `parses_date`, `json_valid`, `min_words`/`max_words`, `code_block`, and
+  `no_refusal`. So far more answer properties are gradeable with no model call.
+- **A universal quality FLOOR** (`OLYMPUS_EVAL_FLOOR`, on by default): every
+  benchmark answer is checked deterministically for a refusal / empty non-answer
+  and floored to the minimum score if it is one — regardless of what the judge
+  said. `looks_like_refusal()` is start-anchored and deliberately UNDER-flags, so
+  it never penalises a substantive answer (even one that quotes a refusal later).
+- **Seeded per-domain objective checks**: 26 of the 50 built-in benchmark items
+  now carry robust, domain-appropriate `checks` (dollar figures + the decisive
+  concept for Plutus; real code + the key fix for Hephaestus; a parseable
+  timetable for Chronos; password-manager/2FA for Aegis; the anti-cliché for
+  Peitho cold email; scam-suspicion for Angelos triage; …). **Every** user-facing
+  domain now has at least one objectively-graded item — a meta-test enforces
+  that coverage and that every seeded check is well-formed.
+
+Each seeded check is a property a *correct* answer already satisfies, so a good
+answer scores unchanged (obj=1.0) and only a regression is penalised — backward
+compatible with the committed baseline. This is the substantive close of the
+judge-noise half of DEFERRED #1. 12 new tests.
+
+
 ### Added — Find → fix: governed patch proposals for recorded findings
 
 Closes the assessment loop: after Aegis FINDS a weakness, `assess_propose_fix` /
