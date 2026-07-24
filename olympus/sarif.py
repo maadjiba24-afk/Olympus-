@@ -11,7 +11,10 @@ of that contract, used by `olympus/assess.py`:
     from a vector, not asserted by a model.
   * **SARIF 2.1.0** output (`github/codeql-action/upload-sarif`-compatible),
     keyed on CWE, so an Olympus assessment drops straight into GitHub
-    code-scanning — the same CI surface Strix targets.
+    code-scanning — the same CI surface Strix targets. Rules carry the
+    `security-severity` GitHub ranks on (from the CVSS score), `security` +
+    `external/cwe/cwe-N` tags, and a MITRE `helpUri`; each result carries a
+    `partialFingerprints` so a consumer tracks the SAME finding across commits.
 
 No external dependency: Strix pulls the `cvss` library and a reporting stack;
 Olympus keeps its three-dep footprint. Everything here is pure arithmetic and
@@ -149,6 +152,12 @@ def _sarif_level(severity: str) -> str:
     return _SARIF_LEVEL.get((severity or "").strip().lower(), "warning")
 
 
+def _cwe_number(cwe: Any) -> str | None:
+    """The bare numeric id from a `CWE-89` string (or None), for helpUri + tags."""
+    m = _CWE_RE.search(str(cwe or ""))
+    return m.group(1) if m else None
+
+
 def _rule_id(finding: dict) -> str:
     cwe = str(finding.get("cwe") or "").strip()
     m = _CWE_RE.search(cwe)
@@ -168,20 +177,36 @@ def to_sarif(findings: list[dict], *, tool_name: str = "Olympus Aegis",
     results: list[dict] = []
     for f in findings:
         rid = _rule_id(f)
-        if rid not in rules:
-            rules[rid] = {
-                "id": rid,
-                "name": str(f.get("cwe") or f.get("title") or rid),
-                "shortDescription": {"text": str(f.get("title", rid))[:200]},
-                "defaultConfiguration": {"level": _sarif_level(f.get("severity", ""))},
-            }
-            help_text = str(f.get("remediation") or "").strip()
-            if help_text:
-                rules[rid]["help"] = {"text": help_text[:2000]}
         score, sev = score_or_none(f.get("cvss_vector"))
         if score is None:
             score = f.get("cvss_score")
             sev = f.get("severity")
+        if rid not in rules:
+            cwe_num = _cwe_number(f.get("cwe"))
+            # tags: GitHub code scanning filters on these; "external/cwe/cwe-N" is
+            # its documented convention for CWE linkage.
+            tags = ["security"]
+            if cwe_num:
+                tags.append(f"external/cwe/cwe-{cwe_num}")
+            rule: dict[str, Any] = {
+                "id": rid,
+                "name": str(f.get("cwe") or f.get("title") or rid),
+                "shortDescription": {"text": str(f.get("title", rid))[:200]},
+                "defaultConfiguration": {"level": _sarif_level(f.get("severity", ""))},
+                "properties": {"tags": tags},
+            }
+            # security-severity: the numeric string GitHub code scanning reads to
+            # rank a rule (it does NOT parse a CVSS vector). Emit the finding's
+            # own CVSS base score so the ecosystem severity matches ours.
+            if score is not None:
+                rule["properties"]["security-severity"] = f"{float(score):.1f}"
+            if cwe_num:
+                rule["helpUri"] = \
+                    f"https://cwe.mitre.org/data/definitions/{cwe_num}.html"
+            help_text = str(f.get("remediation") or "").strip()
+            if help_text:
+                rule["help"] = {"text": help_text[:2000]}
+            rules[rid] = rule
         loc = str(f.get("location") or "").strip()
         result: dict[str, Any] = {
             "ruleId": rid,
@@ -195,6 +220,12 @@ def to_sarif(findings: list[dict], *, tool_name: str = "Olympus Aegis",
                 "confidence": str(f.get("confidence") or ""),
             },
         }
+        # partialFingerprints: stable result identity across runs, so a SARIF
+        # consumer (e.g. GitHub code scanning) tracks the SAME finding across
+        # commits instead of re-opening it. Uses the finding's own fingerprint.
+        fp = str(f.get("id") or "").strip()
+        if fp:
+            result["partialFingerprints"] = {"olympusFingerprint/v1": fp}
         if loc:
             artifact = loc.split(":", 1)[0]
             region = None

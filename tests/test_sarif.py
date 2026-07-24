@@ -97,3 +97,38 @@ def test_sarif_json_is_deterministic():
     b = sarif.to_sarif_json([_finding()])
     assert a == b
     json.loads(a)                                        # valid JSON
+
+
+# --- extended finding contract (GitHub code-scanning interop) ---------------
+
+def test_sarif_rule_has_security_severity_and_cwe_taxonomy():
+    rule = sarif.to_sarif([_finding()])["runs"][0]["tool"]["driver"]["rules"][0]
+    # security-severity: the numeric string GitHub ranks on (matches our CVSS)
+    assert rule["properties"]["security-severity"] == "9.8"
+    # CWE linkage: tags in GitHub's documented convention + a MITRE helpUri
+    assert "security" in rule["properties"]["tags"]
+    assert "external/cwe/cwe-89" in rule["properties"]["tags"]
+    assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/89.html"
+
+
+def test_sarif_result_has_partial_fingerprint():
+    f = _finding(id="abc123def456")
+    res = sarif.to_sarif([f])["runs"][0]["results"][0]
+    assert res["partialFingerprints"]["olympusFingerprint/v1"] == "abc123def456"
+
+
+def test_sarif_no_cwe_omits_taxonomy_but_keeps_security_tag():
+    rule = sarif.to_sarif([_finding(cwe="")])["runs"][0]["tool"]["driver"]["rules"][0]
+    assert rule["properties"]["tags"] == ["security"]     # no cwe tag
+    assert "helpUri" not in rule                          # no MITRE link
+    # security-severity still emitted from the CVSS vector
+    assert rule["properties"]["security-severity"] == "9.8"
+
+
+def test_sarif_missing_vector_omits_security_severity():
+    # A finding with no vector and no score: no security-severity to assert.
+    f = {"title": "Info leak", "severity": "low", "cwe": "CWE-200",
+         "location": "x.py:1"}
+    rule = sarif.to_sarif([f])["runs"][0]["tool"]["driver"]["rules"][0]
+    assert "security-severity" not in rule["properties"]
+    assert "external/cwe/cwe-200" in rule["properties"]["tags"]
