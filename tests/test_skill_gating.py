@@ -53,9 +53,9 @@ def test_hide_unhide_excludes_from_index():
 
 def test_gate_promotes_when_score_holds(monkeypatch):
     skills.create("Helpful", "x", "y", specialist="plutus", provisional=True)
-    # with-provisional run scores higher than without
-    seq = iter([{"avg": 8.0, "items": []}, {"avg": 7.0, "items": []}])
-    monkeypatch.setattr(evals, "run", lambda settings, only=None: next(seq))
+    # A state-aware scorer (robust to the confirmation trial): visible → higher.
+    monkeypatch.setattr(evals, "run", lambda settings, only=None: {
+        "avg": 8.0 if "Helpful" in skills.index() else 7.0, "items": []})
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     msg = orchestrator.gate_skills()
     assert "Promoted" in msg
@@ -72,6 +72,52 @@ def test_gate_reverts_when_score_regresses(monkeypatch):
     msg = orchestrator.gate_skills()
     assert "Reverted" in msg
     assert skills.count() == 0                       # harmful skill removed
+
+
+def test_gate_reverts_sub_margin_improvement(monkeypatch):
+    # A tiny improvement below the margin is judge noise, not value → revert.
+    skills.create("Marginal", "x", "y", specialist="plutus", provisional=True)
+    monkeypatch.setenv("OLYMPUS_GATE_MARGIN", "0.5")
+    monkeypatch.setattr(evals, "run", lambda settings, only=None: {
+        "avg": 7.1 if "Marginal" in skills.index() else 7.0, "items": []})  # +0.1
+    monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
+    msg = orchestrator.gate_skills()
+    assert "Reverted" in msg
+    assert skills.count() == 0                       # sub-margin bump removed
+
+
+def test_gate_reverts_when_improvement_does_not_reproduce(monkeypatch):
+    # Promising on the first trial, but the gain vanishes on the confirmation
+    # trial → not admitted (noise, not a real improvement).
+    skills.create("Flaky", "x", "y", specialist="plutus", provisional=True)
+    monkeypatch.setenv("OLYMPUS_GATE_CONFIRM", "on")
+    trials = {"n": 0}
+    def scorer(settings, only=None):
+        # First trial: visible scores +1. Second trial: visible scores a tie.
+        visible = "Flaky" in skills.index()
+        # each _trial does after(visible) then before(hidden); count on `after`
+        if visible:
+            trials["n"] += 1
+        first_trial = trials["n"] <= 1
+        return {"avg": (8.0 if first_trial else 7.0) if visible else 7.0,
+                "items": []}
+    monkeypatch.setattr(evals, "run", scorer)
+    monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
+    msg = orchestrator.gate_skills()
+    assert "did not reproduce" in msg
+    assert skills.count() == 0                       # not admitted
+
+
+def test_gate_confirm_kill_switch_restores_single_trial(monkeypatch):
+    # With confirmation OFF, a single promising trial promotes (old behavior).
+    skills.create("Quick", "x", "y", specialist="plutus", provisional=True)
+    monkeypatch.setenv("OLYMPUS_GATE_CONFIRM", "off")
+    seq = iter([{"avg": 8.0, "items": []}, {"avg": 7.0, "items": []}])
+    monkeypatch.setattr(evals, "run", lambda settings, only=None: next(seq))
+    monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
+    msg = orchestrator.gate_skills()
+    assert "Promoted" in msg                         # only one trial consumed
+    assert skills.count() == 1
 
 
 def test_gate_generates_eval_for_uncovered_domain(monkeypatch):

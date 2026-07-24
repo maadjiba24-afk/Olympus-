@@ -403,6 +403,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_rep.add_argument("--format", default="markdown",
                           help="markdown | json | sarif")
     p_as_rep.add_argument("--out", default=None)
+    p_as_imp = as_sub.add_parser(
+        "import-sarif", help="ingest a third-party tool's SARIF findings "
+                             "(semgrep/trivy/codeql/…); Olympus runs no tool")
+    p_as_imp.add_argument("file", help="path to a SARIF 2.1.0 file")
+    p_as_self = as_sub.add_parser(
+        "selfassess", help="attack YOUR OWN local app (loopback URL) to find "
+                           "its vulnerabilities: crawl + benign active validation")
+    p_as_self.add_argument("url", help="loopback URL, e.g. http://127.0.0.1:8000")
+    p_as_self.add_argument("--source", default=None,
+                           help="optional workspace path for SAST/secret/dep scans")
+    p_as_self.add_argument("--cookie", default=None,
+                           help="session cookie for your local app to test "
+                                "authenticated pages (e.g. 'session=…')")
+    p_as_fix = as_sub.add_parser(
+        "fix", help="propose a code patch for a recorded finding (never applied)")
+    p_as_fix.add_argument("finding_id", help="id of a recorded finding")
+    p_as_fix.add_argument("--source", default=None,
+                          help="workspace root to read source from")
     as_sub.add_parser("clear", help="clear recorded findings")
 
     # --- Self-discovery (olympus/discovery.py) ---
@@ -508,6 +526,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("skills-starter",
                    help="install a small curated starter-skill pack "
                         "(provisional — benchmark-gated like any other skill)")
+    sub.add_parser("skills-security",
+                   help="install Aegis's read-only security-methodology pack "
+                        "(provisional, Aegis-scoped; detection/reporting only)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
@@ -863,6 +884,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.add_argument("--host", default="0.0.0.0")
     p_hook.add_argument("--port", type=int, default=8487)
 
+    p_hc = sub.add_parser(
+        "http-capture", help="inspect/replay the opt-in HTTP capture store "
+                             "(set OLYMPUS_HTTP_CAPTURE=1 to record fetches): "
+                             "list / show <id> / replay <id> / clear [day]")
+    p_hc.add_argument("action", nargs="?", default="list",
+                      choices=("list", "show", "replay", "clear"))
+    p_hc.add_argument("arg", nargs="?",
+                      help="record id (show/replay) or day YYYYMMDD (clear)")
+
     from . import codegraph_cli as _cg_cli
     p_cg = sub.add_parser(
         "codegraph", help="the code knowledge graph: build/update/watch it, "
@@ -982,6 +1012,31 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "codegraph":
         from . import codegraph_cli
         return codegraph_cli.run(args)
+    elif args.command == "http-capture":
+        from . import httpcapture
+        act = args.action
+        if act == "list":
+            recs = httpcapture.records(limit=50)
+            if not recs:
+                print("No HTTP captures yet." if httpcapture.enabled()
+                      else "HTTP capture is off — set OLYMPUS_HTTP_CAPTURE=1 to "
+                           "record governed fetches for inspection/replay.")
+            else:
+                for r in recs:
+                    print(f"  {r['id']}  {r.get('status')}  {r['bytes']}B  "
+                          f"{r['method']} {r['url']}")
+        elif act == "show":
+            r = httpcapture.get(args.arg) if args.arg else None
+            print(json.dumps(r, indent=2, ensure_ascii=False) if r
+                  else f"No capture record {args.arg!r}.")
+        elif act == "replay":
+            if not args.arg:
+                print("usage: olympus http-capture replay <id>")
+            else:
+                print(json.dumps(httpcapture.replay(args.arg), indent=2))
+        elif act == "clear":
+            n = httpcapture.clear(args.arg)
+            print(f"Cleared {n} capture file(s).")
     elif args.command == "growth":
         from . import companion
         print(companion.summary("cli"))
@@ -1690,6 +1745,35 @@ def main(argv: list[str] | None = None) -> int:
                 from pathlib import Path
                 Path(args.out).write_text(out, encoding="utf-8")
                 print(f"\n[written to {args.out}]", file=sys.stderr)
+        elif sc == "import-sarif":
+            out = assess.import_sarif(args.file)
+            if out.get("error"):
+                print(f"Import failed: {out['error']}", file=sys.stderr)
+                return 1
+            print(f"Imported {out['imported']} finding(s) from SARIF"
+                  + (f" — {out['note']}" if out.get("note") else "") + ".")
+        elif sc == "selfassess":
+            from . import selfassess as _sa
+            out = _sa.selfassess(args.url, source_path=args.source,
+                                 cookie=args.cookie)
+            if out.get("refused"):
+                print(out["error"], file=sys.stderr)
+                return 1
+            sev = ", ".join(f"{n} {s}" for s, n in sorted(out["by_severity"].items()))
+            print(f"Self-assessment of {args.url}: phases "
+                  f"{', '.join(out['phases'])}; {out['total_findings']} "
+                  f"finding(s){' (' + sev + ')' if sev else ''}.")
+            print()
+            print(assess.export_findings("markdown"))
+        elif sc == "fix":
+            out = assess.propose_fix(args.finding_id, source_root=args.source)
+            if out.get("error"):
+                print(out["error"], file=sys.stderr)
+                return 1
+            print(f"Proposed fix for {out['finding_id']} ({out.get('cwe')}) — "
+                  "PROPOSAL ONLY, nothing was written:\n")
+            print(out["proposed_patch"])
+            print(f"\n[{out['note']}]", file=sys.stderr)
         elif sc == "clear":
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:
@@ -1836,6 +1920,13 @@ def main(argv: list[str] | None = None) -> int:
         msgs = skillpack.install_starter_pack()
         print("Installed the starter pack (provisional — run `olympus gate` to "
               "benchmark them):")
+        for m in msgs:
+            print(f"  · {m}")
+    elif args.command == "skills-security":
+        from . import skillpack
+        msgs = skillpack.install_security_pack()
+        print("Installed Aegis's security-methodology pack (provisional, "
+              "Aegis-scoped — read-only knowledge, no tool granted):")
         for m in msgs:
             print(f"  · {m}")
     elif args.command == "gate":

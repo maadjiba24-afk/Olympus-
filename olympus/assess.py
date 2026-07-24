@@ -370,6 +370,161 @@ def clear_findings(user: str | None = None) -> int:
     return n
 
 
+# --- find -> fix: propose a governed patch for a recorded finding ----------
+# The loop closes here: after Aegis FINDS a weakness, the coding specialist can
+# PROPOSE a fix. The proposal is never auto-applied — nothing is written; the
+# operator reviews the patch and applies it themselves (or via the approval-gated
+# edit_file). So the powerful half (writing code) stays behind human review, and
+# the finding's evidence (which can be untrusted, e.g. from imported SARIF or a
+# DAST response) only ever reaches a model that emits a *suggestion*.
+
+_FIX_WINDOW = 40                       # lines of source context around a finding
+_FIX_MAX_SOURCE = 8000                 # chars of source context sent to the coder
+_LOCATION_FILE_RE = re.compile(r"^\s*([^\s\[]+?):(\d+)\b")
+
+
+def finding_by_id(finding_id: str, user: str | None = None) -> dict | None:
+    for f in list_findings(user):
+        if f.get("id") == finding_id:
+            return f
+    return None
+
+
+def _fix_source_context(location: str, source_root: str | None) -> str:
+    """Read a bounded, path-confined source window around a `file:line` finding
+    location. Returns '' for URL/non-file locations or anything outside the root.
+    Never raises."""
+    m = _LOCATION_FILE_RE.match(location or "")
+    if not m:
+        return ""
+    rel, line = m.group(1), int(m.group(2))
+    try:
+        root = Path(source_root).resolve() if source_root else Path.cwd().resolve()
+        target = (root / rel).resolve() if not Path(rel).is_absolute() \
+            else Path(rel).resolve()
+        # Path confinement: refuse anything that escapes the root.
+        if not (target == root or root in target.parents):
+            return ""
+        if not target.is_file() or target.stat().st_size > 2_000_000:
+            return ""
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, ValueError):
+        return ""
+    lo = max(0, line - 1 - _FIX_WINDOW // 2)
+    hi = min(len(lines), line - 1 + _FIX_WINDOW // 2)
+    numbered = [f"{i + 1:>5}  {lines[i]}" for i in range(lo, hi)]
+    return f"# {rel} (around line {line})\n" + "\n".join(numbered)[:_FIX_MAX_SOURCE]
+
+
+def _default_coder(prompt: str) -> str:
+    from . import specialists as specs
+    return specs.SPECIALISTS["hephaestus"].run(prompt)
+
+
+def propose_fix(finding_id: str, source_root: str | None = None,
+                user: str | None = None, *, coder=None) -> dict[str, Any]:
+    """Propose a code fix for a recorded finding — a PROPOSAL ONLY, never applied.
+
+    Loads the finding, reads a bounded, path-confined source window if its
+    location is a local `file:line`, asks the coding specialist for a minimal
+    unified-diff patch, and returns it. Nothing is written to disk — the operator
+    reviews the patch and applies it (or uses the approval-gated `edit_file`).
+    `coder` is injectable (defaults to Hephaestus). Never raises on a missing
+    finding — returns an error dict."""
+    finding = finding_by_id(finding_id, user)
+    if not finding:
+        return {"error": f"no recorded finding with id '{finding_id}'",
+                "applied": False}
+    ctx = _fix_source_context(finding.get("location", ""), source_root)
+    # Secret-redact the finding's untrusted text (evidence may come from imported
+    # SARIF or a DAST response) BEFORE it reaches the coder model — a leaked
+    # credential in a finding must not be forwarded into another model call. The
+    # source context is the operator's own code and is left intact so the patch
+    # can target the real lines.
+    def _clean(v: str) -> str:
+        return security.sanitize_for_prompt(str(v or ""))
+    prompt = (
+        "You are proposing a MINIMAL, safe patch to fix ONE confirmed security "
+        "finding. Output a unified diff (```diff fenced), plus 1-2 sentences on "
+        "why it fixes the issue. Change as little as possible; do not refactor. "
+        "If you lack the exact source, give the concrete change to make.\n\n"
+        f"## Finding\n- CWE: {_clean(finding.get('cwe'))}\n"
+        f"- Severity: {_clean(finding.get('severity'))}\n"
+        f"- Title: {_clean(finding.get('title'))}\n"
+        f"- Location: {_clean(finding.get('location'))}\n"
+        f"- Evidence: {_clean(finding.get('evidence'))}\n"
+        f"- Suggested remediation: {_clean(finding.get('remediation'))}\n\n"
+        + (f"## Source context\n```\n{ctx}\n```\n" if ctx
+           else "## Source context\n(not a local file location — propose the "
+                "change from the finding above)\n"))
+    try:
+        patch = (coder or _default_coder)(prompt)
+    except Exception as err:
+        return {"error": f"could not generate a fix: {str(err)[:200]}",
+                "finding_id": finding_id, "applied": False}
+    return {
+        "finding_id": finding_id,
+        "cwe": finding.get("cwe"),
+        "location": finding.get("location"),
+        "had_source_context": bool(ctx),
+        "proposed_patch": patch,
+        "applied": False,
+        "note": ("Proposal only — nothing was written. Review the patch and apply "
+                 "it yourself (or via the approval-gated edit_file)."),
+    }
+
+
+_MAX_SARIF_BYTES = 8 * 1024 * 1024     # cap on an ingested SARIF document
+_MAX_IMPORT_FINDINGS = 5000            # cap on results absorbed in one import
+
+
+def import_sarif(source: str, user: str | None = None) -> dict[str, Any]:
+    """Absorb a THIRD-PARTY tool's SARIF 2.1.0 output into the findings store, so
+    an operator's own scanners (semgrep/trivy/codeql/gitleaks/grype/…) flow into
+    the same CVSS/dedup/export pipeline. Olympus NEVER runs the tool and opens no
+    egress — the operator runs their scanner, this ingests the standard output.
+
+    `source` is a local file path OR the raw SARIF text. The document is UNTRUSTED
+    external data: size-capped, result-count-capped, and every stored text field
+    is secret-redacted (`security.sanitize_for_prompt`) before it lands. Findings
+    dedup by fingerprint exactly like native ones. Never raises: a bad document
+    returns an error dict."""
+    from . import security
+    text = source
+    try:
+        p = Path(source)
+        if len(source) < 4096 and p.is_file():
+            if p.stat().st_size > _MAX_SARIF_BYTES:
+                return {"error": f"SARIF file exceeds the "
+                        f"{_MAX_SARIF_BYTES // (1024*1024)}MB cap", "imported": 0}
+            text = p.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        text = source
+    if len(text) > _MAX_SARIF_BYTES:
+        return {"error": "SARIF input exceeds the size cap", "imported": 0}
+    try:
+        doc = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as err:
+        return {"error": f"not valid JSON/SARIF: {str(err)[:120]}", "imported": 0}
+
+    parsed = sarif.from_sarif(doc)
+    capped = len(parsed) > _MAX_IMPORT_FINDINGS
+    stored = []
+    for fd in parsed[:_MAX_IMPORT_FINDINGS]:
+        # Redact every text field a finding carries — the SARIF came from outside
+        # and its strings (evidence, titles) may embed a secret or an injection.
+        for key in ("title", "evidence", "remediation", "location", "source"):
+            if fd.get(key):
+                fd[key] = security.sanitize_for_prompt(str(fd[key]))
+        stored.append(record_finding(fd, user))
+    out: dict[str, Any] = {"imported": len(stored), "findings": stored,
+                           "runs": len(doc.get("runs") or []) if isinstance(doc, dict) else 0}
+    if capped:
+        out["note"] = (f"capped at {_MAX_IMPORT_FINDINGS} findings; "
+                       f"{len(parsed) - _MAX_IMPORT_FINDINGS} more were dropped")
+    return out
+
+
 def export_findings(fmt: str = "markdown", user: str | None = None) -> str:
     """Export stored findings as `markdown`, `json`, or `sarif` (SARIF 2.1.0,
     GitHub code-scanning compatible)."""
@@ -435,7 +590,7 @@ def recon(target: str, user: str | None = None) -> dict[str, Any]:
     url = target if target.startswith(("http://", "https://")) else f"https://{target}"
     from . import tools
     try:
-        probe = tools._http_probe(url)
+        probe = _probe(url)
     except ValueError as err:
         return {"target": target, "error": f"blocked: {err}"}
     if probe.get("error") and not probe.get("headers"):
@@ -510,7 +665,7 @@ def http_audit(target: str, record: bool = True,
     url = target if target.startswith(("http://", "https://")) else f"https://{target}"
     from . import tools
     try:
-        probe = tools._http_probe(url)
+        probe = _probe(url)
     except ValueError as err:
         return {"target": target, "error": f"blocked: {err}"}
     headers = probe.get("headers", {})
@@ -1315,6 +1470,40 @@ def run_assessment(target: str, *, source_path: str | None = None,
 
 _CANARY = "olympuscanary"
 
+# Optional authenticated-session headers (e.g. a Cookie) threaded through every
+# assessment probe, so self-assessment can reach BEHIND a login on your own local
+# app. Contextvar-scoped (set by `auth_session`, reset on exit) so it never
+# leaks; CR/LF-bearing values are dropped by `_http_probe` itself.
+_ACTIVE_AUTH: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "assess_auth_headers", default=None)
+
+
+@contextmanager
+def auth_session(headers: dict | None):
+    """While active, merge `headers` (e.g. {'Cookie': 'session=…'}) into every
+    assessment probe — how a self-assessment authenticates to your local app."""
+    token = _ACTIVE_AUTH.set(dict(headers) if headers else None)
+    try:
+        yield
+    finally:
+        _ACTIVE_AUTH.reset(token)
+
+
+def _probe(url: str, *, extra_headers: dict | None = None, **kw):
+    """`tools._http_probe` with the active auth-session headers merged in. An
+    explicit `extra_headers` (e.g. the CORS `Origin`) wins over the session.
+    Only forwards `extra_headers` when there's something to send, so the call
+    shape is unchanged when no auth session and no explicit header are in play."""
+    from . import tools
+    auth = _ACTIVE_AUTH.get()
+    if auth:
+        merged = dict(auth)
+        merged.update(extra_headers or {})
+        extra_headers = merged
+    if extra_headers is not None:
+        kw["extra_headers"] = extra_headers
+    return tools._http_probe(url, **kw)
+
 
 def _set_param(url: str, name: str, value: str) -> str:
     p = urlparse(url)
@@ -1333,7 +1522,7 @@ def _reflection_check(url: str, name: str) -> tuple["Finding | None", str]:
     tok = os.urandom(4).hex()
     marker = f"{_CANARY}{tok}"
     payload = marker + '<">'                      # benign special chars, never a tag
-    probe = tools._http_probe(_set_param(url, name, payload))
+    probe = _probe(_set_param(url, name, payload))
     body = probe.get("body", "") or ""
     if marker not in body:
         return None, f"param '{name}': not reflected"
@@ -1367,7 +1556,7 @@ def _open_redirect_check(url: str, name: str) -> tuple["Finding | None", str]:
     tok = os.urandom(4).hex()
     canary_host = f"olympus-canary-{tok}.invalid"
     target = f"https://{canary_host}/"
-    probe = tools._http_probe(_set_param(url, name, target), follow_redirects=False)
+    probe = _probe(_set_param(url, name, target), follow_redirects=False)
     status = probe.get("status")
     location = (probe.get("headers", {}) or {}).get("location", "") or ""
     if isinstance(status, int) and 300 <= status < 400 and canary_host in location:
@@ -1403,7 +1592,7 @@ def _ssti_check(url: str, name: str) -> tuple["Finding | None", str]:
     marker = f"{_CANARY}{tok}"
     literal = f"{a}*{b}"
     payload = f"{marker}{{{{{literal}}}}}"     # e.g. olympuscanaryAB{{931*907}}
-    probe = tools._http_probe(_set_param(url, name, payload))
+    probe = _probe(_set_param(url, name, payload))
     body = probe.get("body", "") or ""
     if marker not in body:
         return None, f"param '{name}': not reflected"
@@ -1436,7 +1625,7 @@ def _header_injection_check(url: str, name: str) -> tuple["Finding | None", str]
     tok = os.urandom(4).hex()
     hdr = f"x-olympus-canary-{tok}"
     payload = f"{_CANARY}{tok}\r\n{hdr}: 1"     # _set_param URL-encodes the CRLF
-    probe = tools._http_probe(_set_param(url, name, payload), follow_redirects=False)
+    probe = _probe(_set_param(url, name, payload), follow_redirects=False)
     headers = probe.get("headers", {}) or {}
     if hdr in headers:
         finding = Finding(
@@ -1463,7 +1652,7 @@ def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
     from . import tools
     tok = os.urandom(4).hex()
     origin = f"https://olympus-canary-{tok}.evil.invalid"
-    probe = tools._http_probe(url, extra_headers={"Origin": origin})
+    probe = _probe(url, extra_headers={"Origin": origin})
     headers = probe.get("headers", {}) or {}
     acao = (headers.get("access-control-allow-origin", "") or "").strip()
     creds = (headers.get("access-control-allow-credentials", "") or "").strip().lower()
@@ -1489,6 +1678,142 @@ def _cors_check(url: str, name: str) -> tuple["Finding | None", str]:
     return None, "Origin not reflected (safe)"
 
 
+# High-precision, DB-specific SQL parse-error signatures. Matching one of these
+# proves the value crossed into a query context unescaped — the SQL-injection
+# SURFACE — without ever extracting a row. Kept specific (engine + "syntax"/
+# quote wording) so a page that merely contains the word "sql" never matches.
+_SQL_ERROR_SIGNATURES: tuple[str, ...] = (
+    "you have an error in your sql syntax",          # MySQL / MariaDB
+    "warning: mysqli", "warning: mysql_", "mysql_fetch",
+    "unclosed quotation mark after the character string",  # MSSQL
+    "incorrect syntax near",                         # MSSQL
+    "quoted string not properly terminated",         # Oracle
+    "ora-00933", "ora-01756", "ora-00920",           # Oracle
+    "syntax error at or near",                       # PostgreSQL
+    "pg::syntaxerror", "psycopg2.errors",            # PostgreSQL drivers
+    "sqlite3.operationalerror", "sqlitesyntaxerror", "near \"'\": syntax error",
+    "sqlstate[",                                     # PDO / JDBC
+    "odbc sql server driver",
+)
+
+# Framework verbose-error / interactive-debugger signatures (CWE-209). These
+# mean the app leaked its internals — stack frames, source, or a live debugger.
+_ERROR_DISCLOSURE_SIGNATURES: tuple[str, ...] = (
+    "traceback (most recent call last)",             # Python
+    "werkzeug/debugger", "werkzeug.debug", "the console is locked",  # Flask
+    "you're seeing this error because you have debug = true",        # Django
+    "django.core.exceptions", "exception value:",    # Django
+    "at com.", "at org.", "javax.servlet",           # Java stack frames
+    "system.web.httpexception", "asp.net is configured to show",     # ASP.NET
+    "microsoft ole db provider",
+    "fatal error:", "stack trace:",                  # PHP / generic
+    "actioncontroller::", "rails.application",        # Rails
+)
+
+
+# Filesystem-error signatures: the input reached a file open with a bad path.
+# We prove the SURFACE with a NONEXISTENT canary path — never a real file
+# (no /etc/passwd, no secrets), so nothing sensitive is ever read or returned.
+_FS_ERROR_SIGNATURES: tuple[str, ...] = (
+    "no such file or directory",                     # POSIX / many langs
+    "failed to open stream",                         # PHP
+    "errno 2", "enoent",                             # Node / libc
+    "system.io.filenotfoundexception",               # .NET
+    "java.io.filenotfoundexception",                 # Java
+    "filenotfounderror", "ioerror: [errno 2]",        # Python
+    "invalid path", "illegalpath",
+)
+
+
+def _path_traversal_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Confirm a path-traversal SURFACE by DETECTION only: set `name` to a
+    traversal sequence pointing at a NONEXISTENT canary filename, then match a
+    filesystem 'no such file' error. Because the target path does not exist,
+    nothing is ever read — this proves the parameter reaches a file open with
+    attacker-influenced path, without disclosing any real file. Raises ValueError
+    if blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    # ../ repeated, then a canary file that cannot exist → forces a benign ENOENT.
+    payload = "../../../../" + f"olympus-canary-{tok}.nope"
+    probe = _probe(_set_param(url, name, payload))
+    body = (probe.get("body", "") or "").lower()
+    hit = next((s for s in _FS_ERROR_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no filesystem-path error (safe)"
+    finding = Finding(
+        title="Path traversal surface (user input reaches a filesystem path)",
+        severity="high", cwe="CWE-22",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        location=f"{url} [param: {name}]",
+        evidence=f"traversal to a nonexistent canary surfaced a file error: "
+                 f"'…{hit}…'",
+        remediation="Never build a filesystem path from request input. Resolve "
+                    "to a fixed base dir and reject any path that escapes it "
+                    "(canonicalize, then verify the prefix); prefer an opaque id "
+                    "mapped to a known file server-side.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': path-traversal surface CONFIRMED"
+
+
+def _error_probe(url: str, name: str) -> tuple[str, int | None]:
+    """Send `name`'s value with ONE trailing single-quote (an inert boundary
+    char, like the reflection check's `<">`) and return (lower-cased body,
+    status). A quote is the minimal, non-destructive probe that surfaces a
+    string-context parse error: it can only cause a SELECT-side syntax error
+    (read path), never completes a write, and extracts nothing. Raises
+    ValueError if the fetch is blocked (scope/SSRF)."""
+    from . import tools
+    tok = os.urandom(4).hex()
+    payload = f"{_CANARY}{tok}'"                       # canary marker + one quote
+    probe = _probe(_set_param(url, name, payload))
+    return (probe.get("body", "") or "").lower(), probe.get("status")
+
+
+def _sql_error_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Confirm a SQL-injection SURFACE by DETECTION only: a single benign quote,
+    then match a DB-specific parse-error signature. No UNION, no boolean/time
+    extraction, no data pulled — this proves the parameter reaches a query
+    unescaped, nothing more. Raises ValueError if blocked (scope/SSRF)."""
+    body, _ = _error_probe(url, name)
+    hit = next((s for s in _SQL_ERROR_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no SQL error signature (safe)"
+    finding = Finding(
+        title="SQL injection surface (database parse error on a benign quote)",
+        severity="critical", cwe="CWE-89",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        location=f"{url} [param: {name}]",
+        evidence=f"DB parse error surfaced by a single quote: '…{hit}…'",
+        remediation="Use parameterized queries / prepared statements; never "
+                    "build SQL by string concatenation. Disable verbose DB "
+                    "errors in production.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': SQL injection surface CONFIRMED (error-based)"
+
+
+def _error_disclosure_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Detect verbose-error / stack-trace disclosure (CWE-209): the same inert
+    boundary quote, then match a framework stack-trace or interactive-debugger
+    signature in the response. Purely observational — it reads what the app
+    volunteered about its internals. Raises ValueError if blocked."""
+    body, status = _error_probe(url, name)
+    hit = next((s for s in _ERROR_DISCLOSURE_SIGNATURES if s in body), None)
+    if not hit:
+        return None, f"param '{name}': no verbose-error disclosure (safe)"
+    finding = Finding(
+        title="Verbose error / stack-trace disclosure",
+        severity="medium", cwe="CWE-209",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        location=f"{url} [param: {name}]",
+        evidence=f"internal error detail leaked (status {status}): '…{hit}…'",
+        remediation="Return generic error pages to clients; log details "
+                    "server-side only. Disable debug mode and framework "
+                    "interactive debuggers in production.",
+        confidence="high", source="active_validation")
+    return finding, f"param '{name}': verbose-error disclosure CONFIRMED"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
@@ -1497,6 +1822,9 @@ _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("ssti", _ssti_check),
     ("header_injection", _header_injection_check),
     ("cors", _cors_check),
+    ("sql_error", _sql_error_check),
+    ("error_disclosure", _error_disclosure_check),
+    ("path_traversal", _path_traversal_check),
 )
 
 
@@ -1997,10 +2325,13 @@ def containment(user: str | None = None) -> list[dict]:
 
     # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
     # Every registered check must be on the benign allowlist: each sends an inert
-    # marker (canary / arithmetic / reserved .invalid host) to an operator-named
-    # parameter — never a working exploit, shell, or destructive input.
+    # marker (canary / arithmetic / reserved .invalid host) or a single benign
+    # boundary character to an operator-named parameter — never a working exploit,
+    # shell, spray, or destructive input. The error-based checks confirm a
+    # SURFACE (a parse error / leaked stack trace); they extract no data.
     _BENIGN_CHECKS = frozenset({
-        "reflection", "open_redirect", "ssti", "header_injection", "cors"})
+        "reflection", "open_redirect", "ssti", "header_injection", "cors",
+        "sql_error", "error_disclosure", "path_traversal"})
     benign = _MAX_ACTIVE_PROBES <= 50 and all(
         c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
     checks.append(_check(

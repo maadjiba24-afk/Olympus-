@@ -15,6 +15,246 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Find → fix: governed patch proposals for recorded findings
+
+Closes the assessment loop: after Aegis FINDS a weakness, `assess_propose_fix` /
+`olympus assess fix <finding-id>` hands it to the coding specialist for a minimal
+unified-diff **patch proposal**. The powerful half — writing code — stays behind
+human review:
+
+- **Proposal only, never applied.** Nothing is written to disk; the operator
+  reviews the returned patch and applies it themselves (or via the approval-gated
+  `edit_file`). So a hostile finding can never auto-apply a patch.
+- **Path-confined source reads.** A `file:line` finding location is read within
+  the given `source_root`; a location that escapes the root yields no source
+  context (defeats path traversal via a crafted finding). URL findings simply
+  carry no source window.
+- **Untrusted evidence stays contained.** A finding's evidence (possibly from
+  imported SARIF or a DAST response) only reaches a model that emits a
+  *suggestion*, and the tool is classified INGESTION so the proposal is wrapped.
+
+New `assess.propose_fix()` (coder injectable for tests); `assess_propose_fix`
+tool (Aegis; tool count 129 → 130, bound in `docs/THREAT_MODEL.md`); `assess fix`
+CLI. 6 tests. No new dependency.
+
+
+### Added — Objective, judge-independent assertions in the self-improvement gate
+
+The skill/prompt gate scored answers with an LLM judge alone. A benchmark item
+can now carry deterministic **`checks`** — `contains` / `not_contains` / `regex`
+/ `min_chars` / `max_chars` — scored by `evals.objective_score()` with no model
+call. The objective pass-rate proportionally caps the judge score, so a skill or
+prompt that breaks a measurable property (drops a required term/number, emits a
+forbidden claim, blows a length bound) fails the gate **regardless of what the
+judge thought** — making the compounding self-improvement loop partly
+judge-independent, not just judge-noise-bounded (builds on the margin+reproduction
+gate). `generate_item` now also asks the generator for `must_contain` /
+`must_not_contain`, so newly-covered domains get objective assertions from the
+start. Items without checks are a strict no-op (backward compatible; the baseline
+is unchanged). 11 tests; no new dependency.
+
+
+### Added — Self-assessment completeness: authenticated crawling + path-traversal check
+
+Rounds out the local self-assessment capability:
+
+- **Authenticated self-assessment.** `assess_selfassess` / `olympus assess
+  selfassess` now take an optional `--cookie` (a session cookie for YOUR local
+  app), threaded through recon, the crawl, and every validation probe via a new
+  `assess.auth_session()` — so Olympus can test the **behind-login** pages of the
+  app you built, not just the public ones. The cookie is contextvar-scoped (reset
+  on exit, never leaks) and CR/LF-stripped by the probe layer; still loopback-only.
+- **CSRF-token-absence detection (CWE-352).** The self-assess crawl now flags a
+  state-changing **POST form** that carries no hidden anti-CSRF token field
+  (deduped per form endpoint). Reported at medium confidence — a heuristic, since
+  header/SameSite-based CSRF defense is also valid — so the remediation says to
+  confirm before treating it as a bug.
+- **Path-traversal surface check (CWE-22).** A new benign active-validation check
+  joins the suite: it sends a traversal sequence to a **nonexistent canary**
+  filename and matches a filesystem "no such file" error — proving the parameter
+  reaches a file open **without ever reading a real file** (no `/etc/passwd`, no
+  secrets). On the `_BENIGN_CHECKS` allowlist like the rest.
+
+7 new tests. No new dependency; tool/command counts unchanged.
+
+
+### Added — Self-assessment: Olympus attacks the app YOU built, locally
+
+When you create an app or site in Olympus and run it **locally**, Aegis can now
+attack it end-to-end to find its vulnerabilities — the DAST loop you'd run
+against your own dev server, made native. `assess_selfassess` /
+`olympus assess selfassess <loopback-url> [--source path]` drives recon +
+HTTP-header audit + a bounded same-origin **crawl** that discovers
+endpoints/parameters + the benign active-validation suite (XSS/SSTI/open-redirect/
+CRLF/CORS/SQLi-surface/error-disclosure) across everything it finds, plus optional
+SAST/secret/dependency scans of the source — producing the usual CVSS-scored,
+SARIF-exportable findings.
+
+The line that keeps this **yours, not a weapon**:
+
+- **Loopback-only, enforced in code.** The target MUST be a loopback host or it
+  is refused. The one SSRF exception — `security.allow_local_target` — can be
+  armed *only* for a loopback host (a routable/internal host raises at set time),
+  matches an exact `host:port`, is contextvar-scoped (reset on exit), and the pin
+  still requires the target to *resolve* to loopback (so a name rebinding to a
+  public IP is refused). It is **structurally incapable** of reaching a third
+  party, the operator's LAN, or a metadata endpoint.
+- **Confirmation, not weaponization.** Every check confirms a weakness with an
+  inert marker (the same benign markers as `assess_validate`) — it proves WHERE
+  the hole is without dumping data, dropping a shell, or persisting. No
+  data-exfiltration / RCE / persistence primitives are added.
+- **Bounded + audited.** The crawl is page-capped (≤40), each validation is
+  probe-capped, egress is confined to the target for the run, and every finding
+  is ledgered.
+
+New module `olympus/selfassess.py`; `assess_selfassess` tool (Aegis, INGESTION →
+wrapped untrusted; tool count 128 → 129, bound in `docs/THREAT_MODEL.md`). 18
+tests, incl. the SSRF-allowance safety invariants (routable/internal targets
+always refused, exact host:port, rebind-to-public refused, resets on exit). No
+new dependency. The dangerous residue of #16/#18 — arbitrary-target exploitation
+and open-egress raw-socket scanner boxes — stays deliberately unbuilt.
+
+
+### Added — SARIF ingestion: absorb any third-party scanner's findings (DEFERRED #18, safe half)
+
+The safe, governed form of "integrate external scanners": Aegis can now ingest a
+THIRD-PARTY tool's **SARIF 2.1.0** output (semgrep, trivy, codeql, gitleaks,
+grype, …) into its findings store — so an operator's existing scanners flow into
+the same CVSS / dedup / export pipeline. The dangerous half of #18 (running raw-
+socket scanners in an open-egress NET_RAW box) stays deliberately unbuilt: Olympus
+**runs no tool and opens no egress** — the operator runs their scanner, Olympus
+absorbs the standard output.
+
+- **`sarif.from_sarif()`** — the pure, total inverse of the exporter: maps SARIF
+  results back to Olympus finding dicts (severity from the rule's numeric
+  `security-severity` → CVSS band, else the SARIF level; CWE from
+  `external/cwe/cwe-N` tags or a CWE-shaped rule name; location, evidence,
+  remediation). Never raises on malformed input.
+- **`assess.import_sarif()`** — governed ingest: the document is UNTRUSTED
+  external data, so it is size-capped (8 MB), result-count-capped (5000), and
+  every stored text field is secret-redacted (`security.sanitize_for_prompt`)
+  before it lands; findings dedup by fingerprint exactly like native ones. A bad
+  document returns an error dict, never raises.
+- **`assess_import_sarif`** tool (Aegis; classified INGESTION so its result is
+  wrapped untrusted) and **`olympus assess import-sarif <file>`** CLI. Tool count
+  127 → 128; bound in `docs/THREAT_MODEL.md`. 11 tests; no new dependency.
+
+
+### Changed — Skill-admission gate hardened: margin + reproduction (DEFERRED #1)
+
+The self-evolving skill loop admitted a provisional skill on a single-trial
+`after > before` benchmark comparison — but the LLM judge's noise is well over a
+point, so a useless skill could ride a lucky draw in (or a good one be reverted).
+The gate now requires a real, reproducible improvement:
+
+- **Margin** (`OLYMPUS_GATE_MARGIN`, default 0.25/10): a sub-margin bump is judge
+  noise, not value — reverted, as a bare tie already was.
+- **Reproduction** (`OLYMPUS_GATE_CONFIRM`, on by default; `=off` kill switch):
+  a promising skill's improvement must REPRODUCE in an independent confirmation
+  trial before promotion — the same anti-noise idiom `evals.confirm_regressions`
+  uses for the regression gate. Cost-bounded: only skills that pass the first
+  trial pay for the second, so reverted skills cost no more than before.
+
+Adds `config.gate_margin()` / `config.gate_confirm()`; 3 new gate tests. This
+tightens DEFERRED #1 — fully objective per-domain benchmarks remain the deferred
+research residue, but judge-noise admission is now bounded by margin+reproduction.
+
+
+### Added — Assessment depth: two benign checks, richer SARIF, default semantic skills
+
+Three deepenings that make Aegis's assessment engine cover more, export better,
+and retrieve smarter — each staying inside the existing governed model.
+
+- **Two new benign active-validation checks** (`olympus/assess.py`):
+  `sql_error` (**CWE-89**) confirms a SQL-injection *surface* by DETECTION only —
+  a single inert boundary quote, then a DB-specific parse-error signature match;
+  no UNION, no boolean/time extraction, no data pulled. `error_disclosure`
+  (**CWE-209**) detects verbose-error / stack-trace / interactive-debugger
+  disclosure from the same inert probe. Both join the `_BENIGN_CHECKS`
+  containment allowlist (canary marker + a single benign boundary char, never an
+  exploit or spray). Severity is derived from the CVSS vector as usual.
+- **Extended CVSS/SARIF finding contract** (`olympus/sarif.py`) for GitHub
+  code-scanning interop, dependency-free: `security-severity` (the numeric string
+  GitHub ranks on, from the CVSS base score), `security` + `external/cwe/cwe-N`
+  rule tags and a MITRE `helpUri`, and per-result `partialFingerprints` so a
+  consumer tracks the SAME finding across commits. Graceful when a finding has no
+  CWE or no vector.
+- **Semantic skill retrieval is ON BY DEFAULT** (`OLYMPUS_SEMANTIC_SKILLS=off` is
+  the kill switch). It stays a strict no-op below the library-size threshold and
+  degrades to the full index without embeddings, and the effective value is
+  frozen per run into `tr.meta` and restored on replay — so historical runs
+  reproduce their recorded block regardless of the new default.
+- 12 new tests across `test_assess.py`, `test_sarif.py`, `test_semantic_skills.py`.
+
+
+### Added — Aegis security-methodology pack (read-only, attributed)
+
+A curated, **read-only** methodology library for the Aegis specialist: five
+Aegis-scoped skills that steer a thorough, systematic *authorized* assessment
+through Olympus's existing governed suite (`assess_recon` / `assess_http_audit`
+/ `assess_sast` / `assess_secrets` / `assess_deps` / `assess_validate` and the
+findings store). Install with `olympus skills-security`.
+
+- **Knowledge, not capability.** Skills are durable *instructions*; a skill
+  grants no tool, so nothing here is or can be wired to an actuator. Every skill
+  states detection-and-reporting-only and stays inside operator-authorized scope
+  (Aegis holds no self-authorize tool — scope is enforced in code).
+- **Attributed.** The weakness-class taxonomy and assess→validate→report
+  workflow are adapted from the open-source Strix security agent
+  (github.com/usestrix/strix, Apache-2.0) — its *methodology* re-expressed for
+  Olympus's governed, authorized-only model. No Strix code is vendored.
+- **Gated like everything else.** Installed PROVISIONAL and Aegis-scoped, so
+  they go through the same benchmark gate as any self-written skill and never
+  leak into another specialist's index.
+- New `skillpack.SECURITY_PACK` / `install_security_pack()`, `skills-security`
+  CLI command (command count 129 → 130); 4 tests.
+
+
+### Added — Per-run spend ceiling (`OLYMPUS_RUN_BUDGET_USD`)
+
+A second spend guard alongside the daily budget. The daily budget is a
+floor-of-the-day line checked at run entry; this caps a **single** council run.
+Once one question's own fan-out adds `OLYMPUS_RUN_BUDGET_USD` dollars, the
+orchestrator stops dispatching further specialists — so one pathological or
+prompt-injected run can't drain the whole daily budget.
+
+- **Enforced at the single funnel** (`orchestrator._run_one`): the run snapshots
+  its spend baseline on its first specialist, and each subsequent specialist is
+  gated on the run's own delta. Over the ceiling → that specialist degrades to
+  the same typed "treat this part as missing" placeholder the failure-isolation
+  path already returns, so verify/synthesis still complete on the work done.
+- **Replay-safe.** Gated OFF under `OLYMPUS_REPLAY`: a replayed run must
+  re-dispatch exactly what it recorded, so a live-spend STOP never diverges it.
+  The first specialist of a run is never starved (its own delta is 0).
+- `0` (the default) means no per-run cap; the daily budget is unchanged. New
+  `config.run_budget_usd()` / `usage.run_budget()` / `usage.run_over_budget()`;
+  7 tests (`tests/test_run_budget.py`).
+
+
+### Added — Opt-in HTTP capture / replay store (the safe Caido form)
+
+A new observability primitive: when `OLYMPUS_HTTP_CAPTURE=1`, every governed
+outbound fetch (`tools._http_get`) records its request (method / url / a safe
+header subset) and response (status / size / body) to a local, operator-only
+store, so an operator can **see** exactly what an agent sent and received and
+**replay** a request to check whether the resource changed — valuable for
+debugging and for forensic audit of assessment runs (the deferred Strix/Caido
+capture-proxy value, `DEFERRED.md` #18, delivered *without* the open box).
+
+- **No new risk surface.** It only OBSERVES the already-governed fetch path
+  (SSRF-pinned, egress-confined, secret-exfil-scanned) — it opens no new socket
+  and relaxes no gate. `replay` re-issues through the same `_http_get`.
+- **Never a credential sink.** Stored bodies and headers are secret-redacted
+  (`security.sanitize_for_prompt`); `Authorization`/`Cookie`/api-key headers are
+  never persisted (only a small safe subset); bodies are size-capped (64 KB) with
+  the true size and a SHA-256 of the original kept for the replay diff; files are
+  day-stamped and swept on the normal retention cadence. **Off by default.**
+- **Operator surface.** New `olympus http-capture` command: `list` / `show <id>` /
+  `replay <id>` / `clear [day]` (CLI command count 128 → 129). New module
+  `olympus/httpcapture.py`; hook is best-effort and never breaks a fetch.
+- 10 tests (`tests/test_httpcapture.py`), fully offline.
+
+
 ### Added — OS-level computer use can be turned on: the native actuator
 
 The computer-use framework (`computeruse.py`) shipped as safety rails with **no

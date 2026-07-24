@@ -239,6 +239,29 @@ def check_budget() -> None:
                 f"`olympus budget 0` to remove the cap, or wait until tomorrow.")
 
 
+def run_budget() -> float:
+    """Resolved per-run USD ceiling (OLYMPUS_RUN_BUDGET_USD; 0 = no cap).
+
+    Unlike the daily budget, this is not persisted as a saved setting — it is a
+    guardrail an operator arms for a session, not a standing account cap."""
+    return config.run_budget_usd()
+
+
+def run_over_budget(baseline: float) -> float | None:
+    """How much a single run has spent past its per-run ceiling, or None.
+
+    `baseline` is `today_spend()` snapshotted at run start; the run's own spend
+    is the delta against it. Returns the overage (>= 0) once the run has added
+    at least the per-run budget, else None. Like the daily guard this is a soft
+    'stop starting new work' line — one in-flight specialist may overshoot by
+    its own cost. No cap set → always None."""
+    limit = run_budget()
+    if limit <= 0:
+        return None
+    added = today_spend() - baseline
+    return (added - limit) if added >= limit else None
+
+
 def set_budget(amount: float) -> str:
     """Persist the daily budget (0 disables the cap)."""
     from . import prefs

@@ -685,6 +685,18 @@ MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
 # runtime with `olympus budget <amount>`, which takes precedence.
 DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET", "0") or 0)
 
+
+# Per-run spend ceiling: max estimated USD a SINGLE council run may add before
+# the fan-out stops dispatching new specialists (0 = no cap, the default). The
+# daily budget is a floor-of-the-day guard; this is the "no single question runs
+# away" guard, so one pathological fan-out can't drain the whole daily budget.
+# Read live (not frozen at import) so replay_run can restore the recorded value.
+def run_budget_usd() -> float:
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_RUN_BUDGET_USD", "0") or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
 # Heartbeat cadence (seconds).
 HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
@@ -1156,3 +1168,26 @@ def free_chats() -> int:
 # OLYMPUS_GATE_MODEL to run it on a cheaper model than your main one. Unset,
 # the gate uses your configured model unchanged: Olympus assumes no model.
 GATE_MODEL = os.environ.get("OLYMPUS_GATE_MODEL", "")
+
+
+def gate_margin() -> float:
+    """Minimum per-trial benchmark improvement (on the /10 scale) for the skill
+    gate to count a provisional skill as helpful. The LLM judge carries noise of
+    well over a point, so a bare `after > before` tie is no evidence of value;
+    requiring a margin kills exact-tie coin-flips. Default 0.25."""
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_GATE_MARGIN", "0.25")))
+    except (TypeError, ValueError):
+        return 0.25
+
+
+def gate_confirm() -> bool:
+    """Require a promising skill's improvement to REPRODUCE in an independent
+    confirmation trial before promotion (mirrors evals.confirm_regressions:
+    noise rarely strikes the same skill twice, a real improvement reproduces).
+    ON BY DEFAULT — the self-evolving skill loop must not admit a skill on a
+    single lucky judge draw. OLYMPUS_GATE_CONFIRM=off is the kill switch (restores
+    the single-trial gate). Only skills that pass the first trial pay for the
+    second, so reverted skills cost no more than before."""
+    return os.environ.get("OLYMPUS_GATE_CONFIRM", "on").strip().lower() not in (
+        "0", "off", "false", "no")

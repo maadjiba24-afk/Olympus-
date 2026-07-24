@@ -234,7 +234,8 @@ SPECIALISTS: dict[str, Specialist] = {
             # authorize_assessment action.
             extra_tools=("assess_scope", "assess_recon", "assess_http_audit",
                          "assess_sast", "assess_secrets", "assess_deps",
-                         "assess_validate",
+                         "assess_validate", "assess_import_sarif",
+                         "assess_selfassess", "assess_propose_fix",
                          "record_finding", "list_findings", "export_findings",
                          "read_file", "list_dir", "grep_files", "glob_files"),
         ),
@@ -485,18 +486,28 @@ def semantic_roster(task: str) -> str:
 # That's ideal while a library is small, but once a specialist accrues dozens of
 # skills the index bloats the prompt with mostly-irrelevant lines. When the
 # library is large AND embeddings are configured, surface only the top-K skills
-# most relevant to THIS task instead of the whole list. Opt-in
-# (`OLYMPUS_SEMANTIC_SKILLS`), engages only above a size threshold, replay-frozen
-# at the call site, and always degrades to the full index — so no skill ever
-# becomes unreachable (the specialist can still read_skill any skill by name).
+# most relevant to THIS task instead of the whole list. ON BY DEFAULT
+# (`OLYMPUS_SEMANTIC_SKILLS=off` is the kill switch); a strict no-op below the
+# size threshold, replay-frozen at the call site, and always degrades to the
+# full index — so no skill ever becomes unreachable (the specialist can still
+# read_skill any skill by name) and enabling changes nothing for a small library
+# or an instance without embeddings.
 
 _SEMANTIC_SKILLS_MIN = 24          # ≤ this many skills, the full index is fine
 _SEMANTIC_SKILLS_K = 12            # top-K surfaced when scoping to a task
 
 
 def semantic_skills_enabled() -> bool:
-    return os.environ.get("OLYMPUS_SEMANTIC_SKILLS", "").strip().lower() in (
-        "1", "on", "true", "yes")
+    """Scope a specialist's skill index to the top-K most relevant to the task.
+    ON BY DEFAULT (the retrieval quality improves as the library grows, and the
+    path is a strict no-op below the size threshold and degrades to the full
+    index when embeddings are absent — so enabling changes nothing for a small
+    library or an instance without embeddings). OLYMPUS_SEMANTIC_SKILLS=off is
+    the kill switch. Replay-safe: the effective value is frozen per run into
+    `tr.meta['semantic_skills']` and restored on replay, so historical runs
+    reproduce their recorded block regardless of this default."""
+    return os.environ.get("OLYMPUS_SEMANTIC_SKILLS", "on").strip().lower() not in (
+        "0", "off", "false", "no")
 
 
 def _skill_index_for(specialist_key: str, task: str | None) -> str:

@@ -11,7 +11,7 @@ factual pass through a hallucination controller, and the system continuously
 scans the world, learns from YouTube, and upgrades itself.
 
 Out of the box Olympus ships <!--cap:agents-->13<!--/cap--> specialist agents,
-<!--cap:tools-->127<!--/cap--> agent tools, and <!--cap:commands-->128<!--/cap-->
+<!--cap:tools-->130<!--/cap--> agent tools, and <!--cap:commands-->130<!--/cap-->
 CLI commands. Every count here is generated from the code
 (`olympus capabilities`) and verified in CI, so the numbers can't drift from
 what's actually built.
@@ -568,13 +568,14 @@ stronger the more they run — watch the board with `olympus moat`:
   shown to Zeus by embedding-relevance to the request (reorder-only, never
   trims) — a no-op for the curated 13, earning its keep once many file agents are
   loaded and the roster grows large. Replay-frozen on the route path.
-- **Semantic skill retrieval (`OLYMPUS_SEMANTIC_SKILLS`).** Scopes the per-agent
-  skill index injected into a specialist's prompt to the top-K skills most
-  relevant to the task (embedding cosine), instead of the whole list — a no-op
-  until a specialist's library actually outgrows the prompt, and always degrading
-  to the full index (no skill ever becomes unreachable; any skill is still
-  loadable by name with `read_skill`). Replay-frozen per specialist on the
-  prompt-assembly path.
+- **Semantic skill retrieval (`OLYMPUS_SEMANTIC_SKILLS`, on by default).** Scopes
+  the per-agent skill index injected into a specialist's prompt to the top-K
+  skills most relevant to the task (embedding cosine), instead of the whole
+  list — a no-op until a specialist's library actually outgrows the prompt (and
+  when embeddings aren't configured), and always degrading to the full index (no
+  skill ever becomes unreachable; any skill is still loadable by name with
+  `read_skill`). Replay-frozen per specialist on the prompt-assembly path;
+  `OLYMPUS_SEMANTIC_SKILLS=off` is the kill switch.
 - **File-defined agents (`OLYMPUS_AGENTS`).** Drop a `<key>.md` file (frontmatter
   + system prompt) to add a routable specialist without editing source —
   safety-bounded so a file agent can never gain action tools or self-modify.
@@ -587,6 +588,26 @@ stronger the more they run — watch the board with `olympus moat`:
   `ask-all` fans one task across every trusted peer, each reply returned as
   untrusted data. Drive it from the CLI: `olympus federation identity | add-peer |
   peers | call | capabilities | ask-all | serve | lessons`.
+
+### Other tuning knobs
+
+A few cadence / lifetime / routing knobs read from the environment, with their
+defaults:
+
+- **`OLYMPUS_DREAM_EVERY`** (default `86400`, i.e. daily) — seconds between the
+  heartbeat's memory-consolidation ("dreaming") passes that turn accumulated
+  lore into wiki pages.
+- **`OLYMPUS_JOB_RESUME_AFTER`** (default `3600`) — seconds after which a
+  scheduled job whose process was interrupted mid-run is considered resumable on
+  the next heartbeat (the update-handoff path).
+- **`OLYMPUS_PAIR_TTL`** (default `600`) — seconds a chat **pairing code** stays
+  valid before it expires (`olympus pair <channel>`).
+- **`OLYMPUS_ROLE_FALLBACKS`** — explicit per-role model failover order as JSON,
+  e.g. `{"coding":["opus","haiku"]}`; when set for a role it wins over the
+  default strongest-for-role ordering.
+- **`OLYMPUS_CHANNEL_PROFILE`** — the default capability profile applied to chat
+  conversations (e.g. `guest` / `reader` / `full`) unless a specific conversation
+  is restricted with `olympus restrict`; unset means `full`.
 
 ### Connectors: MCP servers & custom plugins
 
@@ -717,7 +738,11 @@ anything to do with Olympus charging you (it never does; you bring your own key)
   spend reaches $5, instead of silently running your bill up. Spending money is
   itself irreversible, so the same principle that gates sending an email gates
   spending a dollar. The browser action panel shows today's spend against the
-  cap, and turns amber when it's reached.
+  cap, and turns amber when it's reached. Set **`OLYMPUS_RUN_BUDGET_USD`** to
+  also cap a *single* council run: once one question's own fan-out adds that
+  many dollars, Olympus stops dispatching further specialists (degrading each
+  gracefully, so you still get the work already done) — so one pathological run
+  can't drain the whole daily budget. `0` (the default) means no per-run cap.
 - **Action rate limits.** A daily cap on how many times each action type may
   actually *execute*, so even fast-clicked approvals (or an injected agent)
   can't flood your contacts. Irreversible actions default to a generous runaway

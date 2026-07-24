@@ -19,6 +19,8 @@ its own memory".
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import ipaddress
 import re
 import socket
@@ -133,7 +135,20 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # INGESTION (wrapped + actuators stripped), like
                              # recon/http_audit.
                              "assess_recon", "assess_http_audit",
-                             "assess_validate"})
+                             "assess_validate",
+                             # assess_import_sarif absorbs a THIRD-PARTY tool's
+                             # SARIF output — external content (its evidence /
+                             # titles may embed an attacker-influenced payload),
+                             # so the ingest result is wrapped untrusted too.
+                             "assess_import_sarif",
+                             # assess_selfassess crawls + probes a LOCAL app and
+                             # folds its (attacker-controllable) responses into a
+                             # report — untrusted content, wrapped like recon.
+                             "assess_selfassess",
+                             # assess_propose_fix feeds a finding's (possibly
+                             # untrusted) evidence to a coder that emits a patch
+                             # PROPOSAL — wrap the suggestion; it is never applied.
+                             "assess_propose_fix"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or
@@ -520,6 +535,56 @@ def _host_is_loopback(host: str) -> bool:
         return False
 
 
+# --- self-assessment loopback allowance (olympus/selfassess.py) -----------
+# Self-assessment lets Olympus test an app the USER built and runs LOCALLY (in
+# the confined sandbox, bound to loopback). The SSRF guard blocks loopback by
+# default; this is the ONE deliberate, tightly-bounded exception. It is
+# structurally incapable of granting arbitrary-target reach:
+#   1. an allowance can be set ONLY for a genuine loopback host — `allow_local_
+#      target` REFUSES any routable/named-non-loopback host at set time;
+#   2. the gate matches an EXACT (host, port) — only the app under test opens;
+#   3. it is contextvar-scoped (set around the self-assess probes, reset on exit)
+#      so it is never globally on; and
+#   4. `resolve_pinned_ip` still requires the host to RESOLVE to a loopback IP,
+#      so a permitted name that rebinds to a public IP is refused anyway.
+# The result: self-testing your own local app works, and nothing else does.
+
+_local_target: contextvars.ContextVar[tuple[str, int] | None] = \
+    contextvars.ContextVar("selfassess_local_target", default=None)
+
+
+def _norm_lb_host(host: str) -> str:
+    return (host or "").strip().lower().strip("[]")
+
+
+@contextlib.contextmanager
+def allow_local_target(host: str, port: int):
+    """Permit fetches to EXACTLY this loopback `host:port` for the duration of
+    the block (self-assessment only). Raises ValueError if `host` is not
+    loopback — a routable target can never be allowed through this path."""
+    h = _norm_lb_host(host)
+    if not _host_is_loopback(h):
+        raise ValueError(
+            f"self-assessment allowance refused: '{host}' is not a loopback "
+            "target (only your own local app, e.g. 127.0.0.1 / localhost)")
+    token = _local_target.set((h, int(port)))
+    try:
+        yield
+    finally:
+        _local_target.reset(token)
+
+
+def _local_target_permits(host: str, port: int | None) -> bool:
+    """True only if the active self-assess allowance names this EXACT loopback
+    host:port. Re-checks loopback so the flag can never widen to a routable IP."""
+    allowed = _local_target.get()
+    if not allowed:
+        return False
+    h = _norm_lb_host(host)
+    return (bool(h) and _host_is_loopback(h) and allowed[0] == h
+            and port is not None and allowed[1] == int(port))
+
+
 def _entry_matches(host: str, entry: str) -> bool:
     """Whether `host` matches an allowlist `entry` (hostname, IP, or CIDR)."""
     host = (host or "").lower()
@@ -629,7 +694,12 @@ def resolve_pinned_ip(host: str, port: int) -> str:
     """
     if not host:
         raise ValueError("URL has no host")
-    if _is_blocked_hostname(host):
+    # Self-assessment loopback exception: ONLY the exact allowed loopback target,
+    # and only if it genuinely resolves to loopback (a rebind to public is still
+    # refused below). Never widens to a routable target — the allowance itself
+    # can only be a loopback host.
+    selfassess = _local_target_permits(host, port)
+    if _is_blocked_hostname(host) and not selfassess:
         raise ValueError(f"refusing to fetch an internal host ({host})")
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
@@ -644,7 +714,13 @@ def resolve_pinned_ip(host: str, port: int) -> str:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             raise ValueError(f"unparseable address for host: {host}")
-        if not _ip_is_public(ip):
+        if selfassess:
+            # Permitted target must resolve to LOOPBACK — never anything else.
+            if not ip.is_loopback:
+                raise ValueError(
+                    f"self-assessment target resolved to a non-loopback "
+                    f"address ({ip}); refusing")
+        elif not _ip_is_public(ip):
             raise ValueError(f"refusing to fetch a non-public address ({ip})")
     # Under sovereign mode the same guard also enforces the egress allowlist:
     # a public host that is not explicitly allowlisted may not receive our data.
@@ -685,10 +761,11 @@ def url_block_reason(url: str, *, resolve: bool = True) -> str | None:
     host = parsed.hostname
     if not host:
         return "URL has no host"
-    if _is_blocked_hostname(host):
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    selfassess = _local_target_permits(host, port)
+    if _is_blocked_hostname(host) and not selfassess:
         return f"refusing to fetch an internal host ({host})"
     if resolve:
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
         try:
             resolve_pinned_ip(host, port)
         except ValueError as err:

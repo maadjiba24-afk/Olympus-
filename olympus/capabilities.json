@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 128,
+    "count": 130,
     "names": [
       "a2a",
       "actions",
@@ -98,6 +98,7 @@
       "growth",
       "health",
       "heartbeat",
+      "http-capture",
       "images",
       "import-agent",
       "journey",
@@ -152,6 +153,7 @@
       "skill-export",
       "skill-import",
       "skills",
+      "skills-security",
       "skills-starter",
       "slack",
       "sleeptime",
@@ -182,17 +184,20 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 127,
+    "count": 130,
     "names": [
       "add_todo",
       "analyze_image",
       "ask_user",
       "assess_deps",
       "assess_http_audit",
+      "assess_import_sarif",
+      "assess_propose_fix",
       "assess_recon",
       "assess_sast",
       "assess_scope",
       "assess_secrets",
+      "assess_selfassess",
       "assess_validate",
       "browse_page",
       "browser_act",

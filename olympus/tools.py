@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -664,9 +665,24 @@ def _http_get(url: str, timeout: float = 30,
         hdrs.update({str(k): str(v) for k, v in headers.items()})
     req = _urlreq.Request(url, headers=hdrs)
     opener = _proxy_opener() if proxied else _pinned_opener()
+    _t0 = time.time()
     with opener.open(req, timeout=timeout) as resp:
-        return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
+        body = resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
             "utf-8", errors="replace")
+        # Opt-in HTTP capture (default off): record this ALREADY-governed fetch
+        # for operator inspection/replay. Best-effort — the whole hook (import,
+        # gate check, and record) is guarded so an observability feature can
+        # never break the fetch it observes.
+        try:
+            from . import httpcapture
+            if httpcapture.enabled():
+                httpcapture.record(
+                    "GET", url, hdrs, getattr(resp, "status", None), body,
+                    elapsed_ms=(time.time() - _t0) * 1000,
+                    resp_headers=dict(getattr(resp, "headers", {}) or {}))
+        except Exception:
+            pass
+        return body
 
 
 def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
@@ -2054,6 +2070,11 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "note_knowledge_gap": lambda topic, context="": _note_knowledge_gap(topic, context),
     "list_findings": lambda: _list_findings(),
     "export_findings": lambda format="markdown": _export_findings(format),
+    "assess_import_sarif": lambda source: _assess_import_sarif(source),
+    "assess_selfassess": lambda base_url, source_path="", cookie="":
+        _assess_selfassess(base_url, source_path, cookie),
+    "assess_propose_fix": lambda finding_id, source_root="":
+        _assess_propose_fix(finding_id, source_root),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -3244,6 +3265,30 @@ def _export_findings(fmt: str = "markdown") -> str:
     return _assess().export_findings(fmt)
 
 
+def _assess_import_sarif(source: str) -> str:
+    import json as _json
+    out = _assess().import_sarif(source)
+    return _json.dumps(out, indent=2, sort_keys=True)
+
+
+def _assess_propose_fix(finding_id: str, source_root: str = "") -> str:
+    import json as _json
+    out = _assess().propose_fix(finding_id, source_root=source_root or None)
+    return _json.dumps(out, indent=2, sort_keys=True, default=str)
+
+
+def _assess_selfassess(base_url: str, source_path: str = "",
+                       cookie: str = "") -> str:
+    import json as _json
+    from . import selfassess
+    out = selfassess.selfassess(base_url, source_path=source_path or None,
+                                cookie=cookie or None)
+    # Keep the tool payload compact: summary + findings, not the whole crawl.
+    return _json.dumps({k: v for k, v in out.items() if k != "findings"}
+                       | {"findings": out.get("findings", [])},
+                       indent=2, sort_keys=True, default=str)
+
+
 ASSESS_SCOPE = {
     "name": "assess_scope",
     "description": (
@@ -3419,6 +3464,76 @@ EXPORT_FINDINGS = {
         "type": "object",
         "properties": {"format": {"type": "string",
                                   "description": "markdown | json | sarif"}},
+    },
+}
+
+ASSESS_IMPORT_SARIF = {
+    "name": "assess_import_sarif",
+    "description": (
+        "Ingest a THIRD-PARTY tool's SARIF 2.1.0 output (semgrep, trivy, codeql, "
+        "gitleaks, grype, …) into the findings store, so an operator's existing "
+        "scanners flow into the same CVSS/dedup/export pipeline. Olympus does NOT "
+        "run the tool and opens no network egress — the operator runs their "
+        "scanner, this absorbs the standard output (secret-redacted, size-capped, "
+        "deduped like native findings). `source` is a local SARIF file path or "
+        "the raw SARIF text."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"source": {"type": "string",
+                                  "description": "SARIF file path or raw SARIF JSON"}},
+        "required": ["source"],
+    },
+}
+
+ASSESS_PROPOSE_FIX = {
+    "name": "assess_propose_fix",
+    "description": (
+        "Propose a code fix for a recorded finding (find → fix). Reads a bounded, "
+        "path-confined source window if the finding's location is a local "
+        "file:line, asks the coding specialist for a minimal unified-diff patch, "
+        "and returns it as a PROPOSAL — nothing is written to disk. The operator "
+        "reviews and applies the patch themselves (or via the approval-gated "
+        "edit_file). `source_root` scopes where local source is read from."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "finding_id": {"type": "string",
+                           "description": "id of a recorded finding (see list_findings)"},
+            "source_root": {"type": "string",
+                            "description": "optional workspace root for reading source"},
+        },
+        "required": ["finding_id"],
+    },
+}
+
+ASSESS_SELFASSESS = {
+    "name": "assess_selfassess",
+    "description": (
+        "Attack an app the USER built and runs LOCALLY, to find its "
+        "vulnerabilities. `base_url` MUST be a loopback URL (http://127.0.0.1:PORT "
+        "or http://localhost:PORT) — the app on this machine; any other target is "
+        "refused (that needs an explicit signed authorization via `assess run`). "
+        "Runs recon + HTTP-header audit + a bounded same-origin crawl that "
+        "discovers endpoints/parameters + benign active validation (XSS/SSTI/open-"
+        "redirect/CRLF/CORS/SQLi-surface/error-disclosure) across everything found, "
+        "plus SAST/secret/dependency scans of `source_path` when given. Confirms "
+        "WHERE the holes are with inert markers — never dumps data or drops a "
+        "shell. Findings are CVSS-scored and SARIF-exportable."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "base_url": {"type": "string",
+                         "description": "loopback URL of your local app"},
+            "source_path": {"type": "string",
+                            "description": "optional workspace path for whitebox scans"},
+            "cookie": {"type": "string",
+                       "description": "optional session cookie for YOUR local app "
+                                      "(e.g. 'session=…') to test authenticated pages"},
+        },
+        "required": ["base_url"],
     },
 }
 
@@ -4386,6 +4501,9 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "note_knowledge_gap": NOTE_KNOWLEDGE_GAP,
     "list_findings": LIST_FINDINGS,
     "export_findings": EXPORT_FINDINGS,
+    "assess_import_sarif": ASSESS_IMPORT_SARIF,
+    "assess_selfassess": ASSESS_SELFASSESS,
+    "assess_propose_fix": ASSESS_PROPOSE_FIX,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

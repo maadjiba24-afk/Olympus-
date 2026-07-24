@@ -1,11 +1,12 @@
-"""Semantic skill retrieval — task-scoped top-K skill index, opt-in, replay-safe.
+"""Semantic skill retrieval — task-scoped top-K skill index, default-on, replay-safe.
 
 The full per-specialist skill index is injected into every system prompt. Once a
 specialist accrues many skills that bloats the prompt; when the library is large
 and embeddings are configured, `_skill_index_for` narrows the block to the
-skills most relevant to the task. It is opt-in (`OLYMPUS_SEMANTIC_SKILLS`),
-engages only above a size threshold, is replay-frozen at the call site, and
-always degrades to the full index — no skill ever becomes unreachable.
+skills most relevant to the task. It is ON BY DEFAULT
+(`OLYMPUS_SEMANTIC_SKILLS=off` is the kill switch), engages only above a size
+threshold, is replay-frozen at the call site, and always degrades to the full
+index — no skill ever becomes unreachable.
 """
 
 import pytest
@@ -67,12 +68,26 @@ def test_scoped_index_lines_match_index_format(monkeypatch):
 
 # --- _skill_index_for gating --------------------------------------------
 
-def test_full_index_when_flag_off(monkeypatch):
-    monkeypatch.delenv("OLYMPUS_SEMANTIC_SKILLS", raising=False)
+def test_full_index_when_kill_switch_off(monkeypatch):
+    # Explicit kill switch (OLYMPUS_SEMANTIC_SKILLS=off) restores the full index.
+    monkeypatch.setenv("OLYMPUS_SEMANTIC_SKILLS", "off")
     _stub_embed(monkeypatch)
     _seed_many()
     block = specialists._skill_index_for("chiron", "help me set pricing")
     assert block == skills.index("chiron")       # untouched full index
+
+
+def test_default_on_scopes_when_large(monkeypatch):
+    # ON BY DEFAULT: with the env var unset, a large library + embeddings scopes.
+    monkeypatch.delenv("OLYMPUS_SEMANTIC_SKILLS", raising=False)
+    assert specialists.semantic_skills_enabled() is True
+    _stub_embed(monkeypatch)
+    _seed_many()
+    store.reset()
+    block = specialists._skill_index_for("chiron", "help me set pricing")
+    assert block != skills.index("chiron")       # scoped by default
+    assert "Pricing Playbook" in block
+    store.reset()
 
 
 def test_full_index_when_no_task(monkeypatch):
