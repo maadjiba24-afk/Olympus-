@@ -184,7 +184,7 @@
   },
   "schema_version": 1,
   "tools": {
-    "count": 129,
+    "count": 130,
     "names": [
       "add_todo",
       "analyze_image",
@@ -192,6 +192,7 @@
       "assess_deps",
       "assess_http_audit",
       "assess_import_sarif",
+      "assess_propose_fix",
       "assess_recon",
       "assess_sast",
       "assess_scope",

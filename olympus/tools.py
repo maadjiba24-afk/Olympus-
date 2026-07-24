@@ -2073,6 +2073,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "assess_import_sarif": lambda source: _assess_import_sarif(source),
     "assess_selfassess": lambda base_url, source_path="", cookie="":
         _assess_selfassess(base_url, source_path, cookie),
+    "assess_propose_fix": lambda finding_id, source_root="":
+        _assess_propose_fix(finding_id, source_root),
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
@@ -3269,6 +3271,12 @@ def _assess_import_sarif(source: str) -> str:
     return _json.dumps(out, indent=2, sort_keys=True)
 
 
+def _assess_propose_fix(finding_id: str, source_root: str = "") -> str:
+    import json as _json
+    out = _assess().propose_fix(finding_id, source_root=source_root or None)
+    return _json.dumps(out, indent=2, sort_keys=True, default=str)
+
+
 def _assess_selfassess(base_url: str, source_path: str = "",
                        cookie: str = "") -> str:
     import json as _json
@@ -3475,6 +3483,28 @@ ASSESS_IMPORT_SARIF = {
         "properties": {"source": {"type": "string",
                                   "description": "SARIF file path or raw SARIF JSON"}},
         "required": ["source"],
+    },
+}
+
+ASSESS_PROPOSE_FIX = {
+    "name": "assess_propose_fix",
+    "description": (
+        "Propose a code fix for a recorded finding (find → fix). Reads a bounded, "
+        "path-confined source window if the finding's location is a local "
+        "file:line, asks the coding specialist for a minimal unified-diff patch, "
+        "and returns it as a PROPOSAL — nothing is written to disk. The operator "
+        "reviews and applies the patch themselves (or via the approval-gated "
+        "edit_file). `source_root` scopes where local source is read from."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "finding_id": {"type": "string",
+                           "description": "id of a recorded finding (see list_findings)"},
+            "source_root": {"type": "string",
+                            "description": "optional workspace root for reading source"},
+        },
+        "required": ["finding_id"],
     },
 }
 
@@ -4473,6 +4503,7 @@ EXTRA_TOOLS: dict[str, dict[str, Any]] = {
     "export_findings": EXPORT_FINDINGS,
     "assess_import_sarif": ASSESS_IMPORT_SARIF,
     "assess_selfassess": ASSESS_SELFASSESS,
+    "assess_propose_fix": ASSESS_PROPOSE_FIX,
     "chart_from_data": CHART_FROM_DATA,
     "analyze_image": ANALYZE_IMAGE,
     "browser_open": BROWSER_OPEN,

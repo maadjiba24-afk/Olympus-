@@ -951,3 +951,64 @@ def test_auth_session_resets_after_context(monkeypatch):
         pass
     assess.validate("https://app.example/search?q=x")
     assert all(not (h or {}).get("Cookie") for h in seen)   # no leak after exit
+
+
+# --- find -> fix: governed patch proposal (never applied) --------------------
+
+def test_propose_fix_missing_finding_is_safe():
+    out = assess.propose_fix("does-not-exist", coder=lambda p: "x")
+    assert out.get("error") and out["applied"] is False
+
+
+def test_propose_fix_returns_proposal_never_applies():
+    f = assess.record_finding(assess.Finding(
+        title="SQLi", severity="high", cwe="CWE-89",
+        location="app/db.py:1", evidence="execute(f'...{x}')",
+        remediation="parameterize"))
+    calls = []
+    out = assess.propose_fix(f["id"], coder=lambda p: calls.append(p) or "```diff\n- bad\n+ good\n```")
+    assert out["applied"] is False
+    assert "```diff" in out["proposed_patch"]
+    assert out["cwe"] == "CWE-89"
+    assert "nothing was written" in out["note"].lower()
+    assert len(calls) == 1                            # the coder was consulted
+
+
+def test_propose_fix_reads_confined_source_window(tmp_path):
+    src = tmp_path / "app"
+    src.mkdir()
+    (src / "db.py").write_text("line1\nvulnerable_here = 1\nline3\n")
+    f = assess.record_finding(assess.Finding(
+        title="x", cwe="CWE-89", location="db.py:2", evidence="e", remediation="r"))
+    seen = {}
+    assess.propose_fix(f["id"], source_root=str(src),
+                       coder=lambda p: seen.setdefault("p", p) or "patch")
+    assert "vulnerable_here" in seen["p"]             # the source window reached the coder
+
+
+def test_propose_fix_refuses_source_outside_root(tmp_path):
+    # A finding location that escapes the source root yields NO source context
+    # (path confinement) — the coder still gets the finding, never the file.
+    (tmp_path / "secret.txt").write_text("TOP SECRET")
+    root = tmp_path / "app"; root.mkdir()
+    f = assess.record_finding(assess.Finding(
+        title="x", cwe="CWE-22", location="../secret.txt:1", evidence="e",
+        remediation="r"))
+    seen = {}
+    out = assess.propose_fix(f["id"], source_root=str(root),
+                             coder=lambda p: seen.setdefault("p", p) or "patch")
+    assert "TOP SECRET" not in seen["p"]              # confined out
+    assert out["had_source_context"] is False
+
+
+def test_propose_fix_url_finding_has_no_source_context():
+    f = assess.record_finding(assess.Finding(
+        title="XSS", cwe="CWE-79", location="http://127.0.0.1:8000/x [param: q]",
+        evidence="reflected", remediation="encode"))
+    out = assess.propose_fix(f["id"], coder=lambda p: "patch")
+    assert out["had_source_context"] is False and out["applied"] is False
+
+
+def test_propose_fix_tool_is_ingestion():
+    assert "assess_propose_fix" in security.INGESTION_TOOLS
+    assert security.should_wrap("assess_propose_fix") is True

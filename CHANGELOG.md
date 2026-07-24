@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Find → fix: governed patch proposals for recorded findings
+
+Closes the assessment loop: after Aegis FINDS a weakness, `assess_propose_fix` /
+`olympus assess fix <finding-id>` hands it to the coding specialist for a minimal
+unified-diff **patch proposal**. The powerful half — writing code — stays behind
+human review:
+
+- **Proposal only, never applied.** Nothing is written to disk; the operator
+  reviews the returned patch and applies it themselves (or via the approval-gated
+  `edit_file`). So a hostile finding can never auto-apply a patch.
+- **Path-confined source reads.** A `file:line` finding location is read within
+  the given `source_root`; a location that escapes the root yields no source
+  context (defeats path traversal via a crafted finding). URL findings simply
+  carry no source window.
+- **Untrusted evidence stays contained.** A finding's evidence (possibly from
+  imported SARIF or a DAST response) only reaches a model that emits a
+  *suggestion*, and the tool is classified INGESTION so the proposal is wrapped.
+
+New `assess.propose_fix()` (coder injectable for tests); `assess_propose_fix`
+tool (Aegis; tool count 129 → 130, bound in `docs/THREAT_MODEL.md`); `assess fix`
+CLI. 6 tests. No new dependency.
+
+
 ### Added — Objective, judge-independent assertions in the self-improvement gate
 
 The skill/prompt gate scored answers with an LLM judge alone. A benchmark item

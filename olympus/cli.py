@@ -416,6 +416,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_self.add_argument("--cookie", default=None,
                            help="session cookie for your local app to test "
                                 "authenticated pages (e.g. 'session=…')")
+    p_as_fix = as_sub.add_parser(
+        "fix", help="propose a code patch for a recorded finding (never applied)")
+    p_as_fix.add_argument("finding_id", help="id of a recorded finding")
+    p_as_fix.add_argument("--source", default=None,
+                          help="workspace root to read source from")
     as_sub.add_parser("clear", help="clear recorded findings")
 
     # --- Self-discovery (olympus/discovery.py) ---
@@ -1760,6 +1765,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"finding(s){' (' + sev + ')' if sev else ''}.")
             print()
             print(assess.export_findings("markdown"))
+        elif sc == "fix":
+            out = assess.propose_fix(args.finding_id, source_root=args.source)
+            if out.get("error"):
+                print(out["error"], file=sys.stderr)
+                return 1
+            print(f"Proposed fix for {out['finding_id']} ({out.get('cwe')}) — "
+                  "PROPOSAL ONLY, nothing was written:\n")
+            print(out["proposed_patch"])
+            print(f"\n[{out['note']}]", file=sys.stderr)
         elif sc == "clear":
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:

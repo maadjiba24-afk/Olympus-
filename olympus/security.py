@@ -144,7 +144,11 @@ INGESTION_TOOLS = frozenset({"web_search", "web_fetch", "watch_youtube",
                              # assess_selfassess crawls + probes a LOCAL app and
                              # folds its (attacker-controllable) responses into a
                              # report — untrusted content, wrapped like recon.
-                             "assess_selfassess"})
+                             "assess_selfassess",
+                             # assess_propose_fix feeds a finding's (possibly
+                             # untrusted) evidence to a coder that emits a patch
+                             # PROPOSAL — wrap the suggestion; it is never applied.
+                             "assess_propose_fix"})
 
 # The explicit trust allowlist for the untrusted-content envelope (M0.3).
 # should_wrap() FAILS CLOSED — it wraps everything except a name listed here (or

@@ -235,7 +235,7 @@ SPECIALISTS: dict[str, Specialist] = {
             extra_tools=("assess_scope", "assess_recon", "assess_http_audit",
                          "assess_sast", "assess_secrets", "assess_deps",
                          "assess_validate", "assess_import_sarif",
-                         "assess_selfassess",
+                         "assess_selfassess", "assess_propose_fix",
                          "record_finding", "list_findings", "export_findings",
                          "read_file", "list_dir", "grep_files", "glob_files"),
         ),

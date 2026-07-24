@@ -370,6 +370,103 @@ def clear_findings(user: str | None = None) -> int:
     return n
 
 
+# --- find -> fix: propose a governed patch for a recorded finding ----------
+# The loop closes here: after Aegis FINDS a weakness, the coding specialist can
+# PROPOSE a fix. The proposal is never auto-applied — nothing is written; the
+# operator reviews the patch and applies it themselves (or via the approval-gated
+# edit_file). So the powerful half (writing code) stays behind human review, and
+# the finding's evidence (which can be untrusted, e.g. from imported SARIF or a
+# DAST response) only ever reaches a model that emits a *suggestion*.
+
+_FIX_WINDOW = 40                       # lines of source context around a finding
+_FIX_MAX_SOURCE = 8000                 # chars of source context sent to the coder
+_LOCATION_FILE_RE = re.compile(r"^\s*([^\s\[]+?):(\d+)\b")
+
+
+def finding_by_id(finding_id: str, user: str | None = None) -> dict | None:
+    for f in list_findings(user):
+        if f.get("id") == finding_id:
+            return f
+    return None
+
+
+def _fix_source_context(location: str, source_root: str | None) -> str:
+    """Read a bounded, path-confined source window around a `file:line` finding
+    location. Returns '' for URL/non-file locations or anything outside the root.
+    Never raises."""
+    m = _LOCATION_FILE_RE.match(location or "")
+    if not m:
+        return ""
+    rel, line = m.group(1), int(m.group(2))
+    try:
+        root = Path(source_root).resolve() if source_root else Path.cwd().resolve()
+        target = (root / rel).resolve() if not Path(rel).is_absolute() \
+            else Path(rel).resolve()
+        # Path confinement: refuse anything that escapes the root.
+        if not (target == root or root in target.parents):
+            return ""
+        if not target.is_file() or target.stat().st_size > 2_000_000:
+            return ""
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, ValueError):
+        return ""
+    lo = max(0, line - 1 - _FIX_WINDOW // 2)
+    hi = min(len(lines), line - 1 + _FIX_WINDOW // 2)
+    numbered = [f"{i + 1:>5}  {lines[i]}" for i in range(lo, hi)]
+    return f"# {rel} (around line {line})\n" + "\n".join(numbered)[:_FIX_MAX_SOURCE]
+
+
+def _default_coder(prompt: str) -> str:
+    from . import specialists as specs
+    return specs.SPECIALISTS["hephaestus"].run(prompt)
+
+
+def propose_fix(finding_id: str, source_root: str | None = None,
+                user: str | None = None, *, coder=None) -> dict[str, Any]:
+    """Propose a code fix for a recorded finding — a PROPOSAL ONLY, never applied.
+
+    Loads the finding, reads a bounded, path-confined source window if its
+    location is a local `file:line`, asks the coding specialist for a minimal
+    unified-diff patch, and returns it. Nothing is written to disk — the operator
+    reviews the patch and applies it (or uses the approval-gated `edit_file`).
+    `coder` is injectable (defaults to Hephaestus). Never raises on a missing
+    finding — returns an error dict."""
+    finding = finding_by_id(finding_id, user)
+    if not finding:
+        return {"error": f"no recorded finding with id '{finding_id}'",
+                "applied": False}
+    ctx = _fix_source_context(finding.get("location", ""), source_root)
+    prompt = (
+        "You are proposing a MINIMAL, safe patch to fix ONE confirmed security "
+        "finding. Output a unified diff (```diff fenced), plus 1-2 sentences on "
+        "why it fixes the issue. Change as little as possible; do not refactor. "
+        "If you lack the exact source, give the concrete change to make.\n\n"
+        f"## Finding\n- CWE: {finding.get('cwe')}\n"
+        f"- Severity: {finding.get('severity')}\n"
+        f"- Title: {finding.get('title')}\n"
+        f"- Location: {finding.get('location')}\n"
+        f"- Evidence: {finding.get('evidence')}\n"
+        f"- Suggested remediation: {finding.get('remediation')}\n\n"
+        + (f"## Source context\n```\n{ctx}\n```\n" if ctx
+           else "## Source context\n(not a local file location — propose the "
+                "change from the finding above)\n"))
+    try:
+        patch = (coder or _default_coder)(prompt)
+    except Exception as err:
+        return {"error": f"could not generate a fix: {str(err)[:200]}",
+                "finding_id": finding_id, "applied": False}
+    return {
+        "finding_id": finding_id,
+        "cwe": finding.get("cwe"),
+        "location": finding.get("location"),
+        "had_source_context": bool(ctx),
+        "proposed_patch": patch,
+        "applied": False,
+        "note": ("Proposal only — nothing was written. Review the patch and apply "
+                 "it yourself (or via the approval-gated edit_file)."),
+    }
+
+
 _MAX_SARIF_BYTES = 8 * 1024 * 1024     # cap on an ingested SARIF document
 _MAX_IMPORT_FINDINGS = 5000            # cap on results absorbed in one import
 
