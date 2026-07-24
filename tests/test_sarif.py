@@ -196,3 +196,19 @@ def test_from_sarif_is_total_on_malformed_input():
     assert sarif.from_sarif({"runs": "nope"}) == []
     assert sarif.from_sarif({"runs": [{"results": ["bad", 3, None]}]}) == []
     assert sarif.from_sarif("not a dict") == []
+
+
+def test_from_sarif_hardens_untrusted_property_fields():
+    # A hostile SARIF stuffing raw property strings must not land unbounded/junk.
+    secret = "sk" + "_live_" + "x" * 40
+    doc = {"runs": [{"tool": {"driver": {"name": "evil", "rules": []}},
+                     "results": [{"ruleId": "r", "level": "error",
+                                  "message": {"text": "m"},
+                                  "properties": {
+                                      "cwe": f"not-a-cwe {secret}",
+                                      "cvssVector": "GARBAGE/" + "A" * 500,
+                                      "confidence": "totally-" + "z" * 200}}]}]}
+    f = sarif.from_sarif(doc)[0]
+    assert f["cwe"] == ""                       # non-CWE-shaped junk dropped
+    assert f["cvss_vector"] == ""               # unparseable vector dropped
+    assert f["confidence"] == "medium"          # out-of-enum normalized

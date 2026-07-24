@@ -340,15 +340,29 @@ def from_sarif(doc: dict, *, default_source: str = "imported") -> list[dict]:
             title = str((rule.get("shortDescription") or {}).get("text")
                         or rid or msg or "imported finding").strip()
             props = result.get("properties") or {}
+            # cwe: accept ONLY a CWE-shaped value (from the rule tags/name or a
+            # `cwe` property) — never store a raw, unbounded property string that
+            # a hostile SARIF could stuff with a payload or secret.
+            cwe = _cwe_from_rule(rule)
+            if not cwe:
+                m = _CWE_RE.search(str(props.get("cwe") or ""))
+                cwe = f"CWE-{m.group(1)}" if m else ""
+            # cvss_vector: bounded, and only kept if it parses (else dropped so the
+            # finding scores from its severity label). A valid base vector is ~50 c.
+            raw_vec = str(props.get("cvssVector") or "")[:120]
+            cvss_vector = raw_vec if score_or_none(raw_vec)[0] is not None else ""
+            # confidence: normalize to the finding enum, else 'medium'.
+            conf = str(props.get("confidence") or "").strip().lower()
+            confidence = conf if conf in ("high", "medium", "low") else "medium"
             out.append({
                 "title": title[:300],
                 "severity": _severity_from_result(result, rule),
-                "cwe": _cwe_from_rule(rule) or str(props.get("cwe") or ""),
-                "cvss_vector": str(props.get("cvssVector") or ""),
+                "cwe": cwe,
+                "cvss_vector": cvss_vector,
                 "location": _location_of(result)[:400],
                 "evidence": (msg or title)[:2000],
                 "remediation": str((rule.get("help") or {}).get("text") or "")[:2000],
-                "confidence": str(props.get("confidence") or "medium"),
+                "confidence": confidence,
                 "source": f"imported:{tool_name}"[:80],
             })
     return out
