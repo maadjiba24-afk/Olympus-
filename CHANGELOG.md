@@ -15,6 +15,22 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Objective, judge-independent assertions in the self-improvement gate
+
+The skill/prompt gate scored answers with an LLM judge alone. A benchmark item
+can now carry deterministic **`checks`** — `contains` / `not_contains` / `regex`
+/ `min_chars` / `max_chars` — scored by `evals.objective_score()` with no model
+call. The objective pass-rate proportionally caps the judge score, so a skill or
+prompt that breaks a measurable property (drops a required term/number, emits a
+forbidden claim, blows a length bound) fails the gate **regardless of what the
+judge thought** — making the compounding self-improvement loop partly
+judge-independent, not just judge-noise-bounded (builds on the margin+reproduction
+gate). `generate_item` now also asks the generator for `must_contain` /
+`must_not_contain`, so newly-covered domains get objective assertions from the
+start. Items without checks are a strict no-op (backward compatible; the baseline
+is unchanged). 11 tests; no new dependency.
+
+
 ### Added — Self-assessment completeness: authenticated crawling + path-traversal check
 
 Rounds out the local self-assessment capability:

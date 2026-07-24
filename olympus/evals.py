@@ -9,6 +9,7 @@ upgrades; if the score drops, he rolls the prompt back.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -126,6 +127,15 @@ _GEN_SCHEMA = {
         "criteria": {"type": "string",
                      "description": "Explicit, independently checkable success "
                      "criteria for a great answer"},
+        "must_contain": {
+            "type": "array", "items": {"type": "string"},
+            "description": "0-3 short substrings a correct answer MUST include "
+            "(e.g. a term/number the task objectively requires). Deterministic — "
+            "leave empty if nothing is objectively required."},
+        "must_not_contain": {
+            "type": "array", "items": {"type": "string"},
+            "description": "0-3 short substrings a correct answer must NOT include "
+            "(e.g. a wrong/unsafe claim). Deterministic; leave empty if none."},
     },
     "required": ["task", "criteria"],
     "additionalProperties": False,
@@ -159,6 +169,15 @@ def generate_item(specialist: str, settings: config.Settings | None = None) -> s
         "task": gen["task"],
         "criteria": gen["criteria"],
     }
+    # Attach any objective assertions the generator produced, so the item scores
+    # partly judge-independently from the start. Empty lists → no `checks` key.
+    checks = {}
+    if gen.get("must_contain"):
+        checks["contains"] = [s for s in gen["must_contain"] if s]
+    if gen.get("must_not_contain"):
+        checks["not_contains"] = [s for s in gen["must_not_contain"] if s]
+    if any(checks.values()):
+        item["checks"] = {k: v for k, v in checks.items() if v}
     add_item(item)
     return f"Generated benchmark item {item['id']} for {spec.name}."
 
@@ -173,6 +192,72 @@ def _judge_settings(settings: config.Settings) -> config.Settings:
                                api_key=settings.api_key,
                                base_url=settings.base_url)
     return settings
+
+
+def objective_score(answer: str, checks: dict | None) -> tuple[float, list[str]]:
+    """Score an answer against DETERMINISTIC assertions — no LLM judge involved.
+
+    `checks` may carry any of: `contains` / `not_contains` / `regex` (str or list
+    of str), and `min_chars` / `max_chars` (int). Each individual assertion is one
+    check. Returns (pass_rate in [0,1], list of human-readable failures). No
+    checks (or a malformed block) → (1.0, []): a strict no-op, so an item without
+    assertions scores exactly as the judge alone gave it.
+
+    This is what makes the self-improvement gate partly JUDGE-INDEPENDENT: a skill
+    or prompt that breaks a measurable property (drops a required caveat, starts
+    emitting a forbidden phrase, blows a length bound) fails the gate regardless
+    of what the LLM judge thought."""
+    if not isinstance(checks, dict):
+        return 1.0, []
+    ans = answer or ""
+    low = ans.lower()
+
+    def _as_list(v):
+        if v is None:
+            return []
+        return list(v) if isinstance(v, (list, tuple)) else [v]
+
+    total, passed, failures = 0, 0, []
+    for needle in _as_list(checks.get("contains")):
+        total += 1
+        if str(needle).lower() in low:
+            passed += 1
+        else:
+            failures.append(f"missing required text: {str(needle)[:60]!r}")
+    for needle in _as_list(checks.get("not_contains")):
+        total += 1
+        if str(needle).lower() not in low:
+            passed += 1
+        else:
+            failures.append(f"contains forbidden text: {str(needle)[:60]!r}")
+    for pat in _as_list(checks.get("regex")):
+        total += 1
+        try:
+            ok = re.search(str(pat), ans, re.I | re.S) is not None
+        except re.error:
+            ok = False                       # a broken pattern fails closed
+        if ok:
+            passed += 1
+        else:
+            failures.append(f"regex did not match: {str(pat)[:60]!r}")
+    for bound, cmp, label in (("min_chars", lambda n: len(ans) >= n, "too short"),
+                              ("max_chars", lambda n: len(ans) <= n, "too long")):
+        if checks.get(bound) is not None:
+            total += 1
+            try:
+                ok = cmp(int(checks[bound]))
+            except (TypeError, ValueError):
+                ok = True                    # malformed bound → ignore, not fail
+                total -= 1
+            else:
+                if ok:
+                    passed += 1
+                else:
+                    failures.append(f"{label} ({len(ans)} chars vs {bound}="
+                                    f"{checks[bound]})")
+    if total == 0:
+        return 1.0, []
+    return passed / total, failures
 
 
 def run(settings: config.Settings | None = None,
@@ -203,9 +288,19 @@ def run(settings: config.Settings | None = None,
                 f"## Assistant answer\n{answer}"}],
             JUDGE_SCHEMA, effort="medium",
         )
-        items.append({"id": bench["id"],
-                      "score": max(1, min(10, int(verdict["score"]))),
-                      "justification": verdict["justification"]})
+        judge_score = max(1, min(10, int(verdict["score"])))
+        # Objective assertions (if the item has any) proportionally cap the judge
+        # score — deterministic, judge-independent. No `checks` → obj=1.0, so the
+        # score is unchanged (backward compatible with every existing item).
+        obj, obj_failures = objective_score(answer, bench.get("checks"))
+        score = max(1, min(10, round(judge_score * obj)))
+        item = {"id": bench["id"], "score": score,
+                "justification": verdict["justification"]}
+        if bench.get("checks"):
+            item["objective"] = {"pass_rate": round(obj, 3),
+                                 "judge_score": judge_score,
+                                 "failures": obj_failures}
+        items.append(item)
     avg = round(sum(i["score"] for i in items) / max(len(items), 1), 2)
     return {"avg": avg, "items": items}
 
