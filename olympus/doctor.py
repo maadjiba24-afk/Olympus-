@@ -127,6 +127,25 @@ def _optional_checks() -> list[Check]:
                      (f"{', '.join(providers)} (order)" if extra
                       else "DuckDuckGo (keyless; add SearXNG/Brave/Tavily/"
                            "Serper/PSE for better results)")))
+    # OS-level computer use: default-off, two-switch opt-in. Show whether it is
+    # active and, if so, whether the platform toolchain is actually present.
+    from . import computeruse
+    if not computeruse.enabled():
+        out.append(Check("computer use", WARN,
+                         "off (OS control disabled; set OLYMPUS_COMPUTER_USE=1 "
+                         "and OLYMPUS_COMPUTER_USE_ACTUATOR=native to enable)"))
+    else:
+        name = computeruse.actuator_name()
+        if name == "disabled":
+            out.append(Check("computer use", WARN,
+                             "enabled but no actuator installed "
+                             "(set OLYMPUS_COMPUTER_USE_ACTUATOR=native)"))
+        else:
+            ready, missing = computeruse.actuator_ready()
+            out.append(Check("computer use", OK if ready else WARN,
+                             f"active ({name} actuator)" if ready
+                             else f"active ({name}) — missing tool(s): "
+                                  f"{', '.join(missing)}"))
     return out
 
 

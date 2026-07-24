@@ -433,6 +433,12 @@ def register_builtins() -> None:
     # Operator (HERMES) credentialed browser actions — see olympus/operator.py.
     from . import operator
     operator.register_operator_actions()
+    # OS-level computer use — registers its 6 IRREVERSIBLE ActionTypes on the
+    # spine so `prepare_action("computer_click", …)` can reach them. Importing
+    # the module runs its `register_actions()`. Execution stays gated: disabled
+    # by default, requires an installed actuator, and each action still needs an
+    # explicit approval (see olympus/computeruse.py).
+    from . import computeruse  # noqa: F401
 
 
 register_builtins()

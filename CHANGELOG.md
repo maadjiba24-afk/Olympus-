@@ -15,6 +15,38 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — OS-level computer use can be turned on: the native actuator
+
+The computer-use framework (`computeruse.py`) shipped as safety rails with **no
+real actuator** — `DisabledActuator` refused everything, so OS control could never
+actually happen. This adds an optional, operator-gated `NativeActuator` so the
+capability can be switched on, without weakening any rail and **without a new
+dependency**:
+
+- **`NativeActuator` drives the desktop through native CLI tools** — Linux (X11):
+  `xdotool` for mouse/keyboard + `scrot`/`maim`/`gnome-screenshot`/ImageMagick for
+  the screenshot; macOS: `screencapture` + `cliclick`/`osascript`; Windows:
+  PowerShell. It **shells out** (like `sandbox.run`), so enabling computer use
+  pulls in no Python GUI package and the three-required-dependency footprint is
+  unchanged. Typed text is fed over **STDIN** (Linux/macOS), so it never lands in
+  the process table — defense in depth over the secret-exfil scan the chokepoint
+  already runs. A missing tool fails with a clear "install X" `ComputerUseError`
+  rather than moving the mouse unpredictably.
+- **Two deliberate switches, fail-safe.** `OLYMPUS_COMPUTER_USE=1` gates the
+  capability and `OLYMPUS_COMPUTER_USE_ACTUATOR=native` selects the actuator;
+  `activate()` installs it only when both are set and never raises (a
+  half-provisioned box stays disabled). Every action still flows through the
+  approval spine at IRREVERSIBLE risk (never auto-executes), the `computer.use`
+  ABC contract, cmdguard on `launch`, the secret scan on typed text, and a
+  witness-signed audit — all unchanged.
+- **Wired to be reachable.** `builtin_actions` now imports `computeruse`, so the
+  six `computer_*` ActionTypes register on the spine and the agent can stage one
+  via `prepare_action` (they were counted in the capability manifest but were not
+  actually on the runtime spine). `doctor` gains a "computer use" line reporting
+  off / enabled-but-no-actuator / active (with any missing platform tools).
+- `run`/`spawn`/`which` are injectable, so the whole actuator is unit-tested
+  offline with no real OS control (`tests/test_computeruse_native.py`, 15 tests).
+
 ### Fixed — Keyless-install UX gaps (FEATURE_AUDIT §2.1, §2.2)
 
 The two runtime surfaces the feature audit flagged as broken/partial are closed
