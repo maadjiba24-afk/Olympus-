@@ -44,9 +44,17 @@ _LOCAL_ONLY = (
     "attacks a host you have not proven you own.")
 
 _HREF_RE = re.compile(r"""(?:href|action)\s*=\s*["']([^"'#\s]+)["']""", re.I)
-_FORM_RE = re.compile(r"<form\b[^>]*>(.*?)</form>", re.I | re.S)
+# Capture the opening-tag attributes (g1) and the form body (g2) separately so we
+# can read the method and scan for an anti-CSRF token field.
+_FORM_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.I | re.S)
 _ACTION_RE = re.compile(r"""action\s*=\s*["']([^"']*)["']""", re.I)
+_METHOD_RE = re.compile(r"""method\s*=\s*["']?\s*(post|get)""", re.I)
 _INPUT_NAME_RE = re.compile(r"""<(?:input|textarea|select)\b[^>]*\bname\s*=\s*["']([^"']+)["']""", re.I)
+# Substrings that mark a hidden anti-CSRF token field. If a state-changing POST
+# form carries none of these, it's a CSRF surface (heuristic — header/SameSite
+# protection is also valid, so this is reported at medium confidence).
+_CSRF_HINTS = ("csrf", "xsrf", "authenticity_token", "_token", "requestverification",
+               "nonce", "anti-forgery", "antiforgery")
 
 
 def is_local_target(url: str) -> bool:
@@ -92,13 +100,29 @@ def _strip_fragment(url: str) -> str:
         return url
 
 
-def _discover(base_url: str, max_pages: int) -> list[str]:
-    """Bounded same-origin crawl from `base_url`. Returns distinct param-bearing
-    URLs (query strings + GET-form inputs synthesized as params) to validate.
+def _csrf_finding(page_url: str, action: str):
+    """A CWE-352 finding for a state-changing POST form lacking an anti-CSRF token."""
+    return assess.Finding(
+        title="State-changing form without an anti-CSRF token",
+        severity="medium", cwe="CWE-352",
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",
+        location=f"{action} [POST form]",
+        evidence="a POST form carries no hidden anti-CSRF token field",
+        remediation="Add a per-session anti-CSRF token to state-changing forms "
+                    "and verify it server-side, or protect the session cookie with "
+                    "SameSite=Lax/Strict. Heuristic: header/SameSite-based CSRF "
+                    "defense is also valid, so confirm before treating as a bug.",
+        confidence="medium", source="active_validation")
+
+
+def _discover(base_url: str, max_pages: int) -> tuple[list[str], list]:
+    """Bounded same-origin crawl from `base_url`. Returns
+    (param-bearing URLs to validate, CSRF findings for token-less POST forms).
     Every fetch is loopback-confined by the caller's allowance."""
     seen: set[str] = set()
     queue: list[str] = [_strip_fragment(base_url)]
     param_urls: dict[str, str] = {}      # canonical (path+sorted params) -> url
+    csrf: dict[str, object] = {}         # location -> Finding (dedup)
 
     def _remember_params(url: str) -> None:
         p = urlparse(url)
@@ -132,20 +156,28 @@ def _discover(base_url: str, max_pages: int) -> list[str]:
                 _remember_params(nxt)
                 if nxt not in seen and len(seen) + len(queue) < max_pages * 2:
                     queue.append(nxt)
-        # GET forms → synthesize a param-bearing URL from the input names.
-        for form in _FORM_RE.findall(body)[:40]:
-            names = _INPUT_NAME_RE.findall(form)
-            if not names:
-                continue
-            m = _ACTION_RE.search(form)
+        for attrs, form_body in _FORM_RE.findall(body)[:40]:
+            names = _INPUT_NAME_RE.findall(form_body)
+            m = _ACTION_RE.search(attrs) or _ACTION_RE.search(form_body)
             action = urljoin(url, m.group(1)) if (m and m.group(1)) else url
             if not _same_origin(action, base_url):
                 continue
-            fields = list(dict.fromkeys(names))[:8]      # de-dup, cap
-            q = "&".join(f"{n}=test" for n in fields)
-            synth = f"{action}{'&' if urlparse(action).query else '?'}{q}"
-            _remember_params(synth)
-    return list(param_urls.values())[:_MAX_VALIDATE]
+            mm = _METHOD_RE.search(attrs)
+            is_post = bool(mm) and mm.group(1).lower() == "post"
+            if is_post and names:
+                # State-changing form → is there an anti-CSRF token field?
+                blob = form_body.lower()
+                if not any(h in blob for h in _CSRF_HINTS):
+                    # dedup by the form ENDPOINT (action), not the embedding page,
+                    # so one token-less form is one finding however many pages show it
+                    csrf.setdefault(action, _csrf_finding(url, action))
+            elif names:
+                # GET form → synthesize a param-bearing URL from the input names.
+                fields = list(dict.fromkeys(names))[:8]      # de-dup, cap
+                q = "&".join(f"{n}=test" for n in fields)
+                synth = f"{action}{'&' if urlparse(action).query else '?'}{q}"
+                _remember_params(synth)
+    return list(param_urls.values())[:_MAX_VALIDATE], list(csrf.values())
 
 
 def selfassess(base_url: str, *, source_path: str | None = None,
@@ -192,8 +224,15 @@ def selfassess(base_url: str, *, source_path: str | None = None,
             phases.append("http_audit")
         except Exception:
             pass
-        crawl_urls = _discover(base_url, max_pages)
+        crawl_urls, csrf_findings = _discover(base_url, max_pages)
         phases.append(f"crawl({len(crawl_urls)} param URLs)")
+        for f in csrf_findings:
+            try:
+                assess.record_finding(f, user)
+            except Exception:
+                continue
+        if csrf_findings:
+            phases.append(f"csrf({len(csrf_findings)})")
         validated = 0
         for url in crawl_urls:
             try:

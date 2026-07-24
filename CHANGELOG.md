@@ -41,6 +41,11 @@ Rounds out the local self-assessment capability:
   `assess.auth_session()` — so Olympus can test the **behind-login** pages of the
   app you built, not just the public ones. The cookie is contextvar-scoped (reset
   on exit, never leaks) and CR/LF-stripped by the probe layer; still loopback-only.
+- **CSRF-token-absence detection (CWE-352).** The self-assess crawl now flags a
+  state-changing **POST form** that carries no hidden anti-CSRF token field
+  (deduped per form endpoint). Reported at medium confidence — a heuristic, since
+  header/SameSite-based CSRF defense is also valid — so the remediation says to
+  confirm before treating it as a bug.
 - **Path-traversal surface check (CWE-22).** A new benign active-validation check
   joins the suite: it sends a traversal sequence to a **nonexistent canary**
   filename and matches a filesystem "no such file" error — proving the parameter

@@ -150,3 +150,41 @@ def test_selfassess_threads_cookie_to_probes(monkeypatch):
     out = selfassess.selfassess("http://127.0.0.1:8000/", cookie="session=abc")
     assert "authenticated" in out["phases"]
     assert any(c == "session=abc" for c in seen)      # cookie reached the probes
+
+
+# --- CSRF-token-absence detection (CWE-352) at the crawl level ---------------
+
+def _form_app_probe(with_token: bool):
+    """A local app whose index has a state-changing POST form; optionally it
+    carries a hidden anti-CSRF token field."""
+    token = '<input type="hidden" name="csrf_token" value="abc">' if with_token else ""
+    html = (f'<html><form method="POST" action="/transfer">{token}'
+            '<input name="amount"><input name="to"></form></html>')
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        return {"status": 200, "headers": {"content-type": "text/html"},
+                "body": html, "url": url}
+    return _probe
+
+
+def test_selfassess_flags_csrf_when_no_token(monkeypatch):
+    monkeypatch.setattr(tools, "_http_probe", _form_app_probe(with_token=False))
+    out = selfassess.selfassess("http://127.0.0.1:8000/")
+    csrf = [f for f in out["findings"] if f["cwe"] == "CWE-352"]
+    assert len(csrf) == 1 and csrf[0]["source"] == "active_validation"
+    assert any(ph.startswith("csrf") for ph in out["phases"])
+
+
+def test_selfassess_no_csrf_flag_when_token_present(monkeypatch):
+    monkeypatch.setattr(tools, "_http_probe", _form_app_probe(with_token=True))
+    out = selfassess.selfassess("http://127.0.0.1:8000/")
+    assert [f for f in out["findings"] if f["cwe"] == "CWE-352"] == []
+
+
+def test_get_form_is_not_a_csrf_finding(monkeypatch):
+    # A GET form is not state-changing → no CSRF finding (it's a param source).
+    html = '<html><form method="GET" action="/search"><input name="q"></form></html>'
+    monkeypatch.setattr(tools, "_http_probe", lambda url, **k: {
+        "status": 200, "headers": {"content-type": "text/html"},
+        "body": html, "url": url})
+    out = selfassess.selfassess("http://127.0.0.1:8000/")
+    assert [f for f in out["findings"] if f["cwe"] == "CWE-352"] == []
