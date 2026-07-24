@@ -1012,3 +1012,13 @@ def test_propose_fix_url_finding_has_no_source_context():
 def test_propose_fix_tool_is_ingestion():
     assert "assess_propose_fix" in security.INGESTION_TOOLS
     assert security.should_wrap("assess_propose_fix") is True
+
+
+def test_propose_fix_redacts_secret_in_evidence_before_coder():
+    secret = "sk" + "_live_" + "abcdef1234567890ABCDEF"
+    f = assess.record_finding(assess.Finding(
+        title="leak", cwe="CWE-798", location="cfg.py:1",
+        evidence=f"hardcoded key {secret}", remediation="rotate it"))
+    seen = {}
+    assess.propose_fix(f["id"], coder=lambda p: seen.setdefault("p", p) or "patch")
+    assert secret not in seen["p"]                   # never forwarded to the coder

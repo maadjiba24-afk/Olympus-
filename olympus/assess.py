@@ -436,17 +436,24 @@ def propose_fix(finding_id: str, source_root: str | None = None,
         return {"error": f"no recorded finding with id '{finding_id}'",
                 "applied": False}
     ctx = _fix_source_context(finding.get("location", ""), source_root)
+    # Secret-redact the finding's untrusted text (evidence may come from imported
+    # SARIF or a DAST response) BEFORE it reaches the coder model — a leaked
+    # credential in a finding must not be forwarded into another model call. The
+    # source context is the operator's own code and is left intact so the patch
+    # can target the real lines.
+    def _clean(v: str) -> str:
+        return security.sanitize_for_prompt(str(v or ""))
     prompt = (
         "You are proposing a MINIMAL, safe patch to fix ONE confirmed security "
         "finding. Output a unified diff (```diff fenced), plus 1-2 sentences on "
         "why it fixes the issue. Change as little as possible; do not refactor. "
         "If you lack the exact source, give the concrete change to make.\n\n"
-        f"## Finding\n- CWE: {finding.get('cwe')}\n"
-        f"- Severity: {finding.get('severity')}\n"
-        f"- Title: {finding.get('title')}\n"
-        f"- Location: {finding.get('location')}\n"
-        f"- Evidence: {finding.get('evidence')}\n"
-        f"- Suggested remediation: {finding.get('remediation')}\n\n"
+        f"## Finding\n- CWE: {_clean(finding.get('cwe'))}\n"
+        f"- Severity: {_clean(finding.get('severity'))}\n"
+        f"- Title: {_clean(finding.get('title'))}\n"
+        f"- Location: {_clean(finding.get('location'))}\n"
+        f"- Evidence: {_clean(finding.get('evidence'))}\n"
+        f"- Suggested remediation: {_clean(finding.get('remediation'))}\n\n"
         + (f"## Source context\n```\n{ctx}\n```\n" if ctx
            else "## Source context\n(not a local file location — propose the "
                 "change from the finding above)\n"))
