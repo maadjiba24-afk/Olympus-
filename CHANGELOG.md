@@ -15,6 +15,26 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — Skill-admission gate hardened: margin + reproduction (DEFERRED #1)
+
+The self-evolving skill loop admitted a provisional skill on a single-trial
+`after > before` benchmark comparison — but the LLM judge's noise is well over a
+point, so a useless skill could ride a lucky draw in (or a good one be reverted).
+The gate now requires a real, reproducible improvement:
+
+- **Margin** (`OLYMPUS_GATE_MARGIN`, default 0.25/10): a sub-margin bump is judge
+  noise, not value — reverted, as a bare tie already was.
+- **Reproduction** (`OLYMPUS_GATE_CONFIRM`, on by default; `=off` kill switch):
+  a promising skill's improvement must REPRODUCE in an independent confirmation
+  trial before promotion — the same anti-noise idiom `evals.confirm_regressions`
+  uses for the regression gate. Cost-bounded: only skills that pass the first
+  trial pay for the second, so reverted skills cost no more than before.
+
+Adds `config.gate_margin()` / `config.gate_confirm()`; 3 new gate tests. This
+tightens DEFERRED #1 — fully objective per-domain benchmarks remain the deferred
+research residue, but judge-noise admission is now bounded by margin+reproduction.
+
+
 ### Added — Assessment depth: two benign checks, richer SARIF, default semantic skills
 
 Three deepenings that make Aegis's assessment engine cover more, export better,

@@ -2516,23 +2516,52 @@ def gate_skills(settings: config.Settings | None = None) -> str:
         if _is_scoped(sp) and not bench_ids:
             skipped.append(f"{name} (no benchmark coverage for '{sp}')")
             continue
-        try:
-            after = evals.run(settings, only=bench_ids)["avg"]   # skill visible
+        def _trial() -> tuple[float, float]:
+            """One before/after measurement of THIS skill's marginal effect.
+            Always un-hides on the way out so a crash never leaves it hidden."""
+            after = evals.run(settings, only=bench_ids)["avg"]    # skill visible
             skills.set_hidden(name, True)
-            before = evals.run(settings, only=bench_ids)["avg"]  # skill hidden
-            skills.set_hidden(name, False)
+            try:
+                before = evals.run(settings, only=bench_ids)["avg"]  # hidden
+            finally:
+                skills.set_hidden(name, False)
+            return before, after
+
+        margin = config.gate_margin()
+        try:
+            before, after = _trial()
         except Exception as err:
             skills.set_hidden(name, False)  # never leave it hidden on error
             skipped.append(f"{name} ({err})")
             continue
-        # Require a STRICT improvement to keep a skill. A tie is no evidence of
-        # value against a noisy LLM judge, so revert it rather than accumulate
-        # neutral (or coin-flip-harmful) skills.
-        if after > before:
+        # Require a MARGIN of improvement, not a bare tie-breaking `>`: the LLM
+        # judge's noise is well over a point, so an exact tie (or sub-margin bump)
+        # is no evidence of value. Not promising → revert now (costs one trial).
+        if after - before < margin:
+            reverted.append(f"{name} [{before}→{after}]: {skills.revert(name)}")
+            continue
+        # Promising. Before admitting it into the self-evolving library, require
+        # the improvement to REPRODUCE in an independent trial (the same anti-
+        # noise idiom evals.confirm_regressions uses for the regression gate:
+        # noise rarely strikes the same skill twice). Only promising skills pay
+        # for this second trial.
+        if config.gate_confirm():
+            try:
+                before2, after2 = _trial()
+            except Exception as err:
+                skills.set_hidden(name, False)
+                skipped.append(f"{name} (confirmation trial: {err})")
+                continue
+            if after2 - before2 < margin:               # did not reproduce
+                reverted.append(
+                    f"{name} [{before}→{after}, confirm {before2}→{after2}]: "
+                    f"improvement did not reproduce — {skills.revert(name)}")
+                continue
+            skills.promote(name)
+            promoted.append(f"{name} [{before}→{after}, confirm {before2}→{after2}]")
+        else:
             skills.promote(name)
             promoted.append(f"{name} [{before}→{after}]")
-        else:
-            reverted.append(f"{name} [{before}→{after}]: {skills.revert(name)}")
 
     if reverted:
         memory.save("corrections", "Skills reverted by benchmark gate",
