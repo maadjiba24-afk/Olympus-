@@ -325,10 +325,19 @@ def objective_score(answer: str, checks: dict | None) -> tuple[float, list[str]]
         try:
             target = float(num["value"])
             tol = float(num.get("tolerance", 0) or 0)
-            found = [float(x.replace(",", "")) for x in _NUM_RE.findall(ans)]
-            ok = any(abs(v - target) <= tol for v in found)
         except (TypeError, ValueError):
-            ok = False
+            target, tol, ok = None, 0.0, False
+        else:
+            # Parse each number token defensively — one malformed token (e.g.
+            # "1.2.3" or a version string) must not fail the whole check when a
+            # correct number is also present.
+            found = []
+            for x in _NUM_RE.findall(ans):
+                try:
+                    found.append(float(x.replace(",", "")))
+                except ValueError:
+                    continue
+            ok = any(abs(v - target) <= tol for v in found)
         _check(ok, f"no number within {num.get('tolerance', 0)} of {num.get('value')}")
 
     if checks.get("parses_date"):

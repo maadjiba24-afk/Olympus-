@@ -209,3 +209,10 @@ def test_builtin_benchmark_checks_are_valid():
         assert set(ch) <= known, (i["id"], set(ch) - known)   # only known keys
         for pat in (ch.get("regex") or []):
             _re.compile(pat)                                    # every regex compiles
+
+
+def test_numeric_ignores_malformed_number_tokens():
+    # A malformed token (version string) alongside the correct number must still
+    # pass — the check parses each token defensively.
+    ans = "in version 1.2.3 the monthly payment is 1,432.86 dollars"
+    assert evals.objective_score(ans, {"numeric": {"value": 1432.86, "tolerance": 0.5}})[0] == 1.0
