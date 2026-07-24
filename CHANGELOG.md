@@ -15,6 +15,33 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Assessment depth: two benign checks, richer SARIF, default semantic skills
+
+Three deepenings that make Aegis's assessment engine cover more, export better,
+and retrieve smarter — each staying inside the existing governed model.
+
+- **Two new benign active-validation checks** (`olympus/assess.py`):
+  `sql_error` (**CWE-89**) confirms a SQL-injection *surface* by DETECTION only —
+  a single inert boundary quote, then a DB-specific parse-error signature match;
+  no UNION, no boolean/time extraction, no data pulled. `error_disclosure`
+  (**CWE-209**) detects verbose-error / stack-trace / interactive-debugger
+  disclosure from the same inert probe. Both join the `_BENIGN_CHECKS`
+  containment allowlist (canary marker + a single benign boundary char, never an
+  exploit or spray). Severity is derived from the CVSS vector as usual.
+- **Extended CVSS/SARIF finding contract** (`olympus/sarif.py`) for GitHub
+  code-scanning interop, dependency-free: `security-severity` (the numeric string
+  GitHub ranks on, from the CVSS base score), `security` + `external/cwe/cwe-N`
+  rule tags and a MITRE `helpUri`, and per-result `partialFingerprints` so a
+  consumer tracks the SAME finding across commits. Graceful when a finding has no
+  CWE or no vector.
+- **Semantic skill retrieval is ON BY DEFAULT** (`OLYMPUS_SEMANTIC_SKILLS=off` is
+  the kill switch). It stays a strict no-op below the library-size threshold and
+  degrades to the full index without embeddings, and the effective value is
+  frozen per run into `tr.meta` and restored on replay — so historical runs
+  reproduce their recorded block regardless of the new default.
+- 12 new tests across `test_assess.py`, `test_sarif.py`, `test_semantic_skills.py`.
+
+
 ### Added — Aegis security-methodology pack (read-only, attributed)
 
 A curated, **read-only** methodology library for the Aegis specialist: five
