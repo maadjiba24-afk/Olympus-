@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 128,
+    "count": 129,
     "names": [
       "a2a",
       "actions",
@@ -98,6 +98,7 @@
       "growth",
       "health",
       "heartbeat",
+      "http-capture",
       "images",
       "import-agent",
       "journey",

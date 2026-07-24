@@ -863,6 +863,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook.add_argument("--host", default="0.0.0.0")
     p_hook.add_argument("--port", type=int, default=8487)
 
+    p_hc = sub.add_parser(
+        "http-capture", help="inspect/replay the opt-in HTTP capture store "
+                             "(set OLYMPUS_HTTP_CAPTURE=1 to record fetches): "
+                             "list / show <id> / replay <id> / clear [day]")
+    p_hc.add_argument("action", nargs="?", default="list",
+                      choices=("list", "show", "replay", "clear"))
+    p_hc.add_argument("arg", nargs="?",
+                      help="record id (show/replay) or day YYYYMMDD (clear)")
+
     from . import codegraph_cli as _cg_cli
     p_cg = sub.add_parser(
         "codegraph", help="the code knowledge graph: build/update/watch it, "
@@ -982,6 +991,31 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "codegraph":
         from . import codegraph_cli
         return codegraph_cli.run(args)
+    elif args.command == "http-capture":
+        from . import httpcapture
+        act = args.action
+        if act == "list":
+            recs = httpcapture.records(limit=50)
+            if not recs:
+                print("No HTTP captures yet." if httpcapture.enabled()
+                      else "HTTP capture is off — set OLYMPUS_HTTP_CAPTURE=1 to "
+                           "record governed fetches for inspection/replay.")
+            else:
+                for r in recs:
+                    print(f"  {r['id']}  {r.get('status')}  {r['bytes']}B  "
+                          f"{r['method']} {r['url']}")
+        elif act == "show":
+            r = httpcapture.get(args.arg) if args.arg else None
+            print(json.dumps(r, indent=2, ensure_ascii=False) if r
+                  else f"No capture record {args.arg!r}.")
+        elif act == "replay":
+            if not args.arg:
+                print("usage: olympus http-capture replay <id>")
+            else:
+                print(json.dumps(httpcapture.replay(args.arg), indent=2))
+        elif act == "clear":
+            n = httpcapture.clear(args.arg)
+            print(f"Cleared {n} capture file(s).")
     elif args.command == "growth":
         from . import companion
         print(companion.summary("cli"))

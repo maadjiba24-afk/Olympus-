@@ -15,6 +15,30 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Opt-in HTTP capture / replay store (the safe Caido form)
+
+A new observability primitive: when `OLYMPUS_HTTP_CAPTURE=1`, every governed
+outbound fetch (`tools._http_get`) records its request (method / url / a safe
+header subset) and response (status / size / body) to a local, operator-only
+store, so an operator can **see** exactly what an agent sent and received and
+**replay** a request to check whether the resource changed — valuable for
+debugging and for forensic audit of assessment runs (the deferred Strix/Caido
+capture-proxy value, `DEFERRED.md` #18, delivered *without* the open box).
+
+- **No new risk surface.** It only OBSERVES the already-governed fetch path
+  (SSRF-pinned, egress-confined, secret-exfil-scanned) — it opens no new socket
+  and relaxes no gate. `replay` re-issues through the same `_http_get`.
+- **Never a credential sink.** Stored bodies and headers are secret-redacted
+  (`security.sanitize_for_prompt`); `Authorization`/`Cookie`/api-key headers are
+  never persisted (only a small safe subset); bodies are size-capped (64 KB) with
+  the true size and a SHA-256 of the original kept for the replay diff; files are
+  day-stamped and swept on the normal retention cadence. **Off by default.**
+- **Operator surface.** New `olympus http-capture` command: `list` / `show <id>` /
+  `replay <id>` / `clear [day]` (CLI command count 128 → 129). New module
+  `olympus/httpcapture.py`; hook is best-effort and never breaks a fetch.
+- 10 tests (`tests/test_httpcapture.py`), fully offline.
+
+
 ### Added — OS-level computer use can be turned on: the native actuator
 
 The computer-use framework (`computeruse.py`) shipped as safety rails with **no

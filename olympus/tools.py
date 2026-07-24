@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -664,9 +665,19 @@ def _http_get(url: str, timeout: float = 30,
         hdrs.update({str(k): str(v) for k, v in headers.items()})
     req = _urlreq.Request(url, headers=hdrs)
     opener = _proxy_opener() if proxied else _pinned_opener()
+    _t0 = time.time()
     with opener.open(req, timeout=timeout) as resp:
-        return resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
+        body = resp.read(_HTTP_TEXT_CAP + 1)[:_HTTP_TEXT_CAP].decode(
             "utf-8", errors="replace")
+        # Opt-in HTTP capture (default off): record this ALREADY-governed fetch
+        # for operator inspection/replay. Best-effort — never breaks the fetch.
+        from . import httpcapture
+        if httpcapture.enabled():
+            httpcapture.record(
+                "GET", url, hdrs, getattr(resp, "status", None), body,
+                elapsed_ms=(time.time() - _t0) * 1000,
+                resp_headers=dict(getattr(resp, "headers", {}) or {}))
+        return body
 
 
 def _http_get_bytes(url: str, max_bytes: int = 12_000_000,
