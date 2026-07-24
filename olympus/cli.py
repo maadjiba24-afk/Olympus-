@@ -508,6 +508,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("skills-starter",
                    help="install a small curated starter-skill pack "
                         "(provisional — benchmark-gated like any other skill)")
+    sub.add_parser("skills-security",
+                   help="install Aegis's read-only security-methodology pack "
+                        "(provisional, Aegis-scoped; detection/reporting only)")
     sub.add_parser("gate", help="benchmark-gate provisional skills now")
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
@@ -1870,6 +1873,13 @@ def main(argv: list[str] | None = None) -> int:
         msgs = skillpack.install_starter_pack()
         print("Installed the starter pack (provisional — run `olympus gate` to "
               "benchmark them):")
+        for m in msgs:
+            print(f"  · {m}")
+    elif args.command == "skills-security":
+        from . import skillpack
+        msgs = skillpack.install_security_pack()
+        print("Installed Aegis's security-methodology pack (provisional, "
+              "Aegis-scoped — read-only knowledge, no tool granted):")
         for m in msgs:
             print(f"  · {m}")
     elif args.command == "gate":

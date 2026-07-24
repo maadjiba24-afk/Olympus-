@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 129,
+    "count": 130,
     "names": [
       "a2a",
       "actions",
@@ -153,6 +153,7 @@
       "skill-export",
       "skill-import",
       "skills",
+      "skills-security",
       "skills-starter",
       "slack",
       "sleeptime",

@@ -69,3 +69,48 @@ def test_export_unknown_skill_raises():
     import pytest
     with pytest.raises(ValueError):
         skillpack.to_skill_md("does-not-exist")
+
+
+# --- Aegis security-methodology pack -------------------------------------
+
+def test_security_pack_installs_aegis_scoped_provisional():
+    msgs = skillpack.install_security_pack()
+    assert len(msgs) == len(skillpack.SECURITY_PACK) >= 5
+    for s in skillpack.SECURITY_PACK:
+        raw = skills.read(s["name"])
+        assert "<!-- specialist: aegis -->" in raw     # Aegis-scoped
+        assert "<!-- provisional -->" in raw           # benchmark-gated
+        assert "Strix" in raw and "Apache-2.0" in raw  # attributed
+
+
+def test_security_pack_is_visible_only_to_aegis():
+    skillpack.install_security_pack()
+    aegis_idx = skills.index("aegis")
+    hephaestus_idx = skills.index("hephaestus")
+    assert "authorized-assessment-workflow" in aegis_idx
+    # a scoped skill never leaks to another specialist's index
+    assert "authorized-assessment-workflow" not in hephaestus_idx
+
+
+def test_security_pack_is_read_only_methodology():
+    """The pack is knowledge, not actuation: every skill states detection/
+    reporting only and grants no tool (skills never grant tools by construction),
+    and none embeds an exploit-style directive to act on a target."""
+    skillpack.install_security_pack()
+    banned = ("exploit the", "gain a shell", "pivot to", "establish persistence",
+              "escalate privileges on")
+    for s in skillpack.SECURITY_PACK:
+        body = skills.read(s["name"]).lower()
+        assert "detection and reporting only" in body or "detection only" in body \
+            or "detection/reporting only" in body
+        for phrase in banned:
+            assert phrase not in body
+
+
+def test_security_pack_passes_import_security_scan():
+    """Curated content must itself be clean under the same scan that guards
+    third-party skill imports (no injection markers, no embedded credentials)."""
+    for s in skillpack.SECURITY_PACK:
+        parsed = {"name": s["name"], "description": s["description"],
+                  "instructions": s["instructions"]}
+        assert skillpack.scan_reason(parsed) is None

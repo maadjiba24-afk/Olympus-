@@ -15,6 +15,29 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Added — Aegis security-methodology pack (read-only, attributed)
+
+A curated, **read-only** methodology library for the Aegis specialist: five
+Aegis-scoped skills that steer a thorough, systematic *authorized* assessment
+through Olympus's existing governed suite (`assess_recon` / `assess_http_audit`
+/ `assess_sast` / `assess_secrets` / `assess_deps` / `assess_validate` and the
+findings store). Install with `olympus skills-security`.
+
+- **Knowledge, not capability.** Skills are durable *instructions*; a skill
+  grants no tool, so nothing here is or can be wired to an actuator. Every skill
+  states detection-and-reporting-only and stays inside operator-authorized scope
+  (Aegis holds no self-authorize tool — scope is enforced in code).
+- **Attributed.** The weakness-class taxonomy and assess→validate→report
+  workflow are adapted from the open-source Strix security agent
+  (github.com/usestrix/strix, Apache-2.0) — its *methodology* re-expressed for
+  Olympus's governed, authorized-only model. No Strix code is vendored.
+- **Gated like everything else.** Installed PROVISIONAL and Aegis-scoped, so
+  they go through the same benchmark gate as any self-written skill and never
+  leak into another specialist's index.
+- New `skillpack.SECURITY_PACK` / `install_security_pack()`, `skills-security`
+  CLI command (command count 129 → 130); 4 tests.
+
+
 ### Added — Per-run spend ceiling (`OLYMPUS_RUN_BUDGET_USD`)
 
 A second spend guard alongside the daily budget. The daily budget is a
