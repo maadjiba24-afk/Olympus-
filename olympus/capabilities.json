@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 130,
+    "count": 131,
     "names": [
       "a2a",
       "actions",
@@ -61,6 +61,7 @@
       "autonomy",
       "backup",
       "budget",
+      "calibration",
       "capabilities",
       "chat",
       "code-eval",

@@ -43,6 +43,7 @@ from . import config, witness
 
 SCHEMA = "olympus-calibration/1"
 SCHEMA_FAMILY = "olympus-calibration"
+_SUPPORTED_MAJOR = 1              # newest schema major this build can read
 LABEL = "calibration/v1"          # witness subkey (domain separation)
 
 _LOCK = threading.Lock()
@@ -55,16 +56,78 @@ TOMBSTONE = "tombstone"
 _KINDS = (OBSERVATION, FEEDBACK, COMPARISON, TOMBSTONE)
 
 # Outcome vocabulary — the first four are reused VERBATIM from outcomes.py so the
-# two stores speak the same language; the last two cover retry/override.
+# two stores speak the same language; the rest cover the full feedback surface.
 APPROVED = "approved"
-APPROVED_AFTER_EDIT = "approved_after_edit"
+APPROVED_AFTER_EDIT = "approved_after_edit"   # kept for back-compat with Phase 1
+EDITED = "edited"                  # user changed the output before accepting
 REJECTED = "rejected"
 UNDONE = "undone"
 RETRIED = "retried"
 OVERRIDDEN = "overridden"
-OUTCOMES = (APPROVED, APPROVED_AFTER_EDIT, REJECTED, UNDONE, RETRIED, OVERRIDDEN)
+ABANDONED = "abandoned"            # user walked away without accepting/rejecting
+PREFERENCE = "preference"          # an explicit stated preference
+VERIFIED = "verified"              # an externally verified downstream outcome
+OUTCOMES = (APPROVED, APPROVED_AFTER_EDIT, EDITED, REJECTED, UNDONE, RETRIED,
+            OVERRIDDEN, ABANDONED, PREFERENCE, VERIFIED)
+
+# --- evidence hierarchy (documented; NEVER collapsed into one "success") ------
+# Four strictly-separated levels of evidence about a run. Higher is stronger, but
+# they are DIFFERENT QUESTIONS, not points on one axis: completion asks "did it
+# run", satisfaction asks "did the user accept it", verified asks "was it actually
+# correct". Analytics reports each separately; nothing blends them.
+EV_COMPLETION = 1                  # execution completed (result field)
+EV_IMPLICIT = 2                    # implicit behavioural signal (edit/retry/abandon)
+EV_EXPLICIT = 3                    # explicit user feedback (approve/reject/preference)
+EV_VERIFIED = 4                    # externally verified downstream outcome
+EVIDENCE_LEVELS = {EV_COMPLETION: "completion", EV_IMPLICIT: "implicit",
+                   EV_EXPLICIT: "explicit", EV_VERIFIED: "verified"}
+
+# Which evidence level each outcome carries.
+_OUTCOME_EVIDENCE = {
+    EDITED: EV_IMPLICIT, RETRIED: EV_IMPLICIT, UNDONE: EV_IMPLICIT,
+    ABANDONED: EV_IMPLICIT, OVERRIDDEN: EV_IMPLICIT,
+    APPROVED: EV_EXPLICIT, APPROVED_AFTER_EDIT: EV_EXPLICIT,
+    REJECTED: EV_EXPLICIT, PREFERENCE: EV_EXPLICIT,
+    VERIFIED: EV_VERIFIED,
+}
 
 _RESULTS = ("ok", "error", "refused", "timeout")
+
+# --- domain taxonomy (controlled + versioned) ---------------------------------
+# A SMALL, EXPLICIT taxonomy — never free-form. The specialist→domain map mirrors
+# `routing_outcomes._TASK_TYPE` (the pipeline's own routing tag, which already
+# reflects the real Olympus workloads) so classification is DETERMINISTIC from
+# structured metadata and never needs a model call or prompt-text inspection.
+# Bump DOMAIN_TAXONOMY_VERSION on any change to the sets below; every classified
+# observation records the version it was tagged under.
+DOMAIN_TAXONOMY_VERSION = "1"
+UNCLASSIFIED = "unclassified"      # no structured metadata to classify from
+OTHER = "other"                    # classified, but outside the known set
+_DOMAIN_BY_SPECIALIST = {
+    "hephaestus": "code",
+    "argus": "research", "mnemosyne": "research",
+    "plutus": "finance",
+    "peitho": "marketing", "iris": "social",
+    "chronos": "scheduling", "angelos": "inbox",
+    "aegis": "security", "chiron": "coaching",
+    "prometheus": "evolution", "metis": "learning",
+    "hermes": "general", "zeus": "general",
+}
+# A coarse tool→domain fallback for tool-led runs with no specialist. Kept tiny
+# and deterministic; unknown tools fall through to `other`, never a guess.
+_DOMAIN_BY_TOOL = {
+    "write_file": "code", "read_file": "code", "run_python": "code",
+    "web_search": "research", "web_fetch": "research",
+    "send_email": "inbox", "assess": "security",
+}
+DOMAINS = frozenset(_DOMAIN_BY_SPECIALIST.values()) | frozenset(
+    _DOMAIN_BY_TOOL.values()) | {UNCLASSIFIED, OTHER}
+
+# Classification source (provenance of the domain label).
+SRC_EXPLICIT = "explicit"          # a caller passed the domain in
+SRC_SPECIALIST = "specialist"      # derived from the dispatched specialist
+SRC_TOOL = "tool"                  # derived from the tool used
+SRC_NONE = "none"                  # nothing to classify from
 
 # Don't infer anything from a tiny history — same bar as outcomes._MIN_SAMPLES.
 _MIN_SAMPLES = 5
@@ -91,8 +154,68 @@ def retention_days() -> int:
         return 0
 
 
+def export_allowed() -> bool:
+    """Export is a separate, explicit permission (default ON only when collection
+    is on). An operator can forbid export while still collecting."""
+    v = os.environ.get("OLYMPUS_CALIBRATION_EXPORT", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def lock_timeout() -> float:
+    """Bounded wait for the cross-process append lock. On expiry an observation
+    is dropped with a VISIBLE error (never silently), because blocking a run on a
+    wedged peer is worse than losing one telemetry row."""
+    try:
+        return max(0.1, float(os.environ.get("OLYMPUS_CALIBRATION_LOCK_TIMEOUT", "5")))
+    except ValueError:
+        return 5.0
+
+
+def status() -> dict:
+    """Visible collection status — for `olympus calibration status` and health()."""
+    return {"enabled": enabled(), "export_allowed": export_allowed(),
+            "retention_days": retention_days(), "path": str(path()),
+            "schema": SCHEMA, "taxonomy_version": DOMAIN_TAXONOMY_VERSION}
+
+
 def path() -> Path:
     return Path(config.MEMORY_DIR) / "calibration.jsonl"
+
+
+# --- domain classification (deterministic; never touches prompt text) ---------
+
+def classify_domain(*, specialist: str = "", tool: str = "",
+                    explicit: str = "") -> dict:
+    """Classify a run's domain from STRUCTURED METADATA ONLY — never from prompt
+    or output text, so no sensitive attribute is ever inferred. Precedence:
+    explicit caller override > dispatched specialist > tool. Deterministic
+    whenever any structured signal is present. Returns
+    {domain, confidence, source, taxonomy_version}."""
+    v = DOMAIN_TAXONOMY_VERSION
+    if explicit:
+        d = explicit.strip().lower()
+        # An explicit label is honoured but still constrained to the taxonomy:
+        # an unknown explicit domain is recorded as `other`, not invented.
+        return {"domain": d if d in DOMAINS else OTHER, "confidence": 1.0,
+                "source": SRC_EXPLICIT, "taxonomy_version": v}
+    if specialist:
+        s = specialist.strip().lower()
+        if s in _DOMAIN_BY_SPECIALIST:
+            return {"domain": _DOMAIN_BY_SPECIALIST[s], "confidence": 1.0,
+                    "source": SRC_SPECIALIST, "taxonomy_version": v}
+        return {"domain": OTHER, "confidence": 0.5, "source": SRC_SPECIALIST,
+                "taxonomy_version": v}
+    if tool:
+        t = tool.strip().lower()
+        if t in _DOMAIN_BY_TOOL:
+            return {"domain": _DOMAIN_BY_TOOL[t], "confidence": 0.9,
+                    "source": SRC_TOOL, "taxonomy_version": v}
+        return {"domain": OTHER, "confidence": 0.4, "source": SRC_TOOL,
+                "taxonomy_version": v}
+    return {"domain": UNCLASSIFIED, "confidence": 0.0, "source": SRC_NONE,
+            "taxonomy_version": v}
 
 
 # --- redaction -------------------------------------------------------------
@@ -244,15 +367,27 @@ def _head() -> tuple[int, str | None, set[str]]:
 
 def _append(kind: str, body: dict, event_key: str, at: str | None = None
             ) -> dict | None:
-    """Append one entry. Returns the entry, or None when collection is disabled
-    or the event is a duplicate. Never raises on I/O — a telemetry write must not
-    break a run."""
+    """Append one entry, safely across THREADS AND PROCESSES.
+
+    The read-modify-write (find the tail hash + seen keys, then append) runs
+    under `proclock` (the repo's existing fcntl cross-process lock — ADR 0005),
+    so two Olympus processes sharing MEMORY_DIR cannot interleave lines or fork
+    the chain. The write itself is a single `write()` of one `\\n`-terminated
+    line, which is atomic for small records on local POSIX filesystems (see
+    docs/CALIBRATION_RECORD.md §6 for the NFS caveat).
+
+    Returns the entry, or None when collection is disabled, the event is a
+    duplicate, or the lock could not be acquired within the bounded timeout. A
+    lock timeout is reported VISIBLY (never a silent drop) — losing one telemetry
+    row under a wedged peer beats blocking a real run. Never raises into the
+    caller."""
     if kind not in _KINDS:
         raise CalibrationError(f"unknown entry kind {kind!r}")
     if not enabled():
         return None
-    with _LOCK:
-        try:
+    from . import proclock
+    try:
+        with proclock.lock("calibration", timeout=lock_timeout()):
             seq, prev, seen = _head()
             if event_key and event_key in seen:
                 return None                    # idempotent: already ingested
@@ -261,9 +396,18 @@ def _append(kind: str, body: dict, event_key: str, at: str | None = None
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())          # durable before the lock releases
             return entry
-        except OSError:
-            return None
+    except TimeoutError as err:
+        try:
+            from . import errors
+            errors.capture("calibration", err, context="append lock timeout")
+        except Exception:
+            pass
+        return None                            # visible above, not silent here
+    except OSError:
+        return None
 
 
 def _clean(body: dict) -> dict:
@@ -288,15 +432,23 @@ def record_observation(run_id: str, *, domain: str = "", provider: str = "",
         raise CalibrationError("run_id is required")
     if result and result not in _RESULTS:
         raise CalibrationError(f"unknown result {result!r}")
+    # Deterministic domain classification from structured metadata only. An
+    # explicit `domain` is honoured as a caller override; otherwise it is derived
+    # from the specialist, then the tool — never from the prompt text.
+    dc = classify_domain(specialist=specialist, tool=tool, explicit=domain)
     body = _clean({
-        "run_id": str(run_id), "domain": domain,
+        "run_id": str(run_id),
+        "domain": dc["domain"], "domain_source": dc["source"],
+        "domain_confidence": dc["confidence"],
+        "taxonomy_version": dc["taxonomy_version"],
         "provider": provider, "model": model,
         "model_key": model_key(provider, model) if provider else "",
         "config_id": config_id(provider, model, base_url, effort) if provider else "",
         "specialist": specialist, "tool": tool,
         "latency_ms": latency_ms, "tokens_in": tokens_in,
         "tokens_out": tokens_out, "cost_usd": cost_usd,
-        "result": result, "task_hash": text_ref(task),
+        "result": result, "evidence_level": EV_COMPLETION,
+        "task_hash": text_ref(task),
         "provenance": _clean({"trace_id": trace_id, "compare_id": compare_id}) or None,
     })
     return _append(OBSERVATION, body,
@@ -307,13 +459,20 @@ def record_observation(run_id: str, *, domain: str = "", provider: str = "",
 
 def record_feedback(run_id: str, outcome: str, *, note: str | None = None,
                     at: str | None = None, seq_hint: str = "") -> dict | None:
-    """Record a human verdict on an earlier run. This is a NEW entry referencing
-    the observation — the observation is never rewritten."""
+    """Record a signal about an earlier run as a NEW entry — the observation is
+    never rewritten, and a run may accrue MANY feedback events over time. Each
+    carries its evidence LEVEL (implicit / explicit / verified), so analytics can
+    keep completion, satisfaction, and verified quality strictly separate. An
+    `edit` is an implicit signal, NOT a failure; an `approval` is an explicit
+    signal, NOT proof of correctness. `note` is hashed, never stored."""
     if not run_id:
         raise CalibrationError("run_id is required")
     if outcome not in OUTCOMES:
         raise CalibrationError(f"unknown outcome {outcome!r}")
+    level = _OUTCOME_EVIDENCE.get(outcome, EV_IMPLICIT)
     body = _clean({"ref_run_id": str(run_id), "outcome": outcome,
+                   "evidence_level": level,
+                   "evidence": EVIDENCE_LEVELS.get(level, ""),
                    "note_hash": text_ref(note)})
     return _append(FEEDBACK, body,
                    _event_key(FEEDBACK, {"run_id": str(run_id),
@@ -370,10 +529,56 @@ def prune(now: float | None = None) -> int:
 
 # --- verification ----------------------------------------------------------
 
+# Integrity states the verifier distinguishes (never collapsed into one bool).
+V_VALID = "valid"                          # signed and chained
+V_UNSIGNED_VALID = "unsigned_valid"        # structurally valid, no crypto sig
+V_CORRUPTED_CHAIN = "corrupted_chain"      # a middle entry altered/removed
+V_INCOMPLETE_TAIL = "incomplete_trailing_write"   # last line truncated (recoverable)
+V_UNSUPPORTED_SCHEMA = "unsupported_schema"       # newer major we can't read
+V_MISSING_EVIDENCE = "missing_referenced_evidence"  # feedback → absent run
+
+
+def _physical_lines() -> list[str]:
+    p = path()
+    if not p.exists():
+        return []
+    try:
+        return [ln for ln in p.read_text(encoding="utf-8").split("\n")]
+    except OSError:
+        return []
+
+
 def verify() -> dict:
-    """Verify the whole chain: every entry's content address recomputes, `prev`
-    linkage is intact, and any signature validates. Reports signed/unsigned
-    honestly rather than failing closed (see the module docstring)."""
+    """Verify the chain and CATEGORIZE its integrity. Distinguishes, without ever
+    silently repairing a middle-of-chain fault:
+
+      valid · unsigned_valid · corrupted_chain · incomplete_trailing_write ·
+      unsupported_schema · missing_referenced_evidence
+
+    A truncated LAST line (a write interrupted by a crash) is reported as a
+    recoverable `incomplete_trailing_write`; a malformed or hash-broken MIDDLE
+    entry is `corrupted_chain` and is never auto-healed. Signature status is
+    reported honestly (signed vs unsigned) rather than failing closed."""
+    lines = _physical_lines()
+    # Trailing empty string from a final newline is normal; a trailing NON-empty
+    # line that won't parse is an interrupted write.
+    states: set[str] = set()
+    incomplete_tail = False
+    if lines:
+        # drop the single trailing "" produced by a terminating newline
+        body_lines = lines[:-1] if lines and lines[-1] == "" else lines
+        for idx, ln in enumerate(body_lines):
+            if not ln.strip():
+                continue
+            try:
+                json.loads(ln)
+            except (json.JSONDecodeError, TypeError):
+                if idx == len(body_lines) - 1:
+                    incomplete_tail = True          # recoverable trailing partial
+                    states.add(V_INCOMPLETE_TAIL)
+                else:
+                    states.add(V_CORRUPTED_CHAIN)     # mid-file garbage line
+
     raw = _read_raw()
     problems: list[str] = []
     signed = unsigned = 0
@@ -382,31 +587,64 @@ def verify() -> dict:
         expected_pub = witness.sub_public_key_hex(LABEL)
     except Exception:
         expected_pub = ""
+    observed_runs: set[str] = set()
     for i, e in enumerate(raw):
+        schema = str(e.get("schema", ""))
+        major = schema.split("/")[-1] if "/" in schema else ""
+        if major and major.isdigit() and int(major) > _SUPPORTED_MAJOR:
+            states.add(V_UNSUPPORTED_SCHEMA)
+            problems.append(f"entry {i}: schema {schema} newer than supported "
+                            f"major {_SUPPORTED_MAJOR}")
         core = _core(e.get("seq", i), e.get("prev"), e.get("kind", ""),
                      e.get("at", ""), e.get("body", {}),
                      e.get("event_key", ""))
         if _entry_hash(core) != e.get("entry_hash"):
             problems.append(f"entry {i} (seq {e.get('seq')}): content hash "
                             "mismatch — entry was altered")
+            states.add(V_CORRUPTED_CHAIN)
         if e.get("prev") != prev_hash:
             problems.append(f"entry {i} (seq {e.get('seq')}): broken chain — "
                             "an earlier entry was edited, reordered, or removed")
+            states.add(V_CORRUPTED_CHAIN)
         prev_hash = e.get("entry_hash")
+        if e.get("kind") == OBSERVATION:
+            observed_runs.add(str((e.get("body") or {}).get("run_id", "")))
         sig, pub = str(e.get("signature", "")), str(e.get("publicKey", ""))
         if not sig:
             unsigned += 1
-            continue
-        ok = bool(expected_pub) and pub.lower() == expected_pub.lower() and \
-            witness.verify_signature(expected_pub,
-                                     str(e.get("entry_hash", "")).encode("utf-8"),
-                                     sig)
-        if ok:
-            signed += 1
         else:
-            problems.append(f"entry {i} (seq {e.get('seq')}): signature invalid")
-    return {"ok": not problems, "entries": len(raw), "signed": signed,
-            "unsigned": unsigned, "problems": problems}
+            ok = bool(expected_pub) and pub.lower() == expected_pub.lower() and \
+                witness.verify_signature(
+                    expected_pub, str(e.get("entry_hash", "")).encode("utf-8"), sig)
+            if ok:
+                signed += 1
+            else:
+                problems.append(f"entry {i} (seq {e.get('seq')}): signature invalid")
+                states.add(V_CORRUPTED_CHAIN)
+
+    # Referenced-evidence integrity: feedback pointing at a run we never observed.
+    dangling = []
+    for e in raw:
+        if e.get("kind") == FEEDBACK:
+            ref = str((e.get("body") or {}).get("ref_run_id", ""))
+            if ref and ref not in observed_runs:
+                dangling.append(ref)
+    if dangling:
+        states.add(V_MISSING_EVIDENCE)
+
+    # The chain is "ok" for tamper purposes iff nothing corrupt was found. A
+    # recoverable trailing partial, unsigned entries, and dangling feedback are
+    # reported but do NOT by themselves mean tampering.
+    chain_ok = V_CORRUPTED_CHAIN not in states
+    if not states:
+        states.add(V_VALID if (signed and not unsigned) else V_UNSIGNED_VALID)
+    elif chain_ok and unsigned and not signed:
+        states.add(V_UNSIGNED_VALID)
+    return {"ok": chain_ok, "entries": len(raw), "signed": signed,
+            "unsigned": unsigned, "problems": problems,
+            "states": sorted(states),
+            "incomplete_trailing_write": incomplete_tail,
+            "missing_referenced_runs": sorted(set(dangling))}
 
 
 # --- export / import -------------------------------------------------------
@@ -416,7 +654,11 @@ _EXPORT_HEADER = {"schema": SCHEMA, "kind": "_export_header"}
 
 def export_jsonl(dest: str | Path) -> int:
     """Export the record as documented JSONL (one entry per line, first line a
-    header). Explicit and operator-invoked — never automatic, never networked."""
+    header). Explicit and operator-invoked — never automatic, never networked.
+    Refuses when export permission is withdrawn (`OLYMPUS_CALIBRATION_EXPORT=0`)."""
+    if not export_allowed():
+        raise CalibrationError(
+            "export is disabled (OLYMPUS_CALIBRATION_EXPORT=0)")
     raw = _read_raw()
     p = Path(dest)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -491,65 +733,101 @@ def _freshness(raw: list[dict], now: float | None = None) -> dict:
     return {"newest_at": newest, "age_seconds": age}
 
 
+# Fields whose absence counts toward the observation-level missing-evidence rate.
 _EVIDENCE_FIELDS = ("provider", "model", "domain", "latency_ms", "tokens_in",
                     "tokens_out", "cost_usd", "result")
 
 
 def report(now: float | None = None) -> dict:
-    """Inferred metrics. NEVER ranks below the minimum-sample bar — an
-    under-sampled cell reports `insufficient_evidence` and omits its rates."""
+    """Inferred metrics — computed here, never stored. Keeps COMPLETION,
+    SATISFACTION, and VERIFIED QUALITY strictly separate; there is deliberately
+    no single 'success' number. Below `_MIN_SAMPLES` a cell reports
+    `insufficient_evidence` and omits its rates."""
     obs = entries(OBSERVATION)
     fb = entries(FEEDBACK)
     cmp_ = entries(COMPARISON)
 
-    # feedback joined to observations by run_id
-    fb_by_run: dict[str, list[str]] = {}
+    # Feedback joined to its run. Track BOTH the outcome and its evidence level so
+    # analytics never blends an implicit edit with an explicit approval.
+    fb_by_run: dict[str, list[dict]] = {}
     for e in fb:
         b = e.get("body", {})
-        fb_by_run.setdefault(str(b.get("ref_run_id", "")), []).append(
-            str(b.get("outcome", "")))
+        fb_by_run.setdefault(str(b.get("ref_run_id", "")), []).append(b)
 
     cells: dict[tuple, dict] = {}
     missing_total = 0
+    unclassified_obs = 0
+    runs_with_feedback = 0
     for e in obs:
         b = e.get("body", {})
+        run = str(b.get("run_id", ""))
+        if b.get("domain", UNCLASSIFIED) == UNCLASSIFIED:
+            unclassified_obs += 1
         key = (b.get("model_key") or model_key(b.get("provider", ""),
                                                b.get("model", "")),
-               b.get("domain", "") or "unclassified")
-        c = cells.setdefault(key, {"n": 0, "ok": 0, "outcomes": {o: 0 for o in OUTCOMES},
-                                   "feedback_n": 0, "latency_ms": [], "cost_usd": 0.0})
+               b.get("domain", "") or UNCLASSIFIED)
+        c = cells.setdefault(key, {
+            "n": 0, "completed": 0, "outcomes": {o: 0 for o in OUTCOMES},
+            "runs_with_fb": 0, "verified_n": 0, "latency_ms": [], "cost_usd": 0.0,
+            "config_ids": set()})
         c["n"] += 1
+        c["config_ids"].add(b.get("config_id", ""))
         if b.get("result") == "ok":
-            c["ok"] += 1
+            c["completed"] += 1
         if isinstance(b.get("latency_ms"), (int, float)):
             c["latency_ms"].append(float(b["latency_ms"]))
         if isinstance(b.get("cost_usd"), (int, float)):
             c["cost_usd"] += float(b["cost_usd"])
-        for o in fb_by_run.get(str(b.get("run_id", "")), []):
+        run_fb = fb_by_run.get(run, [])
+        if run_fb:
+            c["runs_with_fb"] += 1
+            runs_with_feedback += 1
+        for fbb in run_fb:
+            o = str(fbb.get("outcome", ""))
             if o in c["outcomes"]:
                 c["outcomes"][o] += 1
-                c["feedback_n"] += 1
+            if fbb.get("evidence_level") == EV_VERIFIED:
+                c["verified_n"] += 1
         missing_total += sum(1 for f in _EVIDENCE_FIELDS if f not in b)
 
+    def _rate(k, n):
+        return round(k / n, 4) if n else None
+
     out_cells = []
-    for (mk, domain), c in sorted(cells.items()):
-        n, ok = c["n"], c["ok"]
-        row = {"model_key": mk, "domain": domain, "samples": n,
-               "min_samples": _MIN_SAMPLES,
-               "insufficient_evidence": n < _MIN_SAMPLES,
-               "total_cost_usd": round(c["cost_usd"], 6)}
+    for (mk, domain), c in sorted(cells.items(), key=lambda kv: kv[0]):
+        n = c["n"]
+        oc = c["outcomes"]
+        # Explicit-feedback denominator (approve/reject/edit-as-explicit/pref).
+        explicit_n = (oc[APPROVED] + oc[APPROVED_AFTER_EDIT] + oc[REJECTED]
+                      + oc[PREFERENCE])
+        row = {
+            "model_key": mk, "domain": domain, "samples": n,
+            "min_samples": _MIN_SAMPLES,
+            "insufficient_evidence": n < _MIN_SAMPLES,
+            "mixed_config": len([x for x in c["config_ids"] if x]) > 1,
+            "runs_with_feedback": c["runs_with_fb"],
+            "evidence_coverage": _rate(c["runs_with_fb"], n),
+            "total_cost_usd": round(c["cost_usd"], 6),
+        }
         if c["latency_ms"]:
             row["latency_ms_mean"] = round(
                 sum(c["latency_ms"]) / len(c["latency_ms"]), 2)
         if n >= _MIN_SAMPLES:
-            lo, hi = wilson_interval(ok, n)
-            row["success_rate"] = round(ok / n, 4)
-            row["success_ci95"] = [round(lo, 4), round(hi, 4)]
-            fn = c["feedback_n"]
-            if fn:
-                row["feedback_samples"] = fn
-                row["rates"] = {o: round(c["outcomes"][o] / fn, 4)
-                                for o in OUTCOMES}
+            lo, hi = wilson_interval(c["completed"], n)
+            # LEVEL 1 — completion (did it run). NOT quality.
+            row["completion_rate"] = round(c["completed"] / n, 4)
+            row["completion_ci95"] = [round(lo, 4), round(hi, 4)]
+            # LEVEL 3 — explicit satisfaction (kept separate from completion).
+            row["explicit_feedback_samples"] = explicit_n
+            if explicit_n:
+                row["approval_rate"] = _rate(oc[APPROVED] + oc[APPROVED_AFTER_EDIT],
+                                             explicit_n)
+                row["rejection_rate"] = _rate(oc[REJECTED], explicit_n)
+            # LEVEL 2 — implicit behavioural signals (edit/retry), over all runs.
+            row["edit_rate"] = _rate(oc[EDITED] + oc[APPROVED_AFTER_EDIT], n)
+            row["retry_rate"] = _rate(oc[RETRIED], n)
+            # LEVEL 4 — externally verified outcome.
+            row["verified_outcome_rate"] = _rate(c["verified_n"], n)
         out_cells.append(row)
 
     wins: dict[str, int] = {}
@@ -570,49 +848,115 @@ def report(now: float | None = None) -> dict:
 
     denom = len(obs) * len(_EVIDENCE_FIELDS)
     return {
-        "schema": SCHEMA,
+        "schema": SCHEMA, "taxonomy_version": DOMAIN_TAXONOMY_VERSION,
         "observations": len(obs), "feedback": len(fb), "comparisons": len(cmp_),
         "cells": out_cells,
         "comparison_summary": comparisons,
         "freshness": _freshness(_read_raw(), now=now),
+        # Separate, explicitly-named coverage measures (never one 'success').
+        "completion_note": ("completion_rate = execution completed; it is NOT a "
+                            "quality or satisfaction measure"),
+        "unclassified_domain_rate": _rate(unclassified_obs, len(obs)) or 0.0,
+        "missing_feedback_rate": (round(1 - runs_with_feedback / len(obs), 4)
+                                  if obs else 0.0),
         "missing_evidence_rate": round(missing_total / denom, 4) if denom else 0.0,
-        "note": ("Inferred metrics computed from raw observations and verified "
-                 "outcomes. No decision policy consumes this report."),
+        "note": ("Inferred metrics. Completion, satisfaction, and verified "
+                 "quality are reported separately and never combined. No "
+                 "decision policy consumes this report."),
     }
 
 
-def rank_models(domain: str = "", now: float | None = None) -> dict:
-    """Rank models by success rate — or REFUSE. Surfacing insufficient evidence
-    is the point; manufacturing a ranking from thin data is the failure mode."""
+def rank_models(domain: str = "", metric: str = "completion",
+                now: float | None = None) -> dict:
+    """Rank configurations on ONE evidence level — or REFUSE, which is the point.
+    Refuses when: samples are below policy; evidence types aren't comparable (a
+    non-completion metric is missing for some candidate); confidence intervals
+    substantially overlap; domain coverage is inadequate (cross-domain without a
+    single `domain`); or a model_key mixes configurations without grouping.
+    Only completion is rankable here — satisfaction/verified ranking is a
+    separate, deliberately unbuilt decision."""
+    if metric != "completion":
+        return {"ranked": False,
+                "reason": (f"metric '{metric}' is not comparable for ranking in "
+                           "this prototype — only completion is rankable, and it "
+                           "is NOT a quality measure; satisfaction/verified "
+                           "ranking is a separate decision")}
     rep = report(now=now)
-    rows = [c for c in rep["cells"]
-            if (not domain or c["domain"] == domain)]
+    rows = [c for c in rep["cells"] if (not domain or c["domain"] == domain)]
     if not rows:
         return {"ranked": False, "reason": "no observations for this scope",
                 "candidates": []}
+    if not domain and len({c["domain"] for c in rows}) > 1:
+        return {"ranked": False,
+                "reason": ("inadequate domain coverage: candidates span "
+                           f"{len({c['domain'] for c in rows})} domains — pass a "
+                           "single `domain` to rank within it, never across"),
+                "candidates": sorted({c["model_key"] for c in rows})}
     thin = [c["model_key"] for c in rows if c["insufficient_evidence"]]
     if thin:
         return {"ranked": False,
-                "reason": (f"insufficient evidence: {len(thin)} model/domain "
-                           f"cell(s) below {_MIN_SAMPLES} samples "
-                           f"({', '.join(sorted(set(thin)))})"),
+                "reason": (f"insufficient evidence: {len(thin)} cell(s) below "
+                           f"{_MIN_SAMPLES} samples ({', '.join(sorted(set(thin)))})"),
                 "candidates": [c["model_key"] for c in rows]}
-    ranked = sorted(rows, key=lambda c: c["success_rate"], reverse=True)
-    # Overlapping confidence intervals are not a real difference — say so.
+    mixed = [c["model_key"] for c in rows if c["mixed_config"]]
+    if mixed:
+        return {"ranked": False,
+                "reason": (f"mixed model configurations without grouping: "
+                           f"{', '.join(sorted(set(mixed)))} — same name, "
+                           "different endpoint/effort; group by config_id first"),
+                "candidates": [c["model_key"] for c in rows]}
+    ranked = sorted(rows, key=lambda c: c["completion_rate"], reverse=True)
     tied = (len(ranked) > 1
-            and ranked[0]["success_ci95"][0] <= ranked[1]["success_ci95"][1])
-    return {"ranked": True, "separated": not tied,
-            "note": ("confidence intervals overlap — the leader is not "
-                     "statistically separated" if tied else
-                     "leader's interval clears the runner-up"),
+            and ranked[0]["completion_ci95"][0] <= ranked[1]["completion_ci95"][1])
+    return {"ranked": True, "separated": not tied, "metric": "completion",
+            "note": ("completion intervals overlap — the leader is not "
+                     "statistically separated (and completion is not quality)"
+                     if tied else
+                     "leader's completion interval clears the runner-up "
+                     "(completion only — not a quality claim)"),
             "order": [{"model_key": c["model_key"], "domain": c["domain"],
-                       "success_rate": c["success_rate"],
-                       "ci95": c["success_ci95"], "samples": c["samples"]}
+                       "completion_rate": c["completion_rate"],
+                       "ci95": c["completion_ci95"], "samples": c["samples"]}
                       for c in ranked]}
 
 
+def health() -> dict:
+    """Collection-health snapshot with NO sensitive content — for the local
+    inspection command. Reports totals, chain status, signed/unsigned, the
+    unclassified rate, feedback coverage, oldest/newest timestamps, the schema
+    versions present, and any corrupted or incomplete entries."""
+    raw = _read_raw()
+    v = verify()
+    obs = [e for e in raw if e.get("kind") == OBSERVATION]
+    unclassified = sum(1 for e in obs
+                       if (e.get("body") or {}).get("domain", UNCLASSIFIED)
+                       == UNCLASSIFIED)
+    fb_runs = {str((e.get("body") or {}).get("ref_run_id", ""))
+               for e in raw if e.get("kind") == FEEDBACK}
+    obs_runs = {str((e.get("body") or {}).get("run_id", "")) for e in obs}
+    schemas = sorted({str(e.get("schema", "")) for e in raw})
+    return {
+        **status(),
+        "total_records": len(raw),
+        "observations": len(obs),
+        "valid_chain": v["ok"],
+        "integrity_states": v["states"],
+        "signed": v["signed"], "unsigned": v["unsigned"],
+        "unclassified_rate": round(unclassified / len(obs), 4) if obs else 0.0,
+        "feedback_coverage": (round(len(obs_runs & fb_runs) / len(obs_runs), 4)
+                              if obs_runs else 0.0),
+        "oldest_at": raw[0].get("at") if raw else None,
+        "newest_at": raw[-1].get("at") if raw else None,
+        "schema_versions": schemas,
+        "incomplete_trailing_write": v["incomplete_trailing_write"],
+        "corrupted": V_CORRUPTED_CHAIN in v["states"],
+        "missing_referenced_runs": v["missing_referenced_runs"],
+    }
+
+
 def render_report(now: float | None = None) -> str:
-    """Human-facing summary. Explicitly refuses to rank on thin evidence."""
+    """Human-facing summary. Names completion as completion — never 'success' —
+    and refuses to rank on thin evidence."""
     if not enabled():
         return ("Calibration collection is OFF. Enable with OLYMPUS_CALIBRATION=1 "
                 "to begin accumulating provider-neutral reliability evidence "
@@ -621,23 +965,24 @@ def render_report(now: float | None = None) -> str:
     if not rep["observations"]:
         return "Calibration record is empty — no observations yet."
     lines = [f"Calibration record — {rep['observations']} observation(s), "
-             f"{rep['feedback']} feedback, {rep['comparisons']} comparison(s)"]
+             f"{rep['feedback']} feedback, {rep['comparisons']} comparison(s)",
+             "(completion = did it run; NOT quality or satisfaction)"]
     for c in rep["cells"]:
         if c["insufficient_evidence"]:
             lines.append(f"  {c['model_key']} [{c['domain']}]: "
                          f"{c['samples']}/{c['min_samples']} samples — "
-                         "INSUFFICIENT EVIDENCE, no rate reported")
+                         "INSUFFICIENT EVIDENCE, no rates reported")
         else:
-            lo, hi = c["success_ci95"]
-            lines.append(f"  {c['model_key']} [{c['domain']}]: "
-                         f"success {c['success_rate']:.0%} "
-                         f"(95% CI {lo:.0%}–{hi:.0%}, n={c['samples']})")
-    cs = rep["comparison_summary"]
-    if cs["insufficient_evidence"]:
-        lines.append(f"  blind comparisons: {cs['total']}/{cs['min_samples']} — "
-                     "INSUFFICIENT EVIDENCE, no win rate reported")
-    else:
-        for m, r in sorted(cs["win_rate"].items(), key=lambda kv: -kv[1]):
-            lines.append(f"  blind win rate {m}: {r:.0%} ({cs['wins'][m]})")
-    lines.append(f"  missing-evidence rate: {rep['missing_evidence_rate']:.0%}")
+            lo, hi = c["completion_ci95"]
+            seg = (f"  {c['model_key']} [{c['domain']}]: "
+                   f"completion {c['completion_rate']:.0%} "
+                   f"(95% CI {lo:.0%}–{hi:.0%}, n={c['samples']})")
+            if c.get("approval_rate") is not None:
+                seg += (f"; approval {c['approval_rate']:.0%} "
+                        f"(n={c['explicit_feedback_samples']} explicit)")
+            else:
+                seg += "; approval: no explicit feedback yet"
+            lines.append(seg)
+    lines.append(f"  unclassified-domain rate: {rep['unclassified_domain_rate']:.0%}")
+    lines.append(f"  missing-feedback rate: {rep['missing_feedback_rate']:.0%}")
     return "\n".join(lines)

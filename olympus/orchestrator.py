@@ -1598,6 +1598,9 @@ class Olympus:
                     if a.get("specialist") in SPECIALISTS]
             if not keys:
                 return
+            # Remember the plan lead so _finish can classify the run's domain
+            # deterministically from the dispatched specialist (Calibration R3).
+            self._run_lead_specialist = keys[0]
             models = {k: (self.pool.for_specialist(k).model
                           or config.default_model()) for k in keys}
             roles = {k: config.specialist_role(k) for k in keys}
@@ -1669,7 +1672,9 @@ class Olympus:
             s = self.pool.for_role("reasoning")
             calibration.record_observation(
                 self.last_run_id or "", provider=s.provider, model=s.model,
-                base_url=s.base_url or "", result="ok", task=user_message,
+                base_url=s.base_url or "",
+                specialist=getattr(self, "_run_lead_specialist", "") or "",
+                result="ok", task=user_message,
                 trace_id=self.last_run_id or "")
         except Exception:
             pass
@@ -1811,6 +1816,11 @@ class Olympus:
         synthesis, faithfulness check, and the unverified banner. Returns the
         final reply. Extracted so the ask checkpoint can treat it as one
         resumable stage (see `run_checkpointed`)."""
+        # Per-run domain hint for the Calibration Record; set by
+        # _record_routing_outcome on the delegate path, left empty for a direct
+        # reply (which is then honestly recorded as unclassified). Reset here so a
+        # previous delegate turn never leaks its domain onto a later direct turn.
+        self._run_lead_specialist = ""
         mode, brief, result = self._pipeline(user_message, tr)
         if mode in ("direct", "clarify"):
             return result
@@ -2107,6 +2117,17 @@ class Olympus:
         try:
             from . import routing_outcomes
             routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
+        except Exception:
+            pass
+        # Calibration Record: an explicit 👍/👎 is EXPLICIT-level evidence about
+        # this run — append it as new feedback (never rewrites the observation).
+        # A rejection is not a completion failure and an approval is not proof of
+        # correctness; the record keeps those axes separate. Off-by-default no-op.
+        try:
+            pos = str(verdict).lower() in ("up", "good", "positive", "+1", "👍")
+            calibration.record_feedback(
+                self.last_run_id or "",
+                calibration.APPROVED if pos else calibration.REJECTED)
         except Exception:
             pass
         verdict = "positive" if verdict.lower() in ("up", "good", "positive",

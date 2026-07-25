@@ -190,6 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("outcomes", help="Olympus's track record: what you approved, "
                                     "edited, or declined")
     sub.add_parser("status", help="instance health: provider, spend, usage")
+    p_cal = sub.add_parser(
+        "calibration", help="Calibration Record: collection health + report "
+        "(observation-only; changes no behaviour)")
+    p_cal.add_argument("action", nargs="?", default="health",
+                       choices=["health", "status", "report", "export"],
+                       help="health (default) · status · report · export <path>")
+    p_cal.add_argument("dest", nargs="?", default="",
+                       help="destination file for `export`")
     sub.add_parser("routing-stats",
                    help="routing-outcome telemetry (SPEC-04 Phase A) + the "
                         "Phase B data-gate readiness check")
@@ -1222,6 +1230,48 @@ def main(argv: list[str] | None = None) -> int:
                   f"{s['rejected']} rejected, {s['undone']} undone.")
             for ins in outcomes.insights(user):
                 print(f"\n  💡 {ins['message']}")
+    elif args.command == "calibration":
+        from . import calibration
+        firstrun.load_env_file()
+        action = getattr(args, "action", "health")
+        if action == "status":
+            st = calibration.status()
+            print("Calibration collection: "
+                  + ("ON" if st["enabled"] else "OFF (OLYMPUS_CALIBRATION=1 to enable)"))
+            print(f"  export allowed : {st['export_allowed']}")
+            print(f"  retention days : {st['retention_days'] or 'keep all'}")
+            print(f"  data directory : {st['path']}")
+            print(f"  schema         : {st['schema']}  taxonomy v{st['taxonomy_version']}")
+        elif action == "report":
+            print(calibration.render_report())
+        elif action == "export":
+            dest = getattr(args, "dest", "") or "calibration-export.jsonl"
+            try:
+                n = calibration.export_jsonl(dest)
+                print(f"Exported {n} entries to {dest} (metadata + hashes only; "
+                      "no prompt/output text).")
+            except calibration.CalibrationError as err:
+                print(f"Export refused: {err}")
+        else:  # health — no sensitive content
+            h = calibration.health()
+            print("Calibration Record — collection health")
+            print(f"  enabled          : {h['enabled']}")
+            print(f"  total records    : {h['total_records']} "
+                  f"({h['observations']} observations)")
+            print(f"  chain            : {'VALID' if h['valid_chain'] else 'PROBLEM'} "
+                  f"{h['integrity_states']}")
+            print(f"  signed/unsigned  : {h['signed']}/{h['unsigned']}")
+            print(f"  unclassified     : {h['unclassified_rate']:.0%}")
+            print(f"  feedback coverage: {h['feedback_coverage']:.0%}")
+            print(f"  schema versions  : {', '.join(h['schema_versions']) or '—'}")
+            print(f"  oldest / newest  : {h['oldest_at'] or '—'} … {h['newest_at'] or '—'}")
+            if h["incomplete_trailing_write"]:
+                print("  ⚠️ incomplete trailing write (recoverable — last line partial)")
+            if h["corrupted"]:
+                print("  ❌ CORRUPTED middle-of-chain entry — not auto-repaired")
+            if h["missing_referenced_runs"]:
+                print(f"  ⚠️ feedback referencing {len(h['missing_referenced_runs'])} "
+                      "unseen run(s)")
     elif args.command == "learned":
         from . import digest
         firstrun.load_env_file()
