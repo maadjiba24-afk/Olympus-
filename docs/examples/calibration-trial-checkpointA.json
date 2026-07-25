@@ -1,0 +1,51 @@
+{
+  "_DISCLAIMER": "SYNTHETIC harness-validation data, NOT a real trial result",
+  "chain_integrity": {
+    "ok": true,
+    "states": [
+      "valid"
+    ]
+  },
+  "checkpoint": "A",
+  "domain_classification_coverage_routed": 1.0,
+  "feedback_coverage": 0.2,
+  "feedback_events": 24,
+  "gate": {
+    "ok": true,
+    "pause_reasons": []
+  },
+  "generated_at": "2026-07-25T21:45:30+00:00",
+  "incomplete_or_corrupt": {
+    "corrupted": false,
+    "incomplete_trailing_write": false
+  },
+  "lock_timeouts": 0,
+  "note": "Instrumentation quality only. No model comparison at A unless the record's own policy independently finds comparable evidence.",
+  "persisted_observations": 120,
+  "recording_failure_rate": 0.0,
+  "recording_failures": 0,
+  "recording_overhead": {
+    "median_ms": 1.984,
+    "p95_ms": 3.22,
+    "samples": 144
+  },
+  "records_by_domain": {
+    "code": 80,
+    "finance": 40
+  },
+  "records_by_evidence_level": {
+    "completion": 120,
+    "explicit": 24,
+    "implicit": 0,
+    "verified": 0
+  },
+  "records_by_provider_model": {
+    "anthropic/claude-sonnet-5": 60,
+    "openai/gpt-5": 60
+  },
+  "run_attempts_session": 144,
+  "signed": 144,
+  "target_runs": 100,
+  "unclassified_rate": 0.0,
+  "unsigned": 0
+}
