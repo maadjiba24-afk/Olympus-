@@ -1,7 +1,21 @@
 # The Calibration Record — schema, grounding, and privacy note
 
-**Status:** falsifiable prototype. **Observation-only.** Collection is **off by
-default** and changes no Olympus behaviour when enabled.
+**Status:** falsifiable prototype, **Phase 2** (evidence quality + production-safe
+collection). **Observation-only.** Collection is **off by default** and changes
+no Olympus behaviour when enabled.
+
+> **Phase 2 additions** (this document updated): a controlled, versioned domain
+> **taxonomy** (deterministic from the dispatched specialist — never from prompt
+> text); a four-level **evidence hierarchy** (completion / implicit / explicit /
+> verified) that analytics never collapses into one "success"; automatic
+> **feedback linkage** (👍/👎 → explicit-level evidence appended, never rewriting
+> the run); **multi-process safety** via the repo's `proclock` (bounded timeout,
+> visible-on-drop); a **categorizing verifier** (valid · unsigned-valid ·
+> corrupted-chain · incomplete-trailing-write · unsupported-schema ·
+> missing-referenced-evidence); corrected **analytics** (completion/approval/
+> rejection/edit/retry/verified rates all separate) with stronger ranking
+> refusals; and a **trial-mode** `olympus calibration health/status/report/export`
+> inspection command. See `docs/CALIBRATION_REPORT.md` for the Phase 2 verdict.
 
 **Hypothesis under test** (from `docs/MOAT_ANALYSIS.md`): a provider-neutral,
 customer-side record of measured model reliability is the only asset in the
@@ -82,19 +96,38 @@ except `run_id`; missing evidence is simply absent (never a corrupt record).
 | Field | Meaning |
 |---|---|
 | `run_id` | Olympus run identifier — the join key |
-| `domain` | task/domain classification (e.g. `code`, `email`) |
+| `domain` | controlled taxonomy value (Phase 2) — deterministic from the specialist |
+| `domain_source` | `explicit` \| `specialist` \| `tool` \| `none` — provenance of the label |
+| `domain_confidence` | 1.0 for explicit/specialist, 0.9 tool, 0.0 unclassified |
+| `taxonomy_version` | the taxonomy version this row was classified under |
 | `provider`, `model` | **kept explicit and separate — never collapsed into one score** |
 | `config_id` | `sha256(provider, model, base_url, effort)[:16]` — model configuration identity |
 | `specialist`, `tool` | which council member / tool was involved |
 | `latency_ms`, `tokens_in`, `tokens_out`, `cost_usd` | performance + `usage.estimate_cost` |
 | `result` | `ok` \| `error` \| `refused` \| `timeout` |
+| `evidence_level` | `1` (completion) — the observation's own evidence tier |
 | `task_hash` | `sha256(task)[:16]` — **a reference, never the text** |
-| `provenance` | `{trace_id, ledger_run, compare_id}` references |
+| `provenance` | `{trace_id, compare_id}` references |
 
-**`kind: "feedback"`** — appended *later*; **never rewrites the observation**.
-`{ref_run_id, outcome, note_hash}` where `outcome` ∈ `approved`,
-`approved_after_edit`, `rejected`, `undone` (reused verbatim from `outcomes.py`),
-plus `retried` / `overridden`.
+**Domain taxonomy (controlled + versioned, Phase 2).** A small explicit set —
+`code`, `research`, `finance`, `marketing`, `social`, `scheduling`, `inbox`,
+`security`, `coaching`, `evolution`, `learning`, `general`, plus `unclassified`
+and `other`. It mirrors `routing_outcomes._TASK_TYPE` (the pipeline's own routing
+tag reflecting real Olympus workloads), so classification is **deterministic from
+structured metadata** — the dispatched specialist, then the tool — and **never
+reads prompt text**, so no sensitive attribute is inferred. An explicit caller
+override is honoured but still constrained to the taxonomy (an unknown label
+becomes `other`, never invented). `DOMAIN_TAXONOMY_VERSION` is recorded on every
+classified row; bump it on any change to the sets.
+
+**`kind: "feedback"`** — appended *later*; **never rewrites the observation**, and
+a run may carry **many** feedback events. `{ref_run_id, outcome, evidence_level,
+evidence, note_hash}` where `outcome` ∈ `approved`, `approved_after_edit`,
+`edited`, `rejected`, `undone`, `retried`, `overridden`, `abandoned`,
+`preference`, `verified`. Each carries its **evidence level** (see §3), so an
+implicit `edited` is never confused with an explicit `approved`, and neither is
+confused with a `verified` downstream outcome. An edit is **not** a completion
+failure; an approval is **not** proof of correctness.
 
 **`kind: "comparison"`** — `{compare_id, chosen_model, models[], run_ids[], blind}`.
 Links a blind comparison to its runs.
@@ -110,17 +143,37 @@ readable; `migrate_entry()` upgrades in-memory only, never in place.
 
 ---
 
-## 3. The four data layers (kept explicitly distinct)
+## 3. The evidence hierarchy (four levels, never collapsed)
+
+Feedback carries an **evidence level** — a different QUESTION per level, not
+points on one axis. Analytics reports each separately; there is deliberately no
+single "success" number.
+
+| Level | Question | Outcomes | Metric |
+|---|---|---|---|
+| **1 completion** | did it run? | observation `result` | `completion_rate` |
+| **2 implicit** | behavioural signal | `edited`, `retried`, `undone`, `abandoned`, `overridden` | `edit_rate`, `retry_rate` |
+| **3 explicit** | did the user accept it? | `approved`, `rejected`, `preference` | `approval_rate`, `rejection_rate` |
+| **4 verified** | was it actually correct? | `verified` | `verified_outcome_rate` |
+
+**Completion is not quality; approval is not correctness.** A run can complete
+(level 1) and be rejected (level 3); a run can be approved (level 3) yet fail an
+external check (level 4). Blending them is the specific error Phase 2 exists to
+prevent — `report()` keeps them in separate fields and `rank_models()` ranks
+**only** completion, refusing the others as "a separate decision."
+
+### The data layers (still distinct)
 
 | Layer | What it is | Where |
 |---|---|---|
-| **Raw observations** | What happened: latency, tokens, cost, result | `kind:"observation"` |
-| **Verified outcomes** | What a *human* judged: approved / edited / rejected / retried; blind comparison picks | `kind:"feedback"`, `kind:"comparison"` |
-| **Inferred metrics** | Computed, never stored: success/approval rates, Wilson intervals, win rates | `report()` output |
-| **Future decision policies** | Routing, trust expansion, autonomy — **NOT IN THIS PROTOTYPE** | *(none — deliberately)* |
+| **Raw observations** | what happened: latency, tokens, cost, result | `kind:"observation"` |
+| **Verified outcomes** | what a human judged / an external check confirmed | `kind:"feedback"`, `kind:"comparison"` |
+| **Inferred metrics** | computed, never stored: the rates above, Wilson intervals | `report()` output |
+| **Future decision policies** | routing, trust, autonomy — **NOT IN THIS PROTOTYPE** | *(none — deliberately)* |
 
-The separation is the point: layer 4 must never silently consume layers 1–3. A
-test asserts no decision module imports `calibration`.
+Layer 4 must never silently consume layers 1–3. Tests pin that no decision module
+references `calibration`, and that the orchestrator (the one integration point)
+only **writes**, never reads it back.
 
 ---
 
@@ -170,3 +223,42 @@ that stores raw text** — the safest default is no switch at all.
   default exists so enabling is a deliberate, documentable act.
 - **Export leakage.** An export is a portable behavioural dataset. Treat it as
   confidential; the format is documented so it can be reviewed before sharing.
+
+---
+
+## 6. Multi-process safety, recovery, and filesystem assumptions (Phase 2)
+
+### Concurrency
+Appends run under **`proclock.lock("calibration", timeout=…)`** — the repo's
+existing `fcntl.flock` cross-process lock (ADR 0005), not a second abstraction.
+Two Olympus processes sharing `MEMORY_DIR` (the heartbeat-vs-web topology)
+serialize on it, so they cannot interleave lines or fork the hash chain. The lock
+is **bounded** (`OLYMPUS_CALIBRATION_LOCK_TIMEOUT`, default 5 s): on a wedged peer
+the append is **dropped with a visible `errors.capture`**, never a silent success
+and never an unbounded hang on a real run. Each write is a single
+`write()`+`flush()`+`fsync()` of one newline-terminated line.
+
+### Recovery — what `verify()` distinguishes (never silently repairs)
+- **valid** — signed and chained.
+- **unsigned_valid** — structurally valid, no crypto signature (crypto-less host).
+- **incomplete_trailing_write** — the LAST physical line is truncated (a crash
+  mid-`write`). Recoverable: the good prefix reads normally; the partial tail is
+  ignored by readers. Reported, not fatal.
+- **corrupted_chain** — a MIDDLE entry was altered, removed, or won't parse. The
+  hash chain breaks at that point. **Never auto-healed** — flagged for an
+  operator, because silently rebuilding a middle would erase the evidence of
+  tampering that the chain exists to preserve.
+- **unsupported_schema** — an entry with a newer major than this build can read.
+- **missing_referenced_evidence** — feedback/comparison referencing a `run_id`
+  with no observation (e.g. out-of-order arrival). Reported; resolves when the
+  observation lands.
+
+### Filesystem assumptions and known limits
+- **Local POSIX (ext4/xfs/apfs):** `flock` is honoured and a single small
+  `write()` is effectively atomic — the design target.
+- **NFS / network filesystems:** `flock` semantics are weaker or advisory-only,
+  and large writes can tear. Multi-host deployments should use the Postgres store
+  backend and treat the JSONL as single-host. This limit is inherited from
+  `proclock` (ADR 0005), not new here.
+- **Windows (no `fcntl`):** `proclock` degrades to single-process locking with a
+  one-time warning — the heartbeat-vs-web split is documented unsupported there.
