@@ -31,10 +31,10 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import (agent, backend, codegraph, companion, config, connectors,
-               consensus, contracts, contrib, dytopo, effortscore, i18n, llm,
-               memory, playbooks, profile, recall, relgraph, replaystore,
-               steering, trace as trace_mod, tools, usage)
+from . import (agent, backend, calibration, codegraph, companion, config,
+               connectors, consensus, contracts, contrib, dytopo, effortscore,
+               i18n, llm, memory, playbooks, profile, recall, relgraph,
+               replaystore, steering, trace as trace_mod, tools, usage)
 from .specialists import (SPECIALISTS, roster, semantic_roster,
                           semantic_routing_enabled, semantic_skills_enabled)
 
@@ -1659,6 +1659,18 @@ class Olympus:
         try:
             contrib.offer(self.user, self.pool.for_role("reasoning").model,
                           user_message, reply)
+        except Exception:
+            pass
+        # Calibration Record (OBSERVATION ONLY, off by default): note that this
+        # run happened, on which provider/model, so reliability evidence can
+        # accumulate. Records metadata and hashes — never the prompt or reply.
+        # Nothing reads this to change behaviour; when disabled it is a no-op.
+        try:
+            s = self.pool.for_role("reasoning")
+            calibration.record_observation(
+                self.last_run_id or "", provider=s.provider, model=s.model,
+                base_url=s.base_url or "", result="ok", task=user_message,
+                trace_id=self.last_run_id or "")
         except Exception:
             pass
         note_conversation(self.report)
