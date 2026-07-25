@@ -184,6 +184,99 @@ def path() -> Path:
     return Path(config.MEMORY_DIR) / "calibration.jsonl"
 
 
+def failures_path() -> Path:
+    """Durable, append-only log of DROPPED recording attempts (lock timeout /
+    I/O error). Separate from the record so a failure — which by definition did
+    not persist — is still counted, survives restart, and carries a timestamp for
+    selection-bias analysis. Rare by construction (only a wedged peer drops)."""
+    return Path(config.MEMORY_DIR) / "calibration_failures.jsonl"
+
+
+# --- instrumentation: attempted vs persisted vs dropped -----------------------
+# Minimal counters so the trial can compute a recording-failure RATE and detect
+# silent loss. In-process counters are session-scoped (surfaced live); the drop
+# log is durable (survives restart, the basis for the <1% failure gate). This is
+# NOT a queue or event bus — just counting, per the trial's explicit limit.
+_STATS = {"attempted": 0, "persisted": 0, "duplicate": 0,
+          "dropped_timeout": 0, "dropped_error": 0, "disabled_calls": 0}
+
+# Bounded ring of recent persist wall-times (ms), session-scoped — the basis for
+# the trial's median/p95 recording-overhead metric from LIVE traffic.
+_APPEND_MS: list[float] = []
+_APPEND_MS_CAP = 1000
+
+
+def _bump(key: str, n: int = 1) -> None:
+    _STATS[key] = _STATS.get(key, 0) + n
+
+
+def _note_append_ms(ms: float) -> None:
+    _APPEND_MS.append(ms)
+    if len(_APPEND_MS) > _APPEND_MS_CAP:
+        del _APPEND_MS[0]
+
+
+def overhead_percentiles() -> dict:
+    """Median and p95 of recent recording overhead (ms), from live appends."""
+    xs = sorted(_APPEND_MS)
+    if not xs:
+        return {"samples": 0, "median_ms": None, "p95_ms": None}
+    def _pct(p):
+        i = min(len(xs) - 1, int(round((p / 100) * (len(xs) - 1))))
+        return round(xs[i], 3)
+    return {"samples": len(xs), "median_ms": _pct(50), "p95_ms": _pct(95)}
+
+
+def _log_failure(kind: str, reason: str) -> None:
+    """Append one durable failure row. Best-effort and lock-free: a drop is rare,
+    and losing a failure-log line only under-reports failures (fail-safe for the
+    <1% gate — it can never manufacture a false pass by over-counting)."""
+    try:
+        p = failures_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"at": _now_iso(), "kind": kind,
+                                 "reason": str(reason)[:200]}) + "\n")
+    except OSError:
+        pass
+
+
+def record_failures() -> list[dict]:
+    """Durable dropped-attempt rows (oldest first). Malformed lines skipped."""
+    p = failures_path()
+    if not p.exists():
+        return []
+    out = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except (json.JSONDecodeError, TypeError):
+                continue
+    except OSError:
+        return []
+    return out
+
+
+def counters() -> dict:
+    """Attempted-vs-persisted instrumentation for the trial. `persisted` and
+    `durable_failures` are recovered from disk (restart-safe); the rest are this
+    session's in-process counts. `failure_rate` uses the DURABLE numbers so it is
+    meaningful across restarts and cannot be gamed by a fresh process."""
+    persisted = len(_read_raw())
+    durable_failures = len(record_failures())
+    denom = persisted + durable_failures
+    return {
+        "session": dict(_STATS),
+        "persisted_records": persisted,
+        "durable_failures": durable_failures,
+        "failure_rate": round(durable_failures / denom, 6) if denom else 0.0,
+    }
+
+
 # --- domain classification (deterministic; never touches prompt text) ---------
 
 def classify_domain(*, specialist: str = "", tool: str = "",
@@ -384,12 +477,16 @@ def _append(kind: str, body: dict, event_key: str, at: str | None = None
     if kind not in _KINDS:
         raise CalibrationError(f"unknown entry kind {kind!r}")
     if not enabled():
+        _bump("disabled_calls")
         return None
+    _bump("attempted")
     from . import proclock
+    t0 = time.perf_counter()
     try:
         with proclock.lock("calibration", timeout=lock_timeout()):
             seq, prev, seen = _head()
             if event_key and event_key in seen:
+                _bump("duplicate")
                 return None                    # idempotent: already ingested
             entry = _seal(seq, prev, kind, at or _now_iso(), body, event_key)
             p = path()
@@ -398,15 +495,21 @@ def _append(kind: str, body: dict, event_key: str, at: str | None = None
                 fh.write(json.dumps(entry, sort_keys=True) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())          # durable before the lock releases
+            _bump("persisted")
+            _note_append_ms((time.perf_counter() - t0) * 1000)
             return entry
     except TimeoutError as err:
+        _bump("dropped_timeout")
+        _log_failure("lock_timeout", str(err))   # durable + surfaced below
         try:
             from . import errors
             errors.capture("calibration", err, context="append lock timeout")
         except Exception:
             pass
-        return None                            # visible above, not silent here
-    except OSError:
+        return None                            # counted, never a silent drop
+    except OSError as err:
+        _bump("dropped_error")
+        _log_failure("os_error", str(err))
         return None
 
 
@@ -935,10 +1038,15 @@ def health() -> dict:
                for e in raw if e.get("kind") == FEEDBACK}
     obs_runs = {str((e.get("body") or {}).get("run_id", "")) for e in obs}
     schemas = sorted({str(e.get("schema", "")) for e in raw})
+    cnt = counters()
     return {
         **status(),
         "total_records": len(raw),
         "observations": len(obs),
+        "recording_attempts_session": cnt["session"]["attempted"],
+        "persisted_records": cnt["persisted_records"],
+        "durable_failures": cnt["durable_failures"],
+        "recording_failure_rate": cnt["failure_rate"],
         "valid_chain": v["ok"],
         "integrity_states": v["states"],
         "signed": v["signed"], "unsigned": v["unsigned"],

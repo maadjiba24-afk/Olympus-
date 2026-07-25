@@ -889,3 +889,70 @@ def test_disabled_blocks_all_phase2_writes(monkeypatch):
     monkeypatch.setenv("OLYMPUS_CALIBRATION", "0")
     assert calibration.record_feedback("r", calibration.EDITED) is None
     assert not calibration.path().exists()
+
+
+# --- trial instrumentation: attempted vs persisted vs dropped --------------
+
+def test_counters_track_attempted_persisted_duplicate():
+    calibration._STATS.update({k: 0 for k in calibration._STATS})   # reset session
+    _obs("run-1", specialist="hephaestus")
+    _obs("run-1", specialist="hephaestus")          # duplicate → not persisted
+    _obs("run-2", specialist="hephaestus")
+    c = calibration.counters()
+    assert c["session"]["attempted"] == 3
+    assert c["session"]["persisted"] == 2
+    assert c["session"]["duplicate"] == 1
+    assert c["persisted_records"] == 2              # durable, from the record
+    assert c["failure_rate"] == 0.0                 # no drops
+
+
+def test_lock_timeout_is_counted_and_durably_logged(monkeypatch):
+    import contextlib
+    calibration._STATS.update({k: 0 for k in calibration._STATS})
+
+    @contextlib.contextmanager
+    def _boom(name, timeout=None):
+        raise TimeoutError("wedged peer")
+        yield  # pragma: no cover
+
+    from olympus import proclock, errors
+    monkeypatch.setattr(proclock, "lock", _boom)
+    monkeypatch.setattr(errors, "capture", lambda *a, **k: None)
+    assert calibration.record_observation("r1", provider="a", model="m") is None
+    c = calibration.counters()
+    assert c["session"]["dropped_timeout"] == 1
+    assert c["durable_failures"] == 1               # written to the failure log
+    assert c["failure_rate"] == 1.0                 # 1 drop / (0 persisted + 1)
+    # the failure row carries a timestamp for bias analysis, no sensitive content
+    row = calibration.record_failures()[0]
+    assert row["kind"] == "lock_timeout" and row["at"]
+
+
+def test_failure_rate_uses_durable_numbers(monkeypatch):
+    calibration._STATS.update({k: 0 for k in calibration._STATS})
+    for i in range(9):
+        _obs(f"ok-{i}", specialist="hephaestus")     # 9 persisted
+    # one drop
+    import contextlib
+    from olympus import proclock, errors
+
+    @contextlib.contextmanager
+    def _boom(name, timeout=None):
+        raise TimeoutError("x")
+        yield  # pragma: no cover
+    monkeypatch.setattr(proclock, "lock", _boom)
+    monkeypatch.setattr(errors, "capture", lambda *a, **k: None)
+    calibration.record_observation("drop-1", provider="a", model="m")
+    c = calibration.counters()
+    assert c["persisted_records"] == 9
+    assert c["durable_failures"] == 1
+    assert c["failure_rate"] == round(1 / 10, 6)     # 10% here (would fail the gate)
+
+
+def test_health_surfaces_failure_rate():
+    calibration._STATS.update({k: 0 for k in calibration._STATS})
+    _obs("run-1", specialist="hephaestus")
+    h = calibration.health()
+    assert "recording_failure_rate" in h
+    assert h["persisted_records"] == 1
+    assert h["durable_failures"] == 0
