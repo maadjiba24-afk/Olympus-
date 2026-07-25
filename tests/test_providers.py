@@ -205,3 +205,54 @@ def test_complete_text_payload_for_plain_model(monkeypatch):
     s = config.Settings(provider="openai", model="gpt-4o", api_key="k")
     oc.complete_text(s, "sys", [{"role": "user", "content": "hi"}], effort="high")
     assert "reasoning_effort" not in captured and "max_tokens" in captured
+
+
+# --- a 200 with no `choices` is a transient provider hiccup, not a crash -----
+# Regression guard: providers occasionally return HTTP 200 with an empty
+# `choices` array (rate-limit shedding, content filter, upstream error). Callers
+# index `choices[0]`, so returning it raised a bare "IndexError: list index out
+# of range" — an unactionable message that killed a whole 10-minute CI eval.
+
+def _fake_urlopen(bodies):
+    """Yield successive JSON bodies from urlopen, as a context manager."""
+    import io, json as _json
+    seq = list(bodies)
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _open(req, timeout=None):
+        return _Resp(_json.dumps(seq.pop(0)).encode())
+    return _open
+
+
+def test_empty_choices_is_retried_then_succeeds(monkeypatch):
+    import urllib.request
+    from olympus import config, openai_compat as oc
+    monkeypatch.setattr(oc.time, "sleep", lambda *_: None)      # no real backoff
+    # first response has no choices, second is healthy → retried, not raised
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen([
+        {"usage": {}, "choices": []},
+        {"usage": {}, "choices": [{"message": {"content": "recovered"}}]},
+    ]))
+    s = config.Settings(provider="openai", model="gpt-4o", api_key="k",
+                        base_url="https://api.example/v1")
+    assert oc._post(s, {"model": "gpt-4o"})["choices"][0]["message"]["content"] \
+        == "recovered"
+
+
+def test_persistent_empty_choices_raises_a_clear_error(monkeypatch):
+    import urllib.request
+    import pytest as _pytest
+    from olympus import config, openai_compat as oc
+    monkeypatch.setattr(oc.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        _fake_urlopen([{"usage": {}, "choices": []}] * 8))
+    s = config.Settings(provider="openai", model="gpt-4o", api_key="k",
+                        base_url="https://api.example/v1")
+    with _pytest.raises(RuntimeError) as ei:
+        oc._post(s, {"model": "gpt-4o"})
+    msg = str(ei.value)
+    assert "no choices" in msg          # says WHAT went wrong...
+    assert "index out of range" not in msg   # ...not a bare IndexError

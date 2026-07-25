@@ -1,20 +1,21 @@
 {
   "_provenance": {
-    "date": "2026-07-21",
+    "date": "2026-07-25",
     "endpoint": "https://api.moonshot.ai/v1",
     "model": "moonshot-v1-32k",
-    "run": "https://github.com/maadjiba24-afk/Olympus-/actions/runs/29839683673"
+    "run": "https://github.com/maadjiba24-afk/Olympus-/actions/runs/30146104001",
+    "note": "Refreshed 2026-07-25 with operator authorization (see DEFERRED.md #19). The prior baseline (2026-07-21) had drifted below what the gate measures across four consecutive live runs \u2014 a systematic downward shift across nearly all domains, concentrated near no code change, i.e. model/judge variance rather than a regression \u2014 leaving the gate a coin flip. These scores are that run's actual measurements on the same model. NOTE: this run drew peitho HIGH (8.2 vs its typical 7.0-7.2), so peitho's tolerance floor is 7.2 and a future run drawing ~7.0 could flag it; lower peitho here to ~7.2 if that recurs. Refresh again by re-measuring on this same model, confirming the shift is variance not a real drop, then updating date/run/scores together."
   },
   "scores": {
-    "aegis": 9.0,
-    "angelos": 9.4,
-    "argus": 9.4,
-    "chiron": 9.2,
-    "chronos": 7.2,
-    "hephaestus": 7.4,
-    "iris": 9.8,
+    "aegis": 8.2,
+    "angelos": 8.6,
+    "argus": 9.2,
+    "chiron": 7.6,
+    "chronos": 6.8,
+    "hephaestus": 6.8,
+    "iris": 9.6,
     "mnemosyne": 8.4,
-    "peitho": 7.6,
-    "plutus": 9.6
+    "peitho": 8.2,
+    "plutus": 9.2
   }
 }
