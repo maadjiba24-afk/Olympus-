@@ -171,3 +171,81 @@ then run `olympus calibration trial` / `calibration_trial.checkpoint_a()` for th
 real Checkpoint-A report and decision. Do **not** implement routing, trust,
 autonomy, or any adaptive behaviour on this data without a Checkpoint-C CONTINUE
 verdict and a separate explicit request.
+
+---
+
+## Deployment attempt (Step 1) — HALTED: persistence requirement fails
+
+A follow-up task asked to deploy on a real production instance and accumulate to
+100 genuine runs. Step 1's deployment-preparation checks were run against this
+environment and **the storage-persistence requirement fails**, which — by the
+task's own Step 3 rule (*"If persistence fails, disable collection and report the
+incident. Do not continue accumulating into ephemeral storage."*) — is a hard
+stop. Collection was **left disabled**; nothing accumulated.
+
+### Deployment-prep results
+
+| Requirement | Result |
+|---|---|
+| deployed commit matches latest main | 🟢 `1347dd7` (functional code #209–#211 merged) |
+| `OLYMPUS_CALIBRATION` disabled before activation | 🟢 off |
+| calibration dir on **persistent** storage | 🔴 **FAILS** — `/home/user/Olympus-/memory` is on this session container's disk, which the environment reclaims on inactivity/session end |
+| survives process restart | 🟢 yes (verified in #212) |
+| survives **container replacement / host reboot** | 🔴 **FAILS** — session-scoped; the record does not survive reclamation |
+| only the intended instance writes here | 🟢 yes (single sandbox) |
+| filesystem permissions restrict access | 🟡 `drwxr-xr-x root:root` — adequate for single-tenant, not hardened multi-tenant |
+| disk-space monitoring exists | 🔴 none configured |
+| backup/snapshot coverage exists | 🔴 **none found** |
+| backup does not modify the live chain | n/a (no backup) |
+| failure log stored persistently | 🔴 same ephemeral fs |
+| synthetic harness records absent from live dir | 🟢 absent (only under `docs/examples/`) |
+| no raw prompts/outputs/credentials present | 🟢 verified — only hashes/metadata |
+| chain verifies before activation | 🟢 valid |
+
+- **Storage path:** `/home/user/Olympus-/memory` (`/dev/vda`, ext4, session container)
+- **Ownership / permissions:** `root:root`, `0755`
+- **Backup policy:** none
+- **Restore procedure:** none (ephemeral)
+- **Production traffic source:** none — this is a build sandbox, not a deployment
+  serving real users.
+
+### Incident + decision
+
+**INCIDENT: the only available environment is ephemeral and has no production
+traffic.** Accumulating a 100-run, persistence-and-integrity-dependent trial here
+would (a) lose the chain on the next container reclamation and (b) require
+manufacturing the runs, which the hard rules forbid. Per Step 3, collection is
+**not activated for accumulation**; it stays disabled.
+
+**Checkpoint A is NOT attempted** (it requires 100 genuine runs on persistent
+storage; neither precondition is met here).
+
+### Operator runbook — how to actually run this to Checkpoint A
+
+On a **real deployment** with ordinary production usage:
+
+1. **Provision persistent storage** for `MEMORY_DIR` (a mounted volume that
+   survives restart, redeploy, container replacement, and reboot). Point Olympus
+   at it. Confirm `df` shows the volume and that a file written there survives a
+   redeploy.
+2. **Harden access:** restrict the calibration dir to the Olympus service user;
+   ensure only that one instance writes to it.
+3. **Add disk monitoring + backup** of `calibration.jsonl` and
+   `calibration_failures.jsonl`. The backup must be **copy-only** (e.g.
+   `cp`/snapshot) — it must never rewrite or reorder lines, or it breaks the hash
+   chain. Restore = copy the file back; `olympus calibration health` then
+   re-verifies it.
+4. **Persistently set** `OLYMPUS_CALIBRATION=1` (and `OLYMPUS_TRIAL_OWNER`) via the
+   deployment's config mechanism — not a shell session. Redeploy and confirm
+   `olympus calibration status` shows ON afterward.
+5. **Verify** (Step 3): one genuine task → exactly one observation, chain valid,
+   counters reconcile, no leak; redeploy; second genuine task → prior evidence
+   present, chain extended, still enabled, verifier deterministic.
+6. **Accumulate naturally** to 100 genuine runs — no manufactured tasks, no
+   fabricated feedback. Periodically run `olympus calibration trial` (no model
+   calls) for the lightweight health checks; pause on any incident condition.
+7. **At 100 genuine runs**, run `calibration_trial.checkpoint_a()` for the real
+   report and return the CONTINUE/PAUSE/TERMINATE decision.
+
+**No routing, trust, autonomy, or ranking use of the data at any point without a
+Checkpoint-C CONTINUE verdict and a separate explicit request.**
