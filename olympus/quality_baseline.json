@@ -3,7 +3,8 @@
     "date": "2026-07-21",
     "endpoint": "https://api.moonshot.ai/v1",
     "model": "moonshot-v1-32k",
-    "run": "https://github.com/maadjiba24-afk/Olympus-/actions/runs/29839683673"
+    "run": "https://github.com/maadjiba24-afk/Olympus-/actions/runs/29839683673",
+    "note": "Drift observed 2026-07-24 (see DEFERRED.md #19): iris -0.8, chronos -0.6, hephaestus -0.6, peitho -0.4 vs these scores across three consecutive live gate runs; all still PASS, but iris is ~0.2 from the 1.0 tolerance. Model/judge variance, not a code regression. Before refreshing, confirm the current scores are legitimate (not masking a real regression) and re-measure on the SAME model named above, then update `date` and `run` too."
   },
   "scores": {
     "aegis": 9.0,
