@@ -194,8 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
         "calibration", help="Calibration Record: collection health + report "
         "(observation-only; changes no behaviour)")
     p_cal.add_argument("action", nargs="?", default="health",
-                       choices=["health", "status", "report", "export"],
-                       help="health (default) · status · report · export <path>")
+                       choices=["health", "status", "report", "export", "trial"],
+                       help="health (default) · status · report · export <path> · "
+                            "trial (production-trial checkpoint summary)")
     p_cal.add_argument("dest", nargs="?", default="",
                        help="destination file for `export`")
     sub.add_parser("routing-stats",
@@ -1244,6 +1245,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  schema         : {st['schema']}  taxonomy v{st['taxonomy_version']}")
         elif action == "report":
             print(calibration.render_report())
+        elif action == "trial":
+            from . import calibration_trial
+            print(calibration_trial.render())
         elif action == "export":
             dest = getattr(args, "dest", "") or "calibration-export.jsonl"
             try:
