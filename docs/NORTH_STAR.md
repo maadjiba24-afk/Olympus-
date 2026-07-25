@@ -15,7 +15,29 @@
 > document is the *strategic/architectural* layer above it — 2-to-10-year moats
 > and paradigm shifts, not per-screen parity.
 
-**Status:** V2 (first deep pass). V1 is preserved in §2 so the critique is legible.
+**Status:** V3 — **SUPERSEDED. Do not execute this document as written.**
+
+> ⚠️ **This document was adversarially reviewed and REJECTED.** See
+> **`docs/NORTH_STAR_REVIEW.md`**. Its central thesis is *inverted*: it reads
+> deliberate architectural **refusals** as half-built **seeds** (`rlscaffold.py`
+> states it is "emphatically NOT a live training loop"; `consensus.py` explicitly
+> mocks "distributed-systems machinery with no distributed system beneath it" as
+> the dishonest move Olympus declined) and then proposes to undo them while citing
+> them as progress.
+>
+> **Cut by the review:** the weight-level learning flywheel (§3.A — Olympus is an
+> API client and cannot fine-tune the frontier models it uses), the internal
+> economy and BFT consensus (§3.C), the proof-assistant kernel (§3.B-iii), and
+> "counterfactual replay falls out for free" (§3.E).
+>
+> **Read instead:** `docs/ROADMAP.md` (what is actually executable) and
+> `docs/MOAT_ANALYSIS.md` (which found that *none* of the surviving engines is a
+> moat on its own — the defensible assets are accumulated, not built).
+>
+> Retained **unedited** as the decision record: the reasoning, and the critique it
+> failed to survive, are both more useful than a quietly corrected file.
+
+V1 is preserved in §2 so the critique is legible.
 
 ---
 

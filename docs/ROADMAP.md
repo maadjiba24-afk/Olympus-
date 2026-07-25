@@ -3,6 +3,15 @@
 **Derived from:** `docs/NORTH_STAR.md` (architecture) as amended by
 `docs/NORTH_STAR_REVIEW.md` (adversarial review, verdict: *reject as written*).
 
+> ⚠️ **Sequencing amended by `docs/MOAT_ANALYSIS.md`.** That analysis applied the
+> six-month copy test and found **none of E1–E6 is a moat** — every engine is a
+> static feature any frontier lab reproduces in ≤1 quarter. The engines remain
+> correct as *cost of entry*, but the phase order in §2 optimizes for
+> buildability, **not** for advantage. The compounding assets (the Calibration
+> Record; cross-provider comparative evidence) are *integrals over time*, so their
+> value depends on **start date** — begin accumulating now, ahead of the analysis
+> machinery that consumes them. Read `MOAT_ANALYSIS.md` §5 before scheduling work.
+
 **Rule of construction:** no feature appears here that does not trace to a named
 NORTH_STAR engine **and** survive the review. Every API below extends a module
 that exists today; every data model extends a file Olympus already writes. Where
