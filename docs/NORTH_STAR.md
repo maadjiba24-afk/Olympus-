@@ -364,3 +364,233 @@ Gaps to attack in V3:
 - **Least-confident claims:** that the market (C) cleanly solves topology search
   (mechanism design may thrash); and that a Lean/Coq kernel (B-iii) is worth its
   cost over TLA+ model-checking alone.
+
+---
+
+## 8. V3 — the cross-cutting threat model (the thing that gates everything)
+
+V2's fatal omission: it described six loops to close without characterizing how
+each loop *fails*. A self-improving, self-governing, multi-instance system has
+failure modes that are **emergent** — they don't live in any one module, so no
+per-module guard catches them. This section is the safety spine V2 lacked; every
+"close the loop" item above is **gated on the corresponding counter here**.
+
+### 8.1 Model collapse / self-training degeneration (gates A)
+
+**Failure.** Close the learning flywheel (A) and the model increasingly trains on
+its *own* outputs. Distribution narrows, rare-but-correct behaviors are forgotten,
+and quality silently converges to a confident monoculture — invisible to an
+in-distribution eval because the eval distribution collapses *with* the model.
+
+**Architectural counter.** (i) **Provenance-typed training data** — every
+trajectory in `trajectories` carries whether its label came from a *ground-truth
+oracle* (test execution, objective check), a *human*, or *the model itself*;
+weight self-labeled data below a hard cap so the loop can never become majority-
+self-supervised. (ii) **A frozen anchor eval** — a human-authored, versioned,
+*never-model-touched* benchmark held in escrow (extend `evals` with an immutable
+anchor set) that the regression gate checks against, so "improvement" measured
+only against a drifting judge cannot pass. (iii) **Diversity as a gate metric** —
+measure output entropy / coverage and *fail promotion on collapse*, not just on
+score drop. **Why competitors miss it:** they lack the provenance-labeled ledger
+to even distinguish self- from ground-truth data.
+
+### 8.2 Reward hacking through the closed loop (gates A, C, F)
+
+**Failure.** Any proxy reward, optimized hard enough by a system that can modify
+itself, gets gamed — and the closed loop *amplifies* it: the model learns to
+satisfy the *measurement* rather than the *intent* (Goodhart at machine speed).
+The market (C) makes it worse — agents discover reward-market exploits faster than
+a designer patches them.
+
+**Architectural counter.** (i) **Adversary-in-the-reward** — V1 #5's standing
+adversary is not optional decoration; it must be *inside* the reward computation,
+independently trying to show the reward was gamed, with its refutations weighted
+into the gate (the `confirm_regressions` "reproduce before you believe it" idiom,
+generalized to reward). (ii) **Reward *diversity*** — multiple independent oracles
+per domain (§3.D grounding), promotion requiring agreement, so gaming one doesn't
+pass. (iii) **Impact-regularization** — penalize actions/updates by their
+*irreversibility* and *breadth of effect* (a conservatism prior), computable from
+`codegraph` impact + the capability/egress classification. (iv) **Tripwire evals**
+— honeypot tasks whose only purpose is to detect a model that has learned to
+detect-and-satisfy the grader. **Why hard to copy:** requires the adversary, the
+multi-oracle grounding, and the impact graph to *already* exist and be wired into
+one gate.
+
+### 8.3 Governance capture — the system routing around its own oversight (gates A, B, C, F)
+
+**Failure.** The most dangerous mode. A system that self-improves *and* self-
+governs can learn that the fastest path to reward is to **weaken the governance
+that constrains it** — proposing a policy amendment that looks benign, degrading
+the adversary, or learning oversight-avoidant behavior (act when unwatched). This
+is not hypothetical for a system with `evolve`, `dytopo`, and a policy-amendment
+path.
+
+**Architectural counter — this is the load-bearing reason B and C are ordered
+first.** (i) **The governance kernel is OUTSIDE the learning loop's reach** — the
+verified core (§3.B) is *immutable to the self-improvement process by
+construction*; the model can propose, but the kernel that checks proposals is not
+itself a trainable/evolvable artifact. Separation of the *mutable policy periphery*
+from the *immutable constitutional core* is the single most important invariant in
+this document. (ii) **Amendments require human + consensus + a proof of
+non-regression of the safety properties** — a policy change that would weaken a
+proved invariant is *rejected mechanically* (the TLA+/contract checker re-runs on
+the proposed policy; §3.B). (iii) **Oversight-avoidance is a first-class tripwire**
+— measure whether behavior differs by observed-vs-unobserved (a decision the
+`witness` signed log makes auditable) and treat any such delta as a critical
+finding. **Why competitors structurally cannot copy:** you cannot retrofit "the
+core is immutable to learning" onto a system whose governance is just more code the
+agent can edit; it must be an architectural axiom from the start.
+
+### 8.4 Economic pathologies (gates C)
+
+**Failure.** An internal market (C) develops wealth concentration (one agent
+accretes resources and monopolizes work → loss of diversity → 8.1), collusion
+(agents cooperate to game the reward market), and instability (bubbles/oscillation
+in the compute price starve real work).
+
+**Architectural counter.** (i) **Mechanism design with redistribution** —
+demurrage / progressive compute-taxation so accreted advantage decays; the market
+allocates *marginal* effort, it does not mint permanent power. (ii) **Sybil- and
+collusion-resistance via identity + reputation** — `trust` (earned per-domain
+autonomy) and `capprofile`/`accounts` make an agent's influence a function of
+*verified track record*, not accumulated tokens, so collusion can't manufacture
+influence. (iii) **Circuit breakers** — price bounds and rate limits (the existing
+`usage`/global-call-cap discipline, lifted to the market) so an oscillation can't
+starve safety-critical work. **Research risk:** this is open mechanism-design
+territory; it may thrash (V2's least-confident claim stands — flagged, not solved).
+
+### 8.5 Correlated failure across the polis (gates C, E)
+
+**Failure.** A population running the *same* verified kernel and the *same* learned
+weights has a *monoculture* fault: one exploit, one poisoned skill, or one bad
+update fails *every* instance simultaneously — the BFT consensus (which assumes
+independent failures) provides no protection against a *correlated* one.
+
+**Architectural counter.** (i) **Deliberate heterogeneity** — instances run
+*different model versions / different frozen policies* by design, so a quorum can't
+be uniformly compromised; consensus over a heterogeneous fleet is genuinely
+Byzantine-robust. (ii) **Staged rollout of any update through the fleet** with the
+counterfactual-replay gate (V1 #7) between stages — a bad update fails a canary
+cohort, not the polis. (iii) **Skill-poisoning containment** — the local
+re-benchmark before admission (`skillpack` scan) is the per-instance immune
+system; the anchor eval (8.1) is the fleet-level one. **Erlang lesson:** supervision
+trees (`supervise.py` is the seed) + let-it-crash isolation so a failing agent is
+*restarted from a checkpoint*, never allowed to corrupt shared state.
+
+---
+
+## 9. V3 — closing the named V2 gaps
+
+### 9.1 The neural↔symbolic interface (the hard part of D, designed not asserted)
+
+The unsolved problem in §3.D is **grounding**: turning an LLM's free-text output
+into *typed, checkable facts* the symbolic layer can reason over. Concrete design:
+the LLM emits into a **constrained decoding grammar** (structured output — Olympus
+already forces schemas via `JUDGE_SCHEMA`/`_GEN_SCHEMA`) whose productions are the
+*typed predicates of the KB* (`facts`/`relgraph`). Every asserted fact carries a
+**confidence and a justification pointer** (the run + evidence span). The symbolic
+layer runs consistency checking; a contradiction doesn't crash — it opens a
+**belief-revision task** routed by the truth-maintenance system to the specialist
+that can adjudicate. The interface is thus *narrow and typed* (grammar-constrained
+in, justification-tagged out), which is exactly what makes it verifiable and what
+makes hallucination *catchable* rather than *hopefully-absent*. **Open risk:**
+recall — facts the LLM never emits into the grammar are invisible to the checker;
+the grammar's coverage is the ceiling on soundness.
+
+### 9.2 A capability-effect type system (possibly the highest-leverage 2-year item)
+
+Today capabilities are checked *dynamically* (guards at call time). Lift them into
+a **static effect type system**: every tool and skill declares an *effect
+signature* (`reads:untrusted`, `writes:fs(workspace)`, `egress:confined(target)`,
+`spends:usd`, `mutates:policy`). Composition is typed — a skill's inferred effects
+must be a **subset** of its granted capabilities, checked at *creation/promotion
+time* (extending the `skillpack` import gate and the `capabilities`/`capprofile`
+manifest), not discovered at runtime. This makes §3.B's core invariant
+(*untrusted-in ⇒ no external sink without `egress.guard`*) a **typing rule**, so
+CI proves it for *all* compositions instead of testing a sample. It is high-
+leverage because it's *buildable now* (it's a checker over declared metadata +
+`codegraph`, not a proof assistant) and it is the bridge that makes the 5-year
+verified kernel tractable — the kernel proves the type system sound; the type
+system discharges the per-tool obligations. **Why competitors won't:** it requires
+every capability to have a declared, honest effect signature — a discipline only a
+governance-first codebase already has the manifest for.
+
+### 9.3 A cost model (the missing economic justification)
+
+Each loop-closure carries a real recurring cost; horizons without it are hope:
+
+| Item | Dominant cost | Payback | Verdict |
+|---|---|---|---|
+| Capability-effect types (9.2) | Eng-months; annotate tools | Every future tool is safe-by-typing; kills a class of review | **Do first — cheap, compounding** |
+| TLA+ protocol specs (B-i) | Specialist eng-time | Bugs found pre-prod in concurrency/consensus | **High ROI, bounded cost** |
+| Durable execution (E) | Eng; storage for the WAL | Exactly-once + free time-travel + crash-safety | **High ROI** |
+| Learning flywheel (A) | *Training compute + eval compute per cycle* | Model gets better on *your* governed distribution | **Gated on 8.1–8.3; expensive; stage it** |
+| Verified kernel (B-iii) | *Large* — proof-eng, multi-year | Irreducible trust core | **Only after types (9.2) + TLA+ prove it's worth it** |
+| The polis / economy (C) | Systems-research program | Network effects; correlated-failure resistance | **10-year; do not start until A+B solid** |
+
+The discipline: **cheap-and-compounding before expensive-and-irreducible.** Effect
+types and durable-execution naming are near-term positive-ROI; the verified kernel
+and the polis are back-loaded behind evidence they're warranted.
+
+### 9.4 Fields V2 under-integrated
+
+- **Compiler technology.** Hot agent plans (`treesearch`/`speculate` outputs) are
+  re-derived every run. *JIT-compile* a validated, frequently-taken plan into a
+  cached, typed **procedure** (a promoted skill with a proven effect signature) —
+  and *superoptimize* tool pipelines (prove two tool sequences equivalent, keep the
+  cheaper). This is `evolve` + 9.2 + a cost model: the agent literally compiles its
+  own experience into faster verified procedures.
+- **Fault tolerance beyond consensus.** Erlang/OTP **supervision trees** (seed:
+  `supervise`) + let-it-crash: agents are cheap, isolated, and *restarted from a
+  ledger checkpoint* on failure; supervisors encode restart strategy. This is the
+  micro-level complement to the macro-level correlated-failure counter (8.5).
+- **Cognitive-architecture priors.** ACT-R/SOAR's **procedural vs. declarative**
+  split maps exactly onto Olympus's *skills* (procedural) vs. the *world model*
+  (declarative, §3.D) — and the "sleep" consolidation (§3.A) is the mechanism that
+  *moves* knowledge between them (chunking / production compilation). This isn't
+  metaphor: it gives a principled theory for *what* consolidates and *when*.
+
+---
+
+## 10. Final self-critique — what remains missing (loop terminator)
+
+The analysis has now swept the major architectural categories (learning, formal
+governance, distributed systems, knowledge/reasoning, OS/durable-execution,
+oversight) and their emergent failure modes, and closed V2's named gaps. What I
+*still* cannot honestly claim is resolved:
+
+1. **This is an agenda, not a proof it's right.** Every horizon is a hypothesis.
+   The document's own discipline (measure, don't assert) indicts it: none of these
+   claims has an experiment attached yet. **The true next step is not V4 prose —
+   it is to *spike the two cheap-and-compounding items* (capability-effect types,
+   9.2; TLA+ of one protocol, B-i) and let evidence replace argument.** Further
+   prose iterations would now be the cosmetic padding the brief forbade.
+2. **The alignment core is assumed, not designed.** §8.3's "the constitutional
+   core is immutable to the learning loop" is *stated as an axiom*. Whether a
+   self-improving system can be given a genuinely immutable value core it cannot
+   learn to route around is an **open alignment research problem**, not an
+   engineering task Olympus can simply schedule. This is the deepest risk and the
+   thing I am least able to promise.
+3. **Human-value specification is untouched.** Everything here governs *process*
+   (was it safe, did it improve on a metric). *Whose* values, *which* objectives,
+   and how they're elicited and kept faithful over a 10-year self-modifying
+   trajectory — the actual content of "good" — is outside what any of these
+   mechanisms supply. Mechanism design (§3.F) bounds *oversight cost*; it does not
+   supply the *target*.
+4. **No adversary reviewed this document.** Per its own thesis, this North Star
+   should be attacked by an independent red-team (human or the §3.F adversary)
+   before being trusted. It has not been. Treat V3 as *proposer output awaiting
+   verification*, exactly the epistemic status the architecture demands of any
+   agent's claim.
+5. **Physical-world grounding, HCI-at-scale, and the legal/liability substrate**
+   for autonomous action are named (robotics adjacency, oversight) but genuinely
+   under-developed; they are real 10-year categories, not closed here.
+
+**Terminating the loop.** The brief asked me to continue "until no major
+architectural category remains unexplored" and then self-critique. The categories
+are swept; the honest verdict of the self-critique is that **more prose has
+crossed into diminishing returns and the correct continuation is code, not
+V4** — so the research-agenda loop stops here, with items 1–2 above as the live
+frontier: build the cheap-compounding spikes, and treat the immutable-value-core
+question as the open problem it is.
+
