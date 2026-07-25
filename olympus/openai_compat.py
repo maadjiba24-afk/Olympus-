@@ -183,6 +183,20 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
                 usage.record(payload.get("model", "unknown"),
                              int(u.get("prompt_tokens", 0)),
                              int(u.get("completion_tokens", 0)))
+                # A 200 that carries no `choices` is a real provider hiccup
+                # (rate-limit shedding, a content filter, an upstream error
+                # rendered as an empty body). Callers index `choices[0]`, so
+                # returning it raises a bare `IndexError: list index out of
+                # range` — an unactionable message that killed a whole CI eval.
+                # Treat it as the transient failure it is: retry with the same
+                # backoff as a 429/503, then rotate to the next key.
+                if not (isinstance(data.get("choices"), list) and data["choices"]):
+                    last_err = RuntimeError(
+                        f"provider returned no choices: {json.dumps(data)[:300]}")
+                    if attempt < 3:
+                        time.sleep(2 ** attempt)
+                        continue
+                    break                          # advance to the next key
                 if keys:
                     with _ROT_LOCK:
                         _key_cursor[base] = idx    # remember the healthy key
@@ -209,7 +223,7 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
             except (urllib.error.URLError, TimeoutError, OSError) as err:
                 last_err = err
                 time.sleep(2 ** attempt)
-    raise RuntimeError(f"Provider unreachable at {url}: {last_err}")
+    raise RuntimeError(f"Provider call failed at {url}: {last_err}")
 
 
 def _to_openai_tools(tool_defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
