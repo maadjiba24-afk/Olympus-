@@ -524,11 +524,61 @@ def test_cors_safe_when_origin_not_reflected(monkeypatch):
     assert [f for f in r["findings"] if f["cwe"] == "CWE-942"] == []
 
 
+def _hosthdr_probe(reflect: str):
+    """Fake probe: a vulnerable app trusts X-Forwarded-Host and reflects the
+    canary into an absolute link in the body ('body') or a Location redirect
+    ('location'); a safe app ignores it ('none')."""
+    def _probe(url, max_bytes=400_000, follow_redirects=True, extra_headers=None):
+        xfh = (extra_headers or {}).get("X-Forwarded-Host", "")
+        headers = {"content-type": "text/html"}
+        body = "<title>Acme</title>"
+        if reflect == "location" and xfh:
+            headers["location"] = f"https://{xfh}/reset"
+            return {"status": 302, "headers": headers, "body": "", "url": url}
+        if reflect == "body" and xfh:
+            body = f'<a href="https://{xfh}/reset?t=abc">reset</a>'
+        return {"status": 200, "headers": headers, "body": body, "url": url}
+    return _probe
+
+
+def test_validate_confirms_host_header_injection_via_body(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _hosthdr_probe("body"))
+    r = assess.validate("https://app.example/account?id=1")
+    hh = [f for f in r["findings"] if f["cwe"] == "CWE-644"]
+    assert len(hh) == 1                          # per-param repeats dedup to one
+    assert hh[0]["severity"] == "medium"
+    assert "X-Forwarded-Host" in hh[0]["location"]
+
+
+def test_validate_confirms_host_header_injection_via_location(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _hosthdr_probe("location"))
+    r = assess.validate("https://app.example/login?next=/home")
+    hh = [f for f in r["findings"] if f["cwe"] == "CWE-644"]
+    assert len(hh) == 1 and hh[0]["confidence"] == "high"
+
+
+def test_host_header_safe_when_not_reflected(monkeypatch):
+    assess.grant(["app.example"], expires_in=3600)
+    monkeypatch.setattr(tools, "_http_probe", _hosthdr_probe("none"))
+    r = assess.validate("https://app.example/account?id=1")
+    assert [f for f in r["findings"] if f["cwe"] == "CWE-644"] == []
+
+
+def test_host_header_check_is_on_benign_allowlist():
+    # The new check must keep the payloads-containment boundary satisfied: an
+    # active check that isn't on the benign allowlist would flip it to False.
+    payloads = [c for c in assess.containment() if c["id"] == "payloads"]
+    assert payloads and payloads[0]["contained"] is True
+    assert "host_header" in assess.active_check_names()
+
+
 def test_active_check_registry_has_breadth():
     # The self-evolving moat compounds: new benign checks joined the registry.
     assert set(assess.active_check_names()) >= {
         "reflection", "open_redirect", "ssti", "header_injection", "cors",
-        "sql_error", "error_disclosure", "path_traversal"}
+        "sql_error", "error_disclosure", "path_traversal", "host_header"}
 
 
 def test_new_active_checks_are_benign_and_contained():

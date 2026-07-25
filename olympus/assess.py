@@ -1814,6 +1814,44 @@ def _error_disclosure_check(url: str, name: str) -> tuple["Finding | None", str]
     return finding, f"param '{name}': verbose-error disclosure CONFIRMED"
 
 
+def _host_header_check(url: str, name: str) -> tuple["Finding | None", str]:
+    """Send a BENIGN canary host in `X-Forwarded-Host` and see whether the app
+    TRUSTS it — reflecting the canary into an absolute URL in the response body
+    (a password-reset link, a `<base href>`) or into a `Location` redirect. That
+    proves Host-header injection (CWE-644): whoever sets this header can poison
+    the absolute links the app builds — reset-link poisoning, web-cache
+    poisoning. Benign: one GET carrying a canary `.invalid` host that never
+    resolves, read WITHOUT following the redirect, so the poisoned link is
+    OBSERVED but never visited — nothing is ever sent to the canary. Uses
+    `X-Forwarded-Host` (the header proxies actually trust) rather than overriding
+    the real `Host`, so it neither breaks routing nor forges the connection. This
+    check is URL-level (independent of `name`); `record_finding` dedups the
+    per-param repeats to one finding. Raises ValueError if blocked (scope/SSRF)."""
+    tok = os.urandom(4).hex()
+    canary_host = f"olympus-canary-{tok}.invalid"
+    probe = _probe(url, extra_headers={"X-Forwarded-Host": canary_host},
+                   follow_redirects=False)
+    location = (probe.get("headers", {}) or {}).get("location", "") or ""
+    body = probe.get("body", "") or ""
+    where = ("Location header" if canary_host in location
+             else "response body" if canary_host in body else "")
+    if where:
+        finding = Finding(
+            title="Host-header injection (app trusts X-Forwarded-Host)",
+            severity="medium", cwe="CWE-644",
+            cvss_vector="CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N",
+            location=f"{url} [X-Forwarded-Host]",
+            evidence=f"benign canary host reflected into the {where}: {canary_host}",
+            remediation="Never build absolute URLs or make security decisions "
+                        "from the Host / X-Forwarded-Host request header. Derive "
+                        "them from a configured canonical hostname (or an "
+                        "allowlist) server-side, and have the edge proxy strip "
+                        "client-supplied X-Forwarded-* headers.",
+            confidence="high", source="active_validation")
+        return finding, f"host-header injection CONFIRMED (canary in {where})"
+    return None, "X-Forwarded-Host not reflected (safe)"
+
+
 # The registry — extended over successive loop iterations (self-evolving moat).
 # Every entry is benign, scope-locked, parameter-directed, and capped.
 _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
@@ -1825,6 +1863,7 @@ _ACTIVE_CHECKS: tuple[tuple[str, Any], ...] = (
     ("sql_error", _sql_error_check),
     ("error_disclosure", _error_disclosure_check),
     ("path_traversal", _path_traversal_check),
+    ("host_header", _host_header_check),
 )
 
 
@@ -2331,7 +2370,7 @@ def containment(user: str | None = None) -> list[dict]:
     # SURFACE (a parse error / leaked stack trace); they extract no data.
     _BENIGN_CHECKS = frozenset({
         "reflection", "open_redirect", "ssti", "header_injection", "cors",
-        "sql_error", "error_disclosure", "path_traversal"})
+        "sql_error", "error_disclosure", "path_traversal", "host_header"})
     benign = _MAX_ACTIVE_PROBES <= 50 and all(
         c[0] in _BENIGN_CHECKS for c in _ACTIVE_CHECKS)
     checks.append(_check(
