@@ -273,8 +273,9 @@ def test_thin_cell_reports_insufficient_and_omits_rates():
         _obs(f"run-{i}")
     cell = calibration.report()["cells"][0]
     assert cell["insufficient_evidence"] is True
-    assert "success_rate" not in cell            # no manufactured number
-    assert "success_ci95" not in cell
+    assert "completion_rate" not in cell         # no manufactured number
+    assert "completion_ci95" not in cell
+    assert "approval_rate" not in cell
     assert "INSUFFICIENT EVIDENCE" in calibration.render_report()
 
 
@@ -300,13 +301,13 @@ def test_rank_reports_overlap_rather_than_false_precision():
 
 # --- analytics correctness -----------------------------------------------
 
-def test_success_rate_and_interval_are_correct():
+def test_completion_rate_and_interval_are_correct():
     for i in range(10):
         _obs(f"run-{i}", result="ok" if i < 8 else "error")
     cell = calibration.report()["cells"][0]
     assert cell["samples"] == 10
-    assert cell["success_rate"] == 0.8
-    lo, hi = cell["success_ci95"]
+    assert cell["completion_rate"] == 0.8          # completion, not "success"
+    lo, hi = cell["completion_ci95"]
     assert lo < 0.8 < hi                          # interval brackets the estimate
     assert 0.0 <= lo and hi <= 1.0
 
@@ -322,27 +323,30 @@ def test_wilson_interval_known_values():
     assert (hi2 - lo2) < (hi - lo)
 
 
-def test_outcome_rates_join_feedback_to_observations():
+def test_outcome_rates_join_feedback_and_stay_separated():
     for i in range(6):
         _obs(f"run-{i}")
     calibration.record_feedback("run-0", calibration.APPROVED)
     calibration.record_feedback("run-1", calibration.APPROVED)
     calibration.record_feedback("run-2", calibration.REJECTED)
-    calibration.record_feedback("run-3", calibration.RETRIED)
+    calibration.record_feedback("run-3", calibration.RETRIED)   # implicit, not explicit
     cell = calibration.report()["cells"][0]
-    assert cell["feedback_samples"] == 4
-    assert cell["rates"][calibration.APPROVED] == 0.5
-    assert cell["rates"][calibration.REJECTED] == 0.25
-    assert cell["rates"][calibration.RETRIED] == 0.25
+    # explicit satisfaction denominator excludes the implicit retry
+    assert cell["explicit_feedback_samples"] == 3
+    assert cell["approval_rate"] == pytest.approx(2 / 3, abs=1e-3)
+    assert cell["rejection_rate"] == pytest.approx(1 / 3, abs=1e-3)
+    # completion is a DIFFERENT axis and is unaffected by feedback
+    assert cell["completion_rate"] == 1.0
+    assert cell["retry_rate"] == pytest.approx(1 / 6, abs=1e-3)   # implicit level
 
 
 def test_cells_split_by_domain_and_model():
     for i in range(2):
         _obs(f"c{i}", domain="code")
-        _obs(f"e{i}", domain="email")
+        _obs(f"g{i}", domain="general")
     rep = calibration.report()
     assert len(rep["cells"]) == 2
-    assert {c["domain"] for c in rep["cells"]} == {"code", "email"}
+    assert {c["domain"] for c in rep["cells"]} == {"code", "general"}
 
 
 def test_missing_evidence_rate_is_reported():
@@ -554,3 +558,334 @@ def test_real_run_records_nothing_when_disabled(monkeypatch):
 
     assert reply                                   # run still works normally
     assert not calibration.path().exists()         # and wrote nothing at all
+
+
+# =========================================================================
+# Phase 2 — evidence quality + production-safe collection
+# =========================================================================
+
+# --- domain classification (deterministic, structured-metadata only) -------
+
+def test_classify_domain_from_specialist_is_deterministic():
+    d = calibration.classify_domain(specialist="hephaestus")
+    assert d["domain"] == "code"
+    assert d["source"] == calibration.SRC_SPECIALIST
+    assert d["confidence"] == 1.0
+    assert d["taxonomy_version"] == calibration.DOMAIN_TAXONOMY_VERSION
+    # same input → same output, every time
+    assert calibration.classify_domain(specialist="hephaestus") == d
+
+
+def test_classify_domain_from_tool_fallback():
+    d = calibration.classify_domain(tool="web_search")
+    assert d["domain"] == "research" and d["source"] == calibration.SRC_TOOL
+
+
+def test_classify_unknown_specialist_is_other_not_a_guess():
+    d = calibration.classify_domain(specialist="nonesuch")
+    assert d["domain"] == calibration.OTHER
+    assert d["source"] == calibration.SRC_SPECIALIST
+
+
+def test_classify_no_metadata_is_unclassified():
+    d = calibration.classify_domain()
+    assert d["domain"] == calibration.UNCLASSIFIED
+    assert d["confidence"] == 0.0 and d["source"] == calibration.SRC_NONE
+
+
+def test_explicit_domain_override_wins_and_is_constrained():
+    d = calibration.classify_domain(specialist="hephaestus", explicit="finance")
+    assert d["domain"] == "finance" and d["source"] == calibration.SRC_EXPLICIT
+    # an explicit domain outside the taxonomy is recorded as `other`, not invented
+    bad = calibration.classify_domain(explicit="wire-fraud")
+    assert bad["domain"] == calibration.OTHER
+
+
+def test_taxonomy_is_versioned_and_recorded_on_the_observation():
+    e = _obs("run-1", specialist="plutus", domain="")   # classify from specialist
+    assert e["body"]["domain"] == "finance"
+    assert e["body"]["domain_source"] == calibration.SRC_SPECIALIST
+    assert e["body"]["taxonomy_version"] == calibration.DOMAIN_TAXONOMY_VERSION
+
+
+def test_observation_records_domain_from_specialist():
+    e = calibration.record_observation("r1", provider="anthropic",
+                                       model="claude-sonnet-5", specialist="aegis")
+    assert e["body"]["domain"] == "security"
+
+
+def test_domain_never_inferred_from_task_text():
+    # A task string that screams "finance" must NOT influence the domain — only
+    # structured metadata classifies, so a no-specialist run stays unclassified.
+    e = calibration.record_observation(
+        "r1", provider="anthropic", model="m",
+        task="please wire $50,000 and reconcile the invoice ledger")
+    assert e["body"]["domain"] == calibration.UNCLASSIFIED
+
+
+def test_unclassified_rate_is_tracked():
+    _obs("a", specialist="hephaestus")        # code
+    calibration.record_observation("b", provider="anthropic", model="m")  # unclassified
+    rep = calibration.report()
+    assert rep["unclassified_domain_rate"] == 0.5
+
+
+# --- feedback linkage + evidence hierarchy ---------------------------------
+
+def test_all_feedback_kinds_link_and_carry_evidence_level():
+    _obs("run-1", specialist="hephaestus")
+    for outcome, level in [
+        (calibration.APPROVED, calibration.EV_EXPLICIT),
+        (calibration.REJECTED, calibration.EV_EXPLICIT),
+        (calibration.EDITED, calibration.EV_IMPLICIT),
+        (calibration.RETRIED, calibration.EV_IMPLICIT),
+        (calibration.OVERRIDDEN, calibration.EV_IMPLICIT),
+        (calibration.ABANDONED, calibration.EV_IMPLICIT),
+        (calibration.PREFERENCE, calibration.EV_EXPLICIT),
+        (calibration.VERIFIED, calibration.EV_VERIFIED),
+    ]:
+        e = calibration.record_feedback("run-1", outcome)
+        assert e is not None, outcome
+        assert e["body"]["outcome"] == outcome
+        assert e["body"]["evidence_level"] == level
+
+
+def test_multiple_feedback_events_for_one_run():
+    _obs("run-1", specialist="hephaestus")
+    calibration.record_feedback("run-1", calibration.EDITED)
+    calibration.record_feedback("run-1", calibration.APPROVED)
+    calibration.record_feedback("run-1", calibration.VERIFIED)
+    fb = calibration.entries(calibration.FEEDBACK)
+    assert len(fb) == 3
+    assert calibration.entries(calibration.OBSERVATION)[0]["body"]["run_id"] == "run-1"
+
+
+def test_out_of_order_feedback_before_its_observation():
+    # Feedback can arrive before the observation is recorded; it still links, and
+    # verify() flags the (temporarily) missing referenced run rather than crashing.
+    calibration.record_feedback("run-late", calibration.APPROVED)
+    v = calibration.verify()
+    assert "run-late" in v["missing_referenced_runs"]
+    # once the observation lands, the reference resolves
+    _obs("run-late", specialist="hephaestus")
+    assert calibration.verify()["missing_referenced_runs"] == []
+
+
+def test_edit_is_not_a_completion_failure():
+    for i in range(6):
+        _obs(f"r{i}", specialist="hephaestus", result="ok")
+    calibration.record_feedback("r0", calibration.EDITED)
+    cell = calibration.report()["cells"][0]
+    assert cell["completion_rate"] == 1.0        # edit did not lower completion
+    assert cell["edit_rate"] > 0                  # but is visible as its own axis
+
+
+def test_edit_feedback_stores_no_plaintext():
+    _obs("run-1", specialist="hephaestus")
+    calibration.record_feedback("run-1", calibration.EDITED,
+                                note="changed 'Acme Corp' to 'Acme Inc'")
+    raw = calibration.path().read_text(encoding="utf-8")
+    assert "Acme" not in raw and "changed" not in raw
+
+
+# --- analytics: completion vs satisfaction vs verified stay separate -------
+
+def test_completion_and_quality_are_never_one_number():
+    for i in range(6):
+        _obs(f"r{i}", specialist="hephaestus", result="ok" if i < 4 else "error")
+    calibration.record_feedback("r0", calibration.REJECTED)   # completed but bad
+    calibration.record_feedback("r1", calibration.APPROVED)
+    cell = calibration.report()["cells"][0]
+    assert cell["completion_rate"] == pytest.approx(4 / 6, abs=1e-3)
+    # satisfaction is a DIFFERENT number from completion
+    assert cell["approval_rate"] == 0.5
+    assert cell["rejection_rate"] == 0.5
+    assert "success_rate" not in cell            # the ambiguous term is gone
+
+
+def test_verified_outcome_rate_is_its_own_level():
+    for i in range(6):
+        _obs(f"r{i}", specialist="hephaestus")
+    calibration.record_feedback("r0", calibration.VERIFIED)
+    cell = calibration.report()["cells"][0]
+    assert cell["verified_outcome_rate"] == pytest.approx(1 / 6, abs=1e-3)
+
+
+def test_missing_feedback_rate_reported():
+    for i in range(4):
+        _obs(f"r{i}", specialist="hephaestus")
+    calibration.record_feedback("r0", calibration.APPROVED)
+    rep = calibration.report()
+    assert rep["missing_feedback_rate"] == 0.75   # 3 of 4 runs have no feedback
+
+
+# --- ranking refusal conditions --------------------------------------------
+
+def test_rank_refuses_cross_domain_without_grouping():
+    # No explicit domain: classification comes from the specialist, so these span
+    # two domains (code + finance).
+    for i in range(6):
+        calibration.record_observation(f"c{i}", provider="openai", model="gpt-5",
+                                       specialist="hephaestus", result="ok")
+    for i in range(6):
+        calibration.record_observation(f"f{i}", provider="openai", model="gpt-5",
+                                       specialist="plutus", result="ok")
+    r = calibration.rank_models()               # no domain → spans code+finance
+    assert r["ranked"] is False
+    assert "domain coverage" in r["reason"]
+
+
+def test_rank_refuses_mixed_config_without_grouping():
+    for i in range(6):
+        _obs(f"a{i}", provider="openai", model="gpt-5",
+             base_url="https://a.example", specialist="hephaestus")
+    for i in range(6):
+        _obs(f"b{i}", provider="openai", model="gpt-5",
+             base_url="https://b.example", specialist="hephaestus")
+    r = calibration.rank_models(domain="code")   # same model_key, 2 config_ids
+    assert r["ranked"] is False
+    assert "mixed model configuration" in r["reason"]
+
+
+def test_rank_refuses_non_completion_metric():
+    for i in range(6):
+        _obs(f"r{i}", specialist="hephaestus")
+    r = calibration.rank_models(domain="code", metric="approval")
+    assert r["ranked"] is False
+    assert "only completion is rankable" in r["reason"]
+
+
+# --- multi-process safety --------------------------------------------------
+
+def test_concurrent_appends_preserve_the_chain(monkeypatch, tmp_path):
+    # Threads here exercise the same proclock path processes take (each acquisition
+    # opens its own file description; flock serializes them). Deterministic check:
+    # after N concurrent appends the chain still verifies and holds N entries.
+    import concurrent.futures as cf
+    monkeypatch.setattr(calibration.config, "MEMORY_DIR", tmp_path)
+
+    def worker(i):
+        return calibration.record_observation(f"run-{i}", provider="anthropic",
+                                              model="m", specialist="hephaestus")
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(worker, range(40)))
+    assert all(r is not None for r in results)
+    obs = calibration.entries(calibration.OBSERVATION)
+    assert len(obs) == 40                          # none lost, none interleaved
+    v = calibration.verify()
+    assert v["ok"] is True                          # chain intact across contention
+    seqs = [e["seq"] for e in calibration._read_raw()]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 40   # monotone, unique
+
+
+def test_lock_timeout_drops_visibly_not_silently(monkeypatch):
+    # When the append lock cannot be acquired, the observation is dropped but the
+    # failure is CAPTURED (visible), never a silent success.
+    import contextlib
+    captured = {}
+
+    @contextlib.contextmanager
+    def _boom(name, timeout=None):
+        raise TimeoutError("wedged peer")
+        yield  # pragma: no cover
+
+    from olympus import proclock, errors
+    monkeypatch.setattr(proclock, "lock", _boom)
+    monkeypatch.setattr(errors, "capture",
+                        lambda *a, **k: captured.setdefault("hit", (a, k)))
+    out = calibration.record_observation("r1", provider="anthropic", model="m")
+    assert out is None                              # dropped
+    assert "hit" in captured                        # but reported, not silent
+
+
+# --- recovery / integrity categorization -----------------------------------
+
+def test_incomplete_trailing_write_is_recoverable_not_corruption():
+    _obs("run-1", specialist="hephaestus")
+    _obs("run-2", specialist="hephaestus")
+    # simulate a crash mid-write: a truncated final line, no newline
+    with open(calibration.path(), "a", encoding="utf-8") as fh:
+        fh.write('{"schema": "olympus-calibration/1", "seq": 2, "prev"')
+    v = calibration.verify()
+    assert v["incomplete_trailing_write"] is True
+    assert calibration.V_INCOMPLETE_TAIL in v["states"]
+    assert v["ok"] is True                          # tail partial ≠ chain corruption
+    # the two good entries are still readable
+    assert len(calibration.entries(calibration.OBSERVATION)) == 2
+
+
+def test_middle_corruption_is_flagged_and_not_repaired():
+    _obs("r1", specialist="hephaestus")
+    _obs("r2", specialist="hephaestus")
+    _obs("r3", specialist="hephaestus")
+    lines = calibration.path().read_text(encoding="utf-8").splitlines()
+    lines[1] = "corrupt middle line not json"
+    before = "\n".join(lines) + "\n"
+    calibration.path().write_text(before, encoding="utf-8")
+    v = calibration.verify()
+    assert calibration.V_CORRUPTED_CHAIN in v["states"]
+    assert v["ok"] is False
+    # NOT silently repaired: the file is unchanged by verify()
+    assert calibration.path().read_text(encoding="utf-8") == before
+
+
+def test_unsupported_schema_is_distinguished():
+    _obs("r1", specialist="hephaestus")
+    with open(calibration.path(), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"schema": "olympus-calibration/99", "seq": 1,
+                             "kind": "observation", "prev": None,
+                             "at": "2030-01-01T00:00:00+00:00", "event_key": "x",
+                             "body": {"run_id": "future"},
+                             "entry_hash": "sha256:deadbeef"}) + "\n")
+    v = calibration.verify()
+    assert calibration.V_UNSUPPORTED_SCHEMA in v["states"]
+
+
+def test_verify_reports_unsigned_valid_distinctly():
+    _obs("r1", specialist="hephaestus")
+    v = calibration.verify()
+    # no crypto backend in the test env → unsigned but structurally valid
+    if v["unsigned"] and not v["signed"]:
+        assert calibration.V_UNSIGNED_VALID in v["states"]
+        assert v["ok"] is True
+
+
+# --- trial controls + health inspection ------------------------------------
+
+def test_health_reports_without_sensitive_content():
+    _obs("run-1", specialist="hephaestus", task="secret merger with Acme")
+    calibration.record_feedback("run-1", calibration.APPROVED)
+    h = calibration.health()
+    assert h["total_records"] == 2
+    assert h["observations"] == 1
+    assert h["valid_chain"] is True
+    assert h["feedback_coverage"] == 1.0
+    assert h["unclassified_rate"] == 0.0
+    blob = json.dumps(h)
+    assert "Acme" not in blob and "merger" not in blob   # no sensitive content
+
+
+def test_export_permission_can_be_withdrawn(monkeypatch, tmp_path):
+    _obs("run-1", specialist="hephaestus")
+    monkeypatch.setenv("OLYMPUS_CALIBRATION_EXPORT", "0")
+    with pytest.raises(calibration.CalibrationError):
+        calibration.export_jsonl(tmp_path / "e.jsonl")
+    # re-enabling restores it
+    monkeypatch.setenv("OLYMPUS_CALIBRATION_EXPORT", "1")
+    assert calibration.export_jsonl(tmp_path / "e.jsonl") == 1
+
+
+def test_status_reflects_config(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_CALIBRATION_RETENTION_DAYS", "30")
+    st = calibration.status()
+    assert st["enabled"] is True and st["retention_days"] == 30
+    assert st["taxonomy_version"] == calibration.DOMAIN_TAXONOMY_VERSION
+
+
+# --- disabled collection preserves behaviour (Phase 2 surfaces) ------------
+
+def test_disabled_blocks_all_phase2_writes(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_CALIBRATION", "0")
+    assert calibration.record_feedback("r", calibration.EDITED) is None
+    assert not calibration.path().exists()
