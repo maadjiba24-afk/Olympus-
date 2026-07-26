@@ -149,7 +149,7 @@ bound. None was left silently open.
 | C-D1 | **HIGH** | An `ENOSPC` on the usage ledger escaped into `openai_compat`'s retry handler, which treats `OSError` as a **provider** fault: one logical call became **four billed HTTP POSTs**. | Accounting never escapes; a wedged lock and a full disk are captured with distinct contexts. |
 | C-D2 | MED | `trace.flush()` runs from `ask()`'s `finally:` — an `OSError` there replaced an already-computed answer with a traceback. | Guarded, plus a nested guard on the overflow write. |
 | C-D3 | MED | Two threads of one process shared `.{name}.{pid}.tmp`: one snapshot write was silently clobbered, the loser raised `FileNotFoundError` into its reply. | Writer-unique temp name. |
-| D-D1 | MED | `sessionlog.sync` re-scanned, re-verified and re-replayed the **whole journal every turn**, so per-turn cost grew with session depth. Measured 5.35× growth over 400 turns, +0.0198 ms/turn slope, projecting ~200 ms/turn at 10k turns. Wave 1's published "p50 3.0 ms, inside the 5 ms gate" held only for a shallow journal. | Verified replay + chain tail memoized, honoured only when the stat tuple matches **and** the tail seal still matches, both under the session lock. |
+| D-D1 | MED | `sessionlog.sync` re-scanned, re-verified and re-replayed the **whole journal every turn**, so per-turn cost grew with session depth: 26.84 µs/turn of depth-scaling, reaching 82.2 ms/turn at 3000 turns. Wave 1's published "p50 3.0 ms, inside the 5 ms gate" held only for a shallow journal. | Verified replay + chain tail memoized, honoured only when the stat tuple matches **and** the tail seal still matches, both under the session lock. Coefficient drops to **1.70 µs/turn — a 15.8× reduction, not an elimination** (§5). |
 | E-F1 | MED | Retention covered `traces/` and `usage/` only — all five absorption evidence ledgers plus watchdog forensics grew without bound. | `memory.sweep_evidence`, wired into the existing heartbeat job. |
 
 ### Accepted with a measured bound, not fixed
@@ -223,6 +223,32 @@ compaction record was flag-independent. It was gated behind
 `OLYMPUS_CTX_BUDGET` in practice (A-D3). The claim was wrong; the fix and this
 sentence are the correction.
 
+**The D-D1 fix reduces depth scaling by 15.8×; it does not eliminate it.**
+An earlier version of this report said the path was "flat in depth". That was
+wrong, and the measurement that disproved it is recorded rather than the claim
+quietly softened. Medians of syncs taken *at* depth, both arms on one machine:
+
+| depth | cached | uncached |
+|---|---|---|
+| 100 | 1.68 ms | 4.36 ms |
+| 500 | 1.73 ms | 14.56 ms |
+| 1500 | 2.53 ms | 38.31 ms |
+| 3000 | 6.61 ms | 82.20 ms |
+
+The dominant O(journal bytes) parse-and-sha256 term is gone. An O(history
+length) term remains and is **inherent to the contract**: `sync` must compare
+the caller's history against the replayed prefix to tell an extension from a
+rewrite, and `_cache_put` takes a defensive copy so a caller mutating a message
+in place cannot silently de-sync the cache. The term is invisible below ~1000
+turns. The journal-append SLO in §6 is therefore **depth-qualified to ~3000
+turns** and must be re-baselined beyond that.
+
+The original test for this asserted flatness by fitting a slope across the
+deciles of one growing run. At 150 turns that fit was noise-dominated, and it
+**flaked in a full-suite run** — caught by the Phase-5 Step-0 baseline, which is
+what a baseline gate is for. It has been replaced by a direct two-depth
+measurement of the coefficient.
+
 **Journal `append_turn` still rescans.** The D-D1 fix covers `sync`, the live
 per-turn path. `append_turn` retains the full rescan per call — it has no
 production caller, so it is not on any hot path, but the harness reports it
@@ -247,7 +273,8 @@ Measured offline, and therefore real but environment-bound:
 
 | Metric | Measured | Note |
 |---|---|---|
-| `sessionlog.sync` p50 / p99 (live per-turn path) | 1.28 ms / 2.96 ms | flat in journal depth after D-D1 |
+| `sessionlog.sync` p50 / p99 (live per-turn path) | 1.28 ms / 2.96 ms | at shallow depth; **depth-qualified** — see §5 |
+| `sessionlog.sync` depth-scaling coefficient | 1.70 µs/turn (was 26.84) | 15.8× reduction; 6.6 ms/turn at 3000 turns |
 | Journal recovery | 16–17 µs/record | linear, as designed |
 | Observability overhead | +1.5 to +2.1 ms/run | <0.1% of a real model call |
 | `ctxbudget.plan` | 13.9 µs/call | flag default off |

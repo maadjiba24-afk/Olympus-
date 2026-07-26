@@ -60,29 +60,53 @@ def test_sessionlog_sync_is_the_live_per_turn_path_and_is_bounded():
     assert r["p99"] < 250.0, f"sync p99 regressed: {r}"
 
 
-def test_sync_cost_no_longer_grows_with_session_depth():
-    """Stage-D DEFECT D1, fixed. `sync` re-scanned, re-verified and re-replayed
-    the WHOLE journal on every turn, so a conversation's per-turn journaling
-    cost grew with its own depth: measured 5.35x growth across 400 turns,
-    +0.0198 ms/turn of slope, projecting ~200 ms/turn at 10k turns.
+def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated():
+    """Stage-D DEFECT D1, fixed — stated at its true strength.
 
-    `_cache_get` now reuses the previous turn's verified replay and chain tail
-    when the file is provably untouched (stat tuple AND tail seal), so the hot
-    path is O(new records). Measured after the fix: 0.61x growth, slope flat.
+    `sync` re-scanned, re-verified and re-replayed the WHOLE journal on every
+    turn, so a conversation's per-turn journaling cost grew with its own depth.
+    `_cache_get` removes the dominant O(journal bytes) parse-and-sha256 term.
 
-    Both arms run here on the same machine in the same process, so this is a
-    controlled A/B rather than a comparison to a recorded constant. The
-    assertion is deliberately loose (2x headroom on the ratio between arms) —
-    it must catch the cache being disabled or bypassed, not CI jitter."""
-    on = pv.bench_sessionlog_sync(turns=150, cache=True)
-    off = pv.bench_sessionlog_sync(turns=150, cache=False)
-    assert off["growth_ratio"] > 1.5, (
-        f"the pre-fix arm did not reproduce the D1 growth — the A/B is void "
-        f"and this test proves nothing: {off}")
-    assert on["growth_ratio"] < off["growth_ratio"] / 2.0, (
-        f"per-turn cost is growing with depth again: on={on} off={off}")
-    assert on["slope_ms_per_turn"] < off["slope_ms_per_turn"], (
-        f"the cached path is no cheaper at depth: on={on} off={off}")
+    It does NOT make the path flat, and an earlier version of this test claimed
+    it did. An O(history length) term remains — `sync` must still compare the
+    caller's history against the journal's replayed prefix to classify the
+    delta as an extension rather than a rewrite, and `_cache_put` takes a
+    defensive copy so a caller mutating a message in place cannot silently
+    de-sync the cache. Both are inherent to the contract, not oversights.
+
+    Measured (medians of syncs taken AT depth, 100 -> 3000 turns):
+
+        depth   cached    uncached
+          100    1.68 ms     4.36 ms
+          500    1.73 ms    14.56 ms
+         1500    2.53 ms    38.31 ms
+         3000    6.61 ms    82.20 ms
+
+        depth-scaling coefficient: 1.70 us/turn cached, 26.84 us/turn
+        uncached — a 15.8x reduction, not an elimination.
+
+    The previous assertion fitted a slope from the first/last decile of one
+    growing run, which conflates the signal with warm-up and page-cache
+    effects; at 150 turns the noise swamped it and the test flaked in a full
+    suite run. This measures the coefficient directly at two depths.
+
+    Bounds are loose because the point is the ORDER of the effect, not the
+    constant: the uncached arm must reproduce the defect (else the A/B is void
+    and proves nothing), and the cached arm must scale at least 5x more gently
+    against a measured 15.8x."""
+    r = pv.bench_sync_depth_scaling(depths=(100, 900), samples=12)
+    lo, hi = 100, 900
+    off_slope = r["off_us_per_turn_of_depth"]
+    on_slope = r["on_us_per_turn_of_depth"]
+
+    assert off_slope > 5.0, (
+        f"the pre-fix arm did not reproduce the D1 depth scaling — the A/B is "
+        f"void and this test proves nothing: {r}")
+    assert on_slope < off_slope / 5.0, (
+        f"per-turn cost is scaling with depth again: {r}")
+    # and the absolute win at the deeper end is what an operator actually feels
+    assert r[f"on_ms_at_{hi}"] < r[f"off_ms_at_{hi}"] / 2.0, (
+        f"the cached path is no cheaper at depth: {r}")
 
 
 def test_journal_recovery_scales_linearly_and_stays_bounded():

@@ -405,6 +405,67 @@ def _seed_journal(cid: str, records: int) -> None:
         sessionlog._append_records(sid, entries, (0, ""))    # empty-chain tail
 
 
+def bench_sync_depth_scaling(depths=(100, 1500), samples: int = 25) -> dict:
+    """How steeply per-turn journaling cost grows with session depth — the
+    property Stage-D defect D1 was actually about.
+
+    `bench_sessionlog_sync` fits a slope from the first/last decile of ONE
+    growing run. That conflates the signal with warm-up and page-cache effects,
+    and at small `turns` the noise swamps it (it produced a genuinely flaky
+    assertion). This measures the thing directly instead: grow a session to a
+    given depth, then time further syncs AT that depth, for two depths and both
+    cache arms. The slope between the two depths is the depth-scaling
+    coefficient, in microseconds of added cost per turn already in the session.
+
+    Reported for both arms so the comparison is a controlled A/B on one machine
+    rather than a ratio against a remembered constant.
+    """
+    from olympus import memory, sessionlog
+    real_cache_get = sessionlog._cache_get
+    out: dict = {"depths": list(depths), "samples": samples}
+
+    def at(depth: int, cached: bool) -> float:
+        isolate(f"depthscale-{depth}-{int(cached)}")
+        memory.set_user("perf")
+        sessionlog._cache_get = (real_cache_get if cached
+                                 else (lambda sid, path: None))
+        try:
+            cid = f"depth-{depth}"
+            history: list[dict] = []
+            with env(OLYMPUS_SESSION_JOURNAL="on",
+                     OLYMPUS_SESSION_FSYNC="auto"):
+                for i in range(depth):
+                    history += [{"role": "user", "content": f"q{i} " + "u" * 200},
+                                {"role": "assistant",
+                                 "content": f"a{i} " + "a" * 400}]
+                    sessionlog.sync(cid, history)
+                lat: list[float] = []
+                for i in range(samples):
+                    history += [{"role": "user", "content": f"x{i} " + "u" * 200},
+                                {"role": "assistant",
+                                 "content": f"y{i} " + "a" * 400}]
+                    t0 = time.perf_counter()
+                    sessionlog.sync(cid, history)
+                    lat.append((time.perf_counter() - t0) * 1000.0)
+            return pct(lat, 0.5)
+        finally:
+            sessionlog._cache_get = real_cache_get
+
+    lo, hi = min(depths), max(depths)
+    span = max(1, hi - lo)
+    for arm, cached in (("on", True), ("off", False)):
+        c_lo, c_hi = at(lo, cached), at(hi, cached)
+        out[f"{arm}_ms_at_{lo}"] = c_lo
+        out[f"{arm}_ms_at_{hi}"] = c_hi
+        out[f"{arm}_us_per_turn_of_depth"] = (c_hi - c_lo) / span * 1000.0
+    on_slope = out["on_us_per_turn_of_depth"]
+    off_slope = out["off_us_per_turn_of_depth"]
+    out["slope_reduction_x"] = (off_slope / on_slope) if on_slope > 0 else None
+    out["speedup_at_max_depth"] = (out[f"off_ms_at_{hi}"] / out[f"on_ms_at_{hi}"]
+                                   if out[f"on_ms_at_{hi}"] > 0 else None)
+    return out
+
+
 def bench_journal_recovery(sizes=(100, 1000, 5000), repeats: int = 5) -> list[dict]:
     from olympus import sessionlog
     rows = []
@@ -1142,10 +1203,11 @@ UNMEASURABLE = [
 DRAFT_SLOS = [
     ("Journal append (fsync=auto, <=500 records)", "p99 <= 25 ms",
      "MEASURED offline (p99 4.2 ms). The LIVE per-turn path is "
-     "sessionlog.sync, not append_turn, and since the D1 fix it is flat in "
-     "journal depth (p99 3.8 ms at 60 turns; 400-turn A/B slope -0.003 "
-     "ms/turn). append_turn itself still does a full rescan per call, but it "
-     "has no production caller"),
+     "sessionlog.sync, not append_turn. Since the D1 fix its depth-scaling "
+     "coefficient is 1.70 us/turn (was 26.84), so the bound holds to roughly "
+     "3000 turns of session depth and must be re-baselined beyond that -- it "
+     "is a DEPTH-QUALIFIED bound, not a flat one. append_turn itself still "
+     "does a full rescan per call, but it has no production caller"),
     ("Journal append (fsync=always, <=500 records)", "p99 <= 40 ms",
      "MEASURED offline (p99 14.5 ms); storage-dependent, re-baseline on "
      "production disks"),
@@ -1216,20 +1278,30 @@ FINDINGS = [
      "heartbeat. The journal cap is 64 MB (~95k records at ~670 B/record).",
      "Wave 1's published 'append p50 3.0 ms, inside the 5 ms gate' held only "
      "for a SHALLOW journal; at 500 turns p50 was already ~6 ms, outside it. "
-     "FIXED: sessionlog.sync now memoizes the verified replay and chain tail "
-     "and reuses it when the journal is provably untouched -- the stat tuple "
+     "FIXED (partially -- see the residual, which is the honest headline). "
+     "sessionlog.sync now memoizes the verified replay and chain tail and "
+     "reuses it when the journal is provably untouched -- the stat tuple "
      "(inode, device, size, mtime_ns) must match byte-for-byte AND the last "
      "line's seal must still equal the recorded tail sha, both checked under "
      "the session lock. Any miss falls through to the full _scan. Every READ "
      "path (read_verified, recover_history, journal_status, compact) still "
      "verifies the whole chain unconditionally, and the cache is per-process, "
-     "so a fresh process re-verifies from scratch. Controlled A/B on one "
-     "machine, 400 turns: growth 5.35x -> 0.61x, slope +0.0198 -> -0.0028 "
-     "ms/turn, p50 5.34 -> 1.47 ms. Pinned by tests/test_sessionlog_cache.py "
-     "(13 correctness tests) and test_val_performance.py::"
-     "test_sync_cost_no_longer_grows_with_session_depth (the A/B). Residual, "
-     "NOT fixed: sessionlog.compact() still has zero callers in olympus/, so "
-     "journal SIZE remains bounded only by the 64 MB cap."),
+     "so a fresh process re-verifies from scratch. "
+     "MEASURED (medians of syncs taken AT depth, both arms on one machine): "
+     "depth 100 -> 1.68 ms cached / 4.36 ms uncached; 500 -> 1.73 / 14.56; "
+     "1500 -> 2.53 / 38.31; 3000 -> 6.61 / 82.20. Depth-scaling coefficient "
+     "1.70 us/turn cached vs 26.84 us/turn uncached -- a 15.8x REDUCTION. "
+     "RESIDUAL 1 (corrects an earlier overstatement): the path is NOT flat in "
+     "depth. An O(history length) term remains -- sync must still compare the "
+     "caller's history against the replayed prefix to tell an extension from a "
+     "rewrite, and _cache_put takes a defensive copy so a caller mutating a "
+     "message in place cannot silently de-sync the cache. Both are inherent to "
+     "the contract. The term is invisible below ~1000 turns and reaches ~6.6 ms "
+     "at 3000. RESIDUAL 2: sessionlog.compact() still has zero callers in "
+     "olympus/, so journal SIZE remains bounded only by the 64 MB cap. "
+     "Pinned by tests/test_sessionlog_cache.py (13 correctness tests) and "
+     "test_val_performance.py::"
+     "test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated."),
     ("F1", "FINDING -- RE-CHARACTERISED, ACCEPTED WITH A MEASURED BOUND",
      "Observability roughly DOUBLES fake-pipeline wall time (+1.5 to +2.1 ms/run)",
      "Interleaved A/B over 20 iterations: OFF 1.61 ms -> ON 3.64 ms, paired "
@@ -1331,6 +1403,8 @@ def run_all(quick: bool = False) -> dict:
     results["sessionlog_auto"] = bench_sessionlog_append(s(500, 50), "auto")
     results["sessionlog_always"] = bench_sessionlog_append(s(500, 50), "always")
     results["sessionlog_sync"] = bench_sessionlog_sync(s(300, 40))
+    results["sync_depth_scaling"] = bench_sync_depth_scaling(
+        (100, s(1500, 300)), s(25, 8))
     results["journal_recovery"] = bench_journal_recovery(
         (100, 1000, 5000) if not quick else (100, 500))
     results["observability"] = bench_observability_overhead(s(20, 4))
@@ -1374,6 +1448,25 @@ def render(r: dict) -> None:
              f"@50k recs {a['projected_ms_at_50k']:.0f} ms  "
              f"[append_turn: still a full rescan — see D1; it is NOT the "
              f"live per-turn path, which is row 1b]")
+    ds = r["sync_depth_scaling"]
+    lo, hi = min(ds["depths"]), max(ds["depths"])
+    _row("1c. sync cost at depth", f"cache ON, depth {lo}",
+         f"{ds[f'on_ms_at_{lo}']:.3f} ms", f"median of {ds['samples']} syncs")
+    _row("    sync cost at depth", f"cache ON, depth {hi}",
+         f"{ds[f'on_ms_at_{hi}']:.3f} ms", "")
+    _row("    sync cost at depth", f"cache OFF, depth {lo}",
+         f"{ds[f'off_ms_at_{lo}']:.3f} ms", "pre-D1-fix behaviour")
+    _row("    sync cost at depth", f"cache OFF, depth {hi}",
+         f"{ds[f'off_ms_at_{hi}']:.3f} ms", "")
+    _row("    depth-scaling coefficient", "cache ON",
+         f"{ds['on_us_per_turn_of_depth']:.2f} us/turn",
+         "NOT zero — an O(history) term remains (prefix compare + copy)")
+    _row("    depth-scaling coefficient", "cache OFF",
+         f"{ds['off_us_per_turn_of_depth']:.2f} us/turn",
+         f"reduction {ds['slope_reduction_x']:.1f}x" if ds["slope_reduction_x"]
+         else "")
+    print(_rule())
+
     sy = r["sessionlog_sync"]
     _row("1b. sessionlog.sync p50", "LIVE per-turn path", f"{sy['p50']:.3f} ms",
          f"turns={sy['turns']} (memory.save_conversation calls this, "
@@ -1389,7 +1482,8 @@ def render(r: dict) -> None:
          f"{sy['projected_ms_at_1k']:.0f} ms",
          f"@10k turns {sy['projected_ms_at_10k']:.0f} ms; slope "
          f"{sy['slope_ms_per_turn']:.3f} ms/turn  "
-         f"[D1 FIXED — flat in depth; projections clamp at slope<=0]")
+         f"[D1 fixed; this decile fit is NOISY at small `turns` — row 1c is "
+         f"the authoritative depth measurement]")
     print(_rule())
 
     for row in r["journal_recovery"]:
