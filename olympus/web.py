@@ -404,6 +404,376 @@ def _v1_allowed(peer_ip: str, headers) -> bool:
     return _is_loopback(peer_ip) and not _forwarding_headers_present(headers)
 
 
+# --- Anthropic Messages dialect (W3-C5) -------------------------------------
+# Pure translation helpers for `POST /v1/messages`. They are the testable core;
+# `Handler._handle_v1_messages` is a thin shell around them and reuses EVERY
+# seam the OpenAI dialect uses (auth, admission, sovereignty, streamguard, usage
+# accounting, cancellation). There is no second server and no second generation
+# path — the Anthropic request is normalised into the SAME internal message list
+# `openai_server.messages_to_prompt` already consumes, and the council's answer
+# is rendered back in Anthropic shape (W3-I1).
+#
+# Refusal over silent divergence (W3-I2): a field Olympus cannot honour is a
+# typed 400, never a quiet drop.
+
+_ANTHROPIC_ERROR_KINDS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    500: "api_error",
+    529: "overloaded_error",
+}
+
+
+class _AnthropicRefusal(Exception):
+    """A typed refusal from the Anthropic translation layer (W3-I2).
+
+    Carries the HTTP status and the Anthropic error `type` so the handler can
+    render it in the native envelope without re-deciding policy."""
+
+    def __init__(self, message: str, *, status: int = 400,
+                 kind: str = "invalid_request_error") -> None:
+        self.status = int(status)
+        self.kind = str(kind)
+        super().__init__(str(message))
+
+
+def _anthropic_error_kind(status: int) -> str:
+    """The Anthropic error `type` for an HTTP status (5xx ⇒ api_error)."""
+    if status in _ANTHROPIC_ERROR_KINDS:
+        return _ANTHROPIC_ERROR_KINDS[status]
+    return "api_error" if int(status) >= 500 else "invalid_request_error"
+
+
+def _anthropic_error(kind: str, message: str) -> dict:
+    """The native Anthropic error envelope (W3-I4) — deliberately NOT the
+    OpenAI `{"error": {"message", "type", "code"}}` shape."""
+    return {"type": "error",
+            "error": {"type": str(kind), "message": str(message)}}
+
+
+def _anthropic_text(blocks, *, where: str) -> str:
+    """Flatten an Anthropic `system` value (string or block list) to text.
+
+    Only `text` blocks exist for `system`; anything else is refused rather than
+    dropped (W3-I2)."""
+    if blocks is None:
+        return ""
+    if isinstance(blocks, str):
+        return blocks
+    if not isinstance(blocks, list):
+        raise _AnthropicRefusal(
+            f"invalid request: {where} must be a string or a list of text "
+            "blocks.")
+    parts = []
+    for block in blocks:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            raise _AnthropicRefusal(
+                f"invalid request: {where} blocks must be objects.")
+        if block.get("type") != "text":
+            raise _AnthropicRefusal(
+                f"unsupported content block type "
+                f"{str(block.get('type'))!r} in {where}: this endpoint carries "
+                "text (and tool blocks in `messages`) only. Refused rather "
+                "than silently dropped.")
+        parts.append(str(block.get("text", "")))
+    return "\n".join(p for p in parts if p)
+
+
+def _anthropic_blocks_to_internal(content, role: str) -> tuple[str, list, list]:
+    """Split one Anthropic message `content` into (text, tool_calls, results).
+
+    `tool_calls` are in the OpenAI internal shape the existing path already
+    speaks (`{"id", "type": "function", "function": {"name", "arguments"}}`)
+    and `results` are OpenAI `tool` messages — the SAME internal representation
+    `openai_server.messages_to_prompt` consumes, so both dialects collapse to a
+    prompt through one function. Any other block type is refused (W3-I2)."""
+    if isinstance(content, str):
+        return content, [], []
+    if content is None:
+        return "", [], []
+    if not isinstance(content, list):
+        raise _AnthropicRefusal(
+            "invalid request: message `content` must be a string or a list of "
+            "content blocks.")
+    texts: list[str] = []
+    calls: list[dict] = []
+    results: list[dict] = []
+    for block in content:
+        if isinstance(block, str):
+            texts.append(block)
+            continue
+        if not isinstance(block, dict):
+            raise _AnthropicRefusal(
+                "invalid request: content blocks must be objects.")
+        kind = block.get("type")
+        if kind == "text":
+            texts.append(str(block.get("text", "")))
+        elif kind == "tool_use":
+            try:
+                args = json.dumps(block.get("input") or {})
+            except (TypeError, ValueError):
+                raise _AnthropicRefusal(
+                    "invalid request: tool_use `input` must be JSON-encodable.")
+            calls.append({"id": str(block.get("id", "")),
+                          "type": "function",
+                          "function": {"name": str(block.get("name", "")),
+                                       "arguments": args}})
+        elif kind == "tool_result":
+            results.append({
+                "role": "tool",
+                "tool_call_id": str(block.get("tool_use_id", "")),
+                "content": _anthropic_result_text(block.get("content")),
+            })
+        else:
+            raise _AnthropicRefusal(
+                f"unsupported content block type {str(kind)!r} in a {role} "
+                "message: this endpoint carries `text`, `tool_use` and "
+                "`tool_result` blocks only (no image/document/thinking "
+                "blocks). Refused rather than silently dropped.")
+    return "\n".join(t for t in texts if t), calls, results
+
+
+def _anthropic_result_text(content) -> str:
+    """A tool_result's payload as text (string, block list, or JSON value)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            else:
+                raise _AnthropicRefusal(
+                    "unsupported tool_result content: only text blocks are "
+                    "carried. Refused rather than silently dropped.")
+        return "\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    try:
+        return json.dumps(content)
+    except (TypeError, ValueError):
+        return str(content)
+
+
+# Anthropic fields Olympus cannot honour. Silently ignoring them would change
+# the meaning of the request, so they are refused with a typed 400 (W3-I2).
+_ANTHROPIC_REFUSED_FIELDS = {
+    "stop_sequences": "custom stop sequences are not applied by the council "
+                      "pipeline",
+    "top_k": "top-k sampling is not exposed by the council pipeline",
+}
+
+
+def _anthropic_to_internal(payload) -> tuple[list, str, dict]:
+    """Normalise an Anthropic Messages request into (messages, system, opts).
+
+    `messages` is the OpenAI-shaped internal list the existing `/v1` path
+    already consumes (one generation path, two dialects — W3-I1); `system` is
+    the flattened system prompt (string OR block list accepted, W3-I3); `opts`
+    carries the honoured request knobs.
+
+    Raises `_AnthropicRefusal` for a malformed body, an unsupported field
+    (`stop_sequences`, `top_k`), an unsupported content block, or a missing
+    `max_tokens` (required by the Anthropic protocol — W3-I3)."""
+    if not isinstance(payload, dict):
+        raise _AnthropicRefusal("invalid request: body must be a JSON object.")
+    for field, why in _ANTHROPIC_REFUSED_FIELDS.items():
+        value = payload.get(field)
+        if field in payload and value not in (None, [], ()):
+            raise _AnthropicRefusal(
+                f"unsupported parameter `{field}`: {why}. Refused rather than "
+                "silently ignored.")
+    if "max_tokens" not in payload or payload.get("max_tokens") is None:
+        raise _AnthropicRefusal(
+            "invalid request: `max_tokens` is required by the Anthropic "
+            "Messages protocol.")
+    try:
+        max_tokens = int(payload["max_tokens"])
+    except (TypeError, ValueError):
+        raise _AnthropicRefusal(
+            "invalid request: `max_tokens` must be an integer.")
+    if max_tokens <= 0:
+        raise _AnthropicRefusal(
+            "invalid request: `max_tokens` must be a positive integer.")
+    raw = payload.get("messages")
+    if not isinstance(raw, list) or not raw:
+        raise _AnthropicRefusal(
+            "invalid request: `messages` must be a non-empty list.")
+    system = _anthropic_text(payload.get("system"), where="`system`")
+    messages: list[dict] = []
+    for msg in raw:
+        if not isinstance(msg, dict):
+            raise _AnthropicRefusal(
+                "invalid request: each message must be an object.")
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            raise _AnthropicRefusal(
+                f"invalid request: unsupported message role {str(role)!r} "
+                "(only `user` and `assistant` exist in this protocol).")
+        text, calls, results = _anthropic_blocks_to_internal(
+            msg.get("content"), role)
+        # Tool results belong to the turn they answer, so they precede the
+        # user's new text — the order the OpenAI dialect uses too.
+        messages.extend(results)
+        entry: dict = {"role": role, "content": text}
+        if calls:
+            entry["tool_calls"] = calls
+        if text or calls or not results:
+            messages.append(entry)
+    opts = {
+        "model": payload.get("model") or openai_server.MODEL_ID,
+        "max_tokens": max_tokens,
+        "stream": bool(payload.get("stream")),
+    }
+    for knob in ("temperature", "top_p", "tools", "tool_choice", "metadata"):
+        if payload.get(knob) is not None:
+            opts[knob] = payload[knob]
+    return messages, system, opts
+
+
+def _anthropic_usage(usage) -> dict:
+    """Map a usage block onto Anthropic's `input_tokens`/`output_tokens`.
+
+    Accepts the OpenAI-shaped block produced by `openai_server.usage_block`
+    (the existing estimator seam — no second token counter) or an already
+    Anthropic-shaped dict."""
+    usage = usage or {}
+    return {
+        "input_tokens": int(usage.get("input_tokens",
+                                      usage.get("prompt_tokens", 0)) or 0),
+        "output_tokens": int(usage.get("output_tokens",
+                                       usage.get("completion_tokens", 0)) or 0),
+    }
+
+
+def _anthropic_message_id() -> str:
+    return "msg_" + uuid.uuid4().hex[:24]
+
+
+def _internal_to_anthropic(reply: str, *, model: str, usage: dict | None = None,
+                           stop_reason: str = "end_turn",
+                           message_id: str | None = None) -> dict:
+    """Render a council answer as an Anthropic `Message` object (W3-I3/§5)."""
+    return {
+        "id": message_id or _anthropic_message_id(),
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": reply or ""}],
+        "model": model or openai_server.MODEL_ID,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": _anthropic_usage(usage),
+    }
+
+
+def _anthropic_stop_reason(*, truncated: bool = False,
+                           tool_use: bool = False) -> str:
+    """Map the internal outcome onto Anthropic's stop reasons: a tool call ⇒
+    `tool_use`, a length-limited answer ⇒ `max_tokens`, otherwise `end_turn`."""
+    if tool_use:
+        return "tool_use"
+    if truncated:
+        return "max_tokens"
+    return "end_turn"
+
+
+def _anthropic_cap(text: str, max_tokens: int) -> tuple[str, bool]:
+    """Apply the caller's `max_tokens` budget to an answer.
+
+    The council does not take a token cap, so the cap is enforced at this
+    boundary using the SAME estimator the OpenAI surface reports with
+    (`openai_server.estimate_tokens`, ~4 chars/token). Returns
+    (text, truncated); a truncated answer is reported with
+    `stop_reason="max_tokens"`, never as a complete `end_turn` reply."""
+    text = text or ""
+    budget = max(1, int(max_tokens)) * 4
+    if len(text) > budget:
+        return text[:budget], True
+    return text, False
+
+
+def _sse_event(name: str, data: dict) -> str:
+    """One named SSE frame, in the framing style `_stream_v1` already writes."""
+    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+
+# A `ping` every N content deltas (the protocol's keepalive). Small enough that
+# an idle-ish stream still emits one, large enough not to spam a fast stream.
+_ANTHROPIC_PING_EVERY = 16
+
+
+def _anthropic_sse(pieces, *, model: str, max_tokens: int,
+                   input_tokens: int = 0, message_id: str | None = None,
+                   tool_use: bool = False, ping_every: int | None = None):
+    """Yield the Anthropic streaming event sequence for `pieces` (W3-I6).
+
+    Order: `message_start` → `content_block_start` → `content_block_delta`*
+    → `content_block_stop` → `message_delta` → `message_stop`, with periodic
+    `ping` keepalives.
+
+    `pieces` is expected to be the streamguard-wrapped generator
+    (`Handler._guarded_pieces`), so a degenerate stream arrives here as one
+    final disclosure fragment: it is emitted as an ordinary `text_delta` and
+    the envelope is still closed properly — a disclosed abort, never a silent
+    truncation (W2-I8.3)."""
+    ping_every = ping_every or _ANTHROPIC_PING_EVERY
+    mid = message_id or _anthropic_message_id()
+    model = model or openai_server.MODEL_ID
+    yield _sse_event("message_start", {
+        "type": "message_start",
+        "message": {"id": mid, "type": "message", "role": "assistant",
+                    "content": [], "model": model, "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": int(input_tokens or 0),
+                              "output_tokens": 0}},
+    })
+    yield _sse_event("content_block_start", {
+        "type": "content_block_start", "index": 0,
+        "content_block": {"type": "text", "text": ""}})
+    yield _sse_event("ping", {"type": "ping"})
+    budget = max(1, int(max_tokens)) * 4
+    written: list[str] = []
+    size = 0
+    truncated = False
+    seen = 0
+    for piece in pieces:
+        if not piece:
+            continue
+        if size + len(piece) > budget:
+            piece = piece[:max(0, budget - size)]
+            truncated = True
+        if piece:
+            written.append(piece)
+            size += len(piece)
+            seen += 1
+            yield _sse_event("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": piece}})
+            if seen % ping_every == 0:
+                yield _sse_event("ping", {"type": "ping"})
+        if truncated:
+            break
+    yield _sse_event("content_block_stop",
+                     {"type": "content_block_stop", "index": 0})
+    yield _sse_event("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": _anthropic_stop_reason(truncated=truncated,
+                                                        tool_use=tool_use),
+                  "stop_sequence": None},
+        "usage": {"output_tokens": openai_server.estimate_tokens(
+            "".join(written))}})
+    yield _sse_event("message_stop", {"type": "message_stop"})
+
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
@@ -1828,6 +2198,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/chat/completions":
             self._handle_v1_chat()
             return
+        if path == "/v1/messages":        # Anthropic dialect, same council path
+            self._handle_v1_messages()
+            return
         if path not in ("/api/chat", "/api/feedback", "/api/action",
                         "/api/memory", "/api/documents", "/api/compare",
                         "/api/todos", "/api/gallery", "/api/register",
@@ -2201,21 +2574,33 @@ class Handler(BaseHTTPRequestHandler):
                     "off-box and needs the operator token.")
         return True, 200, ""
 
+    def _v1_credential(self) -> str:
+        """The API key presented on a /v1 request, from either header form:
+        `Authorization: Bearer <key>` (OpenAI dialect) or `x-api-key`
+        (Anthropic dialect). Extraction only — the single constant-time
+        comparison stays in `_v1_authorized`, so both dialects authenticate
+        through exactly one check (W3-I5)."""
+        token = self._bearer_token()
+        if token:
+            return token
+        return str(self.headers.get("x-api-key", "") or "").strip()
+
     def _v1_authorized(self) -> tuple[bool, int, str]:
         """Gate the /v1/* endpoints. With OLYMPUS_API_KEYS set, require a valid
-        bearer key. With none set, serve loopback-only — and never an open relay:
-        the remoteness decision comes from the peer socket (not headers), and a
-        process bound off-loopback must carry a key even for a 'local'-looking
-        peer (a reverse proxy connects from loopback while fronting the world).
-        Returns (ok, http_status, message)."""
+        key (bearer or `x-api-key`). With none set, serve loopback-only — and
+        never an open relay: the remoteness decision comes from the peer socket
+        (not headers), and a process bound off-loopback must carry a key even
+        for a 'local'-looking peer (a reverse proxy connects from loopback while
+        fronting the world). Returns (ok, http_status, message)."""
         keys = config.api_keys()
         if keys:
-            token = self._bearer_token()
+            token = self._v1_credential()
             if token and any(hmac.compare_digest(token, k) for k in keys):
                 return True, 200, ""
             return (False, 401,
                     "missing or invalid API key — pass a configured "
-                    "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>'.")
+                    "OLYMPUS_API_KEYS value as 'Authorization: Bearer <key>' "
+                    "or 'x-api-key: <key>'.")
         # No keys configured: loopback-only, and never an open relay. The
         # peer/header decision funnels through the module-level `_v1_allowed`
         # predicate — the SAME function the boundary tests assert — so the
@@ -2243,6 +2628,67 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"error": {"message": message, "type": "invalid_request_error",
                               "code": None}}, code)
 
+    # --- seams shared by BOTH /v1 dialects (W3-I1: one generation path) ---
+
+    def _v1_bot(self):
+        """Build the council bot for a /v1 request — the single entry point
+        both dialects use.
+
+        Data-class routing: an X-Olympus-Data-Class header (public/internal/
+        restricted) selects the destination policy. `restricted` stays local
+        even with sovereign mode off; an unspecified class defaults to
+        local-only when sovereign mode is on. Called INSIDE `_v1_run` so a
+        sovereignty refusal from `local_only()` is rendered, not raised."""
+        data_class = config.normalize_data_class(
+            self.headers.get("X-Olympus-Data-Class"))
+        pool = config.ModelPool.from_env()
+        if config.data_class_local_only(data_class):
+            pool = pool.local_only()            # fail-closed if no local member
+        return orchestrator.Olympus(pool=pool, user="api-v1")
+
+    @staticmethod
+    def _v1_audit_headers(bot) -> dict:
+        """Audit headers: let the caller locate and verify the reasoning behind
+        this answer — `olympus verify --run <X-Olympus-Run-Id>`."""
+        from . import witness
+        hdrs = {"X-Olympus-Audit": "signed-" + witness.posture()}
+        run_id = getattr(bot, "last_run_id", None)
+        if run_id:
+            hdrs["X-Olympus-Run-Id"] = run_id
+        return hdrs
+
+    def _v1_run(self, work, *, error, admission_body, label: str,
+                context: str = "") -> None:
+        """Run a /v1 request body under the shared failure policy.
+
+        One copy of the policy for both dialects (W3-I1) — only the *rendering*
+        differs, and that is what `error(code, message)` and
+        `admission_body(exc, body)` inject:
+          * sovereignty/egress refusal → 403, fail closed, never a downgrade;
+          * admission refusal (W2-C7) → 429 + Retry-After + machine-readable
+            reason; refusal over degradation (ruling R6), the council never
+            silently answers with a cheaper model to fit under load;
+          * anything else → captured and rendered as a 500 with no stack trace.
+        """
+        from . import security
+        try:
+            work()
+        except security.SovereigntyError as err:
+            error(403, str(err))
+        except usage.AdmissionRefused as err:
+            code, body, hdrs = usage.admission_http_response(err)
+            try:
+                self._json(admission_body(err, body), code, extra_headers=hdrs)
+            except Exception:
+                pass                  # a stream already committed its headers
+        except Exception as err:
+            from . import errors
+            errors.capture(label, err, context=(context or "")[:200])
+            try:
+                error(500, str(err))
+            except Exception:
+                pass
+
     def _handle_v1_chat(self) -> None:
         ok, code, msg = self._v1_authorized()
         if not ok:
@@ -2259,53 +2705,102 @@ class Handler(BaseHTTPRequestHandler):
         if not prompt.strip():
             self._v1_error(400, "invalid request: no user message content.")
             return
-        # Data-class routing: an X-Olympus-Data-Class header (public/internal/
-        # restricted) selects the destination policy. `restricted` stays local
-        # even with sovereign mode off; an unspecified class defaults to
-        # local-only when sovereign mode is on.
-        data_class = config.normalize_data_class(
-            self.headers.get("X-Olympus-Data-Class"))
-        from . import security
+
         # Any `model` value maps to the one council pipeline for v1; unsupported
         # params (temperature, tools, ...) are accepted and ignored by design.
-        try:
-            pool = config.ModelPool.from_env()
-            if config.data_class_local_only(data_class):
-                pool = pool.local_only()        # fail-closed if no local member
-            bot = orchestrator.Olympus(pool=pool, user="api-v1")
+        def work() -> None:
+            bot = self._v1_bot()
             if stream:
                 self._stream_v1(bot, prompt, model)
             else:
                 answer = bot.ask(prompt)
-                # Audit headers: let the caller locate and verify the reasoning
-                # behind this answer — `olympus verify --run <X-Olympus-Run-Id>`.
-                from . import witness
-                hdrs = {"X-Olympus-Audit": "signed-" + witness.posture()}
-                run_id = getattr(bot, "last_run_id", None)
-                if run_id:
-                    hdrs["X-Olympus-Run-Id"] = run_id
                 self._json(openai_server.completion_response(
-                    answer, model, prompt_text=prompt), extra_headers=hdrs)
-        except security.SovereigntyError as err:
-            # Fail closed with a clear, non-leaky message (never downgrade).
-            self._v1_error(403, str(err))
-        except usage.AdmissionRefused as err:
-            # W2-C7 admission: 429 + Retry-After + machine-readable reason.
-            # Refusal over degradation (ruling R6) — the council never
-            # silently answers with a cheaper model to fit under load.
-            code, body, hdrs = usage.admission_http_response(err)
-            try:
-                self._json(body, code, extra_headers=hdrs)
-            except Exception:
-                pass                  # a stream already committed its headers
-        except Exception as err:
-            from . import errors
-            errors.capture("web /v1/chat/completions", err,
-                           context=prompt[:200])
-            try:
-                self._v1_error(500, str(err))
-            except Exception:
-                pass
+                    answer, model, prompt_text=prompt),
+                    extra_headers=self._v1_audit_headers(bot))
+
+        self._v1_run(work, error=self._v1_error,
+                     admission_body=lambda _exc, body: body,
+                     label="web /v1/chat/completions", context=prompt)
+
+    # --- Anthropic Messages dialect (W3-C5) ------------------------------
+
+    def _anthropic_fail(self, code: int, message: str,
+                        kind: str | None = None) -> None:
+        """Render a refusal in the NATIVE Anthropic envelope (W3-I4)."""
+        self._json(_anthropic_error(kind or _anthropic_error_kind(code),
+                                    message), code)
+
+    @staticmethod
+    def _anthropic_admission_body(exc, body: dict) -> dict:
+        """Re-render an admission refusal in the Anthropic envelope, keeping
+        `usage.admission_http_response`'s status and headers (Retry-After,
+        X-Olympus-Admission) as the single source of the overload shape."""
+        retry = body.get("retry_after_s", getattr(exc, "retry_after_s", 0))
+        reason = body.get("reason", getattr(exc, "reason", "no_capacity"))
+        detail = body.get("message") or str(exc)
+        return _anthropic_error(
+            "rate_limit_error",
+            f"admission refused ({reason}): {detail} "
+            f"Retry after {retry}s. Nothing was downgraded.")
+
+    def _handle_v1_messages(self) -> None:
+        """`POST /v1/messages` — the Anthropic Messages dialect.
+
+        A translation layer, not a second server: the request is normalised
+        into the same internal message list the OpenAI dialect uses, run
+        through the same council entry (`_v1_bot` → `bot.ask`/`ask_stream`),
+        and rendered back in Anthropic shape. Auth, admission, sovereignty,
+        usage accounting, streamguard and cancellation are the same seams
+        (W3-I1)."""
+        ok, code, msg = self._v1_authorized()
+        if not ok:
+            self._anthropic_fail(code, msg)
+            return
+        payload = self._read_json()
+        if payload is None:
+            self._anthropic_fail(
+                400, "invalid request: body must be JSON and within the "
+                     "size cap.")
+            return
+        try:
+            messages, system, opts = _anthropic_to_internal(payload)
+        except _AnthropicRefusal as err:
+            self._anthropic_fail(err.status, str(err), kind=err.kind)
+            return
+        # The system prompt rejoins the message list as a `system` turn, so
+        # BOTH dialects collapse to a prompt through the one existing function.
+        internal = ([{"role": "system", "content": system}] if system else [])
+        internal += messages
+        prompt = openai_server.messages_to_prompt(internal)
+        if not prompt.strip():
+            self._anthropic_fail(400,
+                                 "invalid request: no user message content.")
+            return
+        model, max_tokens = opts["model"], opts["max_tokens"]
+
+        def work() -> None:
+            bot = self._v1_bot()
+            if opts["stream"]:
+                self._stream_v1_messages(bot, prompt, model,
+                                         max_tokens=max_tokens)
+            else:
+                answer = bot.ask(prompt)
+                text, truncated = _anthropic_cap(answer, max_tokens)
+                # The council does not surface structured tool calls at this
+                # boundary today, so `tool_use` is False here; the mapping
+                # itself lives in the pure helper and is tested there.
+                stop = _anthropic_stop_reason(
+                    truncated=truncated,
+                    tool_use=bool(getattr(bot, "last_tool_calls", None)))
+                self._json(
+                    _internal_to_anthropic(
+                        text, model=model, stop_reason=stop,
+                        usage=openai_server.usage_block(prompt, text)),
+                    extra_headers=self._v1_audit_headers(bot))
+
+        self._v1_run(work, error=self._anthropic_fail,
+                     admission_body=self._anthropic_admission_body,
+                     label="web /v1/messages", context=prompt)
 
     # --- C8 degenerate-stream defense at the HTTP egress seam (W2-PR14) ---
     #
@@ -2362,7 +2857,8 @@ class Handler(BaseHTTPRequestHandler):
                 f"the degenerate-stream guard ({kind}). The text above is "
                 "unfinished and unverified.]")
 
-    def _stream_v1(self, bot, prompt: str, model: str) -> None:
+    def _sse_open(self) -> None:
+        """Commit the SSE response headers — one seam for both /v1 dialects."""
         from . import witness
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -2372,14 +2868,35 @@ class Handler(BaseHTTPRequestHandler):
         # (use /api/status or a non-streaming request to obtain it).
         self.send_header("X-Olympus-Audit", "signed-" + witness.posture())
         self.end_headers()
+
+    def _sse_write(self, frames) -> None:
+        for frame in frames:
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
+    def _stream_v1(self, bot, prompt: str, model: str) -> None:
+        self._sse_open()
         # Guarding the PIECES (not the SSE frames) keeps the envelope
         # well-formed: a disclosure is just another content delta, so the stop
         # frame and the `[DONE]` terminator still close the stream and no client
         # sees a half-written event.
         pieces = self._guarded_pieces(bot.ask_stream(prompt), model=model)
-        for frame in openai_server.stream_events(pieces, model):
-            self.wfile.write(frame.encode("utf-8"))
-            self.wfile.flush()
+        self._sse_write(openai_server.stream_events(pieces, model))
+
+    def _stream_v1_messages(self, bot, prompt: str, model: str, *,
+                            max_tokens: int) -> None:
+        """The Anthropic streaming dialect (W3-I6) over the SAME seams as
+        `_stream_v1`: same council entry (`bot.ask_stream`), same
+        streamguard-wrapped pieces, same SSE headers. Only the event framing
+        differs, and that lives in the pure `_anthropic_sse` generator — so a
+        guard trip arrives as a disclosure `text_delta` and the envelope is
+        still closed by `content_block_stop`/`message_delta`/`message_stop`
+        (W2-I8.3)."""
+        self._sse_open()
+        pieces = self._guarded_pieces(bot.ask_stream(prompt), model=model)
+        self._sse_write(_anthropic_sse(
+            pieces, model=model, max_tokens=max_tokens,
+            input_tokens=openai_server.estimate_tokens(prompt)))
 
     def _stream_reply(self, bot, message: str) -> None:
         self.send_response(200)
