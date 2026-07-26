@@ -1,0 +1,63 @@
+{
+  "files": [
+    {
+      "path": "responses/714ba0fdede9d24f0fe609747974e51b2863971b8ce354adf03a5d660b465349.json",
+      "sha256": "7075807ac6a8c3e5fbab45e35b03604e1cde58e9efe3acd27a136fc19598c1ab"
+    },
+    {
+      "path": "responses/c0daa2403a9cdf570f38ac0627f7f5efd83672431e2d5b46d3231f677ddd47a1.json",
+      "sha256": "6c43c62dc04c7e488bdeae6d0bfe40c8dcf79e27dc647b1c0f95e42ad05dc2cc"
+    },
+    {
+      "path": "responses/dae5ed609382729cb4e202c4b1bb4c162a677ddc31b8230627400aeff8a53246.json",
+      "sha256": "83d6c8ec3928a0adab772c052c15e1ebf80cc5748d7f001b374baf462aafff9c"
+    },
+    {
+      "path": "trace.json",
+      "sha256": "5189b2f7ae2e431613faa1492687e4b158791642705a4db58a7d879518a3afa9"
+    }
+  ],
+  "flags": {
+    "OLYMPUS_ABC": "on",
+    "OLYMPUS_CONTRACTS": "0",
+    "OLYMPUS_EGRESS_GUARD": "0",
+    "OLYMPUS_FAST": "0",
+    "OLYMPUS_INRUN_COMPACT": "",
+    "OLYMPUS_INTERACTIVE_VERIFY": "off",
+    "OLYMPUS_SEMANTIC_ROUTING": "0",
+    "OLYMPUS_SEMANTIC_SKILLS": "0",
+    "OLYMPUS_SWARM": "0"
+  },
+  "models": [
+    {
+      "model": "claude-test",
+      "provider": "anthropic",
+      "version": null
+    }
+  ],
+  "prompt_manifest": {
+    "aegis": "091ef11ddbbb",
+    "aletheia": "9e209422aa65",
+    "angelos": "1de06ca949cc",
+    "argus": "40916664c9d3",
+    "athena": "ec16f63b96e7",
+    "chiron": "f6ccad480c6a",
+    "chronos": "3c492650b4f0",
+    "hephaestus": "80d27893aac6",
+    "hermes": "c4e074ca3c7e",
+    "iris": "d58b317dad40",
+    "metis": "f67d8f49da56",
+    "mnemosyne": "665dd1f7a3d4",
+    "peitho": "f3d0153a65e2",
+    "plutus": "7cbc2623cc79",
+    "prometheus": "80037cc73415",
+    "zeus": "38d4d6b9020b"
+  },
+  "reply_sha": "",
+  "run_id": "c3c5eeaae4eb",
+  "scrub": {
+    "matches": 0,
+    "screen": "v1"
+  },
+  "v": "1.0"
+}
