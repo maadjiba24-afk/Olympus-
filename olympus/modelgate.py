@@ -246,20 +246,53 @@ def _looks_unreachable(err: Exception) -> bool:
 
 # --- corpus runner (budget-enforcing) --------------------------------------
 
-def _run_corpus(settings, items, run_fn, cap, total_cost, max_item):
-    """Run items until exhausted or the projected next-item cost would exceed the
-    cap. Projection uses the MAX per-item cost seen so far (conservative), so the
-    accumulated cost NEVER overruns the cap (I-M1). The first ever item runs
-    unconditionally (no prior estimate exists); thereafter a stop is taken
-    BEFORE running an item that could push past the cap.
+# Pre-flight worst-case estimate parameters. Drift probes are short-answer
+# (answer + LLM judge), so a per-item output bound well below config.MAX_TOKENS
+# is realistic AND lets a full corpus complete under a $1 cap; MAX_TOKENS (16k)
+# would block ~half the corpus. _CALLS_PER_ITEM over-counts (answer + judge +
+# margin). See I-M1 residual note in run_gate's docstring.
+_CALLS_PER_ITEM = 3
+_DRIFT_MAX_OUTPUT = 1024
+
+
+def _worst_case_cost(settings, item) -> float:
+    """A per-item spend UPPER BOUND computed BEFORE running the item, so no item
+    is started unless its worst case fits the remaining budget (I-M1). Priced
+    with the same `usage.PRICES` table the run bills against. Assumes per-item
+    output stays within `_DRIFT_MAX_OUTPUT` (true for the short-answer drift
+    corpus); a provider exceeding that bound could overrun by a single item's
+    excess — a bounded, documented residual, vs the old trailing-max
+    projection's UNBOUNDED overrun on a cost spike."""
+    model = getattr(settings, "model", "") or ""
+    task = str(item.get("task", "")) + " " + str(item.get("criteria", ""))
+    in_tok = max(1, len(task) // 4) + 1024      # prompt + system/tool overhead
+    return usage.estimate_cost(model, in_tok, _DRIFT_MAX_OUTPUT) * _CALLS_PER_ITEM
+
+
+def _run_corpus(settings, items, run_fn, cap, total_cost, max_item,
+                cost_estimator=None):
+    """Run items until exhausted or the next item's WORST-CASE estimated cost
+    would push accumulated spend past the cap.
+
+    The guard is a PRE-FLIGHT estimate (`cost_estimator`, default
+    `_worst_case_cost`), not a trailing max of costs already paid: an item is
+    never STARTED unless its bounded worst case fits the remaining budget. Since
+    the estimate upper-bounds actual per-item cost, the cap is a true
+    never-exceed bound (I-M1) even against a mid-run cost spike or a single
+    expensive/first item (the old trailing-max projection let both overrun — see
+    WAVE1_INDEPENDENT_AUDIT.md). `cost_estimator(settings, item) -> float` is
+    injectable so tests can assert the bound with perfect foresight.
 
     Returns (rows, total_cost, max_item, stopped_reason)."""
+    estimator = cost_estimator or _worst_case_cost
     rows: list[dict] = []
     stopped = ""
     for item in items:
-        if cap > 0 and max_item > 0 and (total_cost + max_item) > cap:
-            stopped = BUDGET_EXHAUSTED
-            break
+        if cap > 0:
+            est = float(estimator(settings, item))
+            if (total_cost + est) > cap:
+                stopped = BUDGET_EXHAUSTED
+                break
         r = run_fn(settings, item)             # may raise ProviderUnavailable
         cost = float(r.get("cost", 0.0) or 0.0)
         total_cost += cost
@@ -401,7 +434,7 @@ def unfreeze(member: str) -> bool:
 
 def run_gate(settings: config.Settings, *, corpus: str = "drift",
              budget_usd: float | None = None, run_fn=None,
-             confirm: bool = True) -> GateResult:
+             confirm: bool = True, cost_estimator=None) -> GateResult:
     """Run the drift corpus under a hard dollar cap and classify the outcome.
 
     `run_fn(settings, item) -> {"score", "cost", "error"}` is injectable for
@@ -419,7 +452,7 @@ def run_gate(settings: config.Settings, *, corpus: str = "drift",
 
     try:
         rows, total_cost, max_item, stopped = _run_corpus(
-            settings, items, run_fn, cap, 0.0, 0.0)
+            settings, items, run_fn, cap, 0.0, 0.0, cost_estimator)
     except ProviderUnavailable:
         # Clean-skip: never a false freeze, exit-0 semantics (spec §C6.9).
         return GateResult(ok=True, severity=SKIPPED, results=[],
@@ -451,7 +484,8 @@ def run_gate(settings: config.Settings, *, corpus: str = "drift",
             retry_items = [it for it in items if _domain(it) in flagged]
             try:
                 r2, total_cost, max_item, _ = _run_corpus(
-                    settings, retry_items, run_fn, cap, total_cost, max_item)
+                    settings, retry_items, run_fn, cap, total_cost, max_item,
+                    cost_estimator)
             except ProviderUnavailable:
                 r2 = []
             retry_scores, _ = _aggregate(r2)
