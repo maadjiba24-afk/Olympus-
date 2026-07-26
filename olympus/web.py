@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -598,7 +599,13 @@ def _anthropic_to_internal(payload) -> tuple[list, str, dict]:
             "Messages protocol.")
     try:
         max_tokens = int(payload["max_tokens"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError matters: json.loads accepts the non-standard literals
+        # Infinity/-Infinity (and 1e400 overflows to inf), and int(float("inf"))
+        # raises OverflowError — which is NOT a ValueError. Unhandled it escaped
+        # the handler and dropped the connection with a logged traceback, i.e. a
+        # trivially reachable pre-generation crash on a network-facing route
+        # (Phase-4 Stage-B finding F1).
         raise _AnthropicRefusal(
             "invalid request: `max_tokens` must be an integer.")
     if max_tokens <= 0:
@@ -2623,6 +2630,42 @@ class Handler(BaseHTTPRequestHandler):
                     "(safety is not inferred from the connection).")
         return True, 200, ""
 
+    def _v1_principal(self) -> str:
+        """The memory namespace for this /v1 request.
+
+        `Olympus(user=...)` scopes long-term memory — lessons, corrections,
+        profile card, recall, playbooks, relationship graph. Every /v1 request
+        used to run as the single literal principal `"api-v1"`, so two holders
+        of two different OLYMPUS_API_KEYS shared one namespace: B's answers were
+        conditioned on context A had written, and B's `recall` could surface A's
+        material. Authentication distinguished the callers; the memory scope
+        threw that distinction away.
+
+        Each configured key now gets its own namespace, derived as a
+        domain-separated SHA-256 prefix of the key. Properties that matter:
+          * one-way — the namespace appears in on-disk paths and in traces, and
+            must never be reversible into the credential;
+          * stable across restarts — a caller's memory has to survive a bounce,
+            so no per-process salt;
+          * domain-separated — the digest is useless against any other system
+            that hashes the same key.
+
+        The keyless loopback case (no OLYMPUS_API_KEYS, local operator only)
+        keeps a single stable namespace: there is exactly one principal, and
+        inventing per-request namespaces would silently discard its memory.
+
+        Migration: existing `api-v1` memory is NOT rewritten or deleted. Keyed
+        deployments start from an empty per-key namespace — which is the point;
+        the old shared pool is the defect being removed. Operators who want the
+        old material under a specific key must copy it deliberately."""
+        token = self._v1_credential()
+        if not token:
+            return "api-local"
+        digest = hashlib.sha256(
+            b"olympus-v1-principal|" + token.encode("utf-8", "replace")
+        ).hexdigest()
+        return "api-" + digest[:16]
+
     def _v1_error(self, code: int, message: str) -> None:
         """An OpenAI-shaped error envelope."""
         self._json({"error": {"message": message, "type": "invalid_request_error",
@@ -2644,7 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
         pool = config.ModelPool.from_env()
         if config.data_class_local_only(data_class):
             pool = pool.local_only()            # fail-closed if no local member
-        return orchestrator.Olympus(pool=pool, user="api-v1")
+        return orchestrator.Olympus(pool=pool, user=self._v1_principal())
 
     @staticmethod
     def _v1_audit_headers(bot) -> dict:

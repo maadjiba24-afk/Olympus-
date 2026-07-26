@@ -1931,7 +1931,13 @@ class Olympus:
         # W2-C6: the run ended — close its progress lease (a no-op when the
         # watchdog is off, since no lease was ever opened).
         if self._watch is not None:
-            self._watch.close("ok")
+            # Close with the lease's ACTUAL outcome. Closing unconditionally
+            # with "ok" re-wrote the forensics of a cancelled run, so the
+            # preserved record contradicted the refusal the user was shown
+            # (Phase-4 Stage-A defect D2).
+            lease = getattr(self._watch, "lease", None)
+            outcome = "cancelled" if getattr(lease, "cancelled", False) else "ok"
+            self._watch.close(outcome)
             self._watch = None
         self.history.append({"role": "user", "content": user_message})
         self.history.append({"role": "assistant", "content": reply})
@@ -2063,9 +2069,22 @@ class Olympus:
             if tr:
                 tr.event("context.truncated", dropped=len(old),
                          reason="compaction_failed")
+            # The trace event alone is NOT a durable record here: _maybe_compact
+            # runs from _finish, on the main thread, where `trace.current()` is
+            # always None (it is only published inside _run_one's workers) — and
+            # ask() flushes the trace BEFORE _finish anyway. So the truncation
+            # was in fact silent in the shipped default configuration, which is
+            # exactly what A6/I-C5 forbid (Phase-4 Stage-A defect D3; the Wave-1
+            # report's "flag-independent" claim was wrong). Capture
+            # unconditionally — the errors ledger persists independently of the
+            # trace, so a dropped slice always leaves evidence.
+            from . import errors
+            errors.capture(
+                "orchestrator.compress_history",
+                RuntimeError(f"compaction failed; dropped {len(old)} messages"),
+                context="context truncated without compaction")
             from . import ctxbudget
             if ctxbudget.enabled():
-                from . import errors
                 errors.capture(
                     "orchestrator.compress_history",
                     RuntimeError("compaction failed — history truncated"),
@@ -2777,8 +2796,19 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             else:
                 os.environ[k] = v
     fresh.flush()
-    diffs = trace_mod.diff_decisions(original.get("decisions", []),
-                                     fresh.decisions)
+    # Replay re-executes `_pipeline` ONLY — the final answer is deliberately out
+    # of scope (see this function's docstring). Decisions recorded AFTER the
+    # pipeline returns therefore cannot appear in `fresh`, and diffing them
+    # produced a FALSE divergence for ordinary runs in the shipped default
+    # config: `synthesis_check` is emitted by `_compute_reply`, so every
+    # verified delegate run reported "diverged in 1 decision(s)". That is not
+    # cosmetic — `replaygate.self_check` writes a corrections memo, alerts
+    # Telegram and opens a GitHub issue on a "failure" (Phase-4 Stage-A defect
+    # D1). Compare only what replay actually re-executes.
+    _POST_PIPELINE = ("synthesis_check",)
+    recorded = [d for d in original.get("decisions", [])
+                if d.get("decision_type") not in _POST_PIPELINE]
+    diffs = trace_mod.diff_decisions(recorded, fresh.decisions)
     return original, fresh, diffs
 
 

@@ -179,8 +179,20 @@ class Trace:
                     f.write(line)
         except TimeoutError:
             alt = path.with_name(f"overflow-{self.id}.jsonl")
-            with alt.open("a", encoding="utf-8") as f:
-                f.write(line)
+            try:
+                with alt.open("a", encoding="utf-8") as f:
+                    f.write(line)
+            except OSError as err:                      # disk full / read-only
+                from . import errors
+                errors.capture("trace.flush", err, context="overflow write")
+        except OSError as err:
+            # `ask()` flushes from a `finally:`, so an I/O error here would
+            # REPLACE an already-computed answer with a traceback (Phase-4
+            # Stage-C defect D-2). The audit trail is important; it is not more
+            # important than the user's reply. Capture and continue — the same
+            # precedent the session journal already sets for ENOSPC.
+            from . import errors
+            errors.capture("trace.flush", err, context="trace write failed")
         # Opt-in OTLP export of the run's STRUCTURE (no content) — best-effort,
         # off unless OLYMPUS_OTLP_ENDPOINT is set, skipped under replay.
         try:

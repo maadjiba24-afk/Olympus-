@@ -790,9 +790,22 @@ def record(model: str, in_tokens: int, out_tokens: int, *,
                     fp_row["hits"] = fp_row.get("hits", 0) + 1
                 fp_row["cache_read"] = fp_row.get("cache_read", 0) + cache_read
             _atomic_write_json(path, ledger)
-    except TimeoutError as err:
+    except (TimeoutError, OSError) as err:
+        # Accounting must NEVER escape into the caller. `_atomic_write_json`
+        # raises OSError on a full/read-only disk; letting that propagate made a
+        # DISK fault look like a PROVIDER fault to `openai_compat._post` (whose
+        # retry handler catches OSError) and to `backend._should_failover` — the
+        # measured result was 4 billed HTTP POSTs for one logical call, i.e. a
+        # disk fault converted into the denial-of-wallet shape the watchdog
+        # exists to catch (Phase-4 Stage-C defect D-1). Capture and continue,
+        # the same contract `record_repair` and `ctxbudget.observe` already use:
+        # losing a usage row is strictly better than re-billing the user.
         from . import errors
-        errors.capture("usage.record", err, context="ledger lock wedged")
+        # Distinct contexts: a wedged lock and a full disk need different
+        # operator actions, so they must not collapse into one message.
+        errors.capture("usage.record", err,
+                       context=("ledger lock wedged" if isinstance(err, TimeoutError)
+                                else "ledger write failed (spend not recorded)"))
 
 
 # --- the budget guard (protects the user's own API bill) -----------------

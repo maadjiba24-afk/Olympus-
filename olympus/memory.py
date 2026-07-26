@@ -316,7 +316,14 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     # Atomic publish: load_conversation maps a torn file to [], so a crash
     # mid-write would drop the whole history (ADR 0005).
     p = _conversation_path(conversation_id)
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    # The temp name must be unique per WRITER, not per process: two threads of
+    # one process saving the same conversation shared `.{name}.{pid}.tmp`, so
+    # one write silently clobbered the other and the loser got FileNotFoundError
+    # from os.replace raised into its reply path (Phase-4 Stage-C defect D-3).
+    # `os.replace` is atomic, so distinct temps make concurrent saves last-writer
+    # -wins instead of corrupt-or-crash; the sealed journal remains the ordered
+    # record of every turn.
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
     os.replace(tmp, p)
     # Seal this turn's delta into the session journal (C1) — purely additive:
