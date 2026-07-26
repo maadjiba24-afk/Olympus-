@@ -402,7 +402,9 @@ def test_safe_tool_calls_returns_copies():
     mon.feed({"type": "content_block_stop"})
     first = mon.safe_tool_calls()
     first[0]["name"] = "mutated"
+    first[0]["input"]["path"] = "/etc/shadow"        # deep, not just shallow
     assert mon.safe_tool_calls()[0]["name"] == "read"
+    assert mon.safe_tool_calls()[0]["input"] == {"path": "/a"}
 
 
 # --- 5. W2-I8.2 detectors are pure -----------------------------------------
@@ -543,6 +545,21 @@ def test_stream_text_healthy_stream_is_unaffected_with_flag_on(monkeypatch):
     assert not _ledger_path().exists()
     # usage still recorded (the C5 path is untouched)
     assert (config.MEMORY_DIR / "usage").exists()
+
+
+def test_stream_text_records_impossible_final_usage(monkeypatch):
+    """The stream finished, so an impossible final counter is evidence, not a
+    retraction — the deltas already reached the user."""
+    monkeypatch.setenv("OLYMPUS_STREAMGUARD", "1")
+    chunks = ["fine ", "answer"]
+    monkeypatch.setattr(
+        llm, "client",
+        lambda settings=None: _fake_client(list(chunks),
+                                           _message(out_toks=9_000_000)))
+    out = list(llm.stream_text("SYS", [{"role": "user", "content": "x"}],
+                               settings=_SETTINGS, max_tokens=16))
+    assert out == chunks
+    assert [r["kind"] for r in _records()] == [streamguard.IMPOSSIBLE_USAGE]
 
 
 def test_complete_records_impossible_usage_without_failing(monkeypatch):

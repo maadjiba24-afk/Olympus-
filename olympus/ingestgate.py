@@ -793,8 +793,12 @@ def check(kind: str, payload, *, source: str = "", provenance=None):
       6. version policy           -- unknown MAJOR refused
       7. provenance + source safety
       8. integrity                -- declared-vs-actual cross-checks
-      9. data classification
-     10. accept
+      9. accept
+
+    Stage 10, data classification, is computed by `check_detailed()`: it labels
+    an accepted artifact (C0/C1/C2) and never refuses, so keeping it out of
+    `check()` lets check() return the artifact itself and makes the byte-
+    identity invariant expressible directly on its return value.
 
     The pre-parse cap at stage 2 is a deliberate strengthening of the spec's
     stated order (canonicalize → size limit): a payload over its cap must die

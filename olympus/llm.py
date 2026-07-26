@@ -473,6 +473,12 @@ def stream_text(
                      provider="anthropic", prefix_fp=_prefix_fp(system))
         _observe_ctx(params["model"], system, messages,
                              uncached + cr + cc)
+        # C8: the stream already completed, so impossible final counters are
+        # recorded as provider evidence rather than raised. No-op when the
+        # flag is off; never raises.
+        streamguard.check_usage_evidence(
+            u, provider="anthropic", model=params["model"],
+            max_tokens=params["max_tokens"])
 
 
 def text_of(message: anthropic.types.Message) -> str:

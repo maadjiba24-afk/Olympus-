@@ -51,6 +51,7 @@ Knobs (all read per call, so they are runtime-flippable):
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -76,6 +77,9 @@ KINDS = (TOKEN_LOOP, EMPTY_PROGRESS, MALFORMED_EVENTS, INVALID_TOOL_DELTA,
          INVALID_UNICODE, EVENT_ORDER, OUTPUT_BOUNDS)
 
 
+_DETAIL_MAX = 240          # bound on the reason text we surface and persist
+
+
 class StreamPathology(Exception):
     """A detector tripped. `.kind` is one of KINDS; `.detail` is the human
     reason (bounded, so it is safe to persist as evidence)."""
@@ -98,8 +102,6 @@ class StreamAborted(StreamPathology):
         super().__init__(kind, detail)
         self.record = record or {}
 
-
-_DETAIL_MAX = 240
 
 # --- flag + limits ----------------------------------------------------------
 
@@ -541,8 +543,12 @@ class StreamMonitor:
             self._trip(INVALID_UNICODE, reason)
         if isinstance(delta, (bytes, bytearray)):
             text = bytes(delta).decode("utf-8", "replace")
-        else:
+        elif isinstance(delta, str):
             text = delta
+        else:
+            text = ""
+            self._trip(MALFORMED_EVENTS,
+                       f"text delta is {type(delta).__name__}, not str")
         peak_ws = self._account(text)
         # progress: a delta contributing zero non-whitespace chars
         if text.strip():
@@ -603,7 +609,7 @@ class StreamMonitor:
         flight when a detector fires is deliberately excluded — callers must
         use this instead of any raw argument buffer, so a partial call can
         never reach the repair ladder or a handler."""
-        return [dict(c) for c in self._complete_calls]
+        return [copy.deepcopy(c) for c in self._complete_calls]
 
     def stats(self) -> dict[str, Any]:
         """Counter snapshot for the evidence record. No content."""
