@@ -511,6 +511,85 @@ def sweep_tool_results(retain_days: int) -> int:
     return removed
 
 
+# Append-only evidence ledgers written by the Colibri-absorption capabilities.
+# Each row carries a "ts" epoch seconds; pruning keeps rows newer than the
+# cutoff. Retention is deliberate policy, not housekeeping: the programme's rule
+# is that raw operational logs must NOT silently become permanent moat data.
+_EVIDENCE_LEDGERS = (
+    ("modelgrade", "evidence.jsonl"),
+    ("routesub", "decisions.jsonl"),
+    ("streamguard", "pathologies.jsonl"),
+    ("ingest", "refusals.jsonl"),
+    ("experiments", "state.jsonl"),
+)
+
+
+def sweep_evidence(retain_days: int) -> int:
+    """Prune absorption evidence ledgers and watchdog forensics by age.
+
+    Returns the number of records + files removed. Without this the stores added
+    by Waves 1-2 grow unbounded — `sweep_dated_files` only ever covered `traces`
+    and `usage`.
+
+    Note on `modelgrade`: pruning evidence legitimately lowers a card's sample
+    count, which is the SAME staleness policy the module already applies
+    (evidence past its TTL loses confidence). `OLYMPUS_RETAIN_DAYS` and
+    `OLYMPUS_GRADE_TTL_DAYS` both default to 30, so a pruned row was already
+    weightless. Never repairs a malformed row — an unparseable line is kept, so
+    a corrupt ledger still trips its owner's reject-never-repair path rather
+    than being silently rewritten here."""
+    import json as _json
+    import time as _time
+    cutoff = _time.time() - max(retain_days, 1) * 86400
+    removed = 0
+
+    for sub, name in _EVIDENCE_LEDGERS:
+        path = config.MEMORY_DIR / sub / name
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        keep, dropped = [], 0
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                ts = float(_json.loads(line).get("ts", 0) or 0)
+            except Exception:
+                keep.append(line)          # unparseable: keep, never repair
+                continue
+            if ts and ts < cutoff:
+                dropped += 1
+            else:
+                keep.append(line)
+        if not dropped:
+            continue
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text("\n".join(keep) + ("\n" if keep else ""),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+            removed += dropped
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    forensics = config.MEMORY_DIR / "watchdog" / "forensics"
+    if forensics.exists():
+        for path in forensics.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 # --- sovereign memory contract: migrate / export / import / delete -------
 #
 # File memory is a data-sovereignty contract: you can version it, carry it out

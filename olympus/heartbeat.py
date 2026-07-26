@@ -305,10 +305,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             removed = memory.sweep_dated_files(config.RETAIN_DAYS)
             orphans = memory.sweep_orphan_responses()
             tool_res = memory.sweep_tool_results(config.RETAIN_DAYS)
-            if removed or orphans or tool_res:
+            # Absorption evidence ledgers + watchdog forensics: without this they
+            # grow unbounded, which would make raw operational logs permanent
+            # moat data by default (Phase-4 Stage-E finding).
+            evidence = memory.sweep_evidence(config.RETAIN_DAYS)
+            if removed or orphans or tool_res or evidence:
                 log.append(f"Maintenance: removed {removed} old trace/usage "
-                           f"files, {orphans} orphaned frozen responses, and "
-                           f"{tool_res} aged tool results.")
+                           f"files, {orphans} orphaned frozen responses, "
+                           f"{tool_res} aged tool results, and {evidence} aged "
+                           f"evidence records.")
             from . import search
             idx = search.maintain()
             if idx.get("vacuumed"):
