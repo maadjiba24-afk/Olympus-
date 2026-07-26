@@ -34,7 +34,8 @@ from typing import Any, Callable
 from . import (agent, backend, calibration, codegraph, companion, config,
                connectors, consensus, contracts, contrib, dytopo, effortscore,
                i18n, llm, memory, playbooks, profile, recall, relgraph,
-               replaystore, steering, trace as trace_mod, tools, usage)
+               replaystore, steering, streamguard, trace as trace_mod, tools,
+               usage)
 from .specialists import (SPECIALISTS, roster, semantic_roster,
                           semantic_routing_enabled, semantic_skills_enabled)
 
@@ -1988,6 +1989,20 @@ class Olympus:
                         yield full
             except replaystore.ReplayDivergence:
                 raise
+            except streamguard.StreamPathology as err:
+                # W2-I8.3: a degenerate provider stream must NEVER be presented
+                # as a finished answer. The generic handler below would keep the
+                # already-yielded partial text silently — a truncated answer the
+                # user cannot distinguish from a complete one. Degradation is
+                # legal only when disclosed (synthesis ruling R6), so disclose.
+                kind = getattr(err, "kind", "pathology")
+                tr.event("synthesize.stream_aborted", kind=kind,
+                         error=str(err)[:200])
+                notice = (f"\n\n[Response incomplete: the model's output stream "
+                          f"was aborted by the degenerate-stream guard ({kind}). "
+                          f"The text above is unfinished and unverified.]")
+                chunks.append(notice)
+                yield notice
             except Exception as err:
                 # Final compose failed — degrade to the verified findings instead
                 # of crashing the stream.
