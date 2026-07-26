@@ -632,7 +632,14 @@ def test_same_council_entry_as_chat_completions(server, monkeypatch):
     _post(server, {"messages": [{"role": "user", "content": "openai side"}]},
           path="/v1/chat/completions")
     assert [c[0] for c in calls] == ["build", "ask", "build", "ask"]
-    assert calls[0][1] == calls[2][1] == "api-v1"
+    # Same factory ⇒ same principal derivation. Both requests present the same
+    # `devkey`, so both land on the same derived namespace. What W3-A1 asserts
+    # is that the two dialects AGREE; the per-key split (F2) lives inside
+    # `_v1_principal`, not in either dialect.
+    expected = web.Handler._v1_principal(
+        type("S", (), {"_v1_credential": lambda self: "devkey"})())
+    assert calls[0][1] == calls[2][1] == expected
+    assert expected != "api-v1"          # the old shared-principal literal
 
 
 def test_source_asserts_one_generation_path():
