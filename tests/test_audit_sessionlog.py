@@ -368,11 +368,12 @@ def test_6_stale_scan_without_serialization_duplicates_seq():
     exactly the outcome proclock exists to prevent."""
     sessionlog.append_turn("s1", [MSG])                    # seq 1
     stale, _ = sessionlog._scan("s1")                      # both writers hold this
+    tail = (stale[-1]["seq"], stale[-1]["sha"])
     with sessionlog._locked("s1"):
         sessionlog._append_records("s1", [("turn", {"messages": [MSG]})],
-                                   records=list(stale))     # writer A ⇒ seq 2
+                                   tail)                    # writer A ⇒ seq 2
         sessionlog._append_records("s1", [("turn", {"messages": [MSG]})],
-                                   records=list(stale))     # writer B ⇒ seq 2 (dup!)
+                                   tail)                    # writer B ⇒ seq 2 (dup!)
     # raw file really does contain a duplicate seq
     seqs = [json.loads(l)["seq"] for l in _lines()]
     assert seqs == [1, 2, 2]

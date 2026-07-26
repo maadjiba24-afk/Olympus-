@@ -24,11 +24,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 
 from . import config
 
 SCHEMA_VERSION = "1.0"
+
+# Hot-path cache for `sync` — see `_cache_get`. Bounded; insertion-ordered so
+# the oldest session is the one evicted.
+_CACHE_MAX = 64
+_CACHE: "dict[str, dict]" = {}
+_CACHE_LOCK = threading.Lock()
 
 
 def enabled() -> bool:
@@ -180,21 +187,110 @@ def _scan(sid: str):
     return records, "ok"
 
 
+def _stat_key(path):
+    """The file identity a cache entry is bound to. `None` when the file is
+    gone — an absent journal can never validate a cache entry."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_dev, st.st_size, st.st_mtime_ns)
+
+
+def _tail_sha(path) -> str:
+    """The `sha` of the journal's last complete line, or "" if there is none.
+
+    Cheap (reads the final block, not the file) and cryptographic: an entry
+    whose recorded tail sha still matches cannot have had its chain head
+    swapped, so the cached (seq, sha) is safe to extend from."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            back = min(size, 8192)
+            f.seek(size - back)
+            block = f.read(back)
+    except OSError:
+        return ""
+    if not block.endswith(b"\n"):       # torn tail: force the full path
+        return ""
+    lines = block.rstrip(b"\n").rsplit(b"\n", 1)
+    try:
+        rec = json.loads(lines[-1].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    return rec.get("sha", "") if isinstance(rec, dict) else ""
+
+
+def _cache_get(sid: str, path):
+    """The cached scan result for this journal, or None.
+
+    `sync` runs on every turn and used to re-read and re-verify the WHOLE
+    journal each time, so a session's journaling cost grew with its own depth:
+    measured 15.99 us/record of slope, i.e. a projected 162 ms append at 10k
+    records and 801 ms at 50k (Phase-4 Stage-D D1). The verification itself is
+    not the problem — repeating it once per turn is.
+
+    An entry is honoured only when BOTH hold: the file's (inode, device, size,
+    mtime_ns) is byte-identical to what this process left behind, AND the last
+    line's seal still matches the tail sha recorded then. The first catches any
+    other process appending or replacing the file; the second catches a rewrite
+    that happened to preserve the stat tuple. The caller holds the session lock
+    across the check and the append, so nothing can slip in between.
+
+    What is deliberately NOT weakened: every READ path (`read_verified`,
+    `recover_history`, `journal_status`, `compact`) still calls `_scan`
+    unconditionally and verifies the full chain. This cache only spares the
+    write path from re-proving what it proved on the way in, and it is
+    per-process — a fresh process always re-verifies from scratch.
+
+    Keyed on the absolute journal PATH, not the bare session id: two different
+    MEMORY_DIRs (a relocated home, a test tmp dir) hold different journals for
+    the same `sid`, and keying on the id alone would make them alias."""
+    with _CACHE_LOCK:
+        entry = _CACHE.get(str(path))
+    if entry is None or entry["stat"] != _stat_key(path):
+        return None
+    if entry["tail_sha"] != _tail_sha(path):
+        return None                     # rewritten under an identical stat
+    return entry
+
+
+def _cache_put(sid: str, path, *, history, seq: int, sha: str) -> None:
+    key = _stat_key(path)
+    if key is None:
+        return
+    entry = {"stat": key, "tail_sha": sha, "seq": seq,
+             "history": [dict(m) for m in history]}
+    with _CACHE_LOCK:
+        _CACHE.pop(str(path), None)
+        _CACHE[str(path)] = entry
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))
+
+
+def _cache_drop(sid: str) -> None:
+    with _CACHE_LOCK:
+        _CACHE.pop(str(_journal_path(sid)), None)
+
+
 def _open_append(path):
     return open(path, "ab")             # seam for fault injection in tests
 
 
-def _append_records(sid: str, entries, records=None) -> int:
+def _append_records(sid: str, entries, tail=None) -> tuple[int, str]:
     """Seal and append (kind, payload) entries. Caller holds the lock.
-    Returns the last seq written; raises on a dead (quarantined/oversize)
-    journal or an I/O failure — public wrappers capture, never propagate."""
-    if records is None:
+    `tail` is an already-verified (last_seq, last_sha) pair; None means scan.
+    Returns the new (last seq, last sha); raises on a dead (quarantined/
+    oversize) journal or an I/O failure — public wrappers capture, never
+    propagate."""
+    if tail is None:
         records, status = _scan(sid)
         if status in ("quarantined", "oversize"):
             raise OSError(
                 f"journal for {sid} is {status}; compact() or delete_session()")
-    prev_sha = records[-1]["sha"] if records else ""
-    seq = records[-1]["seq"] if records else 0
+        tail = ((records[-1]["seq"], records[-1]["sha"]) if records else (0, ""))
+    seq, prev_sha = tail
     always = _fsync_always()
     f = _open_append(_journal_path(sid))
     try:
@@ -214,7 +310,7 @@ def _append_records(sid: str, entries, records=None) -> int:
             os.fsync(f.fileno())
     finally:
         f.close()
-    return seq
+    return seq, prev_sha
 
 
 def append_turn(conversation_id: str, messages) -> int:
@@ -226,11 +322,14 @@ def append_turn(conversation_id: str, messages) -> int:
     sid = _sid(conversation_id)
     try:
         with _locked(sid):
-            return _append_records(
+            seq, _sha = _append_records(
                 sid, [("turn", {"messages": list(messages)})])
+            _cache_drop(sid)    # this path does not track history; re-scan next
+            return seq
     except Exception as err:
         from . import errors
         errors.capture("sessionlog.append_turn", err, context=sid)
+        _cache_drop(sid)
         return 0
 
 
@@ -243,12 +342,15 @@ def append_tombstone(conversation_id: str, from_seq: int,
     sid = _sid(conversation_id)
     try:
         with _locked(sid):
-            return _append_records(
+            seq, _sha = _append_records(
                 sid, [("tombstone", {"from_seq": int(from_seq),
                                      "through_seq": int(through_seq)})])
+            _cache_drop(sid)    # a tombstone changes what _replay returns
+            return seq
     except Exception as err:
         from . import errors
         errors.capture("sessionlog.append_tombstone", err, context=sid)
+        _cache_drop(sid)
         return 0
 
 
@@ -257,19 +359,38 @@ def sync(conversation_id: str, history) -> int:
     snapshot just written (the memory.save_conversation hook). A shrunk or
     rewritten history (compaction, /clear) is recorded as a reset followed by
     the full new history. Never raises; returns the last seq written (0 =
-    nothing new, journaling off, or failure)."""
+    nothing new, journaling off, or failure).
+
+    Hot path: `_cache_get` supplies the previous turn's already-verified replay
+    and chain tail when the file is provably untouched since this process wrote
+    it, so the per-turn cost stops scaling with session depth (Stage-D D1). On
+    any miss — first turn of a process, a concurrent writer, a rewritten file —
+    it falls through to the full `_scan`, which is also what every read path
+    does unconditionally."""
     if not enabled():
         return 0
     sid = _sid(conversation_id)
+    path = _journal_path(sid)
     try:
         with _locked(sid):
-            records, status = _scan(sid)
-            if status in ("quarantined", "oversize"):
-                raise OSError(f"journal for {sid} is {status}; "
-                              "compact() or delete_session()")
-            current = _replay(records)
+            entry = _cache_get(sid, path)
+            if entry is not None:
+                current, tail = entry["history"], (entry["seq"],
+                                                   entry["tail_sha"])
+            else:
+                records, status = _scan(sid)
+                if status in ("quarantined", "oversize"):
+                    raise OSError(f"journal for {sid} is {status}; "
+                                  "compact() or delete_session()")
+                current = _replay(records)
+                tail = ((records[-1]["seq"], records[-1]["sha"])
+                        if records else (0, ""))
             history = list(history)
             if current == history:
+                # Still re-arm the cache: a miss caused by another process's
+                # append must not force a rescan on every subsequent turn.
+                _cache_put(sid, path, history=history, seq=tail[0],
+                           sha=tail[1])
                 return 0
             if len(history) > len(current) and \
                     history[:len(current)] == current:
@@ -278,10 +399,13 @@ def sync(conversation_id: str, history) -> int:
                 entries = [("reset", {})]
                 if history:
                     entries.append(("turn", {"messages": history}))
-            return _append_records(sid, entries, records)
+            seq, sha = _append_records(sid, entries, tail)
+            _cache_put(sid, path, history=history, seq=seq, sha=sha)
+            return seq
     except Exception as err:
         from . import errors
         errors.capture("sessionlog.sync", err, context=sid)
+        _cache_drop(sid)        # never extend from a tail we failed to write
         return 0
 
 
@@ -342,6 +466,7 @@ def compact(conversation_id: str, through_seq: int) -> None:
     quarantined journal — only the verified prefix survives the rewrite."""
     sid = _sid(conversation_id)
     with _locked(sid):
+        _cache_drop(sid)                # the rewrite invalidates any tail state
         records, _status = _scan(sid)
         if not records:
             return
@@ -377,6 +502,7 @@ def delete_session(conversation_id: str) -> None:
     """Hard-delete a session's journal, quarantine copies, and snapshot."""
     sid = _sid(conversation_id)
     with _locked(sid):
+        _cache_drop(sid)
         paths = [_journal_path(sid),
                  config.MEMORY_DIR / "conversations" / f"{sid}.json"]
         paths += list(_quarantine_dir().glob(f"{sid}.*.journal"))
