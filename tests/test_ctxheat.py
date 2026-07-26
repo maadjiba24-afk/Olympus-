@@ -603,8 +603,25 @@ def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
     assert not verifier_callers, (
         "record_verifier_outcome has no trusted source at any wired seam; "
         f"called from {verifier_callers}")
+    # `retention.py` names ctxheat ONLY as a path glob, because deleting a
+    # principal must remove its heat ledger too or P5-A12 ("deletion removes
+    # all derived data") would be false. Allowing the mention without checking
+    # what kind of mention it is would weaken the guard, so the allowance is
+    # paired with an AST check that it never IMPORTS the module — a path
+    # string cannot consume a pin set; an import could.
     assert set(mentions) <= {"config.py", "doctor.py", "experiments.py",
-                             "recall.py"}, f"ctxheat wired in early: {mentions}"
+                             "recall.py", "retention.py"}, \
+        f"ctxheat wired in early: {mentions}"
+    ret_src = (pkg / "retention.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(ret_src)):
+        if isinstance(node, ast.ImportFrom) and node.module == "ctxheat":
+            raise AssertionError("retention.py imports ctxheat")
+        if isinstance(node, ast.ImportFrom) and node.module in (None, "."):
+            assert not any(a.name == "ctxheat" for a in node.names), \
+                "retention.py imports ctxheat — it may only name its PATH"
+        if isinstance(node, ast.Import):
+            assert not any("ctxheat" in a.name for a in node.names), \
+                "retention.py imports ctxheat — it may only name its PATH"
 
     # The wiring must offer NO benchmark gate, or `on` would stop degrading to
     # shadow and heat could reach the prompt unmeasured.
