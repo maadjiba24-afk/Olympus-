@@ -1016,6 +1016,18 @@ def main(argv: list[str] | None = None) -> int:
             except _witness.WitnessError as err:
                 print(f"[sovereign] {err}", file=sys.stderr)
                 return 1
+        # Staging boot invariant (P5-A2): an OLYMPUS_ENV=staging instance must
+        # carry the configuration it cannot safely infer — a persistent memory
+        # dir, a positive spend cap, finite retention, and a credential if it
+        # binds off-loopback. Checked here, beside the production and sovereign
+        # invariants, so every entry point (web, heartbeat, CLI) fails closed at
+        # boot with one actionable list rather than at first request. Dev and
+        # production boots are byte-identically unaffected.
+        try:
+            _config.require_staging_config()
+        except _config.StagingConfigError as err:
+            print(f"[staging] {err}", file=sys.stderr)
+            return 1
 
     if args.command == "setup":
         if getattr(args, "section", None):

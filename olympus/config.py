@@ -1665,3 +1665,180 @@ def record_version_marker() -> str:
         return __version__
     except OSError:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — deployment mode and staging boot validation
+# ---------------------------------------------------------------------------
+# `is_production()` above already gates the signing-seed boot invariant. Phase 5
+# adds a THIRD named mode between dev and production, with its own validation:
+# staging carries real credentials and real durable state but must never be
+# mistaken for either a developer laptop (where anything goes) or production
+# (where the canary rules apply). See PHASE5_STAGING_SHADOW_SPEC.md §6, §13.
+
+STAGING_ENV_VALUES = ("staging", "stage")
+
+
+def deployment_env() -> str:
+    """The declared deployment mode: "production", "staging", or "" for dev.
+
+    Normalised so `prod`/`production` and `stage`/`staging` are one value each —
+    a profile that says `stage` must not silently fall through to dev rules."""
+    raw = os.environ.get("OLYMPUS_ENV", "").strip().lower()
+    if raw in ("production", "prod"):
+        return "production"
+    if raw in STAGING_ENV_VALUES:
+        return "staging"
+    return ""
+
+
+def is_staging() -> bool:
+    return deployment_env() == "staging"
+
+
+class StagingConfigError(RuntimeError):
+    """A staging deployment is missing configuration it cannot safely infer.
+
+    Raised at BOOT, never at first request: an instance that would have served
+    one unsafe response must not start at all. Carries every problem found, not
+    just the first, so an operator fixes the profile in one pass."""
+
+    def __init__(self, problems: list[str]):
+        self.problems = list(problems)
+        super().__init__(
+            "staging configuration is incomplete — refusing to start:\n"
+            + "\n".join(f"  - {p}" for p in self.problems))
+
+
+def _writable_dir(path) -> bool:
+    """Whether `path` exists (or can be created) and accepts a write.
+
+    `os.access(W_OK)` lies under some container/volume permission setups, so
+    this actually writes and removes a probe file."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".olympus-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def staging_problems(*, bind_host: str | None = None) -> list[str]:
+    """Everything wrong with this staging configuration, as operator-actionable
+    lines. Empty list = the profile is complete. PURE: reads config and probes
+    the memory dir; changes no state and never raises.
+
+    Each check exists because getting it wrong produces a specific, known
+    failure — the rationale is in the message, so the operator does not have to
+    find this file to understand the refusal."""
+    problems: list[str] = []
+    if not is_staging():
+        return problems
+
+    # 1. Durable state must be on an explicit, writable, persistent path.
+    #    The default lands inside the image; a container restart would silently
+    #    destroy every journal, ledger and account.
+    if not os.environ.get("OLYMPUS_MEMORY_DIR", "").strip():
+        problems.append(
+            "OLYMPUS_MEMORY_DIR is unset: durable state would default into the "
+            "image and be destroyed on container restart. Point it at a mounted "
+            "volume.")
+    if not _writable_dir(MEMORY_DIR):
+        problems.append(
+            f"OLYMPUS_MEMORY_DIR ({MEMORY_DIR}) is not writable by this process: "
+            f"journals, ledgers and accounts would all fail to persist. Check "
+            f"volume ownership and permissions.")
+
+    # 2. Spend must be bounded. OLYMPUS_DAILY_BUDGET=0 means UNLIMITED (see
+    #    deploy/docker-compose.yml), which is exactly the wrong default for an
+    #    environment whose whole purpose is unattended evidence collection.
+    raw_budget = os.environ.get("OLYMPUS_DAILY_BUDGET", "").strip()
+    if not raw_budget:
+        problems.append(
+            "OLYMPUS_DAILY_BUDGET is unset: staging runs unattended, so an "
+            "unbounded spend is a denial-of-wallet waiting to happen.")
+    else:
+        try:
+            if float(raw_budget) <= 0:
+                problems.append(
+                    "OLYMPUS_DAILY_BUDGET=0 means UNLIMITED, not off. Staging "
+                    "requires a positive cap.")
+        except ValueError:
+            problems.append(
+                f"OLYMPUS_DAILY_BUDGET={raw_budget!r} is not a number.")
+
+    # 3. Exposure must be authenticated. `_authorized` and `_v1_authorized`
+    #    already refuse an off-box caller with no credential (Phase-4 F4/F2),
+    #    but a staging instance that would refuse EVERY request is a
+    #    misconfiguration, not a safety win — catch it at boot instead.
+    host = bind_host if bind_host is not None else os.environ.get(
+        "OLYMPUS_BIND_HOST", "")
+    off_loopback = bool(host) and host not in (
+        "127.0.0.1", "localhost", "::1", "")
+    has_credential = bool(api_keys()
+                          or os.environ.get("OLYMPUS_ACCESS_TOKEN", "").strip()
+                          or os.environ.get("OLYMPUS_REQUIRE_LOGIN", "").strip())
+    if off_loopback and not has_credential:
+        problems.append(
+            f"binding to {host} with no credential configured: set "
+            f"OLYMPUS_API_KEYS (for /v1) and/or OLYMPUS_ACCESS_TOKEN / "
+            f"OLYMPUS_REQUIRE_LOGIN (for the browser API). Without one every "
+            f"request is refused, which is safe but useless.")
+
+    # 4. Retention must be finite. An unbounded staging store accumulates
+    #    prompts and tool arguments forever (PRIVACY_RETENTION_REVIEW.md).
+    if RETAIN_DAYS <= 0:
+        problems.append(
+            f"OLYMPUS_RETAIN_DAYS={RETAIN_DAYS} disables retention sweeps: "
+            f"traces, usage and the absorption evidence ledgers would grow "
+            f"without bound.")
+
+    # 5. Production-only settings must not leak into a staging profile. These
+    #    are not merely redundant — a shared production volume or a live
+    #    off-droplet backup destination would put staging artifacts into
+    #    production storage.
+    if os.environ.get("OLYMPUS_BACKUP_CMD", "").strip() and \
+            not os.environ.get("OLYMPUS_STAGING_ALLOW_BACKUP_CMD", "").strip():
+        problems.append(
+            "OLYMPUS_BACKUP_CMD is set in a staging profile: staging backups "
+            "would be delivered to the production destination. Unset it, or "
+            "set OLYMPUS_STAGING_ALLOW_BACKUP_CMD=1 with a staging-only target.")
+    return problems
+
+
+def require_staging_config(*, bind_host: str | None = None) -> None:
+    """Fail closed on an incomplete staging profile (P5-A2).
+
+    No-op unless OLYMPUS_ENV names staging, so dev and production boots are
+    byte-identically unaffected."""
+    problems = staging_problems(bind_host=bind_host)
+    if problems:
+        raise StagingConfigError(problems)
+
+
+def build_info() -> dict:
+    """Version and commit of the running code, for /readyz and /api/metrics.
+
+    An operator correlating a staging measurement with a code state needs the
+    exact commit. `OLYMPUS_BUILD_COMMIT` is stamped at image build (the
+    container has no .git); the git fallback serves a working tree. Both are
+    best-effort — an unknown commit reports "unknown", never a guess."""
+    from . import __version__
+    commit = os.environ.get("OLYMPUS_BUILD_COMMIT", "").strip()
+    if not commit:
+        try:
+            import subprocess
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+        except Exception:                            # noqa: BLE001
+            commit = ""
+    return {
+        "version": __version__,
+        "commit": commit or "unknown",
+        "env": deployment_env() or "dev",
+    }

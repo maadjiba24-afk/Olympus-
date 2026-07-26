@@ -338,6 +338,32 @@ def _authorized(handler: BaseHTTPRequestHandler) -> bool:
         return False            # unknown peer or bind ⇒ treat as exposed
 
 
+def _readiness() -> tuple[bool, dict]:
+    """(ready, payload) for GET /readyz.
+
+    Ready means: the declared deployment mode's configuration is complete, and
+    durable state is actually writable. Both are probed, not assumed — a
+    read-only volume is the classic failure that leaves a process happily alive
+    while silently dropping every journal append."""
+    info = config.build_info()
+    problems = list(config.staging_problems())
+    writable = config._writable_dir(config.MEMORY_DIR)
+    if not writable:
+        problems.append(f"memory dir {config.MEMORY_DIR} is not writable")
+    payload = {
+        "status": "ready" if not problems else "not_ready",
+        "env": info["env"],
+        "version": info["version"],
+        "commit": info["commit"],
+        "shadow_mode": False,          # replaced by P5-3 once shadow.py lands
+        "memory_dir_writable": writable,
+        "uptime_seconds": metrics.snapshot()["uptime_seconds"],
+    }
+    if problems:
+        payload["problems"] = problems
+    return (not problems), payload
+
+
 def _unauthorized_message() -> str:
     """Why the browser API refused — the two reasons need different operator
     actions, and "missing or wrong access token" is wrong for the second."""
@@ -2031,10 +2057,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/healthz":
-            # Liveness probe for load balancers / uptime checks — no auth, no
-            # data, just "the process is serving".
+            # LIVENESS: "the process is serving". No auth, no data. Must stay
+            # cheap and must NOT consult config or disk — a liveness probe that
+            # fails on a full disk causes a restart loop instead of an alert.
             self._json({"status": "ok",
                         "uptime_seconds": metrics.snapshot()["uptime_seconds"]})
+            return
+        if url.path == "/readyz":
+            # READINESS: "this instance can serve a correct request." Distinct
+            # from liveness on purpose — a config-incomplete or read-only
+            # instance is alive but must be taken out of rotation, not killed.
+            # No auth (an orchestrator probes it before credentials are in
+            # play) and NO user data: only booleans, the declared mode, and the
+            # build. Staging problems are named because the operator reading a
+            # failed probe needs the reason, and they contain no secrets.
+            ready, detail = _readiness()
+            self._json(detail, 200 if ready else 503)
             return
         if url.path == "/":
             self._session_id()           # issue the session cookie up front
@@ -2117,6 +2155,9 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/metrics":
             snap = metrics.snapshot()          # instance ops, not per-user
             snap["sovereignty"] = config.sovereign_status()
+            # Build + mode, so a measurement can be tied to the exact code that
+            # produced it (PHASE5 §15). No secrets: version, commit, mode only.
+            snap["build"] = config.build_info()
             self._json(snap)
             return
         params = parse_qs(url.query)
@@ -2996,11 +3037,61 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8484) -> None:
+    # Boot invariant (P5-A2): a staging profile that cannot serve safely must
+    # not start at all. Raises StagingConfigError listing EVERY problem, so the
+    # operator fixes the profile in one pass instead of one restart per typo.
+    # No-op unless OLYMPUS_ENV names staging — dev and production are unchanged.
+    config.require_staging_config(bind_host=host)
+
     server = ThreadingHTTPServer((host, port), Handler)
+    # An in-flight council run can hold a socket for a long time; without this,
+    # a container stop waits for the daemon-thread pool and SIGKILLs at the end
+    # of the grace period, mid-journal-append. daemon_threads=False + an
+    # explicit shutdown lets `server_close()` join them.
+    server.daemon_threads = False
+    info = config.build_info()
     print(f"⚡ Olympus web UI: http://{host}:{port}  (Ctrl-C to stop)")
+    print(f"   build: v{info['version']} {info['commit'][:12]} env={info['env']}")
     print(f"   OpenAI-compatible API: http://{host}:{port}/v1  "
           + ("(bearer-gated via OLYMPUS_API_KEYS)" if config.api_keys()
              else "(loopback-only — set OLYMPUS_API_KEYS to expose it)"))
     if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
         print("   access token required (OLYMPUS_ACCESS_TOKEN is set)")
-    server.serve_forever()
+
+    _install_shutdown(server)
+    try:
+        server.serve_forever()
+    finally:
+        # Reached on SIGTERM/SIGINT via _install_shutdown, or on any error.
+        # server_close() joins the request threads, so a run that is mid-append
+        # finishes its write instead of being torn in half — the journal's
+        # torn-tail path exists for crashes, not for routine restarts.
+        server.server_close()
+
+
+def _install_shutdown(server) -> None:
+    """Stop `server` on SIGTERM/SIGINT so a container stop is graceful.
+
+    `docker stop` and every orchestrator send SIGTERM first and SIGKILL after a
+    grace period. Python's default SIGTERM handling terminates immediately, so
+    without this an in-flight request dies wherever it happened to be.
+
+    Best-effort by design: signal handlers can only be installed on the main
+    thread, and `serve()` is also called from worker threads in tests and from
+    the TUI. A failure to install is not a reason to refuse to serve — it just
+    means shutdown stays as abrupt as it was before."""
+    import signal
+
+    def _stop(signum, _frame):
+        print(f"\n… received {signal.Signals(signum).name}, "
+              f"finishing in-flight requests")
+        # shutdown() blocks until serve_forever() exits, so it must not run on
+        # the signal-handler stack — that would deadlock against the very loop
+        # it is trying to stop.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError, AttributeError):
+            pass                        # not the main thread, or not POSIX
