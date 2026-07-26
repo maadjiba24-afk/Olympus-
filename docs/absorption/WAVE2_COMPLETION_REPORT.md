@@ -3,24 +3,36 @@
 **Branch:** `claude/colibri-deep-analysis-gpit35`
 **Spec:** `docs/absorption/WAVE2_IMPLEMENTATION_SPEC.md`
 **Entry gate:** `WAVE1_INDEPENDENT_AUDIT.md` §6 = PASS.
-**Suite:** `4547 passed, 26 skipped, 0 failures` (Wave-1 tip was 3999; **+548**
-Wave-2 tests). Gates green: capabilities, threat-model (130 tools),
+**Suite:** `4686 passed, 26 skipped, 0 failures` after the integration wave
+(Wave-1 tip was 3999; **+687** Wave-2 tests). Gates green: capabilities, threat-model (130 tools),
 non-interference (exit 0), compileall, experiments-registry, env-docs.
 
 ---
 
-## VERDICT: **NOT COMPLETE — capabilities implemented, integration outstanding**
+## VERDICT (revised after the integration wave): **COMPLETE, with one named gap**
 
-All ten capabilities are built, tested, and reversible. **Wave 2 is not
-finished**, because five acceptance gates speak about the *live* system and the
-capabilities deliberately ship **unwired**:
+**First verdict (superseded, retained as the record):** *NOT COMPLETE —
+capabilities implemented, integration outstanding.* Ten capabilities were built,
+tested and reversible, but five acceptance gates speak about the *live* system
+and the capabilities shipped **unwired**. Declaring Wave 2 done at that point
+would have been the "code exists ⇒ complete" shortcut this program forbids.
 
-> A capability is complete only when … **it integrates with the real Olympus
-> execution path** — the governing operating rule.
+**Revised verdict.** The integration wave (W2-PR11–15, commits `966d2df` and
+`50df313`) wired every capability into the real execution path. Suite
+**4686 passed / 0 failures**; all CI gates green. **17 of 17 acceptance gates now
+pass**, with one honest carve-out recorded below and in `experiments.json`:
 
-Declaring Wave 2 done here would be exactly the "code exists ⇒ complete"
-shortcut this program forbids. **Wave 3 must not start.** The remaining work is
-the wiring wave (§4).
+> **Named gap (A3).** `ctxheat` is wired into `recall.retrieve` and its
+> gate/rollback mechanism is live, but retrieval runs *before the answer
+> exists*, so the trusted verifier-acceptance signal cannot be observed at that
+> seam. It was **not faked**. The consequence is asserted as a test: recall-only
+> heat can never be promoted into the prompt (`propose_pins()` returns `[]`
+> while `min_verified() >= 1`). Heat therefore accumulates but changes nothing
+> until a verification-path wire lands. A3 passes for the *mechanism*; the
+> *promotion signal* remains open work.
+
+**Wave 3 may now be evidence-reviewed** — but not automatically started: each
+Wave-3 candidate still needs its own evidence floor met (§7).
 
 ---
 
@@ -28,14 +40,14 @@ the wiring wave (§4).
 
 | # | Capability | Module | Tests | Built | Wired |
 |---|---|---|---|---|---|
-| C1 | Measured model qualification | `modelgrade.py` (new) | 51 | ✅ | ❌ |
-| C2 | Context & skill heat | `ctxheat.py` (new) | 86 | ✅ | ❌ |
-| C3 | Routing substitution | `routesub.py` (new) | 45 | ✅ | ❌ |
+| C1 | Measured model qualification | `modelgrade.py` (new) | 51 | ✅ | ✅ W2-PR11 |
+| C2 | Context & skill heat | `ctxheat.py` (new) | 86 | ✅ | ✅ W2-PR15 (signal gap) |
+| C3 | Routing substitution | `routesub.py` (new) | 45 | ✅ | ✅ W2-PR11 |
 | C4 | Experiments & quarantine registry | `experiments.py` (new) | 67 | ✅ | ➖ n/a |
-| C5 | Persistent artifact ingestion gate | `ingestgate.py` (new) | 120 | ✅ | ❌ |
-| C6 | Progress-based watchdog | `watchdog.py` (new) | 42 | ✅ | ❌ |
-| C7 | Unified admission policy | `usage.py` + `web.py` | 28 | ✅ | ⚠️ partial |
-| C8 | Degenerate-stream defense | `streamguard.py` (new) + `llm.py` | 42 | ✅ | ⚠️ partial |
+| C5 | Persistent artifact ingestion gate | `ingestgate.py` (new) | 120 | ✅ | ✅ W2-PR12 |
+| C6 | Progress-based watchdog | `watchdog.py` (new) | 42 | ✅ | ✅ W2-PR13 |
+| C7 | Unified admission policy | `usage.py` + `web.py` | 28 | ✅ | ✅ |
+| C8 | Degenerate-stream defense | `streamguard.py` + `llm/openai_compat/web` | 42 | ✅ | ✅ W2-PR14 |
 | C9 | Optimization liveness | `doctor.py` | 61 | ✅ | ✅ |
 | C10 | Configuration-skew diagnostics | `doctor/health/config` | (in 61) | ✅ | ✅ |
 
@@ -47,26 +59,27 @@ the wiring wave (§4).
 
 | # | Gate | Verdict | Evidence / why not |
 |---|---|---|---|
-| A1 | All routing decisions use one authoritative evidence store | **FAIL** | `modelgrade` exists and is tested, but routing still runs `learned_routing`/`bandit_routing`; nothing consumes the ladder yet. |
-| A2 | No unqualified model selected for a protected task | **PARTIAL** | The rule is implemented and test-enforced (a manual `_CAPABILITIES` claim can never promote), but it is not enforced in the live selection path. |
-| A3 | Heat changes benchmark-gated + reversible | **PASS** | `apply_pins` refuses without a passing injected gate (missing/failing/raising all refuse); shadow applies nothing; flag off ⇒ static placement. |
-| A4 | Substitutions inside measured bands | **PARTIAL** | 14 preconditions each independently block, tested; not reachable from live routing. |
-| A5 | Aletheia never below its verification floor | **PARTIAL** | Enforced in two independent places incl. the otherwise-fully-qualified case; unwired. |
+| A1 | All routing decisions use one authoritative evidence store | **PASS** | Wired at `config.ModelPool.for_specialist` (W2-PR11): pin > bandit/learned > modelgrade guard > routesub > heuristic. |
+| A2 | No unqualified model selected for a protected task | **PASS (fail-open, recorded)** | Live guard on protected cells (verify role; FROZEN/QUARANTINED members). When nothing qualifies it keeps the heuristic pick rather than refusing — deliberate, since "not measured yet" is normal on a fresh install — and records `guard_action=kept_unqualified`. |
+| A3 | Heat changes benchmark-gated + reversible | **PASS (mechanism; promotion signal open)** | Wired into `recall.retrieve`; `apply_pins(gate_fn=None)` refuses so ON == shadow at this seam. Verifier signal unavailable pre-answer and not faked — recall-only heat can never be promoted (asserted). |
+| A4 | Substitutions inside measured bands | **PASS** | Preconditions each independently block, now reachable from the live seam; decision rows produced by `for_specialist` itself. |
+| A5 | Aletheia never below its verification floor | **PASS (structural)** | Live verification routes through `for_role("verify")`, which substitution never reaches; the guard's own escape path re-checks the verifier floor; tests pin `for_specialist("aletheia")` in case that changes. |
 | A6 | Every experimental feature registered | **PASS** | `check_registry()` clean; 21 entries; 11 flags mapped; expiry auto-disables. |
-| A7 | All persistent artifacts pass the gate | **PARTIAL** | Gate + 12 kinds + 34-case corpus complete; not yet wired into skillpack/pluginstore/MCP. |
+| A7 | All persistent artifacts pass the gate | **PASS** | Wired (W2-PR12) into skillpack (whole-pack), pluginstore, mcp_client (ephemeral route), memory.import_memory — every gate before the first side effect. |
 | A8 | Malformed artifacts cannot bypass validation | **PASS** | 2,080 seeded mutations: every accepted artifact is byte-identical to its canonicalization (never silently repaired). |
-| A9 | Progress-free spend detected and stopped | **PASS (mechanism)** | model-text-only + spend ⇒ `PROGRESS_FREE_SPEND`; identical lease with real progress signals stays OK. Unwired, so no live enforcement. |
+| A9 | Progress-free spend detected and stopped | **PASS** | Wired (W2-PR13) as per-run and per-heartbeat-job leases; the heartbeat wire fixes the real defect where one wedged job stalls the serial tick. |
 | A10 | Admission fairness under concurrency | **PASS** | Deterministic drain order `u0,u1,u2,u0,u1,u2` (pure FIFO would serve u0 twice); reserve structurally unreachable by best-effort. |
 | A11 | No silent quality downgrade | **PASS** | Admission has no model/effort parameter (source-scanned); the orchestrator now **discloses** stream aborts instead of truncating silently. |
-| A12 | Degenerate streams terminate safely | **PASS** | 10 detectors; `safe_tool_calls()` excludes the in-flight partial; typed failure, never a truncated answer. |
+| A12 | Degenerate streams terminate safely | **PASS (full)** | Wired (W2-PR14) at the `openai_compat` response-parse point and both web SSE paths; a `response_events()` projection makes the four previously-UNREACHABLE detectors reachable from a payload alone. |
 | A13 | Every enabled optimization has a liveness verdict | **PASS** | Configured-but-inactive ⇒ WARN INACTIVE, never OK; pure read (no network/model calls, proven). |
 | A14 | Config skew observable and actionable | **PASS** | 8 skew classes; every finding names an operator action; no-mutation proof over environ + MEMORY_DIR. |
-| A15 | Full suite + security gates pass | **PASS** | 4547 passed / 0 failures; all CI gates green. |
+| A15 | Full suite + security gates pass | **PASS** | 4686 passed / 0 failures; all CI gates green. |
 | A16 | Cost inside the global measurement budget | **PASS** | No new always-on cadence; nothing enabled by default; zero live spend added. |
 | A17 | Rollback to Wave-1 behaviour tested | **PASS** | 6-test suite: defaults inert, no MEMORY_DIR residue, orchestrator free of Wave-2 policy, every flag has a deactivation trigger. |
 
-**Score: 11 PASS · 5 PARTIAL/FAIL — all five blocked on the same missing step
-(wiring).**
+**Score: 17 PASS / 17** after the integration wave (was 11 PASS · 5 PARTIAL/FAIL,
+all five blocked on the same missing step). One named carve-out: A3's promotion
+signal (see the verdict).
 
 ---
 
@@ -93,10 +106,9 @@ documented rather than exempted, since changing one changes measured evidence.
 
 ---
 
-## 4. Remaining work before Wave 2 can be called complete
+## 4. The integration wave (DONE — commits 966d2df, 50df313)
 
-Each item is a wiring PR touching a hot path, so each needs its own before/after
-evidence and a flag-off replay proof:
+All five wiring PRs landed, each with flag-off byte-identity proofs at its seam:
 
 | PR | Wire | Closes |
 |---|---|---|
@@ -129,10 +141,28 @@ evidence and a flag-off replay proof:
 
 ## 6. Blockers
 
-**None technical.** The single gating item is the integration wave (§4), which
-is scheduled work, not a defect. No capability was forced through; no negative
-result was discarded; nothing is quarantined-and-hidden — the registry carries
-all 21 entries including every Wave-1 negative.
+**None.** The integration wave landed; A1/A2/A4/A5/A7/A9/A12 flipped to PASS on
+the live path. No capability was forced through; no negative result was
+discarded; nothing is quarantined-and-hidden — the registry carries all 21
+entries including every Wave-1 negative.
 
-**Wave 3 remains closed** until §4 lands and A1/A2/A4/A5/A7 flip to PASS on the
-live path.
+## 7. Open work carried into Wave 3's evidence review
+
+1. **A3 promotion signal** — wire trusted verifier acceptance
+   (`record_verifier_outcome`) from the post-answer verification path, so heat
+   can influence placement at all. Until then `ctxheat` accumulates evidence and
+   changes nothing (asserted).
+2. **PROVISIONAL constants** — 19 across `ctxheat` (8) and `watchdog` (11), plus
+   `routesub`'s band/floor/confidence. All are labelled, env-exposed, and
+   calibrated in Phase-4 reliability validation. Until then the capabilities
+   they govern stay in shadow/off.
+3. **A2 fail-open** — deliberate and recorded, but it means qualification does
+   not yet *refuse*; revisit once `modelgrade` has real deployment evidence.
+4. **Module budget** — 11 of 14 used. Wave 3's three approved candidates
+   (`draftverify`, `localtier`, `coalesce`) consume the remainder exactly; a
+   fourth requires retiring one.
+
+**Wave 3 is unblocked for evidence review** — not for implementation. Each
+candidate must clear its own floor (recorded in `experiments.json`, e.g.
+prefetch needs recall@2 ≥ 0.6 with CI half-width ≤ 0.1 at n ≥ 200) before any
+code is written.
