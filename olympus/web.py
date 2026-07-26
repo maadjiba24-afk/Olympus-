@@ -345,6 +345,7 @@ def _readiness() -> tuple[bool, dict]:
     durable state is actually writable. Both are probed, not assumed — a
     read-only volume is the classic failure that leaves a process happily alive
     while silently dropping every journal append."""
+    from . import shadow
     info = config.build_info()
     problems = list(config.staging_problems())
     writable = config._writable_dir(config.MEMORY_DIR)
@@ -355,7 +356,7 @@ def _readiness() -> tuple[bool, dict]:
         "env": info["env"],
         "version": info["version"],
         "commit": info["commit"],
-        "shadow_mode": False,          # replaced by P5-3 once shadow.py lands
+        "shadow_mode": shadow.enabled(),
         "memory_dir_writable": writable,
         "uptime_seconds": metrics.snapshot()["uptime_seconds"],
     }
@@ -2774,7 +2775,12 @@ class Handler(BaseHTTPRequestHandler):
         """Audit headers: let the caller locate and verify the reasoning behind
         this answer — `olympus verify --run <X-Olympus-Run-Id>`."""
         from . import witness
-        hdrs = {"X-Olympus-Audit": "signed-" + witness.posture()}
+        from . import shadow
+        # A shadow response must never be mistakable for a production one
+        # (PHASE5 §7). Stamped on BOTH /v1 dialects because both build their
+        # audit headers here.
+        hdrs = {"X-Olympus-Audit": "signed-" + witness.posture(),
+                "X-Olympus-Mode": shadow.mode()}
         run_id = getattr(bot, "last_run_id", None)
         if run_id:
             hdrs["X-Olympus-Run-Id"] = run_id

@@ -4633,12 +4633,21 @@ def _schedule_task(name: str, interval: str, prompt: str,
 
 def resolve_handler(name: str):
     """Find a tool handler: built-in first, then custom plugins, then native
-    (stdio/SSE) MCP tools."""
+    (stdio/SSE) MCP tools.
+
+    THE SIDE-EFFECT BOUNDARY (Phase 5, P5-A5). Both council tool loops —
+    `agent.run_agent_counted` and `openai_compat.run_agent` — obtain their
+    handler here, so wrapping the result once covers both API dialects plus
+    plugin and MCP handlers. In shadow mode `shadow.wrap_handler` returns a
+    recording or refusing stand-in for anything outside the READ /
+    STAGING_WRITE bands; with shadow mode off it returns the SAME object and
+    dispatch is byte-identical."""
+    from . import shadow
     handler = HANDLERS.get(name)
     if handler is not None:
-        return handler
+        return shadow.wrap_handler(name, handler)
     from . import connectors  # local import to avoid an import cycle
     plugin = connectors.plugin_handler(name)
     if plugin is not None:
-        return plugin
-    return connectors.mcp_client_handler(name)
+        return shadow.wrap_handler(name, plugin)
+    return shadow.wrap_handler(name, connectors.mcp_client_handler(name))
