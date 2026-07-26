@@ -1207,3 +1207,276 @@ def gate_confirm() -> bool:
     second, so reverted skills cost no more than before."""
     return os.environ.get("OLYMPUS_GATE_CONFIRM", "on").strip().lower() not in (
         "0", "off", "false", "no")
+
+
+# ── W2-C10: configuration-skew diagnostics ──────────────────────────────────
+# Gap G7 (docs/absorption/13-review-gaps.md): settings that only apply at
+# process start are silently stale on a long-running daemon. Rather than
+# Colibri's self-re-exec magic, Olympus makes the skew *legible*: the running
+# process publishes a fingerprint of its startup-scoped settings (surfaced by
+# `health`), and `doctor.config_skew()` compares the live environment against
+# it and reports the exact operator action. Nothing here ever self-corrects
+# (W2-I10.1) and nothing here is folklore — the startup-scoped set is a
+# declared, enumerable registry (W2-I10.2).
+
+#: OLYMPUS_* settings whose value is resolved ONCE, at import time, into a
+#: module-level constant. Editing any of these in the environment of a running
+#: process changes nothing until that process restarts. Every entry below is a
+#: variable read at module import in this file — keep it that way: a knob read
+#: live (inside a function) must NOT be listed here.
+STARTUP_SCOPED: tuple[str, ...] = (
+    "OLYMPUS_MEMORY_DIR",                  # MEMORY_DIR
+    "OLYMPUS_MAX_TOKENS",                  # MAX_TOKENS
+    "OLYMPUS_HISTORY_TOKEN_BUDGET",        # HISTORY_TOKEN_BUDGET (+_IS_EXPLICIT)
+    "OLYMPUS_HISTORY_CONTEXT_FRACTION",    # HISTORY_CONTEXT_FRACTION
+    "OLYMPUS_HISTORY_KEEP_TURNS",          # HISTORY_KEEP_TURNS
+    "OLYMPUS_MEMORY",                      # MEMORY_ENABLED
+    "OLYMPUS_MEMORY_FLOOR",                # MEMORY_CONFIDENCE_FLOOR
+    "OLYMPUS_MEMORY_BUDGET",               # MEMORY_RETRIEVAL_BUDGET_TOKENS
+    "OLYMPUS_MAX_CONCURRENT_CALLS",        # MAX_CONCURRENT_CALLS (+ usage semaphore)
+    "OLYMPUS_DAILY_BUDGET",                # DAILY_BUDGET
+    "OLYMPUS_JUDGE_MODEL",                 # JUDGE_MODEL
+    "OLYMPUS_GATE_MODEL",                  # GATE_MODEL
+    "OLYMPUS_AUDIT_EVERY_CHATS",           # AUDIT_EVERY_CHATS
+    "OLYMPUS_RETAIN_DAYS",                 # RETAIN_DAYS
+    "OLYMPUS_FEATURE_EVOLUTION_EVERY",     # FEATURE_EVOLUTION_EVERY
+    "OLYMPUS_DISCOVERY_EVERY",             # DISCOVERY_EVERY
+    "OLYMPUS_DREAM_EVERY",                 # DREAM_EVERY
+    "OLYMPUS_TRAIN_EVERY",                 # TRAIN_EVERY
+    "OLYMPUS_SLEEPTIME_EVERY",             # SLEEPTIME_EVERY
+    "OLYMPUS_SLEEPTIME_GRADUATION",        # SLEEPTIME_GRADUATION
+    "OLYMPUS_SLEEPTIME_CONFIDENCE_MIN",    # SLEEPTIME_CONFIDENCE_MIN
+    "OLYMPUS_LIVE_EVAL_EVERY",             # LIVE_EVAL_EVERY
+    "OLYMPUS_REPLAY_GATE_EVERY",           # REPLAY_GATE_EVERY
+    "OLYMPUS_DRIFT_GATE_EVERY",            # DRIFT_GATE_EVERY
+    "OLYMPUS_BACKUP_EVERY",                # BACKUP_EVERY
+)
+
+#: Retired OLYMPUS_* knobs → the setting that replaces them. Reporting-only:
+#: a deprecated knob is never rewritten into its replacement (W2-I10.1), the
+#: operator is told which one to set. Empty today — no knob has been retired
+#: yet; entries land here the moment one is, so the diagnostic has a registry
+#: to consult instead of folklore.
+DEPRECATED: dict[str, str] = {}
+
+# Predicate vocabulary for the declarative conflict/unsafe registries below.
+# Kept tiny and data-driven so the registries stay enumerable.
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+
+
+def setting_state(name: str, kind: str) -> bool:
+    """Evaluate one declarative predicate against the LIVE environment.
+
+    kind: "on"       — set to a truthy value
+          "off"      — set explicitly to a falsy value
+          "set"      — present and non-empty
+          "unset"    — absent or empty
+          "positive" — parses as a number > 0
+    """
+    raw = os.environ.get(name)
+    val = (raw or "").strip()
+    low = val.lower()
+    if kind == "on":
+        return low in _TRUTHY
+    if kind == "off":
+        return low in _FALSY
+    if kind == "set":
+        return bool(val)
+    if kind == "unset":
+        return not val
+    if kind == "positive":
+        try:
+            return float(val) > 0
+        except (TypeError, ValueError):
+            return False
+    raise ValueError(f"unknown predicate kind: {kind}")
+
+
+#: Mutually-exclusive settings: both sides can be set, but one silently
+#: neutralises or contradicts the other. Each entry names the operator action.
+CONFLICTING: tuple[dict, ...] = (
+    {
+        "a": ("OLYMPUS_REQUIRE_BYOK", "on"),
+        "b": ("OLYMPUS_FREE_CHATS", "positive"),
+        "why": "OLYMPUS_FREE_CHATS governs keyless users REGARDLESS of "
+               "OLYMPUS_REQUIRE_BYOK, so require-BYOK is silently overridden "
+               "for the first N chats/day",
+        "action": "keep OLYMPUS_REQUIRE_BYOK=1 and unset OLYMPUS_FREE_CHATS "
+                  "(hard BYOK), or drop OLYMPUS_REQUIRE_BYOK and keep the "
+                  "free allowance — set exactly one",
+    },
+    {
+        "a": ("OLYMPUS_MEMORY", "off"),
+        "b": ("OLYMPUS_EMBED_MODEL", "set"),
+        "why": "durable memory is disabled, so the embeddings endpoint "
+               "configured for semantic recall is never consulted",
+        "action": "set OLYMPUS_MEMORY=1 to use semantic recall, or unset "
+                  "OLYMPUS_EMBED_MODEL/OLYMPUS_EMBED_BASE_URL",
+    },
+)
+
+#: Combinations that are individually legal but jointly reduce a safety
+#: property. Reported, never rewritten.
+UNSAFE_COMBINATIONS: tuple[dict, ...] = (
+    {
+        "a": ("OLYMPUS_TOOL_VALIDATE", "off"),
+        "b": ("OLYMPUS_TOOL_SALVAGE", "on"),
+        "why": "salvage maps a lone payload onto a single required parameter "
+               "while schema validation is disabled — a malformed tool call "
+               "can be reshaped into an executable one with nothing checking it",
+        "action": "set OLYMPUS_TOOL_VALIDATE=on (salvage is only safe behind "
+                  "the validator), or set OLYMPUS_TOOL_SALVAGE=off",
+    },
+    {
+        "a": ("OLYMPUS_SOVEREIGN", "on"),
+        "b": ("OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED", "on"),
+        "why": "sovereign mode is running on the PUBLIC default signing seed — "
+               "every artifact it signs is forgeable by anyone",
+        "action": "provision a real signing seed and unset "
+                  "OLYMPUS_SOVEREIGN_ALLOW_DEV_SEED (labs/CI only)",
+    },
+    {
+        "a": ("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "on"),
+        "b": ("OLYMPUS_EARNED_AUTONOMY", "on"),
+        "why": "financial/legal browser templates are armed while earned "
+               "autonomy can auto-run actions without a per-action approval",
+        "action": "keep the approval gate: unset OLYMPUS_EARNED_AUTONOMY, or "
+                  "unset OLYMPUS_ENABLE_BROWSER_FINANCIAL",
+    },
+)
+
+#: Settings the CURRENT runtime cannot honour because the code/extra they
+#: select is not installed: knob → (import target, operator action).
+RUNTIME_DEPENDENT: dict[str, tuple[str, str]] = {
+    "OLYMPUS_DATABASE_URL": (
+        "psycopg",
+        "install the Postgres driver (`pip install psycopg[binary]`) or unset "
+        "OLYMPUS_DATABASE_URL — the file store is being used instead"),
+    "OLYMPUS_CTXHEAT": (
+        "olympus.ctxheat",
+        "this build has no context-heat module (Wave 2 C2) — unset "
+        "OLYMPUS_CTXHEAT or upgrade"),
+    "OLYMPUS_ROUTESUB": (
+        "olympus.routesub",
+        "this build has no routing-substitution module (Wave 2 C3) — unset "
+        "OLYMPUS_ROUTESUB or upgrade"),
+}
+
+
+def _startup_values() -> dict[str, str]:
+    """The resolved value of every startup-scoped setting in the LIVE env.
+    Unset resolves to "" — the same string the boot snapshot recorded, so an
+    unset-at-boot / unset-now setting can never look like skew."""
+    return {name: (os.environ.get(name) or "").strip()
+            for name in STARTUP_SCOPED}
+
+
+def config_fingerprint(values: dict[str, str] | None = None) -> str:
+    """Stable sha256[:12] over the resolved startup-scoped settings.
+
+    Same environment ⇒ same fingerprint; changing any startup-scoped setting
+    changes it. Pass `values` to fingerprint a snapshot (e.g. the boot one)
+    instead of the live environment."""
+    import hashlib
+    vals = _startup_values() if values is None else values
+    blob = "\n".join(f"{k}={vals.get(k, '')}" for k in STARTUP_SCOPED)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+# The snapshot this process actually booted on. Everything above is read from
+# the live environment; THIS is frozen at import, and the difference between
+# the two is exactly "restart required".
+BOOT_STARTUP_VALUES: dict[str, str] = _startup_values()
+BOOT_FINGERPRINT: str = config_fingerprint(BOOT_STARTUP_VALUES)
+
+
+def boot_fingerprint() -> str:
+    """The fingerprint of the settings THIS process is actually running on."""
+    return BOOT_FINGERPRINT
+
+
+def stale_startup_settings() -> dict[str, tuple[str, str]]:
+    """Startup-scoped settings whose live value differs from the value this
+    process booted with: name → (running value, current value). Non-empty ⇒ a
+    restart is required for those names. Read-only."""
+    live = _startup_values()
+    return {name: (BOOT_STARTUP_VALUES.get(name, ""), live.get(name, ""))
+            for name in STARTUP_SCOPED
+            if BOOT_STARTUP_VALUES.get(name, "") != live.get(name, "")}
+
+
+_KNOWN_SETTINGS: tuple[str, ...] | None = None
+
+
+def known_settings() -> tuple[str, ...]:
+    """Every OLYMPUS_* name this build's source actually reads, derived by
+    scanning the package (never hand-typed, so it cannot go stale). Cached for
+    the process — the source does not change under a running interpreter."""
+    global _KNOWN_SETTINGS
+    if _KNOWN_SETTINGS is None:
+        pat = re.compile(r"OLYMPUS_[A-Z0-9_]+")
+        found: set[str] = set()
+        try:
+            for path in sorted(Path(__file__).resolve().parent.glob("*.py")):
+                try:
+                    found.update(pat.findall(
+                        path.read_text(encoding="utf-8", errors="ignore")))
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        found.update(STARTUP_SCOPED)
+        found.update(DEPRECATED)
+        _KNOWN_SETTINGS = tuple(sorted(found))
+    return _KNOWN_SETTINGS
+
+
+def env_example_path() -> Path:
+    """`.env.example` — the documented-knob source of truth (git checkouts)."""
+    return PROJECT_ROOT / ".env.example"
+
+
+def documented_settings() -> tuple[str, ...]:
+    """Every OLYMPUS_* name documented in .env.example. Empty tuple when the
+    file is absent (a pip install ships no checkout) — callers must treat that
+    as "cannot judge", never as "nothing is documented"."""
+    path = env_example_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    return tuple(sorted(set(re.findall(r"OLYMPUS_[A-Z0-9_]+", text))))
+
+
+def version_marker_path() -> Path:
+    """Marker recording the package version the last process to run here used.
+    Differing from the installed version means processes sharing this
+    MEMORY_DIR may be running mixed code."""
+    return MEMORY_DIR / ".version_marker"
+
+
+def read_version_marker() -> str:
+    """The recorded version, or "" when none has been written. Never writes."""
+    try:
+        return version_marker_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def record_version_marker() -> str:
+    """Stamp THIS process's version into the marker (best-effort, idempotent).
+
+    Called by the running process when it reports its own health — never by the
+    diagnostic, which must stay a pure read (W2-I10.1). Returns the version
+    that is now recorded (or "" if it could not be written)."""
+    from . import __version__
+    try:
+        path = version_marker_path()
+        if path.exists() and path.read_text(encoding="utf-8").strip() == __version__:
+            return __version__
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(__version__, encoding="utf-8")
+        return __version__
+    except OSError:
+        return ""
