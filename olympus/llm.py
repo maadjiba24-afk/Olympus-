@@ -13,7 +13,7 @@ from typing import Any
 
 import anthropic
 
-from . import config, replaystore, security, usage
+from . import config, replaystore, security, streamguard, usage
 
 _clients: dict[tuple[str | None, str | None], anthropic.Anthropic] = {}
 # Bound the cache: on a public BYOK instance each distinct visitor key/base is a
@@ -383,6 +383,13 @@ def complete(
                     provider="anthropic", prefix_fp=_prefix_fp(system))
                 _observe_ctx(params["model"], system, messages,
                                      uncached + cr + cc)
+                # C8 (non-streaming seam): the impossible-usage detector is
+                # pure and cheap. A finished answer is not retracted over a
+                # counter — the pathology is recorded as provider evidence.
+                # No-op when OLYMPUS_STREAMGUARD is off; never raises.
+                streamguard.check_usage_evidence(
+                    u, provider="anthropic", model=params["model"],
+                    max_tokens=params["max_tokens"])
             replaystore.put(req_hash, message)   # freeze for re-executable replay
             replaystore.note_call(req_hash)
             connectors.emit("post_llm_call", params, message)
@@ -433,9 +440,25 @@ def stream_text(
         params["betas"] = [_EXTENDED_TTL_BETA]
         endpoint = client(settings).beta.messages
     security.assert_egress_allowed(config.member_host(settings))
+    # C8 degenerate-stream defense. Default OFF: `monitor()` then returns an
+    # inert NullMonitor whose feed() cannot raise, so this path stays
+    # byte-identical to the pre-C8 stream. On a trip we leave the `with`
+    # (which aborts the stream), write the evidence record, and raise a typed
+    # StreamAborted — never a silently truncated answer (W2-I8.3).
+    guard = streamguard.monitor(provider="anthropic", model=params["model"],
+                                max_tokens=params["max_tokens"])
     with usage.slot():
         with endpoint.stream(**params) as stream:
             for text in stream.text_stream:
+                try:
+                    guard.feed(text)
+                except streamguard.StreamPathology as exc:
+                    rec = streamguard.pathology_record(
+                        guard, exc, provider="anthropic",
+                        model=params["model"])
+                    streamguard.record_pathology(rec)
+                    raise streamguard.StreamAborted(
+                        exc.kind, exc.detail, record=rec) from exc
                 yield text
             final = stream.get_final_message()
     u = getattr(final, "usage", None)
