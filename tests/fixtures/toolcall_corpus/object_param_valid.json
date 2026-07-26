@@ -1,0 +1,29 @@
+{
+  "name": "object_param_valid",
+  "payload": "{\"name\": \"apply_filters\", \"arguments\": {\"filters\": {\"lang\": \"en\"}}}",
+  "tools": [
+    {
+      "name": "apply_filters",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filters": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "filters"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "filters": {
+        "lang": "en"
+      }
+    },
+    "refused": false
+  }
+}

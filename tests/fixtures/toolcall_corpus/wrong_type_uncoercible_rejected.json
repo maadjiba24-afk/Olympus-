@@ -1,0 +1,25 @@
+{
+  "name": "wrong_type_uncoercible_rejected",
+  "payload": "{\"name\": \"tag_item\", \"arguments\": {\"tags\": \"not-a-list\"}}",
+  "tools": [
+    {
+      "name": "tag_item",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "tags"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 2,
+    "args": null,
+    "refused": true
+  }
+}

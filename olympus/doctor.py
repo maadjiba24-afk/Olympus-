@@ -149,12 +149,31 @@ def _optional_checks() -> list[Check]:
     return out
 
 
+def _repair_checks() -> list[Check]:
+    """Tool-call repair-rate decay signal (C8): a rising rung≥3 share over the
+    last 7 days means the model is emitting more malformed calls — WARN above
+    OLYMPUS_REPAIR_WARN_RATE (default 0.15) once there are ≥50 calls."""
+    from . import toolcall_repair
+    try:
+        r = toolcall_repair.repair_rate(7)
+    except Exception:
+        return []
+    n, rate = r.get("total", 0), r.get("rate", 0.0)
+    detail = f"tool-call repair: {rate * 100:.1f}% over {n} calls (7d)"
+    if n >= 50 and rate > toolcall_repair.repair_warn_rate():
+        return [Check("tool-call repair", WARN,
+                      detail + " — rising repair rate; the model may be "
+                      "degrading at tool-call emission")]
+    return [Check("tool-call repair", OK, detail)]
+
+
 def run_checks() -> list[Check]:
     checks: list[Check] = []
     checks += _provider_checks()
     checks += _memory_checks()
     checks += _sandbox_checks()
     checks += _optional_checks()
+    checks += _repair_checks()
     return checks
 
 

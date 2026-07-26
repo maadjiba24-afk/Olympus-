@@ -1,0 +1,25 @@
+{
+  "name": "missing_required_rejected",
+  "payload": "{\"name\": \"web_search\", \"arguments\": {}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 2,
+    "args": null,
+    "refused": true
+  }
+}

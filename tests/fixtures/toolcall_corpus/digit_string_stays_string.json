@@ -1,0 +1,27 @@
+{
+  "name": "digit_string_stays_string",
+  "payload": "{\"name\": \"lookup_zip\", \"arguments\": {\"zip\": \"02139\"}}",
+  "tools": [
+    {
+      "name": "lookup_zip",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "zip": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "zip"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "zip": "02139"
+    },
+    "refused": false
+  }
+}

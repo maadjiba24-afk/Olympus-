@@ -1,0 +1,28 @@
+{
+  "name": "unknown_extra_key_allowed",
+  "payload": "{\"name\": \"web_search\", \"arguments\": {\"query\": \"styx\", \"extra\": 1}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "query": "styx",
+      "extra": 1
+    },
+    "refused": false
+  }
+}

@@ -199,9 +199,21 @@ def build_parser() -> argparse.ArgumentParser:
                             "trial (production-trial checkpoint summary)")
     p_cal.add_argument("dest", nargs="?", default="",
                        help="destination file for `export`")
-    sub.add_parser("routing-stats",
-                   help="routing-outcome telemetry (SPEC-04 Phase A) + the "
-                        "Phase B data-gate readiness check")
+    p_rstats = sub.add_parser(
+        "routing-stats",
+        help="routing-outcome telemetry (SPEC-04 Phase A) + the "
+             "Phase B data-gate readiness check")
+    p_rstats.add_argument(
+        "--predictability", action="store_true",
+        help="C7 predictability report: offline, read-only analysis of "
+             "specialist-sequence predictors over recorded traces "
+             "(prefetch stays disabled)")
+    p_rstats.add_argument("--days", type=int, default=30,
+                          help="trace window in days for --predictability "
+                               "(default 30)")
+    p_rstats.add_argument("--out", default="",
+                          help="also write the --predictability report JSON "
+                               "to this path")
     sub.add_parser("learned", help="what Olympus learned/did on its own "
                                    "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
@@ -2492,6 +2504,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(usage.set_budget(args.amount))
     elif args.command == "routing-stats":
+        if getattr(args, "predictability", False):
+            import json as _json
+            from . import coupling
+            rep = coupling.predictability_report(days=args.days)
+            print(coupling.render_report(rep))
+            if args.out:
+                from pathlib import Path as _Path
+                _Path(args.out).write_text(_json.dumps(rep, indent=2),
+                                           encoding="utf-8")
+                print(f"\nWrote {args.out}")
+            return 0
         from . import routing_outcomes as ro
         g = ro.gate_status()
         s = g["stats"]

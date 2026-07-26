@@ -1,0 +1,27 @@
+{
+  "name": "float_coercion",
+  "payload": "{\"name\": \"set_ratio\", \"arguments\": {\"ratio\": \"3.2\"}}",
+  "tools": [
+    {
+      "name": "set_ratio",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ratio": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "ratio"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 4,
+    "args": {
+      "ratio": 3.2
+    },
+    "refused": false
+  }
+}

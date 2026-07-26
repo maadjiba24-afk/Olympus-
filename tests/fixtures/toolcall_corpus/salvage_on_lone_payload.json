@@ -1,0 +1,28 @@
+{
+  "name": "salvage_on_lone_payload",
+  "payload": "{\"name\": \"web_search\", \"arguments\": \"who is athena\"}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "salvage": true,
+  "expect": {
+    "rung": 4,
+    "args": {
+      "query": "who is athena"
+    },
+    "refused": false
+  }
+}
