@@ -2134,6 +2134,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._stream_reply(bot, message)
                 else:
                     self._json({"reply": bot.ask(message)})
+        except usage.AdmissionRefused as err:
+            # W2-C7 admission: overload is an honest 429 + Retry-After with a
+            # machine-readable reason — never a silent downgrade of the answer
+            # (invariant W2-I7.1, ruling R6). Rendered by usage so every
+            # channel emits one overload shape.
+            code, body, hdrs = usage.admission_http_response(err)
+            try:
+                self._json(body, code, extra_headers=hdrs)
+            except Exception:
+                pass                  # a stream already committed its headers
         except Exception as err:
             from . import errors
             errors.capture("web /api/chat", err, context=message[:200])
@@ -2279,6 +2289,15 @@ class Handler(BaseHTTPRequestHandler):
         except security.SovereigntyError as err:
             # Fail closed with a clear, non-leaky message (never downgrade).
             self._v1_error(403, str(err))
+        except usage.AdmissionRefused as err:
+            # W2-C7 admission: 429 + Retry-After + machine-readable reason.
+            # Refusal over degradation (ruling R6) — the council never
+            # silently answers with a cheaper model to fit under load.
+            code, body, hdrs = usage.admission_http_response(err)
+            try:
+                self._json(body, code, extra_headers=hdrs)
+            except Exception:
+                pass                  # a stream already committed its headers
         except Exception as err:
             from . import errors
             errors.capture("web /v1/chat/completions", err,
