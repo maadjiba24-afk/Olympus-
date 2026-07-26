@@ -149,6 +149,46 @@ def rotation_report(settings: config.Settings) -> str:
     return "\n".join(lines)
 
 
+def _payload_chars(payload: dict[str, Any]) -> int:
+    """Cheap, deterministic character count of the request's message contents
+    — the calibration input for ctxbudget.observe (C4)."""
+    total = 0
+    for m in payload.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else m
+        if isinstance(content, str):
+            total += len(content)
+        elif content is not None:
+            total += len(str(content))
+    return total
+
+
+def _record_usage(payload: dict[str, Any], usage_block: dict[str, Any]) -> None:
+    """C5/C4 seam: record the cache split when the provider reports it
+    (`prompt_tokens_details.cached_tokens`), and feed the reported input total
+    to context calibration. Telemetry must never break the call — the observe
+    hook is exception-swallowed (observe() itself validates the sample)."""
+    model = payload.get("model", "unknown")
+    prompt = int(usage_block.get("prompt_tokens", 0) or 0)
+    details = usage_block.get("prompt_tokens_details")
+    cached = 0
+    if isinstance(details, dict):
+        try:
+            cached = int(details.get("cached_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            cached = 0
+    cached = max(0, min(cached, prompt))
+    usage.record(model, prompt - cached,
+                 int(usage_block.get("completion_tokens", 0) or 0),
+                 cache_read=cached, provider="openai-compat")
+    try:
+        from . import ctxbudget
+        chars = _payload_chars(payload)
+        if chars > 0 and prompt > 0:
+            ctxbudget.observe("openai-compat", model, chars, prompt)
+    except Exception:
+        pass
+
+
 def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
     url = _endpoint_url(settings, base)
@@ -180,9 +220,7 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
                     with urllib.request.urlopen(req, timeout=600) as resp:
                         data = json.loads(resp.read())
                 u = data.get("usage") or {}
-                usage.record(payload.get("model", "unknown"),
-                             int(u.get("prompt_tokens", 0)),
-                             int(u.get("completion_tokens", 0)))
+                _record_usage(payload, u)
                 # A 200 that carries no `choices` is a real provider hiccup
                 # (rate-limit shedding, a content filter, an upstream error
                 # rendered as an empty body). Callers index `choices[0]`, so

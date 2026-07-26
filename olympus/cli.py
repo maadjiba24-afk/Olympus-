@@ -2634,6 +2634,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "usage":
         from . import usage
         print(usage.report(args.days))
+        cs = usage.cache_stats(args.days)
+        if cs.get("verdict") != "no_signal":
+            print(f"\n  prompt cache ({cs['days']}d): {cs['verdict']} — "
+                  f"{cs['hit_rate'] * 100:.0f}% hit rate "
+                  f"({cs['hits']}/{cs['fp_calls']} calls), "
+                  f"{cs['cache_read']} tokens read from cache, "
+                  f"~${cs['savings_usd']:.4f} saved")
     elif args.command == "connectors":
         from . import connectors
         print(connectors.summary())

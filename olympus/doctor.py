@@ -167,6 +167,30 @@ def _repair_checks() -> list[Check]:
     return [Check("tool-call repair", OK, detail)]
 
 
+def _cache_checks() -> list[Check]:
+    """Prompt-cache liveness (C5): from recorded usage telemetry, is caching
+    producing cache reads at all? Inert caching (many fingerprint-carrying
+    calls, zero cache reads) means the money spent on cache writes buys
+    nothing — WARN with the likely causes."""
+    from . import usage
+    try:
+        s = usage.cache_stats(7)
+    except Exception:
+        return []
+    verdict = s.get("verdict")
+    if verdict == "active":
+        return [Check("prompt cache", OK,
+                      f"active — {s.get('hit_rate', 0.0) * 100:.0f}% hit rate "
+                      f"over {s.get('fp_calls', 0)} calls (7d), "
+                      f"~${s.get('savings_usd', 0.0):.4f} saved")]
+    if verdict == "inert":
+        return [Check("prompt cache", WARN,
+                      "prompt caching configured but producing no cache reads "
+                      f"({s.get('fp_calls', 0)} calls) — check prompt prefix "
+                      "stability / provider support")]
+    return [Check("prompt cache", OK, "no cache telemetry yet")]
+
+
 def run_checks() -> list[Check]:
     checks: list[Check] = []
     checks += _provider_checks()
@@ -174,6 +198,7 @@ def run_checks() -> list[Check]:
     checks += _sandbox_checks()
     checks += _optional_checks()
     checks += _repair_checks()
+    checks += _cache_checks()
     return checks
 
 
