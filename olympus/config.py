@@ -486,7 +486,16 @@ class ModelPool:
         adaptive = (bandit_routing.choose(self.members, key, heuristic)
                     if bandit_routing.enabled()
                     else learned_routing.choose(self.members, key, heuristic))
-        return adaptive or heuristic
+        pick = adaptive or heuristic
+        # Wave-2 W2-PR11 (gates A1/A2/A4/A5): the MEASURED-evidence layer sits
+        # below the adaptive selectors and above nothing at all — it can only
+        # move the pick, never invent one. Full precedence is therefore
+        #   pin > (bandit | learned) > modelgrade guard > routesub > heuristic.
+        # Both steps carry the same contract as `learned_routing.choose`: they
+        # never raise into the caller, and with their flags off they are not
+        # even imported, so Wave-1 routing is reproduced byte-identically.
+        pick = _modelgrade_guard(self, key, pick)
+        return _routesub_substitute(self, key, pick)
 
     def fastest(self) -> Settings:
         """The member most likely to respond quickly — by model-name hints
@@ -520,6 +529,182 @@ class ModelPool:
         lines.append("  members: "
                      + ", ".join(f"{m.provider}/{m.model}" for m in self.members))
         return "\n".join(lines)
+
+
+# --- Wave-2 measured-evidence routing (W2-PR11) ----------------------------
+# Two consultations wired into `ModelPool.for_specialist`, in this order:
+#
+#   1. `_modelgrade_guard`      A2 — an unqualified model is never selected for
+#                               a PROTECTED task cell.
+#   2. `_routesub_substitute`   A4/A5 — a cheaper or warmer, measured-equivalent
+#                               member may replace the pick, inside a band.
+#
+# Both are strictly fail-safe. Any exception, a missing module, or a disabled
+# flag returns the incoming pick UNCHANGED — the same contract
+# `learned_routing.choose` / `bandit_routing.choose` already carry, and the
+# reason routing can never be broken by a telemetry or evidence-store fault.
+
+def _wave2_flag_off(name: str) -> bool:
+    """A cheap "the operator has not enabled this" pre-check.
+
+    Only unambiguous off-values short-circuit here; anything else defers to the
+    owning module's own `enabled()`/`mode()`, which remains the single authority
+    (it is what also forces the feature off under `OLYMPUS_REPLAY`). This exists
+    so that the shipped default costs exactly one environment read: with the flag
+    unset the Wave-2 module is not imported, not called, and cannot be observed
+    at all."""
+    return os.environ.get(name, "").strip().lower() in (
+        "", "0", "off", "false", "no")
+
+
+def _routesub_substitute(pool: "ModelPool", key: str, pick: "Settings") -> "Settings":
+    """Optionally substitute a cheaper/warmer, measured-equivalent member.
+
+    Mode-aware (`OLYMPUS_ROUTESUB`, default off):
+
+      off     not consulted at all — zero overhead, no import, no ledger row.
+      shadow  `routesub` computes and RECORDS the counterfactual decision, and
+              its return is IGNORED here (`routesub.choose` answers None in
+              shadow), so the pick is byte-identically unchanged.
+      on      the substituted member is used.
+
+    The recorded row is written by `routesub.evaluate` on the live path and
+    carries the original preferred route, the substituted route, the reason and
+    the estimated savings (plus the full precondition table); `record_outcome()`
+    completes it with the actual cost/latency/verifier verdict.
+
+    Fail-safe: any exception, or a missing/broken `routesub`, keeps `pick`."""
+    try:
+        if _wave2_flag_off("OLYMPUS_ROUTESUB"):
+            return pick
+        from . import routesub
+        if not routesub.enabled():
+            return pick
+        chosen = routesub.choose(pool.members, key, pick)
+        return chosen if chosen is not None else pick
+    except Exception:                                 # noqa: BLE001 - never raise
+        return pick
+
+
+#: Ledger `blocked_by` tag for an A2 guard row, kept distinct from
+#: `routesub.PRECONDITIONS` names so the two never blur in a histogram.
+_GUARD_TAG = "modelgrade_protected_cell"
+
+
+def _modelgrade_guard(pool: "ModelPool", key: str, pick: "Settings") -> "Settings":
+    """A2: an UNQUALIFIED model is never selected for a PROTECTED task cell.
+
+    "Protected" is deliberately narrow and honest — widening it would turn an
+    unmeasured deployment into a broken one:
+
+      * the VERIFY role (Aletheia and any `verify`-role specialist): the head of
+        the routing, where an unqualified model is a correctness risk rather
+        than a cost one; and
+      * ANY specialist whose task cell `modelgrade` marks the preferred member
+        FROZEN or QUARANTINED — a `modelgate` freeze is a positive, measured
+        statement that this member must not run this work.
+
+    Everything else keeps today's heuristic behaviour untouched, so enabling
+    `OLYMPUS_MODELGRADE` on a deployment with no evidence changes no route.
+
+    When the preferred member is unusable for a protected cell, the next
+    QUALIFIED member in the pool's own role-fallback order is preferred.
+
+    FAIL-OPEN, DELIBERATELY: when NO member of the pool is qualified for a
+    protected cell we keep today's heuristic pick rather than refusing to
+    answer. `untested` is `modelgrade`'s correct default on a fresh install, and
+    converting "we have not measured this yet" into a refusal would be strictly
+    worse than the Wave-1 behaviour it replaces. This is a recorded trade-off,
+    not an oversight: the event is appended to `routesub`'s decision ledger
+    (`kind="modelgrade_guard"`), so every protected cell that ran on an
+    unqualified model is visible to an operator and to `routesub.decisions()`.
+
+    Fail-safe: any exception, or a missing/broken store, keeps `pick`."""
+    try:
+        if _wave2_flag_off("OLYMPUS_MODELGRADE"):
+            return pick
+        from . import modelgrade, routesub
+        if not modelgrade.enabled():
+            return pick
+        cell = routesub.cell_for(key)
+        ckey = modelgrade.cell_key(cell)
+        blocked_states = (modelgrade.FROZEN, modelgrade.QUARANTINED)
+
+        pick_id = routesub.member_id(pick)
+        pick_state = modelgrade.status(pick_id, cell)
+        frozen = pick_state in blocked_states
+        verifying = routesub.is_verification(key, ckey)
+        if not frozen and not verifying:
+            return pick                 # not a protected cell — Wave-1 exactly
+        if not frozen and pick_state == modelgrade.QUALIFIED:
+            return pick                 # protected AND qualified — nothing to do
+
+        for alt in pool.fallbacks_for(pick, specialist_role(key)):
+            alt_id = routesub.member_id(alt)
+            if modelgrade.status(alt_id, cell) != modelgrade.QUALIFIED:
+                continue                # covers frozen/quarantined/untested
+            if verifying and routesub.verification_score(
+                    modelgrade.card(alt_id, cell)) < routesub.verifier_floor():
+                continue                # W2-I3.1: verification work is never
+                                        # moved onto a member below the
+                                        # measured verifier floor, not even to
+                                        # escape an unqualified incumbent
+            _record_guard(routesub, key=key, cell=ckey, preferred=pick_id,
+                          chosen=alt_id, state=pick_state, kept=False,
+                          reason=(f"{pick_id} is {pick_state} for {ckey}; "
+                                  f"selected the qualified {alt_id} instead "
+                                  "(A2: no unqualified model on a protected "
+                                  "cell)"))
+            return alt
+
+        _record_guard(routesub, key=key, cell=ckey, preferred=pick_id,
+                      chosen=pick_id, state=pick_state, kept=True,
+                      reason=(f"{pick_id} is {pick_state} for {ckey} and NO "
+                              "pool member is qualified — keeping the heuristic "
+                              "pick (deliberate fail-open, recorded: refusing "
+                              "to answer on thin evidence would be worse than "
+                              "the Wave-1 behaviour)"))
+        return pick
+    except Exception:                                 # noqa: BLE001 - never raise
+        return pick
+
+
+def _record_guard(routesub, *, key, cell, preferred, chosen, state, kept,
+                  reason) -> bool:
+    """Append one A2 guard event to `routesub`'s decision ledger.
+
+    Written through `routesub._append` on purpose: that is the single
+    proclock-guarded, never-raising writer for this ledger, and standing up a
+    second writer here would be the one way to corrupt it. The row is tagged
+    `kind="modelgrade_guard"` and leaves `substituted`/`counterfactual` False so
+    it can never be miscounted as a COST substitution in `agreement_stats()`;
+    `guard_action` says what the guard actually did."""
+    try:
+        import time
+        import uuid
+        return bool(routesub._append({
+            "kind": "modelgrade_guard",
+            "decision_id": uuid.uuid4().hex,
+            "ts": time.time(),
+            "mode": routesub.mode(),
+            "specialist": str(key),
+            "cell": str(cell),
+            "preferred_route": str(preferred),
+            "candidate_route": "" if kept else str(chosen),
+            "substituted_route": "" if kept else str(chosen),
+            "substituted": False,
+            "counterfactual": False,
+            "guard_action": "kept_unqualified" if kept else "requalified",
+            "preferred_state": str(state),
+            "reason": str(reason),
+            "blocked_by": _GUARD_TAG,
+            "fallback": bool(kept),
+            "user_visible_degradation": False,
+            "estimated_savings_usd": 0.0,
+            "outcome_recorded": False,
+        }))
+    except Exception:                                 # noqa: BLE001 - never raise
+        return False
 
 
 # Project root (the directory containing the `olympus` package).

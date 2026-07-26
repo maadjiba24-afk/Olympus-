@@ -14,6 +14,7 @@ of those is an invariant here, not a comment:
 """
 from __future__ import annotations
 
+import ast
 import json
 import math
 import time
@@ -551,17 +552,34 @@ def test_off_mode_is_fully_inert(monkeypatch):
     assert not Path(config.MEMORY_DIR).exists()    # not one byte written
 
 
-def test_no_module_consumes_a_pin_set(shadow):
-    """W2-I2.5 in its strongest form: placement is static because NOTHING reads
-    a pin set. The library ships inert — recall/wiki/skills/orchestrator do not
-    call it, and the only references anywhere are diagnostics (doctor's
-    read-only liveness, config's runtime-dependency note, the experiments
-    registry entry for the flag)."""
+def test_only_the_gated_recall_seam_consumes_a_pin_set(shadow):
+    """W2-I2.4/W2-I2.5 in their strongest form, updated by W2-PR15.
+
+    Until that PR this test asserted that NOTHING consumed the placement API —
+    the library shipped inert. W2-PR15 wires exactly one consumer, so the guard
+    now pins the shape of that wiring instead of forbidding it; deleting the
+    guard rather than tightening it would have retired the protection along
+    with the condition.
+
+    Three things must stay true:
+
+    1. `recall.py` is the ONLY consumer — wiki/skills/orchestrator must still
+       not read a pin set (the orchestrator is separately forbidden from
+       naming ctxheat at all by `test_wave2_rollback`);
+    2. that consumer supplies NO `gate_fn`, so `apply_pins()` refuses there and
+       `on` degrades to `shadow` (W2-I2.4: no unmeasured pin-set write path);
+    3. NOTHING calls `record_verifier_outcome()`. The promotion signal has no
+       honest source yet — the retrieval seam runs before the answer exists —
+       and a call from anywhere else would be the poisoning path the capability
+       is built to refuse. Prose ABOUT it (recall.py documents why it is
+       unwired) is fine; a call is not, so this is decided from the AST.
+    """
     pkg = Path(__file__).resolve().parent.parent / "olympus"
     placement_api = ("propose_pins", "apply_pins", "applied_pins", "pins_path",
-                     "clear_pins", "record_verifier_outcome")
-    offenders = {}
+                     "clear_pins")
+    consumers = {}
     mentions = []
+    verifier_callers = []
     for path in sorted(pkg.glob("*.py")):
         if path.name == "ctxheat.py":
             continue
@@ -570,10 +588,34 @@ def test_no_module_consumes_a_pin_set(shadow):
             mentions.append(path.name)
         hits = [name for name in placement_api if name in text]
         if hits:
-            offenders[path.name] = hits
-    assert offenders == {}, f"pin state consumed early: {offenders}"
-    assert set(mentions) <= {"config.py", "doctor.py", "experiments.py"}, \
-        f"ctxheat wired in early: {mentions}"
+            consumers[path.name] = hits
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.attr if isinstance(func, ast.Attribute)
+                    else getattr(func, "id", ""))
+            if name == "record_verifier_outcome":
+                verifier_callers.append(path.name)
+
+    assert set(consumers) <= {"recall.py"}, \
+        f"pin state consumed outside the gated recall seam: {consumers}"
+    assert not verifier_callers, (
+        "record_verifier_outcome has no trusted source at any wired seam; "
+        f"called from {verifier_callers}")
+    assert set(mentions) <= {"config.py", "doctor.py", "experiments.py",
+                             "recall.py"}, f"ctxheat wired in early: {mentions}"
+
+    # The wiring must offer NO benchmark gate, or `on` would stop degrading to
+    # shadow and heat could reach the prompt unmeasured.
+    recall_src = (pkg / "recall.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(recall_src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "apply_pins":
+            gates = [kw.value for kw in node.keywords if kw.arg == "gate_fn"]
+            assert gates and all(isinstance(g, ast.Constant) and g.value is None
+                                 for g in gates), \
+                "recall must pass gate_fn=None — it has no benchmark to run"
 
 
 def test_the_doctor_liveness_reader_only_reads(shadow):

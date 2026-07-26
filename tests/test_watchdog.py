@@ -656,14 +656,25 @@ def test_quarantine_ignores_a_sink_without_the_function(enforce_mode,
 
 # --- 6. the module ships inert ---------------------------------------------
 
-def test_watchdog_is_not_wired_into_the_pipeline():
-    """This PR is the library only: no other module may import it yet (the
-    wiring PR flips this test)."""
+def test_watchdog_is_wired_only_at_the_sanctioned_seams():
+    """The wiring PR (W2-PR13) flipped this test, as its previous docstring
+    anticipated. The invariant is no longer 'nothing imports watchdog' — that
+    only encoded 'not built yet'. What must hold now is narrower and permanent:
+    watchdog may be consulted ONLY from the two seams the spec sanctions
+    (`orchestrator` for run leases, `heartbeat` for job leases), so a future
+    change cannot quietly spread lease logic across the codebase."""
     pkg = Path(config.__file__).parent
     importers = sorted(
         p.name for p in pkg.glob("*.py")
         if p.name != "watchdog.py"
         and ("import watchdog" in p.read_text(encoding="utf-8")
              or "from .watchdog" in p.read_text(encoding="utf-8")))
-    assert importers == []
-    assert watchdog.status()["wired"] is False
+    assert set(importers) <= {"orchestrator.py", "heartbeat.py"}, (
+        f"watchdog consulted from an unsanctioned module: {importers}")
+
+
+def test_watchdog_ships_disabled_so_the_wiring_is_inert():
+    """Wiring is not activation: the shipped default must still be off, which is
+    what makes rollback to Wave-1 behaviour a no-op (gate W2-A17)."""
+    assert watchdog.mode() == "off"
+    assert watchdog.status()["enabled"] is False

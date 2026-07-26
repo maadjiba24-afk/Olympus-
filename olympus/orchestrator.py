@@ -35,7 +35,7 @@ from . import (agent, backend, calibration, codegraph, companion, config,
                connectors, consensus, contracts, contrib, dytopo, effortscore,
                i18n, llm, memory, playbooks, profile, recall, relgraph,
                replaystore, steering, streamguard, trace as trace_mod, tools,
-               usage)
+               usage, watchdog)
 from .specialists import (SPECIALISTS, roster, semantic_roster,
                           semantic_routing_enabled, semantic_skills_enabled)
 
@@ -239,6 +239,222 @@ def _parse_verdict(text: str) -> tuple[str, dict | None]:
     return (text or "").strip(), None
 
 
+# --- W2-C6: progress-watchdog wiring (OLYMPUS_WATCHDOG, default off) --------
+#
+# Gate A9 on the LIVE path. Everything below is inert unless an operator arms
+# `OLYMPUS_WATCHDOG=observe|enforce`: `_wd_open` returns None when the flag is
+# off, every call site is `if watch is not None`, and no `ProgressLease` is ever
+# constructed. Off, the pipeline is byte-identical to Wave-1 — same decisions,
+# same output, no lease, no disk read, no forensics.
+#
+# W2-I6.1 is the load-bearing rule here: the lease is fed ONLY signals a
+# VERIFIER accepted (a DAG node completed, a specialist output that passed its
+# contract, a verified response section, a bounded generation that finished).
+# Model text is never fed as progress — the sentinel outputs `_run_one` returns
+# when a specialist fails, is skipped or is rejected by its contract are beaten
+# as `model_text`, which counts for NOTHING while still carrying the spend. A
+# run that only produces those while burning money is exactly the
+# PROGRESS_FREE_SPEND shape the detection exists for.
+
+#: The sentinel prefix/marker every `_run_one` failure return shares. These are
+#: NOT accepted specialist output, so they are never progress.
+_WD_SENTINEL = "Treat this part as missing"
+
+
+def _wd_is_sentinel(out) -> bool:
+    """True when `_run_one` returned one of its typed 'this part is missing'
+    markers (specialist failed, skipped by the budget guard, or rejected by its
+    output contract) rather than an accepted specialist output."""
+    text = (out or "").lstrip()
+    return text.startswith("[") and _WD_SENTINEL in text
+
+
+def _wd_capture(where: str, err: BaseException, context: str = "") -> None:
+    """Best-effort error capture for the watchdog wiring. A watchdog failure
+    must never break a run, so every call site funnels through here."""
+    try:
+        from . import errors
+        errors.capture(where, err, context=context)
+    except Exception:                        # noqa: BLE001 - never raise
+        pass
+
+
+class _RunCancel:
+    """The run-scoped admission cancel token the watchdog's `release_fn` trips.
+
+    Shape-compatible with `usage.slot(cancel_token=...)` (`.cancelled() -> bool`):
+    a waiter holding this token abandons its queue position immediately."""
+
+    __slots__ = ("_cancelled",)
+
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+
+class _RunWatch:
+    """One run's `ProgressLease` plus the spend cursor and the cancel token.
+
+    The orchestrator never holds an admission slot itself — slots are taken and
+    released inside `usage.slot()` around each model call. "Release admission
+    slots" therefore means, on this seam: trip the run-scoped cancel token so no
+    further specialist queues for a slot, and let the enforce-mode
+    `WatchdogRefusal` unwind the in-flight `with usage.slot():` frames promptly.
+    That callable is what is injected as the lease's `release_fn`; this class
+    knows nothing about the lease's ladder, and the lease knows nothing about
+    `usage`.
+    """
+
+    def __init__(self, tr: "trace_mod.Trace") -> None:
+        self.tr = tr
+        self.cancel_token = _RunCancel()
+        self.live_spend = not replaystore.replaying()
+        self._reported = 0.0
+        self._lock = threading.Lock()
+        # Snapshot the run's spend baseline HERE, at run start — the same
+        # quantity the per-run budget guard uses. If that guard already took
+        # one this turn, reuse it rather than accounting the same money twice;
+        # otherwise take our own and deliberately do NOT publish it into
+        # tr.meta, so arming the watchdog can never move the budget guard's
+        # own baseline (and with it the budget guard's decisions).
+        self._baseline: float | None = None
+        if self.live_spend:
+            try:
+                base = tr.meta.get("budget_baseline")
+                self._baseline = (float(base) if base is not None
+                                  else float(usage.today_spend()))
+            except Exception as err:          # noqa: BLE001 - never raise
+                _wd_capture("orchestrator.watchdog.baseline", err,
+                            context=tr.id)
+                self._baseline = 0.0
+        self.lease = watchdog.ProgressLease(
+            f"run-{tr.id}", kind="run", release_fn=self._release)
+
+    # -- the injected release_fn ------------------------------------------
+    def _release(self) -> None:
+        self.cancel_token.cancel()
+        try:
+            self.tr.event("watchdog.slot_released", lease=self.lease.lease_id)
+        except Exception:                    # noqa: BLE001 - never raise
+            pass
+
+    # -- spend ------------------------------------------------------------
+    def spend_delta(self) -> float:
+        """USD this run has added since its budget baseline that has not been
+        reported to the lease yet.
+
+        Measured against the EXISTING per-run baseline snapshot (`tr.meta
+        ["budget_baseline"]` when the budget guard already took one, else our
+        own at run start) rather than introducing a second accounting of the
+        same money. Always 0.0 during replay: a replayed run must not read live
+        spend, or the same trace would classify differently on every replay."""
+        if not self.live_spend or self._baseline is None:
+            return 0.0
+        try:
+            with self._lock:
+                total = usage.today_spend()
+                delta = total - self._baseline - self._reported
+                if delta <= 0:
+                    return 0.0
+                self._reported += delta
+                return float(delta)
+        except Exception as err:              # noqa: BLE001 - never raise
+            _wd_capture("orchestrator.watchdog.spend", err, context=self.tr.id)
+            return 0.0
+
+    # -- recording --------------------------------------------------------
+    def beat(self, signal: str, amount: float = 1.0) -> None:
+        try:
+            self.lease.beat(signal, amount, spend=self.spend_delta())
+        except Exception as err:              # noqa: BLE001 - never raise
+            _wd_capture("orchestrator.watchdog.beat", err, context=str(signal))
+
+    def record(self, method: str, *args) -> None:
+        """Call one of the lease's recorder methods, swallowing any failure."""
+        try:
+            getattr(self.lease, method)(*args)
+        except Exception as err:              # noqa: BLE001 - never raise
+            _wd_capture(f"orchestrator.watchdog.{method}", err,
+                        context=self.tr.id)
+
+    def output(self, key: str, out: str) -> str:
+        """Classify one `_run_one` return as progress or not, then check.
+
+        W2-I6.1: only a real, non-sentinel specialist output is
+        `specialist_output_accepted`. A failure/skip/contract-rejection
+        sentinel is model text a verifier did NOT accept, so it is beaten as
+        `model_text` — recorded, carrying its spend, counting for nothing."""
+        if _wd_is_sentinel(out):
+            self.beat("model_text")
+        else:
+            self.beat("specialist_output_accepted")
+        self.check(f"specialist:{key}")
+        return out
+
+    # -- classification ---------------------------------------------------
+    def check(self, where: str = "") -> None:
+        """Classify the lease and honour a terminal verdict.
+
+        `observe` classifies and preserves forensics and returns; `enforce`
+        runs the full ladder inside `lease.check()` (cancel -> forensics ->
+        refuse -> release the admission slot via `release_fn` -> quarantine)
+        and leaves the lease TERMINAL, which this turns into the typed
+        `WatchdogRefusal` that cancels the run."""
+        try:
+            verdict = self.lease.check()
+            if verdict.tripped:
+                try:
+                    self.tr.event("watchdog.tripped", kind=verdict.kind,
+                                  where=where, mode=watchdog.mode(),
+                                  reason=verdict.reason[:200])
+                except Exception:            # noqa: BLE001 - never raise
+                    pass
+        except watchdog.WatchdogRefusal:
+            raise
+        except Exception as err:              # noqa: BLE001 - never raise
+            _wd_capture("orchestrator.watchdog.check", err, context=where)
+            return
+        self.lease.raise_if_terminal()        # enforce only; observe never is
+
+    def close(self, outcome: str = "ok") -> None:
+        try:
+            self.lease.close(outcome)
+        except Exception as err:              # noqa: BLE001 - never raise
+            _wd_capture("orchestrator.watchdog.close", err, context=outcome)
+
+
+def _wd_cancel_notice(err: BaseException) -> str:
+    """The user-facing text for an enforce-mode cancellation. Names the exact
+    reason and where the preserved forensics are, so a cancelled run is never a
+    silent truncation."""
+    return (f"⛔ Olympus cancelled this run — the progress watchdog refused to "
+            f"continue it: {err}\n\nForensics for this run are preserved under "
+            f"{watchdog.forensics_dir()} (they name the exact reason and the "
+            f"operator action). Set OLYMPUS_WATCHDOG=observe to classify "
+            f"without cancelling.")
+
+
+def _wd_open(tr: "trace_mod.Trace") -> "_RunWatch | None":
+    """Open the run's progress lease, or None when the watchdog is off.
+
+    This is the ONLY place a `ProgressLease` is constructed on the run path, so
+    with `OLYMPUS_WATCHDOG` unset nothing about the watchdog is touched beyond
+    one env read."""
+    try:
+        if not watchdog.enabled():
+            return None
+        return _RunWatch(tr)
+    except Exception as err:                  # noqa: BLE001 - never raise
+        _wd_capture("orchestrator.watchdog.open", err, context=getattr(
+            tr, "id", ""))
+        return None
+
+
 class Olympus:
     """Stateful conversation handler running the full pipeline.
 
@@ -272,6 +488,9 @@ class Olympus:
             memory.load_conversation(conversation_id) if conversation_id else []
         )
         self.last_run_id: str | None = None   # set by ask(); used to replay a run
+        # The current run's progress lease (W2-C6). None unless OLYMPUS_WATCHDOG
+        # is armed; opened by _pipeline, closed by _finish.
+        self._watch: "_RunWatch | None" = None
         # Interaction provider for the ask_user tool: interactive surfaces
         # install one; captured here so worker threads (which don't inherit
         # thread-locals) can re-install it. None = headless (ask_user returns
@@ -1019,6 +1238,14 @@ class Olympus:
         method safely across the dispatch ThreadPoolExecutor.
         """
         memory.set_user(self.user)  # worker threads get their own context
+        # W2-C6: the run's progress lease (None unless OLYMPUS_WATCHDOG is
+        # armed). Checked BEFORE any work starts, so a refused run — the
+        # terminal state the ladder's "refuse unsafe continuation" step
+        # produces — starts no further specialists and none of them queues for
+        # an admission slot.
+        watch = self._watch
+        if watch is not None:
+            watch.check(f"run_one.start:{key}")
         # Per-run spend ceiling (OLYMPUS_RUN_BUDGET_USD): stop dispatching NEW
         # specialists once this single run has added its per-run budget, so one
         # pathological fan-out can't drain the whole daily budget. The baseline
@@ -1039,9 +1266,10 @@ class Olympus:
                 self.report(
                     f"💸 Per-run budget reached (${usage.run_budget():.2f}); "
                     f"skipping {SPECIALISTS[key].name} to protect your bill.")
-                return (f"[Skipped {SPECIALISTS[key].name} — this run reached its "
-                        f"per-run spend ceiling. Treat this part as missing and "
-                        f"answer from the other specialists.]")
+                skipped = (f"[Skipped {SPECIALISTS[key].name} — this run reached "
+                           f"its per-run spend ceiling. Treat this part as "
+                           f"missing and answer from the other specialists.]")
+                return skipped if watch is None else watch.output(key, skipped)
         # Publish the run's Trace for this worker thread so deep actuators (the
         # egress gateway, called inside the specialist's tool loop) can record
         # into the current run's signed log without threading `tr` through the
@@ -1100,17 +1328,33 @@ class Olympus:
                     tr.event("effort.budget_capped", specialist=key,
                              denied=effort, floor=spec.effort)
                     effort = spec.effort
-                output, tool_calls = spec.run_counted(
-                    task,
-                    settings=settings_override or self.pool.for_specialist(key),
-                    effort=effort)
+                if watch is not None:
+                    # A single provider call open past the hard ceiling is
+                    # PROVIDER_HANG; the same (key, task) issued over and over
+                    # is IDENTICAL_CALLS. Both are cheap to record right here,
+                    # around the only call this funnel makes.
+                    watch.record("call_started")
+                    watch.record("record_call",
+                                 f"{key}:{hash(task) & 0xffffffff:08x}")
+                try:
+                    output, tool_calls = spec.run_counted(
+                        task,
+                        settings=settings_override or self.pool.for_specialist(key),
+                        effort=effort)
+                finally:
+                    if watch is not None:
+                        watch.record("call_finished")
             except replaystore.ReplayDivergence:
                 raise                       # never mask a replay divergence
+            except watchdog.WatchdogRefusal:
+                raise                       # a cancelled run is never a
+                                            # "specialist failed" degradation
             except Exception as err:
                 self.report(f"⚠️ {SPECIALISTS[key].name} failed: {str(err)[:120]}")
-                return (f"[{SPECIALISTS[key].name} could not complete this task: "
-                        f"{err}. Treat this part as missing and answer from the "
-                        "other specialists.]")
+                failed = (f"[{SPECIALISTS[key].name} could not complete this task: "
+                          f"{err}. Treat this part as missing and answer from the "
+                          "other specialists.]")
+                return failed if watch is None else watch.output(key, failed)
 
             # --- hard output contract (off unless enabled) ------------------
             if config.contracts_enabled():
@@ -1138,10 +1382,14 @@ class Olympus:
                     # "treat this part as missing" contract the existing
                     # exception path returns, so verify/synthesis tolerate it
                     # unchanged.
-                    return (f"[{spec.name}'s output was rejected by its output "
-                            f"contract: {reasons}. Treat this part as missing "
-                            "and answer from the other specialists.]")
-            return output
+                    rejected = (f"[{spec.name}'s output was rejected by its output "
+                                f"contract: {reasons}. Treat this part as missing "
+                                "and answer from the other specialists.]")
+                    return (rejected if watch is None
+                            else watch.output(key, rejected))
+            # The one accepted-output seam: a real specialist output that
+            # survived the contract check is `specialist_output_accepted`.
+            return output if watch is None else watch.output(key, output)
         finally:
             sandbox.reset_worker_root(wr_token)
             interaction.reset_provider(ask_prev)
@@ -1245,6 +1493,18 @@ class Olympus:
             self.report("   ☑ " + ", ".join(
                 f"{SPECIALISTS[s['specialist']].name}" for s in ready)
                 + f"  ({len(done)}/{len(by_id)} done)")
+            # W2-C6: a DAG level completing is verifiable advancement — one
+            # `plan_node_completed` per node that finished with a REAL output.
+            # A node whose output is a "this part is missing" sentinel advanced
+            # nothing (W2-I6.1), so a level of nothing-but-sentinels contributes
+            # no progress at all. Classified at the level boundary, the natural
+            # cancellation point: a run refused here dispatches no further level.
+            watch = self._watch
+            if watch is not None:
+                for _sid, _key, _out in level_results:
+                    if not _wd_is_sentinel(_out):
+                        watch.beat("plan_node_completed")
+                watch.check(f"dag.level:{level}")
 
         return outputs
 
@@ -1326,6 +1586,12 @@ class Olympus:
         # review skip, synthesis check). Recomputed each turn; on replay the
         # env is a concrete 1/0, so this reproduces the recorded value.
         self._fast_turn = config.fast_mode_for(user_message)
+        # W2-C6: open this RUN's progress lease. None (and nothing constructed)
+        # unless OLYMPUS_WATCHDOG is armed. A lease left open by a previous turn
+        # that never reached _finish is closed here rather than leaked.
+        if self._watch is not None:
+            self._watch.close("abandoned")
+        self._watch = _wd_open(tr)
         replaystore.set_run(tr.id)      # scope frozen run-state to this run
         # Record the enforcement mode as run metadata so a replay can reproduce
         # it: a run recorded with contracts ON, replayed with them OFF, would
@@ -1365,6 +1631,23 @@ class Olympus:
         # off, would hash a different per-specialist request. Record it so replay
         # reproduces the same prompt-assembly path.
         tr.meta["semantic_skills"] = semantic_skills_enabled()
+        # Wave-2 W2-PR11: measured model qualification and routing substitution
+        # both act inside `config.ModelPool.for_specialist`, i.e. they change
+        # WHICH MODEL a specialist runs on. A run recorded with either enabled,
+        # replayed with it off, would dispatch to a different member and hash a
+        # different request → spurious divergence. Record the raw flag values so
+        # `replay_run` can restore them, exactly as for the toggles above.
+        # These are plain environment reads: the decision path still never calls
+        # a Wave-2 policy module (the decision itself lives in config, behind
+        # that module's own flag).
+        tr.meta["routesub_mode"] = os.environ.get("OLYMPUS_ROUTESUB", "")
+        tr.meta["modelgrade_enabled"] = os.environ.get("OLYMPUS_MODELGRADE", "")
+        # W2-C6 flag pairing. In `enforce` the watchdog can CANCEL a run, which
+        # truncates the decision path — so, exactly like fast_mode above, the
+        # armed mode is recorded here and restored by `replay_run`. Recorded in
+        # every mode (including "off") so a trace always states what supervised
+        # it; `meta` is not part of the diffed decision path.
+        tr.meta["watchdog"] = watchdog.mode()
         with tr.span("route"):
             route = self._route(user_message)
         route_rec = tr.decision(
@@ -1431,12 +1714,19 @@ class Olympus:
                     verified, verdict = self._verify_timed(brief, outputs)
             except replaystore.ReplayDivergence:
                 raise                   # never mask a replay divergence
+            except watchdog.WatchdogRefusal:
+                raise                   # a cancelled run is not a verify failure
             except Exception as err:
                 tr.event("verify.failed", error=str(err)[:200])
                 self.report("⚠️ Verification failed; the answer will carry an "
                             "UNVERIFIED banner.")
                 verified = raw
                 verify_error = True
+            # W2-C6: a verifier ACCEPTING a response section is the archetypal
+            # progress signal (W2-I6.1) — the verifier, not the model, says so.
+            if self._watch is not None and verdict is not None:
+                self._watch.beat("response_section_verified")
+                self._watch.check("verify")
             if verdict is None and not verify_error:
                 # The verifier ran but omitted/mangled its verdict line — an
                 # infrastructure failure, handled visibly (ADR 0005).
@@ -1466,6 +1756,12 @@ class Olympus:
         if review.get("verdict") == "retry" and retry_keys:
             self.report(f"🦉 Athena orders rework: {', '.join(retry_keys)}")
             tr.event("rework", specialists=retry_keys)
+            # W2-C6: one verify->rework cycle (VERIFIER_LOOP) plus a retry per
+            # specialist the supervisor sent back (RETRY_LOOP).
+            if self._watch is not None:
+                self._watch.record("record_verify_cycle")
+                for k in retry_keys:
+                    self._watch.record("record_retry", f"rework:{k}")
             by_key = {a["specialist"]: a["task"] for a in assignments}
             prev = dict(outputs)
             redo = [
@@ -1507,6 +1803,9 @@ class Olympus:
                                                  retry_index=1))
                 except replaystore.ReplayDivergence:
                     raise               # never mask a replay divergence
+                except watchdog.WatchdogRefusal:
+                    raise               # a cancelled run is not a degraded
+                                        # rework: it stops here
                 except Exception as err:
                     # An errored quality rework keeps the first-pass outputs
                     # and proceeds — degraded immediately, no retry loop
@@ -1533,12 +1832,17 @@ class Olympus:
                     tr.event("reverify.verdict_missing")
             except replaystore.ReplayDivergence:
                 raise                   # never mask a replay divergence
+            except watchdog.WatchdogRefusal:
+                raise                   # a cancelled run is not a verify failure
             except Exception as err:
                 tr.event("reverify.failed", error=str(err)[:200])
                 verified = "\n\n".join(
                     f"### {SPECIALISTS[k].name}\n{v}" for k, v in outputs)
                 verdict = None
                 verify_error = True
+            if self._watch is not None and verdict is not None:
+                self._watch.beat("response_section_verified")
+                self._watch.check("reverify")
 
             # DEFERRED #4: the rework is now RE-REVIEWED once (bounded — Athena
             # never loops beyond this second pass). This closes the one-shot gap
@@ -1624,6 +1928,11 @@ class Olympus:
             pass
 
     def _finish(self, user_message: str, reply: str) -> None:
+        # W2-C6: the run ended — close its progress lease (a no-op when the
+        # watchdog is off, since no lease was ever opened).
+        if self._watch is not None:
+            self._watch.close("ok")
+            self._watch = None
         self.history.append({"role": "user", "content": user_message})
         self.history.append({"role": "assistant", "content": reply})
         self._maybe_compact()
@@ -1863,7 +2172,14 @@ class Olympus:
         try:
             with tr.span("synthesize"):
                 reply = self._synthesize(user_message, brief, result)
+            # W2-C6: a bounded generation that COMPLETED. Not "tokens arrived"
+            # (that is never progress, W2-I6.1) — the generation finished
+            # within its bound, which is a verifiable advancement.
+            if self._watch is not None:
+                self._watch.beat("tokens_generated_bounded")
         except replaystore.ReplayDivergence:
+            raise
+        except watchdog.WatchdogRefusal:
             raise
         except Exception as err:
             # The final compose failed (e.g. a provider error). Don't crash —
@@ -1911,6 +2227,12 @@ class Olympus:
                 reply = state["reply"]
             else:
                 reply = self._compute_reply(user_message, tr)
+        except watchdog.WatchdogRefusal as err:
+            # W2-C6 enforce: the progress watchdog cancelled this run. The
+            # ladder has already preserved forensics and released the admission
+            # slot; surface the refusal (with the operator action) instead of
+            # letting a typed cancellation escape as a traceback.
+            reply = _wd_cancel_notice(err)
         finally:
             steering.reset(steer_token)
             tr.flush()
@@ -1945,7 +2267,15 @@ class Olympus:
         steer_token = steering.set_current(
             self.conversation_id or f"user-{self.user}")
         try:
-            mode, brief, result = self._pipeline(user_message, tr)
+            try:
+                mode, brief, result = self._pipeline(user_message, tr)
+            except watchdog.WatchdogRefusal as err:
+                # W2-C6 enforce: cancelled mid-run. Disclose it rather than
+                # streaming a truncated answer (the same doctrine as W2-I8.3).
+                notice = _wd_cancel_notice(err)
+                yield notice
+                self._finish(user_message, notice)
+                return
             if mode in ("direct", "clarify"):
                 yield result
                 self._finish(user_message, result)
@@ -2061,7 +2391,10 @@ class Olympus:
         tr = trace_mod.Trace("ask_ephemeral", self.user)
         tr.meta = {"input": question, "conversation_id": None}
         try:
-            mode, brief, result = self._pipeline(question, tr)
+            try:
+                mode, brief, result = self._pipeline(question, tr)
+            except watchdog.WatchdogRefusal as err:
+                return _wd_cancel_notice(err)   # cancelled, never a traceback
             if mode in ("direct", "clarify"):
                 return result
             try:
@@ -2357,6 +2690,23 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
     prev_semskills = os.environ.get("OLYMPUS_SEMANTIC_SKILLS")
     os.environ["OLYMPUS_SEMANTIC_SKILLS"] = \
         "1" if _meta.get("semantic_skills") else "0"
+    # Wave-2 W2-PR11: routing substitution and measured qualification select the
+    # MODEL a specialist runs on, so reproduce the recorded flag values or a
+    # substituted run replays on a different member and diverges. The raw string
+    # is restored (not a normalised 1/0) because both flags are multi-valued
+    # (`off|shadow|on`). Absent from pre-Wave-2 traces ⇒ "" ⇒ off, so older runs
+    # replay exactly as before.
+    prev_routesub = os.environ.get("OLYMPUS_ROUTESUB")
+    prev_modelgrade = os.environ.get("OLYMPUS_MODELGRADE")
+    os.environ["OLYMPUS_ROUTESUB"] = str(_meta.get("routesub_mode", "") or "")
+    os.environ["OLYMPUS_MODELGRADE"] = str(
+        _meta.get("modelgrade_enabled", "") or "")
+    # W2-C6: in `enforce` the progress watchdog can CANCEL a run, truncating the
+    # decision path — so a run recorded under enforce, replayed with the
+    # watchdog off, would carry on past the cancellation and diverge. Reproduce
+    # the recorded mode (absent ⇒ "off", so pre-Wave-2 traces replay unchanged).
+    prev_watchdog = os.environ.get("OLYMPUS_WATCHDOG")
+    os.environ["OLYMPUS_WATCHDOG"] = str(_meta.get("watchdog", "") or "off")
     try:
         bot = Olympus(user=original.get("user", "shared"), pool=pool)
         # Restore the conversation history AS OF run start so _route hashes the
@@ -2393,6 +2743,18 @@ def replay_run(run_id: str) -> tuple[dict, "trace_mod.Trace", list[dict]]:
             os.environ.pop("OLYMPUS_SEMANTIC_SKILLS", None)
         else:
             os.environ["OLYMPUS_SEMANTIC_SKILLS"] = prev_semskills
+        if prev_routesub is None:
+            os.environ.pop("OLYMPUS_ROUTESUB", None)
+        else:
+            os.environ["OLYMPUS_ROUTESUB"] = prev_routesub
+        if prev_modelgrade is None:
+            os.environ.pop("OLYMPUS_MODELGRADE", None)
+        else:
+            os.environ["OLYMPUS_MODELGRADE"] = prev_modelgrade
+        if prev_watchdog is None:
+            os.environ.pop("OLYMPUS_WATCHDOG", None)
+        else:
+            os.environ["OLYMPUS_WATCHDOG"] = prev_watchdog
         if prev is None:
             os.environ.pop("OLYMPUS_REPLAY", None)
         else:

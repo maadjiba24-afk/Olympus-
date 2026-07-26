@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import (accounts, actions, builtin_actions, config, metrics,  # noqa: F401
-               openai_server, orchestrator, usage)
+               openai_server, orchestrator, streamguard, usage)
 
 
 def _user_for(sid: str) -> str:
@@ -2307,6 +2307,61 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    # --- C8 degenerate-stream defense at the HTTP egress seam (W2-PR14) ---
+    #
+    # `llm.stream_text` already guards the ANTHROPIC provider stream. These two
+    # handlers are the last seam before bytes leave the process, and they see
+    # every streamed answer regardless of which provider produced it — including
+    # the non-Anthropic branch of `orchestrator._synthesize_stream`, which has
+    # no provider-level guard at all. Wiring here is therefore not a duplicate:
+    # it is the only place a degenerate stream from any other backend can be
+    # stopped before the client reads it as a finished reply.
+    #
+    # What this seam carries is TEXT — the council yields answer fragments, not
+    # provider events — so the text detectors (token loop, empty progress,
+    # whitespace flood, invalid unicode) are what run here. The event-order,
+    # tool-delta and usage detectors need provider events, which this seam
+    # genuinely does not have; they are reached at the `openai_compat`
+    # response-parse seam instead. Saying so is the point: a guard wired where
+    # the information isn't would be theatre.
+
+    def _guarded_pieces(self, pieces, *, model: str):
+        """Yield the council's answer fragments through a C8 monitor.
+
+        Flag off ⇒ `monitor()` returns an inert NullMonitor whose `feed()`
+        cannot raise, so this generator yields exactly the fragments it was
+        given, in order, and the response is byte-identical to the unwired one
+        (A17 rollback).
+
+        On a trip the offending fragment is NOT written (it is fed before it is
+        yielded), the pathology is recorded as provider-decay evidence, and a
+        DISCLOSURE fragment is yielded in its place before the stream ends —
+        the user gets a reply that says it is unfinished, never a truncated one
+        that looks complete (W2-I8.3)."""
+        guard = streamguard.monitor(provider="olympus-web", model=model)
+        for piece in pieces:
+            try:
+                guard.feed(piece)
+            except streamguard.StreamPathology as exc:
+                yield self._disclose_stream_abort(guard, exc, model)
+                return
+            yield piece
+
+    @staticmethod
+    def _disclose_stream_abort(guard, exc, model: str) -> str:
+        """Record the pathology and render the user-visible notice. Mirrors the
+        wording committed in `orchestrator._synthesize_stream` so one abort
+        reads the same on every channel. Evidence writing never raises."""
+        kind = getattr(exc, "kind", "pathology")
+        try:
+            streamguard.record_pathology(streamguard.pathology_record(
+                guard, exc, provider="olympus-web", model=model))
+        except Exception:                 # noqa: BLE001 — evidence is best-effort
+            pass
+        return ("\n\n[Response incomplete: the output stream was aborted by "
+                f"the degenerate-stream guard ({kind}). The text above is "
+                "unfinished and unverified.]")
+
     def _stream_v1(self, bot, prompt: str, model: str) -> None:
         from . import witness
         self.send_response(200)
@@ -2317,7 +2372,11 @@ class Handler(BaseHTTPRequestHandler):
         # (use /api/status or a non-streaming request to obtain it).
         self.send_header("X-Olympus-Audit", "signed-" + witness.posture())
         self.end_headers()
-        pieces = bot.ask_stream(prompt)
+        # Guarding the PIECES (not the SSE frames) keeps the envelope
+        # well-formed: a disclosure is just another content delta, so the stop
+        # frame and the `[DONE]` terminator still close the stream and no client
+        # sees a half-written event.
+        pieces = self._guarded_pieces(bot.ask_stream(prompt), model=model)
         for frame in openai_server.stream_events(pieces, model):
             self.wfile.write(frame.encode("utf-8"))
             self.wfile.flush()
@@ -2327,7 +2386,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        for chunk in bot.ask_stream(message):
+        for chunk in self._guarded_pieces(bot.ask_stream(message),
+                                          model="council"):
             if chunk:
                 self.wfile.write(chunk.encode("utf-8"))
                 self.wfile.flush()

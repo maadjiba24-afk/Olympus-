@@ -59,11 +59,17 @@ threshold is env-overridable. The PROVISIONAL set is exactly:
     OLYMPUS_WATCHDOG_VERIFY_CYCLE_MAX, OLYMPUS_WATCHDOG_PROGRESS_FREE_USD,
     OLYMPUS_WATCHDOG_QUEUE_WAIT_SECS.
 
-SCOPE. This PR ships the LIBRARY ONLY. Nothing in the orchestrator, heartbeat,
-usage, doctor or cli calls it — wiring (`heartbeat` supervision, admission-slot
-release in `usage.slot`, `olympus jobs`) is a later PR. Shipping it inert is
-deliberate: a component with cancel authority earns its wiring only after its
-false-positive rate is measured.
+SCOPE. WIRED (W2-PR13) into the two live seams that can wedge:
+`orchestrator._pipeline` opens one lease per RUN (fed `plan_node_completed`,
+`specialist_output_accepted`, `response_section_verified`,
+`tokens_generated_bounded`, and spend measured against the run's budget
+baseline), and `heartbeat.tick` opens one lease per JOB — the serial loop this
+module was written for. `usage.slot` still knows nothing about leases: slot
+release stays the caller's contract, injected as `release_fn`. Still NOT wired:
+`doctor` and `cli`. The wiring changes nothing at the shipped default, because
+the default mode is `off` and a lease is only ever constructed when the flag is
+armed: a component with cancel authority earns `enforce` only after Phase-4
+measures its false-positive rate.
 """
 
 from __future__ import annotations
@@ -1104,4 +1110,7 @@ def status() -> dict:
             "non_progress_signals": list(NON_PROGRESS_SIGNALS),
             "detections": list(DETECTION_KINDS),
             "thresholds": thresholds(),
-            "wired": False}
+            # W2-PR13: wired into the live path (orchestrator run leases +
+            # heartbeat job leases). Inert at the default mode regardless.
+            "wired": True,
+            "wired_seams": ["orchestrator._pipeline", "heartbeat.tick"]}

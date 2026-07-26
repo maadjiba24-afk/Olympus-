@@ -75,13 +75,79 @@ def test_orchestrator_decision_path_does_not_consult_wave2_policy():
     """The routing/planning/verification seams must not call Wave-2 policy while
     it is disabled. streamguard is the one deliberate exception: the orchestrator
     catches its exception type for disclosure (W2-I8.3), which is unreachable
-    when the guard is off."""
+    when the guard is off.
+
+    Scope note (W2-PR11). The orchestrator may NAME a Wave-2 flag — its
+    `OLYMPUS_*` environment string and the `tr.meta` key that records it — in the
+    run-metadata and `replay_run` reproduction lists. Any flag that can change
+    the decision path MUST be paired into both, or a replay of a run made with
+    that flag on diverges; that pairing is a plain `os.environ` read, and a
+    string is not a call. What stays forbidden is what this gate is actually
+    about: importing or invoking a Wave-2 policy module from the decision path.
+    The substitution/qualification decision itself lives in
+    `config.ModelPool.for_specialist`, behind each module's own default-off flag.
+
+    Scope note (W2-PR13). `watchdog` has been REMOVED from the list below,
+    honestly and deliberately: its evidence gate (A9) is now closed on the live
+    path, so the orchestrator legitimately imports it and opens one progress
+    lease per run. Textual absence was only ever a proxy for the real
+    invariant, and for a wired capability the proxy is simply wrong. The
+    invariant itself — *Wave-2 policy is not consulted while DISABLED* — is
+    unchanged and is now asserted directly, on behaviour rather than on source
+    text, by `test_disabled_watchdog_is_never_consulted` below (and in full, on
+    a complete run, by tests/test_watchdog_wiring.py).
+    """
     src = Path(config.__file__).with_name("orchestrator.py").read_text()
-    for name in ("modelgrade", "ctxheat", "routesub", "watchdog"):
-        assert name not in src, (
-            f"orchestrator references {name}; Wave-2 policy must stay unwired "
-            "until its evidence gate passes")
+    for name in ("modelgrade", "ctxheat", "routesub"):
+        for call in (f"import {name}", f"from .{name}", f"{name}."):
+            assert call not in src, (
+                f"orchestrator uses {name} ({call!r}); Wave-2 policy must stay "
+                "unwired from the decision path until its evidence gate passes")
     assert "streamguard.StreamPathology" in src
+
+
+def test_disabled_watchdog_is_never_consulted(monkeypatch):
+    """The wired capability, stated as the invariant that survives wiring.
+
+    With `OLYMPUS_WATCHDOG` at its shipped default the orchestrator and the
+    heartbeat must not build a lease, classify anything or write a byte —
+    proved by replacing `ProgressLease` with a constructor that raises, which
+    turns any consultation into a hard failure rather than a silent one."""
+    from olympus import heartbeat, orchestrator, trace
+
+    monkeypatch.delenv("OLYMPUS_WATCHDOG", raising=False)
+    monkeypatch.setattr(watchdog, "ProgressLease", _exploding_lease)
+
+    assert watchdog.mode() == "off"
+    assert orchestrator._wd_open(trace.Trace("chat", "shared")) is None
+    assert heartbeat._watch_job("probe", lambda: "ran") == "ran"
+    assert not watchdog.forensics_dir().exists()
+
+
+def _exploding_lease(*a, **kw):
+    raise AssertionError("a disabled watchdog was consulted")
+
+
+def test_wave2_routing_flags_are_paired_into_meta_and_replay():
+    """The flag-pairing invariant for the Wave-2 capabilities that ARE wired.
+
+    `OLYMPUS_ROUTESUB` / `OLYMPUS_MODELGRADE` alter which model a specialist
+    runs on, and `OLYMPUS_WATCHDOG=enforce` can cancel a run outright and so
+    truncate its decision path — all three therefore belong in `tr.meta` AND in
+    `replay_run`'s env reproduction. Rollback depends on the pair: a run
+    recorded with substitution on must replay against the same routing, a run
+    recorded under enforce must replay under enforce, and a run recorded with
+    any of them off must not pick up a later operator's flag."""
+    src = Path(config.__file__).with_name("orchestrator.py").read_text()
+    meta, replay = src.split("def replay_run(", 1)
+    for flag, key in (("OLYMPUS_ROUTESUB", "routesub_mode"),
+                      ("OLYMPUS_MODELGRADE", "modelgrade_enabled"),
+                      ("OLYMPUS_WATCHDOG", "watchdog")):
+        assert f'tr.meta["{key}"]' in meta, f"{flag} not recorded in tr.meta"
+        assert flag in meta, f"{flag} not read into run metadata"
+        assert flag in replay, f"{flag} not reproduced by replay_run"
+        assert f'_meta.get("{key}"' in replay, (
+            f"replay_run does not restore {flag} from the recorded meta")
 
 
 def test_every_wave2_flag_is_registered_in_experiments():
