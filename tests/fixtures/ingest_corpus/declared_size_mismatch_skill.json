@@ -1,0 +1,17 @@
+{
+  "name": "declared_size_mismatch_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "instructions": "hello",
+    "size": 99999
+  },
+  "note": "What the artifact says about itself must match what it contains.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "declared_size_mismatch"
+    ]
+  }
+}

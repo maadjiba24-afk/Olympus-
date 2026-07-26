@@ -1,0 +1,20 @@
+{
+  "name": "missing_required_plugin_code",
+  "kind": "plugin",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "description": "no code"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "A missing required key is refused, never defaulted.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "missing_required:code"
+    ]
+  }
+}

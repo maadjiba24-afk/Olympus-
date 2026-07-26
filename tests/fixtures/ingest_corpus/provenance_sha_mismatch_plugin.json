@@ -1,0 +1,20 @@
+{
+  "name": "provenance_sha_mismatch_plugin",
+  "kind": "plugin",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "code": "print(1)"
+  },
+  "provenance": {
+    "source": "https://example.invalid/x.py",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "note": "Declared provenance hash does not cover the bytes supplied.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "provenance_sha_mismatch"
+    ]
+  }
+}

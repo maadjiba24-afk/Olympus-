@@ -1,0 +1,23 @@
+{
+  "name": "provenance_incomplete_policy_file",
+  "kind": "policy_file",
+  "payload": {
+    "version": "1.0",
+    "name": "egress",
+    "rules": [
+      {
+        "allow": "loopback"
+      }
+    ]
+  },
+  "provenance": {
+    "source": "https://example.invalid/policy.json"
+  },
+  "note": "Provenance without a hash proves nothing.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "provenance_incomplete:sha256"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "valid_session_import",
+  "kind": "session_import",
+  "payload": {
+    "version": "1.0",
+    "session_id": "run-2026-07-26-a",
+    "messages": [
+      {
+        "role": "user",
+        "content": "hello"
+      }
+    ]
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

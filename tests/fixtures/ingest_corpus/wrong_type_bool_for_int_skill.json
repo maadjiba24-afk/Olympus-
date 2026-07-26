@@ -1,0 +1,17 @@
+{
+  "name": "wrong_type_bool_for_int_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "instructions": "hi",
+    "size": true
+  },
+  "note": "bool is a subclass of int in Python; the gate does not accept it.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "wrong_type:size"
+    ]
+  }
+}

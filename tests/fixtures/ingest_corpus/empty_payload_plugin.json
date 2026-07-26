@@ -1,0 +1,16 @@
+{
+  "name": "empty_payload_plugin",
+  "kind": "plugin",
+  "payload_text": "",
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "Omission is a failure mode, not an empty success.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "empty_payload"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "duplicate_keys_skill",
+  "kind": "skill",
+  "payload_text": "{\"version\":\"1.0\",\"name\":\"a\",\"name\":\"b\",\"instructions\":\"hi\"}",
+  "note": "json.loads silently keeps the last duplicate; the gate refuses.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "duplicate_keys"
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "provenance_missing_memory_import",
+  "kind": "memory_import",
+  "payload": {
+    "version": "1.0",
+    "entries": [
+      {
+        "kind": "lesson",
+        "text": "trust nothing"
+      }
+    ]
+  },
+  "note": "Durable beliefs require provenance; absence is a refusal.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "provenance_missing"
+    ]
+  }
+}

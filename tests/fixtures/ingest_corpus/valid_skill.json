@@ -1,0 +1,17 @@
+{
+  "name": "valid_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "1.0",
+    "name": "summarize",
+    "instructions": "Summarize the input in three bullets.",
+    "description": "terse summaries",
+    "tags": [
+      "writing"
+    ]
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "valid_eval_corpus",
+  "kind": "eval_corpus",
+  "payload": {
+    "version": "1.0",
+    "name": "regression",
+    "cases": [
+      {
+        "prompt": "two plus two",
+        "expect": "four"
+      }
+    ],
+    "description": "a small regression corpus"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "unknown_major_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "9.0",
+    "name": "x",
+    "instructions": "hi"
+  },
+  "note": "An unknown MAJOR is refused, never best-effort parsed.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "unknown_major_version"
+    ]
+  }
+}

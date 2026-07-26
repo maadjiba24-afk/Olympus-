@@ -1,0 +1,21 @@
+{
+  "name": "depth_bomb_config_bundle",
+  "kind": "config_bundle",
+  "payload_build": {
+    "op": "nest",
+    "depth": 60,
+    "prefix": "{\"version\":\"1.0\",\"settings\":",
+    "suffix": "}"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "Bounds before parse: json.loads would RecursionError on this.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "max_depth_exceeded"
+    ]
+  }
+}

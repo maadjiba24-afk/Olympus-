@@ -1,0 +1,16 @@
+{
+  "name": "wrong_type_skill_instructions",
+  "kind": "skill",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "instructions": 123
+  },
+  "note": "A wrong type is refused, never coerced to str.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "wrong_type:instructions"
+    ]
+  }
+}

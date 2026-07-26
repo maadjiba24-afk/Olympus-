@@ -1,0 +1,16 @@
+{
+  "name": "non_json_policy_file",
+  "kind": "policy_file",
+  "payload_text": "rules:\n  - allow: all\n",
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "A durable policy that will not parse is refused, never guessed at.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "invalid_json"
+    ]
+  }
+}

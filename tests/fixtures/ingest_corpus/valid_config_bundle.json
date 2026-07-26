@@ -1,0 +1,19 @@
+{
+  "name": "valid_config_bundle",
+  "kind": "config_bundle",
+  "payload": {
+    "version": "1.0",
+    "name": "hardening",
+    "settings": {
+      "OLYMPUS_INGESTGATE": "1"
+    }
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

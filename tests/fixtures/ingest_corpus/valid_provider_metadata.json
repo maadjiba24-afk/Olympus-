@@ -1,0 +1,16 @@
+{
+  "name": "valid_provider_metadata",
+  "kind": "provider_metadata",
+  "payload": {
+    "version": "1.0",
+    "provider": "demo",
+    "models": [
+      "demo-small",
+      "demo-large"
+    ]
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

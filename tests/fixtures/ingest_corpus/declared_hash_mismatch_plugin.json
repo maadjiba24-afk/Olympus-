@@ -1,0 +1,21 @@
+{
+  "name": "declared_hash_mismatch_plugin",
+  "kind": "plugin",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "code": "print(1)",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "Declared-vs-actual cross-check (Colibri's numel*esize analogue).",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "declared_hash_mismatch"
+    ]
+  }
+}

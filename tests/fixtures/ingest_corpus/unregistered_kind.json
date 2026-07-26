@@ -1,0 +1,16 @@
+{
+  "name": "unregistered_kind",
+  "kind": "spellbook",
+  "payload": {
+    "version": "1.0",
+    "name": "fireball",
+    "code": "boom"
+  },
+  "note": "W2-I5.1: a kind nobody registered is REFUSED, not passed through.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "unregistered_kind"
+    ]
+  }
+}

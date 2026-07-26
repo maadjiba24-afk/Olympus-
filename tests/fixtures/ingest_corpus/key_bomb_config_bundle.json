@@ -1,0 +1,24 @@
+{
+  "name": "key_bomb_config_bundle",
+  "kind": "config_bundle",
+  "payload_build": {
+    "op": "keys",
+    "base": {
+      "version": "1.0",
+      "settings": {}
+    },
+    "field": "settings",
+    "count": 5000
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "Key count is bounded independently of the byte cap.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "too_many_keys"
+    ]
+  }
+}

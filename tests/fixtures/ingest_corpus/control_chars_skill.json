@@ -1,0 +1,12 @@
+{
+  "name": "control_chars_skill",
+  "kind": "skill",
+  "payload_text": "{\"version\":\"1.0\",\"name\":\"x\",\"instructions\":\"a\u0007b\"}",
+  "note": "C0 control characters (other than TAB/LF/CR) are refused.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "control_chars"
+    ]
+  }
+}
