@@ -626,6 +626,52 @@ def export_memory(out_path, *, user: str | None = None, all_users: bool = False,
     return manifest
 
 
+def _gate_import(manifest: dict, origin: str) -> None:
+    """Run an export manifest through the persistent-artifact ingestion gate
+    (W2-C5) BEFORE a single restored byte is written.
+
+    A restored archive is durable belief: kind `memory_import`, persistent,
+    reject-never-repair. The manifest is the artifact — it is what names every
+    file, its size and its hash — so gating it gates the restore. Provenance is
+    required for this kind; a local archive carries no publisher attestation,
+    so the record binds the artifact-as-read to the archive path (which the
+    gate's source-safety rules then check), while the per-file sha256s inside
+    `entries` remain what the restore loop verifies file by file.
+
+    Raises ValueError — import_memory's existing refusal vocabulary. Because it
+    runs before the restore loop, a refusal leaves MEMORY_DIR untouched.
+
+    Inert while `OLYMPUS_INGESTGATE` is off: the gate is not consulted at all.
+    """
+    from . import ingestgate
+    if not ingestgate.enabled():
+        return
+    version = manifest.get("schema_version")
+    artifact = {
+        "version": version if isinstance(version, str) else str(version),
+        "entries": manifest.get("files"),
+        "origin": str(origin),
+    }
+    scope = manifest.get("scope")
+    if isinstance(scope, dict) and isinstance(scope.get("user"), str):
+        artifact["user"] = scope["user"]
+    try:
+        prov_sha = ingestgate.payload_sha256(artifact)
+    except Exception:            # unserializable manifest — check() refuses it
+        prov_sha = ""
+    provenance = {"source": str(origin), "sha256": prov_sha}
+    try:
+        ingestgate.check("memory_import", artifact, source=str(origin),
+                         provenance=provenance)
+    except ingestgate.IngestRefused as refusal:
+        ref = (f"; evidence {refusal.evidence_ref}"
+               if refusal.evidence_ref else "")
+        raise ValueError(
+            "the ingestion gate refused this memory export "
+            f"({'; '.join(refusal.reasons)}{ref}). "
+            "Nothing was restored.") from refusal
+
+
 def import_memory(archive, *, overwrite: bool = True) -> dict:
     """Restore a memory export into MEMORY_DIR. Validates the manifest's
     schema_version and REFUSES an unknown one (raises ValueError) rather than
@@ -647,6 +693,7 @@ def import_memory(archive, *, overwrite: bool = True) -> dict:
                 f"refusing to import unknown schema_version {version!r} "
                 f"(this build supports {sorted(SUPPORTED_ARCHIVE_VERSIONS)}). "
                 "Upgrade Olympus, or migrate the archive first.")
+        _gate_import(manifest, str(archive))     # W2-C5, before any restore
         restored, verified = [], 0
         for entry in manifest.get("files", []):
             rel = entry["path"]

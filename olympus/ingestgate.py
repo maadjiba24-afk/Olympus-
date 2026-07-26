@@ -37,9 +37,18 @@ invariant `canonical_bytes(check(k, p)) == canonical_bytes(canonicalize(k, p))`
 is what makes the absence of repair *testable* rather than aspirational.
 
 **Enforcement flag.** `OLYMPUS_INGESTGATE` (default OFF). While off, `check()`
-is a pass-through that records nothing and refuses nothing, so call sites
-can be wired in a separate PR before enforcement is switched on. This PR
-delivers the gate, the corpus and the tests only — no call site is wired yet.
+is a pass-through that records nothing and refuses nothing, so the wiring below
+is inert until enforcement is switched on.
+
+**Wired call sites** (W2-PR12): `skillpack.import_file` / `_import_text` and the
+curated packs (kind `skill`, whole-pack validation so a poisoned entry installs
+nothing); `pluginstore.install` (kind `plugin`, the operator's pinned sha256 is
+handed over as the declared hash so this gate does the verification);
+`mcp_client.call` / `discover` (kind `mcp_payload`, the EPHEMERAL route —
+`sanitize_ephemeral` then `assert_schema`, never the durable path); and
+`memory.import_memory` (kind `memory_import`, gated on the export manifest before
+the restore loop). Every gate sits before the first side effect, so a refusal
+leaves no partial state.
 """
 
 from __future__ import annotations

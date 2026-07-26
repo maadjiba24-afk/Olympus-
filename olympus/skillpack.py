@@ -36,19 +36,25 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def parse_skill_md(text: str) -> dict:
-    """Normalize a SKILL.md into {name, description, instructions, specialist}."""
+    """Normalize a SKILL.md into {name, description, instructions, specialist,
+    version}. `version` carries the frontmatter's declared version through to
+    the ingestion gate untouched (absent => the caller's envelope version)."""
     meta, body = _parse_frontmatter(text)
     name = meta.get("name", "")
     description = meta.get("description", "")
     specialist = meta.get("specialist") or None
+    version = meta.get("version") or None
     instructions = body
     if not name:                       # fall back to a leading '# Heading'
         for line in body.splitlines():
             if line.startswith("# "):
                 name = line[2:].strip()
                 break
-    return {"name": name or "imported-skill", "description": description,
-            "instructions": instructions, "specialist": specialist}
+    out = {"name": name or "imported-skill", "description": description,
+           "instructions": instructions, "specialist": specialist}
+    if version is not None:
+        out["version"] = version
+    return out
 
 
 def to_skill_md(name: str) -> str:
@@ -107,6 +113,53 @@ def scan_reason(parsed: dict) -> str | None:
     return None
 
 
+def gate_reason(parsed: dict, origin: str = "") -> str | None:
+    """Run a candidate skill through the persistent-artifact ingestion gate
+    (W2-C5) and return a refusal reason, or None when it passes.
+
+    A skill is durable agent *instructions* written to disk and replayed into
+    every future run, so it is a PERSISTENT artifact: reject-never-repair. The
+    envelope handed to the gate carries the parsed fields with their original
+    types — a wrong type or a malformed frontmatter version must be REFUSED
+    here, never coerced. Only `version` is supplied by this call site when the
+    file declares none (SKILL.md has no mandatory version field), and that is
+    the envelope's version, not a repair of the artifact.
+
+    Inert while `OLYMPUS_INGESTGATE` is off: the gate is not consulted at all.
+    """
+    from . import ingestgate
+    if not ingestgate.enabled():
+        return None
+    artifact = {
+        "version": parsed.get("version", "1"),
+        "name": parsed.get("name"),
+        "instructions": parsed.get("instructions"),
+    }
+    if parsed.get("description") is not None:
+        artifact["description"] = parsed.get("description")
+    try:
+        ingestgate.check("skill", artifact, source=str(origin or ""))
+    except ingestgate.IngestRefused as refusal:
+        ref = (f" [evidence {refusal.evidence_ref}]"
+               if refusal.evidence_ref else "")
+        return ("the ingestion gate refused it: "
+                f"{'; '.join(refusal.reasons)}{ref}")
+    return None
+
+
+def _pack_refusal(pack, label: str) -> str | None:
+    """Gate an ENTIRE curated pack before any of it is installed. A pack is
+    installed all-or-nothing: one refused skill means nothing is written, so a
+    refusal can never leave a half-installed pack behind."""
+    for entry in pack:
+        reason = gate_reason(entry, f"{label}:{entry.get('name')}")
+        if reason:
+            return (f"Error: refused to install the {label} — "
+                    f"'{entry.get('name')}' failed the gate: {reason}. "
+                    "Nothing was installed.")
+    return None
+
+
 def import_file(path: str, *, provisional: bool = False) -> str:
     """Import a SKILL.md (or a directory containing one) into the Olympus
     library. Imported skills are permanent by default (they're curated); pass
@@ -131,6 +184,10 @@ def import_file(path: str, *, provisional: bool = False) -> str:
     if reason:
         return (f"Error: refused to import '{parsed.get('name') or p.name}' — "
                 f"{reason}.")
+    gated = gate_reason(parsed, str(p))
+    if gated:
+        return (f"Error: refused to import '{parsed.get('name') or p.name}' — "
+                f"{gated}.")
     return skills.create(parsed["name"], parsed["description"],
                          parsed["instructions"],
                          specialist=parsed["specialist"],
@@ -184,6 +241,12 @@ def _import_text(text: str, origin: str, *, provisional: bool) -> str:
     if reason:
         return (f"Error: refused to import '{parsed.get('name') or origin}' — "
                 f"{reason}.")
+    # W2-C5: the remote/tarball path is the fetched-artifact boundary — gate it
+    # BEFORE the skill becomes a live object on disk.
+    gated = gate_reason(parsed, origin)
+    if gated:
+        return (f"Error: refused to import '{parsed.get('name') or origin}' — "
+                f"{gated}.")
     return skills.create(parsed["name"], parsed["description"],
                          parsed["instructions"],
                          specialist=parsed["specialist"],
@@ -316,6 +379,9 @@ STARTER_PACK: tuple[dict, ...] = (
 
 def install_starter_pack() -> list[str]:
     """Install the curated starter skills (PROVISIONAL). Returns messages."""
+    refusal = _pack_refusal(STARTER_PACK, "starter pack")
+    if refusal:
+        return [refusal]
     out = []
     for s in STARTER_PACK:
         out.append(skills.create(s["name"], s["description"], s["instructions"],
@@ -488,6 +554,9 @@ SECURITY_PACK: tuple[dict, ...] = (
 def install_security_pack() -> list[str]:
     """Install the curated Aegis security-methodology skills (PROVISIONAL,
     Aegis-scoped). Read-only knowledge — no tool is granted. Returns messages."""
+    refusal = _pack_refusal(SECURITY_PACK, "security pack")
+    if refusal:
+        return [refusal]
     out = []
     for s in SECURITY_PACK:
         out.append(skills.create(s["name"], s["description"], s["instructions"],
