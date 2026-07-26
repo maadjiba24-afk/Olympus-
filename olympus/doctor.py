@@ -191,6 +191,29 @@ def _cache_checks() -> list[Check]:
     return [Check("prompt cache", OK, "no cache telemetry yet")]
 
 
+def _drift_checks() -> list[Check]:
+    """Provider-drift freeze markers (C6): a member the drift gate froze because
+    the pinned model regressed or started erroring. FAIL if any member is at
+    severity `block` (a verify/refusal regression); WARN if any freeze/quarantine
+    marker is present; OK otherwise. Markers are files — deleting one unfreezes."""
+    from . import modelgate
+    try:
+        frozen = modelgate.frozen_members()
+    except Exception:
+        return []
+    if not frozen:
+        return [Check("provider drift", OK, "no frozen members")]
+    blocked = [m for m, v in frozen.items() if v.get("severity") == "block"]
+    summary = ", ".join(f"{m}:{v.get('severity')}" for m, v in sorted(
+        frozen.items()))
+    if blocked:
+        return [Check("provider drift", FAIL,
+                      f"{len(frozen)} frozen ({summary}) — a pinned model "
+                      "regressed on verify/refusal; investigate or unfreeze")]
+    return [Check("provider drift", WARN,
+                  f"{len(frozen)} frozen: {summary}")]
+
+
 def run_checks() -> list[Check]:
     checks: list[Check] = []
     checks += _provider_checks()
@@ -199,6 +222,7 @@ def run_checks() -> list[Check]:
     checks += _optional_checks()
     checks += _repair_checks()
     checks += _cache_checks()
+    checks += _drift_checks()
     return checks
 
 

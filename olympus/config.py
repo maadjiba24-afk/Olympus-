@@ -697,6 +697,17 @@ def run_budget_usd() -> float:
     except (TypeError, ValueError):
         return 0.0
 
+
+# Provider-drift gate (C6): hard per-run spend ceiling for one drift-corpus run.
+# Enforced by cost accumulation inside `modelgate.run_gate` — the run stops
+# mid-corpus rather than overrun (I-M1). Read live so a session can arm/adjust it.
+def drift_budget_usd() -> float:
+    try:
+        return max(0.0, float(
+            os.environ.get("OLYMPUS_DRIFT_BUDGET_USD", "1.0") or 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
 # Heartbeat cadence (seconds).
 HEARTBEAT_TICK = 60                  # main loop resolution
 OPPORTUNITY_SCAN_EVERY = 6 * 3600    # Argus scans the world every 6 hours
@@ -765,6 +776,11 @@ MAINTENANCE_EVERY = 86400            # housekeeping sweep cadence
 # this cadence and escalates if a live run no longer replays byte-identically.
 # It makes a few real model calls (budget-guarded); 0 disables it.
 REPLAY_GATE_EVERY = int(os.environ.get("OLYMPUS_REPLAY_GATE_EVERY", str(7 * 86400)))
+
+# Provider-drift regression gate (C6): the heartbeat runs the keyed drift corpus
+# on this cadence, budget-guarded, and freezes members that regress. Default 0 =
+# OFF (no uncontrolled job family; CLI/CI invocation stays explicit — I-M4).
+DRIFT_GATE_EVERY = int(os.environ.get("OLYMPUS_DRIFT_GATE_EVERY", "0") or 0)
 
 # Off-droplet data backups: the heartbeat archives MEMORY_DIR (user memory,
 # accounts, encrypted OAuth tokens, the signed decision log), encrypts and signs

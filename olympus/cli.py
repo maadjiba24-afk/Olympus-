@@ -672,8 +672,13 @@ def build_parser() -> argparse.ArgumentParser:
                                            "Prometheus strengthen the weakest")
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
-    sub.add_parser("scores", help="show the saved per-specialist benchmark "
-                   "baseline (run `olympus eval` to compute fresh scores)")
+    p_scores = sub.add_parser("scores", help="show the saved per-specialist "
+                              "benchmark baseline (run `olympus eval` to compute "
+                              "fresh scores)")
+    p_scores.add_argument("--drift", action="store_true",
+                          help="run the provider-drift gate on the current "
+                               "settings and print the severity report (respects "
+                               "OLYMPUS_DRIFT_BUDGET_USD)")
     p_models = sub.add_parser("models",
                               help="show the model pool and role assignments")
     p_models.add_argument("action", nargs="?", default="show",
@@ -2609,6 +2614,14 @@ def main(argv: list[str] | None = None) -> int:
               "Wilson lower bound is strictly higher; otherwise the heuristic "
               "stands. Replay always uses the recorded decisions.)")
     elif args.command == "scores":
+        if getattr(args, "drift", False):
+            # Provider-drift gate (C6): an explicit, budget-capped live run on
+            # the current settings. Rides this existing command as a flag (no new
+            # command, no capabilities-manifest churn — I-M4).
+            from . import config as _config, modelgate
+            res = modelgate.run_gate(_config.Settings.from_env())
+            print(modelgate.format_report(res))
+            return 0
         from . import evals
         # Display-only: read the committed per-specialist baseline. A "show"
         # command must never trigger the paid live benchmark (that is what
