@@ -243,7 +243,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
                        "responses and prove the decision path is unchanged")
-    p_replay.add_argument("run_id", help="the run id from a trace")
+    p_replay.add_argument("run_id", nargs="?",
+                          help="the run id from a trace (omit with --fixture)")
+    p_replay.add_argument("--export-fixture", metavar="PATH",
+                          help="export the run as a portable, sanitized "
+                               "fixture directory instead of replaying it")
+    p_replay.add_argument("--fixture", metavar="PATH",
+                          help="import a fixture directory into the live "
+                               "store first, then replay its run")
     p_explain = sub.add_parser(
         "explain", help="show the decision path of a recorded run, or one "
                         "decision record by id")
@@ -1320,18 +1327,45 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(usage.report(7))
     elif args.command == "replay":
+        from . import replaystore
+        if args.export_fixture:
+            # Export-only path: bundle the run into a portable fixture and
+            # stop — no replay.
+            if not args.run_id:
+                print("usage: olympus replay <run_id> --export-fixture PATH")
+                return 1
+            try:
+                path = replaystore.export_fixture(args.run_id,
+                                                  args.export_fixture)
+            except (ValueError, replaystore.FixtureError) as err:
+                print(f"[error] {err}")
+                return 1
+            print(path)
+            return 0
+        run_id = args.run_id
+        if args.fixture:
+            try:
+                run_id = replaystore.import_fixture(args.fixture)
+            except replaystore.FixtureError as err:
+                print(f"[error] {err}")
+                return 1
+            print(f"Imported fixture run {run_id} into the store.")
+        if not run_id:
+            print("usage: olympus replay <run_id> | olympus replay "
+                  "--fixture PATH")
+            return 1
         try:
-            original, fresh, diffs = orchestrator.replay_run(args.run_id)
+            original, fresh, diffs = orchestrator.replay_run(run_id)
         except ValueError as err:
             print(f"[error] {err}")
             return 1
         n = len(original.get("decisions", []))
         if not diffs:
-            print(f"✓ Re-executable replay of run {args.run_id}: "
+            print(f"✓ Re-executable replay of run {run_id}: "
                   f"{n} decision(s) replayed byte-identically against the "
                   "frozen LLM responses. The reasoning path is reproducible.")
         else:
-            print(f"✗ Replay of run {args.run_id} diverged in "
+            print(f"✗ Replay of run {run_id} diverged in "
                   f"{len(diffs)} decision(s):")
             for d in diffs:
                 orig = d["original"] or {}
