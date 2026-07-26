@@ -302,11 +302,50 @@ def _key_decision(brought: bool, free_used: int) -> str:
 
 
 def _authorized(handler: BaseHTTPRequestHandler) -> bool:
+    """Gate the browser API (`/api/*`).
+
+    With OLYMPUS_ACCESS_TOKEN set, the token IS the credential and the peer
+    does not matter. With no token configured, this used to return True
+    unconditionally — so `/api/chat` was the ONE surface with no loopback
+    fallback. `/v1/*` and `/api/admin` both refuse an off-box caller when no
+    credential is configured; `/api/chat` handed any peer that could reach the
+    port an anonymous namespace and a funded council run (Stage-B finding F4).
+
+    The safe default always held — `serve()` binds 127.0.0.1 — so reaching it
+    took an explicit `--host 0.0.0.0`. That is exactly the case where an
+    operator most needs the server to refuse rather than to infer safety: the
+    remoteness decision comes from the kernel peer socket, never a header, and
+    a process bound off-loopback must carry a credential even for a
+    loopback-looking peer (a reverse proxy connects from loopback while
+    fronting the world).
+
+    `OLYMPUS_REQUIRE_LOGIN` is a separate, additional gate (per-account
+    sessions); this one is about whether the surface is exposed at all, so the
+    two do not substitute for each other."""
     required = os.environ.get("OLYMPUS_ACCESS_TOKEN")
-    if not required:
-        return True
-    provided = handler.headers.get("X-Olympus-Token", "")
-    return hmac.compare_digest(provided, required)
+    if required:
+        provided = handler.headers.get("X-Olympus-Token", "")
+        return hmac.compare_digest(provided, required)
+    if accounts.require_login():
+        return True             # per-account auth is the configured credential
+    addr = getattr(handler, "client_address", None)
+    peer = (addr[0] if addr else "") or ""
+    if not _v1_allowed(peer, handler.headers):
+        return False
+    try:
+        return _is_loopback(handler.server.server_address[0])
+    except Exception:
+        return False            # unknown peer or bind ⇒ treat as exposed
+
+
+def _unauthorized_message() -> str:
+    """Why the browser API refused — the two reasons need different operator
+    actions, and "missing or wrong access token" is wrong for the second."""
+    if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
+        return "missing or wrong access token"
+    return ("set OLYMPUS_ACCESS_TOKEN (or OLYMPUS_REQUIRE_LOGIN): with no "
+            "credential configured the browser API is loopback-only — it is "
+            "never served to an off-box caller or through a reverse proxy.")
 
 
 def _https_request(handler: BaseHTTPRequestHandler) -> bool:
@@ -2061,7 +2100,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(openai_server.models_response())
             return
         if not _authorized(self):
-            self._json({"error": "missing or wrong access token"}, 401)
+            self._json({"error": _unauthorized_message()}, 401)
             return
         if url.path == "/api/admin":
             # Operator overview (read-only). _authorized above already
@@ -2216,7 +2255,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         if not _authorized(self):
-            self._json({"error": "missing or wrong access token"}, 401)
+            self._json({"error": _unauthorized_message()}, 401)
             return
         payload = self._read_json()
         if payload is None:

@@ -1141,8 +1141,11 @@ UNMEASURABLE = [
 
 DRAFT_SLOS = [
     ("Journal append (fsync=auto, <=500 records)", "p99 <= 25 ms",
-     "MEASURED offline (p99 13.5 ms) — DEPTH-QUALIFIED: see DEFECT D1, the "
-     "bound does not hold on a deep uncompacted journal"),
+     "MEASURED offline (p99 4.2 ms). The LIVE per-turn path is "
+     "sessionlog.sync, not append_turn, and since the D1 fix it is flat in "
+     "journal depth (p99 3.8 ms at 60 turns; 400-turn A/B slope -0.003 "
+     "ms/turn). append_turn itself still does a full rescan per call, but it "
+     "has no production caller"),
     ("Journal append (fsync=always, <=500 records)", "p99 <= 40 ms",
      "MEASURED offline (p99 14.5 ms); storage-dependent, re-baseline on "
      "production disks"),
@@ -1368,7 +1371,9 @@ def render(r: dict) -> None:
         _row("   projected append @10k recs", label,
              f"{a['projected_ms_at_10k']:.0f} ms",
              f"slope {a['slope_ms_per_record'] * 1000:.2f} us/record; "
-             f"@50k recs {a['projected_ms_at_50k']:.0f} ms  [DEFECT D1]")
+             f"@50k recs {a['projected_ms_at_50k']:.0f} ms  "
+             f"[append_turn: still a full rescan — see D1; it is NOT the "
+             f"live per-turn path, which is row 1b]")
     sy = r["sessionlog_sync"]
     _row("1b. sessionlog.sync p50", "LIVE per-turn path", f"{sy['p50']:.3f} ms",
          f"turns={sy['turns']} (memory.save_conversation calls this, "
@@ -1383,7 +1388,8 @@ def render(r: dict) -> None:
     _row("    projected sync @1k turns", "LIVE per-turn path",
          f"{sy['projected_ms_at_1k']:.0f} ms",
          f"@10k turns {sy['projected_ms_at_10k']:.0f} ms; slope "
-         f"{sy['slope_ms_per_turn']:.3f} ms/turn  [DEFECT D1]")
+         f"{sy['slope_ms_per_turn']:.3f} ms/turn  "
+         f"[D1 FIXED — flat in depth; projections clamp at slope<=0]")
     print(_rule())
 
     for row in r["journal_recovery"]:

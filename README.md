@@ -303,7 +303,10 @@ user-facing specialist and trains the weakest on a cadence:
   optimize against his own scorer.
 - **Web instance protection** — per-IP rate limiting
   (`OLYMPUS_RATE_LIMIT`/min) and an optional shared access token
-  (`OLYMPUS_ACCESS_TOKEN`). Final answers stream token-by-token.
+  (`OLYMPUS_ACCESS_TOKEN`). With no credential configured at all, the browser
+  API is served on loopback only — binding to `0.0.0.0` without a token or
+  `OLYMPUS_REQUIRE_LOGIN` refuses rather than exposing an anonymous council.
+  Final answers stream token-by-token.
 - **Action tools are off until allowlisted** — email sends only to
   `OLYMPUS_EMAIL_ALLOWLIST` recipients; webhooks only to operator-defined
   `OLYMPUS_WEBHOOKS` URLs; Hephaestus can only *prepare* code execution as an

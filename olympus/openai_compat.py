@@ -264,6 +264,72 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError(f"Provider call failed at {url}: {last_err}")
 
 
+def _message_of(data: Any) -> dict[str, Any]:
+    """The assistant message from an OpenAI-shaped completion, or a typed
+    refusal.
+
+    Every caller used to write `data["choices"][0]["message"]` inline, which
+    assumes the provider is well-behaved. A compromised or merely broken
+    provider (`choices` absent, empty, a string, `message` null) turned that
+    into an untyped KeyError/TypeError/IndexError propagating out of the parse.
+    Containment happened one layer up, in `orchestrator._run_one`'s broad
+    `except Exception` — real, but incidental: the parser was contained by
+    luck, not by design, and the operator saw a traceback rather than "the
+    provider sent something that is not a completion".
+
+    Stage-B finding F3. The refusal is a RuntimeError so it joins the same
+    provider-failure class `_post` already raises, and failover/retry treat it
+    identically."""
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Provider response is not a JSON object (got "
+            f"{type(data).__name__}) — refusing to parse it as a completion.")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError(
+            "Provider response has no usable 'choices' array — refusing to "
+            "parse it as a completion.")
+    first = choices[0]
+    message = first.get("message") if isinstance(first, dict) else None
+    if not isinstance(message, dict):
+        raise RuntimeError(
+            "Provider response choice carries no 'message' object — refusing "
+            "to parse it as a completion.")
+    return message
+
+
+def _named_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """The tool calls that are structurally complete enough to dispatch.
+
+    `call["function"]["name"]` sat outside the per-call `try`, so one malformed
+    entry from a hostile provider crashed the whole loop instead of being
+    dropped. Screening here keeps the security property that mattered (an
+    unnamed call NEVER reaches `resolve_handler`) and makes it deliberate:
+    a call is kept only when it carries a non-empty string name.
+
+    Dropping rather than refusing is right for this one: the remaining calls in
+    the batch are individually well-formed, and a provider response is
+    ephemeral — the sanitise-and-continue side of the house rule. A response
+    whose calls are ALL malformed degrades to `not tool_calls`, i.e. the text
+    branch, which is the same honest outcome as a model that answered in
+    prose."""
+    raw = message.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for call in raw:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        out.append(call)
+    return out
+
+
 def _to_openai_tools(tool_defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic-style tool defs to OpenAI function-calling format."""
     return [
@@ -515,7 +581,7 @@ def complete_text(settings: config.Settings, system: str,
     # the typed StreamAborted propagates INSTEAD of the text — a degenerate
     # reply must never be handed back as a finished answer (W2-I8.3).
     _guard_response(settings, payload, resp)
-    return (resp["choices"][0]["message"].get("content") or "").strip()
+    return (_message_of(resp).get("content") or "").strip()
 
 
 def complete_json(settings: config.Settings, system: str,
@@ -617,8 +683,8 @@ def run_agent(settings: config.Settings, system: str, task: str,
             _guard_response(settings, payload, data)
         except streamguard.StreamAborted as exc:
             return abort_disclosure(exc)
-        message = data["choices"][0]["message"]
-        tool_calls = message.get("tool_calls") or []
+        message = _message_of(data)
+        tool_calls = _named_tool_calls(message)
 
         # Weak models sometimes emit the tool call as JSON in `content` with an
         # empty `tool_calls`. Recover it — but only when it names an offered tool,

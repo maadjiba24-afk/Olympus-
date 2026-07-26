@@ -1367,16 +1367,24 @@ class TestProviderCompromise:
             ingestgate.check("skill", huge)
         assert any(r.startswith("oversize") for r in exc.value.reasons)
 
-    def test_malformed_toolcall_from_a_hostile_provider_FINDING(
+    def test_malformed_toolcall_from_a_hostile_provider_is_contained(
             self, monkeypatch):
-        """FINDING (MEDIUM, containment-by-luck): the openai-compat agent loop
-        dereferences `call["function"]["name"]` and `choices[0]["message"]`
-        OUTSIDE its per-call `try`, so a compromised provider crashes the parse
-        with an untyped KeyError/TypeError instead of an honest refusal.
+        """Was FINDING F3 (MEDIUM, containment-by-luck), now fixed.
 
-        The security-relevant half still holds and is asserted here: NO handler
-        is reached. Containment is provided one layer up by
-        `orchestrator._run_one`'s broad `except Exception`, not by the parser."""
+        The openai-compat agent loop dereferenced `choices[0]["message"]` and
+        `call["function"]["name"]` OUTSIDE its per-call `try`, so a compromised
+        provider crashed the parse with an untyped KeyError/TypeError. The
+        security-relevant half always held — no handler was reached — but only
+        because `orchestrator._run_one`'s broad `except Exception` caught it one
+        layer up. The parser was contained by luck, not by design, and the
+        operator saw a traceback instead of "the provider sent something that
+        is not a completion".
+
+        `_message_of` now raises a typed RuntimeError (the same class `_post`
+        already raises for provider failures, so failover treats it
+        identically) and `_named_tool_calls` drops entries that cannot name a
+        tool. This test requires BOTH: no handler is ever reached, and nothing
+        untyped escapes."""
         spy = _Spy()
         # Realistic dispatch: only the OFFERED tool resolves, exactly as
         # `tools.resolve_handler` behaves.
@@ -1397,19 +1405,41 @@ class TestProviderCompromise:
             {"choices": ["not-a-dict"]},
             {"choices": [{"message": {"tool_calls": [None]}}]},
         ]
-        leaked = []
+        untyped = []
         for body in hostile:
             monkeypatch.setattr(openai_compat, "_post", lambda s, p, b=body: b)
             try:
                 openai_compat.run_agent(settings, "s", "t", defs,
                                         max_iterations=1)
-            except Exception as err:
-                leaked.append(type(err).__name__)
+            except RuntimeError:
+                pass                    # the typed provider-failure refusal
+            except Exception as err:    # pragma: no cover - the defect
+                untyped.append(f"{type(err).__name__}: {err} on {body!r}")
         assert spy.calls == [], (
             "a malformed provider payload REACHED a handler")
-        # The defect, pinned so a fix flips this assertion loudly:
-        assert leaked, ("openai_compat now contains malformed provider "
-                        "payloads — update this test to assert the refusal")
+        assert untyped == [], (
+            "openai_compat leaked an untyped exception from the response "
+            "parse: " + "; ".join(untyped))
+
+    def test_a_response_with_only_malformed_calls_degrades_to_text(
+            self, monkeypatch):
+        """Dropping unnamed calls must not invent an action. When every call in
+        the batch is malformed the loop takes the text branch — the same honest
+        outcome as a model that answered in prose."""
+        monkeypatch.setattr(openai_compat.tools, "resolve_handler",
+                            lambda name: None)
+        settings = config.Settings(model="m", api_key="k",
+                                   base_url="http://local.invalid")
+        body = {"choices": [{"message": {
+            "content": "  I cannot do that.  ",
+            "tool_calls": [{"id": "x", "function": {"name": ""}}, None]}}]}
+        monkeypatch.setattr(openai_compat, "_post", lambda s, p: body)
+        out = openai_compat.run_agent(
+            settings, "s", "t",
+            [{"name": "read_file", "description": "d",
+              "input_schema": {"type": "object", "properties": {}}}],
+            max_iterations=1)
+        assert out == "I cannot do that."
 
 
 # =============================================================================
@@ -1632,28 +1662,49 @@ class TestPrivilegeBoundary:
         for hdr in web._FORWARDING_HEADERS:
             assert web._v1_allowed("127.0.0.1", {hdr: "1.2.3.4"}) is False, hdr
 
-    def test_chat_surface_hardening_is_ASYMMETRIC_FINDING(self):
-        """FINDING (LOW, deployment-hardening). `/v1/*` and `/api/admin` each
-        carry an independent loopback fallback when no credential is
-        configured, so binding off-loopback cannot silently expose them.
-        `/api/chat` has NO such fallback: with `OLYMPUS_ACCESS_TOKEN` unset AND
-        `OLYMPUS_REQUIRE_LOGIN` unset (both default), any peer that can reach
-        the port gets an anonymous namespace and a funded council run.
+    def test_chat_surface_hardening_is_SYMMETRIC(self, monkeypatch):
+        """Was FINDING F4 (LOW, deployment-hardening), now fixed.
 
-        The safe default holds — `serve()` binds 127.0.0.1 — so this is only
-        reachable through an explicit operator act (`--host 0.0.0.0`). Pinned
-        so the asymmetry is a recorded decision, not an accident."""
+        `/v1/*` and `/api/admin` each carry an independent loopback fallback
+        when no credential is configured, so binding off-loopback cannot
+        silently expose them. `/api/chat` had NO such fallback: with
+        `OLYMPUS_ACCESS_TOKEN` unset AND `OLYMPUS_REQUIRE_LOGIN` unset (both
+        default), any peer that could reach the port got an anonymous namespace
+        and a funded council run. The safe default held — `serve()` binds
+        127.0.0.1 — so it took an explicit `--host 0.0.0.0` to reach, which is
+        precisely when the server should refuse rather than infer safety.
+
+        All three surfaces now share the posture, and this test requires the
+        symmetry structurally AND behaviourally."""
         from olympus import accounts
         import inspect
+        monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("OLYMPUS_REQUIRE_LOGIN", raising=False)
         assert inspect.signature(web.serve).parameters["host"].default \
             == "127.0.0.1", "the web server no longer defaults to loopback"
         assert accounts.require_login() is False           # default posture
-        # /v1 and /api/admin DO carry the fallback; /api/chat does not.
-        assert "_bound_to_loopback" in inspect.getsource(
-            web.Handler._v1_authorized)
-        assert "_bound_to_loopback" in inspect.getsource(
-            web.Handler._admin_authorized)
-        assert "_bound_to_loopback" not in inspect.getsource(web._authorized)
+        # structural: all three consult the peer AND the bind
+        for src in (inspect.getsource(web.Handler._v1_authorized),
+                    inspect.getsource(web.Handler._admin_authorized),
+                    inspect.getsource(web._authorized)):
+            assert "_is_loopback" in src or "_bound_to_loopback" in src
+
+        # behavioural: an off-box peer is refused on the browser API too
+        class _Srv:
+            def __init__(self, bind):
+                self.server_address = (bind, 8000)
+
+        class _H:
+            def __init__(self, peer, bind):
+                self.headers = {}
+                self.client_address = (peer, 5000)
+                self.server = _Srv(bind)
+
+        assert web._authorized(_H("127.0.0.1", "127.0.0.1")) is True
+        assert web._authorized(_H("203.0.113.7", "0.0.0.0")) is False
+        assert web._authorized(_H("127.0.0.1", "0.0.0.0")) is False, (
+            "a process bound off-loopback still serves a loopback-looking "
+            "peer — a reverse proxy connects exactly that way")
 
     def test_password_hashing_is_not_a_bare_digest(self):
         from olympus import accounts
