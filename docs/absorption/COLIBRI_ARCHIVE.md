@@ -170,6 +170,5 @@ deviation from the Wave-1 pattern in the final report §3.
 **Olympus-native work belongs under `docs/native/`, not here.** This directory
 is closed to new programmes.
 
-The Olympus Native Evolution programme is a separate programme with its own
-commit; once it lands, its index is `docs/native/README.md`. Deliberately not a
-link here, so this archive is self-consistent at the moment it is sealed.
+The active roadmap is the Olympus Native Evolution programme:
+[`../native/README.md`](../native/README.md).
