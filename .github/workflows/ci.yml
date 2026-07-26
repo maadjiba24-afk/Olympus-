@@ -52,6 +52,21 @@ jobs:
       - run: python scripts/check_threat_model.py
       - run: pytest -q
 
+  noninterference:
+    # Observability non-interference gate (Wave 1 C3). Keyless, no secrets, no
+    # network: it imports the committed replay fixture into a throwaway store and
+    # re-runs the recorded pipeline twice — instrumentation OFF vs ON (stub OTLP
+    # poster, metrics recording, a hostile observe-only plugin) — failing the
+    # build if any decision or reply hash differs. Proves I-N1/I-N2 per PR.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: python scripts/noninterference_gate.py
+
   # Aggregate gate that reports a single status context named `test`.
   # The real work above runs as a per-version MATRIX, so it reports
   # `test (py3.10)` … `test (py3.13)` — there is no longer a plain `test`
@@ -60,9 +75,11 @@ jobs:
   # every merge. This job restores that context: it needs the whole matrix and
   # fails if any leg failed or was cancelled, so requiring `test` keeps
   # enforcing the full matrix without pinning each version name in settings.
+  # The keyless non-interference gate is folded into the same required context so
+  # branch protection enforces it too without a second settings pin.
   test-gate:
     name: test
-    needs: [test]
+    needs: [test, noninterference]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -74,6 +91,14 @@ jobs:
             exit 1
           fi
           echo "All test (py3.x) matrix legs passed."
+      - name: Require the non-interference gate to pass
+        run: |
+          result="${{ needs.noninterference.result }}"
+          if [ "$result" != "success" ]; then
+            echo "::error::non-interference gate did not pass (result: $result)"
+            exit 1
+          fi
+          echo "Non-interference gate passed."
 
   package:
     # Build the wheel/sdist and validate their metadata the same way the

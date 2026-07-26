@@ -286,6 +286,23 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append("Replay self-check errored:\n" + traceback.format_exc())
         state["replay_gate"] = now
 
+    if config.DRIFT_GATE_EVERY and _due(state, "drift_gate",
+                                        config.DRIFT_GATE_EVERY, now):
+        # Provider-drift tripwire (C6): budget-guarded like every other job, then
+        # run the keyed drift corpus within its own hard dollar cap. Default OFF.
+        try:
+            from . import usage
+            usage.check_budget()
+            from . import modelgate
+            res = modelgate.run_gate(config.Settings.from_env())
+            log.append(f"Drift gate: {res.severity} ({len(res.results)} items, "
+                       f"~${res.cost:.4f}).")
+        except usage.BudgetExceeded as err:
+            log.append(f"Drift gate: skipped (budget) — {err}")
+        except Exception:
+            log.append(_job_error("Drift gate", configured))
+        state["drift_gate"] = now
+
     if config.BACKUP_EVERY and _due(state, "backup", config.BACKUP_EVERY, now):
         try:
             from . import backup
@@ -321,6 +338,8 @@ def run_forever() -> None:
     print(f"  evolution audit  : every {config.EVOLUTION_AUDIT_EVERY // 86400} d")
     if config.REPLAY_GATE_EVERY:
         print(f"  replay self-check: every {config.REPLAY_GATE_EVERY // 86400} d")
+    if config.DRIFT_GATE_EVERY:
+        print(f"  drift gate       : every {config.DRIFT_GATE_EVERY // 3600} h")
     if config.BACKUP_EVERY:
         dest = "off-droplet" if config.backup_command() else "local only"
         print(f"  data backup      : every {config.BACKUP_EVERY // 3600} h "

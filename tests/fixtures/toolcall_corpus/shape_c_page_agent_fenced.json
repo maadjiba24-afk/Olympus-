@@ -1,0 +1,27 @@
+{
+  "name": "shape_c_page_agent_fenced",
+  "payload": "```json\n{\"web_search\": {\"query\": \"hermes\"}}\n```",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 3,
+    "args": {
+      "query": "hermes"
+    },
+    "refused": false
+  }
+}

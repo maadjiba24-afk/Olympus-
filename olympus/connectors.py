@@ -28,6 +28,7 @@ Both are governed by the same security model as built-in tools:
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -196,6 +197,10 @@ HOOK_EVENTS = ("session_start", "session_end", "run_start", "run_end",
 
 _HOOKS: dict[str, list[Callable]] = {}
 
+# Observe-only events: their args are handed to plugins as deep copies so an
+# in-place mutation cannot reach the caller (see emit / I-N2).
+_OBSERVE_ONLY_EVENTS = frozenset({"pre_llm_call", "post_llm_call"})
+
 
 def hook(event: str):
     """Decorator registering a plugin lifecycle hook.
@@ -217,8 +222,19 @@ def hook(event: str):
 
 
 def emit(event: str, *args) -> None:
-    """Fire observe-only hooks; exceptions are contained."""
+    """Fire observe-only hooks; exceptions are contained.
+
+    I-N2 (observability non-interference): for the observe-only LLM-call events
+    (`pre_llm_call`, `post_llm_call`) the caller passes its LIVE params dict —
+    already hashed for replay in llm.complete. A plugin that mutated it in place
+    would silently desync record/replay, so each dict arg is deep-copied before
+    dispatch; the return value is ignored and the copy is discarded by design.
+    All OTHER events dispatch their args unchanged (byte-for-byte), and the
+    deliberately mutating tool hooks live in emit_pre_tool/emit_post_tool."""
     load_plugins()
+    if event in _OBSERVE_ONLY_EVENTS:
+        args = tuple(copy.deepcopy(a) if isinstance(a, dict) else a
+                     for a in args)
     for fn in _HOOKS.get(event, ()):
         try:
             fn(*args)

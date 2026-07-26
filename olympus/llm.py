@@ -6,6 +6,7 @@ and cache the system prompt so repeated agent calls are cheap.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any
@@ -32,6 +33,52 @@ def _cache_control() -> dict[str, str]:
 
 # Beta header for the 1-hour prompt-cache tier.
 _EXTENDED_TTL_BETA = "extended-cache-ttl-2025-04-11"
+
+
+def _prefix_fp(system: str) -> str:
+    """Stable fingerprint of the cacheable system prefix (the text block that
+    _cache_control marks cacheable): sha256 hexdigest[:12]. Telemetry only —
+    computed when recording usage, never added to request params (I-U4)."""
+    return hashlib.sha256(
+        (system or "").encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _prompt_chars(system: str, messages: list[dict[str, Any]]) -> int:
+    """Cheap, deterministic character count of the prompt (system + message
+    content strings) — the sample fed to ctxbudget.observe (C4)."""
+    total = len(system or "")
+    for m in messages or []:
+        content = m.get("content", "") if isinstance(m, dict) else m
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    total += len(block)
+                elif isinstance(block, dict):
+                    text = block.get("text", "")
+                    total += len(text) if isinstance(text, str) \
+                        else len(str(text))
+                else:
+                    total += len(str(block))
+        else:
+            total += len(str(content))
+    return total
+
+
+def _observe_ctx(model: str, system: str,
+                 messages: list[dict[str, Any]],
+                 total_input_tokens: int) -> None:
+    """C4 estimator hook: feed the provider-reported input total to
+    ctxbudget.observe. Observability must never break a call — any failure
+    is swallowed (observe() itself validates the sample)."""
+    try:
+        from . import ctxbudget
+        chars = _prompt_chars(system, messages)
+        if chars > 0 and total_input_tokens > 0:
+            ctxbudget.observe("anthropic", model, chars, total_input_tokens)
+    except Exception:
+        pass
 
 
 def _cache_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -324,13 +371,18 @@ def complete(
                     message = stream.get_final_message()
             u = getattr(message, "usage", None)
             if u is not None:
+                # C5: keep the cache split (in = UNCACHED input tokens);
+                # the fingerprint is telemetry-only and never touches params.
+                uncached = getattr(u, "input_tokens", 0) or 0
+                cr = getattr(u, "cache_read_input_tokens", 0) or 0
+                cc = getattr(u, "cache_creation_input_tokens", 0) or 0
                 usage.record(
-                    params["model"],
-                    getattr(u, "input_tokens", 0)
-                    + getattr(u, "cache_read_input_tokens", 0)
-                    + getattr(u, "cache_creation_input_tokens", 0),
-                    getattr(u, "output_tokens", 0),
-                )
+                    params["model"], uncached,
+                    getattr(u, "output_tokens", 0) or 0,
+                    cache_read=cr, cache_creation=cc,
+                    provider="anthropic", prefix_fp=_prefix_fp(system))
+                _observe_ctx(params["model"], system, messages,
+                                     uncached + cr + cc)
             replaystore.put(req_hash, message)   # freeze for re-executable replay
             replaystore.note_call(req_hash)
             connectors.emit("post_llm_call", params, message)
@@ -388,11 +440,16 @@ def stream_text(
             final = stream.get_final_message()
     u = getattr(final, "usage", None)
     if u is not None:
-        usage.record(params["model"],
-                     getattr(u, "input_tokens", 0)
-                     + getattr(u, "cache_read_input_tokens", 0)
-                     + getattr(u, "cache_creation_input_tokens", 0),
-                     getattr(u, "output_tokens", 0))
+        # C5: keep the cache split (in = UNCACHED input tokens).
+        uncached = getattr(u, "input_tokens", 0) or 0
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        cc = getattr(u, "cache_creation_input_tokens", 0) or 0
+        usage.record(params["model"], uncached,
+                     getattr(u, "output_tokens", 0) or 0,
+                     cache_read=cr, cache_creation=cc,
+                     provider="anthropic", prefix_fp=_prefix_fp(system))
+        _observe_ctx(params["model"], system, messages,
+                             uncached + cr + cc)
 
 
 def text_of(message: anthropic.types.Message) -> str:

@@ -1,0 +1,27 @@
+{
+  "name": "truncated_unambiguous_close",
+  "payload": "{\"name\": \"web_search\", \"arguments\": {\"query\": \"olympus tren",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 4,
+    "args": {
+      "query": "olympus tren"
+    },
+    "refused": false
+  }
+}

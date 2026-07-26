@@ -1,0 +1,30 @@
+{
+  "name": "array_param_valid",
+  "payload": "{\"name\": \"tag_item\", \"arguments\": {\"tags\": [\"a\", \"b\"]}}",
+  "tools": [
+    {
+      "name": "tag_item",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "tags"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "tags": [
+        "a",
+        "b"
+      ]
+    },
+    "refused": false
+  }
+}

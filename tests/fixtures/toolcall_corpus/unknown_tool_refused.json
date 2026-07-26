@@ -1,0 +1,25 @@
+{
+  "name": "unknown_tool_refused",
+  "payload": "{\"name\": \"rm_rf_everything\", \"arguments\": {}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 6,
+    "args": null,
+    "refused": true
+  }
+}

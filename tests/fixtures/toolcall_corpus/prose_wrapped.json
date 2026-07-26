@@ -1,0 +1,27 @@
+{
+  "name": "prose_wrapped",
+  "payload": "Sure \u2014 here is the call: {\"name\": \"web_search\", \"arguments\": {\"query\": \"apollo\"}} \u2014 hope that helps!",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 3,
+    "args": {
+      "query": "apollo"
+    },
+    "refused": false
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "int_coercion",
+  "payload": "{\"name\": \"browser_click\", \"arguments\": {\"index\": \"5\"}}",
+  "tools": [
+    {
+      "name": "browser_click",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 4,
+    "args": {
+      "index": 5
+    },
+    "refused": false
+  }
+}

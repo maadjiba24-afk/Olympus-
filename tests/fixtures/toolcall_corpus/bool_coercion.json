@@ -1,0 +1,27 @@
+{
+  "name": "bool_coercion",
+  "payload": "{\"name\": \"toggle\", \"arguments\": {\"flag\": \"true\"}}",
+  "tools": [
+    {
+      "name": "toggle",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "flag": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "flag"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 4,
+    "args": {
+      "flag": true
+    },
+    "refused": false
+  }
+}

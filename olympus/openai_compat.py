@@ -149,6 +149,46 @@ def rotation_report(settings: config.Settings) -> str:
     return "\n".join(lines)
 
 
+def _payload_chars(payload: dict[str, Any]) -> int:
+    """Cheap, deterministic character count of the request's message contents
+    — the calibration input for ctxbudget.observe (C4)."""
+    total = 0
+    for m in payload.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else m
+        if isinstance(content, str):
+            total += len(content)
+        elif content is not None:
+            total += len(str(content))
+    return total
+
+
+def _record_usage(payload: dict[str, Any], usage_block: dict[str, Any]) -> None:
+    """C5/C4 seam: record the cache split when the provider reports it
+    (`prompt_tokens_details.cached_tokens`), and feed the reported input total
+    to context calibration. Telemetry must never break the call — the observe
+    hook is exception-swallowed (observe() itself validates the sample)."""
+    model = payload.get("model", "unknown")
+    prompt = int(usage_block.get("prompt_tokens", 0) or 0)
+    details = usage_block.get("prompt_tokens_details")
+    cached = 0
+    if isinstance(details, dict):
+        try:
+            cached = int(details.get("cached_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            cached = 0
+    cached = max(0, min(cached, prompt))
+    usage.record(model, prompt - cached,
+                 int(usage_block.get("completion_tokens", 0) or 0),
+                 cache_read=cached, provider="openai-compat")
+    try:
+        from . import ctxbudget
+        chars = _payload_chars(payload)
+        if chars > 0 and prompt > 0:
+            ctxbudget.observe("openai-compat", model, chars, prompt)
+    except Exception:
+        pass
+
+
 def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     base = (settings.base_url or DEFAULT_BASE_URL).rstrip("/")
     url = _endpoint_url(settings, base)
@@ -180,9 +220,7 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
                     with urllib.request.urlopen(req, timeout=600) as resp:
                         data = json.loads(resp.read())
                 u = data.get("usage") or {}
-                usage.record(payload.get("model", "unknown"),
-                             int(u.get("prompt_tokens", 0)),
-                             int(u.get("completion_tokens", 0)))
+                _record_usage(payload, u)
                 # A 200 that carries no `choices` is a real provider hiccup
                 # (rate-limit shedding, a content filter, an upstream error
                 # rendered as an empty body). Callers index `choices[0]`, so
@@ -286,6 +324,58 @@ def complete_json(settings: config.Settings, system: str,
     return extract_json(text)
 
 
+def _raw_string_payload(raw: Any) -> str | None:
+    """The lone STRING payload of a tool call's `arguments`, if that is what
+    the model sent (directly, or JSON-encoded by the recovery path) — the
+    input to the default-off salvage tier. None when arguments held anything
+    structured."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        val = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw                      # a bare non-JSON string
+    return val if isinstance(val, str) and val.strip() else None
+
+
+def _validated_args(settings: config.Settings, name: str, call: dict[str, Any],
+                    args: dict[str, Any], schema: dict[str, Any],
+                    recovered: bool) -> tuple[dict[str, Any], bool, str]:
+    """C8 execution precondition (I-T1): a call reaches its handler ONLY after
+    passing rung-2 validation against the authoritative input_schema. Returns
+    (args, ok, error_message): on hard failure the handler is never invoked and
+    `error_message` is fed back to the model (rung 2, outcome 'rejected')."""
+    rung = (toolcall_repair.RUNG_NORMALIZED if recovered
+            else toolcall_repair.RUNG_STRICT)
+    errors, _warnings = toolcall_repair.validate_arguments(args, schema)
+    if not errors:
+        toolcall_repair.record_repair("openai-compat", settings.model, name,
+                                      rung, "ok")
+        return args, True, ""
+    # Rung 4a: schema-typed coercion, accepted only if it fully fixes the call.
+    coerced = toolcall_repair.coerce_arguments(args, schema)
+    errors2, _warnings2 = toolcall_repair.validate_arguments(coerced, schema)
+    if not errors2:
+        toolcall_repair.record_repair("openai-compat", settings.model, name,
+                                      toolcall_repair.RUNG_REPAIRED, "coerced")
+        return coerced, True, ""
+    # Rung 4b (default OFF): lone string payload onto the single required param.
+    if not args and toolcall_repair.salvage_enabled():
+        payload = _raw_string_payload(call["function"].get("arguments"))
+        if payload is not None:
+            salvaged = toolcall_repair.salvage_arguments(payload, schema)
+            if salvaged is not None:
+                errors3, _w3 = toolcall_repair.validate_arguments(salvaged, schema)
+                if not errors3:
+                    toolcall_repair.record_repair(
+                        "openai-compat", settings.model, name,
+                        toolcall_repair.RUNG_REPAIRED, "salvaged")
+                    return salvaged, True, ""
+    toolcall_repair.record_repair("openai-compat", settings.model, name,
+                                  toolcall_repair.RUNG_VALIDATED, "rejected")
+    return args, False, "Error: invalid arguments: " + "; ".join(errors2)
+
+
 def run_agent(settings: config.Settings, system: str, task: str,
               tool_defs: list[dict[str, Any]] | None, effort: str = "high",
               max_iterations: int = config.MAX_AGENT_ITERATIONS) -> str:
@@ -299,6 +389,11 @@ def run_agent(settings: config.Settings, system: str, task: str,
     # tool-call recovery: a call is only reconstructed from `content` when it
     # names one of these (see toolcall_repair.recover_tool_call).
     known_names = {d["name"] for d in tool_defs} if tool_defs else set()
+    # The authoritative schema per tool (C8 rung-2 validation source) and the
+    # legacy escape hatch (OLYMPUS_TOOL_VALIDATE=off ⇒ pre-C8 pass-through).
+    schema_by_name = ({d["name"]: (d.get("input_schema") or {})
+                       for d in tool_defs} if tool_defs else {})
+    validate_on = toolcall_repair.validate_enabled()
 
     reasoning = _reasoning_params(settings.model, effort)
     for _ in range(max_iterations):
@@ -314,8 +409,20 @@ def run_agent(settings: config.Settings, system: str, task: str,
         # so a genuine refusal or final answer stays text (never faked into an
         # action). No tools offered → nothing to recover.
         if not tool_calls and payload_tools:
-            recovered = toolcall_repair.recover_tool_call(
-                message.get("content") or "", known_names)
+            content = message.get("content") or ""
+            recovered = toolcall_repair.recover_tool_call(content, known_names)
+            if recovered is None:
+                # Truncated tail: close it ONLY when unambiguous (C8 rung 4),
+                # then re-run the same refusal-gated recovery on the result.
+                closed = toolcall_repair.close_truncated(content)
+                if closed is not None:
+                    recovered = toolcall_repair.recover_tool_call(
+                        closed, known_names)
+                    if recovered is not None:
+                        toolcall_repair.record_repair(
+                            "openai-compat", settings.model,
+                            recovered["function"]["name"],
+                            toolcall_repair.RUNG_REPAIRED, "closed")
             if recovered is not None:
                 tool_calls = [recovered]
 
@@ -330,10 +437,22 @@ def run_agent(settings: config.Settings, system: str, task: str,
         for call in tool_calls:
             name = call["function"]["name"]
             handler = tools.resolve_handler(name)
+            recovered_call = str(call.get("id", "")).startswith("repaired_")
             try:
                 args = toolcall_repair.repair_arguments(
                     call["function"].get("arguments"))
-                result = handler(**args) if handler else f"Error: unknown tool {name}"
+                if handler is None:
+                    result = f"Error: unknown tool {name}"
+                elif validate_on:
+                    # Execution precondition (I-T1): validate — native and
+                    # recovered calls alike — before the handler ever runs; a
+                    # hard failure bounces back to the model as an error result.
+                    args, ok, err_msg = _validated_args(
+                        settings, name, call, args,
+                        schema_by_name.get(name, {}), recovered_call)
+                    result = handler(**args) if ok else err_msg
+                else:
+                    result = handler(**args)   # legacy pass-through
             except Exception as err:
                 result = f"Error: {err}"
             text = str(result)[:40_000]

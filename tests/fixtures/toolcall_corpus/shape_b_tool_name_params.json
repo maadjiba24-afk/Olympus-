@@ -1,0 +1,27 @@
+{
+  "name": "shape_b_tool_name_params",
+  "payload": "{\"tool_name\": \"web_search\", \"params\": {\"query\": \"ares\"}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "query": "ares"
+    },
+    "refused": false
+  }
+}

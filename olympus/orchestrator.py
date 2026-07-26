@@ -1681,9 +1681,24 @@ class Olympus:
         note_conversation(self.report)
 
     @staticmethod
-    def _estimate_tokens(history: list[dict[str, Any]]) -> int:
+    def _estimate_tokens(history: list[dict[str, Any]],
+                         provider: str | None = None,
+                         model: str | None = None) -> int:
         """Cheap, dependency-free token estimate (~4 chars/token) — enough to
-        decide *when* to compact without pulling in a tokenizer."""
+        decide *when* to compact without pulling in a tokenizer. When
+        OLYMPUS_CTX_BUDGET is on, delegates to the calibrated estimator
+        (ctxbudget) for the given provider/model — callers with a pool pass
+        their primary member's pair; unbound callers (tui) fall back to the
+        env-configured pair. Flag off: exactly the legacy chars//4 (I-C1)."""
+        from . import ctxbudget
+        if ctxbudget.enabled():
+            if provider is None:
+                provider = os.environ.get(
+                    "OLYMPUS_PROVIDER", "anthropic").lower()
+            if model is None:
+                model = config.default_model()
+            return ctxbudget.estimate_tokens(
+                history, provider=provider, model=model)
         chars = sum(len(str(m.get("content", ""))) for m in history)
         return chars // 4
 
@@ -1697,7 +1712,8 @@ class Olympus:
         entries.) The budget scales to the active model's context window; an
         explicit OLYMPUS_HISTORY_TOKEN_BUDGET overrides it absolutely."""
         budget = config.history_token_budget(self.settings.model)
-        if self._estimate_tokens(self.history) <= budget:
+        if self._estimate_tokens(self.history, self.settings.provider,
+                                 self.settings.model) <= budget:
             return
         if len(self.history) <= config.HISTORY_KEEP_TURNS:
             return  # everything is in the verbatim tail; nothing to fold away
@@ -1726,6 +1742,24 @@ class Olympus:
         state = self._ace_compress(as_text) if config.ace_enabled() \
             else self._legacy_compress(as_text)
         if state is None:
+            # The truncation fallback is never silent: emit a trace event
+            # (flag-independent — observability-additive, I-C5) before dropping
+            # the older slice. With calibrated budgeting ON, also surface it as
+            # an operator-visible error. A same-turn user notice is not
+            # possible here: compaction runs in _finish, AFTER the reply (and
+            # its banner) has already been delivered — Wave 1 deliberately
+            # stops at event + capture rather than inventing UI plumbing.
+            tr = trace_mod.current()
+            if tr:
+                tr.event("context.truncated", dropped=len(old),
+                         reason="compaction_failed")
+            from . import ctxbudget
+            if ctxbudget.enabled():
+                from . import errors
+                errors.capture(
+                    "orchestrator.compress_history",
+                    RuntimeError("compaction failed — history truncated"),
+                    context=f"dropped {len(old)} older messages")
             self.history = keep         # fall back to truncation on any failure
             return
         self.history = [

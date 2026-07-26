@@ -1,0 +1,27 @@
+{
+  "name": "shape_a_nested",
+  "payload": "{\"function\": {\"name\": \"web_search\", \"arguments\": {\"query\": \"nike\"}}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "query": "nike"
+    },
+    "refused": false
+  }
+}

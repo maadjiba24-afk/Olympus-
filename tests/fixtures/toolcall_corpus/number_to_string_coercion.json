@@ -1,0 +1,27 @@
+{
+  "name": "number_to_string_coercion",
+  "payload": "{\"name\": \"web_search\", \"arguments\": {\"query\": 42}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 4,
+    "args": {
+      "query": "42"
+    },
+    "refused": false
+  }
+}

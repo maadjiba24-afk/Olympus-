@@ -1,0 +1,25 @@
+{
+  "name": "non_object_json_refused",
+  "payload": "[1, 2, 3]",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 6,
+    "args": null,
+    "refused": true
+  }
+}

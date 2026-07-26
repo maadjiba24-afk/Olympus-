@@ -66,9 +66,43 @@ def slot():
             yield
 
 
-def estimate_cost(model: str, in_tokens: int, out_tokens: int) -> float:
+# Cache-token price multipliers, applied to the model's INPUT price. The
+# defaults mirror published provider pricing (reads ~10% of input, writes
+# ~125%); both are runtime-flippable knobs, and deliberately NOT tied to any
+# cache-lifetime constant — pricing here is a multiplier, nothing else.
+
+def cache_read_mult() -> float:
+    """Input-price multiplier for cache-READ tokens (OLYMPUS_CACHE_READ_MULT,
+    default 0.1)."""
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_CACHE_READ_MULT", "0.1")))
+    except (TypeError, ValueError):
+        return 0.1
+
+
+def cache_write_mult() -> float:
+    """Input-price multiplier for cache-CREATION tokens
+    (OLYMPUS_CACHE_WRITE_MULT, default 1.25)."""
+    try:
+        return max(0.0, float(os.environ.get("OLYMPUS_CACHE_WRITE_MULT",
+                                             "1.25")))
+    except (TypeError, ValueError):
+        return 1.25
+
+
+def estimate_cost(model: str, in_tokens: int, out_tokens: int, *,
+                  cache_read: int = 0, cache_creation: int = 0) -> float:
+    """Estimated USD for one call. `in_tokens` is the UNCACHED input count at
+    cache-aware call sites (legacy positional callers pass totals with zero
+    cache fields — identical arithmetic to before). Cache reads/creations are
+    priced off the input price via the multiplier knobs above."""
     price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
-    return (in_tokens * price_in + out_tokens * price_out) / 1_000_000
+    total = in_tokens * price_in + out_tokens * price_out
+    if cache_read:
+        total += cache_read * price_in * cache_read_mult()
+    if cache_creation:
+        total += cache_creation * price_in * cache_write_mult()
+    return total / 1_000_000
 
 
 def _atomic_write_json(path: Path, obj) -> None:
@@ -88,12 +122,17 @@ _SESSION: dict[str, dict] = {}
 
 
 def _bump_session(user: str, in_tokens: int, out_tokens: int,
-                  cost: float) -> None:
+                  cost: float, cache_read: int = 0,
+                  cache_creation: int = 0) -> None:
     row = _SESSION.setdefault(
         user, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
     row["calls"] += 1
     row["in"] += in_tokens
     row["out"] += out_tokens
+    # Additive cache split (C5): absent = 0, existing keys untouched, so
+    # footers/session totals for legacy positional callers are unchanged.
+    row["cache_read"] = row.get("cache_read", 0) + cache_read
+    row["cache_creation"] = row.get("cache_creation", 0) + cache_creation
     row["cost"] = round(row["cost"] + cost, 6)
 
 
@@ -123,16 +162,27 @@ def footer(reply_delta: dict, user: str) -> str:
             f"${session['cost']:.2f} session · ${today_spend():.2f} today")
 
 
-def record(model: str, in_tokens: int, out_tokens: int) -> None:
-    """Append usage to the per-day ledger, attributed to the active user."""
-    cost = estimate_cost(model, in_tokens, out_tokens)
+def record(model: str, in_tokens: int, out_tokens: int, *,
+           cache_read: int = 0, cache_creation: int = 0,
+           provider: str = "", prefix_fp: str = "") -> None:
+    """Append usage to the per-day ledger, attributed to the active user.
+
+    Cache-aware call sites (C5) pass `in_tokens` = the UNCACHED input count
+    plus the provider-reported cache split; legacy positional callers pass
+    totals with zero cache fields and keep identical behaviour (I-U1). When
+    `prefix_fp` is given (the sha256[:12] of the cacheable system prefix),
+    per-fingerprint call/hit counts aggregate under the day file's "prefix"
+    key so a prompt-layout change is visible as a hit-rate cliff."""
+    cost = estimate_cost(model, in_tokens, out_tokens,
+                         cache_read=cache_read, cache_creation=cache_creation)
     day = time.strftime("%Y-%m-%d")
     user = memory.current_user()
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     from . import proclock
     with _TOTALS_LOCK:
-        _bump_session(user, in_tokens, out_tokens, cost)
+        _bump_session(user, in_tokens, out_tokens, cost,
+                      cache_read=cache_read, cache_creation=cache_creation)
     # The ledger read-modify-write holds ONLY the cross-process lock — never
     # nested inside _TOTALS_LOCK. Holding the in-process mutex across an
     # unbounded flock wait would couple session_totals()/today_spend() (the
@@ -156,7 +206,19 @@ def record(model: str, in_tokens: int, out_tokens: int) -> None:
                 row["calls"] += 1
                 row["in"] += in_tokens
                 row["out"] += out_tokens
+                # Optional additive keys (migration-free: absent reads as 0
+                # on old files, and old readers ignore the new keys).
+                row["cache_read"] = row.get("cache_read", 0) + cache_read
+                row["cache_creation"] = (row.get("cache_creation", 0)
+                                         + cache_creation)
                 row["cost"] = round(row["cost"] + cost, 6)
+            if prefix_fp:
+                fp_row = ledger.setdefault("prefix", {}).setdefault(
+                    prefix_fp, {"calls": 0, "hits": 0, "cache_read": 0})
+                fp_row["calls"] = fp_row.get("calls", 0) + 1
+                if cache_read > 0:
+                    fp_row["hits"] = fp_row.get("hits", 0) + 1
+                fp_row["cache_read"] = fp_row.get("cache_read", 0) + cache_read
             _atomic_write_json(path, ledger)
     except TimeoutError as err:
         from . import errors
@@ -301,3 +363,78 @@ def report(days: int = 7) -> str:
         lines.append(f"  today's budget: ${b['spent']:.4f} / ${b['limit']:.2f}"
                      f"{flag}")
     return "\n".join(lines)
+
+
+# --- prompt-cache liveness (C5) -------------------------------------------
+
+def cache_stats(days: int = 7) -> dict:
+    """Is prompt caching actually working? Answered from recorded day files.
+
+    Returns totals over the last `days` ledgers, the hit rate over
+    fingerprint-carrying calls (a "hit" = a call whose provider reported
+    cache_read > 0), an estimated savings figure (cache-read tokens repriced
+    at the read multiplier instead of full input price), a per-fingerprint
+    breakdown (a layout change shows as a new fp with a hit-rate cliff), and
+    a verdict:
+
+    - "active":    cache reads observed — caching is working.
+    - "inert":     >= 20 fingerprint-carrying calls, zero cache reads —
+                   configured but producing nothing.
+    - "no_signal": no fingerprint-carrying calls recorded, or the provider
+                   reports no cache fields at all.
+    """
+    out: dict = {"days": 0, "fp_calls": 0, "hits": 0, "hit_rate": 0.0,
+                 "cache_read": 0, "cache_creation": 0, "savings_usd": 0.0,
+                 "verdict": "no_signal", "by_fp": {}}
+    base = config.MEMORY_DIR / "usage"
+    if not base.exists():
+        return out
+    read_mult = cache_read_mult()
+    savings = 0.0
+    files = sorted(base.glob("*.json"), reverse=True)[:days]
+    for path in sorted(files):               # ascending: last_day wins below
+        try:
+            ledger = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(ledger, dict):
+            continue
+        out["days"] += 1
+        for key, row in ledger.items():
+            if not (key.startswith("model:") and isinstance(row, dict)):
+                continue
+            try:
+                cr = int(row.get("cache_read", 0) or 0)
+                cc = int(row.get("cache_creation", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            out["cache_read"] += cr
+            out["cache_creation"] += cc
+            price_in, _ = PRICES.get(key[len("model:"):], DEFAULT_PRICE)
+            savings += cr * price_in * (1.0 - read_mult) / 1_000_000
+        prefixes = ledger.get("prefix")
+        if not isinstance(prefixes, dict):
+            continue
+        for fp, row in prefixes.items():
+            if not isinstance(row, dict):
+                continue
+            agg = out["by_fp"].setdefault(
+                fp, {"calls": 0, "hits": 0, "cache_read": 0,
+                     "first_day": path.stem, "last_day": path.stem})
+            agg["calls"] += int(row.get("calls", 0) or 0)
+            agg["hits"] += int(row.get("hits", 0) or 0)
+            agg["cache_read"] += int(row.get("cache_read", 0) or 0)
+            agg["last_day"] = path.stem
+    for agg in out["by_fp"].values():
+        agg["hit_rate"] = round(agg["hits"] / agg["calls"], 4) \
+            if agg["calls"] else 0.0
+    out["fp_calls"] = sum(a["calls"] for a in out["by_fp"].values())
+    out["hits"] = sum(a["hits"] for a in out["by_fp"].values())
+    out["hit_rate"] = round(out["hits"] / out["fp_calls"], 4) \
+        if out["fp_calls"] else 0.0
+    out["savings_usd"] = round(max(0.0, savings), 6)
+    if out["hits"] > 0 or out["cache_read"] > 0:
+        out["verdict"] = "active"
+    elif out["fp_calls"] >= 20 and out["cache_read"] == 0:
+        out["verdict"] = "inert"
+    return out

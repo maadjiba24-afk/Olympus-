@@ -199,9 +199,21 @@ def build_parser() -> argparse.ArgumentParser:
                             "trial (production-trial checkpoint summary)")
     p_cal.add_argument("dest", nargs="?", default="",
                        help="destination file for `export`")
-    sub.add_parser("routing-stats",
-                   help="routing-outcome telemetry (SPEC-04 Phase A) + the "
-                        "Phase B data-gate readiness check")
+    p_rstats = sub.add_parser(
+        "routing-stats",
+        help="routing-outcome telemetry (SPEC-04 Phase A) + the "
+             "Phase B data-gate readiness check")
+    p_rstats.add_argument(
+        "--predictability", action="store_true",
+        help="C7 predictability report: offline, read-only analysis of "
+             "specialist-sequence predictors over recorded traces "
+             "(prefetch stays disabled)")
+    p_rstats.add_argument("--days", type=int, default=30,
+                          help="trace window in days for --predictability "
+                               "(default 30)")
+    p_rstats.add_argument("--out", default="",
+                          help="also write the --predictability report JSON "
+                               "to this path")
     sub.add_parser("learned", help="what Olympus learned/did on its own "
                                    "(the autonomous loop)")
     sub.add_parser("reports", help="problem reports users submitted from the web UI")
@@ -231,7 +243,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_replay = sub.add_parser(
         "replay", help="re-execute a recorded run against its frozen LLM "
                        "responses and prove the decision path is unchanged")
-    p_replay.add_argument("run_id", help="the run id from a trace")
+    p_replay.add_argument("run_id", nargs="?",
+                          help="the run id from a trace (omit with --fixture)")
+    p_replay.add_argument("--export-fixture", metavar="PATH",
+                          help="export the run as a portable, sanitized "
+                               "fixture directory instead of replaying it")
+    p_replay.add_argument("--fixture", metavar="PATH",
+                          help="import a fixture directory into the live "
+                               "store first, then replay its run")
     p_explain = sub.add_parser(
         "explain", help="show the decision path of a recorded run, or one "
                         "decision record by id")
@@ -653,8 +672,13 @@ def build_parser() -> argparse.ArgumentParser:
                                            "Prometheus strengthen the weakest")
     p_train.add_argument("--focus", type=int, default=2,
                          help="how many of the weakest specialists to improve")
-    sub.add_parser("scores", help="show the saved per-specialist benchmark "
-                   "baseline (run `olympus eval` to compute fresh scores)")
+    p_scores = sub.add_parser("scores", help="show the saved per-specialist "
+                              "benchmark baseline (run `olympus eval` to compute "
+                              "fresh scores)")
+    p_scores.add_argument("--drift", action="store_true",
+                          help="run the provider-drift gate on the current "
+                               "settings and print the severity report (respects "
+                               "OLYMPUS_DRIFT_BUDGET_USD)")
     p_models = sub.add_parser("models",
                               help="show the model pool and role assignments")
     p_models.add_argument("action", nargs="?", default="show",
@@ -1308,18 +1332,45 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(usage.report(7))
     elif args.command == "replay":
+        from . import replaystore
+        if args.export_fixture:
+            # Export-only path: bundle the run into a portable fixture and
+            # stop — no replay.
+            if not args.run_id:
+                print("usage: olympus replay <run_id> --export-fixture PATH")
+                return 1
+            try:
+                path = replaystore.export_fixture(args.run_id,
+                                                  args.export_fixture)
+            except (ValueError, replaystore.FixtureError) as err:
+                print(f"[error] {err}")
+                return 1
+            print(path)
+            return 0
+        run_id = args.run_id
+        if args.fixture:
+            try:
+                run_id = replaystore.import_fixture(args.fixture)
+            except replaystore.FixtureError as err:
+                print(f"[error] {err}")
+                return 1
+            print(f"Imported fixture run {run_id} into the store.")
+        if not run_id:
+            print("usage: olympus replay <run_id> | olympus replay "
+                  "--fixture PATH")
+            return 1
         try:
-            original, fresh, diffs = orchestrator.replay_run(args.run_id)
+            original, fresh, diffs = orchestrator.replay_run(run_id)
         except ValueError as err:
             print(f"[error] {err}")
             return 1
         n = len(original.get("decisions", []))
         if not diffs:
-            print(f"✓ Re-executable replay of run {args.run_id}: "
+            print(f"✓ Re-executable replay of run {run_id}: "
                   f"{n} decision(s) replayed byte-identically against the "
                   "frozen LLM responses. The reasoning path is reproducible.")
         else:
-            print(f"✗ Replay of run {args.run_id} diverged in "
+            print(f"✗ Replay of run {run_id} diverged in "
                   f"{len(diffs)} decision(s):")
             for d in diffs:
                 orig = d["original"] or {}
@@ -2492,6 +2543,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(usage.set_budget(args.amount))
     elif args.command == "routing-stats":
+        if getattr(args, "predictability", False):
+            import json as _json
+            from . import coupling
+            rep = coupling.predictability_report(days=args.days)
+            print(coupling.render_report(rep))
+            if args.out:
+                from pathlib import Path as _Path
+                _Path(args.out).write_text(_json.dumps(rep, indent=2),
+                                           encoding="utf-8")
+                print(f"\nWrote {args.out}")
+            return 0
         from . import routing_outcomes as ro
         g = ro.gate_status()
         s = g["stats"]
@@ -2552,6 +2614,14 @@ def main(argv: list[str] | None = None) -> int:
               "Wilson lower bound is strictly higher; otherwise the heuristic "
               "stands. Replay always uses the recorded decisions.)")
     elif args.command == "scores":
+        if getattr(args, "drift", False):
+            # Provider-drift gate (C6): an explicit, budget-capped live run on
+            # the current settings. Rides this existing command as a flag (no new
+            # command, no capabilities-manifest churn — I-M4).
+            from . import config as _config, modelgate
+            res = modelgate.run_gate(_config.Settings.from_env())
+            print(modelgate.format_report(res))
+            return 0
         from . import evals
         # Display-only: read the committed per-specialist baseline. A "show"
         # command must never trigger the paid live benchmark (that is what
@@ -2577,6 +2647,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "usage":
         from . import usage
         print(usage.report(args.days))
+        cs = usage.cache_stats(args.days)
+        if cs.get("verdict") != "no_signal":
+            print(f"\n  prompt cache ({cs['days']}d): {cs['verdict']} — "
+                  f"{cs['hit_rate'] * 100:.0f}% hit rate "
+                  f"({cs['hits']}/{cs['fp_calls']} calls), "
+                  f"{cs['cache_read']} tokens read from cache, "
+                  f"~${cs['savings_usd']:.4f} saved")
     elif args.command == "connectors":
         from . import connectors
         print(connectors.summary())

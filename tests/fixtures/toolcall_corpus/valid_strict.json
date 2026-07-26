@@ -1,0 +1,27 @@
+{
+  "name": "valid_strict",
+  "payload": "{\"name\": \"web_search\", \"arguments\": {\"query\": \"olympus\"}}",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 1,
+    "args": {
+      "query": "olympus"
+    },
+    "refused": false
+  }
+}

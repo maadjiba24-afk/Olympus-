@@ -1,0 +1,27 @@
+{
+  "name": "fenced",
+  "payload": "```json\n{\"name\": \"web_search\", \"arguments\": {\"query\": \"hera\"}}\n```",
+  "tools": [
+    {
+      "name": "web_search",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 3,
+    "args": {
+      "query": "hera"
+    },
+    "refused": false
+  }
+}

@@ -6,6 +6,7 @@ Layout:
       users/<user-id>/lessons|corrections|feedback/   per-user namespaces
       reports/ upgrades/ prompt_backups/ evals/       always shared (system)
       conversations/<id>.json                persisted chat histories
+      sessions/<id>.journal.jsonl            sealed per-session journal (sessionlog)
       skills/                                the self-built skill library
 
 User-scoped categories keep one person's lessons, corrections, and feedback
@@ -291,7 +292,22 @@ def load_conversation(conversation_id: str) -> list[dict]:
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as err:
+            # Corrupt snapshot: rebuild from the session journal's verified
+            # prefix (C1) instead of silently dropping the whole history.
+            try:
+                from . import errors, sessionlog
+                if sessionlog.enabled():
+                    recovered = sessionlog.recover_history(conversation_id)
+                    if recovered:
+                        errors.capture(
+                            "memory.load_conversation", err,
+                            context=f"corrupt snapshot {safe_id(conversation_id)}; "
+                                    f"recovered {len(recovered)} messages "
+                                    "from the session journal")
+                        return recovered
+            except Exception:
+                pass
             return []
     return []
 
@@ -303,6 +319,15 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
     os.replace(tmp, p)
+    # Seal this turn's delta into the session journal (C1) — purely additive:
+    # the snapshot above stays the source of truth, and a journal failure must
+    # never block the reply (sync captures its own errors; belt and braces).
+    try:
+        from . import sessionlog
+        sessionlog.sync(conversation_id, history)
+    except Exception as err:
+        from . import errors
+        errors.capture("memory.save_conversation", err, context="session journal")
     # Keep the cross-session search index fresh (best-effort; never block a save).
     try:
         from . import search

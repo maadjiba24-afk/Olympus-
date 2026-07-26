@@ -149,12 +149,80 @@ def _optional_checks() -> list[Check]:
     return out
 
 
+def _repair_checks() -> list[Check]:
+    """Tool-call repair-rate decay signal (C8): a rising rung≥3 share over the
+    last 7 days means the model is emitting more malformed calls — WARN above
+    OLYMPUS_REPAIR_WARN_RATE (default 0.15) once there are ≥50 calls."""
+    from . import toolcall_repair
+    try:
+        r = toolcall_repair.repair_rate(7)
+    except Exception:
+        return []
+    n, rate = r.get("total", 0), r.get("rate", 0.0)
+    detail = f"tool-call repair: {rate * 100:.1f}% over {n} calls (7d)"
+    if n >= 50 and rate > toolcall_repair.repair_warn_rate():
+        return [Check("tool-call repair", WARN,
+                      detail + " — rising repair rate; the model may be "
+                      "degrading at tool-call emission")]
+    return [Check("tool-call repair", OK, detail)]
+
+
+def _cache_checks() -> list[Check]:
+    """Prompt-cache liveness (C5): from recorded usage telemetry, is caching
+    producing cache reads at all? Inert caching (many fingerprint-carrying
+    calls, zero cache reads) means the money spent on cache writes buys
+    nothing — WARN with the likely causes."""
+    from . import usage
+    try:
+        s = usage.cache_stats(7)
+    except Exception:
+        return []
+    verdict = s.get("verdict")
+    if verdict == "active":
+        return [Check("prompt cache", OK,
+                      f"active — {s.get('hit_rate', 0.0) * 100:.0f}% hit rate "
+                      f"over {s.get('fp_calls', 0)} calls (7d), "
+                      f"~${s.get('savings_usd', 0.0):.4f} saved")]
+    if verdict == "inert":
+        return [Check("prompt cache", WARN,
+                      "prompt caching configured but producing no cache reads "
+                      f"({s.get('fp_calls', 0)} calls) — check prompt prefix "
+                      "stability / provider support")]
+    return [Check("prompt cache", OK, "no cache telemetry yet")]
+
+
+def _drift_checks() -> list[Check]:
+    """Provider-drift freeze markers (C6): a member the drift gate froze because
+    the pinned model regressed or started erroring. FAIL if any member is at
+    severity `block` (a verify/refusal regression); WARN if any freeze/quarantine
+    marker is present; OK otherwise. Markers are files — deleting one unfreezes."""
+    from . import modelgate
+    try:
+        frozen = modelgate.frozen_members()
+    except Exception:
+        return []
+    if not frozen:
+        return [Check("provider drift", OK, "no frozen members")]
+    blocked = [m for m, v in frozen.items() if v.get("severity") == "block"]
+    summary = ", ".join(f"{m}:{v.get('severity')}" for m, v in sorted(
+        frozen.items()))
+    if blocked:
+        return [Check("provider drift", FAIL,
+                      f"{len(frozen)} frozen ({summary}) — a pinned model "
+                      "regressed on verify/refusal; investigate or unfreeze")]
+    return [Check("provider drift", WARN,
+                  f"{len(frozen)} frozen: {summary}")]
+
+
 def run_checks() -> list[Check]:
     checks: list[Check] = []
     checks += _provider_checks()
     checks += _memory_checks()
     checks += _sandbox_checks()
     checks += _optional_checks()
+    checks += _repair_checks()
+    checks += _cache_checks()
+    checks += _drift_checks()
     return checks
 
 

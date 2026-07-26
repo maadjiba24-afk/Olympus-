@@ -1,0 +1,27 @@
+{
+  "name": "shape_b_action_input_encoded",
+  "payload": "{\"action\": \"browser_click\", \"action_input\": \"{\\\"index\\\": 2}\"}",
+  "tools": [
+    {
+      "name": "browser_click",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index"
+        ]
+      }
+    }
+  ],
+  "expect": {
+    "rung": 3,
+    "args": {
+      "index": 2
+    },
+    "refused": false
+  }
+}
