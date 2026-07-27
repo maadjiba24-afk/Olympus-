@@ -645,7 +645,7 @@ def compute_report(equity_curve: Sequence[tuple[Any, Any]],
                    risk_free_rate: float = 0.0,
                    continuous: bool = False,
                    cost_curve: Sequence[tuple[Any, Any]] | None = None,
-                   fees: Decimal | float = 0,
+                   fees: Decimal | float | None = None,
                    slippage: Decimal | float = 0,
                    exposure: float = 0.0,
                    turnover: float = 0.0,
@@ -662,6 +662,10 @@ def compute_report(equity_curve: Sequence[tuple[Any, Any]],
     the gross curve be reconstructed *chronologically* rather than by adding the
     total back at the end; the backtester always supplies it.
 
+    `fees` defaults to the sum of the trades' own fees rather than to zero. A
+    report that silently reports zero costs because the caller forgot an
+    argument is precisely the failure this module exists to prevent.
+
     `risk_free_rate` is annualised and de-annualised internally.
     """
     notes = list(warnings)
@@ -672,7 +676,11 @@ def compute_report(equity_curve: Sequence[tuple[Any, Any]],
 
     start_eq = Decimal(str(equity_curve[0][1])) if equity_curve else _ZERO
     end_eq = Decimal(str(equity_curve[-1][1])) if equity_curve else _ZERO
-    fees_d = Decimal(str(fees))
+    if fees is None:
+        fees_d = sum((Decimal(str(getattr(t, "fees", 0) or 0)) for t in trades),
+                     _ZERO)
+    else:
+        fees_d = Decimal(str(fees))
     slip_d = Decimal(str(slippage))
 
     net_curve = [(ts, _f(v)) for ts, v in equity_curve]

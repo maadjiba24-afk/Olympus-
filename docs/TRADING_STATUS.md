@@ -6,7 +6,7 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~19,800 lines across 28 modules; 32 test files; **1452 trading tests passing**
+- **Scale:** ~21,000 lines across 29 modules; 33 test files; **1503 trading tests passing**
 - **Whole repository:** 6122 passed, 17 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
@@ -78,12 +78,12 @@ missing. When the two disagree, this file is right.
 | `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
 | `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross/net are *required* constructor fields so a single-cost-basis report cannot be built; per-instrument/regime/period breakdowns whose trade counts sum back to the whole |
 | `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the Kronos and non-Kronos arms, so the signal source is the only difference |
+| `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `kronos_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
 
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
-| `evaluate.py` | 🔵 | **`kronos_is_valuable()` does not exist.** The Kronos-vs-baseline comparison is designed, not implemented. |
 | `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
 | `sentiment.py` | 🔵 | No news ingestion. The taint barrier it would feed (`risk.Tainted` / `assert_untainted`) **is** built and tested. |
 | `monitor.py` | 🔵 | No monitor loop. `killswitch.evaluate_auto_trips()` is built and tested; nothing calls it on a schedule. |
@@ -116,7 +116,7 @@ Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
 |---|---|---|
 | **Paper trade through a real broker sandbox** | ⛔ **Blocked** | No broker credentials, no venue reachable. What exists is a fully functional `PaperBroker` and the ABC a real adapter must satisfy. That is a real simulated venue — it is **not** a demonstration against a broker's sandbox and must not be reported as one. |
 | **Run Kronos against the published checkpoints** | ⛔ **Blocked** | `huggingface.co` returns HTTP 403 through this environment's proxy (verified during the teardown). The adapter is tested against a deterministic fake backend: its *logic* is tested, its *numerical agreement with upstream Kronos* is not. |
-| **Demonstrate Kronos adds value** | ⛔ **Blocked, and unimplemented** | Needs real checkpoints, real data, **and** `evaluate.py`/`backtest.py`, which do not exist. No claim about Kronos's usefulness is made or supported. Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
+| **Demonstrate Kronos adds value** | ⛔ **Still blocked — but now decidable** | The machinery exists (`evaluate.kronos_is_valuable`, `backtest`), so the question can be *answered* the moment real checkpoints and real data are available. It has not been answered here: no checkpoint is reachable and no market data is available, so the function returns its honest default of `False`. **No claim about Kronos's usefulness is made or supported.** Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
 | **Backtest without known data leakage** | ✅ **Built and tested** | 20 tests, each naming the self-deception it closes. Two honest limits, disclosed in every result's `warnings`: fills are evaluated against bar OHLC rather than ticks, and a static universe cannot have survivorship bias removed by the engine. |
 | **Live trading** | ⛔ **Correctly disabled** | The designed state. At least gates G2 (account), G4 (reconciliation), G7 (connectivity), G8 (paper history) cannot pass without a real venue. |
 
