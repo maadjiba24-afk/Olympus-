@@ -243,6 +243,19 @@ def test_config_sorts_quantiles_and_is_json_safe():
     json.dumps(config.to_dict())
 
 
+def test_a_private_fine_tune_pin_bounds_the_config_the_same_way():
+    """Operators running their own fine-tune get the same guards as the public
+    checkpoints — the rules live on the pin, not on a hardcoded list."""
+    private = CheckpointPin(repo_id="acme/kronos-5m", kind="predictor",
+                            revision="b" * 40, expected_s1_bits=10,
+                            expected_s2_bits=10, max_context=64)
+    KronosConfig(context_length=64, horizon=8, predictor_pin=private)
+    with pytest.raises(ConfigurationError):
+        KronosConfig(context_length=128, horizon=8, predictor_pin=private)
+    with pytest.raises(ConfigurationError):
+        KronosConfig(context_length=64, horizon=64, predictor_pin=private)
+
+
 def test_config_rejects_a_pin_of_the_wrong_kind():
     with pytest.raises(ConfigurationError):
         KronosConfig(context_length=32, horizon=4, tokenizer_pin=KRONOS_SMALL)
@@ -793,14 +806,29 @@ def test_a_malformed_timeframe_is_a_wiring_error():
 def test_the_forecaster_cannot_reach_execution():
     """Structural, not stylistic: a forecasting component that can import the
     OMS is a forecasting component that can put an order on a venue without
-    passing risk."""
+    passing risk. Checked against the module's real import graph rather than a
+    substring scan, so prose about execution in the docstring does not count and
+    an aliased import cannot slip past."""
+    import ast
     import pathlib
     import olympus.trading.kronos_adapter as adapter
-    source = pathlib.Path(adapter.__file__).read_text(encoding="utf-8")
-    for forbidden in ("from .oms", "from .execution", "from .brokers",
-                      "from .risk", "from .strategy", "import oms",
-                      "TradeIntent", "Order("):
-        assert forbidden not in source, forbidden
+
+    tree = ast.parse(pathlib.Path(adapter.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+            imported.update(alias.name for alias in node.names)
+
+    forbidden = {"oms", "execution", "brokers", "risk", "strategy", "reconcile",
+                 "signals", "audit", "modes", "killswitch",
+                 "Order", "Fill", "TradeIntent", "RiskDecision", "Position"}
+    assert not (imported & forbidden), sorted(imported & forbidden)
+    # And nothing execution-shaped leaks into the module namespace either.
+    for name in ("Order", "Fill", "TradeIntent", "RiskDecision"):
+        assert not hasattr(adapter, name), name
 
 
 def test_the_forecaster_is_reusable_across_calls():

@@ -1,17 +1,19 @@
 # Olympus Trading Domain — Implementation Status
 
 **The honest ledger.** `docs/TRADING_ARCHITECTURE.md` describes the *target*;
-this file records what actually exists, what is only designed, what is tested,
-and what is unsafe or incomplete. When the two disagree, this file is right.
+this file records what actually exists, what is tested, and what is unsafe or
+missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Operating mode:** `PAPER` (default; live trading is disabled)
-- **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE** — see §4
+- **Scale:** ~15,100 lines across 22 modules; 22 test files; **956 trading tests passing**
+- **Existing Olympus suite:** no regressions
+- **Operating mode:** `PAPER` (the default; live is disabled)
+- **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
-> **Read §4 before using any of this.** Several completion-standard items
-> cannot be demonstrated in this environment, and saying so is part of the
-> deliverable.
+> **Read §3 and §4 before trusting any of this.** Several completion-standard
+> items cannot be demonstrated in this environment, and saying so plainly is
+> part of the deliverable.
 
 ---
 
@@ -19,101 +21,127 @@ and what is unsafe or incomplete. When the two disagree, this file is right.
 
 | Mark | Meaning |
 |---|---|
-| ✅ **Built + tested** | Implemented, with tests that actually exercise the behaviour, passing offline |
-| 🟡 **Built, thinly tested** | Implemented; tests cover the happy path but not the adversarial surface |
-| 🔵 **Designed only** | Specified in the architecture doc; no code |
-| ⛔ **Blocked** | Cannot be built or demonstrated in this environment; reason stated |
+| ✅ | Implemented with tests that exercise the adversarial cases, passing offline |
+| 🟡 | Implemented; happy path tested, adversarial surface thin |
+| 🔵 | Designed in the architecture doc; **no code** |
+| ⛔ | Cannot be built or demonstrated here; reason stated |
 
 ---
 
 ## 2. Module status
 
-*(Updated as the build lands. Rows marked 🔵 have a written specification in
-`docs/TRADING_ARCHITECTURE.md` but no implementation yet.)*
-
-### Foundation
+### Foundation & composition
 
 | Module | Status | Evidence |
 |---|---|---|
-| `contracts.py` | ✅ | Frozen dataclasses; invariants enforced at construction (OHLC coherence, UTC-only, `REJECTED ⟹ quantity 0`, stop on the protective side). Verified by probe + `test_trading_boundaries.py` |
-| `errors.py` | ✅ | Stable typed codes; unsupported configs raise rather than silently corrupt |
-| `clock.py` | ✅ | Injectable time; `FixedClock` refuses to move backwards |
-| `__init__.py` | ✅ | Lazy submodule loading; subprocess test proves `import olympus.trading` pulls in no torch/numpy/pandas/scipy |
+| `contracts.py` | ✅ | Invariants at construction: OHLC coherence, UTC-only, `REJECTED ⟹ quantity 0`, stop on the protective side |
+| `errors.py` | ✅ | Typed codes; unsupported configs raise rather than silently corrupt |
+| `clock.py` | ✅ | Injectable; `FixedClock` refuses to move backwards |
+| `pipeline.py` | ✅ | 20 tests: no order without an approving decision; fails closed on throwing risk engine, unreadable kill-switch registry, broken mode controller |
 
 ### Market analysis
 
 | Module | Status | Evidence |
 |---|---|---|
-| `instruments.py` | ✅ | Sessions verified across the 2026-03-08 US DST transition; epoch-anchored timeframe grid; sealable (immutable) registry |
-| `storage.py` | ✅ | Probed: idempotent dedupe, ascending order, exact float round-trip, cross-instance persistence |
-| `validate.py` | ✅ | Probed: gaps detected without fabricating bars, dedupe keeps last, `assert_no_lookahead` keyed on `ts_close` (not `ts_open`) and catches a future bar |
-| `candles.py` | ✅ | Probed: 1m→5m resample with correct OHLC aggregation and the trailing partial bucket withheld |
+| `instruments.py` | ✅ | Sessions verified across the 2026-03-08 US DST transition; epoch-anchored timeframe grid; sealable registry |
+| `storage.py` | ✅ | Idempotent dedupe, ordering, exact float round-trip, cross-process persistence |
+| `validate.py` | ✅ | Gaps detected without fabrication; `assert_no_lookahead` keyed on `ts_close` |
+| `candles.py` | ✅ | Tick aggregation, resampling, trailing partial bucket withheld |
+| `ta.py` | ✅ | Indicators aligned to input length with exact warm-up regions |
+| `features.py` | ✅ | `assert_causal` independently verified: rejects a full-sample z-score (the §12.9 bug in miniature), accepts an expanding window |
+| `regime.py` | ✅ | Rule-based with hysteresis; `UNKNOWN` on insufficient history |
+| `volatility.py` | ✅ | Multiple estimators; timeframe-derived annualisation |
 
-### Composition
+### Forecasting
 
 | Module | Status | Evidence |
 |---|---|---|
-| `pipeline.py` | ✅ | 20 tests in `test_trading_pipeline.py` prove the central claim: no order exists without an approving `RiskDecision`. Fails closed on a throwing risk engine, an unreadable kill-switch registry, and a broken mode controller (falls back to `PAPER`, never live). Execution sizes from `decision.approved_quantity`, never the intent's. Strategy context asserted to expose no `broker`/`oms`/`execution`/`limits`/`vault`. **Caveat:** proven against fakes that enforce the same preconditions the real components must; the real `risk.py`/`execution.py` need their own behavioural tests. Written against the authored specs, so integration reconciliation is expected. |
+| `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer |
+| `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
+| `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy |
+| `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
-### Remaining modules
+### Decision, safety, execution
 
-Status for `ta`, `features`, `regime`, `volatility`, `kronos_runtime`,
-`kronos_adapter`, `forecast`, `signals`, `risk`, `killswitch`, `portfolio`,
-`oms`, `brokers/`, `execution`, `reconcile`, `audit`, `modes`, `backtest`,
-`perf`, `strategy`, `evaluate`, `registry`, `sentiment`, `monitor`, `agents`
-is recorded here as each lands. Until a row says ✅, treat the capability as
-**not present**, regardless of what the architecture document describes.
-
----
-
-## 3. Structural guarantees currently enforced by tests
-
-| Guarantee | Enforced by | State |
+| Module | Status | Evidence |
 |---|---|---|
-| `strategy.py` has no import path to a broker, the OMS, or the execution engine | `test_trading_boundaries.py::test_strategy_module_has_no_execution_surface` | ✅ harness live (asserts once `strategy.py` exists) |
-| Layer boundary graph (analysis ⊥ execution, forecaster ⊥ broker, risk ⊥ LLM) | `test_trading_boundaries.py::test_layer_boundaries_are_respected` | ✅ harness live, 29 module rules |
-| No heavy dependency at module scope anywhere in the domain | `test_no_heavy_imports_at_module_scope` | ✅ passing |
-| `import olympus.trading` does not pull in torch | subprocess probe | ✅ passing |
-| Every lazily-imported third party is declared in `pyproject` | `tests/test_deps_claim.py` (pre-existing CI guard) | ✅ passing with the new `kronos` extra |
+| `risk.py` | ✅ | 56 tests, boundary-tested per limit with stable reason codes; fails closed on missing measurements; projected (post-fill) exposure; reduce-never-increase; taint barrier |
+| `killswitch.py` | ✅ | Survives restart; auto-trips need operator override; unreadable registry raises |
+| `portfolio.py` | ✅ | 19 tests; zero-crossing cost basis correct **both** directions; exact Decimal cash; idempotent fills; restart recovery |
+| `oms.py` | ✅ | 18 tests; deterministic idempotency key from the decision; over-fill raised not clamped; terminal states terminal |
+| `brokers/base.py` | ✅ | Credentials are vault *references*; `repr`/`str` cannot leak material (tested) |
+| `brokers/paper.py` | ✅ | 19 tests; fills at next bar's open, self-enforced via staging timestamps; fees, adverse slippage, partial fills, rejections, outages, `force_desync` |
+| `execution.py` | ✅ | Requires an approving decision; query-then-adopt retry; price collar; shadow mode reaches no venue |
+| `reconcile.py` | ✅ | Adopts orders/fills; **never** auto-repairs a position break; trips the desync switch |
+| `audit.py` | ✅ | 14 tests; forgery and deletion both detected by actually rewriting history on disk |
+| `modes.py` | ✅ | 29 tests; default PAPER; live needs all 9 gates + token + named operator + audit event |
+
+### Not built
+
+| Module | Status | Consequence |
+|---|---|---|
+| `backtest.py`, `perf.py` | 🔵 | **No event-driven backtester or performance metrics.** The anti-leakage *primitives* are built and tested (`assert_no_lookahead`, `assert_causal`, next-bar fills, fit/transform split), but there is no engine composing them into a run, and none of the required metrics (Sharpe, Sortino, Calmar, profit factor, …) are computed anywhere. |
+| `strategy.py` | 🔵 | No concrete strategies. The pipeline accepts any object with `.on_bar(ctx) -> [TradeIntent]`; none ships. |
+| `evaluate.py` | 🔵 | **`kronos_is_valuable()` does not exist.** The Kronos-vs-baseline comparison is designed, not implemented. |
+| `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
+| `sentiment.py` | 🔵 | No news ingestion. The taint barrier it would feed (`risk.Tainted` / `assert_untainted`) **is** built and tested. |
+| `monitor.py` | 🔵 | No monitor loop. `killswitch.evaluate_auto_trips()` is built and tested; nothing calls it on a schedule. |
+| `agents.py` | 🔵 | No market-intelligence agent schemas. |
+| `ingest.py` | 🔵 | No live market-data source. Data enters via `storage`/`validate` from the caller. |
 
 ---
 
-## 4. What is **not** demonstrable in this environment
+## 3. Kronos defect regressions
 
-Stated explicitly, per the task's stop-and-report rule.
+Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
+`tests/test_trading_kronos_defects.py`:
+
+| Defect | Repair |
+|---|---|
+| §12.1 `top_k`+`top_p` silently ignores `top_p` | Combination raises `ConfigurationError` |
+| §12.6 opaque pandas error when `horizon ≥ context` | Refused at config **and** against the checkpoint's `max_context` |
+| §12.7 paths averaged away inside inference | Every path preserved; mean is a view; quantiles from the ensemble |
+| §12.7 incoherent OHLC output | Repaired per bar and warned; invariant asserted |
+| §12.9 normalisation leaks the horizon | Proven context-only: backend sees identical input regardless of what follows `as_of` |
+| §12.2 asymmetric `s1/s2` bits corrupt silently | Refused at pin construction |
+| Unpinned checkpoints | `CheckpointVerificationError` before any network/torch work |
+| §12.10 `comet_ml` hard import | Not inherited — no training code vendored |
+
+---
+
+## 4. What is **not** demonstrable here
 
 | Completion-standard item | State | Reason |
 |---|---|---|
-| **Paper trade through a real broker sandbox or paper account** | ⛔ **Blocked** | No broker credentials and no outbound access to any venue. What is built instead is a `BrokerAdapter` ABC plus a fully functional `PaperBroker` (fills, fees, slippage, partial fills, rejections, outages, forced desync). That is a real simulated venue and a real contract for adapters — it is **not** a demonstration against a broker's sandbox, and must not be reported as one. |
-| **Run Kronos forecasts against the real published checkpoints** | ⛔ **Blocked** | `huggingface.co` returns HTTP 403 through this environment's proxy (verified during the teardown), and torch is not installed. The adapter is therefore tested against a deterministic fake backend. Its *logic* — abstention, normalisation, path preservation, OHLC repair, config rejection — is tested; its *numerical agreement with upstream Kronos* is **not**. |
-| **Demonstrate measurable Kronos value** | ⛔ **Blocked** | Requires both real checkpoints and real market data. `evaluate.kronos_is_valuable()` exists so the question is decided by measurement; with no data it returns `False`, which is the correct default. Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
-| **Live trading** | ⛔ **Correctly disabled** | Not a limitation — the designed state. Nine deployment gates plus an operator token are required, and at least G2 (account verified), G4 (reconciliation), G7 (broker connectivity) and G8 (paper-trading history) cannot pass without a real venue. |
+| **Paper trade through a real broker sandbox** | ⛔ **Blocked** | No broker credentials, no venue reachable. What exists is a fully functional `PaperBroker` and the ABC a real adapter must satisfy. That is a real simulated venue — it is **not** a demonstration against a broker's sandbox and must not be reported as one. |
+| **Run Kronos against the published checkpoints** | ⛔ **Blocked** | `huggingface.co` returns HTTP 403 through this environment's proxy (verified during the teardown). The adapter is tested against a deterministic fake backend: its *logic* is tested, its *numerical agreement with upstream Kronos* is not. |
+| **Demonstrate Kronos adds value** | ⛔ **Blocked, and unimplemented** | Needs real checkpoints, real data, **and** `evaluate.py`/`backtest.py`, which do not exist. No claim about Kronos's usefulness is made or supported. Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
+| **Backtest without known data leakage** | 🟡 **Partial** | The primitives are built and tested; the engine that composes them is not. |
+| **Live trading** | ⛔ **Correctly disabled** | The designed state. At least gates G2 (account), G4 (reconciliation), G7 (connectivity), G8 (paper history) cannot pass without a real venue. |
 
 ---
 
 ## 5. Known issues and technical debt
 
-| # | Issue | Severity | Plan |
-|---|---|---|---|
-| 1 | `validate.py` re-implements timeframe parsing that `instruments.py` owns, delegating opportunistically. Its delegate path returns early without the positivity re-check — harmless today because `instruments` rejects `0m`, but it is duplicated logic with two possible answers. | Low | Collapse to a single owner (`instruments`) in the consolidation pass |
-| 2 | The default `min_completeness` of 0.95 marks a window with one missing bar in five as `UNUSABLE`. Correct-but-strict; may be too strict for illiquid instruments. | Low | Document; make per-instrument configurable |
+| # | Issue | Severity |
+|---|---|---|
+| 1 | `validate.py` re-implements timeframe parsing that `instruments.py` owns, delegating opportunistically; its delegate path returns early without the positivity re-check. Harmless today (`instruments` rejects `0m`) but two code paths can answer the same question. | Low |
+| 2 | Default `min_completeness` of 0.95 marks one missing bar in five as `UNUSABLE`. Correct-but-strict; may be wrong for illiquid instruments. | Low |
+| 3 | `risk.py`/`killswitch.py`/`portfolio.py`/`oms.py`/`brokers`/`execution.py`/`reconcile.py`/`audit.py`/`modes.py` were authored directly rather than by the parallel build, so a duplicate-cluster overwrite is possible; all are committed, so any clobber is recoverable by `git checkout`. | Low |
+| 4 | No CLI surface (`olympus trading …`). All use is via the Python API. | Medium |
 
 ---
 
-## 6. How to verify these claims yourself
+## 6. Verify these claims yourself
 
 ```bash
-# the whole trading suite, offline, no torch required
-python -m pytest tests/test_trading_*.py -q
-
-# the structural guarantees specifically
-python -m pytest tests/test_trading_boundaries.py -q
-
-# the pre-existing repo guards this integration must not break
-python -m pytest tests/test_deps_claim.py -q
-python -m olympus capabilities --check
+python -m pytest tests/test_trading_*.py -q      # 956 passing, offline, no torch needed
+python -m pytest tests/test_trading_end_to_end.py -q   # the completion standard
+python -m pytest tests/test_trading_kronos_defects.py -q  # teardown regressions
+python -m pytest tests/test_trading_boundaries.py -q   # structural guarantees
+python -m olympus capabilities --check           # Olympus's own CI guard
+python -m pytest tests/test_deps_claim.py -q     # dependency truthfulness
 ```
 
-Every claim marked ✅ above corresponds to a test or a reproducible probe. If a
-command here fails, this document is wrong and should be corrected rather than
-explained away.
+Every ✅ above corresponds to a test. If a command here fails, this document is
+wrong and should be corrected rather than explained away.

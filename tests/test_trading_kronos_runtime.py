@@ -437,12 +437,12 @@ def test_runtime_refuses_an_incompatible_pair():
     loader = pair_loader(tokenizer=fake_tokenizer(s1_bits=10, s2_bits=10),
                          predictor=fake_predictor(s1_bits=8, s2_bits=8,
                                                   s1_vocab_size=256))
-    pin = KRONOS_SMALL.with_revision(OTHER_REV)
-    # The pin's expectations would catch this first, so use a bespoke pin that
-    # declares nothing and let verify_compatibility be the thing that fires.
+    # KRONOS_SMALL's own expectations would catch this first, so the test uses
+    # a bespoke pin that declares no geometry — that way verify_compatibility,
+    # not the pin check, is demonstrably the thing that fires.
+    assert KRONOS_SMALL.expected_s1_bits == 10
     bespoke = CheckpointPin(repo_id="local/pred", kind="predictor",
                             revision=OTHER_REV, max_context=512)
-    assert pin.expected_s1_bits == 10
     with pytest.raises(IncompatibleModelError):
         KronosRuntime.load(predictor_pin=bespoke, device="cpu", loader=loader)
 
