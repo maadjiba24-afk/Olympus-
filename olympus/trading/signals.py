@@ -167,6 +167,8 @@ class SignalContext:
     @classmethod
     def coerce(cls, context: Any = None, *, default_as_of: datetime | None = None,
                **kwargs) -> "SignalContext":
+        if isinstance(context, SignalContext) and not kwargs:
+            return context                   # already the right shape; keep it
         data: dict[str, Any] = {}
         if context is not None:
             if isinstance(context, SignalContext):
