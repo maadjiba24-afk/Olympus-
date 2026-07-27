@@ -61,6 +61,11 @@ from .errors import DuplicateOrderError, ExecutionError, TradingError
 
 _NS = "trading.orders"
 _FILL_NS = "trading.fills"
+#: broker_order_id -> client_order_id. An index rather than a scan because the
+#: lookup happens on every venue callback, and a linear scan over every order
+#: this account has ever placed is a latency cliff that only appears in
+#: production.
+_BROKER_INDEX_SUFFIX = ".broker_ids"
 
 #: Legal order-status transitions. Anything not listed is refused.
 LEGAL_TRANSITIONS: Mapping[OrderStatus, frozenset[OrderStatus]] = {
@@ -136,15 +141,27 @@ class OrderStore:
     """
 
     def __init__(self, *, clock: Clock | None = None, namespace: str = _NS,
-                 fill_namespace: str = _FILL_NS, audit=None):
+                 fill_namespace: str = _FILL_NS, audit=None,
+                 store_ns: str | None = None):
         self.clock = clock or default_clock()
-        self.namespace = namespace
+        self.namespace = store_ns or namespace
         self.fill_namespace = fill_namespace
+        self.broker_index_namespace = self.namespace + _BROKER_INDEX_SUFFIX
         self.audit = audit
 
     def _store(self):
         from olympus import store
         return store.backend()
+
+    def _lock(self, client_order_id: str):
+        """Serialise the read-modify-write of one order across processes.
+
+        Per-order: the poller, the reconciler, and the submitting thread all
+        touch the same record, and a lost update there means a fill that was
+        counted disappears from the local book.
+        """
+        from olympus import proclock
+        return proclock.lock(f"trading-oms-{self.namespace}-{client_order_id}")
 
     # -- reads ------------------------------------------------------------
 
@@ -173,6 +190,13 @@ class OrderStore:
         return [o for o in self.all_orders() if o.is_open]
 
     def by_broker_id(self, broker_order_id: str) -> Order | None:
+        """Resolve a venue identifier to our order. Index first, scan as a
+        fallback so records written before the index existed still resolve."""
+        raw = self._store().get(self.broker_index_namespace, _safe_key(broker_order_id))
+        if raw:
+            order = self.get(raw.decode("utf-8"))
+            if order is not None and order.broker_order_id == broker_order_id:
+                return order
         for order in self.all_orders():
             if order.broker_order_id == broker_order_id:
                 return order
@@ -185,6 +209,12 @@ class OrderStore:
             {"order": order.to_dict(), "fills": [f.to_dict() for f in fills]},
             sort_keys=True).encode("utf-8")
         self._store().put(self.namespace, order.client_order_id, payload)
+        if order.broker_order_id:
+            # Written on every mutation, not only in `link_broker_id`: the id
+            # usually arrives as a side effect of a status transition.
+            self._store().put(self.broker_index_namespace,
+                              _safe_key(order.broker_order_id),
+                              order.client_order_id.encode("utf-8"))
 
     def create(self, order: Order) -> Order:
         """Record a new order. Refuses to overwrite an existing id.

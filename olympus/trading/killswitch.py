@@ -108,11 +108,17 @@ class KillSwitchRegistry:
     halted system keeps trading.
     """
 
-    def __init__(self, *, clock: Clock | None = None, namespace: str = _NS,
-                 audit=None):
+    def __init__(self, *, clock: Clock | None = None, store_ns: str = _NS,
+                 namespace: str | None = None, audit=None):
         self.clock = clock or default_clock()
-        self.namespace = namespace
+        #: `namespace` is the older spelling and still wins when both are given,
+        #: so no existing caller changes behaviour.
+        self.namespace = namespace if namespace is not None else store_ns
         self.audit = audit
+
+    @property
+    def store_ns(self) -> str:
+        return self.namespace
 
     # -- persistence ------------------------------------------------------
 
