@@ -289,14 +289,36 @@ def _peeking_centred_average(candles):
 def _peeking_full_sample_zscore(candles):
     """A subtler peek: z-scored against the mean and stdev of the WHOLE series.
 
-    Prefix truncation hides this one (the prefix is its own whole series), so
-    only the future-perturbation check catches it. It is the same shape as the
-    Kronos finetune_csv normalisation leak.
+    Exactly the shape of the Kronos finetune_csv normalisation leak — the
+    scaling of every bar encodes statistics of bars that had not happened.
     """
     closes = [c.close for c in candles]
     mean = sum(closes) / len(closes)
     spread = (sum((x - mean) ** 2 for x in closes) / len(closes)) ** 0.5 or 1.0
     return [(x - mean) / spread for x in closes]
+
+
+def _peeking_scale_by_running_max(candles):
+    """A peek that *prefix truncation alone cannot see*.
+
+    Each bar is divided by the maximum close of the whole series. On a
+    monotonically declining series the maximum is always the first bar, so
+    ``fn(candles[:k])[k-1] == fn(candles)[k-1]`` for every k and the prefix
+    check is satisfied — yet the function genuinely reads the future, and would
+    behave differently the moment the series rose. Only perturbing the future
+    exposes it. This is why `assert_causal` runs both checks instead of
+    treating the prefix check as sufficient.
+    """
+    closes = [c.close for c in candles]
+    peak = max(closes)
+    return [x / peak for x in closes]
+
+
+def decline(n: int, start: float = 100.0, step: float = 0.5):
+    """A monotonically falling series — see `_peeking_scale_by_running_max`."""
+    closes = [start - i * step for i in range(n)]
+    return [bar(i, close, open_=closes[i - 1] if i else closes[0])
+            for i, close in enumerate(closes)]
 
 
 def _misaligned(candles):
@@ -317,6 +339,19 @@ def test_assert_causal_catches_a_feature_that_reads_the_next_bar():
 def test_assert_causal_catches_a_transform_fitted_on_the_whole_series():
     with pytest.raises(DataValidationError) as excinfo:
         assert_causal(_peeking_full_sample_zscore, ramp(12))
+    assert "not causal" in str(excinfo.value)
+
+
+def test_perturbation_check_catches_what_the_prefix_check_cannot():
+    """The prefix check alone passes this function on a declining series; the
+    future-perturbation check is what fails it."""
+    bars = decline(12)
+    full = _peeking_scale_by_running_max(bars)
+    for k in range(1, len(bars) + 1):
+        prefix = _peeking_scale_by_running_max(bars[:k])
+        assert prefix[k - 1] == pytest.approx(full[k - 1])
+    with pytest.raises(DataValidationError) as excinfo:
+        assert_causal(_peeking_scale_by_running_max, bars)
     assert "leaking backwards" in str(excinfo.value)
 
 
@@ -337,18 +372,38 @@ def test_every_builtin_feature_is_causal():
     assert_builder_causal(FeatureBuilder(), ramp(40), clock=CLOCK) is None
 
 
-def test_assert_builder_causal_catches_a_peeking_custom_feature():
-    """A registered feature can still peek if it closes over history it was
-    not handed. This is the realistic version of the bug."""
-    history = ramp(20)
+def test_assert_builder_causal_catches_a_feature_that_carries_state():
+    """A window-passing scalar feature cannot index into the future — but it
+    can smuggle a value in through state that survives between calls, which is
+    what a "cache the last close" optimisation quietly does. Here the value
+    left behind by one evaluation pass shows up at bar 0 of the next."""
+    remembered = {}
 
-    def peeking(window):
-        # Ignores its own window and reads the last bar of the full history.
-        return history[len(window)].close if len(window) < len(history) else None
+    def stateful(window):
+        previous = remembered.get("close", window[-1].close)
+        remembered["close"] = window[-1].close
+        return previous
 
-    builder = FeatureBuilder(builtins=False).register("peek", peeking, 1)
+    builder = FeatureBuilder(builtins=False).register("stateful", stateful, 1)
     with pytest.raises(DataValidationError):
-        assert_builder_causal(builder, history, clock=CLOCK)
+        assert_builder_causal(builder, ramp(10), clock=CLOCK)
+
+
+def test_assert_builder_causal_names_the_offending_feature():
+    """With a dozen features registered, "something is not causal" is useless;
+    the failure must say which one."""
+    counter = {"n": 0}
+
+    def drifting(window):
+        counter["n"] += 1
+        return float(counter["n"])       # depends on call order, not on bars
+
+    builder = FeatureBuilder(builtins=False)
+    builder.register("honest", lambda w: w[-1].close, 1)
+    builder.register("drifting", drifting, 1)
+    with pytest.raises(DataValidationError) as excinfo:
+        assert_builder_causal(builder, ramp(8), clock=CLOCK)
+    assert "drifting" in str(excinfo.value)
 
 
 # --- normalisation: fit on train, transform later --------------------------
@@ -364,6 +419,7 @@ def rows_at(values, *, start_minute: int = 0):
 def test_fit_scaler_uses_only_the_rows_it_was_given():
     train = rows_at([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     stats = fit_scaler(train, method="zscore")
+    assert isinstance(stats, ScalerStats)
     assert stats.center["x"] == pytest.approx(5.5)
     assert stats.scale["x"] == pytest.approx(8.25 ** 0.5)
     assert stats.n_samples == 10

@@ -133,6 +133,18 @@ class FeatureSet:
 # `FeatureBuilder.series` produce a causal series and what `assert_causal`
 # verifies.
 
+# How far back the *recursively smoothed* features look. Fixed, not "all the
+# history the caller happened to pass". EMA- and Wilder-smoothed indicators are
+# seeded from the start of their input, so their value at a given bar depends on
+# where the series began: the same bar scores differently in a training run with
+# five years of data and in a live loop with a 500-bar ring buffer, and the model
+# then sees a feature it was never trained on. Capping the lookback makes each
+# feature a function of the last N bars and nothing else. N is set so the seed's
+# influence has decayed below ~1e-6 relative — (13/14)^186 for the Wilder ones,
+# (25/27)^274 for MACD — which is far below the noise in the underlying prices.
+_WILDER_LOOKBACK = 200          # RSI(14), ATR(14)
+_MACD_LOOKBACK = 300            # EMA(26) inside MACD(12, 26, 9)
+
 def _return_over(candles: Sequence[Candle], lag: int) -> Optional[float]:
     if len(candles) < lag + 1:
         return None
@@ -193,7 +205,7 @@ def _atr_pct(candles: Sequence[Candle]) -> Optional[float]:
     raw ATR is not."""
     if len(candles) < 15:
         return None
-    value = ta.atr(candles[-15:], 14)[-1]
+    value = ta.atr(candles[-_WILDER_LOOKBACK:], 14)[-1]
     close = candles[-1].close
     return None if value is None or close <= 0.0 else value / close
 
@@ -201,13 +213,13 @@ def _atr_pct(candles: Sequence[Candle]) -> Optional[float]:
 def _rsi_14(candles: Sequence[Candle]) -> Optional[float]:
     if len(candles) < 15:
         return None
-    return ta.rsi([c.close for c in candles], 14)[-1]
+    return ta.rsi([c.close for c in candles[-_WILDER_LOOKBACK:]], 14)[-1]
 
 
 def _macd_hist(candles: Sequence[Candle]) -> Optional[float]:
     if len(candles) < 34:
         return None
-    return ta.macd([c.close for c in candles], 12, 26, 9)[2][-1]
+    return ta.macd([c.close for c in candles[-_MACD_LOOKBACK:]], 12, 26, 9)[2][-1]
 
 
 def _bb_position(candles: Sequence[Candle]) -> Optional[float]:
@@ -216,7 +228,8 @@ def _bb_position(candles: Sequence[Candle]) -> Optional[float]:
     is the interesting case."""
     if len(candles) < 20:
         return None
-    upper, _middle, lower = ta.bollinger([c.close for c in candles], 20, 2.0)
+    upper, _middle, lower = ta.bollinger(
+        [c.close for c in candles[-20:]], 20, 2.0)
     top, bottom = upper[-1], lower[-1]
     if top is None or bottom is None:
         return None
@@ -230,7 +243,7 @@ def _volume_zscore(candles: Sequence[Candle]) -> Optional[float]:
     """How unusual this bar's volume is against the last 20 bars."""
     if len(candles) < 20:
         return None
-    return ta.zscore([c.volume for c in candles], 20)[-1]
+    return ta.zscore([c.volume for c in candles[-20:]], 20)[-1]
 
 
 def _range_pct(candles: Sequence[Candle]) -> Optional[float]:
@@ -256,14 +269,14 @@ def _trend_strength(candles: Sequence[Candle]) -> Optional[float]:
     """Signed efficiency ratio over 20 bars — see `ta.trend_strength`."""
     if len(candles) < 20:
         return None
-    return ta.trend_strength([c.close for c in candles], 20)[-1]
+    return ta.trend_strength([c.close for c in candles[-20:]], 20)[-1]
 
 
 def _distance_from_sma_50(candles: Sequence[Candle]) -> Optional[float]:
     """Fractional distance of price above/below its 50-bar mean."""
     if len(candles) < 50:
         return None
-    mean = ta.sma([c.close for c in candles], 50)[-1]
+    mean = ta.sma([c.close for c in candles[-50:]], 50)[-1]
     return None if mean is None or mean == 0.0 else candles[-1].close / mean - 1.0
 
 
