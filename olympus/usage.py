@@ -14,10 +14,13 @@ spend reaches it — a seatbelt on their provider bill, not a charge from us.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
+import math
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from . import config, memory, proclock
@@ -55,15 +58,582 @@ _GLOBAL_SLOT = "model-call"
 
 
 @contextlib.contextmanager
-def slot():
+def slot(*, cls: str = "default", key: str | None = None,
+         priority: str | None = None, timeout: float | None = None,
+         cancel_token=None, dims=None):
     """Acquire one of the limited model-call slots — capped both per-process
     (a local BoundedSemaphore) AND machine-globally (a proclock counting
     semaphore over MEMORY_DIR). The local semaphore is acquired first (outer)
     so a single process never holds more machine slots than its own cap, then
-    the cross-process slot (inner); both release on exit."""
-    with _SEMAPHORE:
-        with proclock.slot(_GLOBAL_SLOT, config.MAX_CONCURRENT_CALLS):
-            yield
+    the cross-process slot (inner); both release on exit.
+
+    Every argument is keyword-only and defaults to today's behaviour, so the
+    hot-path contract `with usage.slot():` (llm.py, openai_compat.py) is
+    unchanged. With `OLYMPUS_ADMISSION` OFF (the default) this function is
+    exactly the two lines it always was — no queue, no classes, no refusals,
+    no state touched. With the flag ON, the admission POLICY below runs first
+    (ruling R3: policy on top of the ONE slot primitive, never beside it):
+
+    - `cls`      workload bucket (grouping + optional per-class cap).
+    - `key`      tenant/user identity for fairness + per-tenant caps
+                 (default: the active user).
+    - `priority` one of PRIORITY_CLASSES (default "interactive").
+    - `timeout`  max queue wait in seconds (default OLYMPUS_ADMISSION_QUEUE_
+                 TIMEOUT); <= 0 means "do not wait".
+    - `cancel_token` any object with `.cancelled() -> bool`; a waiter that is
+                 cancelled abandons its queue position immediately.
+    - `dims`     read-only labels for extra capacity dimensions, e.g.
+                 `{"provider": "anthropic", "model": "claude-opus-4-8"}`.
+                 READ ONLY — see W2-I7.1 below.
+
+    Raises `AdmissionRefused` (never a downgrade) when the request cannot be
+    admitted and cannot wait."""
+    if not admission_enabled():
+        with _SEMAPHORE:
+            with proclock.slot(_GLOBAL_SLOT, config.MAX_CONCURRENT_CALLS):
+                yield
+        return
+    waiter = _admit(cls=cls, key=key, priority=priority, timeout=timeout,
+                    cancel_token=cancel_token, dims=dims)
+    try:
+        with _SEMAPHORE:
+            with proclock.slot(_GLOBAL_SLOT, config.MAX_CONCURRENT_CALLS):
+                yield
+    finally:
+        _release(waiter)
+
+
+# --- W2-C7: unified admission policy --------------------------------------
+#
+# Ruling R3 (docs/absorption/00-SYNTHESIS.md): admission mechanics live in an
+# EXTENDED `usage.slot` — there is no parallel admission system and no new
+# module. Everything below is POLICY layered in front of the single primitive
+# above; the local BoundedSemaphore and the machine-global `proclock.slot`
+# still do the actual capacity work, unchanged and unconditional.
+#
+# W2-I7.1 — NO SILENT QUALITY DOWNGRADE. Admission decides WHEN a request
+# runs, never WHAT runs. There is deliberately no `model`, `effort`, `route`
+# or `mode` parameter anywhere in this API, and no statement in this section
+# assigns one: there is no code path by which admission can substitute a
+# cheaper model or a faster mode in order to make a request fit. When capacity
+# is unavailable the request QUEUES; when it cannot queue it is REFUSED with a
+# typed `AdmissionRefused` (ruling R6: refusal over silent degradation). The
+# `dims` mapping is an input label set — read to choose which counters a
+# request is measured against, never written back to the caller.
+#
+# W2-I7.2 — FAIRNESS. Under saturation the wait queue is drained round-robin
+# over distinct `key`s (least-recently-admitted tenant first, arrival order as
+# the tie-break), so one user cannot starve another.
+#
+# W2-I7.3 — RESERVED CAPACITY. `OLYMPUS_ADMISSION_RESERVE` slots are reserved
+# for priority class "critical" (verification / refusal paths): best-effort
+# traffic can hold at most `MAX_CONCURRENT_CALLS - reserve` slots, so the
+# reserve is never consumable by it.
+
+#: Priority classes, most important first.
+PRIORITY_CLASSES: tuple[str, ...] = ("critical", "interactive", "background")
+DEFAULT_PRIORITY = "interactive"
+_PRIORITY_RANK = {name: i for i, name in enumerate(PRIORITY_CLASSES)}
+
+_ADMISSION_POLL = 0.02          # cancel-token responsiveness while queued
+_SPEND_WINDOW_S = 60.0          # sliding window for the denial-of-wallet rate
+
+
+class AdmissionRefused(RuntimeError):
+    """A request could not be admitted — a TYPED refusal carrying machine-
+    readable retry guidance.
+
+    Never a downgrade: `as_dict()["degraded"]` is always False, because
+    admission has no authority to change what a request asks for (W2-I7.1).
+    `reason` is one of: budget_exceeded, spend_rate_exceeded, queue_full,
+    queue_timeout, no_capacity, cancelled."""
+
+    def __init__(self, reason: str, retry_after_s: float = 0.0,
+                 detail: str = "") -> None:
+        self.reason = str(reason)
+        try:
+            self.retry_after_s = round(max(0.0, float(retry_after_s or 0.0)), 3)
+        except (TypeError, ValueError):
+            self.retry_after_s = 0.0
+        self.detail = str(detail or "")
+        super().__init__(self.detail or f"admission refused ({self.reason})")
+
+    def as_dict(self) -> dict:
+        """The gateway/HTTP body: machine-readable reason + retry guidance."""
+        return {
+            "error": "admission_refused",
+            "reason": self.reason,
+            "retry_after_s": self.retry_after_s,
+            "detail": self.detail,
+            "message": str(self),
+            "degraded": False,          # W2-I7.1: nothing was downgraded
+        }
+
+
+def admission_http_response(exc: AdmissionRefused) -> tuple[int, dict, dict]:
+    """(status, body, headers) for an HTTP transport: 429 + `Retry-After`.
+
+    Kept here (not in web.py) so every channel renders one overload shape."""
+    seconds = max(0, int(math.ceil(exc.retry_after_s)))
+    return (429, exc.as_dict(), {
+        "Retry-After": str(seconds),
+        "X-Olympus-Admission": exc.reason,
+    })
+
+
+# --- knobs (read live; 0/unset = unlimited, flag default OFF) --------------
+
+def _env_str(name: str, fallback: str = "") -> str:
+    val = os.environ.get(name)
+    if val is None or not str(val).strip():
+        val = os.environ.get(fallback) if fallback else None
+    return "" if val is None else str(val).strip()
+
+
+def _env_int(name: str, default: int = 0, fallback: str = "") -> int:
+    raw = _env_str(name, fallback)
+    if not raw:
+        return default
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float = 0.0, fallback: str = "") -> float:
+    raw = _env_str(name, fallback)
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def admission_enabled() -> bool:
+    """Whether the unified admission policy runs at all (default OFF). With it
+    off, `slot()` is byte-for-byte the pre-C7 primitive."""
+    return os.environ.get("OLYMPUS_ADMISSION", "").strip().lower() in (
+        "1", "on", "true", "yes")
+
+
+def admission_provider_max() -> int:
+    """Max concurrent calls per provider (0 = unlimited)."""
+    return _env_int("OLYMPUS_ADMISSION_PROVIDER_MAX", 0)
+
+
+def admission_model_max() -> int:
+    """Max concurrent calls per model (0 = unlimited)."""
+    return _env_int("OLYMPUS_ADMISSION_MODEL_MAX", 0)
+
+
+def admission_tenant_max() -> int:
+    """Max concurrent calls per tenant/user key (0 = unlimited)."""
+    return _env_int("OLYMPUS_ADMISSION_TENANT_MAX", 0)
+
+
+def admission_class_max() -> int:
+    """Max concurrent calls per workload class `cls` (0 = unlimited)."""
+    return _env_int("OLYMPUS_ADMISSION_CLASS_MAX", 0)
+
+
+def admission_reserve() -> int:
+    """Slots reserved for priority class "critical" (default 1). Accepts the
+    ruling-R3 spelling OLYMPUS_SLOT_RESERVE as a fallback. Clamped at call
+    time to at most `MAX_CONCURRENT_CALLS - 1` so a misconfiguration can never
+    wedge best-effort traffic to zero capacity (which would queue forever)."""
+    return _env_int("OLYMPUS_ADMISSION_RESERVE", 1, "OLYMPUS_SLOT_RESERVE")
+
+
+def admission_max_queue() -> int:
+    """Max waiters in the admission queue (0 = unbounded). Accepts the
+    ruling-R3 spelling OLYMPUS_MAX_QUEUE as a fallback."""
+    return _env_int("OLYMPUS_ADMISSION_MAX_QUEUE", 64, "OLYMPUS_MAX_QUEUE")
+
+
+def admission_queue_timeout() -> float:
+    """Default max queue wait, seconds. One default across the platform (300 s,
+    ruling R3); accepts the R3 spelling OLYMPUS_QUEUE_TIMEOUT as a fallback."""
+    return _env_float("OLYMPUS_ADMISSION_QUEUE_TIMEOUT", 300.0,
+                      "OLYMPUS_QUEUE_TIMEOUT")
+
+
+def admission_spend_rate_max() -> float:
+    """Denial-of-wallet guard: max USD/minute one key may sustain (0 = off)."""
+    return _env_float("OLYMPUS_ADMISSION_SPEND_RATE_MAX", 0.0)
+
+
+# --- admission state (per process; the machine-global cap stays proclock's) -
+
+class _Waiter:
+    """One request's place in the admission queue."""
+
+    __slots__ = ("cls", "key", "priority", "provider_label", "model_label",
+                 "seq",
+                 "admitted", "queued_at", "wait_s")
+
+    def __init__(self, cls: str, key: str, priority: str,
+                 provider_label: str, model_label: str, seq: int) -> None:
+        self.cls = cls
+        self.key = key
+        self.priority = priority
+        # Labels the CALLER declared, used only to pick which counters this
+        # request is measured against. Admission never chooses them (W2-I7.1),
+        # hence the `_label` suffix: they are evidence, not a decision.
+        self.provider_label = provider_label
+        self.model_label = model_label
+        self.seq = seq
+        self.admitted = False
+        self.queued_at = time.monotonic()
+        self.wait_s = 0.0
+
+
+def _new_priority_row() -> dict:
+    return {"in_flight": 0, "queued": 0, "admitted": 0, "refused": 0,
+            "timed_out": 0, "cancelled": 0}
+
+
+_COND = threading.Condition()
+_adm_queue: list[_Waiter] = []
+_adm_seq = itertools.count(1)
+_adm_ticket = 0                       # monotonic admission ticket (fairness)
+_adm_in_flight = 0
+_adm_last_admit: dict[str, int] = {}  # key -> ticket of its last admission
+_adm_by_provider: dict[str, int] = {}
+_adm_by_model: dict[str, int] = {}
+_adm_by_key: dict[str, int] = {}
+_adm_by_cls: dict[str, int] = {}
+_adm_by_priority: dict[str, dict] = {p: _new_priority_row()
+                                     for p in PRIORITY_CLASSES}
+_adm_counters: dict[str, float] = {
+    "admitted": 0, "refused": 0, "timed_out": 0, "cancelled": 0,
+    "queue_full": 0, "budget_refused": 0, "spend_rate_refused": 0,
+    "no_capacity": 0, "starvation_prevented": 0, "wait_s_total": 0.0,
+}
+_SPEND_LOCK = threading.Lock()
+_SPEND_SAMPLES: dict[str, deque] = {}
+
+
+def _bump(table: dict, name: str, delta: int) -> None:
+    val = table.get(name, 0) + delta
+    if val <= 0:
+        table.pop(name, None)
+    else:
+        table[name] = val
+
+
+def _label(value) -> str:
+    return str(value).strip()[:80] if value else ""
+
+
+def _resolve_key(key: str | None) -> str:
+    """The fairness / per-tenant identity. Defaults to the active user, which
+    is the tenant identity the rest of the tree already uses."""
+    if key:
+        return _label(key)
+    try:
+        return memory.safe_id(memory.current_user())
+    except Exception:                            # pragma: no cover - defensive
+        return "default"
+
+
+def _fits_locked(w: _Waiter) -> bool:
+    """Can this waiter be admitted RIGHT NOW under every capacity dimension?"""
+    total = max(1, int(config.MAX_CONCURRENT_CALLS))
+    if _adm_in_flight >= total:
+        return False
+    if w.priority != "critical":
+        # W2-I7.3: best-effort traffic tops out below the reserve, so the
+        # reserved slots are never consumable by it.
+        reserve = min(max(0, admission_reserve()), total - 1)
+        best_effort = sum(_adm_by_priority[p]["in_flight"]
+                          for p in PRIORITY_CLASSES if p != "critical")
+        if best_effort >= total - reserve:
+            return False
+    for table, name, cap in (
+            (_adm_by_provider, w.provider_label, admission_provider_max()),
+            (_adm_by_model, w.model_label, admission_model_max()),
+            (_adm_by_key, w.key, admission_tenant_max()),
+            (_adm_by_cls, w.cls, admission_class_max())):
+        if cap > 0 and name and table.get(name, 0) >= cap:
+            return False
+    return True
+
+
+def _rank_locked(w: _Waiter) -> tuple:
+    """Selection order: priority class first, then the least-recently-admitted
+    tenant (round-robin fairness, W2-I7.2), then arrival order."""
+    return (_PRIORITY_RANK.get(w.priority, len(PRIORITY_CLASSES)),
+            _adm_last_admit.get(w.key, 0),
+            w.seq)
+
+
+def _promote_locked() -> None:
+    """Admit as many queued waiters as current capacity allows, in policy
+    order. Called under _COND on every arrival and every release; the winner
+    is chosen and its capacity charged HERE, so the drain order is decided by
+    policy alone and not by thread wake-up races."""
+    global _adm_in_flight, _adm_ticket
+    promoted = 0
+    while _adm_queue:
+        eligible = [w for w in _adm_queue if _fits_locked(w)]
+        if not eligible:
+            break
+        best = min(eligible, key=_rank_locked)
+        if best is not eligible[0] and best.priority == eligible[0].priority:
+            # Fairness overrode arrival order: an older waiter from a
+            # recently-served tenant yielded its turn (W2-I7.2).
+            _adm_counters["starvation_prevented"] += 1
+        _adm_queue.remove(best)
+        _adm_by_priority[best.priority]["queued"] -= 1
+        _adm_in_flight += 1
+        _adm_by_priority[best.priority]["in_flight"] += 1
+        _adm_by_priority[best.priority]["admitted"] += 1
+        _bump(_adm_by_provider, best.provider_label, 1)
+        _bump(_adm_by_model, best.model_label, 1)
+        _bump(_adm_by_key, best.key, 1)
+        _bump(_adm_by_cls, best.cls, 1)
+        _adm_ticket += 1
+        _adm_last_admit[best.key] = _adm_ticket
+        best.wait_s = max(0.0, time.monotonic() - best.queued_at)
+        best.admitted = True
+        _adm_counters["admitted"] += 1
+        _adm_counters["wait_s_total"] += best.wait_s
+        promoted += 1
+    if promoted:
+        _COND.notify_all()
+
+
+def _drop_locked(w: _Waiter) -> None:
+    """Remove a waiter that gave up (timeout / cancellation), freeing its
+    queue position for everyone else."""
+    if w in _adm_queue:
+        _adm_queue.remove(w)
+        _adm_by_priority[w.priority]["queued"] -= 1
+
+
+def _cancelled(token) -> bool:
+    if token is None:
+        return False
+    try:
+        return bool(token.cancelled())
+    except Exception:                            # pragma: no cover - defensive
+        return False
+
+
+def _seconds_to_local_midnight() -> float:
+    now = time.localtime()
+    left = 86400 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec)
+    return float(max(60, min(86400, left)))
+
+
+def _capacity_retry_after() -> float:
+    """Retry guidance for capacity refusals: a tenth of the queue timeout,
+    clamped to a sane 1–30 s so clients neither hammer nor sleep for minutes."""
+    return round(min(30.0, max(1.0, admission_queue_timeout() / 10.0)), 3)
+
+
+def spend_rate(key: str, *, window_s: float = _SPEND_WINDOW_S) -> float:
+    """This key's recent spend in USD/minute, derived from the session totals
+    already recorded by `record()` — no new measurement, no new store.
+
+    Sampled at admission time into a small sliding window per key. The window
+    floor is one second, so a burst measured over a few milliseconds cannot
+    report an absurd rate. Keys that are not user ids have no recorded spend
+    and therefore always read 0.0 (they cannot trip the guard)."""
+    now = time.monotonic()
+    try:
+        cost = float(session_totals(key).get("cost", 0.0))
+    except Exception:                            # pragma: no cover - defensive
+        return 0.0
+    with _SPEND_LOCK:
+        samples = _SPEND_SAMPLES.setdefault(key, deque(maxlen=64))
+        while len(samples) > 1 and now - samples[0][0] > window_s:
+            samples.popleft()
+        rate = 0.0
+        if samples:
+            t0, c0 = samples[0]
+            elapsed = max(now - t0, 1.0)
+            rate = max(0.0, (cost - c0) / (elapsed / 60.0))
+        samples.append((now, cost))
+    return rate
+
+
+def _refuse(reason: str, retry_after_s: float, detail: str,
+            priority: str | None = None, counter: str | None = None
+            ) -> AdmissionRefused:
+    """Count and build a typed refusal (never a downgrade — W2-I7.1)."""
+    with _COND:
+        _adm_counters["refused"] += 1
+        if counter:
+            _adm_counters[counter] = _adm_counters.get(counter, 0) + 1
+        if priority in _adm_by_priority:
+            _adm_by_priority[priority]["refused"] += 1
+            if reason == "queue_timeout":
+                _adm_by_priority[priority]["timed_out"] += 1
+            elif reason == "cancelled":
+                _adm_by_priority[priority]["cancelled"] += 1
+    return AdmissionRefused(reason, retry_after_s, detail)
+
+
+def _admit(*, cls: str, key: str | None, priority: str | None,
+           timeout: float | None, cancel_token, dims) -> _Waiter:
+    """The admission decision. Returns the admitted waiter or raises
+    `AdmissionRefused`. Never inspects or alters what the request asks for."""
+    priority = (priority or DEFAULT_PRIORITY).strip().lower()
+    if priority not in _PRIORITY_RANK:
+        raise ValueError(
+            f"unknown priority {priority!r}; expected one of "
+            f"{', '.join(PRIORITY_CLASSES)}")
+    cls = _label(cls) or "default"
+    key = _resolve_key(key)
+    # `dims` is READ here and nowhere else — never written back, never used to
+    # pick a model or a mode (W2-I7.1).
+    provider_label = model_label = ""
+    if dims:
+        try:
+            provider_label = _label(dims.get("provider"))
+            model_label = _label(dims.get("model"))
+        except AttributeError:
+            provider_label = model_label = ""
+
+    # --- denial-of-wallet: refuse, never quietly downgrade (ruling R6) ------
+    try:
+        check_budget()
+    except BudgetExceeded as err:
+        raise _refuse("budget_exceeded", _seconds_to_local_midnight(),
+                      str(err), priority, "budget_refused") from err
+    rate_max = admission_spend_rate_max()
+    if rate_max > 0:
+        rate = spend_rate(key)
+        if rate > rate_max:
+            raise _refuse(
+                "spend_rate_exceeded", _SPEND_WINDOW_S,
+                f"spend rate for '{key}' is about ${rate:.2f}/min, over the "
+                f"${rate_max:.2f}/min admission ceiling "
+                f"(OLYMPUS_ADMISSION_SPEND_RATE_MAX). Nothing was downgraded "
+                f"to fit — retry when the rate falls.",
+                priority, "spend_rate_refused")
+
+    wait_s = admission_queue_timeout() if timeout is None else float(timeout)
+    max_queue = admission_max_queue()
+    if _cancelled(cancel_token):
+        raise _refuse("cancelled", 0.0, "cancelled before admission",
+                      priority, "cancelled")
+
+    with _COND:
+        w = _Waiter(cls, key, priority, provider_label, model_label,
+                    next(_adm_seq))
+        _adm_queue.append(w)
+        _adm_by_priority[priority]["queued"] += 1
+        _promote_locked()
+        if not w.admitted:
+            if wait_s <= 0:
+                _drop_locked(w)
+                raise _refuse(
+                    "no_capacity", _capacity_retry_after(),
+                    "no free slot and this caller asked not to wait "
+                    "(timeout <= 0).", priority, "no_capacity")
+            if max_queue > 0 and len(_adm_queue) > max_queue:
+                _drop_locked(w)
+                raise _refuse(
+                    "queue_full", _capacity_retry_after(),
+                    f"admission queue is full ({max_queue} waiting). The "
+                    f"request was refused, not downgraded — retry after the "
+                    f"interval below.", priority, "queue_full")
+        deadline = time.monotonic() + wait_s
+        while not w.admitted:
+            if _cancelled(cancel_token):
+                _drop_locked(w)
+                raise _refuse("cancelled", 0.0,
+                              "waiter cancelled; queue position released",
+                              priority, "cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _drop_locked(w)
+                raise _refuse(
+                    "queue_timeout", _capacity_retry_after(),
+                    f"waited {wait_s:.2f}s for a slot without one freeing.",
+                    priority, "timed_out")
+            _COND.wait(min(remaining, _ADMISSION_POLL))
+        return w
+
+
+def _release(w: _Waiter) -> None:
+    """Give the slot back and re-run the policy over the wait queue."""
+    global _adm_in_flight
+    with _COND:
+        _adm_in_flight = max(0, _adm_in_flight - 1)
+        row = _adm_by_priority[w.priority]
+        row["in_flight"] = max(0, row["in_flight"] - 1)
+        _bump(_adm_by_provider, w.provider_label, -1)
+        _bump(_adm_by_model, w.model_label, -1)
+        _bump(_adm_by_key, w.key, -1)
+        _bump(_adm_by_cls, w.cls, -1)
+        if len(_adm_last_admit) > 1024:
+            live = set(_adm_by_key) | {q.key for q in _adm_queue}
+            for stale in [k for k in _adm_last_admit if k not in live]:
+                _adm_last_admit.pop(stale, None)
+        _promote_locked()
+        _COND.notify_all()
+
+
+def admission_status() -> dict:
+    """Observability snapshot — a PURE read (copies only; feeds C9 liveness /
+    doctor). Safe to call from any thread at any time."""
+    with _COND:
+        admitted = _adm_counters["admitted"]
+        wait_total = _adm_counters["wait_s_total"]
+        return {
+            "enabled": admission_enabled(),
+            "flag": "OLYMPUS_ADMISSION",
+            "in_flight": _adm_in_flight,
+            "queued": len(_adm_queue),
+            "limits": {
+                "global": max(1, int(config.MAX_CONCURRENT_CALLS)),
+                "provider": admission_provider_max(),
+                "model": admission_model_max(),
+                "tenant": admission_tenant_max(),
+                "cls": admission_class_max(),
+                "reserve": admission_reserve(),
+                "max_queue": admission_max_queue(),
+                "queue_timeout_s": admission_queue_timeout(),
+                "spend_rate_max_usd_min": admission_spend_rate_max(),
+            },
+            "priority": {p: dict(row)
+                         for p, row in _adm_by_priority.items()},
+            "by_provider": dict(_adm_by_provider),
+            "by_model": dict(_adm_by_model),
+            "by_tenant": dict(_adm_by_key),
+            "by_cls": dict(_adm_by_cls),
+            "counters": {k: (round(v, 4) if isinstance(v, float) else v)
+                         for k, v in _adm_counters.items()},
+            "queue_wait_ms_avg": round(
+                (wait_total / admitted) * 1000.0, 3) if admitted else 0.0,
+            # W2-I7.1, machine-readable: admission never downgrades.
+            "downgrades": 0,
+        }
+
+
+def admission_reset() -> None:
+    """Clear admission counters and per-key fairness memory. For tests and for
+    an operator resetting statistics — the runtime never calls it."""
+    global _adm_in_flight, _adm_ticket
+    with _COND:
+        _adm_queue.clear()
+        _adm_in_flight = 0
+        _adm_ticket = 0
+        _adm_last_admit.clear()
+        for table in (_adm_by_provider, _adm_by_model, _adm_by_key,
+                      _adm_by_cls):
+            table.clear()
+        for p in PRIORITY_CLASSES:
+            _adm_by_priority[p] = _new_priority_row()
+        for name in list(_adm_counters):
+            _adm_counters[name] = 0.0 if name == "wait_s_total" else 0
+        _COND.notify_all()
+    with _SPEND_LOCK:
+        _SPEND_SAMPLES.clear()
 
 
 # Cache-token price multipliers, applied to the model's INPUT price. The
@@ -220,9 +790,22 @@ def record(model: str, in_tokens: int, out_tokens: int, *,
                     fp_row["hits"] = fp_row.get("hits", 0) + 1
                 fp_row["cache_read"] = fp_row.get("cache_read", 0) + cache_read
             _atomic_write_json(path, ledger)
-    except TimeoutError as err:
+    except (TimeoutError, OSError) as err:
+        # Accounting must NEVER escape into the caller. `_atomic_write_json`
+        # raises OSError on a full/read-only disk; letting that propagate made a
+        # DISK fault look like a PROVIDER fault to `openai_compat._post` (whose
+        # retry handler catches OSError) and to `backend._should_failover` — the
+        # measured result was 4 billed HTTP POSTs for one logical call, i.e. a
+        # disk fault converted into the denial-of-wallet shape the watchdog
+        # exists to catch (Phase-4 Stage-C defect D-1). Capture and continue,
+        # the same contract `record_repair` and `ctxbudget.observe` already use:
+        # losing a usage row is strictly better than re-billing the user.
         from . import errors
-        errors.capture("usage.record", err, context="ledger lock wedged")
+        # Distinct contexts: a wedged lock and a full disk need different
+        # operator actions, so they must not collapse into one message.
+        errors.capture("usage.record", err,
+                       context=("ledger lock wedged" if isinstance(err, TimeoutError)
+                                else "ledger write failed (spend not recorded)"))
 
 
 # --- the budget guard (protects the user's own API bill) -----------------

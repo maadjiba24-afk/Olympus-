@@ -245,12 +245,24 @@ FIXTURE_VERSION = "1.0"
 
 # The secret screen (invariant I-R2). Every candidate blob's text is scanned;
 # ANY match refuses the whole export — fixtures are for committing/sharing.
+# v2 (Wave-1 audit): the v1 `sk-[A-Za-z0-9]{8,}` missed the modern OpenAI key
+# shapes (`sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`) because only 4 alnum chars
+# follow `sk-` before the next dash; the class now allows dashes. Auth-header and
+# api-key patterns are whitespace-tolerant (space-before-colon, spaced values),
+# and common other-provider credential shapes are screened too. Base64-encoded,
+# entropy-only, and split-across-fields secrets remain a documented residual
+# (would need entropy detection — see WAVE1_INDEPENDENT_AUDIT.md).
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = tuple(re.compile(p) for p in (
-    r"sk-[A-Za-z0-9]{8,}",
-    r"(?i)authorization:\s*bearer",
-    r"(?i)api[_-]?key\s*[=:]\s*\S{8,}",
+    r"sk-[A-Za-z0-9-]{8,}",                       # OpenAI incl. sk-proj-/svcacct-/admin-
+    r"(?i)authorization\s*:\s*bearer\s+\S",       # bearer tokens (space-before-colon ok)
+    r"(?i)api[_-]?key\s*[=:]\s*\S",               # api_key with any value (spaced ok)
+    r"(?i)(secret|password|access[_-]?token)\s*[=:]\s*\S{6,}", # keyed secrets (contiguous value)
+    r"AKIA[0-9A-Z]{12,}",                          # AWS access key id
+    r"gh[posru]_[A-Za-z0-9]{20,}",                 # GitHub PAT/OAuth/refresh/server
+    r"xox[baprs]-[A-Za-z0-9-]{8,}",                # Slack token
+    r"AIza[0-9A-Za-z_\-]{20,}",                    # Google API key
 ))
-_SECRET_SCREEN_VERSION = "v1"
+_SECRET_SCREEN_VERSION = "v2"
 
 # env-flag fingerprint: the EXACT env names `orchestrator.replay_run`
 # reproduces, derived from the same trace-meta keys with the same defaults

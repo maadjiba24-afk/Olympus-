@@ -1,0 +1,22 @@
+{
+  "name": "valid_policy_file",
+  "kind": "policy_file",
+  "payload": {
+    "version": "1.0",
+    "name": "egress",
+    "rules": [
+      {
+        "allow": "loopback"
+      }
+    ],
+    "default": "deny"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

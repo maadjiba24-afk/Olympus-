@@ -1,0 +1,17 @@
+{
+  "name": "path_traversal_source_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "1.0",
+    "name": "x",
+    "instructions": "hi"
+  },
+  "source": "../../etc/passwd",
+  "note": "A source string that tries to escape its root is refused.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "unsafe_source"
+    ]
+  }
+}

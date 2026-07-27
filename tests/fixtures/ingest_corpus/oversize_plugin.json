@@ -1,0 +1,26 @@
+{
+  "name": "oversize_plugin",
+  "kind": "plugin",
+  "payload_build": {
+    "op": "fill",
+    "base": {
+      "version": "1.0",
+      "name": "big",
+      "code": ""
+    },
+    "field": "code",
+    "char": "A",
+    "length": 600000
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "note": "600000 B over the plugin cap (512 KiB); dies before the parse.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "oversize"
+    ]
+  }
+}

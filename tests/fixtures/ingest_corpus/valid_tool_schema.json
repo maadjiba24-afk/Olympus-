@@ -1,0 +1,21 @@
+{
+  "name": "valid_tool_schema",
+  "kind": "tool_schema",
+  "payload": {
+    "version": "1.0",
+    "name": "read_file",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "description": "read a file"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

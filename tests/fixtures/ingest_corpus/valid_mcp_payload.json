@@ -1,0 +1,17 @@
+{
+  "name": "valid_mcp_payload",
+  "kind": "mcp_payload",
+  "payload": {
+    "version": "1.0",
+    "result": {
+      "text": "ok"
+    },
+    "server": "files",
+    "tool": "read",
+    "is_error": false
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

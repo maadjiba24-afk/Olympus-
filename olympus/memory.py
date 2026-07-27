@@ -316,7 +316,14 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     # Atomic publish: load_conversation maps a torn file to [], so a crash
     # mid-write would drop the whole history (ADR 0005).
     p = _conversation_path(conversation_id)
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    # The temp name must be unique per WRITER, not per process: two threads of
+    # one process saving the same conversation shared `.{name}.{pid}.tmp`, so
+    # one write silently clobbered the other and the loser got FileNotFoundError
+    # from os.replace raised into its reply path (Phase-4 Stage-C defect D-3).
+    # `os.replace` is atomic, so distinct temps make concurrent saves last-writer
+    # -wins instead of corrupt-or-crash; the sealed journal remains the ordered
+    # record of every turn.
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
     os.replace(tmp, p)
     # Seal this turn's delta into the session journal (C1) — purely additive:
@@ -511,6 +518,85 @@ def sweep_tool_results(retain_days: int) -> int:
     return removed
 
 
+# Append-only evidence ledgers written by the Colibri-absorption capabilities.
+# Each row carries a "ts" epoch seconds; pruning keeps rows newer than the
+# cutoff. Retention is deliberate policy, not housekeeping: the programme's rule
+# is that raw operational logs must NOT silently become permanent moat data.
+_EVIDENCE_LEDGERS = (
+    ("modelgrade", "evidence.jsonl"),
+    ("routesub", "decisions.jsonl"),
+    ("streamguard", "pathologies.jsonl"),
+    ("ingest", "refusals.jsonl"),
+    ("experiments", "state.jsonl"),
+)
+
+
+def sweep_evidence(retain_days: int) -> int:
+    """Prune absorption evidence ledgers and watchdog forensics by age.
+
+    Returns the number of records + files removed. Without this the stores added
+    by Waves 1-2 grow unbounded — `sweep_dated_files` only ever covered `traces`
+    and `usage`.
+
+    Note on `modelgrade`: pruning evidence legitimately lowers a card's sample
+    count, which is the SAME staleness policy the module already applies
+    (evidence past its TTL loses confidence). `OLYMPUS_RETAIN_DAYS` and
+    `OLYMPUS_GRADE_TTL_DAYS` both default to 30, so a pruned row was already
+    weightless. Never repairs a malformed row — an unparseable line is kept, so
+    a corrupt ledger still trips its owner's reject-never-repair path rather
+    than being silently rewritten here."""
+    import json as _json
+    import time as _time
+    cutoff = _time.time() - max(retain_days, 1) * 86400
+    removed = 0
+
+    for sub, name in _EVIDENCE_LEDGERS:
+        path = config.MEMORY_DIR / sub / name
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        keep, dropped = [], 0
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                ts = float(_json.loads(line).get("ts", 0) or 0)
+            except Exception:
+                keep.append(line)          # unparseable: keep, never repair
+                continue
+            if ts and ts < cutoff:
+                dropped += 1
+            else:
+                keep.append(line)
+        if not dropped:
+            continue
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp.write_text("\n".join(keep) + ("\n" if keep else ""),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+            removed += dropped
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    forensics = config.MEMORY_DIR / "watchdog" / "forensics"
+    if forensics.exists():
+        for path in forensics.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 # --- sovereign memory contract: migrate / export / import / delete -------
 #
 # File memory is a data-sovereignty contract: you can version it, carry it out
@@ -626,6 +712,52 @@ def export_memory(out_path, *, user: str | None = None, all_users: bool = False,
     return manifest
 
 
+def _gate_import(manifest: dict, origin: str) -> None:
+    """Run an export manifest through the persistent-artifact ingestion gate
+    (W2-C5) BEFORE a single restored byte is written.
+
+    A restored archive is durable belief: kind `memory_import`, persistent,
+    reject-never-repair. The manifest is the artifact — it is what names every
+    file, its size and its hash — so gating it gates the restore. Provenance is
+    required for this kind; a local archive carries no publisher attestation,
+    so the record binds the artifact-as-read to the archive path (which the
+    gate's source-safety rules then check), while the per-file sha256s inside
+    `entries` remain what the restore loop verifies file by file.
+
+    Raises ValueError — import_memory's existing refusal vocabulary. Because it
+    runs before the restore loop, a refusal leaves MEMORY_DIR untouched.
+
+    Inert while `OLYMPUS_INGESTGATE` is off: the gate is not consulted at all.
+    """
+    from . import ingestgate
+    if not ingestgate.enabled():
+        return
+    version = manifest.get("schema_version")
+    artifact = {
+        "version": version if isinstance(version, str) else str(version),
+        "entries": manifest.get("files"),
+        "origin": str(origin),
+    }
+    scope = manifest.get("scope")
+    if isinstance(scope, dict) and isinstance(scope.get("user"), str):
+        artifact["user"] = scope["user"]
+    try:
+        prov_sha = ingestgate.payload_sha256(artifact)
+    except Exception:            # unserializable manifest — check() refuses it
+        prov_sha = ""
+    provenance = {"source": str(origin), "sha256": prov_sha}
+    try:
+        ingestgate.check("memory_import", artifact, source=str(origin),
+                         provenance=provenance)
+    except ingestgate.IngestRefused as refusal:
+        ref = (f"; evidence {refusal.evidence_ref}"
+               if refusal.evidence_ref else "")
+        raise ValueError(
+            "the ingestion gate refused this memory export "
+            f"({'; '.join(refusal.reasons)}{ref}). "
+            "Nothing was restored.") from refusal
+
+
 def import_memory(archive, *, overwrite: bool = True) -> dict:
     """Restore a memory export into MEMORY_DIR. Validates the manifest's
     schema_version and REFUSES an unknown one (raises ValueError) rather than
@@ -647,6 +779,7 @@ def import_memory(archive, *, overwrite: bool = True) -> dict:
                 f"refusing to import unknown schema_version {version!r} "
                 f"(this build supports {sorted(SUPPORTED_ARCHIVE_VERSIONS)}). "
                 "Upgrade Olympus, or migrate the archive first.")
+        _gate_import(manifest, str(archive))     # W2-C5, before any restore
         restored, verified = [], 0
         for entry in manifest.get("files", []):
             rel = entry["path"]

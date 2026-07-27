@@ -98,6 +98,52 @@ def _fetch(source: str) -> bytes:
         return resp.read(_MAX_PLUGIN_BYTES + 1)
 
 
+def _gate_plugin(source: str, stem: str, data: bytes, digest: str,
+                 pinned: str) -> None:
+    """Run the fetched plugin through the persistent-artifact ingestion gate
+    (W2-C5) before ANY of it reaches disk. A plugin is durable, executable
+    third-party code — the archetypal persistent artifact.
+
+    The operator's pinned `sha256` is handed to the gate as the artifact's
+    declared hash so the gate's declared-vs-actual cross-check does the
+    verification (no second hash comparison is written here), and `source` is
+    handed over as provenance so the gate applies its source-safety rules
+    (traversal / control characters) too. Raises ValueError — install()'s
+    existing failure vocabulary — and, because it runs before the first write,
+    a refusal leaves nothing behind.
+
+    Inert while `OLYMPUS_INGESTGATE` is off: the gate is not consulted at all.
+    """
+    from . import ingestgate
+    if not ingestgate.enabled():
+        return
+    artifact = {
+        "version": "1",
+        "name": stem,
+        # surrogateescape (rather than "replace") so non-UTF-8 plugin bytes
+        # surface to the gate as invalid_utf8 instead of being silently
+        # repaired into U+FFFD.
+        "code": data.decode("utf-8", "surrogateescape"),
+        "sha256": (pinned.strip().lower() if pinned else digest),
+        "size": len(data),
+    }
+    try:
+        prov_sha = ingestgate.payload_sha256(artifact)
+    except Exception:            # unserializable bytes — check() refuses below
+        prov_sha = ""
+    provenance = {"source": source, "sha256": prov_sha}
+    try:
+        ingestgate.check("plugin", artifact, source=source,
+                         provenance=provenance)
+    except ingestgate.IngestRefused as refusal:
+        ref = (f"; evidence {refusal.evidence_ref}"
+               if refusal.evidence_ref else "")
+        raise ValueError(
+            "the ingestion gate refused this plugin "
+            f"({'; '.join(refusal.reasons)}{ref}). "
+            "Refusing to install — nothing was written.") from refusal
+
+
 def install(source: str, sha256: str = "", name: str = "",
             allow_unpinned: bool = False) -> dict:
     """Install a plugin from `source` after verifying provenance. Returns a
@@ -127,6 +173,7 @@ def install(source: str, sha256: str = "", name: str = "",
     if not stem or stem.startswith("_"):
         stem = "plugin_" + digest[:8]
     dest = plugins_dir() / f"{stem}.py"
+    _gate_plugin(source, stem, data, digest, sha256)   # W2-C5, before any write
     dest.write_bytes(data)
     try:
         os.chmod(dest, 0o600)

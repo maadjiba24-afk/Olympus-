@@ -122,10 +122,40 @@ def _connections() -> dict:
     return {"status": OK, "detail": "Google OAuth configured"}
 
 
+def _config() -> dict:
+    """W2-C10/I10.2 — the running process's startup-config fingerprint.
+
+    Startup-scoped settings (`config.STARTUP_SCOPED`) are resolved once, at
+    import; editing them under a long-running daemon changes nothing until it
+    restarts. Publishing the fingerprint of what this process actually booted
+    on is what lets `doctor.config_skew()` say "restart required for: X"
+    instead of the operator guessing. Always `ok` — this component reports what
+    is running; judging the skew is `doctor`'s job, not a health verdict."""
+    from . import config
+    try:
+        from . import __version__
+    except Exception:                       # pragma: no cover - import-time only
+        __version__ = ""
+    fp = config.boot_fingerprint()
+    # Stamp this process's version so another process (or a later doctor run)
+    # can detect mixed-version workers. Best-effort and idempotent; the
+    # diagnostic itself never writes (W2-I10.1).
+    try:
+        config.record_version_marker()
+    except Exception:
+        pass
+    return {"status": OK,
+            "detail": f"fingerprint {fp} · v{__version__} · "
+                      f"{len(config.STARTUP_SCOPED)} startup-scoped settings",
+            "config_fingerprint": fp,
+            "version": __version__,
+            "startup_scoped": list(config.STARTUP_SCOPED)}
+
+
 # Ordered component names; each maps to a module-level `_<name>()` probe,
 # resolved by name at call time so probes stay individually patchable/testable.
 _COMPONENTS = ("models", "memory", "gateway", "search", "notifications",
-               "connections")
+               "connections", "config")
 
 
 def report() -> dict:

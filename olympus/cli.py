@@ -220,6 +220,27 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("errors", help="recent captured runtime errors (operator view)")
     sub.add_parser("dashboard", help="one consolidated operator health view "
                                      "(uptime, spend, reports, errors, policy)")
+    p_ret = sub.add_parser(
+        "retention",
+        help="retention posture, principal deletion, and the legacy api-v1 "
+             "namespace procedure (dry-run by default)")
+    p_ret.add_argument(
+        "action", nargs="?", default="status",
+        choices=["status", "report", "inspect", "delete", "sweep",
+                 "legacy-inspect", "legacy-quarantine", "legacy-restore",
+                 "legacy-export"],
+        help="what to do (default: status)")
+    p_ret.add_argument("--principal", default="",
+                       help="principal id for inspect/delete")
+    p_ret.add_argument("--reason", default="",
+                       help="recorded in the audit log (use it — a deletion "
+                            "with no stated reason is hard to defend later)")
+    p_ret.add_argument("--dest", default="",
+                       help="destination directory for legacy-export")
+    p_ret.add_argument(
+        "--apply", action="store_true",
+        help="ACTUALLY perform it. Everything is a dry run without this.")
+
     p_backup = sub.add_parser(
         "backup", help="archive, encrypt, sign, and deliver a data backup of "
                        "your memory/accounts/tokens off-droplet")
@@ -1016,6 +1037,18 @@ def main(argv: list[str] | None = None) -> int:
             except _witness.WitnessError as err:
                 print(f"[sovereign] {err}", file=sys.stderr)
                 return 1
+        # Staging boot invariant (P5-A2): an OLYMPUS_ENV=staging instance must
+        # carry the configuration it cannot safely infer — a persistent memory
+        # dir, a positive spend cap, finite retention, and a credential if it
+        # binds off-loopback. Checked here, beside the production and sovereign
+        # invariants, so every entry point (web, heartbeat, CLI) fails closed at
+        # boot with one actionable list rather than at first request. Dev and
+        # production boots are byte-identically unaffected.
+        try:
+            _config.require_staging_config()
+        except _config.StagingConfigError as err:
+            print(f"[staging] {err}", file=sys.stderr)
+            return 1
 
     if args.command == "setup":
         if getattr(args, "section", None):
@@ -1609,6 +1642,123 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "dashboard":
         from . import dashboard
         print(dashboard.render())
+    elif args.command == "retention":
+        from . import config as _config, retention
+        import json as _json
+        act = args.action
+        dry = not args.apply
+
+        if act == "status":
+            blocked = retention.deployment_blocked_reason()
+            print(f"conversation retention : {retention.policy_status()}")
+            print(f"evidence retention     : {_config.RETAIN_DAYS} days")
+            hold = sorted(retention.legal_hold())
+            print(f"legal hold             : {', '.join(hold) or '(none)'}")
+            print(f"principals             : "
+                  f"{len(retention.list_principals())}")
+            legacy = retention.inspect_legacy()
+            print(f"legacy api-v1          : "
+                  + (f"PRESENT — {legacy['files']} files, "
+                     f"{legacy['bytes'] // 1024} KB"
+                     if legacy["exists"] else "absent"))
+            if blocked:
+                print()
+                print("DEPLOYMENT BLOCKED for regulated / multi-user personal "
+                      "data:")
+                print(f"  {blocked}")
+                return 1
+            return 0
+
+        if act == "report":
+            print(_json.dumps(retention.report(dry_run=dry), indent=1,
+                              default=str))
+            return 0
+
+        if act == "inspect":
+            if not args.principal:
+                print("--principal is required", file=sys.stderr)
+                return 1
+            print(_json.dumps(retention.inspect_principal(args.principal),
+                              indent=1, default=str))
+            return 0
+
+        if act == "delete":
+            if not args.principal:
+                print("--principal is required", file=sys.stderr)
+                return 1
+            out = retention.delete_principal(args.principal, dry_run=dry,
+                                             reason=args.reason)
+            if out.get("refused"):
+                print(f"✗ refused: {out['refused']}", file=sys.stderr)
+                return 1
+            if dry:
+                print(f"DRY RUN — would delete {out['files']} files "
+                      f"({out['bytes'] // 1024} KB) for "
+                      f"'{out['principal']}':")
+                for pth in out["paths"]:
+                    print(f"  {pth}")
+                print("\nRe-run with --apply to perform it.")
+            else:
+                print(f"✓ deleted {len(out['deleted'])} paths for "
+                      f"'{out['principal']}'; verified="
+                      f"{out['verified']}")
+                for err in out["errors"]:
+                    print(f"  ! {err}", file=sys.stderr)
+                return 0 if out["verified"] and not out["errors"] else 1
+            return 0
+
+        if act == "sweep":
+            out = retention.sweep_conversations(dry_run=dry)
+            if out["skipped_reason"]:
+                print(f"no sweep: {out['skipped_reason']}")
+                return 0
+            print(f"policy {out['policy']} — {len(out['candidates'])} "
+                  f"candidate(s), {len(out['held'])} held"
+                  + ("" if dry else f", {out['removed']} removed"))
+            for c in out["candidates"]:
+                print(f"  {c['principal']}  ({c['age_days']} days old)")
+            if dry and out["candidates"]:
+                print("\nRe-run with --apply to perform it.")
+            return 0
+
+        if act == "legacy-inspect":
+            print(_json.dumps(retention.inspect_legacy(), indent=1,
+                              default=str))
+            return 0
+
+        if act == "legacy-quarantine":
+            out = retention.quarantine_legacy(dry_run=dry)
+            if out.get("reason"):
+                print(out["reason"])
+                return 0
+            print(("DRY RUN — would move " if dry else "✓ moved ")
+                  + f"{out['bytes'] // 1024} KB from {out['from']} "
+                    f"to {out['to']}")
+            if dry:
+                print("\nRe-run with --apply to perform it. This is "
+                      "reversible: `olympus retention legacy-restore --apply`.")
+            return 0
+
+        if act == "legacy-restore":
+            if dry:
+                print("DRY RUN — would move the quarantined api-v1 namespace "
+                      "back under users/. Re-run with --apply.")
+                return 0
+            out = retention.restore_legacy_quarantine()
+            print(("✓ restored to " + out["path"]) if out["restored"]
+                  else f"nothing restored: {out['reason']}")
+            return 0 if out["restored"] else 1
+
+        if act == "legacy-export":
+            if not args.dest:
+                print("--dest is required", file=sys.stderr)
+                return 1
+            out = retention.export_legacy(args.dest)
+            print(f"✓ exported to {out['path']}" if out["exported"]
+                  else f"nothing exported: {out['reason']}")
+            return 0
+        return 0
+
     elif args.command == "backup":
         from . import backup, config
         if args.list:

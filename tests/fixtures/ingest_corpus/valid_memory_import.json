@@ -1,0 +1,22 @@
+{
+  "name": "valid_memory_import",
+  "kind": "memory_import",
+  "payload": {
+    "version": "1.0",
+    "entries": [
+      {
+        "kind": "lesson",
+        "text": "gate every import"
+      }
+    ],
+    "user": "shared"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

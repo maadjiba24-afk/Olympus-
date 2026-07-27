@@ -1,0 +1,88 @@
+# OLYMPUS — STAGING profile (Phase 5).
+#
+# This is deliberately NOT docker-compose.yml with different values. Staging
+# differs from production in ways that must be structural, not configural:
+#
+#   * NO heartbeat service. The production profile runs the self-learning loop
+#     by default, which makes model calls on its own schedule and spends real
+#     money unattended. A staging environment whose purpose is bounded evidence
+#     collection must not have one.
+#   * NO Caddy, NO ports: mapping. Nothing here is reachable from the host, let
+#     alone the internet. `expose` publishes on the compose network only.
+#   * A SEPARATE volume. Sharing `olympus-memory` with production would put
+#     synthetic staging evidence into production stores — the exact
+#     provenance contamination PHASE5_STAGING_SHADOW_SPEC.md §10 forbids.
+#   * OLYMPUS_ENV=staging, which activates the fail-closed boot validation in
+#     `config.require_staging_config()`. An incomplete profile refuses to start.
+#
+# Usage:
+#   cp .env.staging.example .env.staging   # then fill it in
+#   docker compose -f docker-compose.staging.yml config     # validate
+#   docker compose -f docker-compose.staging.yml up -d --build
+#
+# Reaching it (from the compose network only):
+#   docker compose -f docker-compose.staging.yml exec olympus-staging \
+#       curl -s localhost:8484/readyz
+#
+# NOT VERIFIED BY EXECUTION: this file has been schema-validated with
+# `docker compose config`. It has never been brought up, because the
+# environment Phase 5 was authored in has no Docker daemon. See
+# PHASE5_STAGING_REPORT.md.
+
+name: olympus-staging
+
+services:
+  olympus-staging:
+    build: ..
+    restart: unless-stopped
+    env_file: .env.staging
+    environment:
+      # Declared here rather than only in .env.staging so the profile cannot be
+      # run as production by swapping the env file.
+      OLYMPUS_ENV: staging
+      OLYMPUS_MEMORY_DIR: /app/memory
+      # Stamped at build time; the container has no .git, so `build_info()`
+      # cannot fall back to `git rev-parse`. Pass it through:
+      #   docker compose ... build --build-arg ... / or set it in .env.staging
+      OLYMPUS_BUILD_COMMIT: ${OLYMPUS_BUILD_COMMIT:-unknown}
+    command:
+      - python
+      - -m
+      - olympus
+      - web
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8484"
+    volumes:
+      # All durable state: journals, ledgers, evidence stores, accounts, vault.
+      # Owned by the container user (root in the shipped image). If you run the
+      # image as a non-root UID, chown this volume to match or the boot probe
+      # in `staging_problems()` will refuse to start — which is the intended
+      # behaviour, not a bug to work around.
+      - olympus-staging-memory:/app/memory
+    expose:
+      - "8484"                     # compose network only — never the host
+    healthcheck:
+      # Readiness, not liveness: an instance with an incomplete config or a
+      # read-only volume is alive but must not receive traffic.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8484/readyz',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 60s         # `serve()` handles SIGTERM and drains
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+
+volumes:
+  olympus-staging-memory:
+    # Named distinctly on purpose. Never point this at the production volume.

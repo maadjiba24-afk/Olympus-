@@ -1,0 +1,12 @@
+{
+  "name": "not_an_object_eval_corpus",
+  "kind": "eval_corpus",
+  "payload_text": "[1,2,3]",
+  "note": "Every registered kind is a JSON object; a bare array is refused.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "not_an_object"
+    ]
+  }
+}

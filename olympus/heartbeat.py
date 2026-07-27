@@ -8,10 +8,135 @@ Run with `python -m olympus heartbeat`. On its own cadence it:
 
 from __future__ import annotations
 
+import contextvars
+import threading
 import time
 import traceback
 
 from . import config, gateway, memory, orchestrator, scheduler
+
+# --- W2-C6: progress-watchdog supervision (OLYMPUS_WATCHDOG, default off) ---
+
+#: How often a supervised job is re-classified while it is still running.
+#: PROVISIONAL, and only ever a poll granularity — it is not a threshold.
+_JOB_POLL_SECS = 0.25
+
+
+def _clock() -> float:
+    """The clock the heartbeat's progress leases run on.
+
+    Indirected through the module so a test can inject a deterministic clock
+    (and so watchdog thresholds can be exercised) instead of sleeping."""
+    return time.time()
+
+
+class JobAbandoned(RuntimeError):
+    """An enforce-mode watchdog verdict abandoned a wedged heartbeat job so the
+    serial tick could continue to the next cadence."""
+
+
+def _wd_capture(where: str, err: BaseException, context: str = "") -> None:
+    """Best-effort error capture. A watchdog failure must never break a tick,
+    so every watchdog interaction below funnels through here."""
+    try:
+        from . import errors
+        errors.capture(where, err, context=context)
+    except Exception:                        # noqa: BLE001 - never raise
+        pass
+
+
+def _wd_supervise(lease, name: str) -> bool:
+    """Classify the lease once; True if the job may continue.
+
+    FAIL-SAFE: if anything at all goes wrong inside the watchdog, the answer is
+    True — a broken watchdog must never abandon a healthy job."""
+    try:
+        lease.check()
+        return bool(lease.continue_allowed())
+    except Exception as err:                 # noqa: BLE001 - never raise
+        _wd_capture(f"heartbeat.watchdog.check:{name}", err, context=name)
+        return True
+
+
+def _wd_do(lease, method: str, name: str, *args) -> None:
+    try:
+        getattr(lease, method)(*args)
+    except Exception as err:                 # noqa: BLE001 - never raise
+        _wd_capture(f"heartbeat.watchdog.{method}:{name}", err, context=name)
+
+
+def _watch_job(name: str, fn):
+    """Run ONE heartbeat job under a Wave-2 progress lease (W2-C6).
+
+    This is the concrete defect the watchdog was written for: `tick()` runs
+    every cadence SERIALLY and INLINE, so one wedged job — a provider that
+    accepts the request and never streams a token — stalls the scheduler,
+    goals, backups and every cadence after it, silently and indefinitely.
+    `proclock.DEFAULT_TIMEOUT` cannot help: a wedged holder is alive.
+
+    OFF (`OLYMPUS_WATCHDOG` unset — the shipped default): `fn()` is called
+    directly. No lease, no thread, no classification, no clock read — the tick
+    is byte-for-byte the tick it always was.
+
+    OBSERVE: the job runs on a worker thread and the tick waits for it exactly
+    as long as it would have waited inline — a wedged job still stalls the
+    tick, because observe changes NOTHING. It is classified while it runs and
+    its forensics are preserved, so the stall is visible instead of silent.
+
+    ENFORCE: the same supervision, but a tripping verdict ABANDONS the job
+    (raising `JobAbandoned`, which each call site's existing `except Exception`
+    already logs) and the tick continues to the next cadence.
+
+    An abandoned job's thread is a daemon and cannot be killed, so the lease is
+    deliberately given NO `release_fn`: this seam cannot honestly release an
+    admission slot held inside a thread it no longer controls, and the lease
+    records that as `slot_release_skipped` rather than pretending.
+
+    Fail-safe by construction: failing to arm, classify or close the lease all
+    degrade to running the job exactly as an unsupervised tick would.
+    """
+    try:
+        from . import watchdog
+        if not watchdog.enabled():
+            return fn()
+        lease = watchdog.ProgressLease(f"heartbeat:{name}", kind="job",
+                                       clock=_clock)
+    except Exception as err:                 # noqa: BLE001 - never raise
+        _wd_capture(f"heartbeat.watchdog.open:{name}", err, context=name)
+        return fn()
+
+    box: dict = {}
+    # A worker thread starts with a fresh context, so carry the tick's
+    # contextvars (memory's user namespace above all) across the hop.
+    ctx = contextvars.copy_context()
+
+    def _runner() -> None:
+        try:
+            box["value"] = ctx.run(fn)
+        except BaseException as err:         # re-raised on the tick's thread
+            box["error"] = err
+
+    worker = threading.Thread(target=_runner, name=f"olympus-job-{name}",
+                              daemon=True)
+    worker.start()
+    while True:
+        worker.join(_JOB_POLL_SECS)
+        if not worker.is_alive():
+            break
+        if not _wd_supervise(lease, name):
+            _wd_do(lease, "close", name, "abandoned")
+            raise JobAbandoned(
+                f"{name}: abandoned by the progress watchdog — "
+                f"{getattr(lease, 'refusal_reason', '') or 'no progress'}")
+    if "error" in box:
+        _wd_do(lease, "close", name, "error")
+        raise box["error"]
+    # The job returned: one cadence completed is one verifiable plan node done
+    # (W2-I6.1 — this is the job's own completion, not text a model emitted).
+    _wd_do(lease, "beat", name, "plan_node_completed")
+    _wd_supervise(lease, name)
+    _wd_do(lease, "close", name, "ok")
+    return box.get("value")
 
 
 def _due(state: dict, key: str, interval: int, now: float) -> bool:
@@ -47,7 +172,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     # Upgrade/restart handoff: the previous process journaled what it was in
     # the middle of. Report it once — each subsystem (gateway inflight,
     # scheduler interrupted-run resume) re-runs its own work.
-    try:
+    def _job_handoff() -> None:
         from . import selfupdate
         handoff = selfupdate.take_handoff()
         if handoff:
@@ -62,32 +187,44 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             log.append(note)
             if carried:
                 gateway.notify_all(note)
+
+    try:
+        _watch_job("handoff", _job_handoff)
     except Exception:
         log.append("Handoff check failed:\n" + traceback.format_exc())
 
     # User-defined scheduled tasks (natural-language cron). Checked every tick;
     # each job has its own interval, so this is cheap when nothing is due.
-    try:
+    def _job_scheduler() -> None:
         for line in scheduler.run_due(now):
             log.append("Scheduler: " + line)
+
+    try:
+        _watch_job("scheduler", _job_scheduler)
     except Exception:
         log.append("Scheduler failed:\n" + traceback.format_exc())
 
     # Always-on operator jobs (HERMES). No-op unless OLYMPUS_OPERATOR is on; each
     # job still runs through the approval spine (scope/budget/approval all apply).
-    try:
+    def _job_operator() -> None:
         from . import operator
         for line in operator.run_due(now):
             log.append("Operator: " + line)
+
+    try:
+        _watch_job("operator", _job_operator)
     except Exception:
         log.append("Operator failed:\n" + traceback.format_exc())
 
     # Per-agent heartbeats: compact autonomous wake-ups. Each beat has its own
     # cadence and stays quiet (HB_OK) unless something needs attention.
-    try:
+    def _job_agentbeat() -> None:
         from . import agentbeat
         for line in agentbeat.run_due(now):
             log.append("Heartbeats: " + line)
+
+    try:
+        _watch_job("agentbeat", _job_agentbeat)
     except Exception:
         log.append("Heartbeats failed:\n" + traceback.format_exc())
 
@@ -95,42 +232,55 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     # on a real change. No-op unless OLYMPUS_WEB_MONITOR is on (and forced off
     # during replay); each check goes through the SSRF-gated fetch and reports
     # changed content as untrusted data.
-    try:
+    def _job_webmonitor() -> None:
         from . import webmonitor
         for line in webmonitor.run_due(now):
             log.append("Monitor: " + line)
+
+    try:
+        _watch_job("webmonitor", _job_webmonitor)
     except Exception:
         log.append("Web monitor failed:\n" + traceback.format_exc())
 
     # Web reflection: turn accumulated domain lore into discoveries (new formats
     # to use, feeds to watch, sites needing interaction). No-op unless
     # OLYMPUS_WEB_REFLECT is on; surfaces each standing pattern once.
-    try:
+    def _job_webreflect() -> None:
         from . import webreflect
         for line in webreflect.run_due(now):
             log.append("WebReflect: " + line)
+
+    try:
+        _watch_job("webreflect", _job_webreflect)
     except Exception:
         log.append("Web reflection failed:\n" + traceback.format_exc())
 
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
-    try:
+    def _job_goals() -> None:
         from . import goals
         for line in goals.run_due(now):
             log.append("Goals: " + line)
             if "COMPLETE" in line or "STALLED" in line:
                 gateway.notify_all("🎯 " + line)
+
+    try:
+        _watch_job("goals", _job_goals)
     except Exception:
         log.append("Goals failed:\n" + traceback.format_exc())
 
     if _due(state, "opportunity_scan", config.OPPORTUNITY_SCAN_EVERY, now):
         log.append("Argus: scanning the world for opportunities...")
-        try:
+
+        def _job_argus() -> None:
             report = orchestrator.opportunity_scan()
             log.append("Argus: report saved to memory/reports.")
             pushed = gateway.notify_all("🌐 Olympus opportunity scan:\n\n" + report)
             if pushed:
                 log.append(f"Argus: report pushed to {', '.join(pushed)}.")
+
+        try:
+            _watch_job("opportunity_scan", _job_argus)
         except Exception:
             log.append(_job_error("Argus", configured))
         state["opportunity_scan"] = now
@@ -139,22 +289,31 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         url = memory.watchlist_pop()
         if url:
             log.append(f"Mnemosyne: watching {url} ...")
-            try:
+
+            def _job_watchlist() -> None:
                 orchestrator.watch_and_learn(url)
                 log.append("Mnemosyne: lessons saved to memory/lessons.")
+
+            try:
+                _watch_job("watchlist", _job_watchlist)
             except Exception:
                 log.append(_job_error("Mnemosyne", configured))
         state["watchlist"] = now
 
     if _due(state, "maintenance", config.MAINTENANCE_EVERY, now):
-        try:
+        def _job_maintenance() -> None:
             removed = memory.sweep_dated_files(config.RETAIN_DAYS)
             orphans = memory.sweep_orphan_responses()
             tool_res = memory.sweep_tool_results(config.RETAIN_DAYS)
-            if removed or orphans or tool_res:
+            # Absorption evidence ledgers + watchdog forensics: without this they
+            # grow unbounded, which would make raw operational logs permanent
+            # moat data by default (Phase-4 Stage-E finding).
+            evidence = memory.sweep_evidence(config.RETAIN_DAYS)
+            if removed or orphans or tool_res or evidence:
                 log.append(f"Maintenance: removed {removed} old trace/usage "
-                           f"files, {orphans} orphaned frozen responses, and "
-                           f"{tool_res} aged tool results.")
+                           f"files, {orphans} orphaned frozen responses, "
+                           f"{tool_res} aged tool results, and {evidence} aged "
+                           f"evidence records.")
             from . import search
             idx = search.maintain()
             if idx.get("vacuumed"):
@@ -164,16 +323,22 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             stale = domainlore.prune(config.RETAIN_DAYS, now)
             if stale:
                 log.append(f"Web knowledge: pruned {stale} stale domain(s).")
+
+        try:
+            _watch_job("maintenance", _job_maintenance)
         except Exception:
             log.append("Maintenance failed:\n" + traceback.format_exc())
         state["maintenance"] = now
 
     if _due(state, "dreaming", config.DREAM_EVERY, now):
-        try:
+        def _job_dreaming() -> None:
             from . import wiki
             # Quiet when there was nothing to consolidate — a nightly job
             # must not turn the heartbeat log into a metronome.
-            log += ["Wiki: " + line for line in wiki.dream_all(now)]
+            log.extend("Wiki: " + line for line in wiki.dream_all(now))
+
+        try:
+            _watch_job("dreaming", _job_dreaming)
         except Exception:
             log.append(_job_error("Dreaming", configured))
         state["dreaming"] = now
@@ -183,33 +348,47 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         # The unified sleep-time reflection cycle: BOTH targets (memory
         # consolidation + prompt reflection) under budget caps and the
         # reflection.cycle Plane-1 contract (Plane 3.4).
-        try:
+        def _job_sleeptime() -> None:
             from . import reflection
-            log += reflection.sleep_cycle().get("log", [])
+            log.extend(reflection.sleep_cycle().get("log", []))
+
+        try:
+            _watch_job("sleeptime", _job_sleeptime)
         except Exception:
             log.append(_job_error("Sleep-time reflection", configured))
         state["sleeptime"] = now
 
     if config.live_eval_enabled() and _due(state, "live_eval",
                                            config.LIVE_EVAL_EVERY, now):
-        try:
+        def _job_liveeval() -> None:
             from . import liveeval
-            log += liveeval.run()
+            log.extend(liveeval.run())
+
+        try:
+            _watch_job("live_eval", _job_liveeval)
         except Exception:
             log.append(_job_error("Live-eval", configured))
         state["live_eval"] = now
 
     if _due(state, "daily_learning", config.DAILY_LEARNING_EVERY, now):
         log.append("Metis: running the daily learning cycle...")
-        try:
+
+        def _job_metis() -> None:
             orchestrator.daily_learning()
             log.append("Metis: skills updated; report saved to memory/reports.")
+
+        try:
+            _watch_job("daily_learning", _job_metis)
         except Exception:
             log.append(_job_error("Metis", configured))
+
         # Metis also prunes drifted operator site profiles (Phase 4).
-        try:
+        def _job_operator_review() -> None:
             from . import operator
             log.append("Operator review: " + operator.review_profiles())
+
+        try:
+            _watch_job("operator_review", _job_operator_review)
         except Exception:
             log.append(_job_error("Operator review", configured))
         state["daily_learning"] = now
@@ -217,21 +396,29 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     from . import discovery
     if discovery.enabled() and _due(state, "discovery", config.DISCOVERY_EVERY, now):
         log.append("Discovery: closing knowledge/capability gaps...")
-        try:
+
+        def _job_discovery() -> None:
             r = discovery.run()
             for line in r.get("learned", []) + r.get("proposed", []):
                 log.append("Discovery: " + line)
             log.append(f"Discovery: {r.get('open_knowledge', 0)} knowledge / "
                        f"{r.get('open_capability', 0)} capability gap(s) open.")
+
+        try:
+            _watch_job("discovery", _job_discovery)
         except Exception:
             log.append(_job_error("Discovery", configured))
         state["discovery"] = now
 
     if config.TRAIN_EVERY and _due(state, "train", config.TRAIN_EVERY, now):
         log.append("Prometheus: training the weakest specialists...")
-        try:
+
+        def _job_train() -> None:
             orchestrator.train_specialists()
             log.append("Prometheus: training round saved to memory/reports.")
+
+        try:
+            _watch_job("train", _job_train)
         except Exception:
             log.append(_job_error("Training", configured))
         state["train"] = now
@@ -239,35 +426,46 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     from . import curator
     if _due(state, "skill_curation", curator.curation_every(), now):
         log.append("Curator: grading and pruning the skill library...")
-        try:
+
+        def _job_curator() -> None:
             log.append("Curator: " + curator.curate())
+
+        try:
+            _watch_job("skill_curation", _job_curator)
         except Exception:
             log.append(_job_error("Curator", configured))
         state["skill_curation"] = now
 
     from . import evolve
     if _due(state, "feature_evolution", config.FEATURE_EVOLUTION_EVERY, now):
-        try:
+        def _job_evolve() -> None:
             log.append(evolve.review())
+
+        try:
+            _watch_job("feature_evolution", _job_evolve)
         except Exception:
             log.append(_job_error("Feature-evolution review", configured))
         state["feature_evolution"] = now
 
     if _due(state, "evolution_audit", config.EVOLUTION_AUDIT_EVERY, now):
         log.append("Prometheus: running self-audit and self-upgrade...")
-        try:
+
+        def _job_audit() -> None:
             report = orchestrator.evolution_audit()
             log.append("Prometheus: audit saved to memory/reports.")
             pushed = gateway.notify_all("🔧 Olympus self-audit:\n\n" + report)
             if pushed:
                 log.append(f"Prometheus: audit pushed to {', '.join(pushed)}.")
+
+        try:
+            _watch_job("evolution_audit", _job_audit)
         except Exception:
             log.append(_job_error("Prometheus", configured))
         state["evolution_audit"] = now
 
     if config.REPLAY_GATE_EVERY and _due(state, "replay_gate",
                                           config.REPLAY_GATE_EVERY, now):
-        try:
+        def _job_replay_gate() -> None:
             from . import firstrun, replaygate
             if not firstrun.configured():
                 log.append("Replay self-check skipped: no provider key.")
@@ -282,6 +480,9 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                     if res.get("issue"):
                         msg += f" (GitHub issue: {res['issue']})"
                     log.append(msg)
+
+        try:
+            _watch_job("replay_gate", _job_replay_gate)
         except Exception:
             log.append("Replay self-check errored:\n" + traceback.format_exc())
         state["replay_gate"] = now
@@ -290,13 +491,17 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                                         config.DRIFT_GATE_EVERY, now):
         # Provider-drift tripwire (C6): budget-guarded like every other job, then
         # run the keyed drift corpus within its own hard dollar cap. Default OFF.
-        try:
-            from . import usage
+        from . import usage      # named by the BudgetExceeded handler below
+
+        def _job_drift_gate() -> None:
             usage.check_budget()
             from . import modelgate
             res = modelgate.run_gate(config.Settings.from_env())
             log.append(f"Drift gate: {res.severity} ({len(res.results)} items, "
                        f"~${res.cost:.4f}).")
+
+        try:
+            _watch_job("drift_gate", _job_drift_gate)
         except usage.BudgetExceeded as err:
             log.append(f"Drift gate: skipped (budget) — {err}")
         except Exception:
@@ -304,7 +509,7 @@ def tick(state: dict, now: float | None = None) -> list[str]:
         state["drift_gate"] = now
 
     if config.BACKUP_EVERY and _due(state, "backup", config.BACKUP_EVERY, now):
-        try:
+        def _job_backup() -> None:
             from . import backup
             res = backup.run()
             if res.get("ok"):
@@ -319,6 +524,9 @@ def tick(state: dict, now: float | None = None) -> list[str]:
                            f"{res.get('error')}")
                 gateway.notify_all("⚠️ Olympus backup failed at "
                                    f"{res.get('stage')}: {res.get('error')}")
+
+        try:
+            _watch_job("backup", _job_backup)
         except Exception:
             log.append("Backup errored:\n" + traceback.format_exc())
         state["backup"] = now

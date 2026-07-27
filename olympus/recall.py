@@ -307,6 +307,113 @@ def flush_slice(user: str, history_text: str,
 
 _SEMANTIC_K = 64   # cap on semantic candidates (the token budget trims further)
 
+# --- context heat (W2-C2, wired by W2-PR15) -------------------------------
+#
+# Flag-gated by OLYMPUS_CTXHEAT (default `off`). With the flag off `_ctxheat()`
+# returns None before anything is imported or called, so retrieval is untouched
+# — no record, no proposal, no file, no cost.
+#
+# What is wired, and how it stays inside the invariants:
+#
+#   * RETRIEVAL is recorded — `ctxheat.record(id, "memory", retrieved=True)`.
+#     W2-I2.1 makes passing content structurally impossible (`record()` has no
+#     content parameter), and the call site keeps that honest: the ONLY values
+#     that cross are `m["id"]`, the literal kind `"memory"`, the user scope
+#     (W2-I2.2 isolation) and the provenance label `"recall"`. Item text never
+#     leaves this module.
+#   * SHADOW records heat and lets `propose_pins()` compute, then hands the
+#     proposal to `apply_pins()`, which refuses and logs the counterfactual.
+#     Nothing about WHICH items `retrieve()` returns, or in what order, changes
+#     (W2-I2.5).
+#   * ON is identical here, because this seam supplies NO `gate_fn`: a missing
+#     gate REFUSES (W2-I2.4), so `on` degrades to exactly shadow. Heat can only
+#     reach placement through `applied_pins()` — a pin set that some other,
+#     benchmark-gated caller already published — which is the one path
+#     `apply_pins` guards. There is no unmeasured route from heat to the prompt.
+#
+# What is NOT wired, deliberately: `ctxheat.record_verifier_outcome()`. It
+# demands a source from TRUSTED_VERIFIER_SOURCES, and the retrieval seam runs
+# BEFORE the answer exists — it cannot observe whether Aletheia or synth_check
+# accepted a memory. Manufacturing a source here would forge the exact signal
+# the capability is built to require. The stated consequence: with
+# `min_verified() >= 1`, no item whose heat comes only from recall is
+# pin-ELIGIBLE, so proposals from this seam are empty until the verification
+# path is wired. That is a missing signal, not a silent one.
+#
+# Everything is fail-safe: heat is telemetry, never a retrieval dependency.
+
+
+def _ctxheat():
+    """The ctxheat module when OLYMPUS_CTXHEAT is on, else None. Never raises —
+    an import failure or a broken flag means retrieval simply runs unheated."""
+    try:
+        from . import ctxheat
+        return ctxheat if ctxheat.enabled() else None
+    except Exception:                      # noqa: BLE001 — never break retrieval
+        return None
+
+
+def _heat_safe(what: str, fn, fallback=None):
+    """Run a ctxheat call fail-safe. A ctxheat error is captured as an error,
+    never raised into retrieval — a heat ledger problem must not cost the user
+    their memories."""
+    try:
+        return fn()
+    except Exception as err:               # noqa: BLE001 — telemetry, not policy
+        try:
+            from . import errors
+            errors.capture("recall.ctxheat", err, context=what)
+        except Exception:
+            pass
+        return fallback
+
+
+def _heat_token_cost(mem: dict) -> int:
+    """The same cost `retrieve()` charges this item against its budget — a
+    SIZE, not content. Passing it to `propose_pins` lets pin economics use
+    measured item sizes instead of ctxheat's PROVISIONAL per-kind fallbacks."""
+    return len(mem["content"]) // 4 + 4
+
+
+def _heat_order(heat, user: str, scored: list) -> list:
+    """Heat-informed ordering — ONLY from a pin set that passed the benchmark
+    gate when it was applied.
+
+    `applied_pins()` is empty unless the mode is `on` AND `apply_pins()`
+    previously published a pin set behind a passing gate, so in `off`, in
+    `shadow`, and in `on` without such a pin set this is the identity function
+    and placement stays static (W2-I2.5). The reorder itself is a STABLE
+    partition: pinned items move to the front, relevance order is preserved
+    within each part, and no item is added or dropped."""
+    pins = heat.applied_pins(user)
+    pinned = {p.get("id") for p in pins or [] if p.get("kind") == "memory"}
+    if not pinned:
+        return scored
+    front = [s for s in scored if s[1].get("id") in pinned]
+    if not front:
+        return scored
+    return front + [s for s in scored if s[1].get("id") not in pinned]
+
+
+def _heat_record(heat, user: str, chosen: list) -> None:
+    """Record the retrieval. Ids and kinds only (W2-I2.1)."""
+    for mem in chosen:
+        heat.record(mem.get("id"), "memory", retrieved=True, user=user,
+                    provenance="recall")
+
+
+def _heat_propose(heat, user: str, chosen: list) -> None:
+    """Compute the pin proposal and offer it to the gate.
+
+    `gate_fn` is deliberately ABSENT: retrieval has no benchmark to run, so
+    `apply_pins()` refuses (`no_benchmark_gate`) and logs the counterfactual —
+    `on` behaves exactly as `shadow` here, by construction rather than by
+    convention."""
+    est = {mem["id"]: _heat_token_cost(mem) for mem in chosen}
+    proposals = heat.propose_pins(user=user, est_tokens=est)
+    heat.apply_pins(proposals, gate_fn=None, user=user,
+                    reason="recall.retrieve")
+
 
 def _semantic_hits(user: str, query: str, already: set[str]) -> list[tuple]:
     """Cosine-ranked memories with embeddings, excluding ids already found
@@ -367,6 +474,13 @@ def retrieve(user: str, query: str,
 
     scored.sort(key=lambda s: s[0], reverse=True)
 
+    # C2 context heat. `_ctxheat()` is None unless OLYMPUS_CTXHEAT is on, so
+    # the default path below is exactly the pre-C2 one.
+    heat = _ctxheat()
+    if heat is not None:
+        scored = _heat_safe("order", lambda: _heat_order(heat, user, scored),
+                            scored)
+
     chosen, used = [], 0
     for _, m in scored:
         cost = len(m["content"]) // 4 + 4
@@ -374,6 +488,10 @@ def retrieve(user: str, query: str,
             break
         chosen.append(m)
         used += cost
+
+    if heat is not None and chosen:
+        _heat_safe("record", lambda: _heat_record(heat, user, chosen))
+        _heat_safe("propose", lambda: _heat_propose(heat, user, chosen))
     return chosen
 
 

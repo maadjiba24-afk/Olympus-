@@ -1,0 +1,16 @@
+{
+  "name": "malformed_version_skill",
+  "kind": "skill",
+  "payload": {
+    "version": "not-a-version",
+    "name": "x",
+    "instructions": "hi"
+  },
+  "note": "An unparsable version is a refusal, not a silent default of 1.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "malformed_version"
+    ]
+  }
+}

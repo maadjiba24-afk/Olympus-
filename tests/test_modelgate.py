@@ -166,8 +166,11 @@ def test_provider_errors_quarantine():
 
 def test_budget_cap_stops_mid_corpus_without_overrun():
     s = _settings()
+    # The never-exceed guard is a PRE-FLIGHT estimate: inject a foresight
+    # estimator matching the actual per-item cost so the stop point is exact.
     res = modelgate.run_gate(s, budget_usd=1.0,
-                             run_fn=make_run_fn(default=8, cost=0.4))
+                             run_fn=make_run_fn(default=8, cost=0.4),
+                             cost_estimator=lambda _s, _i: 0.4)
     assert res.stopped_reason == modelgate.BUDGET_EXHAUSTED
     assert res.severity == modelgate.BUDGET_EXHAUSTED
     assert len(res.results) == 2                      # stops before item 3

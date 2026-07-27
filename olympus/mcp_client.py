@@ -237,8 +237,47 @@ def discover(server) -> list[dict]:
             "input_schema": getattr(t, "inputSchema", None)
             or {"type": "object", "properties": {}},
         })
+    try:                          # W2-C5: gate the tool list before it is used
+        schemas = _gate_ephemeral(name, "tools/list", schemas)
+    except Exception as exc:      # noqa: BLE001 — contained, fail-closed
+        _log.warning("tool list from '%s' was refused by the ingestion gate: "
+                     "%s", name, exc)
+        for s in schemas:         # no half-registered discovery survives
+            _KIND_CACHE.pop(s.get("name"), None)
+        return []
     _SCHEMA_CACHE[name] = (time.monotonic() + DISCOVER_TTL, schemas)
     return schemas
+
+
+def _gate_ephemeral(server: str, tool: str, payload, *,
+                    is_error: bool = False, rules: dict | None = None):
+    """The EPHEMERAL half of the ingestion gate (W2-C5) for inbound MCP server
+    payloads: `sanitize_ephemeral()` then `assert_schema()`.
+
+    An MCP payload is consumed once and never written, so it is the "sanitize-
+    and-continue" half of the doctrine — but sanitation only makes it safe to
+    *look at*. It must still pass the authoritative schema before anything acts
+    on it (the C8/tool-ladder boundary), which is what `assert_schema` does
+    here. The persistent reject-never-repair path (`check()`) is deliberately
+    NOT used: `mcp_payload` is a registered EPHEMERAL kind, and
+    `sanitize_ephemeral` itself refuses any persistent kind, so this route can
+    never be pointed at durable state.
+
+    Raises ingestgate.IngestRefused; the callers contain it (a refused payload
+    is never acted on). Inert while `OLYMPUS_INGESTGATE` is off.
+    """
+    from . import ingestgate
+    if not ingestgate.enabled():
+        return payload
+    envelope = {"version": "1", "server": str(server), "tool": str(tool),
+                "result": payload, "is_error": bool(is_error)}
+    clean = ingestgate.sanitize_ephemeral(
+        "mcp_payload", envelope,
+        rules=rules if rules is not None
+        else {"normalize": "NFC", "strip_control": True})
+    ingestgate.assert_schema(clean, ingestgate.KINDS["mcp_payload"]["schema"],
+                             kind="mcp_payload")
+    return clean.get("result")
 
 
 def _clean_description(desc: str, server: str, tool: str) -> str:
@@ -294,7 +333,15 @@ def call(server_name: str, tool: str, args: dict | None = None) -> str:
         result = _run_sync(lambda: _with_session(server, _call), CALL_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 — contained
         return f"Error calling MCP tool '{tool}' on '{server_name}': {exc}"
-    return _render(result)
+    try:                      # W2-C5: gate the payload before it is acted on
+        return str(_gate_ephemeral(
+            server_name, tool, _render(result),
+            is_error=bool(getattr(result, "isError", False)),
+            rules={"normalize": "NFC", "strip_control": True,
+                   "max_len": _MCP_OUTPUT_CAP}))
+    except Exception as exc:  # noqa: BLE001 — contained, fail-closed
+        return (f"Error: the payload from MCP tool '{tool}' on '{server_name}' "
+                f"was refused by the ingestion gate: {exc}")
 
 
 def _resolve(server_name: str):

@@ -15,7 +15,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
-from . import config, security, toolcall_repair, tools, usage
+from . import config, security, streamguard, toolcall_repair, tools, usage
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
@@ -264,6 +264,72 @@ def _post(settings: config.Settings, payload: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError(f"Provider call failed at {url}: {last_err}")
 
 
+def _message_of(data: Any) -> dict[str, Any]:
+    """The assistant message from an OpenAI-shaped completion, or a typed
+    refusal.
+
+    Every caller used to write `data["choices"][0]["message"]` inline, which
+    assumes the provider is well-behaved. A compromised or merely broken
+    provider (`choices` absent, empty, a string, `message` null) turned that
+    into an untyped KeyError/TypeError/IndexError propagating out of the parse.
+    Containment happened one layer up, in `orchestrator._run_one`'s broad
+    `except Exception` — real, but incidental: the parser was contained by
+    luck, not by design, and the operator saw a traceback rather than "the
+    provider sent something that is not a completion".
+
+    Stage-B finding F3. The refusal is a RuntimeError so it joins the same
+    provider-failure class `_post` already raises, and failover/retry treat it
+    identically."""
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Provider response is not a JSON object (got "
+            f"{type(data).__name__}) — refusing to parse it as a completion.")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError(
+            "Provider response has no usable 'choices' array — refusing to "
+            "parse it as a completion.")
+    first = choices[0]
+    message = first.get("message") if isinstance(first, dict) else None
+    if not isinstance(message, dict):
+        raise RuntimeError(
+            "Provider response choice carries no 'message' object — refusing "
+            "to parse it as a completion.")
+    return message
+
+
+def _named_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """The tool calls that are structurally complete enough to dispatch.
+
+    `call["function"]["name"]` sat outside the per-call `try`, so one malformed
+    entry from a hostile provider crashed the whole loop instead of being
+    dropped. Screening here keeps the security property that mattered (an
+    unnamed call NEVER reaches `resolve_handler`) and makes it deliberate:
+    a call is kept only when it carries a non-empty string name.
+
+    Dropping rather than refusing is right for this one: the remaining calls in
+    the batch are individually well-formed, and a provider response is
+    ephemeral — the sanitise-and-continue side of the house rule. A response
+    whose calls are ALL malformed degrades to `not tool_calls`, i.e. the text
+    branch, which is the same honest outcome as a model that answered in
+    prose."""
+    raw = message.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for call in raw:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        out.append(call)
+    return out
+
+
 def _to_openai_tools(tool_defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic-style tool defs to OpenAI function-calling format."""
     return [
@@ -293,6 +359,207 @@ def extract_json(text: str) -> dict[str, Any]:
     return obj
 
 
+# --- C8 degenerate-response defense (W2-PR14) -------------------------------
+#
+# **This module is NOT streaming.** `_post` reads the whole body and json-parses
+# it in one go; there is no SSE consumer here, so there is no delta seam to feed
+# and no partially-delivered answer to truncate. That is stated plainly because
+# the honest consequence matters: the guard runs at the RESPONSE-PARSE point,
+# before any of the payload is turned into an answer or a tool execution.
+#
+# It is also the seam that closes the gap the Wave-2 completion report names.
+# The EVENT-based detectors (`detect_malformed_event`, `detect_event_order`,
+# `detect_invalid_tool_delta`, `detect_impossible_usage`) were unreachable from
+# `llm.stream_text`, because the Anthropic SDK's `text_stream` yields text and
+# nothing else. An OpenAI-compatible body carries exactly that missing
+# information — role/content/tool_calls/usage — merely collapsed into one
+# object. `response_events()` projects it back into the canonical event
+# sequence, in the order a provider would have streamed it, and the monitor
+# walks it.
+#
+# The projection is FAITHFUL, not decorative: every event it emits is derived
+# from a field the provider actually sent, and it never invents an ordering the
+# payload does not assert. A trip therefore always names a real defect in the
+# body — a non-mapping message, a non-str content, an argument buffer that is
+# not a string, two parallel calls interleaved into one `index`, a tool RESULT
+# echoed back as the model's own message, counters that cannot be true.
+# Well-formed bodies (the overwhelming majority) walk the projection cleanly,
+# which is the false-positive guard.
+
+
+def _declared_max_tokens(payload: dict[str, Any]) -> int | None:
+    """The output bound this request declared, whichever key the model needed
+    (`max_completion_tokens` for reasoning models, `max_tokens` otherwise).
+    `None` when nothing was declared — then there is no bound to enforce."""
+    for name in ("max_completion_tokens", "max_tokens"):
+        val = payload.get(name) if isinstance(payload, dict) else None
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return None
+
+
+def _arg_payload(raw: Any) -> Any:
+    """The wire form of a tool call's `arguments`.
+
+    A dict is the STRUCTURED form of the same value — `repair_arguments()`
+    accepts it as a supported provider variant — so it is projected as its JSON
+    encoding rather than flagged, or the guard would reject calls this backend
+    has always executed. An absent value is an empty buffer. Anything else is
+    handed to the detector AS IS: a number, a list or a bool where the argument
+    buffer belongs is precisely `INVALID_TOOL_DELTA`."""
+    if raw is None:
+        return ""
+    if isinstance(raw, dict):
+        try:
+            return json.dumps(raw)
+        except (TypeError, ValueError):
+            return raw              # unserialisable — let the detector see it
+    return raw
+
+
+def _tool_call_events(tool_calls: Any):
+    """Project `message.tool_calls` into content blocks.
+
+    OpenAI keys PARALLEL calls by `index`: entries sharing an index are one
+    argument buffer. Projecting them that way is what makes the "tool id changed
+    mid-block" arm of `detect_invalid_tool_delta` reachable — a provider that
+    interleaves two different call ids into a single index is synthesizing a
+    tool call nobody asked for. Entries with no `index` are each their own
+    block, and a continuation entry that carries no id (the streaming
+    convention, where only the first chunk names the call) simply extends the
+    open buffer, exactly as it should."""
+    if tool_calls is None:
+        return
+    if not isinstance(tool_calls, list):
+        yield {"type": "content_block_start", "content_block": tool_calls}
+        return
+    open_key: Any = None
+    opened = False
+    for pos, call in enumerate(tool_calls):
+        if not isinstance(call, dict):
+            if opened:
+                yield {"type": "content_block_stop"}
+                opened = False
+            yield {"type": "content_block_start", "content_block": call}
+            continue
+        fn = call.get("function")
+        fn = fn if isinstance(fn, dict) else {}
+        idx = call.get("index")
+        group = (("i", idx) if isinstance(idx, int) and not isinstance(idx, bool)
+                 else ("p", pos))
+        call_id = str(call.get("id") or "")
+        if group != open_key:
+            if opened:
+                yield {"type": "content_block_stop"}
+            yield {"type": "content_block_start",
+                   "content_block": {"type": "tool_use",
+                                     "id": call_id or f"call_{pos}",
+                                     "name": str(fn.get("name") or "")}}
+            open_key = group
+            opened = True
+        yield {"type": "content_block_delta",
+               "delta": {"type": "input_json_delta",
+                         "partial_json": _arg_payload(fn.get("arguments")),
+                         "id": call_id or None}}
+    if opened:
+        yield {"type": "content_block_stop"}
+
+
+def response_events(data: Any, *, choice_index: int = 0):
+    """Project one parsed `/chat/completions` body into the canonical provider
+    event sequence. PURE (W2-I8.2): a generator over the payload — no I/O, no
+    clock, no hidden state, safe to call from a test with a crafted body."""
+    yield {"type": "message_start"}
+    if not isinstance(data, dict):
+        yield data                      # not a mapping ⇒ MALFORMED_EVENTS
+        return
+
+    choices = data.get("choices")
+    choice = None
+    if isinstance(choices, list) and len(choices) > choice_index:
+        choice = choices[choice_index]
+    message = choice.get("message") if isinstance(choice, dict) else None
+
+    if isinstance(message, dict):
+        # A tool RESULT echoed back as the model's OWN message — a broken relay
+        # or a proxy replaying the conversation. The payload literally asserts a
+        # tool_result, and nothing before it was a tool_use, so the order
+        # detector is right to reject it.
+        if message.get("tool_call_id") or message.get("role") == "tool":
+            yield {"type": "tool_result"}
+        content = message.get("content")
+        if content is not None:
+            yield {"type": "content_block_start",
+                   "content_block": {"type": "text"}}
+            yield {"type": "content_block_delta",
+                   "delta": {"type": "text_delta", "text": content}}
+            yield {"type": "content_block_stop"}
+        yield from _tool_call_events(message.get("tool_calls"))
+    elif message is not None:
+        # `message` is present but is not a mapping: project it as the content
+        # block it claims to be so the shape detector sees it.
+        yield {"type": "content_block_start", "content_block": message}
+
+    usage_block = data.get("usage")
+    if usage_block is not None:
+        yield {"type": "message_delta", "delta": {}, "usage": usage_block}
+    yield {"type": "message_stop"}
+
+
+def _guard_response(settings: config.Settings, payload: dict[str, Any],
+                    data: Any):
+    """Walk a parsed response through the C8 monitor. Returns the monitor.
+
+    Flag off (`OLYMPUS_STREAMGUARD` unset) ⇒ `monitor()` hands back an inert
+    `NullMonitor` and this function returns immediately WITHOUT projecting
+    anything, so the response path is byte-identical to the pre-C8 one and
+    costs nothing (A17 rollback).
+
+    On a trip: the evidence record is written and a typed `StreamAborted` is
+    raised. The caller has not yet produced an answer or executed a tool, so
+    aborting here is what "terminate safely" means at a non-streaming seam —
+    there is nothing to truncate and nothing to roll back."""
+    model = str(payload.get("model") or settings.model or "")
+    guard = streamguard.monitor(provider="openai-compat", model=model,
+                                max_tokens=_declared_max_tokens(payload))
+    if not getattr(guard, "enabled", False):
+        return guard
+    try:
+        for event in response_events(data):
+            guard.feed(event)
+    except streamguard.StreamPathology as exc:
+        rec = streamguard.pathology_record(guard, exc,
+                                           provider="openai-compat",
+                                           model=model)
+        streamguard.record_pathology(rec)
+        raise streamguard.StreamAborted(exc.kind, exc.detail,
+                                        record=rec) from exc
+    return guard
+
+
+def abort_disclosure(exc: streamguard.StreamAborted) -> str:
+    """The user-visible disclosure for a tripped response (W2-I8.3): an explicit
+    failure that names the pathology, never a truncated answer presented as a
+    finished one.
+
+    The completed tool calls are named from `safe_tool_calls()` (carried on the
+    evidence record) so the disclosure is honest about what was discarded — and
+    it is a DISCARD, not a deferral: nothing from a tripped response is
+    executed, so the partial call in flight cannot reach a handler (W2-I8.1)."""
+    kind = getattr(exc, "kind", "pathology")
+    detail = getattr(exc, "detail", "") or str(exc)
+    safe = [str(n) for n in (getattr(exc, "record", {}) or {}).get(
+        "safe_tool_calls", []) if n]
+    tail = ""
+    if safe:
+        tail = (f" {len(safe)} tool call(s) that had parsed cleanly "
+                f"({', '.join(safe[:8])}) were discarded with it.")
+    return (f"[Response aborted: the provider's reply tripped the "
+            f"degenerate-stream guard ({kind}: {detail}). No tool call from "
+            f"this response was executed.{tail} Nothing above is a finished "
+            f"answer.]")
+
+
 def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
     payload: dict[str, Any] = {
@@ -310,7 +577,11 @@ def complete_text(settings: config.Settings, system: str,
                else "max_tokens")
     payload[tok_key] = config.MAX_TOKENS
     resp = _post(settings, payload)
-    return (resp["choices"][0]["message"].get("content") or "").strip()
+    # C8 response-parse seam. No-op when OLYMPUS_STREAMGUARD is off. On a trip
+    # the typed StreamAborted propagates INSTEAD of the text — a degenerate
+    # reply must never be handed back as a finished answer (W2-I8.3).
+    _guard_response(settings, payload, resp)
+    return (_message_of(resp).get("content") or "").strip()
 
 
 def complete_json(settings: config.Settings, system: str,
@@ -401,8 +672,19 @@ def run_agent(settings: config.Settings, system: str, task: str,
         if payload_tools:
             payload["tools"] = payload_tools
         payload.update(reasoning)
-        message = _post(settings, payload)["choices"][0]["message"]
-        tool_calls = message.get("tool_calls") or []
+        data = _post(settings, payload)
+        # C8 execution precondition (W2-I8.1): the guard runs BEFORE a single
+        # tool call is looked at, so a tripped response can never reach
+        # `repair_arguments` / a handler — the in-flight partial call has no
+        # path to execution. On a healthy response the guard changes nothing and
+        # the repair ladder keeps its job (a merely unparseable buffer is the
+        # ladder's business, not a pathology).
+        try:
+            _guard_response(settings, payload, data)
+        except streamguard.StreamAborted as exc:
+            return abort_disclosure(exc)
+        message = _message_of(data)
+        tool_calls = _named_tool_calls(message)
 
         # Weak models sometimes emit the tool call as JSON in `content` with an
         # empty `tool_calls`. Recover it — but only when it names an offered tool,

@@ -1,0 +1,20 @@
+{
+  "name": "valid_plugin",
+  "kind": "plugin",
+  "payload": {
+    "version": "1.0",
+    "name": "hello",
+    "code": "def run(payload):\n    return payload\n",
+    "description": "identity plugin",
+    "entrypoint": "run"
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "source": "file:///corpus/hello.json",
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

@@ -27,7 +27,7 @@ def test_report_shape(env):
     assert set(rep) == {"ok", "down", "degraded", "components"}
     assert set(rep["components"]) == {
         "models", "memory", "gateway", "search", "notifications",
-        "connections"}
+        "connections", "config"}
 
 
 def test_healthy_minimal_install_is_ok(env):

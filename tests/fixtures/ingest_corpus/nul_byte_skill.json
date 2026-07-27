@@ -1,0 +1,12 @@
+{
+  "name": "nul_byte_skill",
+  "kind": "skill",
+  "payload_text": "{\"version\":\"1.0\",\"name\":\"x\",\"instructions\":\"a\u0000b\"}",
+  "note": "NUL is the classic truncation/smuggling primitive.",
+  "expect": {
+    "refused": true,
+    "reasons": [
+      "nul_byte"
+    ]
+  }
+}

@@ -9,6 +9,7 @@ keys.sh
 # the signing seed must never be committed, wherever keygen wrote it
 signing_seed
 deploy/.env
+deploy/.env.staging
 olympus/verification.json
 
 # Python build artifacts (never commit)

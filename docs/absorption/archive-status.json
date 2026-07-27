@@ -1,0 +1,45 @@
+{
+  "programme": "colibri-absorption",
+  "status": "closed",
+  "closed_on": "2026-07-26",
+  "final_verdict": "COLIBRI ABSORPTION COMPLETE",
+  "final_report": "docs/absorption/COLIBRI_ABSORPTION_FINAL_REPORT.md",
+  "archive_index": "docs/absorption/COLIBRI_ARCHIVE.md",
+  "future_role": "historical-reference-and-optional-benchmark",
+  "runtime_dependency": false,
+  "build_dependency": false,
+  "design_dependency": false,
+  "roadmap_dependency": false,
+  "capabilities_dispositioned": 26,
+  "classification_counts": {
+    "ABSORBED": 3,
+    "ABSORBED_AND_REDESIGNED": 14,
+    "REPLACED_BY_OLYMPUS_NATIVE_DESIGN": 5,
+    "DEFERRED_PENDING_EVIDENCE": 4,
+    "REJECTED": 0,
+    "OUT_OF_SCOPE": 0,
+    "INCOMPLETE": 0
+  },
+  "new_modules": 13,
+  "module_budget": 14,
+  "deferred_capabilities": [
+    "speculative-execution",
+    "predictive-prefetch",
+    "provider-mirroring",
+    "local-inference-tier"
+  ],
+  "production_readiness": {
+    "note": "Programme closure is NOT production approval. These are separate questions.",
+    "verdict": "CONDITIONAL GO FOR CONTINUED STAGING",
+    "source": "docs/absorption/PHASE5_COMPLETION_REPORT.md"
+  },
+  "verified_at_closure": {
+    "tests_passed": 5141,
+    "tests_failed": 0,
+    "tests_skipped": 30,
+    "ci_gates_green": true,
+    "colibri_imports_in_runtime_code": 0,
+    "colibri_identifiers_in_runtime_code": 0
+  },
+  "reopening_policy": "Broad Colibri re-absorption requires a new approved programme charter. A single-capability review requires a specific proposal and new evidence; Colibri parity alone is never sufficient justification."
+}

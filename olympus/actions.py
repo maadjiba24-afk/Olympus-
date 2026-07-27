@@ -374,6 +374,23 @@ def _execute(action: Action) -> Action:
         action.error = f"unknown action type: {action.type}"
         _save(action); _audit(action, "failed")
         return action
+    # Shadow boundary, defence in depth (P5-A5). The primary enforcement point
+    # is `tools.resolve_handler`, but the approval spine can be reached without
+    # a tool call at all — a CLI approval, the web approval handler, a
+    # scheduled job. An action's own risk class decides: reversible ones are
+    # Olympus-local and may run; irreversible and financial ones are exactly
+    # what shadow mode exists to prevent.
+    from . import shadow
+    if shadow.enabled() and action.risk_class in (IRREVERSIBLE,
+                                                  FINANCIAL_LEGAL):
+        shadow.record_intent(f"action:{action.type}", shadow.PROHIBITED,
+                             "refused", detail=f"risk={action.risk_class}")
+        action.status = FAILED
+        action.error = (
+            f"refused in shadow mode: '{action.type}' is {action.risk_class}. "
+            f"Shadow runs record irreversible intents, they never perform them.")
+        _save(action); _audit(action, "blocked_shadow")
+        return action
     if at.scope and at.scope not in granted_scopes(action.user):
         action.status = FAILED
         action.error = (f"permission '{at.scope}' not granted — "

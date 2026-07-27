@@ -206,7 +206,14 @@ def observe(provider: str, model: str, prompt_chars: Any,
         if v <= 0:
             _discard("non-positive usage sample", ctx)
             return False
-    sample = prompt_chars / reported_input_tokens
+    try:
+        sample = prompt_chars / reported_input_tokens
+    except (OverflowError, ZeroDivisionError):
+        # Astronomically huge ints (unreachable with real prompt sizes, but a
+        # crafted sample could reach here) overflow float division; discard-and-
+        # count rather than propagate. WAVE1_INDEPENDENT_AUDIT.md residual.
+        _discard("overflow computing chars-per-token", ctx)
+        return False
     if not (CPT_MIN <= sample <= CPT_MAX):
         _discard(f"implausible chars-per-token {sample:.3f}", ctx)
         return False

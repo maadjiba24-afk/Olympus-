@@ -94,7 +94,7 @@ def test_manifest_carries_flags_models_and_prompt_hashes(tmp_path, monkeypatch):
     assert {"provider": "anthropic", "model": "claude-test",
             "version": None} in manifest["models"]
     assert manifest["prompt_manifest"]["zeus"]            # prompts/*.md hashed
-    assert manifest["scrub"] == {"screen": "v1", "matches": 0}
+    assert manifest["scrub"] == {"screen": "v2", "matches": 0}
     listed = {f["path"] for f in manifest["files"]}
     assert "trace.json" in listed
     assert sum(p.startswith("responses/") for p in listed) == 3

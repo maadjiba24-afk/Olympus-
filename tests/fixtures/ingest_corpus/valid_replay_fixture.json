@@ -1,0 +1,22 @@
+{
+  "name": "valid_replay_fixture",
+  "kind": "replay_fixture",
+  "payload": {
+    "version": "1.0",
+    "run_id": "run-abc",
+    "files": [
+      {
+        "path": "trace.json",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "provenance": {
+    "source": "file:///corpus/artifact.json",
+    "sha256": "auto"
+  },
+  "expect": {
+    "refused": false,
+    "reasons": []
+  }
+}

@@ -66,15 +66,51 @@ def test_public_hostname_pointing_internal_is_blocked(monkeypatch):
 
 # --- transport: constant-time access token -------------------------------
 
+class _FakeServer:
+    def __init__(self, bind):
+        self.server_address = (bind, 8000)
+
+
 class _FakeHandler:
-    def __init__(self, headers):
+    def __init__(self, headers, peer="127.0.0.1", bind="127.0.0.1"):
         self.headers = headers
+        self.client_address = (peer, 51234)
+        self.server = _FakeServer(bind)
 
 
-def test_authorized_open_when_no_token(monkeypatch):
+def test_authorized_is_loopback_only_when_no_token(monkeypatch):
+    """Stage-B finding F4, fixed. With no credential configured the browser
+    API used to answer ANY peer, while /v1/* and /api/admin both fell back to
+    loopback-only. The asymmetry is gone: the remoteness decision comes from
+    the kernel peer socket, and a process bound off-loopback needs a credential
+    even for a loopback-looking peer (a reverse proxy connects from loopback
+    while fronting the world)."""
     from olympus import web
     monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("OLYMPUS_REQUIRE_LOGIN", raising=False)
+    # on-box, bound on-box: served
     assert web._authorized(_FakeHandler({})) is True
+    # off-box peer: refused
+    assert web._authorized(_FakeHandler({}, peer="203.0.113.7")) is False
+    # bound off-loopback: refused even for a loopback peer
+    assert web._authorized(_FakeHandler({}, bind="0.0.0.0")) is False
+    # relayed through a proxy: refused
+    assert web._authorized(
+        _FakeHandler({"X-Forwarded-For": "203.0.113.7"})) is False
+    # a handler that cannot report its peer is treated as exposed
+    class _Blind:
+        headers = {}
+    assert web._authorized(_Blind()) is False
+
+
+def test_authorized_with_require_login_defers_to_account_auth(monkeypatch):
+    """`OLYMPUS_REQUIRE_LOGIN` IS a configured credential, so it lifts the
+    loopback fallback the same way an access token does — otherwise a
+    multi-account deployment could never be reached."""
+    from olympus import web
+    monkeypatch.delenv("OLYMPUS_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("OLYMPUS_REQUIRE_LOGIN", "1")
+    assert web._authorized(_FakeHandler({}, peer="203.0.113.7")) is True
 
 
 def test_authorized_requires_matching_token(monkeypatch):
