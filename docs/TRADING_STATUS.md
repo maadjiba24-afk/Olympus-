@@ -6,7 +6,7 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~21,000 lines across 29 modules; 33 test files; **1503 trading tests passing**
+- **Scale:** ~23,900 lines across 32 modules; 39 test files; **1939 trading tests passing**
 - **Whole repository:** 6122 passed, 17 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
@@ -78,12 +78,20 @@ missing. When the two disagree, this file is right.
 | `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
 | `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross/net are *required* constructor fields so a single-cost-basis report cannot be built; per-instrument/regime/period breakdowns whose trade counts sum back to the whole |
 | `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the Kronos and non-Kronos arms, so the signal source is the only difference |
+| `registry.py` | ✅ | Model registry; approval requires an operator and an unpinned revision can never be approved |
+| `sentiment.py` | ✅ | Injection payloads neutralised (verified by probe: instruction text and fenced system blocks stripped, benign headlines untouched); nothing derived from a `NewsItem` can reach the limits API |
+| `monitor.py` | ✅ | Health probes and auto-trip evaluation; a failing probe reports DEGRADED rather than taking the safety system down with it |
+| `agents.py` | ✅ | Validated output schemas for the seven market-intelligence agents; malformed/out-of-range/instruction-bearing outputs rejected |
 | `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `kronos_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
 
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
+| `ingest.py` | 🔵 | **No live market-data source.** Data enters through `storage`/`validate` from whatever the caller supplies. Every downstream guarantee (freshness, gaps, staleness) is implemented and tested, but nothing connects to a feed. |
+| CLI (`olympus trading …`) | 🔵 | No operator command surface. All use is via the Python API. |
+
+---|---|---|
 | `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
 | `sentiment.py` | 🔵 | No news ingestion. The taint barrier it would feed (`risk.Tainted` / `assert_untainted`) **is** built and tested. |
 | `monitor.py` | 🔵 | No monitor loop. `killswitch.evaluate_auto_trips()` is built and tested; nothing calls it on a schedule. |

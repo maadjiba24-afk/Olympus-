@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import bisect
 import math
+from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -799,7 +800,7 @@ def group_by_regime(trades: Sequence[Any],
     out: dict[str, list[Any]] = {}
     stamps: list[Any] = []
     values: list[Any] = []
-    if isinstance(regimes, Mapping):
+    if isinstance(regimes, _MappingABC):
         pairs = sorted((k for k in regimes if isinstance(k, datetime)))
         stamps = list(pairs)
         values = [regimes[k] for k in pairs]
@@ -809,7 +810,7 @@ def group_by_regime(trades: Sequence[Any],
         found: Any = None
         if callable(regimes):
             found = regimes(t)
-        elif isinstance(regimes, Mapping):
+        elif isinstance(regimes, _MappingABC):
             if closed in regimes:
                 found = regimes[closed]
             elif stamps and isinstance(closed, datetime):

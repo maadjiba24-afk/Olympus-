@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -55,7 +56,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import perf
 from .clock import FixedClock
-from .contracts import (Candle, DataQuality, Instrument, Mode, Order, Side,
+from .contracts import (Candle, DataQuality, Instrument, Mode, Order,
                         TradeIntent, ensure_utc, jsonable, to_decimal)
 from .errors import ConfigurationError, DataValidationError, TradingError
 from .oms import OrderStore
@@ -680,7 +681,7 @@ class BacktestEngine:
         if self.regime_classifier is None:
             if callable(self.regimes):
                 return None
-            if isinstance(self.regimes, Mapping):
+            if isinstance(self.regimes, _MappingABC):
                 return self.regimes.get(ts)
             return None
         try:
