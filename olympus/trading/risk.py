@@ -43,7 +43,7 @@ from typing import Any, Mapping, Sequence
 from .clock import Clock, default_clock
 from .contracts import (AccountSnapshot, Candle, DataQuality,
                         DataQualityReport, Instrument, Mode, OrderType,
-                        PortfolioSnapshot, RiskCheck, RiskDecision, Side,
+                        PortfolioSnapshot, RiskCheck, RiskDecision,
                         TradeIntent, Verdict, ensure_utc, jsonable, to_decimal)
 from .errors import (ConfigurationError, LimitsImmutableError, RiskError,
                      TradingError)
@@ -336,9 +336,17 @@ class LimitsStore:
                 "no operator token is configured; risk limits cannot be changed")
         if operator_token != self._operator_token:
             raise LimitsImmutableError("operator token rejected")
+        if not reason:
+            # An unexplained limit change is the one an incident review cannot
+            # reconstruct, so the field is mandatory in substance, not just in
+            # signature.
+            raise LimitsImmutableError("a limit change must state a reason")
+        previous = self.load()
         payload = {
             "limits": limits.to_dict(),
             "policy_hash": limits.policy_hash(),
+            "previous_policy_hash": previous.policy_hash(),
+            "changed": _diff_limits(previous, limits),
             "saved_at": self.clock.now().isoformat(),
             "by": by,
             "reason": reason,
@@ -346,6 +354,10 @@ class LimitsStore:
         blob = json.dumps(payload, sort_keys=True).encode("utf-8")
         self._store().put(self.namespace, "active", blob)
         self._store().put(self.namespace, f"v-{limits.policy_hash()[:16]}", blob)
+        # The change log lives in the store, not only in an injected audit sink:
+        # a deployment that forgot to wire an audit trail must still be able to
+        # answer "who widened this limit, when, and from what".
+        self._append_audit(payload)
         if self.audit is not None:
             try:
                 self.audit.record("CONFIG_CHANGED", payload, actor=by,
@@ -353,6 +365,30 @@ class LimitsStore:
             except Exception:                           # noqa: BLE001
                 pass
         return limits
+
+    def _append_audit(self, payload: Mapping[str, Any]) -> None:
+        from olympus import proclock
+        # Read-modify-write on one key, so it is serialised: two operators
+        # saving at once must produce two records, not one survivor (ADR 0005).
+        with proclock.lock(f"{self.namespace}.audit"):
+            raw = self._store().get(self.namespace, "audit")
+            log = json.loads(raw.decode("utf-8")) if raw else []
+            log.append(dict(payload))
+            self._store().put(self.namespace, "audit",
+                              json.dumps(log, sort_keys=True).encode("utf-8"))
+
+    def history(self) -> list[dict]:
+        """Every recorded limit change, oldest first."""
+        raw = self._store().get(self.namespace, "audit")
+        return json.loads(raw.decode("utf-8")) if raw else []
+
+
+def _diff_limits(before: RiskLimits, after: RiskLimits) -> dict:
+    """The fields that actually moved, so an audit record is readable at a
+    glance rather than being two full policy dumps to eyeball."""
+    a, b = before.to_dict(), after.to_dict()
+    return {k: {"from": a.get(k), "to": b.get(k)}
+            for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)}
 
 
 def _limits_from_dict(data: Mapping[str, Any]) -> RiskLimits:
@@ -980,10 +1016,19 @@ class RiskEngine:
 
     @staticmethod
     def _reference_price(intent: TradeIntent, ctx: RiskContext) -> Decimal | None:
+        """Best available mark, in descending order of trustworthiness.
+
+        The intent's own prices come last deliberately: they are the strategy's
+        opinion of where the market is, and valuing a trade against the number
+        the proposer supplied is how a stale or optimistic strategy sizes itself
+        past a notional limit.
+        """
         if ctx.reference_price is not None:
             return to_decimal(ctx.reference_price, field_name="reference_price")
         if ctx.quote is not None and getattr(ctx.quote, "mid", None):
             return to_decimal(ctx.quote.mid, field_name="mid")
+        if ctx.candle is not None and getattr(ctx.candle, "close", None):
+            return to_decimal(ctx.candle.close, field_name="close")
         if intent.intended_entry is not None:
             return to_decimal(intent.intended_entry, field_name="intended_entry")
         if intent.limit_price is not None:
@@ -998,15 +1043,21 @@ class RiskEngine:
         return pos.quantity if pos is not None else Decimal("0")
 
     @staticmethod
-    def _equity(ctx: RiskContext) -> Decimal:
+    def _equity(ctx: RiskContext) -> Decimal | None:
+        """Account equity, or None when nothing measured it.
+
+        Returning None rather than 0 for "unknown" is the point: 0 is a real
+        equity value that fails a leverage check, whereas unknown must fail a
+        *different* way — with a code that says the measurement was missing.
+        """
         if ctx.equity is not None:
             return ctx.equity
         if ctx.portfolio is not None:
             try:
                 return ctx.portfolio.equity
             except Exception:                           # noqa: BLE001
-                return Decimal("0")
-        return Decimal("0")
+                return None
+        return None
 
     @staticmethod
     def _exposures(ctx: RiskContext) -> tuple[Decimal, Decimal]:
@@ -1018,18 +1069,37 @@ class RiskEngine:
             return Decimal("0"), Decimal("0")
 
     @staticmethod
+    def _instrument_leg(key: str, ctx: RiskContext) -> tuple[Decimal, Decimal]:
+        """This instrument's (gross, net) contribution to the current exposures.
+
+        Valued at the portfolio's own mark, not at the risk engine's reference
+        price, because it is subtracted from totals that were computed from
+        those marks. Mixing the two sources leaves a residue that shows up as
+        phantom headroom.
+        """
+        if ctx.portfolio is None:
+            return Decimal("0"), Decimal("0")
+        pos = ctx.portfolio.positions.get(key)
+        mark = ctx.portfolio.marks.get(key)
+        if pos is None or mark is None:
+            return Decimal("0"), Decimal("0")
+        signed = pos.market_value(mark)
+        return abs(signed), signed
+
+    @staticmethod
     def _open_position_count(ctx: RiskContext) -> int:
         if ctx.portfolio is None:
             return 0
         return len(ctx.portfolio.open_positions)
 
     @staticmethod
-    def _group_exposure(group: str, limits: RiskLimits, ctx: RiskContext) -> Decimal:
+    def _group_exposure(group: str, limits: RiskLimits, ctx: RiskContext,
+                        *, exclude: str = "") -> Decimal:
         if ctx.portfolio is None:
             return Decimal("0")
         total = Decimal("0")
         for key, pos in ctx.portfolio.positions.items():
-            if limits.correlation_groups.get(key) != group:
+            if key == exclude or limits.correlation_groups.get(key) != group:
                 continue
             mark = ctx.portfolio.marks.get(key)
             if mark is None:

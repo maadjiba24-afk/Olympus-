@@ -30,6 +30,19 @@ Transitions are validated against `LEGAL_TRANSITIONS`. An illegal transition
 (`FILLED → NEW`) is an error rather than a silent overwrite, because it almost
 always means two sources of truth have diverged — and silently accepting the
 later one is how a filled order gets resubmitted.
+
+Re-asserting the status an order already has is *not* an illegal transition:
+brokers redeliver the same status routinely, and treating a redelivery as an
+error would make ordinary polling noisy. Only a move to a *different*, unlisted
+status is refused.
+
+Durability
+----------
+Every mutation is written through to `olympus.store` before it returns, under a
+`proclock` covering the read-modify-write. Buffering would leave a window in
+which a crash loses the record of an order that is live at the venue — exposure
+you do not know you have, which is the worst state to recover from. The lock is
+per-order rather than global so two instruments do not serialise on each other.
 """
 
 from __future__ import annotations
