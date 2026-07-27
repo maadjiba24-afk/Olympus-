@@ -232,6 +232,86 @@ def test_strategy_module_has_no_execution_surface():
         "strategy.py must have NO route to a venue; found: " + ", ".join(hits))
 
 
+#: Modules that must be *deterministic*: same inputs ⟹ same outputs, always.
+#: A risk engine that consults the wall clock, a random number generator, the
+#: network, or a language model is not auditable — you cannot replay a decision
+#: and get the same answer, which defeats the entire point of recording it.
+DETERMINISTIC = ("risk", "killswitch", "oms", "perf")
+
+#: Import names that break determinism. `random`/`secrets` introduce
+#: unreproducibility; `time`/`datetime` smuggle in wall-clock reads that should
+#: come from the injected clock; the network and LLM stacks introduce both.
+NONDETERMINISTIC_IMPORTS = {
+    "random", "secrets", "socket", "urllib", "http", "requests", "httpx",
+    "aiohttp", "anthropic", "openai",
+}
+
+#: Olympus modules that pull in the LLM stack. A deterministic module reaching
+#: any of these means an LLM can influence an authorisation decision.
+LLM_MODULES = {"llm", "agent", "orchestrator", "specialists", "moa",
+               "consensus", "subagents", "tools"}
+
+
+@pytest.mark.parametrize("module_key", DETERMINISTIC)
+def test_deterministic_modules_have_no_nondeterministic_imports(module_key):
+    """The risk engine's decisions must be replayable.
+
+    `datetime`/`time` are permitted only for *type* usage, which is why this
+    checks imports of the RNG, network, and LLM stacks rather than banning
+    `datetime` outright — the clock discipline is enforced separately by
+    `test_deterministic_modules_do_not_read_the_wall_clock`.
+    """
+    modules = _modules()
+    path = modules.get(module_key)
+    if path is None:
+        pytest.skip(f"olympus/trading/{module_key}.py not present")
+
+    violations = []
+    for name, lineno, _scope in _imports(path):
+        head = name.split(".")[0]
+        if head in NONDETERMINISTIC_IMPORTS:
+            violations.append(f"`{name}` (line {lineno})")
+        if name.startswith("olympus."):
+            sub = name.split(".")[1] if "." in name else ""
+            if sub in LLM_MODULES:
+                violations.append(f"`{name}` — LLM stack (line {lineno})")
+        # `from . import x` / `from .. import x` reaching the LLM stack
+        if name in ("..", ".."):
+            continue
+    assert not violations, (
+        f"{module_key}.py must be deterministic and must not reach the RNG, "
+        f"the network, or the LLM stack; found: {', '.join(violations)}")
+
+
+@pytest.mark.parametrize("module_key", DETERMINISTIC)
+def test_deterministic_modules_do_not_read_the_wall_clock(module_key):
+    """Time must arrive through the injected `Clock`, never `datetime.now()`.
+
+    A wall-clock read inside the risk engine makes a decision unreplayable and
+    silently breaks the backtest/live equivalence the whole design rests on.
+    """
+    modules = _modules()
+    path = modules.get(module_key)
+    if path is None:
+        pytest.skip(f"olympus/trading/{module_key}.py not present")
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    banned = {("datetime", "now"), ("datetime", "utcnow"), ("date", "today"),
+              ("time", "time"), ("time", "monotonic")}
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        attr = node.func.attr
+        owner = node.func.value
+        owner_name = getattr(owner, "id", None) or getattr(owner, "attr", None)
+        if (owner_name, attr) in banned:
+            hits.append(f"{owner_name}.{attr}() at line {node.lineno}")
+    assert not hits, (
+        f"{module_key}.py reads the wall clock directly ({', '.join(hits)}); "
+        "take a `clock` parameter instead — see olympus/trading/clock.py")
+
+
 # --- 2. no new required dependencies ---------------------------------------
 
 #: Third-party packages that may never be imported at module scope anywhere in
