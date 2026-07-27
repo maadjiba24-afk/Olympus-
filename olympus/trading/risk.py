@@ -41,7 +41,8 @@ from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
 from .clock import Clock, default_clock
-from .contracts import (DataQuality, Instrument, Mode, OrderType,
+from .contracts import (AccountSnapshot, Candle, DataQuality,
+                        DataQualityReport, Instrument, Mode, OrderType,
                         PortfolioSnapshot, RiskCheck, RiskDecision, Side,
                         TradeIntent, Verdict, ensure_utc, jsonable, to_decimal)
 from .errors import (ConfigurationError, LimitsImmutableError, RiskError,
@@ -87,6 +88,11 @@ R_PORTFOLIO_DRAWDOWN = "MAX_PORTFOLIO_DRAWDOWN_REACHED"
 R_BELOW_MIN_QUANTITY = "BELOW_MIN_QUANTITY_AFTER_REDUCTION"
 R_BELOW_MIN_NOTIONAL = "BELOW_MIN_NOTIONAL_AFTER_REDUCTION"
 R_NO_REFERENCE_PRICE = "NO_REFERENCE_PRICE"
+#: A P&L / equity measurement a configured limit depends on was not supplied.
+#: Distinct from R_DATA_MISSING so an operator can tell "the market feed was
+#: silent" apart from "our own accounting did not report".
+R_PNL_MISSING = "PNL_MEASUREMENT_MISSING"
+R_EQUITY_MISSING = "EQUITY_MEASUREMENT_MISSING"
 
 
 # ---------------------------------------------------------------------------
@@ -379,34 +385,81 @@ class RiskContext:
     Frozen and explicit so a decision is a pure function of its inputs. If a
     check needs something that is not here, it must be added here — a check that
     reaches out to fetch its own data would destroy replayability.
+
+    Two ways to supply the same fact
+    --------------------------------
+    Several fields exist in both a *raw evidence* form (`data_quality_report`,
+    `last_reconciliation_ts`, `account`, `candle`) and a *reduced measurement*
+    form (`data_quality`, `reconciliation_age_s`, `equity`, `reference_price`).
+    The reduction happens here, once, in `__post_init__` — never inside a check.
+
+    The reason is a specific failure this replaces: a caller that carefully
+    assembles a `DataQualityReport` and passes it in, while the engine only ever
+    reads the `data_quality` field the caller left as `None`, gets a system that
+    *looks* like it validates data and does not. Deriving at construction means
+    handing over the evidence is enough; you cannot supply it and have it
+    ignored. An explicitly-supplied measurement always wins, so a caller can
+    still override a derivation deliberately.
     """
     as_of: datetime
     mode: Mode
     instrument: Instrument
     portfolio: PortfolioSnapshot | None = None
+    #: Broker-reported account state. Source of `equity` when not given directly;
+    #: kept whole because a decision record should show what the broker said,
+    #: not just the one number we extracted from it.
+    account: AccountSnapshot | None = None
     reference_price: float | None = None
     quote: Any = None
+    #: The most recent finalised bar. Last-resort source of a reference price.
+    candle: Candle | None = None
+    #: The validator's verdict on the data window behind this decision.
+    data_quality_report: DataQualityReport | None = None
     data_age_s: float | None = None
     data_quality: DataQuality | None = None
     forecast: Any = None
     session_open: bool | None = None
     broker_connected: bool | None = None
+    #: When reconciliation last *succeeded*. None means it never has.
+    last_reconciliation_ts: datetime | None = None
     reconciliation_age_s: float | None = None
     recent_order_count: int | None = None
     daily_pnl: Decimal | None = None
     strategy_drawdown: Decimal | None = None
     portfolio_drawdown: Decimal | None = None
     strategy_active: bool = True
+    strategy_id: str = ""
     average_volume: Decimal | None = None
     equity: Decimal | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "as_of", ensure_utc(self.as_of, field_name="as_of"))
+        if self.last_reconciliation_ts is not None:
+            object.__setattr__(self, "last_reconciliation_ts",
+                               ensure_utc(self.last_reconciliation_ts,
+                                          field_name="last_reconciliation_ts"))
         for name in ("daily_pnl", "strategy_drawdown", "portfolio_drawdown",
                      "average_volume", "equity"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, to_decimal(value, field_name=name))
+
+        # -- derivations. Explicit values win; these only fill in blanks.
+        report = self.data_quality_report
+        if report is not None:
+            if self.data_quality is None:
+                object.__setattr__(self, "data_quality", report.status)
+            if self.data_age_s is None and report.age_seconds is not None:
+                object.__setattr__(self, "data_age_s", float(report.age_seconds))
+        if self.reconciliation_age_s is None and self.last_reconciliation_ts is not None:
+            age = (self.as_of - self.last_reconciliation_ts).total_seconds()
+            # A reconciliation timestamped in the future is a clock disagreement
+            # between us and the broker, not freshness. Clamp at 0 rather than
+            # handing a negative age to a "<= max_age" comparison that would
+            # then pass unconditionally.
+            object.__setattr__(self, "reconciliation_age_s", max(0.0, age))
+        if self.equity is None and self.account is not None:
+            object.__setattr__(self, "equity", self.account.equity)
 
 
 # ---------------------------------------------------------------------------
@@ -638,21 +691,38 @@ class RiskEngine:
                 return reject("order-rate ceiling reached")
 
         # 10. Loss control — evaluated before sizing, because a breach here is
-        #     a stop, not a reason to trade smaller.
-        if limits.max_daily_loss is not None and ctx.daily_pnl is not None:
+        #     a stop, not a reason to trade smaller. Each fails closed: a
+        #     configured loss ceiling with nothing measuring P&L against it is
+        #     an unbounded system that merely looks protected.
+        if limits.max_daily_loss is not None:
+            if ctx.daily_pnl is None:
+                add("daily_loss", False, R_PNL_MISSING,
+                    "daily P&L unknown while a daily-loss ceiling is configured",
+                    limit=str(limits.max_daily_loss))
+                return reject("daily P&L is unknown")
             breached = ctx.daily_pnl <= -limits.max_daily_loss
             if not add("daily_loss", not breached, R_DAILY_LOSS,
                        "daily loss limit reached", observed=str(ctx.daily_pnl),
                        limit=str(limits.max_daily_loss)):
                 return reject("daily loss limit reached")
-        if limits.max_strategy_drawdown is not None and ctx.strategy_drawdown is not None:
+        if limits.max_strategy_drawdown is not None:
+            if ctx.strategy_drawdown is None:
+                add("strategy_drawdown", False, R_PNL_MISSING,
+                    "strategy drawdown unknown while a ceiling is configured",
+                    limit=str(limits.max_strategy_drawdown))
+                return reject("strategy drawdown is unknown")
             if not add("strategy_drawdown",
                        ctx.strategy_drawdown < limits.max_strategy_drawdown,
                        R_STRATEGY_DRAWDOWN, "strategy drawdown limit reached",
                        observed=str(ctx.strategy_drawdown),
                        limit=str(limits.max_strategy_drawdown)):
                 return reject("strategy drawdown limit reached")
-        if limits.max_portfolio_drawdown is not None and ctx.portfolio_drawdown is not None:
+        if limits.max_portfolio_drawdown is not None:
+            if ctx.portfolio_drawdown is None:
+                add("portfolio_drawdown", False, R_PNL_MISSING,
+                    "portfolio drawdown unknown while a ceiling is configured",
+                    limit=str(limits.max_portfolio_drawdown))
+                return reject("portfolio drawdown is unknown")
             if not add("portfolio_drawdown",
                        ctx.portfolio_drawdown < limits.max_portfolio_drawdown,
                        R_PORTFOLIO_DRAWDOWN, "portfolio drawdown limit reached",
@@ -662,6 +732,10 @@ class RiskEngine:
 
         # 11. Sizing. From here the engine may REDUCE.
         quantity = instrument.quantize_quantity(intent.quantity)
+        sign = Decimal(intent.side.sign)
+        #: Value of one unit of quantity. Every "how many can I afford" solve
+        #: divides by this exactly once.
+        unit = to_decimal(ref, field_name="ref") * instrument.multiplier
         reduced = False
 
         def cap(new_qty: Decimal, name: str, code: str, detail: str,
@@ -670,68 +744,95 @@ class RiskEngine:
             new_qty = instrument.quantize_quantity(max(Decimal("0"), new_qty))
             if new_qty < quantity:
                 reduced = True
-                add(name, True, code, f"{detail} (reduced)", observed, limit_value)
+                # The code is recorded even though the check "passed": the limit
+                # genuinely was exceeded, and an operator asking why a fill was
+                # smaller than the strategy asked for needs that code.
+                checks.append(RiskCheck(name=name, passed=True, code=code,
+                                        detail=f"{detail} (reduced)",
+                                        observed=observed, limit=limit_value))
+                reasons.append(code)
                 return new_qty
             add(name, True, "", detail, observed, limit_value)
             return quantity
 
+        position = self._position_quantity(intent.instrument_key, ctx)
+
+        def max_qty_for_abs_position(allowed_abs_qty: Decimal) -> Decimal:
+            """Largest trade size q >= 0 with |position + q*sign| <= allowed.
+
+            The reason this is a function rather than `allowed - abs(position)`
+            inline: when the trade is on the *opposite* side of an existing
+            position it first closes it and only then opens the other way, so
+            the headroom is `allowed + abs(position)`. Getting that wrong in the
+            subtracting direction blocks the trades that de-risk the book; the
+            symmetric mistake — ignoring the flip entirely — lets a small short
+            be flipped into an arbitrarily large long, which is the dangerous
+            half and the reason this is centralised.
+            """
+            if position * sign >= 0:                       # adding to the position
+                return max(Decimal("0"), allowed_abs_qty - abs(position))
+            return max(Decimal("0"), allowed_abs_qty + abs(position))
+
         if limits.max_order_value is not None:
-            value = instrument.notional(quantity, ref)
+            value = abs(instrument.notional(quantity, ref))
             if value > limits.max_order_value:
-                allowed = limits.max_order_value / (ref * instrument.multiplier)
-                quantity = cap(allowed, "max_order_value", R_MAX_ORDER_VALUE,
+                quantity = cap(limits.max_order_value / unit,
+                               "max_order_value", R_MAX_ORDER_VALUE,
                                "order value above limit", str(value),
                                str(limits.max_order_value))
             else:
                 add("max_order_value", True, observed=str(value),
                     limit=str(limits.max_order_value))
 
-        position = self._position_quantity(intent.instrument_key, ctx)
-        projected = position + quantity * intent.side.sign
-
         if limits.max_position_size is not None:
+            projected = position + quantity * sign
             if abs(projected) > limits.max_position_size:
-                headroom = limits.max_position_size - abs(position) \
-                    if (position * intent.side.sign) >= 0 else \
-                    limits.max_position_size + abs(position)
-                quantity = cap(headroom, "max_position_size", R_MAX_POSITION_SIZE,
+                quantity = cap(max_qty_for_abs_position(limits.max_position_size),
+                               "max_position_size", R_MAX_POSITION_SIZE,
                                "projected position above limit", str(abs(projected)),
                                str(limits.max_position_size))
-                projected = position + quantity * intent.side.sign
             else:
                 add("max_position_size", True, observed=str(abs(projected)),
                     limit=str(limits.max_position_size))
 
         if limits.max_position_notional is not None:
-            notional = abs(instrument.notional(projected, ref))
+            notional = abs(instrument.notional(position + quantity * sign, ref))
             if notional > limits.max_position_notional:
-                allowed_qty = limits.max_position_notional / (ref * instrument.multiplier)
-                headroom = allowed_qty - abs(position)
-                quantity = cap(headroom, "max_position_notional",
-                               R_MAX_POSITION_NOTIONAL,
-                               "projected position notional above limit",
-                               str(notional), str(limits.max_position_notional))
-                projected = position + quantity * intent.side.sign
+                quantity = cap(
+                    max_qty_for_abs_position(limits.max_position_notional / unit),
+                    "max_position_notional", R_MAX_POSITION_NOTIONAL,
+                    "projected position notional above limit",
+                    str(notional), str(limits.max_position_notional))
             else:
                 add("max_position_notional", True, observed=str(notional),
                     limit=str(limits.max_position_notional))
 
         # 12. PROJECTED portfolio exposure — after the fill, never before.
+        #
+        # Everything below is expressed as "the book without this instrument,
+        # plus this instrument as it would be after the fill". Modelling the
+        # trade as a *delta* added to today's exposure is the tempting shortcut
+        # and it is wrong in exactly one case that matters: a trade large enough
+        # to flip the sign of the position both closes the old exposure and
+        # opens a new one, so its effect on gross exposure is not monotone in
+        # the traded size. Rebuilding the leg from the projected position has no
+        # such blind spot.
         equity = self._equity(ctx)
         gross_now, net_now = self._exposures(ctx)
-        delta = instrument.notional(quantity * intent.side.sign, ref)
-        # Gross rises by the added notional unless the trade reduces an existing
-        # position; treating a reducing trade as exposure-adding would block the
-        # very trades that make the book safer.
-        reduces = (position != 0) and ((position > 0) != (intent.side is Side.BUY))
-        gross_projected = gross_now + (abs(delta) if not reduces else -min(abs(delta), abs(instrument.notional(position, ref))))
-        net_projected = net_now + delta
+        leg_gross_now, leg_net_now = self._instrument_leg(intent.instrument_key, ctx)
+        other_gross = gross_now - leg_gross_now
+        other_net = net_now - leg_net_now
+
+        def projected_leg(qty: Decimal) -> tuple[Decimal, Decimal]:
+            signed = instrument.notional(position + qty * sign, ref)
+            return abs(signed), signed
 
         if limits.max_gross_exposure is not None:
-            if gross_projected > limits.max_gross_exposure and not reduces:
-                headroom = limits.max_gross_exposure - gross_now
-                allowed_qty = headroom / (ref * instrument.multiplier) if ref > 0 else Decimal("0")
-                quantity = cap(allowed_qty, "max_gross_exposure", R_MAX_GROSS_EXPOSURE,
+            gross_projected = other_gross + projected_leg(quantity)[0]
+            if gross_projected > limits.max_gross_exposure:
+                room = (limits.max_gross_exposure - other_gross) / unit
+                quantity = cap(max_qty_for_abs_position(max(Decimal("0"), room)),
+                               "max_gross_exposure", R_MAX_GROSS_EXPOSURE,
                                "projected gross exposure above limit",
                                str(gross_projected), str(limits.max_gross_exposure))
             else:
@@ -739,23 +840,38 @@ class RiskEngine:
                     limit=str(limits.max_gross_exposure))
 
         if limits.max_net_exposure is not None:
+            net_projected = other_net + projected_leg(quantity)[1]
             if abs(net_projected) > limits.max_net_exposure:
-                headroom = limits.max_net_exposure - abs(net_now)
-                allowed_qty = max(Decimal("0"), headroom) / (ref * instrument.multiplier) if ref > 0 else Decimal("0")
-                quantity = cap(allowed_qty, "max_net_exposure", R_MAX_NET_EXPOSURE,
+                # Solve |other_net + (position + q*sign)*unit| <= limit for q.
+                # Only the bound the trade moves *towards* can bind, hence the
+                # single signed expression rather than a two-sided clamp.
+                room = ((sign * limits.max_net_exposure - other_net) / unit
+                        - position) * sign
+                quantity = cap(max(Decimal("0"), room),
+                               "max_net_exposure", R_MAX_NET_EXPOSURE,
                                "projected net exposure above limit",
                                str(abs(net_projected)), str(limits.max_net_exposure))
             else:
                 add("max_net_exposure", True, observed=str(abs(net_projected)),
                     limit=str(limits.max_net_exposure))
 
-        if limits.max_leverage is not None and equity and equity > 0:
+        if limits.max_leverage is not None:
+            if equity is None:
+                add("max_leverage", False, R_EQUITY_MISSING,
+                    "equity unknown while a leverage ceiling is configured",
+                    limit=str(limits.max_leverage))
+                return reject("equity is unknown")
+            if equity <= 0:
+                add("max_leverage", False, R_MAX_LEVERAGE,
+                    "no positive equity to lever", observed=str(equity),
+                    limit=str(limits.max_leverage))
+                return reject("account has no positive equity")
+            gross_projected = other_gross + projected_leg(quantity)[0]
             lev = gross_projected / equity
             if lev > limits.max_leverage:
-                allowed_gross = limits.max_leverage * equity
-                headroom = allowed_gross - gross_now
-                allowed_qty = max(Decimal("0"), headroom) / (ref * instrument.multiplier) if ref > 0 else Decimal("0")
-                quantity = cap(allowed_qty, "max_leverage", R_MAX_LEVERAGE,
+                room = (limits.max_leverage * equity - other_gross) / unit
+                quantity = cap(max_qty_for_abs_position(max(Decimal("0"), room)),
+                               "max_leverage", R_MAX_LEVERAGE,
                                "projected leverage above limit", str(lev),
                                str(limits.max_leverage))
             else:
@@ -772,12 +888,21 @@ class RiskEngine:
                        observed=projected_count, limit=limits.max_open_positions):
                 return reject("maximum number of open positions reached")
 
-        if limits.max_concentration is not None and equity and equity > 0:
-            conc = abs(instrument.notional(position + quantity * intent.side.sign, ref)) / equity
+        if limits.max_concentration is not None:
+            if equity is None:
+                add("max_concentration", False, R_EQUITY_MISSING,
+                    "equity unknown while a concentration ceiling is configured",
+                    limit=limits.max_concentration)
+                return reject("equity is unknown")
+            if equity <= 0:
+                add("max_concentration", False, R_CONCENTRATION,
+                    "no positive equity to concentrate", observed=str(equity),
+                    limit=limits.max_concentration)
+                return reject("account has no positive equity")
+            conc = projected_leg(quantity)[0] / equity
             if float(conc) > limits.max_concentration:
                 allowed_notional = Decimal(str(limits.max_concentration)) * equity
-                allowed_qty = allowed_notional / (ref * instrument.multiplier) if ref > 0 else Decimal("0")
-                quantity = cap(max(Decimal("0"), allowed_qty - abs(position)),
+                quantity = cap(max_qty_for_abs_position(allowed_notional / unit),
                                "max_concentration", R_CONCENTRATION,
                                "projected concentration above limit", float(conc),
                                limits.max_concentration)
@@ -785,19 +910,34 @@ class RiskEngine:
                 add("max_concentration", True, observed=float(conc),
                     limit=limits.max_concentration)
 
-        if limits.max_correlated_exposure is not None and equity and equity > 0:
+        if limits.max_correlated_exposure is not None:
             group = limits.correlation_groups.get(intent.instrument_key)
-            if group:
-                exposure = self._group_exposure(group, limits, ctx)
-                exposure += abs(delta)
+            if not group:
+                add("max_correlated_exposure", True, detail="no correlation group")
+            elif equity is None:
+                add("max_correlated_exposure", False, R_EQUITY_MISSING,
+                    "equity unknown while a correlated-exposure ceiling is set",
+                    limit=limits.max_correlated_exposure)
+                return reject("equity is unknown")
+            elif equity <= 0:
+                add("max_correlated_exposure", False, R_CORRELATED,
+                    "no positive equity", observed=str(equity),
+                    limit=limits.max_correlated_exposure)
+                return reject("account has no positive equity")
+            else:
+                # Same projected-leg treatment: the group's other members at
+                # their marks, plus this instrument as it would be after the
+                # fill. Adding |delta| to a total that already contains this
+                # instrument's current leg double-counts it.
+                exposure = (self._group_exposure(group, limits, ctx,
+                                                 exclude=intent.instrument_key)
+                            + projected_leg(quantity)[0])
                 frac = exposure / equity
                 if not add("max_correlated_exposure",
                            float(frac) <= limits.max_correlated_exposure,
                            R_CORRELATED, "correlated-group exposure above limit",
                            observed=float(frac), limit=limits.max_correlated_exposure):
                     return reject("correlated exposure limit reached")
-            else:
-                add("max_correlated_exposure", True, detail="no correlation group")
 
         # 13. Floor. A zero-size approval is forbidden by the contract, so a
         #     reduction that lands below the tradable minimum is a rejection.

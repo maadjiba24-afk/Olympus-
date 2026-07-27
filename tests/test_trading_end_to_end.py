@@ -327,3 +327,72 @@ def test_fees_and_slippage_actually_reduce_equity(stack):
     assert fills[0].price > Decimal("100"), "buy must slip against us"
     assert fills[0].fee > 0
     assert stack["portfolio"].fees_paid > 0
+
+
+# --- pipeline composition with the real forecasting layer ------------------
+
+def test_the_pipeline_builds_a_real_risk_context(stack):
+    """Regression: the pipeline once handed the risk engine a loose namespace,
+    which worked until the engine read a field it did not carry.
+
+    A risk engine that raises AttributeError mid-authorisation is one whose
+    refusals cannot be relied on, so the pipeline must construct the declared
+    `RiskContext` — making a missing field a loud construction error rather
+    than a surprise inside a decision.
+    """
+    from olympus.trading import forecast as F
+    from olympus.trading.pipeline import TradingPipeline
+
+    clock = stack["clock"]
+    bars = [bar(i, 100 + i * 0.3, 101 + i * 0.3, 99 + i * 0.3, 100.5 + i * 0.3)
+            for i in range(40)]
+    as_of = bars[-1].ts_close
+    clock.set(as_of)
+
+    service = F.ForecastService(
+        {"persistence": F.PersistenceForecaster(horizon=5, clock=clock)},
+        clock=clock)
+
+    class _Strategy:
+        id = "s1"
+        version = "1"
+
+        def on_bar(self, ctx):
+            return [intent(qty="5", intended_entry=Decimal("111"),
+                           stop_loss=Decimal("100"))]
+
+    limits = R.RiskLimits(
+        approved_instruments=frozenset({INST.key}),
+        allowed_modes=frozenset({Mode.PAPER}),
+        max_order_value=Decimal("10000"), require_stop_loss=True,
+        require_broker_connected=False, max_daily_loss=None,
+        max_data_age_s=86400 * 2)
+    engine = R.RiskEngine(limits=limits, killswitches=stack["killswitches"],
+                          clock=clock)
+
+    pipeline = TradingPipeline(risk_engine=engine, strategies=[_Strategy()],
+                               forecast_service=service, clock=clock,
+                               portfolio=stack["portfolio"])
+    outcome = pipeline.run(instrument=INST, timeframe="1d", candles=bars,
+                           as_of=as_of)
+
+    assert outcome.forecasts["persistence"].usable
+    assert len(outcome.decisions) == 1
+    assert outcome.decisions[0].verdict is Verdict.APPROVED
+    # The engine must have actually evaluated checks, not skipped them all.
+    assert len(outcome.decisions[0].checks) >= 5
+
+
+def test_a_baseline_forecast_reports_full_uncertainty(stack):
+    """A single deterministic path carries no dispersion information, and the
+    baseline must not pretend otherwise — that honesty is what makes it a fair
+    control arm against Kronos."""
+    from olympus.trading import forecast as F
+
+    clock = stack["clock"]
+    bars = [bar(i, 100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(30)]
+    clock.set(bars[-1].ts_close)
+    result = F.PersistenceForecaster(horizon=5, clock=clock).forecast(
+        bars, as_of=bars[-1].ts_close, instrument_key=INST.key, timeframe="1d")
+    assert result.usable
+    assert result.uncertainty == 1.0

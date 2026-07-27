@@ -392,22 +392,69 @@ class TradingPipeline:
                 portfolio_snapshot = None
         return SimpleNamespace(clock=self.clock, portfolio=portfolio_snapshot, **kw)
 
-    def _risk_context(self, **kw):
+    def _risk_context(self, *, instrument, timeframe, candles, quote,
+                      forecasts, quality, mode, as_of, extra):
         """The evidence the risk engine judges from.
 
-        A `SimpleNamespace` by default so this module does not hard-depend on
-        `risk.RiskContext`'s exact field list; a deployment that wants the real
-        dataclass subclasses and overrides this.
+        Builds the real `risk.RiskContext` rather than a loose namespace. An
+        earlier draft passed a `SimpleNamespace`, which worked right up until
+        the engine read a field the namespace did not carry — and a risk engine
+        that raises `AttributeError` mid-authorisation is a risk engine whose
+        refusals you cannot rely on. Constructing the declared contract means a
+        missing field is a loud construction error here, not a surprise inside
+        a decision.
+
+        `risk` is imported inside the method: the module-level dependency would
+        be one more edge in the layer graph for no benefit, and this is the only
+        place the pipeline needs it.
         """
-        from types import SimpleNamespace
+        from .risk import RiskContext
+
         portfolio_snapshot = None
         if self.portfolio is not None:
             try:
                 portfolio_snapshot = self.portfolio.snapshot()
             except Exception:                      # noqa: BLE001
                 portfolio_snapshot = None
-        return SimpleNamespace(clock=self.clock, portfolio=portfolio_snapshot,
-                               killswitches=self.killswitches, **kw)
+
+        overrides = dict(extra or {})
+        last = candles[-1] if candles else None
+        data_age_s = overrides.pop("data_age_s", None)
+        if data_age_s is None and last is not None:
+            data_age_s = max(0.0, (as_of - last.ts_close).total_seconds())
+
+        reference_price = overrides.pop("reference_price", None)
+        if reference_price is None:
+            if quote is not None:
+                reference_price = quote.mid
+            elif last is not None:
+                reference_price = last.close
+
+        # The forecast a limit is checked against is the primary one when the
+        # caller names it, else the single result when there is exactly one.
+        # Guessing among several would make the check silently arbitrary.
+        forecast = overrides.pop("forecast", None)
+        if forecast is None and forecasts:
+            primary = overrides.pop("primary_forecast", None)
+            if primary and primary in forecasts:
+                forecast = forecasts[primary]
+            elif len(forecasts) == 1:
+                forecast = next(iter(forecasts.values()))
+
+        fields = dict(
+            as_of=as_of, mode=mode, instrument=instrument,
+            portfolio=portfolio_snapshot, reference_price=reference_price,
+            quote=quote, data_age_s=data_age_s, data_quality=quality,
+            forecast=forecast)
+        # Anything else the caller supplied (session_open, broker_connected,
+        # reconciliation_age_s, daily_pnl, drawdowns, strategy_active, …) is
+        # passed through verbatim; unknown keys are dropped rather than
+        # smuggled in, so a typo cannot silently disable a check.
+        allowed = set(RiskContext.__dataclass_fields__)
+        for key, value in overrides.items():
+            if key in allowed:
+                fields[key] = value
+        return RiskContext(**fields)
 
 
 __all__ = ["TradingPipeline", "PipelineOutcome", "STAGE_COMPLETE",
