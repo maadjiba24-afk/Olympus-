@@ -371,8 +371,98 @@ def _num(value: Any) -> float:
     return float(value)
 
 
+@dataclass(frozen=True)
+class Trip:
+    """One rule's verdict, resolved to the switch it would engage.
+
+    A named record rather than the `(rule, target, detail)` tuple the low-level
+    function returns, because the caller that acts on this is the one wiring a
+    scope and a target into `engage()` — and getting those two arguments the
+    wrong way round is silent (a STRATEGY switch on an instrument key blocks
+    nothing at all).
+    """
+    rule: TripRule
+    scope: KillSwitchScope
+    target: str
+    code: str
+    detail: str
+
+    def to_dict(self) -> dict:
+        return {"rule": self.rule.name, "scope": self.scope.value,
+                "target": self.target, "code": self.code, "detail": self.detail}
+
+
+class AutoTripRules:
+    """The automatic shutdown conditions, as an evaluatable object.
+
+    Split from the registry on purpose: this half decides *whether* to stop and
+    touches neither the store nor the clock, so the whole rule set can be
+    exercised over a table of measurements. The registry half performs the stop.
+    A monitor that fused the two would be untestable without persistence, and
+    the untested branch would be the one that fires during an incident.
+    """
+
+    def __init__(self, rules: Iterable[TripRule] = AUTO_RULES):
+        self.rules = tuple(rules)
+
+    def evaluate(self, portfolio: Any = None, stats: Mapping[str, Any] | None = None,
+                 limits: Any = None) -> list[Trip]:
+        """Return every trip that should fire, right now, for these numbers.
+
+        `stats` is authoritative; `portfolio` only fills in measurements the
+        caller did not supply. That direction matters — a monitor that computes
+        session P&L properly (with a day boundary, deposits, and withdrawals)
+        must not have it silently replaced by this module's cruder derivation.
+        """
+        merged = self._with_portfolio_fallbacks(portfolio, dict(stats or {}))
+        allowed = {r.name for r in self.rules}
+        return [Trip(rule=rule, scope=rule.scope, target=target, code=rule.code,
+                     detail=detail)
+                for rule, target, detail in evaluate_auto_trips(merged, limits)
+                if rule.name in allowed]
+
+    @staticmethod
+    def _with_portfolio_fallbacks(portfolio: Any,
+                                  stats: dict[str, Any]) -> dict[str, Any]:
+        if portfolio is None:
+            return stats
+        if stats.get("daily_pnl") is None and stats.get("daily_loss") is None:
+            try:
+                stats["daily_pnl"] = (portfolio.realised_pnl
+                                      + portfolio.unrealised_pnl
+                                      - portfolio.fees_paid)
+            except Exception:                          # noqa: BLE001
+                pass                                    # unmeasured, not "fine"
+        peak = stats.get("peak_equity")
+        if stats.get("portfolio_drawdown") is None and peak is not None:
+            try:
+                from decimal import Decimal as _D
+                stats["portfolio_drawdown"] = max(_D("0"),
+                                                  _D(str(peak)) - portfolio.equity)
+            except Exception:                          # noqa: BLE001
+                pass
+        return stats
+
+    def apply(self, registry: KillSwitchRegistry, trips: Iterable[Trip], *,
+              by: str = "auto-monitor") -> list[KillSwitchState]:
+        """Engage a switch for each trip, marked `auto=True`.
+
+        `auto=True` is the whole reason this method exists rather than callers
+        looping over `engage()`: it is what makes the trip need an operator
+        override to clear, and it is exactly the argument a hurried caller
+        forgets.
+        """
+        engaged: list[KillSwitchState] = []
+        for trip in trips:
+            engaged.append(registry.engage(
+                trip.scope, trip.target, reason=trip.detail, code=trip.code,
+                by=by, auto=True))
+        return engaged
+
+
 __all__ = ["KillSwitchScope", "KillSwitchState", "KillSwitchRegistry",
-           "TripRule", "AUTO_RULES", "evaluate_auto_trips",
+           "TripRule", "Trip", "AutoTripRules", "AUTO_RULES",
+           "evaluate_auto_trips",
            "CODE_MANUAL", "CODE_DAILY_LOSS", "CODE_PORTFOLIO_DRAWDOWN",
            "CODE_STRATEGY_DRAWDOWN", "CODE_ORDER_RATE", "CODE_STALE_DATA",
            "CODE_BROKER_DESYNC", "CODE_RECONCILIATION_STALE"]

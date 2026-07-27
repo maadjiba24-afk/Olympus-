@@ -223,44 +223,70 @@ class OrderStore:
         between "this is a safe retry, give me the existing order" and "this is
         a bug" — a distinction the store itself cannot make.
         """
-        existing = self.get(order.client_order_id)
-        if existing is not None:
-            raise DuplicateOrderError(
-                "an order with this client_order_id already exists",
-                client_order_id=order.client_order_id,
-                existing_status=existing.status.value)
-        self._put(order, ())
+        with self._lock(order.client_order_id):
+            existing = self.get(order.client_order_id)
+            if existing is not None:
+                raise DuplicateOrderError(
+                    "an order with this client_order_id already exists",
+                    client_order_id=order.client_order_id,
+                    existing_status=existing.status.value)
+            self._put(order, ())
         self._audit("ORDER_SUBMITTED", order)
         return order
 
     def get_or_create(self, order: Order) -> tuple[Order, bool]:
-        """Idempotent create. Returns (order, created)."""
-        existing = self.get(order.client_order_id)
-        if existing is not None:
-            return existing, False
-        return self.create(order), True
+        """Idempotent create. Returns (order, created).
+
+        The path a retry takes: the caller re-derives the same deterministic
+        `client_order_id`, lands here, and gets the order it already placed
+        instead of placing a second one.
+        """
+        with self._lock(order.client_order_id):
+            existing = self.get(order.client_order_id)
+            if existing is not None:
+                return existing, False
+            return self.create(order), True
 
     def transition(self, client_order_id: str, new_status: OrderStatus,
                    **changes: Any) -> Order:
-        order = self._require(client_order_id)
+        """Move an order to `new_status`, refusing illegal moves.
+
+        Re-asserting the current status is allowed (venues redeliver), and may
+        carry field updates such as a broker id that arrived late. Moving to a
+        different status not listed in `LEGAL_TRANSITIONS` is refused loudly.
+        """
         new_status = OrderStatus(new_status)
-        allowed = LEGAL_TRANSITIONS.get(order.status, frozenset())
-        if new_status != order.status and new_status not in allowed:
-            raise ExecutionError(
-                "illegal order state transition",
-                client_order_id=client_order_id,
-                current=order.status.value, requested=new_status.value)
-        updated = order.evolve(status=new_status,
-                               updated_at=self.clock.now(), **changes)
-        self._put(updated, self.fills_for(client_order_id))
+        with self._lock(client_order_id):
+            order = self._require(client_order_id)
+            allowed = LEGAL_TRANSITIONS.get(order.status, frozenset())
+            if new_status != order.status and new_status not in allowed:
+                raise ExecutionError(
+                    "illegal order state transition",
+                    client_order_id=client_order_id,
+                    current=order.status.value, requested=new_status.value)
+            updated = order.evolve(status=new_status,
+                                   updated_at=self.clock.now(), **changes)
+            self._put(updated, self.fills_for(client_order_id))
         self._audit("BROKER_RESPONSE", updated)
         return updated
 
     def link_broker_id(self, client_order_id: str, broker_order_id: str) -> Order:
-        order = self._require(client_order_id)
-        updated = order.evolve(broker_order_id=broker_order_id,
-                               updated_at=self.clock.now())
-        self._put(updated, self.fills_for(client_order_id))
+        """Record the venue's identifier for an order we already have.
+
+        Refuses to re-point an order at a different venue id: that means either
+        a duplicate submission upstream or a mixed-up callback, and overwriting
+        would destroy the only evidence of it.
+        """
+        with self._lock(client_order_id):
+            order = self._require(client_order_id)
+            if order.broker_order_id and order.broker_order_id != broker_order_id:
+                raise ExecutionError(
+                    "order is already linked to a different broker id",
+                    client_order_id=client_order_id,
+                    existing=order.broker_order_id, requested=broker_order_id)
+            updated = order.evolve(broker_order_id=broker_order_id,
+                                   updated_at=self.clock.now())
+            self._put(updated, self.fills_for(client_order_id))
         return updated
 
     def record_fill(self, fill: Fill) -> Order:
@@ -271,39 +297,67 @@ class OrderStore:
         disagree, and quietly clamping would hide the divergence that
         reconciliation exists to catch.
         """
-        order = self._require(fill.client_order_id)
-        fills = self.fills_for(fill.client_order_id)
-        if any(f.fill_id == fill.fill_id for f in fills):
-            return order
+        with self._lock(fill.client_order_id):
+            order = self._require(fill.client_order_id)
+            fills = self.fills_for(fill.client_order_id)
+            if any(f.fill_id == fill.fill_id for f in fills):
+                # Redelivery. Return the current order unchanged — counting it
+                # again would double the position on the next portfolio apply.
+                return order
 
-        total = sum((f.quantity for f in fills), Decimal("0")) + fill.quantity
-        if total > order.quantity:
-            raise ExecutionError(
-                "fill would exceed the order quantity",
-                client_order_id=order.client_order_id,
-                order_quantity=str(order.quantity), filled=str(total))
+            # A fill for the wrong instrument or the wrong side is not a fill
+            # of this order at all; booking it would corrupt the position and
+            # bury the routing bug that produced it.
+            if fill.instrument_key != order.instrument_key:
+                raise ExecutionError(
+                    "fill instrument does not match the order",
+                    client_order_id=order.client_order_id,
+                    order_instrument=order.instrument_key,
+                    fill_instrument=fill.instrument_key)
+            if fill.side is not order.side:
+                raise ExecutionError(
+                    "fill side does not match the order",
+                    client_order_id=order.client_order_id,
+                    order_side=order.side.value, fill_side=fill.side.value)
 
-        fills.append(fill)
-        notional = sum((f.quantity * f.price for f in fills), Decimal("0"))
-        avg = notional / total if total > 0 else None
-        fees = sum((f.fee for f in fills), Decimal("0"))
-        status = OrderStatus.FILLED if total == order.quantity \
-            else OrderStatus.PARTIALLY_FILLED
-        allowed = LEGAL_TRANSITIONS.get(order.status, frozenset())
-        if status != order.status and status not in allowed:
-            raise ExecutionError(
-                "fill implies an illegal state transition",
-                client_order_id=order.client_order_id,
-                current=order.status.value, implied=status.value)
+            total = sum((f.quantity for f in fills), Decimal("0")) + fill.quantity
+            if total > order.quantity:
+                raise ExecutionError(
+                    "fill would exceed the order quantity",
+                    client_order_id=order.client_order_id,
+                    order_quantity=str(order.quantity), filled=str(total))
 
-        updated = order.evolve(filled_quantity=total, average_fill_price=avg,
-                               fees=fees, status=status,
-                               updated_at=self.clock.now())
-        self._put(updated, fills)
-        self._store().put(self.fill_namespace, fill.fill_id,
-                          json.dumps(fill.to_dict(), sort_keys=True).encode("utf-8"))
+            fills.append(fill)
+            # Volume-weighted across every fill, recomputed from the whole list
+            # rather than updated incrementally: an incremental average cannot
+            # be corrected if one fill is later found to be wrong.
+            notional = sum((f.quantity * f.price for f in fills), Decimal("0"))
+            avg = notional / total if total > 0 else None
+            fees = sum((f.fee for f in fills), Decimal("0"))
+            status = OrderStatus.FILLED if total == order.quantity \
+                else OrderStatus.PARTIALLY_FILLED
+            allowed = LEGAL_TRANSITIONS.get(order.status, frozenset())
+            if status != order.status and status not in allowed:
+                raise ExecutionError(
+                    "fill implies an illegal state transition",
+                    client_order_id=order.client_order_id,
+                    current=order.status.value, implied=status.value)
+
+            updated = order.evolve(filled_quantity=total, average_fill_price=avg,
+                                   fees=fees, status=status,
+                                   updated_at=self.clock.now())
+            self._put(updated, fills)
+            self._store().put(self.fill_namespace, _safe_key(fill.fill_id),
+                              json.dumps(fill.to_dict(), sort_keys=True).encode("utf-8"))
         self._audit("FILL", updated, extra=fill.to_dict())
         return updated
+
+    def fill(self, fill_id: str) -> Fill | None:
+        """Look up a single fill by its venue id, independent of its order."""
+        raw = self._store().get(self.fill_namespace, _safe_key(fill_id))
+        if not raw:
+            return None
+        return _fill_from_dict(json.loads(raw.decode("utf-8")))
 
     # -- helpers ----------------------------------------------------------
 
