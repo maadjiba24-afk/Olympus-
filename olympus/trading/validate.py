@@ -29,29 +29,30 @@ Sharpe ratio. Every component that selects a data window by time — the
 backtester and the forecast adapter — calls it, and it raises rather than
 warns.
 
-Timeframe arithmetic lives here (`parse_timeframe`, `floor_to_timeframe`) with a
-pure-stdlib implementation, but delegates to `olympus.trading.instruments` when
-that module provides the same helpers, so the package has exactly one bucketing
-rule even though two modules need it. The delegation is lazy (inside the call)
-to keep the import graph acyclic.
+Timeframe arithmetic (`parse_timeframe`, `floor_to_timeframe`) is re-exported
+from `instruments` rather than reimplemented, so validation, candle building and
+the venue calendars can never disagree by one bar about where a bucket starts.
 """
 
 from __future__ import annotations
 
 import math
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from .clock import Clock
 from .contracts import Candle, DataQuality, DataQualityReport, Instrument, ensure_utc
 from .errors import (
-    ConfigurationError,
     DataValidationError,
     InsufficientDataError,
     MarketDataError,
     StaleDataError,
 )
+# Timeframe arithmetic has exactly one implementation, in `instruments`. Two
+# modules disagreeing by one bar about where a bucket starts is the kind of
+# defect that only shows up as an unexplained backtest/live divergence, so the
+# bucketing rule is imported, never re-derived.
+from .instruments import floor_to_timeframe, parse_timeframe, timeframe_seconds
 
 #: A window with less than this fraction of its expected bars is UNUSABLE.
 #: 0.95 is deliberately strict: at 1m bars that is 3 missing minutes an hour,
@@ -78,92 +79,11 @@ ERR_INCOMPLETE = "DATA_INCOMPLETE"
 ERR_INSUFFICIENT = "DATA_INSUFFICIENT"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_TF_RE = re.compile(r"^\s*(\d+)\s*([smhdw])\s*$", re.IGNORECASE)
-_TF_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-# 1970-01-01 was a Thursday; shifting the epoch back three days puts the weekly
-# grid on Monday, which is what every venue calendar means by "week".
-_WEEK_ANCHOR_OFFSET = 3 * 86400
 
 
 # ---------------------------------------------------------------------------
-# timeframe arithmetic
+# timeframe helpers
 # ---------------------------------------------------------------------------
-
-def _instruments_helper(name: str):
-    """Return `instruments.<name>` if that module exists and defines it.
-
-    Imported lazily and defensively: `instruments.py` is a sibling that may not
-    be present (or may not export these yet), and validation must not acquire a
-    hard dependency on it — nor an import cycle, since instruments legitimately
-    wants to import this module.
-    """
-    try:
-        from . import instruments  # noqa: PLC0415 - deliberate lazy import
-    except Exception:                            # pragma: no cover - defensive
-        return None
-    fn = getattr(instruments, name, None)
-    # Guard against a re-export of *these* functions, which would recurse.
-    if fn is None or fn is globals().get(name):
-        return None
-    return fn
-
-
-def parse_timeframe(timeframe: str) -> timedelta:
-    """`"5m"` -> `timedelta(minutes=5)`. Rejects anything it does not understand.
-
-    An unparseable timeframe is a configuration bug, and guessing (say,
-    defaulting to a minute) would produce a silently wrong bar grid — the exact
-    failure mode this package refuses.
-    """
-    delegate = _instruments_helper("parse_timeframe")
-    if delegate is not None:
-        try:
-            result = delegate(timeframe)
-            if isinstance(result, timedelta):
-                return result
-            if isinstance(result, (int, float)):
-                return timedelta(seconds=float(result))
-        except TypeError:                        # pragma: no cover - defensive
-            pass
-    if isinstance(timeframe, timedelta):
-        delta = timeframe
-    else:
-        match = _TF_RE.match(str(timeframe))
-        if match is None:
-            raise ConfigurationError(
-                "unrecognised timeframe; expected <n><s|m|h|d|w>",
-                timeframe=str(timeframe))
-        delta = timedelta(seconds=int(match.group(1))
-                          * _TF_UNIT_SECONDS[match.group(2).lower()])
-    if delta <= timedelta(0):
-        raise ConfigurationError("timeframe must be positive",
-                                 timeframe=str(timeframe))
-    return delta
-
-
-def timeframe_seconds(timeframe: str) -> int:
-    return int(parse_timeframe(timeframe).total_seconds())
-
-
-def floor_to_timeframe(ts: datetime, timeframe: str) -> datetime:
-    """Snap `ts` down onto the absolute UTC grid for `timeframe`.
-
-    Absolute (epoch-anchored), not relative to whatever the first observation
-    happened to be: two processes that bucket the same tick stream must agree on
-    bar boundaries even if they started at different times.
-    """
-    ts = ensure_utc(ts, field_name="ts")
-    delegate = _instruments_helper("floor_to_timeframe")
-    if delegate is not None:
-        try:
-            return ensure_utc(delegate(ts, timeframe), field_name="ts")
-        except (TypeError, ValueError):          # pragma: no cover - defensive
-            pass
-    step = int(parse_timeframe(timeframe).total_seconds())
-    offset = _WEEK_ANCHOR_OFFSET if step % 604800 == 0 else 0
-    elapsed = int(math.floor((ts - _EPOCH).total_seconds())) + offset
-    return _EPOCH + timedelta(seconds=(elapsed - elapsed % step) - offset)
-
 
 def is_on_grid(ts: datetime, timeframe: str) -> bool:
     return floor_to_timeframe(ts, timeframe) == ensure_utc(ts, field_name="ts")

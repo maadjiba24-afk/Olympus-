@@ -40,10 +40,10 @@ from typing import Iterable, Sequence
 from .clock import Clock, default_clock
 from .contracts import Candle, ensure_utc
 from .errors import ConfigurationError, DataValidationError
-# Bucketing lives in validate.py (which delegates to instruments.py when that
-# module provides it), so the builder, the validator and the resampler cannot
-# drift into three different opinions about where a bar starts.
-from .validate import floor_to_timeframe, parse_timeframe
+# One bucketing rule for the whole package (see `instruments.floor_to_timeframe`)
+# so the builder, the validator and the resampler cannot drift into three
+# different opinions about where a bar starts.
+from .instruments import floor_to_timeframe, parse_timeframe
 
 
 @dataclass(frozen=True)
