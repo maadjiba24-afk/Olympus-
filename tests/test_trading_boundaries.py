@@ -56,10 +56,19 @@ def _imports(path: pathlib.Path) -> list[tuple[str, int, bool]]:
 
     top_level_nodes = set()
 
+    # Nodes whose bodies run at IMPORT time, so an import inside them is still
+    # an import-time dependency. A `def`/`async def`/`lambda` body is the
+    # opposite — it runs only when called, which is exactly what makes a lazy
+    # optional backend lazy — so those are NOT descended into. Getting this
+    # wrong flags correct lazy imports as violations.
+    _EXECUTES_AT_IMPORT = (ast.If, ast.Try, ast.With, ast.For, ast.While,
+                           ast.ClassDef, ast.Module)
+
     def _mark(nodes):
         for node in nodes:
             top_level_nodes.add(id(node))
-            # Module-scope `try:`/`if:` still executes at import time.
+            if not isinstance(node, _EXECUTES_AT_IMPORT):
+                continue
             for attr in ("body", "orelse", "finalbody"):
                 _mark(getattr(node, attr, []) or [])
             for handler in getattr(node, "handlers", []) or []:
