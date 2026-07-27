@@ -368,5 +368,16 @@ def _dec(value: Any) -> Decimal | None:
     return None if value is None else Decimal(str(value))
 
 
+def _safe_key(value: str) -> str:
+    """Hash an externally-supplied identifier before using it as a store key.
+
+    Broker order ids are arbitrary vendor strings — slashes, colons, unicode —
+    and the file-backed store sanitises key names, which would silently map two
+    distinct ids onto one index entry. Hashing makes the key total and
+    collision-free in practice, and identical on every backend.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+
+
 __all__ = ["OrderStore", "OrderRecord", "make_client_order_id",
            "LEGAL_TRANSITIONS"]

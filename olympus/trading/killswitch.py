@@ -299,6 +299,10 @@ def evaluate_auto_trips(stats: Mapping[str, Any], limits: Any,
     "we did not measure it" must not be confused with "it is fine". The one
     exception is reconciliation age, where a *missing* value means reconciliation
     has never succeeded — which is itself a desync condition.
+
+    P&L is SIGNED (negative is a loss), under either the `daily_pnl` or the
+    legacy `daily_loss` key. Comparing its magnitude instead would halt the
+    system on a good day, which trains operators to override the switch.
     """
     trips: list[tuple[TripRule, str, str]] = []
     by_name = {r.name: r for r in AUTO_RULES}
@@ -306,12 +310,14 @@ def evaluate_auto_trips(stats: Mapping[str, Any], limits: Any,
     def limit(name, default=None):
         return getattr(limits, name, default) if limits is not None else default
 
-    daily_loss = stats.get("daily_loss")
+    daily_pnl = stats.get("daily_pnl")
+    if daily_pnl is None:
+        daily_pnl = stats.get("daily_loss")
     max_daily = limit("max_daily_loss")
-    if daily_loss is not None and max_daily is not None and max_daily > 0:
-        if abs(_num(daily_loss)) >= _num(max_daily):
+    if daily_pnl is not None and max_daily is not None and max_daily > 0:
+        if _num(daily_pnl) <= -_num(max_daily):
             trips.append((by_name["daily_loss"], "",
-                          f"daily loss {daily_loss} >= limit {max_daily}"))
+                          f"daily P&L {daily_pnl} <= -limit {max_daily}"))
 
     dd = stats.get("portfolio_drawdown")
     max_dd = limit("max_portfolio_drawdown")
