@@ -49,6 +49,12 @@ and what is unsafe or incomplete. When the two disagree, this file is right.
 | `validate.py` | ✅ | Probed: gaps detected without fabricating bars, dedupe keeps last, `assert_no_lookahead` keyed on `ts_close` (not `ts_open`) and catches a future bar |
 | `candles.py` | ✅ | Probed: 1m→5m resample with correct OHLC aggregation and the trailing partial bucket withheld |
 
+### Composition
+
+| Module | Status | Evidence |
+|---|---|---|
+| `pipeline.py` | ✅ | 20 tests in `test_trading_pipeline.py` prove the central claim: no order exists without an approving `RiskDecision`. Fails closed on a throwing risk engine, an unreadable kill-switch registry, and a broken mode controller (falls back to `PAPER`, never live). Execution sizes from `decision.approved_quantity`, never the intent's. Strategy context asserted to expose no `broker`/`oms`/`execution`/`limits`/`vault`. **Caveat:** proven against fakes that enforce the same preconditions the real components must; the real `risk.py`/`execution.py` need their own behavioural tests. Written against the authored specs, so integration reconciliation is expected. |
+
 ### Remaining modules
 
 Status for `ta`, `features`, `regime`, `volatility`, `kronos_runtime`,
