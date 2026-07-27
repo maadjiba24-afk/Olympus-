@@ -259,18 +259,37 @@ def test_no_heavy_imports_at_module_scope():
 
 
 def test_trading_package_imports_without_optional_backends():
-    """`import olympus.trading` must be cheap and must not require torch."""
-    import importlib
+    """`import olympus.trading` must be cheap and must not require torch.
+
+    Run in a SUBPROCESS, deliberately. The obvious in-process version — evict
+    `olympus.trading.*` from `sys.modules` and re-import — silently corrupts the
+    rest of the suite: sibling test modules that already did
+    `from olympus.trading.errors import ConfigurationError` keep a reference to
+    the *old* class object, so a later `pytest.raises(ConfigurationError)`
+    stops matching the freshly-imported class and fails for reasons that have
+    nothing to do with the code under test. A subprocess also tests the real
+    claim more honestly: what a *fresh interpreter* pulls in.
+    """
+    import subprocess
     import sys
 
-    for name in [m for m in sys.modules if m.startswith("olympus.trading")]:
-        del sys.modules[name]
-
-    mod = importlib.import_module("olympus.trading")
-    assert mod.SCHEMA_VERSION >= 1
-    assert "torch" not in sys.modules, (
-        "importing olympus.trading pulled in torch — the lazy-import contract "
-        "in olympus/trading/__init__.py is broken")
+    probe = (
+        "import sys, olympus.trading as t;"
+        "assert t.SCHEMA_VERSION >= 1;"
+        "heavy = sorted(m for m in ('torch','numpy','pandas','scipy') "
+        "               if m in sys.modules);"
+        "print(','.join(heavy))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True,
+        cwd=str(pathlib.Path(__file__).resolve().parent.parent))
+    assert proc.returncode == 0, (
+        f"`import olympus.trading` failed in a clean interpreter:\n{proc.stderr}")
+    pulled = proc.stdout.strip()
+    assert not pulled, (
+        f"importing olympus.trading pulled in {pulled} — the lazy-import "
+        "contract in olympus/trading/__init__.py is broken")
 
 
 def test_public_contracts_are_exported():
