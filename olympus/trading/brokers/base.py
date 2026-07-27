@@ -29,9 +29,9 @@ on some venues — a rate-limit strike.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from ..contracts import (AccountSnapshot, Candle, Fill, Order, OrderType,
                          Position, Quote, TimeInForce)
@@ -53,12 +53,19 @@ class BrokerCredentials:
             raise ConfigurationError("credential ref must be non-empty")
 
     # Both dunders are overridden: a handle that leaks through an f-string, a
-    # log line, or a traceback repr would defeat the whole arrangement.
+    # log line, or a traceback repr would defeat the whole arrangement. There
+    # is nothing secret to leak *today* — the dataclass holds two names — but
+    # the overrides are what keeps that true if a field is ever added by
+    # someone who has not read this docstring.
     def __repr__(self) -> str:
         return f"BrokerCredentials(ref={self.ref!r}, user={self.user!r})"
 
     def __str__(self) -> str:
         return f"<credentials {self.ref}>"
+
+    def to_dict(self) -> dict:
+        """Audit-safe projection: names only, never a resolved value."""
+        return {"ref": self.ref, "user": self.user}
 
 
 def resolve_credentials(handle: BrokerCredentials) -> Mapping[str, Any]:
@@ -128,6 +135,29 @@ class BrokerAdapter(ABC):
     @property
     @abstractmethod
     def capabilities(self) -> BrokerCapabilities: ...
+
+    @property
+    def supports(self) -> dict:
+        """Capabilities as a plain JSON-safe mapping.
+
+        The OMS reads this to refuse an unsupported order *before* a round
+        trip, and it goes into the audit record so a later reader can tell
+        whether a rejection was ours or the venue's.
+        """
+        return self.capabilities.to_dict()
+
+    def __repr__(self) -> str:
+        # Adapters hold a credential *handle*; keeping the repr to identity
+        # fields means no subclass can accidentally print one via a default
+        # dataclass-style repr.
+        return (f"<{type(self).__name__} name={self.name!r} venue={self.venue!r} "
+                f"connected={self._safe_connected()}>")
+
+    def _safe_connected(self) -> bool:
+        try:
+            return bool(self.is_connected())
+        except Exception:                                # noqa: BLE001
+            return False
 
     # -- lifecycle --------------------------------------------------------
 

@@ -35,18 +35,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from .clock import Clock, default_clock
 from .contracts import (AccountSnapshot, Candle, DataQuality,
                         DataQualityReport, Instrument, Mode, OrderType,
                         PortfolioSnapshot, RiskCheck, RiskDecision,
                         TradeIntent, Verdict, ensure_utc, jsonable, to_decimal)
-from .errors import (ConfigurationError, LimitsImmutableError, RiskError,
-                     TradingError)
+from .errors import ConfigurationError, LimitsImmutableError, TradingError
 from .killswitch import KillSwitchRegistry
 
 _NS = "trading.limits"

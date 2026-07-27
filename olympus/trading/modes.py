@@ -23,18 +23,36 @@ Downgrading is always allowed
 Moving to a *less* live mode never requires gates or a token. Making it hard to
 stop trading would be an obvious safety inversion — the friction belongs on the
 way in, not the way out.
+
+Why live is unreachable by accident
+-----------------------------------
+Three separate things must be true, and no single actor supplies all three:
+
+1. **The default is PAPER**, including when the mode record is absent, empty,
+   corrupt, or names a mode this build does not know. There is no code path
+   where "I could not read the mode" resolves to a live one.
+2. **The operator token is constructor state.** It is never read from the
+   store, the gate context, or a payload, so no configuration file and no agent
+   output can introduce it — only whoever starts the process. A controller
+   built without one raises `ModeNotPermitted` no matter how green the gates.
+3. **Every gate must pass, and the change must be recorded.** Gate evidence is
+   checked for completeness, and for a live mode the `MODE_CHANGED` audit event
+   is written *before* the mode is persisted, so a transition that cannot be
+   recorded does not happen.
+
+Restated for anyone tempted to add a convenience: an agent, an LLM, a strategy,
+or a market-data payload has no route to live here. That is the point.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .clock import Clock, default_clock
-from .contracts import Mode, ensure_utc, jsonable
-from .errors import ConfigurationError, GateFailure, ModeNotPermitted
+from .contracts import Mode, jsonable
+from .errors import GateFailure, ModeNotPermitted
 
 _NS = "trading.mode"
 
@@ -44,6 +62,14 @@ _SAFE_MODES = frozenset({Mode.BACKTEST, Mode.PAPER, Mode.SHADOW})
 #: How live a mode is, so a "downgrade" can be recognised.
 _RANK = {Mode.BACKTEST: 0, Mode.PAPER: 1, Mode.SHADOW: 2,
          Mode.LIVE_RESTRICTED: 3, Mode.LIVE_BOUNDED: 4}
+
+
+def _rank(mode: Mode, *, unknown: int) -> int:
+    """Rank a mode, with an explicit answer for one this table has not been
+    taught. A future mode added to the enum but not here must not slip through
+    the downgrade shortcut, so callers pass the *pessimistic* default for their
+    side of the comparison."""
+    return _RANK.get(mode, unknown)
 
 
 @dataclass(frozen=True)
@@ -290,12 +316,17 @@ def run_gates(gates: Sequence[Gate], ctx: Mapping[str, Any]) -> list[GateResult]
 class ModeController:
     """Owns the current operating mode. Defaults to PAPER, always."""
 
-    def __init__(self, *, clock: Clock | None = None, audit=None,
-                 namespace: str = _NS, operator_token: str | None = None,
+    def __init__(self, clock: Clock | None = None, audit=None,
+                 store_ns: str | None = None, *, namespace: str | None = None,
+                 operator_token: str | None = None,
                  gates: Sequence[Gate] | None = None):
         self.clock = clock or default_clock()
         self.audit = audit
-        self.namespace = namespace
+        self.namespace = store_ns or namespace or _NS
+        # The token lives on the controller, not in the store and not in the
+        # gate context: it must be supplied by whoever *constructs* the trading
+        # process, so no file an agent can write and no payload it can craft
+        # reaches it. A controller built with no token cannot ever go live.
         self._operator_token = operator_token
         self.gates = tuple(gates) if gates is not None else DEFAULT_GATES
 
@@ -303,15 +334,62 @@ class ModeController:
         from olympus import store
         return store.backend()
 
-    def current(self) -> Mode:
+    def record(self) -> dict:
+        """The persisted mode record, or `{}` when there is none or it is
+        unreadable. Exposed so an operator can see the evidence behind the
+        current mode without parsing the store by hand."""
         raw = self._store().get(self.namespace, "current")
         if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:                                # noqa: BLE001
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def current(self) -> Mode:
+        """The mode in force. PAPER unless a *credible* record says otherwise.
+
+        Absent, unreadable, or unrecognised records all resolve to PAPER: there
+        is no failure of this method that produces permission to trade.
+        """
+        data = self.record()
+        if not data:
             return Mode.PAPER
         try:
-            return Mode(json.loads(raw.decode("utf-8"))["mode"])
+            mode = Mode(data["mode"])
         except Exception:                                # noqa: BLE001
-            # An unreadable mode record must not be interpreted as live.
+            # An unreadable or unknown mode must not be interpreted as live.
             return Mode.PAPER
+        if mode.is_live and not self._live_record_is_credible(data):
+            return Mode.PAPER
+        return mode
+
+    def _live_record_is_credible(self, data: Mapping[str, Any]) -> bool:
+        """Whether a stored *live* mode was actually authorised, or merely
+        written down.
+
+        The store is a file. Anything that can write files — a config
+        generator, a botched deploy, an agent with a filesystem tool — can put
+        `{"mode": "live_bounded"}` there, and a controller that trusts that
+        string has made live reachable by editing a file. So a live record is
+        honoured only when it carries the evidence a real transition produces
+        (a named operator and a full set of passing gate results) *and* this
+        process holds an operator token. Forging the record is then not enough:
+        you also have to be the one who started the process.
+
+        The failure mode is safe in the right direction — a live process
+        restarted without its token comes back up in PAPER.
+        """
+        if not self._operator_token:
+            return False
+        if not str(data.get("operator") or "").strip():
+            return False
+        gates = data.get("gates")
+        if not isinstance(gates, list) or not gates:
+            return False
+        return all(isinstance(g, Mapping) and g.get("passed") is True
+                   for g in gates)
 
     def permits_live_orders(self) -> bool:
         return self.current().is_live
@@ -319,13 +397,26 @@ class ModeController:
     def request(self, mode: Any, *, operator: str = "", reason: str = "",
                 operator_token: str | None = None,
                 gate_context: Mapping[str, Any] | None = None,
+                gate_results: Sequence[GateResult] | None = None,
                 gates: Sequence[Gate] | None = None) -> Mode:
-        """Change mode. Live requires every gate plus a valid operator token."""
+        """Change mode. Live requires every gate plus a valid operator token.
+
+        Gate evidence arrives one of two ways: `gate_context` (this controller
+        runs the gates itself) or `gate_results` (an operator ran them and is
+        presenting the output). The second exists because gates can be slow or
+        need credentials the controller does not hold — but presented results
+        are checked for *completeness* against the configured gate set, so
+        handing over one passing result does not buy a live mode.
+        """
         mode = Mode(mode)
         previous = self.current()
 
         # Downgrades are always permitted — friction belongs on the way in.
-        if mode in _SAFE_MODES or _RANK[mode] < _RANK[previous]:
+        # A requested mode we cannot rank is assumed maximally live; a previous
+        # mode we cannot rank is assumed minimally live. Both defaults make the
+        # comparison below fail closed.
+        if mode in _SAFE_MODES or (_rank(mode, unknown=99)
+                                   < _rank(previous, unknown=0)):
             return self._commit(mode, previous, operator=operator or "system",
                                 reason=reason, gate_results=())
 
@@ -340,8 +431,20 @@ class ModeController:
             raise ModeNotPermitted("an authorised operator must be named",
                                    requested=mode.value)
 
-        results = run_gates(gates if gates is not None else self.gates,
-                            dict(gate_context or {}))
+        required = tuple(gates if gates is not None else self.gates)
+        if gate_results is not None:
+            results = tuple(gate_results)
+            presented = {r.name for r in results}
+            missing = [g.name for g in required if g.name not in presented]
+            if missing:
+                # A partial submission is not evidence. Treating it as such
+                # would make "run only the gates that pass" a working strategy.
+                raise GateFailure(
+                    "live trading refused: gate evidence is incomplete",
+                    requested=mode.value, failed=missing,
+                    details={name: "no result presented" for name in missing})
+        else:
+            results = tuple(run_gates(required, dict(gate_context or {})))
         failed = [r for r in results if not r.passed]
         if failed:
             raise GateFailure(
@@ -354,15 +457,42 @@ class ModeController:
 
     def _commit(self, mode: Mode, previous: Mode, *, operator: str,
                 reason: str, gate_results: Sequence[GateResult]) -> Mode:
+        """Persist the new mode, with the audit event as a *precondition* of
+        going live rather than a side effect of having gone live.
+
+        The ordering is deliberate. For a live mode the event is written first
+        and a failure to write it aborts the change: an unrecorded live
+        transition is exactly the thing this module exists to prevent, and a
+        system that cannot say when it went live cannot be audited afterwards.
+        For every other mode the write is best-effort, because a broken trail
+        must never be a reason you cannot *stop* trading.
+        """
         payload = {
             "mode": mode.value, "previous": previous.value,
             "operator": operator, "reason": reason,
             "at": self.clock.now().isoformat(),
             "gates": [g.to_dict() for g in gate_results],
         }
-        self._store().put(self.namespace, "current",
-                          json.dumps(payload, sort_keys=True).encode("utf-8"))
-        if self.audit is not None:
+        if mode.is_live:
+            if self.audit is None:
+                raise ModeNotPermitted(
+                    "live trading requires an audit trail; an unrecordable "
+                    "transition to live is refused", requested=mode.value)
+            self.audit.record("MODE_CHANGED", payload, actor=operator or "system",
+                              subject="", correlation_id="")
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        # Serialise the whole read-previous/write-current cycle across processes:
+        # two operators racing must not interleave into a record whose
+        # `previous` never happened (ADR 0005 — the store is not the lock).
+        try:
+            from olympus import proclock
+            with proclock.lock(f"trading-mode-{self.namespace}"):
+                self._store().put(self.namespace, "current", encoded)
+        except Exception:                                # noqa: BLE001
+            # Locking is an optimisation for concurrent operators (and is a
+            # no-op on non-POSIX); losing it must not lose the mode change.
+            self._store().put(self.namespace, "current", encoded)
+        if not mode.is_live and self.audit is not None:
             try:
                 self.audit.record("MODE_CHANGED", payload, actor=operator or "system",
                                   subject="", correlation_id="")

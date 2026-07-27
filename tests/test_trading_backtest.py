@@ -254,14 +254,24 @@ def test_report_formats_undefined_metrics_as_not_available():
 
 
 def test_breakdowns_partition_the_trades():
+    """Each breakdown returns a report per bucket, and the trade counts must sum
+    back to the whole — a breakdown that loses or double-counts trades would
+    quietly misattribute where the P&L came from."""
     class T:
         def __init__(self, key, when):
             self.net_pnl = 1.0
             self.gross_pnl = 1.0
             self.instrument_key = key
             self.closed_at = when
+
     trades = [T("A", T0), T("B", T0), T("A", T0 + timedelta(days=40))]
-    assert sum(len(v) for v in perf.by_instrument(trades).values()) == 3
-    assert set(perf.by_instrument(trades)) == {"A", "B"}
-    assert sum(len(v) for v in perf.by_period(trades, "M").values()) == 3
-    assert len(perf.by_period(trades, "Y")) == 1
+
+    per_instrument = perf.by_instrument(trades)
+    assert set(per_instrument) == {"A", "B"}
+    assert sum(r.n_trades for r in per_instrument.values()) == len(trades)
+    assert per_instrument["A"].n_trades == 2
+
+    curve = [(T0 + timedelta(days=i), Decimal("1000") + i) for i in range(60)]
+    per_month = perf.by_period(curve, "M", trades=trades)
+    assert sum(r.n_trades for r in per_month.values()) == len(trades)
+    assert len(perf.by_period(curve, "Y", trades=trades)) == 1

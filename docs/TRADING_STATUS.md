@@ -6,7 +6,7 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~16,400 lines across 26 modules; 26 test files; **1106 trading tests passing**
+- **Scale:** ~19,800 lines across 28 modules; 32 test files; **1452 trading tests passing**
 - **Whole repository:** 6122 passed, 17 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
@@ -76,13 +76,13 @@ missing. When the two disagree, this file is right.
 | `audit.py` | ✅ | 14 tests; forgery and deletion both detected by actually rewriting history on disk |
 | `modes.py` | ✅ | 29 tests; default PAPER; live needs all 9 gates + token + named operator + audit event |
 | `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
-| `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross and net always reported together; per-instrument/regime/period breakdowns |
+| `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross/net are *required* constructor fields so a single-cost-basis report cannot be built; per-instrument/regime/period breakdowns whose trade counts sum back to the whole |
+| `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the Kronos and non-Kronos arms, so the signal source is the only difference |
 
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
-| `strategy.py` | 🔵 | No concrete strategies. The pipeline accepts any object with `.on_bar(ctx) -> [TradeIntent]`; none ships. |
 | `evaluate.py` | 🔵 | **`kronos_is_valuable()` does not exist.** The Kronos-vs-baseline comparison is designed, not implemented. |
 | `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
 | `sentiment.py` | 🔵 | No news ingestion. The taint barrier it would feed (`risk.Tainted` / `assert_untainted`) **is** built and tested. |
