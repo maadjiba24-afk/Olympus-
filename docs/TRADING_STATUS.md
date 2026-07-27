@@ -6,14 +6,15 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~23,900 lines across 32 modules; 39 test files; **1939 trading tests passing**
-- **Whole repository:** 6122 passed, 17 skipped, **zero regressions**
+- **Scale:** ~25,500 lines across 39 modules; 42 test files; **2018 trading tests passing**
+- **Whole repository:** 7181 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
 > **Read §3 and §4 before trusting any of this.** Several completion-standard
 > items cannot be demonstrated in this environment, and saying so plainly is
-> part of the deliverable.
+> part of the deliverable. `docs/TRADING_EXTERNAL_VALIDATION.md` scores the
+> twelve external-validation gates and measures the blocker host by host.
 
 ---
 
@@ -84,19 +85,20 @@ missing. When the two disagree, this file is right.
 | `agents.py` | ✅ | Validated output schemas for the seven market-intelligence agents; malformed/out-of-range/instruction-bearing outputs rejected |
 | `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `kronos_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
 
+### Connectivity & operations
+
+| Module | Status | Evidence |
+|---|---|---|
+| `ingest.py` | 🟡 | 28 tests. `IngestionService` is the single write path: duplicates dropped, gaps **counted and never filled**, late bars refused, three timestamps (venue open/close + local `received_at`), restart recovery, reconnect-then-backfill. Adversarially tested against `ReplayProvider`; `BinanceSpotProvider`'s REST/websocket parsing is tested against Binance's documented wire formats but **not** against Binance — the host is unreachable here (§4). |
+| `brokers/binance_testnet.py` | 🟡 | 27 tests. Testnet enforced by host allow-list (pointing it at `api.binance.com` raises at construction); spot-only, so the futures testnet host is refused; uncovered SELL rejected before any request; HMAC signing, `-2010` duplicate → adopt, `-2013` unknown → `None`, unmapped status raises rather than reading as open; signed URLs deliberately excluded from exception text. **Never contacted the venue** (§4). |
+| `cli.py` | ✅ | 24 tests, the load-bearing ones negative: an AST scan asserts the module cannot import or construct `LimitsStore`, `ModeController` or `ExecutionEngine`, and the parser offers no `mode`/`submit`/`set-limit`/`disengage` command. Renders status/portfolio/orders/strategies/models/limits; the only write actions are `kill` and read-only `reconcile`/`verify-audit`. Survives a subsystem that throws. |
+
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
-| `ingest.py` | 🔵 | **No live market-data source.** Data enters through `storage`/`validate` from whatever the caller supplies. Every downstream guarantee (freshness, gaps, staleness) is implemented and tested, but nothing connects to a feed. |
-| CLI (`olympus trading …`) | 🔵 | No operator command surface. All use is via the Python API. |
-
----|---|---|
-| `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
-| `sentiment.py` | 🔵 | No news ingestion. The taint barrier it would feed (`risk.Tainted` / `assert_untainted`) **is** built and tested. |
-| `monitor.py` | 🔵 | No monitor loop. `killswitch.evaluate_auto_trips()` is built and tested; nothing calls it on a schedule. |
-| `agents.py` | 🔵 | No market-intelligence agent schemas. |
-| `ingest.py` | 🔵 | No live market-data source. Data enters via `storage`/`validate` from the caller. |
+| Checkpoint-validation harness | 🔵 | Phase-5 hash pinning, upstream-vs-Olympus numerical comparison and latency/memory measurement are designed but unwritten: a harness whose subject cannot be obtained cannot be tested, and would be untested code claiming a validated model. |
+| Scheduled monitor loop | 🔵 | `monitor.py` and `killswitch.evaluate_auto_trips()` are built and tested; nothing runs them on a timer. Auto-trips fire only when a caller evaluates them. |
 
 ---
 
@@ -122,7 +124,8 @@ Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
 
 | Completion-standard item | State | Reason |
 |---|---|---|
-| **Paper trade through a real broker sandbox** | ⛔ **Blocked** | No broker credentials, no venue reachable. What exists is a fully functional `PaperBroker` and the ABC a real adapter must satisfy. That is a real simulated venue — it is **not** a demonstration against a broker's sandbox and must not be reported as one. |
+| **Ingest real market data** | ⛔ **Blocked** | Every candidate feed is refused by this environment's egress policy with HTTP 403 at CONNECT — Binance, Alpaca, Coinbase, Kraken, Finnhub, Polygon, Yahoo, Stooq. Measured host by host in `docs/TRADING_EXTERNAL_VALIDATION.md` §1. `BinanceSpotProvider` was executed against `api.binance.com` and correctly surfaced the denial as a typed `MarketDataError`; that is the only real-external-system result in this work, and it is a fact about the blocker, not about trading. **No real bar has ever entered the system.** |
+| **Paper trade through a real broker sandbox** | ⛔ **Blocked** | `testnet.binance.vision` is 403 like the rest, and no credentials exist. `BinanceTestnetBroker` is written and unit-tested but **has never contacted the venue**: nothing about real fills, fees, rate limits or clock skew is verified. What is demonstrated end to end is `PaperBroker`, a real simulated venue — it is **not** a broker sandbox and must not be reported as one. |
 | **Run Kronos against the published checkpoints** | ⛔ **Blocked** | `huggingface.co` returns HTTP 403 through this environment's proxy (verified during the teardown). The adapter is tested against a deterministic fake backend: its *logic* is tested, its *numerical agreement with upstream Kronos* is not. |
 | **Demonstrate Kronos adds value** | ⛔ **Still blocked — but now decidable** | The machinery exists (`evaluate.kronos_is_valuable`, `backtest`), so the question can be *answered* the moment real checkpoints and real data are available. It has not been answered here: no checkpoint is reachable and no market data is available, so the function returns its honest default of `False`. **No claim about Kronos's usefulness is made or supported.** Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
 | **Backtest without known data leakage** | ✅ **Built and tested** | 20 tests, each naming the self-deception it closes. Two honest limits, disclosed in every result's `warnings`: fills are evaluated against bar OHLC rather than ticks, and a static universe cannot have survivorship bias removed by the engine. |
@@ -137,17 +140,21 @@ Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
 | 1 | `validate.py` re-implements timeframe parsing that `instruments.py` owns, delegating opportunistically; its delegate path returns early without the positivity re-check. Harmless today (`instruments` rejects `0m`) but two code paths can answer the same question. | Low |
 | 2 | Default `min_completeness` of 0.95 marks one missing bar in five as `UNUSABLE`. Correct-but-strict; may be wrong for illiquid instruments. | Low |
 | 3 | `risk.py`/`killswitch.py`/`portfolio.py`/`oms.py`/`brokers`/`execution.py`/`reconcile.py`/`audit.py`/`modes.py` were authored directly rather than by the parallel build, so a duplicate-cluster overwrite is possible; all are committed, so any clobber is recoverable by `git checkout`. | Low |
-| 4 | No CLI surface (`olympus trading …`). All use is via the Python API. | Medium |
+| 4 | `BrokerUnavailable` is a *sibling* of `BrokerError` (both subclass `ExecutionError`), which is easy to get wrong: `binance_testnet`'s `health()` and `get_quote()` originally caught only `BrokerError`, so the unreachable case escaped the health probe that exists to report it. Fixed and regression-tested, but the hierarchy remains a trap for the next adapter. | Medium |
+| 5 | Streaming reconnect/backoff/gap-backfill is exercised only through `ReplayProvider`'s simulated disconnect. Real websocket failure modes — half-open sockets, silent stalls, out-of-order frames — are unexercised. | Medium |
+| 6 | No scheduler runs `monitor`/`evaluate_auto_trips`; auto-trips fire only when something calls them. | Medium |
 
 ---
 
 ## 6. Verify these claims yourself
 
 ```bash
-python -m pytest tests/test_trading_*.py -q      # 956 passing, offline, no torch needed
+python -m pytest tests/test_trading_*.py -q      # 2018 passing, offline, no torch needed
+python -m pytest -q                              # 7181 passed, 30 skipped (whole repo)
 python -m pytest tests/test_trading_end_to_end.py -q   # the completion standard
 python -m pytest tests/test_trading_kronos_defects.py -q  # teardown regressions
 python -m pytest tests/test_trading_boundaries.py -q   # structural guarantees
+python -m pytest tests/test_trading_cli.py -q    # the console's negative guarantees
 python -m olympus capabilities --check           # Olympus's own CI guard
 python -m pytest tests/test_deps_claim.py -q     # dependency truthfulness
 ```
