@@ -6,8 +6,8 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-27
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~15,100 lines across 22 modules; 22 test files; **956 trading tests passing**
-- **Existing Olympus suite:** no regressions
+- **Scale:** ~16,400 lines across 26 modules; 26 test files; **1106 trading tests passing**
+- **Whole repository:** 6122 passed, 17 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
@@ -75,12 +75,13 @@ missing. When the two disagree, this file is right.
 | `reconcile.py` | ✅ | Adopts orders/fills; **never** auto-repairs a position break; trips the desync switch |
 | `audit.py` | ✅ | 14 tests; forgery and deletion both detected by actually rewriting history on disk |
 | `modes.py` | ✅ | 29 tests; default PAPER; live needs all 9 gates + token + named operator + audit event |
+| `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
+| `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross and net always reported together; per-instrument/regime/period breakdowns |
 
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
-| `backtest.py`, `perf.py` | 🔵 | **No event-driven backtester or performance metrics.** The anti-leakage *primitives* are built and tested (`assert_no_lookahead`, `assert_causal`, next-bar fills, fit/transform split), but there is no engine composing them into a run, and none of the required metrics (Sharpe, Sortino, Calmar, profit factor, …) are computed anywhere. |
 | `strategy.py` | 🔵 | No concrete strategies. The pipeline accepts any object with `.on_bar(ctx) -> [TradeIntent]`; none ships. |
 | `evaluate.py` | 🔵 | **`kronos_is_valuable()` does not exist.** The Kronos-vs-baseline comparison is designed, not implemented. |
 | `registry.py` | 🔵 | Model registry absent; `ModelApprovedGate` passes trivially when no models are declared. |
@@ -116,7 +117,7 @@ Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
 | **Paper trade through a real broker sandbox** | ⛔ **Blocked** | No broker credentials, no venue reachable. What exists is a fully functional `PaperBroker` and the ABC a real adapter must satisfy. That is a real simulated venue — it is **not** a demonstration against a broker's sandbox and must not be reported as one. |
 | **Run Kronos against the published checkpoints** | ⛔ **Blocked** | `huggingface.co` returns HTTP 403 through this environment's proxy (verified during the teardown). The adapter is tested against a deterministic fake backend: its *logic* is tested, its *numerical agreement with upstream Kronos* is not. |
 | **Demonstrate Kronos adds value** | ⛔ **Blocked, and unimplemented** | Needs real checkpoints, real data, **and** `evaluate.py`/`backtest.py`, which do not exist. No claim about Kronos's usefulness is made or supported. Public third-party evidence is currently negative (teardown §16; upstream issues #354/#355). |
-| **Backtest without known data leakage** | 🟡 **Partial** | The primitives are built and tested; the engine that composes them is not. |
+| **Backtest without known data leakage** | ✅ **Built and tested** | 20 tests, each naming the self-deception it closes. Two honest limits, disclosed in every result's `warnings`: fills are evaluated against bar OHLC rather than ticks, and a static universe cannot have survivorship bias removed by the engine. |
 | **Live trading** | ⛔ **Correctly disabled** | The designed state. At least gates G2 (account), G4 (reconciliation), G7 (connectivity), G8 (paper history) cannot pass without a real venue. |
 
 ---
