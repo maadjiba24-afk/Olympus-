@@ -188,6 +188,15 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.native.representations",
     "olympus.trading.native.baselines",
     "olympus.trading.native.benchmark",
+    "olympus.trading.native.tasks",
+    "olympus.trading.native.model",
+    "olympus.trading.native.abstain",
+    "olympus.trading.native.result",
+    "olympus.trading.native.pipeline",
+    "olympus.trading.native.serve",
+    "olympus.trading.native.evaluation",
+    "olympus.trading.native.originality",
+    "olympus.trading.native.modelcard",
 )
 
 

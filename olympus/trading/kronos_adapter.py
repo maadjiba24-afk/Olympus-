@@ -939,5 +939,32 @@ def kronos_value_hypothesis(*, instrument: str = "", clock: Any = None):
             "in this system",))
 
 
+def native_benchmark_arm(*, observations: Sequence[Any] = ()):
+    """This model as an arm in a native evaluation. Usually unavailable.
+
+    Lives here rather than in `native/evaluation.py` because the native
+    evaluation module must not contain a third-party model's name — that is
+    what `tests/test_trading_independence.py` enforces, and the enforcement is
+    the point. The mechanism is generic; the identity is this adapter's, and
+    the adapter is the one file that is allowed to know it.
+
+    Returns an *unavailable* arm unless a caller supplies observations, because
+    no official checkpoint is reachable from this environment. An evaluation
+    that dropped the arm entirely would read as complete; one that carries it
+    as missing, with the reason, does not.
+    """
+    from .native.evaluation import ComparisonArm, unavailable_arm
+    if observations:
+        return ComparisonArm(name="kronos", kind="external",
+                             observations=tuple(observations))
+    return unavailable_arm(
+        "kronos",
+        "no official checkpoint is reachable from this environment "
+        "(blocker B2: the model hub returns 403 at CONNECT), and the weight "
+        "licence is unverified (blocker B4). No claim of superiority to this "
+        "model is made or can be made.")
+
+
 __all__ = ["KronosConfig", "KronosForecaster", "RETIRED_REASON_CODES",
-           "RETIRED_STRATEGY_IDS", "kronos_value_hypothesis"]
+           "RETIRED_STRATEGY_IDS", "kronos_value_hypothesis",
+           "native_benchmark_arm"]

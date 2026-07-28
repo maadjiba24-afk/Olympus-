@@ -39,6 +39,21 @@ KRONOS_MODULES = {"kronos_adapter.py", "kronos_runtime.py"}
 LAZY_TABLE_EXEMPT = {"kronos_adapter", "kronos_runtime",
                      ".kronos_adapter", ".kronos_runtime"}
 
+#: The one module whose *job* is to forbid these names, and which therefore must
+#: contain them: `native/originality.py` implements the automated originality
+#: checks, so its forbidden-module set and its detection logic name what they
+#: reject. That is the opposite of depending on it.
+#:
+#: Enumerated with its reason rather than pattern-matched, for the same reason
+#: `LAZY_TABLE_EXEMPT` is: an exemption a reviewer can read is one a reviewer
+#: can withdraw, and a heuristic guessing at intent would let a real dependency
+#: hide behind a comment. `test_the_checker_exemption_is_still_needed` fails if
+#: the exemption outlives its reason.
+CHECKER_EXEMPT: dict[str, str] = {
+    "originality.py": "implements the originality checks; must name what it "
+                      "forbids",
+}
+
 
 def olympus_modules() -> list[Path]:
     """Every trading module that is not part of the Kronos implementation."""
@@ -150,6 +165,8 @@ def test_no_olympus_runtime_string_names_kronos():
     """
     offenders = []
     for path in olympus_modules():
+        if path.name in CHECKER_EXEMPT and path.parent.name == "native":
+            continue
         exempt = LAZY_TABLE_EXEMPT if path.name == "__init__.py" else set()
         for lineno, text in _string_constants(parse(path)):
             if "kronos" not in text.lower():
@@ -171,6 +188,10 @@ def test_the_lazy_import_exemption_is_only_used_by_init():
     """The one exemption must not spread."""
     for path in olympus_modules():
         if path.name == "__init__.py":
+            continue
+        if path.name in CHECKER_EXEMPT and path.parent.name == "native":
+            # The checker's own forbidden-module set contains these names by
+            # construction; it is not borrowing the lazy-import exemption.
             continue
         for _, text in _string_constants(parse(path)):
             assert text not in LAZY_TABLE_EXEMPT, (
@@ -276,6 +297,16 @@ def native_modules() -> list[Path]:
     return sorted(NATIVE.rglob("*.py"))
 
 
+def test_the_checker_exemption_is_still_needed():
+    """An exemption for a module that no longer needs one is a standing hole."""
+    for name, reason in CHECKER_EXEMPT.items():
+        path = NATIVE / name
+        assert path.exists(), f"{name} is exempted and does not exist"
+        assert "kronos" in path.read_text(encoding="utf-8").lower(), (
+            f"native/{name} is exempted from the Kronos rules and no longer "
+            f"mentions Kronos; the exemption has outlived its reason ({reason})")
+
+
 def test_the_native_package_exists_and_is_scanned():
     modules = native_modules()
     assert len(modules) >= 6, f"expected the native package, got {len(modules)}"
@@ -300,6 +331,8 @@ def test_any_kronos_mention_in_native_is_confined_to_the_module_docstring():
     """
     offenders = []
     for path in native_modules():
+        if path.name in CHECKER_EXEMPT:
+            continue
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text)
         docstring_end = 0
@@ -365,6 +398,8 @@ def test_no_native_module_reads_an_external_weight_or_vocabulary_file():
                   "load_state_dict_from_url")
     offenders = []
     for path in native_modules():
+        if path.name in CHECKER_EXEMPT:
+            continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             lowered = line.lower()
             for marker in suspicious:

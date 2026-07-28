@@ -1,0 +1,73 @@
+{
+  "name": "<model name>",
+  "version": "<version>",
+  "created_at": "<ISO-8601 UTC>",
+  "summary": "<what it is, in three sentences>",
+  "intended_use": "<what it is for, and inside what boundary>",
+  "out_of_scope": [
+    "<what it must not be used for>"
+  ],
+  "architecture": {
+    "blocks": {},
+    "external_methods": [],
+    "claimed_original": [],
+    "not_claimed": []
+  },
+  "tasks": {
+    "enabled": [],
+    "blocked": {}
+  },
+  "training_data": {
+    "source": "",
+    "content_hash": "",
+    "manifest_gaps": []
+  },
+  "training_procedure": {
+    "seed": 0,
+    "epochs": 0,
+    "selection_split": ""
+  },
+  "evaluation": {
+    "verdict": "",
+    "strata": 0,
+    "missing_arms": []
+  },
+  "performance": [
+    {
+      "metric": "",
+      "value": null,
+      "evidence": "synthetic_data|unit_tested|none",
+      "dataset": "",
+      "n": 0
+    }
+  ],
+  "limitations": [
+    "<at least one; 'none known' must be written as one>"
+  ],
+  "external_methods": [
+    "<every published technique used, by name>"
+  ],
+  "dependencies": {
+    "torch": "PyTorch \u2014 tensors, autograd and the optimiser. A general-purpose framework, used as such. No model, weight file or architecture is taken from it or from its hub.",
+    "python-stdlib": "The Python standard library \u2014 statistics, math, hashlib, json, dataclasses. Everything outside the neural path is stdlib only."
+  },
+  "ownership": {
+    "code": "",
+    "weights": "",
+    "architecture": "",
+    "scope_of_claim": "",
+    "weights_trained_on_real_data": false
+  },
+  "abstention": {
+    "reasons": {}
+  },
+  "checkpoint": {
+    "content_hash": "",
+    "initialised_from": ""
+  },
+  "reproducibility": {
+    "reproducible": false,
+    "gaps": []
+  },
+  "card_version": 1
+}

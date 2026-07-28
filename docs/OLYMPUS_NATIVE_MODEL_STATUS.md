@@ -7,11 +7,12 @@ records what actually exists. When they disagree, this file is right.
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
 - **Commit surveyed:** `e8380c6`; **P1 (decouple), P2 (skeleton), P3 (learning
-  on synthetic data) and Phase 1 (representation, dataset and baseline
-  foundations) complete**
+  on synthetic data), Phase 1 (representation, dataset and baseline
+  foundations) and Phase 2 (the multi-task model) complete**
 - **Companions:** `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset
   format), `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines,
-  benchmark record)
+  benchmark record), `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task
+  model, abstention, pipeline, evaluation)
 
 ---
 
@@ -28,6 +29,18 @@ P3 changed the second clause and nothing else: there is now a real learner in
 the pipeline rather than a lookup table. It was trained on series this
 repository generates, so it demonstrates that the pipeline can recover a
 structure that is definitely present. **It says nothing about markets.**
+
+Phase 2 built the multi-task model itself: fifteen registered tasks of which
+seven can be trained here, a causal-convolution core with a mixture of experts
+routed by a separately supervised regime head, nine structural abstention
+reasons, a 22-field forecast contract, a training pipeline whose
+reproducibility is computed rather than asserted, a stratified evaluation over
+eight cuts and fourteen metrics, and six automated originality checks that the
+model card must pass before it will render. **It did not change the one-line
+summary**: the model still loses to persistence on the proper scoring rule, and
+its intervals are three times wider than the realised dispersion warrants while
+still covering only 68% of validation observations against a nominal 80% — too
+wide *and* mis-centred.
 
 Phase 1 added the foundations that make a claim about a model checkable at all —
 a 38-channel market-state schema with full per-channel metadata, a dataset and
@@ -101,18 +114,27 @@ That row of the ledger is empty and will stay empty until B1 lifts.
 | Representation **candidates** | `native/representations.py` | ✅**S** | Seven implemented and compared on reconstruction. Each ships a machine-readable record with rationale, formulation, complexity, limitations and prior-art relationship; a candidate with a blank field is refused at construction |
 | **Baselines** | `native/baselines.py` | ✅**S** | Nine, on one interface, emitting the same `QuantilePrediction` the native model does. Seven pure stdlib; two behind the `native` extra |
 | **Benchmark harness** | `native/benchmark.py` | ✅**S** | One split, one cost model, one metric set for every model. Paired bootstrap on the intersection of scored windows. Decides nothing |
+| **Task registry** | `native/tasks.py` | ✅ | Fifteen tasks: 7 trainable here, 5 blocked with stated reasons, 3 derived. A task whose supervision does not exist is refused at config construction |
+| **Multi-task model** | `native/model.py` | ✅**S** | Causal core, regime-routed mixture of experts, optional identity/cross-asset/fusion blocks, one head per enabled task. 7,561 parameters at the tested config |
+| **Abstention policy** | `native/abstain.py` | ✅ | Nine reasons, each a measured check against a stated threshold, recorded on the passing path too. Fails closed and checks integrity first |
+| **Forecast contract** | `native/result.py` | ✅ | All 22 required fields. Provenance mandatory; an uncomputed field is `None`; an abstaining forecast carries no task values |
+| **Training pipeline** | `native/pipeline.py` | 🟡 | Seeds, accumulation, checkpointing, resume, early stopping, tracking, pinning, per-task monitoring, signing, audit — all exercised. **Mixed precision and distributed are implemented and have never run** (B5), and the run record names them |
+| **Inference** | `native/serve.py` | ✅**S** | Verifies before loading, one forward pass for every head, derives what is derived, decides, assembles. Latency and memory measured |
+| **Evaluation pipeline** | `native/evaluation.py` | ✅**S** | Fourteen metrics over eight strata, decisions after costs as the headline, thin strata marked, abstained rows excluded from accuracy |
+| **Originality checks** | `native/originality.py` | ✅ | Six automated checks; two enumerated exemptions, each with a staleness test that has already removed two entries |
+| **Model card** | `native/modelcard.py` | ✅ | Generated from the artefacts, audits itself before rendering, refuses a real-data claim outright |
 | Trainer | `native/train.py` | ✅ | 340 lines. `train` and `train_neural`, both in the one safe order; splits before any statistic is computed |
 | Checkpoint format | `native/checkpoint.py` | ✅ | 407 lines. Manifest required at construction; foreign origins refused by shape; append-only store with content-hash verification |
 | Evaluation driver | `native/train.evaluate_on_split` | 🟡 | Drives `evaluate.py`'s metrics and reports abstentions separately. `WalkForward` integration not yet wired |
 | `Forecaster` implementation | `native/forecaster.py` | ✅ | 372 lines. Estimator registry — table or network, chosen by the checkpoint's kind. Registers beside the baselines; nothing downstream learns it exists |
 
-**Native modules built: 17 files, 9,181 lines, 293 tests.** Of the 26 components
-in the table above, **15 are built and adversarially tested (3 of them also
-measured on synthetic data), 5 are partial, and 6 are untouched**: the regime,
-volatility, conformal, liquidity, event and portfolio-evaluation heads. Every
-untouched one needs data that B1 blocks, except two — the conformal layer, which
-Phase 1 gave a reason to build, and the liquidity head, whose inputs already
-exist in `outcomes.py`.
+**Native modules built: 26 files, 14,558 lines, 418 tests.** Of the 36 components
+in the table above, **25 are built and adversarially tested (7 of them also
+measured on synthetic data), 6 are partial, and 5 are untouched**: the standalone
+regime, volatility, conformal, liquidity and event heads. Phase 2 absorbed the
+regime and volatility heads into the multi-task model, so what remains untouched
+is the conformal layer — which Phase 2 gave a much sharper reason to build — and
+the heads whose inputs B1 blocks.
 
 ### Infrastructure the native work will reuse — already built
 
@@ -213,6 +235,47 @@ document — `learned_tokens` plateaus at 256× the continuous error, `residual_
 cuts that by 2.4×. **No selection has been made**; choosing on synthetic
 reconstruction would be choosing on the fiction.
 
+
+### Phase 2 — what the multi-task model measured
+
+Full tables in `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` §8. Reproduce with
+`python scripts/native_train_and_evaluate.py`.
+
+**The headline is a defect, not a result.** The model's prediction intervals are
+**3.1–3.4× wider** than a Gaussian at the realised dispersion would need, and
+they still cover only **0.68** of validation observations against a nominal
+**0.80**. Widening a well-centred interval raises coverage; this one does not,
+which means the *location* is wrong as well as the scale. A scale correction —
+which is what `fit_calibration` produces — cannot fix that, and saying so is
+more useful than shipping the correction.
+
+| Measurement | Value |
+|---|---|
+| Parameters | 7,561 |
+| Inference latency | p50 1.18 ms, p95 1.47 ms, max 7.9 ms |
+| Peak resident memory | ~700 MB, whole process, `getrusage` |
+| Directional accuracy | 0.580 |
+| Coverage error (signed, points) | **+13.4** overall; 0.0 in the high-volatility stratum, +20.0 in the low |
+| Quantile loss vs persistence | **−0.0089, significant (p ≈ 0) — worse** |
+| Net return after costs | +0.00047 overall; **negative** in the low-liquidity and high-volatility strata |
+| Dead heads | none — all seven heads' losses moved |
+
+Two secondary findings worth keeping:
+
+- **The stratification earns its place immediately.** Overall net return is
+  positive; the low-liquidity-proxy stratum is −0.0036 and the high-volatility
+  stratum is −0.0018. An average would have hidden both, and they are the strata
+  a live system meets first.
+- **Calibration is regime-dependent.** Coverage error is 0.0 in high volatility
+  and +20.0 in low — the model is correctly sized when markets move and far too
+  cautious when they do not. That is a specific, actionable defect rather than a
+  general "miscalibrated".
+
+**No comparison against any third-party model was run and none can be.** No
+official checkpoint is reachable (B2) and its weight licence is unverified (B4).
+The arm is carried in the report as *missing with a reason* rather than dropped.
+No claim of superiority is made.
+
 ---
 
 ## 3. Completion gates — current state
@@ -229,18 +292,17 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G6 | No look-ahead in the training pipeline | ✅ **Met, and now audited independently.** Horizon-inside-input refused on timestamps; embargo cannot be set below the horizon; split before any statistic; instance normalisation reads the input window only; the trunk is left-padded, tested by perturbation. Phase 1 added `dataset.leakage_report`, which re-derives the checks *without sharing code with the splitter*, plus survivorship filtering, as-of corporate-action adjustment, causal multi-timeframe alignment and a `ScalerPolicy` that refuses to fit across the boundary |
 | G7 | Training reproducible from a seed | ✅ **Met, and now for a gradient-descent learner.** Same seed → byte-identical weights; different seed → different weights (a fit that ignored its seed would pass the first assertion alone). `configure_determinism` sets `manual_seed`, `use_deterministic_algorithms(True)`, single-threaded execution and a seeded batching `Generator` |
 | G8 | Every checkpoint carries a complete manifest | ✅ **Met.** Required at construction; missing reproducibility fields reported in `manifest.gaps` rather than hidden |
-| G9 | Abstains outside the training manifold | 🟡 **Partial.** Range-based OOD works and is tested; the conformal nonconformity detector is not built. Phase 1 made abstention measurable rather than merely possible: `benchmark.ForecastScore.abstention_rate` sits beside every score and `compare_scored` intersects window sets, so a model cannot win by declining the hard cases |
-| G10 | Uncertainty calibrated within ±5 coverage points | ⛔ **Blocked — B1** for the gate itself, but the *measurement* now exists and has been run on synthetic data, where the native model **fails it badly**: coverage 1.000 against a nominal 0.800, a +20-point error. That is not a G10 result — G10 is about real data — but it is a defect found, and it was invisible before Phase 1 |
-| G11 | Beats persistence / drift / seasonal-naive out of sample | ⛔ **Blocked — B1.** No real data. The harness that would decide it is built, has nine opponents rather than three, applies costs, and has been shown capable of reporting a loss — the native model currently loses to AR(3) on synthetic data |
+| G9 | Abstains outside the training manifold | ✅ **Met.** Phase 2 built the full policy: nine structural reasons, each a measured check against a stated threshold, recorded on the passing path too, integrity checked first and failing closed. Every reason is individually constructed in `tests/test_trading_native_model.py`. Abstention cannot be gamed — accuracy metrics score answered rows only, and the rate sits beside every score. The conformal *detector* remains unbuilt; the range-based one plus the eight structural checks is what "met" rests on |
+| G10 | Uncertainty calibrated within ±5 coverage points | ⛔ **Blocked — B1** for the gate itself. The measurement exists, is run every evaluation, and the model **fails it on synthetic data**: +13.4 coverage points overall, +20.0 in low volatility, 0.0 in high. Phase 2 also found the intervals are 3.1–3.4× too wide *and* mis-centred, which a scale correction cannot fix. Not a G10 result — G10 is about real data — but a specific defect with a specific location |
+| G11 | Beats persistence / drift / seasonal-naive out of sample | ⛔ **Blocked — B1.** No real data. The harness is built, has nine opponents rather than three, applies costs, stratifies over eight cuts, and has now reported a loss twice: the multi-task model loses to persistence on quantile loss (p ≈ 0) and Phase 1's network lost to a 19-parameter AR(3) fit |
 | G12 | Beats the same strategy without it | ⛔ **Blocked — B1** |
-| G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2.** Kronos weights unreachable |
+| G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2, B4.** The harness now has a first-class *unavailable arm*: the comparison is carried in every report as missing-with-a-reason rather than dropped, and the arm's identity comes from `kronos_adapter` so the native evaluation module contains no competitor's name. Weights unreachable, licence unverified, no claim made |
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11. Now measurable: `ForecastScore.parameters` is reported beside every result and `RepresentationResult.error_per_parameter` scales reconstruction error by size, so the largest model cannot win by being largest |
-| G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today |
-| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All seventeen native modules — sixteen submodules plus the package itself — are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. The model produces forecasts and nothing else — it cannot submit an order, change a limit, reach a credential or promote itself, and `benchmark.run_benchmark` returns numbers rather than decisions |
+| G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today, and `evaluation.run` / `benchmark.run_benchmark` return numbers rather than decisions |
+| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All twenty-six native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. The model produces forecasts and nothing else — it cannot submit an order, change a limit, reach a credential, enable live trading or promote itself |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
 
-**Score: 11 met, 2 partial, 4 blocked, 0 vacuous — unchanged by P3 and by
-Phase 1.**
+**Score: 12 met, 1 partial, 4 blocked, 0 vacuous.** Phase 2 closed G9.
 
 P1 closed G1 and G5; P2 closed G2, G3, G6, G7, G8 and G16, and moved G9 to
 partial and G10 from vacuous to blocked. Every remaining gate is now either
@@ -253,6 +315,14 @@ is re-establish them for a learner that can violate them: a lookup table has no
 optimiser to be non-deterministic and no receptive field to leak through, so
 those gates were cheap to hold. They now hold for a network. That is a
 strengthening of existing evidence, not a new gate, and it is recorded as such.
+
+**Phase 2 closed G9** — abstention outside the training manifold — on the
+strength of nine structural checks, each individually constructed in a test, and
+a harness in which declining cannot be gamed. It closed nothing else. Every value
+gate is still blocked on B1, and Phase 2 did not lift it. What it did instead is
+find a defect: the intervals are too wide *and* mis-centred, and the coverage
+error is regime-dependent. A phase that finds a defect in its own output has done
+its job.
 
 **Phase 1 also closed no new gate**, and it would be wrong to claim otherwise.
 Every value gate is blocked on B1 and Phase 1 did not lift it. What Phase 1
@@ -295,19 +365,22 @@ document should keep saying so.
 | **P2 — Native skeleton** | ✅ **Done** | Closed G2, G3, G6, G7, G8, G16. The estimator is real, not a stub — it can beat a baseline or fail to, which is what makes the comparison worth running |
 | **P3 — Learning on synthetic data** | ✅ **Done** | Closed no new gate; strengthened G6 and G7 for a gradient-descent learner. Encoder, trunk, monotone quantile head, trainer, 30 tests. Converges on a known structure, recovers it (r = 0.516 against the closed-form conditional mean), and correctly fails to beat persistence on white noise. **Proves nothing about markets** and must not be reported as if it did |
 | **Phase 1 — representation and dataset foundations** | ✅ **Done** | Closed no gate; moved G6, G9, G10 and G14 from asserted to measurable. 38-channel schema, dataset provenance and leakage audit, encoder contracts, 7 representation candidates, 9 baselines, 1 harness, 196 new tests. **First result: the native model loses to AR(3) and its intervals are 20 coverage points too wide** |
+| **Phase 2 — the multi-task model** | ✅ **Done** | Closed G9. Fifteen tasks (7 trainable), regime-routed mixture of experts, nine abstention reasons, 22-field contract, reproducibility computed not asserted, 14 metrics over 8 strata, 6 originality checks, self-auditing model card. 125 new tests. **First result: the model loses to persistence and its intervals are 3.1–3.4× too wide while covering only 0.68 against a nominal 0.80** |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
 **Recommendation.** Two pieces of unblocked work are now worth more than any
 further architecture.
 
-1. **Fix the calibration defect Phase 1 found.** Coverage 1.000 against a
-   nominal 0.800 is a real defect in a real component, found by a real
-   measurement, and it does not need market data to fix — a conformal
-   calibration layer (architecture doc §3.9) is the designed answer and G9 is
-   still only partial. This is the rare case where synthetic data is a
-   legitimate test bed, because a badly-calibrated interval is badly calibrated
-   whatever the series.
+1. **Fix the interval defect, which Phase 2 localised.** The intervals are
+   3.1–3.4× wider than the realised dispersion warrants *and* still cover only
+   0.68 against a nominal 0.80, with the error concentrated in low volatility
+   (+20.0 points) and absent in high (0.0). Too wide and mis-centred is not what
+   a conformal scale correction fixes — `fit_calibration` would narrow a band
+   that is already missing. The location error has to be found first, and the
+   regime-dependence is the clue: the model is correctly sized when markets move
+   and far too cautious when they do not. This does not need market data, which
+   makes it the one substantial piece of unblocked modelling work left.
 2. **The liquidity / execution-cost head** (§3.8), because `outcomes.py` already
    records real fills, fees and slippage from the paper broker. It remains the
    only component in the system whose training data was not invented for a test.
@@ -370,6 +443,13 @@ python -m pytest tests/test_trading_independence.py -q
 
 # reproduce the published benchmark tables, including the negative control
 python scripts/native_benchmark.py
+
+# train the multi-task model, evaluate it, and emit its model card
+python scripts/native_train_and_evaluate.py
+
+# the six originality checks, as data
+python -c "import json;from olympus.trading.native import originality as o;\
+print(json.dumps(o.audit_report(), indent=2))"
 
 # every Kronos reference in the repo
 grep -ril kronos --include='*.py' --include='*.toml' .
