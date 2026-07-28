@@ -3,9 +3,11 @@
 The design for an Olympus-owned forecasting system that does not depend on
 Kronos, and the measurable gates it must pass before anyone may say it works.
 
-- **Status:** design + **P1 (decouple), P2 (skeleton) and P3 (learning on synthetic data) complete**. The native package exists; the encoder, causal trunk and monotone quantile head are built and train to convergence. **No weights trained on market data exist.**
+- **Status:** design + **P1 (decouple), P2 (skeleton), P3 (learning on synthetic data) and Phase 1 (representation, dataset and baseline foundations) complete**. The native package carries a 38-channel market-state schema, a dataset and provenance system, stable encoder contracts, seven implemented representation candidates, nine baselines and one scoring harness. **No weights trained on market data exist.**
 - **Companion documents:** `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` (what couples
-  us to Kronos today), `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` (the honest ledger)
+  us to Kronos today), `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` (the honest ledger),
+  `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset format),
+  `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines, benchmarks)
 - **Surveyed at:** `e8380c6`
 
 > **The hard part is not the architecture.** Any competent design will do; the
@@ -328,6 +330,7 @@ advance, and phases 4–7 are all blocked on external access (§7).
 | **P0 — Documentation** | These three documents | *(this deliverable)* |
 | **P1 — Decouple** ✅ | Class B + C renames per dependency-map §7 R1. `tests/test_trading_independence.py` asserting no Olympus module outside `kronos_*` references Kronos | ✅ **Done.** 28 independence tests pass; G1 and G5 closed; no native code written |
 | **P2 — Native skeleton** ✅ | `native/` package: `MarketState`, dataset windowing, checkpoint format + manifest, a deterministic conditional-quantile `Forecaster` (no torch) | ✅ **Done.** Registered in `ForecastService` beside the three baselines, produces valid `ForecastResult`s, evaluable by the existing evaluator |
+| **Phase 1 — representation and dataset foundations** ✅ | Market-state schema with full per-channel metadata; dataset provenance, alignment and leakage audit; encoder contracts; representation candidates implemented and compared; baselines and a single scoring harness | ✅ **Met.** 38 channels (21 obtainable here), 7 candidates, 9 baselines, 196 new tests. Reported that the native model **loses to a 19-parameter AR(3) fit** on a linear synthetic process and that its intervals are 20 coverage points too wide — the benchmark's first job was to be able to say that |
 | **P3 — Learning, offline** ✅ | `torch` behind a `native` extra. Encoder + trunk + quantile head. Trainer with manifest, seeding, temporal split | ✅ **Met.** 1,679-parameter model converges on an AR(1) process whose conditional mean is closed-form, and the predicted median correlates **0.516 with that truth**; beats persistence significantly (MAE 0.0067 vs 0.0088). Negative control: on a random walk the loss falls just as smoothly and the model is significantly *worse* than persistence, so the harness distinguishes learning from fitting. Validates the pipeline, not the market |
 | **P4 — Real data** ⛔ | Ingest real bars, build the corpus, train | **BLOCKED — B1.** No provider reachable |
 | **P5 — Extended heads** | Regime, volatility, conformal, liquidity, event, OOD | Each head measurably beats the corresponding baseline out of sample |
@@ -335,12 +338,17 @@ advance, and phases 4–7 are all blocked on external access (§7).
 | **P7 — Paper trading** ⛔ | Shadow, then paper | **BLOCKED — B3.** No broker reachable |
 | **P8 — Continuous learning** | Wire the native model into `drift.py`, `outcomes.py`, `evolution.py`; scheduled retraining proposals | Retraining is *proposed* autonomously and *approved* by a human — the existing governance split, unchanged |
 
-**P1, P2 and P3 are done.** P3's limit was known in advance and held: a model
-that fits synthetic data proves the pipeline works and nothing about markets.
-With it complete, the unblocked model work is exhausted apart from the
-liquidity/execution-cost head (§3.8), which is the only component whose training
-data — real fills, fees and slippage in `outcomes.py` — was not invented for a
-test. Everything from P4 on waits on B1.
+**P1, P2, P3 and Phase 1 are done.** P3's limit was known in advance and held: a
+model that fits synthetic data proves the pipeline works and nothing about
+markets. Phase 1's contribution was to make that limit *visible* — every claim
+about a representation or a model now has a measurement beside it, and the first
+measurement was a loss.
+
+Two pieces of unblocked work remain worth doing: the conformal calibration layer
+(§3.9), because Phase 1 found a real calibration defect that does not need market
+data to fix; and the liquidity/execution-cost head (§3.8), the only component
+whose training data — real fills, fees and slippage in `outcomes.py` — was not
+invented for a test. Everything from P4 on waits on B1.
 
 ---
 
@@ -470,9 +478,18 @@ cannot be registered (G8).
 
 ## 8. What this document does not claim
 
-- **This remains a design ahead of its evidence.** Nine of the eighteen
-  components are built; `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` is the ledger and
-  it, not this document, is authoritative on what exists.
+- **This remains a design ahead of its evidence.** Fifteen of the twenty-six
+  components in the ledger's table are built and adversarially tested, five are
+  partial and six are untouched; `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` is the
+  ledger and it, not this document, is authoritative on what exists.
+- **No representation has been selected.** Seven are implemented and compared on
+  synthetic reconstruction. Choosing one on that basis would be choosing on the
+  fiction, and `neural.py` still uses the continuous patch encoder on the
+  parsimony argument rather than on a measured win.
+- **The native model does not currently beat the simple alternatives.** On a
+  linear synthetic process it is fifth of ten, behind a 19-parameter
+  autoregressive fit. That is reported here rather than buried, because a
+  benchmark whose losses are not published is not a benchmark.
 - **The trained weights that exist were trained on invented series.** Every
   number in the P3 row of §5 comes from a process defined in
   `tests/test_trading_native_neural.py`. None of it transfers to a claim about

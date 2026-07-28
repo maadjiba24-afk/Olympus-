@@ -182,6 +182,12 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.native.encoder",
     "olympus.trading.native.trunk",
     "olympus.trading.native.neural",
+    "olympus.trading.native.schema",
+    "olympus.trading.native.dataset",
+    "olympus.trading.native.interfaces",
+    "olympus.trading.native.representations",
+    "olympus.trading.native.baselines",
+    "olympus.trading.native.benchmark",
 )
 
 

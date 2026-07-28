@@ -316,6 +316,65 @@ def test_any_kronos_mention_in_native_is_confined_to_the_module_docstring():
         "else:\n" + "\n".join(offenders))
 
 
+def test_no_native_module_imports_a_kronos_source_module():
+    """The named structural check: no native module imports Kronos source.
+
+    `test_no_olympus_module_imports_kronos` above already covers this, because
+    `olympus_modules()` walks the whole trading package including `native/`.
+    This exists as a *separate, named* test anyway, for two reasons. It states
+    the guarantee in the vocabulary the phase plan uses, so a reader looking for
+    "the test that proves the native model does not import Kronos" finds one
+    rather than an argument about coverage. And it checks every import at any
+    depth — inside a function, inside a class, inside a conditional — where the
+    G1 test's rule about *identifiers* would catch the name but not necessarily
+    the import statement that a lazy loader would use.
+
+    A lazy import inside a function is exactly how a dependency gets
+    reintroduced without anyone editing an import block.
+    """
+    forbidden = {"kronos", "kronos_adapter", "kronos_runtime"}
+    offenders = []
+    for path in native_modules():
+        for node in ast.walk(parse(path)):       # any depth, not module scope
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""] + [alias.name for alias in node.names]
+            else:
+                continue
+            for name in names:
+                parts = {part.lower() for part in name.split(".")}
+                if parts & forbidden or "kronos" in name.lower():
+                    offenders.append(f"native/{path.name}:{node.lineno} {name}")
+    assert offenders == [], (
+        "a native module imports Kronos source:\n" + "\n".join(offenders))
+
+
+def test_no_native_module_reads_an_external_weight_or_vocabulary_file():
+    """A codebook loaded from somewhere else is a borrowed representation.
+
+    `representations.py` builds two quantised candidates, and a codebook is the
+    one component here that could plausibly be initialised from a published
+    artefact rather than trained. It is not: the check is that no native module
+    contains a path or hub identifier of the shape a weight file has.
+    `checkpoint.assert_olympus_origin` enforces the same thing at runtime; this
+    is the same rule applied to the source.
+    """
+    suspicious = (".safetensors", ".ckpt", ".pt\"", ".pt'", "pytorch_model",
+                  "from_pretrained", "hf_hub", "huggingface", "torch.hub",
+                  "load_state_dict_from_url")
+    offenders = []
+    for path in native_modules():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            lowered = line.lower()
+            for marker in suspicious:
+                if marker in lowered:
+                    offenders.append(f"native/{path.name}:{lineno} {line.strip()[:70]}")
+    assert offenders == [], (
+        "a native module references an external weight source:\n"
+        + "\n".join(offenders))
+
+
 @pytest.mark.parametrize("constant", KRONOS_IMPOSED)
 def test_no_native_module_inherits_a_kronos_imposed_constant(constant):
     """These exist because the pretrained weights require them. Arriving at the

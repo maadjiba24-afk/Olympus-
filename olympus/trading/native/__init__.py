@@ -5,16 +5,23 @@ Olympus-controlled training pipeline, and checkpoints trained from Olympus
 datasets. Kronos is a benchmark and a replaceable provider, not an ancestor —
 `tests/test_trading_independence.py` proves nothing here reaches it.
 
-What exists (phases P2–P3)
---------------------------
-The pipeline, and two estimators to run through it:
+What exists
+-----------
+The observation, the data, the representation, the model, and the harness that
+judges it:
 
+* `schema`     — the 38 channels, and what is true about each one
 * `state`      — `MarketState`: typed, causal, multi-scale observation
 * `data`       — windowing and the embargoed temporal split
-* `quantile`   — conditional quantiles by lookup; the cheap baseline
+* `dataset`    — provenance, universe membership, alignment, leakage audit
+* `interfaces` — the encoder contracts the rest of Olympus depends on
 * `encoder`    — continuous patch projection; no codebook, no vocabulary
+* `representations` — seven candidates, implemented and comparable
 * `trunk`      — dilated **causal** convolutions, non-autoregressive
+* `quantile`   — conditional quantiles by lookup; the cheap estimator
 * `neural`     — the learned monotone quantile ladder, trained by pinball loss
+* `baselines`  — nine opponents on one interface
+* `benchmark`  — one split, one cost model, one metric set, for every model
 * `torchutil`  — the torch boundary: lazy import, seeded determinism
 * `checkpoint` — Olympus checkpoints and the manifest that makes them claimable
 * `train`      — the pipeline, in the one order that is safe
@@ -22,35 +29,46 @@ The pipeline, and two estimators to run through it:
 
 What does not exist
 -------------------
-Cross-asset and multi-timeframe modelling, the regime, volatility, liquidity and
-event heads, conformal calibration, and the full out-of-distribution detector.
+The regime, volatility, liquidity, event and portfolio-evaluation heads;
+conformal calibration; the full out-of-distribution detector; and any model that
+consumes more than the base timeframe or more than one instrument — the causal
+alignment for both exists in `dataset`, and nothing reads it yet.
 `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` is the ledger; when it and this docstring
 disagree, the ledger is right.
 
-**Olympus does not own a trained market model.** The estimators here have been
-fitted only to synthetic series in tests, because no market data is reachable
-from this environment (`docs/TRADING_EXTERNAL_VALIDATION.md` §1). P3 showed the
-network recovers a structure that is genuinely there and correctly fails to beat
-persistence on white noise — evidence about the pipeline, not about markets.
+**Olympus does not own a trained market model.** Everything here has been fitted
+only to synthetic series, because no market data is reachable from this
+environment (`docs/TRADING_EXTERNAL_VALIDATION.md` §1). On those series the
+network recovers a structure that is genuinely there, correctly fails to beat
+persistence on white noise, and **loses to a nineteen-parameter autoregressive
+fit** — evidence about the pipeline and the harness, not about markets.
 
 Import discipline
 -----------------
-Everything except `encoder`, `trunk`, `neural` and `torchutil` is pure stdlib,
-like the rest of the trading core. Those four import torch *inside functions*,
-behind the `native` extra, and raise `errors.DependencyMissing` when it is
-absent — so the package imports, and its stdlib half runs, on an installation
-that has never seen torch. That is why `tests/test_deps_claim.py` stays green.
+`encoder`, `trunk`, `neural`, `representations`, `torchutil` and two of the nine
+`baselines` need torch; everything else is pure stdlib, like the rest of the
+trading core. Those import torch *inside functions*, behind the `native` extra,
+and raise `errors.DependencyMissing` when it is absent — so the package imports,
+its stdlib half runs, and a benchmark still fields seven opponents on an
+installation that has never seen torch. That is why `tests/test_deps_claim.py`
+stays green.
 """
 
 from __future__ import annotations
 
 _LAZY = {
+    "baselines": ".baselines",
+    "benchmark": ".benchmark",
     "checkpoint": ".checkpoint",
     "data": ".data",
+    "dataset": ".dataset",
     "encoder": ".encoder",
     "forecaster": ".forecaster",
+    "interfaces": ".interfaces",
     "neural": ".neural",
     "quantile": ".quantile",
+    "representations": ".representations",
+    "schema": ".schema",
     "state": ".state",
     "torchutil": ".torchutil",
     "train": ".train",
