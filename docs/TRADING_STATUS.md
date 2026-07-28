@@ -15,7 +15,9 @@ missing. When the two disagree, this file is right.
 > items cannot be demonstrated in this environment, and saying so plainly is
 > part of the deliverable. `docs/TRADING_EXTERNAL_VALIDATION.md` scores the
 > twelve external-validation gates and measures the blocker host by host;
-> `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates.
+> `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
+> `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
+> work, which is **designed and not started** — Olympus owns no trained model.
 
 ---
 
@@ -58,7 +60,7 @@ missing. When the two disagree, this file is right.
 
 | Module | Status | Evidence |
 |---|---|---|
-| `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer |
+| `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer. **Kronos-owned, not Olympus-owned** — see `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` |
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
 | `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
