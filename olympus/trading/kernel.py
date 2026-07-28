@@ -197,6 +197,15 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.native.evaluation",
     "olympus.trading.native.originality",
     "olympus.trading.native.modelcard",
+    "olympus.trading.native.capability",
+    "olympus.trading.native.timeframes",
+    "olympus.trading.native.crossasset",
+    "olympus.trading.native.microstructure",
+    "olympus.trading.native.events",
+    "olympus.trading.native.portfolio_context",
+    "olympus.trading.native.specialists",
+    "olympus.trading.native.scenarios",
+    "olympus.trading.native.explain",
 )
 
 

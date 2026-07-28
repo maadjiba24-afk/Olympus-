@@ -6,13 +6,16 @@ records what actually exists. When they disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Commit surveyed:** `e8380c6`; **P1 (decouple), P2 (skeleton), P3 (learning
+- **Commit surveyed:** `41d8c03`; **P1 (decouple), P2 (skeleton), P3 (learning
   on synthetic data), Phase 1 (representation, dataset and baseline
-  foundations) and Phase 2 (the multi-task model) complete**
+  foundations), Phase 2 (the multi-task model) and Phase 3 (capabilities beyond
+  the reference model) complete**
 - **Companions:** `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset
   format), `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines,
   benchmark record), `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task
-  model, abstention, pipeline, evaluation)
+  model, abstention, pipeline, evaluation),
+  `docs/OLYMPUS_NATIVE_CAPABILITIES.md` (the nine capabilities and their
+  eight-fact reports)
 
 ---
 
@@ -41,6 +44,18 @@ summary**: the model still loses to persistence on the proper scoring rule, and
 its intervals are three times wider than the realised dispersion warrants while
 still covering only 68% of validation observations against a nominal 80% — too
 wide *and* mis-centred.
+
+Phase 3 built nine capabilities the reference model does not have — multi-scale
+bar-state tracking, a time-versioned cross-asset graph, an order-book
+tradability gate, an event boundary, read-only portfolio conditioning, a
+recorded specialist router, probabilistic scenarios, closed-set explanation
+codes, and a thirteen-condition adversarial suite. **Every one of them is
+research-usable and none is production-eligible**, because production
+eligibility needs seven facts and two of them — real-data and paper-trading
+evaluation — are unobtainable here. The register computes that verdict rather
+than asserting it: `CapabilityStatus.production_eligible` has no setter, and
+`registry.enable(..., mode="production")` refuses with the missing facts named.
+**It did not change the one-line summary either.**
 
 Phase 1 added the foundations that make a claim about a model checkable at all —
 a 38-channel market-state schema with full per-channel metadata, a dataset and
@@ -99,14 +114,14 @@ That row of the ledger is empty and will stay empty until B1 lifts.
 | Quantile head — table | `native/quantile.py` | 🟡 | 493 lines. Direct multi-horizon conditional quantiles by lookup. Kept as the cheap baseline and the abstention reference. Declines on a thin cell, an out-of-range input or a missing feature |
 | Quantile head — learned | `native/neural.py` | ✅ | 439 lines. Monotone quantile ladder (softplus increments — quantiles cannot cross), trained by pinball loss, the same function `evaluate.py` scores with. 1,679 parameters at the tested config |
 | Torch boundary | `native/torchutil.py` | ✅ | 164 lines. Lazy import behind the `native` extra, `DependencyMissing` when absent, seeded determinism, state-dict ⇄ JSON with shape checking |
-| Multi-timeframe | `native/state.py`, `native/dataset.py` | 🟡 | The state carries one `ScaleObservation` per timeframe, and `align_timeframes` now pairs each base bar with the newest *closed* context bar and reports its staleness — a finer context series is refused. **No model consumes more than the base scale yet**, and `TimeframeFusion` is a contract with no implementation |
-| Cross-asset | `native/dataset.py` | 🟡 | `align_cross_asset` and `cross_asset_returns` are implemented and tested — a stale reference yields `None`, never a zero return. `CrossAssetContext` is a contract with no implementation, and the modelling remains blocked by B1: there is one instrument's worth of reachable data and it is synthetic |
+| Multi-timeframe | `native/timeframes.py`, `native/state.py`, `native/dataset.py` | ✅**S** | Phase 3 added the eight-rung ladder with a `BarState` on every observation. `last_close` is gated on the state, not on the bar's existence, because a partial bar *has* a close and returning it is the leak; `assert_no_partial_leak` re-derives the states independently. **No model consumes more than the base scale yet** — the ladder produces features and `MultiTaskModel` does not read them |
+| Cross-asset | `native/crossasset.py`, `native/dataset.py` | ✅**S** | Phase 3 added the relationship graph: seven edge kinds, every edge carrying `since`/`until` so a relationship declared in March cannot inform a February forecast. Features are causal by delegation to `align_cross_asset`, and `assert_no_future_reference` re-checks the raw series. Modelling remains blocked by B1: there is one instrument's worth of reachable data and it is synthetic |
 | Regime head | `native/regime.py` | 🔵 | Weak supervision from `regime.RegimeClassifier` (Olympus-owned labels) |
 | Volatility head | `native/vol.py` | 🔵 | Supervised against six existing estimators |
 | Conformal calibration | `native/conformal.py` | 🔵 | Distribution-free coverage |
 | Liquidity / execution cost | `native/liquidity.py` | 🔵 | Best data situation: `outcomes.py` already records fills, fees, slippage |
-| Event awareness | `native/events.py` | 🔵 | Event *timing* only; claims stay untrusted per `knowledge.py` |
-| Portfolio-aware evaluation | `native/portfolio_eval.py` | 🔵 | Produces evidence, never sizing |
+| Event awareness | `native/events.py` | ✅**S** | Seven kinds, split by whether their timing is knowable ahead. **Timing and declared importance only — no content field and no numeric surprise field.** External text is sanitised at construction and only the sanitised form is stored; `assert_event_boundary` refuses source naming a forbidden control, with one enumerated exemption and a staleness test |
+| Portfolio-aware forecasting | `native/portfolio_context.py` | ✅**S** | Evidence, never sizing — and structurally so: the view copies values out and retains no manager, every type is frozen, and `assert_read_only` runs over every native module. The one capability whose inputs Olympus owns |
 | Abstention / OOD | `native/quantile.py` | 🟡 | Range-based OOD and thin-cell abstention, feeding the existing `ForecastResult.abstained`. **Not** the conformal detector §3.11 describes |
 | Dataset / windowing | `native/data.py` | ✅ | 324 lines. Horizon-inside-input refused on timestamps; embargoed split that cannot be set below the horizon |
 | Dataset **provenance and alignment** | `native/dataset.py` | ✅ | Universe membership through time, corporate actions applied only as of a stated instant, causal multi-timeframe and cross-asset alignment, gap and duplicate detection, three-way and walk-forward splits, an **independent** leakage audit, and a two-hash manifest |
@@ -127,14 +142,22 @@ That row of the ledger is empty and will stay empty until B1 lifts.
 | Checkpoint format | `native/checkpoint.py` | ✅ | 407 lines. Manifest required at construction; foreign origins refused by shape; append-only store with content-hash verification |
 | Evaluation driver | `native/train.evaluate_on_split` | 🟡 | Drives `evaluate.py`'s metrics and reports abstentions separately. `WalkForward` integration not yet wired |
 | `Forecaster` implementation | `native/forecaster.py` | ✅ | 372 lines. Estimator registry — table or network, chosen by the checkpoint's kind. Registers beside the baselines; nothing downstream learns it exists |
+| **Capability register** | `native/capability.py` | ✅ | The eight facts per capability, with `production_eligible` computed from seven of them and no setter. The rule is published as data in `ELIGIBILITY_RULE`; `enable()` refuses and names what is missing; `force=True` demands a written reason and records it |
+| **Order book / liquidity** | `native/microstructure.py` | ✅**S** | Snapshots, spread, depth with its band, imbalance, fill probability, slippage, square-root impact, deterioration against the book's own median — and the six-condition tradability gate. **Nothing is calibrated**; every number pairs with `Estimate.calibrated=False` |
+| **Regime specialists** | `native/specialists.py` | 🟡 | Eight specialists plus an always-registered generalist, four distinct fallback reasons, every decision recorded, and a `degenerate` check because a router that always picks the same destination is not routing. **No specialist has been trained** — they are registered slots |
+| **Scenario generation** | `native/scenarios.py` | ✅**S** | Six scenarios summing to exactly one. The unconditional two take their probabilities from the model's own quantile asymmetry; the conditional three are declared, because a return distribution contains no information about whether the exchange will halt. A scenario with no falsifier is refused |
+| **Explainability** | `native/explain.py` | ✅**S** | Twenty-six reason codes in a closed set, each with a measurement. `evidence_only` is what a machine reads; `narrative()` is assembled from the codes and cannot carry a claim they do not. Rules over context, **not attribution over the model's computation** |
 
-**Native modules built: 26 files, 14,558 lines, 418 tests.** Of the 36 components
-in the table above, **25 are built and adversarially tested (7 of them also
-measured on synthetic data), 6 are partial, and 5 are untouched**: the standalone
-regime, volatility, conformal, liquidity and event heads. Phase 2 absorbed the
-regime and volatility heads into the multi-task model, so what remains untouched
-is the conformal layer — which Phase 2 gave a much sharper reason to build — and
-the heads whose inputs B1 blocks.
+**Native modules built: 35 files, 18,914 lines, 529 tests.** Of the 41 components
+in the table above, **33 are built and adversarially tested (15 of them also
+measured on synthetic data), 5 are partial, and 3 are untouched**: the standalone
+conformal, regime and volatility heads. Phase 2 absorbed the regime and
+volatility heads into the multi-task model and Phase 3 built the liquidity and
+event components, so what remains untouched is the conformal layer — which
+Phase 2 gave a much sharper reason to build.
+
+All 35 are registered in `kernel.EVOLUTION_MODULES` and
+`audit_evolution_modules()` returns zero findings.
 
 ### Infrastructure the native work will reuse — already built
 
@@ -276,6 +299,72 @@ official checkpoint is reachable (B2) and its weight licence is unverified (B4).
 The arm is carried in the report as *missing with a reason* rather than dropped.
 No claim of superiority is made.
 
+### Phase 3 — what the capability register reports
+
+Full detail in `docs/OLYMPUS_NATIVE_CAPABILITIES.md`. Print the register with:
+
+```bash
+python -c "from olympus.trading.native.capability import native_capabilities;\
+print(native_capabilities().table())"
+```
+
+**Nine capabilities. Zero production-eligible. Nine research-usable.**
+
+| Capability | Impl | Data | Tests | Historical | Real | Paper | Production |
+|---|---|---|---|---|---|---|---|
+| multi_timeframe | implemented | not ingested | adversarial | synthetic | blocked | none | **NO** |
+| cross_asset | implemented | unreachable | adversarial | synthetic | blocked | none | **NO** |
+| order_book_liquidity | implemented | not ingested | adversarial | synthetic | blocked | none | **NO** |
+| event_awareness | implemented | not ingested | adversarial | synthetic | blocked | none | **NO** |
+| portfolio_aware | implemented | internal | adversarial | synthetic | none | none | **NO** |
+| regime_specialists | implemented | derivable | adversarial | synthetic | blocked | none | **NO** |
+| scenario_generation | implemented | derivable | adversarial | synthetic | blocked | none | **NO** |
+| explainability | implemented | derivable | adversarial | synthetic | none | none | **NO** |
+| robustness | implemented | derivable | adversarial | synthetic | blocked | none | **NO** |
+
+Phase 3 measured no new forecasting number, and that is the correct outcome:
+the capabilities are inputs to and constraints on a forecast, not a forecast.
+What it did establish is a set of structural results, each of which is a test
+rather than a claim:
+
+- **A partial higher-timeframe bar cannot leak its close.** The attribute
+  exists on the candle; the gate is on the state, and a second, independent
+  check re-derives every state from the bars and the clock.
+- **A cross-asset edge declared later cannot inform an earlier instant.**
+  Verified by declaring one after the fact and asserting the context comes back
+  empty.
+- **A positive expected return is not a tradable forecast.** Six conditions,
+  each broken alone in a test, each alone blocking the trade. An unknown book
+  is treated as *not fitting*, never as an infinite one.
+- **Event text reaches nothing.** Not because the sanitiser is complete — it is
+  a denylist and the suite feeds it a payload it misses — but because
+  `EventContext` exposes four numbers and no content field at all.
+- **A forecaster cannot mutate the portfolio.** The view copies out and retains
+  no manager; `assert_read_only` runs over all 35 native modules.
+- **The router falls back for four distinct reasons**, and `RoutingLog`
+  reports when one destination has taken 95% of decisions — which the
+  individual decisions never show.
+- **Scenario probabilities sum to one or the set is refused**, and the
+  bullish/bearish split is derived from the model's own quantile asymmetry
+  rather than declared.
+
+Three limitations are worth carrying into this document rather than leaving in
+the capability file:
+
+1. **Nothing in the microstructure module is calibrated.** Fill probability,
+   slippage and impact all run on declared defaults. The impact coefficient
+   *could* be fitted from `outcomes.py`'s recorded fills — that is the one
+   calibration this system could perform today, and it has not been done.
+2. **No specialist has been trained.** The router, the fallbacks and the record
+   are complete; the specialists are registered slots. At the lookbacks used
+   here the regime classifier reports `UNKNOWN` and the generalist answers
+   everything, which is correct behaviour and means the specialisation has
+   never been exercised.
+3. **The robustness suite establishes safe degradation, not good degradation.**
+   Safe degradation is refusing to answer, and a system that refused everything
+   would also pass it. That is why abstention rates sit beside every score in
+   the Phase 2 evaluation rather than "it declined" being counted as a success.
+
 ---
 
 ## 3. Completion gates — current state
@@ -299,10 +388,16 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2, B4.** The harness now has a first-class *unavailable arm*: the comparison is carried in every report as missing-with-a-reason rather than dropped, and the arm's identity comes from `kronos_adapter` so the native evaluation module contains no competitor's name. Weights unreachable, licence unverified, no claim made |
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11. Now measurable: `ForecastScore.parameters` is reported beside every result and `RepresentationResult.error_per_parameter` scales reconstruction error by size, so the largest model cannot win by being largest |
 | G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today, and `evaluation.run` / `benchmark.run_benchmark` return numbers rather than decisions |
-| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All twenty-six native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. The model produces forecasts and nothing else — it cannot submit an order, change a limit, reach a credential, enable live trading or promote itself |
+| G16 | Safety kernel unreachable from `native/` | ✅ **Met, and now on three axes.** All **thirty-five** native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. Phase 3 added two further source-level boundaries over the same set: `events.assert_event_boundary` (no event-handling code names a risk limit, credential, permission, live-mode flag, safety control or deployment gate) and `portfolio_context.assert_read_only` (no forecasting module names a portfolio or order mutator). Each has exactly one enumerated exemption — the module that declares the forbidden names — with a companion staleness test |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
 
 **Score: 12 met, 1 partial, 4 blocked, 0 vacuous.** Phase 2 closed G9.
+**Phase 3 closed none**, and it would be wrong to claim otherwise: nine
+capabilities that cannot be evaluated on real data cannot close a gate that is
+about real data. What Phase 3 changed is G16's evidence — the audit now covers
+35 native modules rather than 26, and two further structural boundaries
+(`assert_event_boundary`, `assert_read_only`) are enforced over every one of
+them — and it added a register that refuses to call any of the new work ready.
 
 P1 closed G1 and G5; P2 closed G2, G3, G6, G7, G8 and G16, and moved G9 to
 partial and G10 from vacuous to blocked. Every remaining gate is now either
@@ -366,6 +461,7 @@ document should keep saying so.
 | **P3 — Learning on synthetic data** | ✅ **Done** | Closed no new gate; strengthened G6 and G7 for a gradient-descent learner. Encoder, trunk, monotone quantile head, trainer, 30 tests. Converges on a known structure, recovers it (r = 0.516 against the closed-form conditional mean), and correctly fails to beat persistence on white noise. **Proves nothing about markets** and must not be reported as if it did |
 | **Phase 1 — representation and dataset foundations** | ✅ **Done** | Closed no gate; moved G6, G9, G10 and G14 from asserted to measurable. 38-channel schema, dataset provenance and leakage audit, encoder contracts, 7 representation candidates, 9 baselines, 1 harness, 196 new tests. **First result: the native model loses to AR(3) and its intervals are 20 coverage points too wide** |
 | **Phase 2 — the multi-task model** | ✅ **Done** | Closed G9. Fifteen tasks (7 trainable), regime-routed mixture of experts, nine abstention reasons, 22-field contract, reproducibility computed not asserted, 14 metrics over 8 strata, 6 originality checks, self-auditing model card. 125 new tests. **First result: the model loses to persistence and its intervals are 3.1–3.4× too wide while covering only 0.68 against a nominal 0.80** |
+| **Phase 3 — capabilities beyond the reference model** | ✅ **Done** | Closed no gate; strengthened G16 on two new axes. Nine capabilities, a register whose readiness verdict is computed, thirteen adversarial conditions, 178 new tests. **First result: nine of nine are research-usable and zero are production-eligible**, which is what the evidence supports and not a placeholder |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
@@ -381,9 +477,15 @@ further architecture.
    regime-dependence is the clue: the model is correctly sized when markets move
    and far too cautious when they do not. This does not need market data, which
    makes it the one substantial piece of unblocked modelling work left.
-2. **The liquidity / execution-cost head** (§3.8), because `outcomes.py` already
-   records real fills, fees and slippage from the paper broker. It remains the
-   only component in the system whose training data was not invented for a test.
+2. **Calibrate the impact model from recorded fills.** Phase 3 built
+   `ImpactModel.calibrate_from_fills`, which needs `size`, `depth`,
+   `spread_bps` and `realised_bps` per fill — and `outcomes.py` already records
+   real fills, fees and slippage from the paper broker. It is the only estimator
+   in the system whose calibration is reachable today, and until it is run every
+   slippage and tradability number reports `calibrated=False` and means it. The
+   liquidity / execution-cost *head* (§3.8) is the larger version of the same
+   observation: it remains the only model component whose training data was not
+   invented for a test.
 
 Everything else waits on B1. Further architecture — multi-timeframe,
 cross-asset, regime and volatility heads — would be tuned against series this
@@ -446,6 +548,14 @@ python scripts/native_benchmark.py
 
 # train the multi-task model, evaluate it, and emit its model card
 python scripts/native_train_and_evaluate.py
+
+# the nine capabilities and their readiness verdicts
+python -c "from olympus.trading.native.capability import native_capabilities;\
+print(native_capabilities().table())"
+
+# the capabilities and the thirteen adversarial conditions
+python -m pytest tests/test_trading_native_capabilities.py \
+                tests/test_trading_native_robustness.py -q
 
 # the six originality checks, as data
 python -c "import json;from olympus.trading.native import originality as o;\

@@ -6,7 +6,7 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~48,800 lines across 74 modules (48 top-level + 26 in `native/`); 64 test files; **2879 trading tests passing**
+- **Scale:** ~51,700 lines across 83 modules (48 top-level + 35 in `native/`); 66 test files; **3057 trading tests passing**
 - **Whole repository:** 8042 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
@@ -73,7 +73,7 @@ missing. When the two disagree, this file is right.
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
 | `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
 | independence | ✅ | 30 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else; `native/` additionally carries no Kronos-imposed constant, no module-scope torch, no Kronos import at any depth, and no reference to an external weight file or codebook |
-| `native/` | 🟡 | 26 modules, 14,558 lines, 418 tests. A 38-channel market-state schema, dataset provenance with five leakage defences, stable encoder contracts, seven representation candidates, a multi-task model (fifteen registered tasks, seven trainable), nine structural abstention reasons, a reproducible training pipeline and a stratified evaluation over eight strata. **Fitted only to synthetic series, where it loses to persistence and its intervals are 3.1–3.4× too wide** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` |
+| `native/` | 🟡 | 35 modules, 18,914 lines, 529 tests. A 38-channel market-state schema, dataset provenance with five leakage defences, stable encoder contracts, seven representation candidates, a multi-task model (fifteen registered tasks, seven trainable), nine structural abstention reasons, a reproducible training pipeline, a stratified evaluation over eight strata, and nine capabilities behind a register whose readiness verdict is computed rather than declared. **Fitted only to synthetic series, where it loses to persistence and its intervals are 3.1–3.4× too wide; nine of nine capabilities are research-usable and zero are production-eligible** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` and `docs/OLYMPUS_NATIVE_CAPABILITIES.md` |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution

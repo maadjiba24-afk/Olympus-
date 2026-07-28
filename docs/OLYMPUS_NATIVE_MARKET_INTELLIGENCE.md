@@ -3,13 +3,14 @@
 The design for an Olympus-owned forecasting system that does not depend on
 Kronos, and the measurable gates it must pass before anyone may say it works.
 
-- **Status:** design + **P1, P2, P3, Phase 1 and Phase 2 complete**. The native package carries a 38-channel market-state schema, a dataset and provenance system, stable encoder contracts, seven representation candidates, nine baselines, one scoring harness, and a multi-task model with fifteen registered tasks, nine abstention reasons, a reproducible training pipeline and a stratified evaluation. **No weights trained on market data exist.**
+- **Status:** design + **P1, P2, P3, Phase 1, Phase 2 and Phase 3 complete**. The native package carries a 38-channel market-state schema, a dataset and provenance system, stable encoder contracts, seven representation candidates, nine baselines, one scoring harness, a multi-task model with fifteen registered tasks, nine abstention reasons, a reproducible training pipeline and a stratified evaluation — and nine capabilities (multi-timeframe, cross-asset, order book, events, portfolio, regime specialists, scenarios, explainability, robustness) behind a register that computes readiness from seven facts. **No weights trained on market data exist, and no capability is production-eligible.**
 - **Companion documents:** `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` (what couples
   us to Kronos today), `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` (the honest ledger),
   `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset format),
   `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines, benchmarks),
-  `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task model)
-- **Surveyed at:** `e8380c6`
+  `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task model),
+  `docs/OLYMPUS_NATIVE_CAPABILITIES.md` (the nine capabilities)
+- **Surveyed at:** `41d8c03`
 
 > **The hard part is not the architecture.** Any competent design will do; the
 > binding constraints are *data* and *compute*, and this environment has neither.
@@ -334,23 +335,37 @@ advance, and phases 4–7 are all blocked on external access (§7).
 | **Phase 1 — representation and dataset foundations** ✅ | Market-state schema with full per-channel metadata; dataset provenance, alignment and leakage audit; encoder contracts; representation candidates implemented and compared; baselines and a single scoring harness | ✅ **Met.** 38 channels (21 obtainable here), 7 candidates, 9 baselines, 196 new tests. Reported that the native model **loses to a 19-parameter AR(3) fit** on a linear synthetic process and that its intervals are 20 coverage points too wide — the benchmark's first job was to be able to say that |
 | **P3 — Learning, offline** ✅ | `torch` behind a `native` extra. Encoder + trunk + quantile head. Trainer with manifest, seeding, temporal split | ✅ **Met.** 1,679-parameter model converges on an AR(1) process whose conditional mean is closed-form, and the predicted median correlates **0.516 with that truth**; beats persistence significantly (MAE 0.0067 vs 0.0088). Negative control: on a random walk the loss falls just as smoothly and the model is significantly *worse* than persistence, so the harness distinguishes learning from fitting. Validates the pipeline, not the market |
 | **Phase 2 — the multi-task model** ✅ | Multi-task heads with explicit task configuration and loss weighting; regime-conditioned processing; abstention as a first-class output; the full forecast contract; a reproducible training pipeline; stratified evaluation; automated originality checks | ✅ **Met.** Closed G9. Fifteen tasks registered, seven trainable here and five refused for want of supervision. Reported that the model **loses to persistence** on quantile loss and that its intervals are 3.1–3.4× too wide while covering 0.68 against a nominal 0.80 |
+| **Phase 3 — capabilities beyond the reference model** ✅ | Multi-timeframe, cross-asset, order-book/liquidity, event-aware, portfolio-aware, regime specialists, scenarios, explainability, adversarial robustness — each modular, independently testable and measurable | ✅ **Met.** Nine capabilities, 178 new tests, thirteen adversarial conditions. Reported that **nine of nine are research-usable and zero are production-eligible**: production eligibility needs real-data and paper-trading evaluation, and neither is obtainable here. `CapabilityStatus.production_eligible` is computed from seven facts and has no setter |
 | **P4 — Real data** ⛔ | Ingest real bars, build the corpus, train | **BLOCKED — B1.** No provider reachable |
 | **P5 — Extended heads** | Regime, volatility, conformal, liquidity, event, OOD | Each head measurably beats the corresponding baseline out of sample |
 | **P6 — Champion/challenger** ⛔ | Native vs Kronos under one `EvaluationHarness` | **BLOCKED — B2, B4.** Kronos weights unreachable |
 | **P7 — Paper trading** ⛔ | Shadow, then paper | **BLOCKED — B3.** No broker reachable |
 | **P8 — Continuous learning** | Wire the native model into `drift.py`, `outcomes.py`, `evolution.py`; scheduled retraining proposals | Retraining is *proposed* autonomously and *approved* by a human — the existing governance split, unchanged |
 
-**P1, P2, P3 and Phase 1 are done.** P3's limit was known in advance and held: a
-model that fits synthetic data proves the pipeline works and nothing about
-markets. Phase 1's contribution was to make that limit *visible* — every claim
-about a representation or a model now has a measurement beside it, and the first
-measurement was a loss.
+**P1, P2, P3, Phase 1, Phase 2 and Phase 3 are done.** P3's limit was known in
+advance and held: a model that fits synthetic data proves the pipeline works and
+nothing about markets. Phase 1's contribution was to make that limit *visible* —
+every claim about a representation or a model now has a measurement beside it,
+and the first measurement was a loss. Phase 3's contribution is the same idea one
+level up: nine capabilities now exist, and the register that describes them
+refuses to call any of them ready.
+
+Sections 3.4, 3.5, 3.8, 3.9 and 3.10 of this document were designs; Phase 3 built
+them, and building them changed two of the designs. §3.5's cross-sectional
+attention is implemented, but the *relationships* it attends over are declared
+with validity intervals rather than estimated, because an estimated edge uses the
+future to find itself. §3.9's event channel carries timing and declared
+importance only — there is no numeric surprise feature, because using one
+without vintages is a look-ahead of days. Both are narrower than the design and
+both are narrower on purpose; `docs/OLYMPUS_NATIVE_CAPABILITIES.md` states each
+as a limitation rather than as a completed item.
 
 Two pieces of unblocked work remain worth doing: the conformal calibration layer
-(§3.9), because Phase 1 found a real calibration defect that does not need market
-data to fix; and the liquidity/execution-cost head (§3.8), the only component
-whose training data — real fills, fees and slippage in `outcomes.py` — was not
-invented for a test. Everything from P4 on waits on B1.
+(§3.7), because Phase 2 localised a real interval defect that does not need
+market data to fix; and the impact/execution-cost calibration (§3.8) — Phase 3
+built `ImpactModel.calibrate_from_fills` and `outcomes.py` already holds the real
+fills, fees and slippage it needs, making it the only estimator in the system
+whose calibration is reachable today. Everything from P4 on waits on B1.
 
 ---
 

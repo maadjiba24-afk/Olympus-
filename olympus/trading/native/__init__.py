@@ -58,6 +58,15 @@ from __future__ import annotations
 
 _LAZY = {
     "abstain": ".abstain",
+    "capability": ".capability",
+    "crossasset": ".crossasset",
+    "events": ".events",
+    "explain": ".explain",
+    "microstructure": ".microstructure",
+    "portfolio_context": ".portfolio_context",
+    "scenarios": ".scenarios",
+    "specialists": ".specialists",
+    "timeframes": ".timeframes",
     "baselines": ".baselines",
     "benchmark": ".benchmark",
     "checkpoint": ".checkpoint",
