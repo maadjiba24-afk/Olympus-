@@ -261,6 +261,126 @@ def test_a_retired_strategy_id_is_not_reused():
     assert S.ForecastMomentumStrategy.id not in K.RETIRED_STRATEGY_IDS
 
 
+# --- G2 / G16: the native package -------------------------------------------
+
+NATIVE = TRADING / "native"
+
+#: Constants the Kronos weights impose on Kronos. A native model that inherited
+#: one would be a Kronos derivative wearing Olympus names, whatever its module
+#: is called. Listed in docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md §2.
+KRONOS_IMPOSED = ("KRONOS_FEATURES", "TEMPORAL_FEATURES", "s1_bits", "s2_bits",
+                  "max_context", "BSQ", "BinarySphericalQuantization")
+
+
+def native_modules() -> list[Path]:
+    return sorted(NATIVE.rglob("*.py"))
+
+
+def test_the_native_package_exists_and_is_scanned():
+    modules = native_modules()
+    assert len(modules) >= 6, f"expected the native package, got {len(modules)}"
+
+
+def test_any_kronos_mention_in_native_is_confined_to_the_module_docstring():
+    """G2's prose half, made mechanical.
+
+    The G1 tests above already cover `native/` for imports, identifiers and
+    runtime strings, because `olympus_modules()` walks the whole package. What
+    this adds is a rule about *where* prose may mention Kronos at all.
+
+    A module docstring may: `data.py` opens by saying that every leakage defect
+    the teardown found was a data-pipeline defect, which is why the embargo
+    exists, and `__init__.py` states outright that Kronos is a benchmark and not
+    an ancestor. Both are provenance a reviewer should meet at the top of the
+    file.
+
+    The *body* may not. A comment three hundred lines down reasoning about what
+    Kronos does is a native module deriving its design from Kronos, and the
+    difference between that and a citation is exactly the line this test draws.
+    """
+    offenders = []
+    for path in native_modules():
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        docstring_end = 0
+        body = tree.body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            docstring_end = body[0].value.end_lineno or 0
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if "kronos" in line.lower() and lineno > docstring_end:
+                offenders.append(f"native/{path.name}:{lineno} {line.strip()[:70]}")
+    assert offenders == [], (
+        "a native module may cite Kronos in its module docstring and nowhere "
+        "else:\n" + "\n".join(offenders))
+
+
+@pytest.mark.parametrize("constant", KRONOS_IMPOSED)
+def test_no_native_module_inherits_a_kronos_imposed_constant(constant):
+    """These exist because the pretrained weights require them. Arriving at the
+    same six-column feature order by our own argument is fine; importing the
+    constant that encodes somebody else's is not."""
+    offenders = [f"native/{p.name}" for p in native_modules()
+                 if constant in p.read_text(encoding="utf-8")]
+    assert offenders == [], (
+        f"{constant} is a Kronos-imposed constant: " + ", ".join(offenders))
+
+
+def test_no_native_module_imports_torch_at_module_scope():
+    """The trading core is pure stdlib and `tests/test_deps_claim.py` guards it.
+    When the neural work lands, torch is imported lazily inside functions behind
+    a `native` extra — never at module scope."""
+    offenders = []
+    for path in native_modules():
+        tree = parse(path)
+        for node in tree.body:                    # module scope only
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = ([a.name for a in node.names]
+                         + [getattr(node, "module", "") or ""])
+                for name in names:
+                    if name.split(".")[0] in {"torch", "numpy", "scipy",
+                                              "pandas", "sklearn"}:
+                        offenders.append(f"native/{path.name}:{node.lineno} {name}")
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_the_native_package_is_covered_by_the_kernel_audit():
+    """G16. Added from the first commit rather than when it grows a model: the
+    moment to prove a component cannot reach the kernel is before there is
+    anything in it worth being tempted by."""
+    from olympus.trading import kernel as K
+    covered = {m for m in K.EVOLUTION_MODULES if m.startswith("olympus.trading.native")}
+    assert len(covered) >= 6, f"native modules missing from the audit: {covered}"
+    assert K.audit_evolution_modules() == []
+
+
+def test_the_native_package_cannot_reach_the_safety_kernel():
+    from olympus.trading import kernel as K
+    findings = K.audit_evolution_modules(
+        [m for m in K.EVOLUTION_MODULES if ".native" in m])
+    assert findings == [], "\n".join(str(f) for f in findings)
+
+
+def test_a_native_checkpoint_cannot_be_seeded_from_foreign_weights():
+    """G3, at the boundary rather than by policy."""
+    from olympus.trading.native.checkpoint import (ForeignWeightsRefused,
+                                                   assert_olympus_origin)
+    for origin in ("https://huggingface.co/x/y", "/weights/kronos.safetensors",
+                   "shiyu-coder/Kronos-small", "~/model.pt"):
+        with pytest.raises(ForeignWeightsRefused):
+            assert_olympus_origin(origin)
+    assert assert_olympus_origin(None) == ""
+
+
+def test_the_native_forecaster_is_a_peer_of_the_baselines():
+    """Independence is only useful if the native model plugs into the same
+    interface everything else does."""
+    from olympus.trading.forecast import Forecaster
+    from olympus.trading.native.forecaster import NativeForecaster
+    assert issubclass(NativeForecaster, Forecaster)
+
+
 # --- the generalised surface still works -------------------------------------
 
 def test_the_value_verdict_asks_the_same_questions_of_any_model():

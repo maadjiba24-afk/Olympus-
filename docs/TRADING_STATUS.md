@@ -6,8 +6,8 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~34,000 lines across 52 modules; 56 test files; **2444 trading tests passing**
-- **Whole repository:** 7607 passed, 30 skipped, **zero regressions**
+- **Scale:** ~36,000 lines across 59 modules; 57 test files; **2525 trading tests passing**
+- **Whole repository:** 7688 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
@@ -17,8 +17,9 @@ missing. When the two disagree, this file is right.
 > twelve external-validation gates and measures the blocker host by host;
 > `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
 > `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
-> work: decoupling from Kronos is **done and enforced by test**, but **Olympus
-> owns no trained model** and no native model code exists.
+> work: decoupling from Kronos is **done and enforced by test**, and the native
+> package exists as working plumbing — but **Olympus owns no trained market
+> model**, having fitted only synthetic series.
 
 ---
 
@@ -64,7 +65,8 @@ missing. When the two disagree, this file is right.
 | `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer. **Kronos-owned, not Olympus-owned** — see `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` |
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
 | `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
-| independence | ✅ | 14 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else |
+| independence | ✅ | 28 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else; `native/` additionally carries no Kronos-imposed constant and no module-scope torch |
+| `native/` | 🟡 | 7 modules, 2,173 lines, 67 tests. Causal `MarketState`, embargoed temporal split, conditional-quantile estimator, provenanced checkpoints, `Forecaster` plug point. **Fitted only to synthetic series** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution

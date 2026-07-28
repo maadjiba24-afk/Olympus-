@@ -6,16 +6,18 @@ records what actually exists. When they disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Commit surveyed:** `e8380c6`; **P1 (decouple) complete**
+- **Commit surveyed:** `e8380c6`; **P1 (decouple) and P2 (skeleton) complete**
 
 ---
 
 ## The one-line summary
 
-> **Olympus owns no trained market model.** No native module exists, no
-> checkpoint exists, no training run has been performed, and no evaluation
-> against any model has been attempted. What exists is a design and a
-> dependency map.
+> **Olympus owns no trained market model.** The native package exists and
+> works: it builds market states, splits data without leakage, fits a
+> conditional quantile estimator, writes provenanced checkpoints, and serves
+> forecasts through the standard interface. It has been fitted **only to
+> synthetic series in tests**, because no market data is reachable (B1). It is
+> plumbing that works, not a model that knows anything.
 
 This line should not change until §3's gates start passing, and the phrase
 "Olympus owns a Kronos-class model" must not appear anywhere until **G7, G8,
@@ -40,11 +42,11 @@ G11 and G13** have all passed on real data.
 
 | Component | Module (planned) | Status | Notes |
 |---|---|---|---|
-| Market-state representation | `native/state.py` | 🔵 | Designed. Reuses `features`, `regime`, `volatility` — all of which exist and are tested |
-| Encoder | `native/encoder.py` | 🔵 | Continuous multi-scale, no codebook |
-| Temporal architecture | `native/trunk.py` | 🔵 | Non-autoregressive |
-| Quantile head | `native/quantile.py` | 🔵 | Pinball loss; `evaluate.pinball_loss` already exists |
-| Multi-timeframe | `native/encoder.py` | 🔵 | `instruments.py` owns the alignment grid |
+| Market-state representation | `native/state.py` | ✅ | 336 lines. Typed, causal (a scale closing after `as_of` raises), multi-scale, missing-is-missing. Reuses `features`, `regime`, `volatility` |
+| Encoder | `native/encoder.py` | 🔵 | Continuous multi-scale, no codebook. **Not built** |
+| Temporal architecture | `native/trunk.py` | 🔵 | Non-autoregressive. **Not built** |
+| Quantile head | `native/quantile.py` | 🟡 | 493 lines. Direct multi-horizon conditional quantiles — the right *shape*, learned by a lookup table rather than a network. Declines on a thin cell, an out-of-range input or a missing feature |
+| Multi-timeframe | `native/state.py` | 🟡 | The state carries one `ScaleObservation` per timeframe and single-scale is the degenerate case; **no model consumes more than the base scale yet** |
 | Cross-asset | `native/trunk.py` | 🔵 | Blocked in practice by B1 — needs a multi-instrument corpus |
 | Regime head | `native/regime.py` | 🔵 | Weak supervision from `regime.RegimeClassifier` (Olympus-owned labels) |
 | Volatility head | `native/vol.py` | 🔵 | Supervised against six existing estimators |
@@ -52,14 +54,16 @@ G11 and G13** have all passed on real data.
 | Liquidity / execution cost | `native/liquidity.py` | 🔵 | Best data situation: `outcomes.py` already records fills, fees, slippage |
 | Event awareness | `native/events.py` | 🔵 | Event *timing* only; claims stay untrusted per `knowledge.py` |
 | Portfolio-aware evaluation | `native/portfolio_eval.py` | 🔵 | Produces evidence, never sizing |
-| Abstention / OOD | `native/ood.py` | 🔵 | Feeds the existing `ForecastResult.abstained` |
-| Dataset / windowing | `native/data.py` | 🔵 | Strict temporal split; scalers train-only |
-| Trainer | `native/train.py` | 🔵 | Deterministic; writes a manifest |
-| Checkpoint format | `native/checkpoint.py` | 🔵 | Manifest-bearing; no foreign-weight init path |
-| Evaluation driver | `native/eval.py` | 🔵 | Drives existing `evaluate.py` + `WalkForward` |
-| `Forecaster` implementation | `native/forecaster.py` | 🔵 | The plug point into `ForecastService` |
+| Abstention / OOD | `native/quantile.py` | 🟡 | Range-based OOD and thin-cell abstention, feeding the existing `ForecastResult.abstained`. **Not** the conformal detector §3.11 describes |
+| Dataset / windowing | `native/data.py` | ✅ | 324 lines. Horizon-inside-input refused on timestamps; embargoed split that cannot be set below the horizon |
+| Trainer | `native/train.py` | ✅ | 217 lines. One function, in the one safe order; splits before any statistic is computed |
+| Checkpoint format | `native/checkpoint.py` | ✅ | 407 lines. Manifest required at construction; foreign origins refused by shape; append-only store with content-hash verification |
+| Evaluation driver | `native/train.evaluate_on_split` | 🟡 | Drives `evaluate.py`'s metrics and reports abstentions separately. `WalkForward` integration not yet wired |
+| `Forecaster` implementation | `native/forecaster.py` | ✅ | 330 lines. Registers beside the baselines; nothing downstream learns it exists |
 
-**Native modules built: 0 of 18.**
+**Native modules built: 7 files, 2,173 lines, 67 tests.** Of the eighteen
+components designed, **six are built, four partial, eight untouched** — every
+untouched one is neural or needs data.
 
 ### Infrastructure the native work will reuse — already built
 
@@ -80,10 +84,11 @@ Not native-model work, but load-bearing for it. Verified present and tested at
 | `capabilities.py`, `governance.py`, `kernel.py` | ✅ | Promotion gating, unchanged |
 | `drift.py`, `outcomes.py`, `evolution.py` | ✅ | Deterioration detection and the learning loop |
 
-**The genuinely missing thing is machine learning.** `torch` and `numpy` are
-imported in exactly one file in the repository — `kronos_runtime.py`. There is
-no dataset, no training loop, no optimiser, no checkpoint format, and no trained
-weight of any kind.
+**What is still genuinely missing is the neural work.** `torch` and `numpy` are
+still imported in exactly one file in the repository — `kronos_runtime.py` — and
+the native package is pure stdlib, so `tests/test_deps_claim.py` stays green.
+There is now a dataset, a checkpoint format and a training pipeline; there is no
+optimiser, no encoder, no trunk, and no learned weight beyond a lookup table.
 
 ---
 
@@ -94,28 +99,32 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | # | Gate | State |
 |---|---|---|
 | G1 | No Olympus module outside the Kronos files references Kronos | ✅ **Met.** `tests/test_trading_independence.py`: no import, no identifier, no runtime string. One enumerated exemption (`__init__.py`'s lazy-import table) |
-| G2 | No native module imports Kronos or a Kronos constant | ➖ Vacuous — no native module exists |
-| G3 | Native weights never initialised from foreign weights | ➖ Vacuous — no weights exist |
+| G2 | No native module imports Kronos or a Kronos constant | ✅ **Met.** No import, identifier or runtime string; no Kronos-imposed constant; prose mentions confined to module docstrings; no module-scope torch |
+| G3 | Native weights never initialised from foreign weights | ✅ **Met.** `assert_olympus_origin` refuses a URL, a path, a weights file or a hub id by shape, and an unknown id when the store is consulted |
 | G4 | Design note per component | ✅ **Met** — all twelve in architecture doc §3 |
 | G5 | Deleting the Kronos modules breaks no Olympus module | ✅ **Met, executed.** A subprocess blocks both modules at import and every other trading module still imports |
-| G6 | No look-ahead in the training pipeline | ➖ No pipeline. `features.assert_causal` exists and is tested |
-| G7 | Training reproducible from a seed | ➖ No trainer |
-| G8 | Every checkpoint carries a complete manifest | ➖ No checkpoints |
-| G9 | Abstains outside the training manifold | ➖ No model |
-| G10 | Uncertainty calibrated within ±5 coverage points | ➖ No model |
+| G6 | No look-ahead in the training pipeline | ✅ **Met.** Horizon-inside-input refused on timestamps; embargo cannot be set below the horizon; split happens before any statistic; state causality raises |
+| G7 | Training reproducible from a seed | ✅ **Met** for this estimator: identical rows produce byte-identical parameters, asserted at both the estimator and pipeline level |
+| G8 | Every checkpoint carries a complete manifest | ✅ **Met.** Required at construction; missing reproducibility fields reported in `manifest.gaps` rather than hidden |
+| G9 | Abstains outside the training manifold | 🟡 **Partial.** Range-based OOD works and is tested; the conformal nonconformity detector is not built |
+| G10 | Uncertainty calibrated within ±5 coverage points | ⛔ **Blocked — B1.** Uncertainty is computed and bounded; coverage cannot be measured without real out-of-sample data |
 | G11 | Beats persistence / drift / seasonal-naive out of sample | ⛔ **Blocked — B1.** No real data |
 | G12 | Beats the same strategy without it | ⛔ **Blocked — B1** |
 | G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2.** Kronos weights unreachable |
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11 |
 | G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today |
-| G16 | Safety kernel unreachable from `native/` | ➖ Vacuous until `native/` exists; the mechanism (`kernel.audit_evolution_modules`) is built and tested |
+| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All seven native modules are in `kernel.EVOLUTION_MODULES` and the audit is clean |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
 
-**Score: 5 met, 0 not met, 4 blocked, 8 vacuous.**
+**Score: 11 met, 2 partial, 4 blocked, 0 vacuous.**
 
-G1 and G5 were closed by P1. The other three met gates are *governance* gates
-that were already true before this work started. **No value gate has been
-attempted, and none can be until B1 lifts.**
+P1 closed G1 and G5; P2 closed G2, G3, G6, G7, G8 and G16, and moved G9 to
+partial and G10 from vacuous to blocked. Every remaining gate is now either
+*measured* or *blocked on data* — none is vacuous, which is the useful thing
+P2 changed.
+
+**No value gate has been attempted.** G11–G14 are the ones that decide whether
+any of this is worth having, and all four need B1 to lift.
 
 ---
 
@@ -144,12 +153,17 @@ document should keep saying so.
 | Phase | Blocked? | Value |
 |---|---|---|
 | **P1 — Decouple from Kronos** | ✅ **Done** | Closed G1 and G5. 14 independence tests; 2444 trading tests green; no native code written |
-| **P2 — Native skeleton, no learning** | No | Moderate. Establishes `MarketState`, the dataset windowing, the checkpoint manifest and the `Forecaster` plug point using a deterministic statistical model. Closes G8's mechanism and G16 |
+| **P2 — Native skeleton** | ✅ **Done** | Closed G2, G3, G6, G7, G8, G16. 2,173 lines, 67 tests. The estimator is real, not a stub — it can beat a baseline or fail to, which is what makes the comparison worth running |
 | **P3 — Learning on synthetic data** | No | Low-moderate. Proves the training pipeline recovers known structure. Closes G6, G7. **Proves nothing about markets** and must not be reported as if it did |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
-**Recommendation.** P1 is done. Next is P2.
+**Recommendation.** P1 and P2 are done. P3 (learning on synthetic data) is
+unblocked but of limited value — it would prove a *training loop* converges,
+which the current pipeline already demonstrates for a model that has no loop.
+The higher-value unblocked work is the liquidity/execution-cost head (§3.8),
+because `outcomes.py` already records real fills, fees and slippage from the
+paper broker: that is the one component with data available today.
 
 **Original recommendation, kept for the record:** do P1 first and completely. It removes a real dependency, is
 independently verifiable by an AST test, and its value does not depend on the

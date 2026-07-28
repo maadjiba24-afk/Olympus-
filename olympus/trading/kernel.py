@@ -168,6 +168,16 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.proposals",
     "olympus.trading.champion",
     "olympus.trading.evolution",
+    # The native forecasting work. Added from its first commit rather than when
+    # it grows a model: the moment to prove a component cannot reach the kernel
+    # is before there is anything in it worth being tempted by.
+    "olympus.trading.native",
+    "olympus.trading.native.state",
+    "olympus.trading.native.data",
+    "olympus.trading.native.quantile",
+    "olympus.trading.native.checkpoint",
+    "olympus.trading.native.train",
+    "olympus.trading.native.forecaster",
 )
 
 

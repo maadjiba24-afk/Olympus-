@@ -66,6 +66,7 @@ _LAZY = {
     "lab": ".lab",
     "modes": ".modes",
     "monitor": ".monitor",
+    "native": ".native",
     "oms": ".oms",
     "outcomes": ".outcomes",
     "perf": ".perf",
