@@ -211,6 +211,7 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.native.isolation",
     "olympus.trading.native.promotion",
     "olympus.trading.native.improvement",
+    "olympus.trading.native.matched",
 )
 
 

@@ -66,6 +66,7 @@ _LAZY = {
     "explain": ".explain",
     "improvement": ".improvement",
     "isolation": ".isolation",
+    "matched": ".matched",
     "microstructure": ".microstructure",
     "portfolio_context": ".portfolio_context",
     "promotion": ".promotion",

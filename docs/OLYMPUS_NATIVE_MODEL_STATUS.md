@@ -9,7 +9,8 @@ records what actually exists. When they disagree, this file is right.
 - **Commit surveyed:** `41d8c03`; **P1 (decouple), P2 (skeleton), P3 (learning
   on synthetic data), Phase 1 (representation, dataset and baseline
   foundations), Phase 2 (the multi-task model), Phase 3 (capabilities beyond
-  the reference model) and Phase 4 (controlled self-evolution) complete**
+  the reference model), Phase 4 (controlled self-evolution) and Phase 5 (the
+  matched Kronos evaluation) complete**
 - **Companions:** `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset
   format), `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines,
   benchmark record), `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task
@@ -17,7 +18,8 @@ records what actually exists. When they disagree, this file is right.
   `docs/OLYMPUS_NATIVE_CAPABILITIES.md` (the nine capabilities and their
   eight-fact reports),
   `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` (the learning loop, research
-  isolation and the twelve-stage gate)
+  isolation and the twelve-stage gate),
+  `docs/OLYMPUS_VS_KRONOS.md` (the matched evaluation and its verdict)
 
 ---
 
@@ -46,6 +48,19 @@ summary**: the model still loses to persistence on the proper scoring rule, and
 its intervals are three times wider than the realised dispersion warrants while
 still covering only 68% of validation observations against a nominal 80% — too
 wide *and* mis-centred.
+
+Phase 5 ran the matched comparison, and its result is the most consequential
+number in this document. **The Kronos arm could not be built** — the source is
+MIT and obtainable, the weights are behind an egress denial — so the verdict is
+**INSUFFICIENT EVIDENCE** and no promotion decision is possible. But five of the
+six required arms did run, and on the question this environment *can* answer the
+answer is unambiguous: **the native model loses to persistence, to an order-3
+autoregression and to gradient-boosted trees, on every metric, in every regime,
+in every period, at the corrected significance level — nine usable comparisons,
+nine significant losses, zero wins.** Its mean absolute error is 0.0256 against
+0.0066 for the trees, and **its bias is +0.0250** — essentially the whole error
+is a location offset of about 2.7 realised standard deviations. Full report in
+`docs/OLYMPUS_VS_KRONOS.md`.
 
 Phase 4 connected the native models to the self-evolution framework: a forecast
 evidence journal carrying all fourteen required fields, ten weakness detectors,
@@ -164,18 +179,19 @@ That row of the ledger is empty and will stay empty until B1 lifts.
 | **Challenger proposals** | `native/challengers.py` | ✅ | Ten kinds, eleven required fields, contradicting evidence mandatory, compute budget enforced by `isolation.py` rather than declared. Every complexity-adding proposal is paired with a simplification, so the parsimony tie-break has something to break toward |
 | **Research isolation** | `native/isolation.py` | ✅**S** | Separate process, network namespace, seccomp-BPF filter, rlimits, allowlisted environment, read-only bind-mounted inputs, signed inputs and results, destroyed worker. Confinement is **observed by the worker**, not asserted by the parent, and a run whose confinement did not hold is discarded |
 | **Promotion gate** | `native/promotion.py` | 🟡 | Twelve stages in order; a missing check fails rather than passes; rejection is terminal; `promote()` calls `governance.authorise` first and has no `force`. **Stages 9 and 10 have never actually run** — no paper broker on real quotes (B3), no live stream to shadow |
+| **Matched evaluation** | `native/matched.py` | ✅**S** | Twelve-field fairness contract enforced by fingerprint (a mismatch raises, it does not warn), six required arms with unavailable ones carried rather than dropped, an input-class axis that separates data advantage from architecture, fifteen forecast and eighteen trading metrics, Holm-corrected paired bootstrap, non-overlapping period sampling, and six computed decision categories. **`verdict` returns `INSUFFICIENT_EVIDENCE` whenever the Kronos arm did not run, and there is no argument that overrides it** |
 | **Improvement metrics** | `native/improvement.py` | 🟡 | The twelve Phase 4 names, with thirteen volume counters that raise rather than being ignored. **Seven of the twelve are unmeasured here** and are listed as such |
 | **Explainability** | `native/explain.py` | ✅**S** | Twenty-six reason codes in a closed set, each with a measurement. `evidence_only` is what a machine reads; `narrative()` is assembled from the codes and cannot carry a claim they do not. Rules over context, **not attribution over the model's computation** |
 
-**Native modules built: 40 files, 22,930 lines, 659 tests.** Of the 46 components
-in the table above, **36 are built and adversarially tested (18 of them also
+**Native modules built: 41 files, 24,154 lines, 698 tests.** Of the 47 components
+in the table above, **37 are built and adversarially tested (19 of them also
 measured on synthetic data), 7 are partial, and 3 are untouched**: the standalone
 conformal, regime and volatility heads. Phase 2 absorbed the regime and
 volatility heads into the multi-task model and Phase 3 built the liquidity and
 event components, so what remains untouched is the conformal layer — which
 Phase 2 gave a much sharper reason to build.
 
-All 40 are registered in `kernel.EVOLUTION_MODULES` and
+All 41 are registered in `kernel.EVOLUTION_MODULES` and
 `audit_evolution_modules()` returns zero findings.
 
 ### Infrastructure the native work will reuse — already built
@@ -438,6 +454,53 @@ Two limitations belong in this document rather than only in the capability file:
   return and `simpler_at_equal_performance`. Four need something outside a
   forecast journal; three need trades that happened.
 
+### Phase 5 — the matched evaluation
+
+Full report in `docs/OLYMPUS_VS_KRONOS.md`. Reproduce with
+`python scripts/matched_evaluation.py --bars 2000`.
+
+| arm | MAE | quantile loss | coverage (nominal 0.80) | net return | Sharpe |
+|---|---|---|---|---|---|
+| persistence | 0.008711 | 0.003215 | 0.833 | +0.000 | – |
+| autoregression | 0.007038 | 0.002470 | 0.768 | +0.904 | +20.0 |
+| **gradient-boosted trees** | **0.006589** | **0.002334** | 0.773 | **+1.052** | **+23.5** |
+| olympus-native | 0.025636 | 0.008821 | 0.471 | −0.362 | −7.4 |
+
+**Verdict: INSUFFICIENT EVIDENCE. Promotion: none possible.** Computed, not
+chosen — `MatchedReport.verdict` returns this whenever the Kronos arm did not
+run, and a test constructs the most favourable possible arrangement of the other
+five arms and asserts it still does.
+
+Three findings that belong in this ledger rather than only in the report:
+
+1. **The native model's error is almost entirely bias.** MAE 0.025636, bias
+   +0.025038 — a location offset of roughly 2.7 realised standard deviations,
+   with approximately correct spread. This is the Phase 2 defect ("too wide
+   *and* mis-centred") reproduced on different data, larger, and after a
+   validation-only configuration search. It explains the coverage (0.47 against
+   0.80), the sub-coin-toss directional accuracy (0.448) and the fact that the
+   only stratum where the model is net positive is trending-up.
+2. **The input-advantage axis measured exactly zero.** The candles-only and
+   derived-feature arms share weights and differ only in which outputs are
+   permitted; the derived channels do not reach the point forecast, so
+   permitting them changed no prediction and no trade. Whatever the multi-task
+   heads contribute, they do not contribute to the number the strategy acts on.
+   Regime accuracy on this data is **0.000**.
+3. **The harness itself produced a wrong number first.** Treating stride-1
+   windows as independent trading periods reported a Sharpe of +38 for the
+   autoregression; nothing raised, and the arms were still ranked correctly.
+   `matched.non_overlapping` is the fix. An earlier version also under-trained
+   the Olympus arm and measured a bias a larger model does not have — under-
+   training one arm is as unfair as over-searching another, which is why every
+   arm now gets the same declared, validation-only search with its size
+   recorded.
+
+**Kronos status, narrowed.** The upstream source clones from GitHub and is
+MIT. It carries no weights. The weights are on `huggingface.co`, which this
+environment's gateway denies with a 403 at CONNECT. So B2 is unchanged and
+**B4 is narrower than it was**: the code licence is known to be MIT, the
+*weight* licence is on a page that cannot be read.
+
 ---
 
 ## 3. Completion gates — current state
@@ -456,15 +519,19 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G8 | Every checkpoint carries a complete manifest | ✅ **Met.** Required at construction; missing reproducibility fields reported in `manifest.gaps` rather than hidden |
 | G9 | Abstains outside the training manifold | ✅ **Met.** Phase 2 built the full policy: nine structural reasons, each a measured check against a stated threshold, recorded on the passing path too, integrity checked first and failing closed. Every reason is individually constructed in `tests/test_trading_native_model.py`. Abstention cannot be gamed — accuracy metrics score answered rows only, and the rate sits beside every score. The conformal *detector* remains unbuilt; the range-based one plus the eight structural checks is what "met" rests on |
 | G10 | Uncertainty calibrated within ±5 coverage points | ⛔ **Blocked — B1** for the gate itself. The measurement exists, is run every evaluation, and the model **fails it on synthetic data**: +13.4 coverage points overall, +20.0 in low volatility, 0.0 in high. Phase 2 also found the intervals are 3.1–3.4× too wide *and* mis-centred, which a scale correction cannot fix. Not a G10 result — G10 is about real data — but a specific defect with a specific location |
-| G11 | Beats persistence / drift / seasonal-naive out of sample | ⛔ **Blocked — B1.** No real data. The harness is built, has nine opponents rather than three, applies costs, stratifies over eight cuts, and has now reported a loss twice: the multi-task model loses to persistence on quantile loss (p ≈ 0) and Phase 1's network lost to a 19-parameter AR(3) fit |
+| G11 | Beats persistence / drift / seasonal-naive out of sample | ⛔ **Blocked — B1, and now failed a third time on synthetic data.** Phase 5's matched run reports nine usable comparisons against persistence, autoregression and gradient-boosted trees: **nine significant losses, zero wins**, after Holm correction. The harness is built, has nine opponents rather than three, applies costs, stratifies over eight cuts, and has now reported a loss three times: the multi-task model loses to persistence on quantile loss (p ≈ 0) and Phase 1's network lost to a 19-parameter AR(3) fit |
 | G12 | Beats the same strategy without it | ⛔ **Blocked — B1** |
-| G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2, B4.** The harness now has a first-class *unavailable arm*: the comparison is carried in every report as missing-with-a-reason rather than dropped, and the arm's identity comes from `kronos_adapter` so the native evaluation module contains no competitor's name. Weights unreachable, licence unverified, no claim made |
+| G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2, B4, and now attempted rather than assumed.** Phase 5 built the full matched harness — twelve-field fairness contract enforced by fingerprint, six required arms, fifteen forecast and eighteen trading metrics, Holm-corrected paired bootstrap, six decision categories — and ran it. Five arms ran; Kronos did not, because its weights are behind an egress denial measured at run time. The verdict is `INSUFFICIENT_EVIDENCE` **by construction**. Original note: **Blocked — B1, B2, B4.** The harness now has a first-class *unavailable arm*: the comparison is carried in every report as missing-with-a-reason rather than dropped, and the arm's identity comes from `kronos_adapter` so the native evaluation module contains no competitor's name. Weights unreachable, licence unverified, no claim made |
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11. Now measurable: `ForecastScore.parameters` is reported beside every result and `RepresentationResult.error_per_parameter` scales reconstruction error by size, so the largest model cannot win by being largest |
 | G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today, and `evaluation.run` / `benchmark.run_benchmark` return numbers rather than decisions |
 | G16 | Safety kernel unreachable from `native/` | ✅ **Met, and now on three axes.** All **thirty-five** native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. Phase 3 added two further source-level boundaries over the same set: `events.assert_event_boundary` (no event-handling code names a risk limit, credential, permission, live-mode flag, safety control or deployment gate) and `portfolio_context.assert_read_only` (no forecasting module names a portfolio or order mutator). Each has exactly one enumerated exemption — the module that declares the forbidden names — with a companion staleness test |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met, and now exercised on a native model.** Phase 4's demonstration B runs the whole path: a measured metric regression flags the component, the monitor restricts it to `DISABLED` with no operator, an autonomous reinstatement is refused, two rollback triggers fire, the deployment ledger restores the version a named operator deployed, and a twelve-entry hash-chained audit trail verifies. On synthetic evidence, so the state does not change |
 
 **Score: 12 met, 1 partial, 4 blocked, 0 vacuous.** Phase 2 closed G9.
+**Phase 5 closed none either**, and it moved G13 from *unattempted* to
+*attempted and blocked at a named, measured point*. That is worth less than
+closing a gate and more than an assertion: the harness now exists, it runs, and
+what stops it is one HTTP status code rather than an absence of work.
 **Phase 4 closed none.** G15 (cannot promote itself) and G16 (kernel
 unreachable) were already met and are now met on a wider surface — five more
 modules audited, and a promotion path that exists and refuses. G17
@@ -520,7 +587,7 @@ Full statements in the architecture doc §7.
 | **B1** | No training data — every provider 403 at CONNECT | ⛔ Hard | Phases P4+ cannot start. No claim about market performance is possible |
 | **B2** | Kronos checkpoint unreachable (`huggingface.co` 403) | ⛔ Hard | G13 unattemptable. "Outperforms Kronos" not claimable |
 | **B3** | No broker sandbox reachable | ⛔ Hard | P7 cannot start |
-| **B4** | Kronos **weight** licence unverifiable | ⛔ Hard | Distillation prohibited until read. May be permanent |
+| **B4** | Kronos **weight** licence unverifiable | ⛔ Hard | Distillation prohibited until read. May be permanent. **Narrowed by Phase 5:** the upstream *source* clones from GitHub and is MIT; it carries no weights. Only the weight licence, hosted on the model hub, remains unread |
 | **B5** | 4 CPU cores, 15 GB RAM, no CUDA, ephemeral | 🟡 Severe | Caps the model at ~10⁵–10⁶ parameters. Shapes the architecture; does not block it |
 | **B6** | Olympus ships 3 required deps with a CI guard | 🟡 Constraint | `torch` goes in a `native` extra, imported lazily |
 | **B7** | Ephemeral container, no artefact store | 🟡 Constraint | Checkpoint storage undecided. The manifest is small and must be committed regardless |
@@ -542,6 +609,7 @@ document should keep saying so.
 | **Phase 2 — the multi-task model** | ✅ **Done** | Closed G9. Fifteen tasks (7 trainable), regime-routed mixture of experts, nine abstention reasons, 22-field contract, reproducibility computed not asserted, 14 metrics over 8 strata, 6 originality checks, self-auditing model card. 125 new tests. **First result: the model loses to persistence and its intervals are 3.1–3.4× too wide while covering only 0.68 against a nominal 0.80** |
 | **Phase 3 — capabilities beyond the reference model** | ✅ **Done** | Closed no gate; strengthened G16 on two new axes. Nine capabilities, a register whose readiness verdict is computed, thirteen adversarial conditions, 178 new tests. **First result: nine of nine are research-usable and zero are production-eligible**, which is what the evidence supports and not a placeholder |
 | **Phase 4 — controlled self-evolution** | ✅ **Done** | Closed no gate; widened G15/G16 and exercised G17 on a native model. Evidence journal, ten weakness detectors, ten challenger kinds, OS-level research isolation, a twelve-stage gate and twelve improvement metrics. 130 new tests. **First result: the end-to-end demonstration ends in a rejection**, because the challenger converged on persistence and could not be distinguished from it while carrying more parameters |
+| **Phase 5 — matched Kronos evaluation** | 🟡 **Done, verdict blocked** | Closed no gate; moved G13 from unattempted to measured-and-blocked. Matched harness, six arms, thirty-three metrics, Holm-corrected statistics, six computed decision categories, 39 tests. **First result: verdict INSUFFICIENT EVIDENCE (Kronos unreachable), and the native model loses to all three simple baselines on every metric — nine significant losses, zero wins** |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
@@ -628,6 +696,12 @@ python scripts/native_benchmark.py
 
 # train the multi-task model, evaluate it, and emit its model card
 python scripts/native_train_and_evaluate.py
+
+# the matched evaluation, its tables and its verdict
+python scripts/matched_evaluation.py --bars 2000
+
+# the harness guarantees, including the rule that makes the verdict honest
+python -m pytest tests/test_trading_native_matched.py -q
 
 # what this host can enforce on generated research code
 python -c "import json; from olympus.trading.native.isolation import \

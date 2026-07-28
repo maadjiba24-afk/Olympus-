@@ -6,7 +6,7 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~55,700 lines across 88 modules (48 top-level + 40 in `native/`); 68 test files; **3187 trading tests passing**
+- **Scale:** ~56,900 lines across 89 modules (48 top-level + 41 in `native/`); 69 test files; **3226 trading tests passing**
 - **Whole repository:** 8042 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
@@ -73,7 +73,7 @@ missing. When the two disagree, this file is right.
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
 | `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
 | independence | ✅ | 30 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else; `native/` additionally carries no Kronos-imposed constant, no module-scope torch, no Kronos import at any depth, and no reference to an external weight file or codebook |
-| `native/` | 🟡 | 40 modules, 22,930 lines, 659 tests. A 38-channel market-state schema, dataset provenance with five leakage defences, stable encoder contracts, seven representation candidates, a multi-task model (fifteen registered tasks, seven trainable), nine structural abstention reasons, a reproducible training pipeline, a stratified evaluation over eight strata, nine capabilities behind a register whose readiness verdict is computed, and a self-evolution loop with OS-level research isolation — separate process, network namespace, seccomp filter, rlimits, signed inputs and results. **Fitted only to synthetic series, where it loses to persistence and its intervals are 3.1–3.4× too wide; zero of nine capabilities are production-eligible; the end-to-end evolution demonstration ends in a rejection** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md`, `docs/OLYMPUS_NATIVE_CAPABILITIES.md` and `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` |
+| `native/` | 🟡 | 41 modules, 24,154 lines, 698 tests. A 38-channel market-state schema, dataset provenance with five leakage defences, stable encoder contracts, seven representation candidates, a multi-task model (fifteen registered tasks, seven trainable), nine structural abstention reasons, a reproducible training pipeline, a stratified evaluation over eight strata, nine capabilities behind a register whose readiness verdict is computed, a self-evolution loop with OS-level research isolation, and a matched six-arm evaluation harness whose verdict is computed rather than chosen. **Fitted only to synthetic series. The matched run's verdict is INSUFFICIENT EVIDENCE — the Kronos checkpoint is unreachable — and on the arms that did run the native model loses to persistence, autoregression and gradient-boosted trees on every metric: nine significant losses, zero wins** — see `docs/OLYMPUS_VS_KRONOS.md` |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution

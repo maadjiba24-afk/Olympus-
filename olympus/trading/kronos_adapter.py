@@ -939,6 +939,22 @@ def kronos_value_hypothesis(*, instrument: str = "", clock: Any = None):
             "in this system",))
 
 
+def matched_reference_label() -> str:
+    """The name the Phase 5 matched evaluation prints for the incumbent arm.
+
+    Lives here rather than in `native/matched.py` for the reason gate G2
+    exists: the native evaluation module must carry no competitor identity in
+    its own vocabulary. The comparison is real and the name is real; what the
+    independence boundary forbids is the *native* package knowing it.
+    """
+    return "kronos (official checkpoint)"
+
+
+def matched_reference_blockers() -> tuple[str, ...]:
+    """Why that arm cannot be built here. Blocker ids, for the manifest."""
+    return ("B2", "B4")
+
+
 def native_benchmark_arm(*, observations: Sequence[Any] = ()):
     """This model as an arm in a native evaluation. Usually unavailable.
 
