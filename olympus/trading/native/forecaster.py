@@ -55,6 +55,22 @@ from .checkpoint import NativeCheckpoint
 from .quantile import ConditionalQuantileModel, Declined, QuantilePrediction
 from .state import MarketState, MarketStateBuilder
 
+#: Estimator kinds this forecaster can serve. A registry rather than an
+#: `if`-chain so that adding an estimator is one entry and a name, and so an
+#: unknown `model_kind` fails with the list of what *is* known rather than
+#: falling through to whichever branch happened to be last.
+def _estimators() -> dict:
+    from .quantile import ConditionalQuantileModel as _Statistical
+    out = {_Statistical.KIND: _Statistical}
+    try:
+        from .neural import NeuralQuantileModel as _Neural
+        out[_Neural.KIND] = _Neural
+    except Exception:                                    # noqa: BLE001
+        # torch absent. The statistical estimator still serves, which is the
+        # whole reason the native package does not require a tensor library.
+        pass
+    return out
+
 #: Reported in `failure_code` when the estimator declines. Distinct from the
 #: data-condition codes in `forecast.py` because this is the model choosing not
 #: to speak about an input it has no basis for, not the input being bad.
@@ -94,21 +110,31 @@ class NativeForecaster(Forecaster):
                 "without a manifest cannot say what it is",
                 got=type(checkpoint).__name__)
         self.checkpoint = checkpoint
-        self.model = ConditionalQuantileModel.from_parameters(checkpoint.parameters)
+        estimators = _estimators()
+        estimator = estimators.get(checkpoint.model_kind)
+        if estimator is None:
+            raise ConfigurationError(
+                "no estimator can serve this checkpoint's model_kind",
+                model_kind=checkpoint.model_kind, known=sorted(estimators))
+        self.model = estimator.from_parameters(checkpoint.parameters)
+        #: A window-consuming estimator reads bars; a feature-consuming one
+        #: reads a `MarketState`. Decided once here rather than per forecast.
+        self.consumes_bars = hasattr(self.model, "predict_from_bars")
         self.state_builder = state_builder or MarketStateBuilder(
             features=FeatureBuilder(), clock=self.clock)
 
         # A model served against a different feature set than it was trained on
         # is silently, totally wrong — so this is checked once, loudly, at
         # construction rather than per forecast.
-        trained_on = set(checkpoint.manifest.feature_names)
-        available = set(self.state_builder.feature_names)
-        missing = sorted(set(self.model.config.conditioners) - available)
-        if missing:
-            raise ConfigurationError(
-                "the state builder cannot supply features this checkpoint was "
-                "trained on", missing=missing,
-                trained_on=sorted(trained_on), available=sorted(available))
+        if not self.consumes_bars:
+            trained_on = set(checkpoint.manifest.feature_names)
+            available = set(self.state_builder.feature_names)
+            missing = sorted(set(self.model.config.conditioners) - available)
+            if missing:
+                raise ConfigurationError(
+                    "the state builder cannot supply features this checkpoint "
+                    "was trained on", missing=missing,
+                    trained_on=sorted(trained_on), available=sorted(available))
 
     # -- identity ----------------------------------------------------------
 
@@ -130,6 +156,10 @@ class NativeForecaster(Forecaster):
         50-bar feature raises this automatically instead of producing a model
         that quietly abstains on every short window.
         """
+        if self.consumes_bars:
+            # A window encoder needs exactly its lookback: more would be
+            # truncated, fewer cannot be padded honestly.
+            return int(self.model.config.lookback)
         needed = [self.state_builder.features.min_bars(name)
                   for name in self.model.config.conditioners
                   if name in self.state_builder.feature_names]
@@ -201,7 +231,13 @@ class NativeForecaster(Forecaster):
             return abstain(f"market state could not be built: {exc}",
                            "DATA_VALIDATION_FAILED")
 
-        prediction = self.model.predict(dict(state.base.features))
+        if self.consumes_bars:
+            # Exactly the lookback the encoder was built for, taken from the
+            # end of the window.
+            prediction = self.model.predict_from_bars(
+                bars[-self.model.config.lookback:])
+        else:
+            prediction = self.model.predict(dict(state.base.features))
         if isinstance(prediction, Declined):
             # Not an error. The model has no basis for this input and says so,
             # which is worth more than a confident guess.
@@ -276,10 +312,16 @@ class NativeForecaster(Forecaster):
                                        "cell": list(prediction.cell),
                                        "cell_samples": prediction.cell_samples}),
             data_quality=state.data_quality,
-            warnings=("paths are quantile bands, not sampled futures: each "
-                      "path traces one quantile through the horizon",
-                      f"conditioned on cell {prediction.cell} with "
-                      f"{prediction.cell_samples} training observations"))
+            warnings=self._warnings(prediction))
+
+    @staticmethod
+    def _warnings(prediction: QuantilePrediction) -> tuple[str, ...]:
+        out = ["paths are quantile bands, not sampled futures: each path "
+               "traces one quantile through the horizon"]
+        if prediction.cell:
+            out.append(f"conditioned on cell {prediction.cell} with "
+                       f"{prediction.cell_samples} training observations")
+        return tuple(out)
 
     @staticmethod
     def _uncertainty(forecast_volatility: float, realised: float,

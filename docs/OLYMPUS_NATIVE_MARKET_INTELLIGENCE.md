@@ -3,7 +3,7 @@
 The design for an Olympus-owned forecasting system that does not depend on
 Kronos, and the measurable gates it must pass before anyone may say it works.
 
-- **Status:** design + **P1 (decouple) and P2 (skeleton) complete**. The native package exists and is pure stdlib; no neural model and no trained weights.
+- **Status:** design + **P1 (decouple), P2 (skeleton) and P3 (learning on synthetic data) complete**. The native package exists; the encoder, causal trunk and monotone quantile head are built and train to convergence. **No weights trained on market data exist.**
 - **Companion documents:** `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` (what couples
   us to Kronos today), `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` (the honest ledger)
 - **Surveyed at:** `e8380c6`
@@ -326,18 +326,21 @@ advance, and phases 4–7 are all blocked on external access (§7).
 | Phase | Work | Exit condition |
 |---|---|---|
 | **P0 — Documentation** | These three documents | *(this deliverable)* |
-| **P1 — Decouple** ✅ | Class B + C renames per dependency-map §7 R1. `tests/test_trading_independence.py` asserting no Olympus module outside `kronos_*` references Kronos | ✅ **Done.** 14 independence tests pass; G1 and G5 closed; 2444 trading tests green; no native code written |
-| **P2 — Native skeleton** ✅ | `native/` package: `MarketState`, dataset windowing, checkpoint format + manifest, a deterministic conditional-quantile `Forecaster` (no torch) | ✅ **Done.** Registered in `ForecastService` beside the three baselines, produces valid `ForecastResult`s, evaluable by the existing evaluator. 2,173 lines, 67 tests |
-| **P3 — Learning, offline** | `torch` behind a `native` extra. Encoder + trunk + quantile head. Trainer with manifest, seeding, temporal split | Trains to convergence on **synthetic** series with known structure and recovers that structure. This validates the pipeline, not the market |
+| **P1 — Decouple** ✅ | Class B + C renames per dependency-map §7 R1. `tests/test_trading_independence.py` asserting no Olympus module outside `kronos_*` references Kronos | ✅ **Done.** 28 independence tests pass; G1 and G5 closed; no native code written |
+| **P2 — Native skeleton** ✅ | `native/` package: `MarketState`, dataset windowing, checkpoint format + manifest, a deterministic conditional-quantile `Forecaster` (no torch) | ✅ **Done.** Registered in `ForecastService` beside the three baselines, produces valid `ForecastResult`s, evaluable by the existing evaluator |
+| **P3 — Learning, offline** ✅ | `torch` behind a `native` extra. Encoder + trunk + quantile head. Trainer with manifest, seeding, temporal split | ✅ **Met.** 1,679-parameter model converges on an AR(1) process whose conditional mean is closed-form, and the predicted median correlates **0.516 with that truth**; beats persistence significantly (MAE 0.0067 vs 0.0088). Negative control: on a random walk the loss falls just as smoothly and the model is significantly *worse* than persistence, so the harness distinguishes learning from fitting. Validates the pipeline, not the market |
 | **P4 — Real data** ⛔ | Ingest real bars, build the corpus, train | **BLOCKED — B1.** No provider reachable |
 | **P5 — Extended heads** | Regime, volatility, conformal, liquidity, event, OOD | Each head measurably beats the corresponding baseline out of sample |
 | **P6 — Champion/challenger** ⛔ | Native vs Kronos under one `EvaluationHarness` | **BLOCKED — B2, B4.** Kronos weights unreachable |
 | **P7 — Paper trading** ⛔ | Shadow, then paper | **BLOCKED — B3.** No broker reachable |
 | **P8 — Continuous learning** | Wire the native model into `drift.py`, `outcomes.py`, `evolution.py`; scheduled retraining proposals | Retraining is *proposed* autonomously and *approved* by a human — the existing governance split, unchanged |
 
-**P1 and P2 are unblocked and can begin immediately** once this design is
-accepted. P3 is unblocked but of limited value: a model that fits synthetic data
-proves the pipeline works and nothing about markets.
+**P1, P2 and P3 are done.** P3's limit was known in advance and held: a model
+that fits synthetic data proves the pipeline works and nothing about markets.
+With it complete, the unblocked model work is exhausted apart from the
+liquidity/execution-cost head (§3.8), which is the only component whose training
+data — real fills, fees and slippage in `outcomes.py` — was not invented for a
+test. Everything from P4 on waits on B1.
 
 ---
 
@@ -467,13 +470,19 @@ cannot be registered (G8).
 
 ## 8. What this document does not claim
 
-- **No native code exists.** This is a design. `docs/OLYMPUS_NATIVE_MODEL_STATUS.md`
-  is the ledger and currently records nothing built.
+- **This remains a design ahead of its evidence.** Nine of the eighteen
+  components are built; `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` is the ledger and
+  it, not this document, is authoritative on what exists.
+- **The trained weights that exist were trained on invented series.** Every
+  number in the P3 row of §5 comes from a process defined in
+  `tests/test_trading_native_neural.py`. None of it transfers to a claim about
+  markets, and the word "trained" must carry the qualifier wherever it appears.
 - **No claim that the native model will beat Kronos.** G13 is unattempted and
   blocked, and losing it is an acceptable outcome.
 - **No claim that this architecture is better than Kronos's.** It is different,
   for stated reasons. Whether the differences help is an empirical question that
   B1 and B5 currently prevent anyone from answering.
-- **Olympus does not own a Kronos-class model.** It owns no trained weights at
-  all. That sentence should stay in this document until G7, G8, G11 and G13 have
-  all been passed with real data.
+- **Olympus does not own a Kronos-class model.** It owns a small network whose
+  only training corpus is synthetic, which is not the same thing and must never
+  be reported as if it were. That sentence should stay in this document until
+  G7, G8, G11 and G13 have all been passed with real data.

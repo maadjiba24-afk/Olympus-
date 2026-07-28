@@ -178,6 +178,10 @@ EVOLUTION_MODULES: tuple[str, ...] = (
     "olympus.trading.native.checkpoint",
     "olympus.trading.native.train",
     "olympus.trading.native.forecaster",
+    "olympus.trading.native.torchutil",
+    "olympus.trading.native.encoder",
+    "olympus.trading.native.trunk",
+    "olympus.trading.native.neural",
 )
 
 

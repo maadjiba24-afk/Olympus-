@@ -6,8 +6,8 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~36,000 lines across 59 modules; 57 test files; **2525 trading tests passing**
-- **Whole repository:** 7688 passed, 30 skipped, **zero regressions**
+- **Scale:** ~37,500 lines across 59 modules (48 top-level + 11 in `native/`); 58 test files; **2555 trading tests passing**
+- **Whole repository:** 7718 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
@@ -18,8 +18,8 @@ missing. When the two disagree, this file is right.
 > `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
 > `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
 > work: decoupling from Kronos is **done and enforced by test**, and the native
-> package exists as working plumbing — but **Olympus owns no trained market
-> model**, having fitted only synthetic series.
+> package now trains a real network end to end — but **Olympus owns no trained
+> market model**, having fitted only synthetic series.
 
 ---
 
@@ -66,7 +66,7 @@ missing. When the two disagree, this file is right.
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
 | `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
 | independence | ✅ | 28 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else; `native/` additionally carries no Kronos-imposed constant and no module-scope torch |
-| `native/` | 🟡 | 7 modules, 2,173 lines, 67 tests. Causal `MarketState`, embargoed temporal split, conditional-quantile estimator, provenanced checkpoints, `Forecaster` plug point. **Fitted only to synthetic series** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` |
+| `native/` | 🟡 | 11 modules, 3,330 lines, 97 tests. Causal `MarketState`, embargoed temporal split, continuous patch encoder, causal-convolution trunk, monotone quantile network trained by pinball loss, provenanced checkpoints, `Forecaster` plug point. **Fitted only to synthetic series** — see `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution
