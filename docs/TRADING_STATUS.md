@@ -4,17 +4,18 @@
 this file records what actually exists, what is tested, and what is unsafe or
 missing. When the two disagree, this file is right.
 
-- **Last updated:** 2026-07-27
+- **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~25,500 lines across 39 modules; 42 test files; **2018 trading tests passing**
-- **Whole repository:** 7181 passed, 30 skipped, **zero regressions**
+- **Scale:** ~34,000 lines across 52 modules; 55 test files; **2427 trading tests passing**
+- **Whole repository:** 7590 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
 > **Read §3 and §4 before trusting any of this.** Several completion-standard
 > items cannot be demonstrated in this environment, and saying so plainly is
 > part of the deliverable. `docs/TRADING_EXTERNAL_VALIDATION.md` scores the
-> twelve external-validation gates and measures the blocker host by host.
+> twelve external-validation gates and measures the blocker host by host;
+> `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates.
 
 ---
 
@@ -93,12 +94,30 @@ missing. When the two disagree, this file is right.
 | `brokers/binance_testnet.py` | 🟡 | 27 tests. Testnet enforced by host allow-list (pointing it at `api.binance.com` raises at construction); spot-only, so the futures testnet host is refused; uncovered SELL rejected before any request; HMAC signing, `-2010` duplicate → adopt, `-2013` unknown → `None`, unmapped status raises rather than reading as open; signed URLs deliberately excluded from exception text. **Never contacted the venue** (§4). |
 | `cli.py` | ✅ | 24 tests, the load-bearing ones negative: an AST scan asserts the module cannot import or construct `LimitsStore`, `ModeController` or `ExecutionEngine`, and the parser offers no `mode`/`submit`/`set-limit`/`disengage` command. Renders status/portfolio/orders/strategies/models/limits; the only write actions are `kill` and read-only `reconcile`/`verify-audit`. Survives a subsystem that throws. |
 
+### Controlled self-evolution (`docs/SELF_EVOLUTION.md`)
+
+| Module | Status | Evidence |
+|---|---|---|
+| `governance.py` | ✅ | 34 tests. The autonomous / human-only / prohibited split as a call that **raises** — a returned `False` is something an autonomous caller can ignore. Every `Action` is classified; an unclassified one fails closed. An operator without a token cannot be constructed, and no serialisation carries one. |
+| `kernel.py` | ✅ | 22 tests, the gate-13 proof. Eleven components / 14 modules declared; content sealing that names *which* module changed; an AST scan asserting no self-evolution module can import `execution`/`brokers`/`vault`/`modes` or call ~20 kernel mutation entry points. `propose_kernel_change()` exists; no `apply` counterpart does, asserted by parsing the whole package. |
+| `knowledge.py` | ✅ | 38 tests. Repetition capped at 0.5 confidence however many sources agree; same-origin evidence counted once; external content untrusted until attributed validation; correction writes a new version and keeps the old; no record however evidenced reaches risk config, credentials, permissions or execution settings. |
+| `outcomes.py` | ✅ | 32 tests. Thirteen scoring axes; an unmeasurable axis grades UNKNOWN, never GOOD; decision records frozen at decision time and unamendable; abstentions scored as well as trades; weakness detection requires n≥30. |
+| `drift.py` | ✅ | 36 tests. PSI + two-sample KS in pure stdlib, both reported with their thresholds; five-rung ladder where descending is autonomous and ascending needs an operator; staleness alone flags a component whose metrics look perfect. |
+| `hypotheses.py` | ✅ | 31 tests. A proposal cannot be constructed without a failure condition, nor with success/failure criteria that overlap. `REFUTED` is terminal and undeletable. The standing Kronos hypothesis carries the negative upstream evidence (#354/#355) rather than omitting it. |
+| `lab.py` | ✅ | 32 tests. Sandbox isolation by *absence* — no attribute exists for a denied resource; fails closed on unlisted ones; breach attempts recorded before the exception propagates. Seven experiment kinds; parameter sweeps carry a Bonferroni correction. |
+| `proposals.py` | ✅ | 38 tests. Every required field enforced at construction. A patch naming a kernel file, or whose *body* reaches into one, raises before review. No `apply`/`merge`/`deploy` function exists, asserted on the AST. |
+| `capabilities.py` | ✅ | 26 tests. Ten states; promotion is operator-only, one rung at a time, and names exactly which evidence is missing — a rationale is refused identically to nothing. Suspension and deprecation are autonomous. |
+| `champion.py` | ✅ | 28 tests. A mismatched harness (data, costs, or risk limits) **raises** rather than reporting; in-sample can never justify replacement; parsimony breaks statistical ties; a challenger materially worse in any regime is refused. |
+| `rollback.py` | ✅ | 40 tests. Deployment refused without reproducible config, pinned dependencies, evidence and a written procedure. Rolling back is autonomous *because* it can only retreat to a human-deployed version. Nine triggers; post-rollback reconciliation is reported, never auto-repaired. |
+| `evolution.py` | ✅ | 35 tests. Append-only ledger with no update or delete; `explain()` answers the seven required questions, returning `None` for "did it improve" until there is measurement; the improvement verdict starts at UNPROVEN and excludes the three governance counters. |
+| `storekeys.py` | ✅ | Composite keys over `olympus.store`, whose `_safe()` rewrites separators. Fixes a defect that made five registries write records they could never list. |
+
 ### Not built
 
 | Module | Status | Consequence |
 |---|---|---|
 | Checkpoint-validation harness | 🔵 | Phase-5 hash pinning, upstream-vs-Olympus numerical comparison and latency/memory measurement are designed but unwritten: a harness whose subject cannot be obtained cannot be tested, and would be untested code claiming a validated model. |
-| Scheduled monitor loop | 🔵 | `monitor.py` and `killswitch.evaluate_auto_trips()` are built and tested; nothing runs them on a timer. Auto-trips fire only when a caller evaluates them. |
+| Scheduled monitor / evolution loop | 🔵 | `monitor.py`, `killswitch.evaluate_auto_trips()`, `drift.EvaluationSchedule` and `evolution.EvolutionCycle.run()` are all built and tested; nothing runs any of them on a timer. Every one fires only when a caller invokes it. |
 
 ---
 
@@ -142,19 +161,24 @@ Each defect from `docs/KRONOS_TEARDOWN.md` has a named test in
 | 3 | `risk.py`/`killswitch.py`/`portfolio.py`/`oms.py`/`brokers`/`execution.py`/`reconcile.py`/`audit.py`/`modes.py` were authored directly rather than by the parallel build, so a duplicate-cluster overwrite is possible; all are committed, so any clobber is recoverable by `git checkout`. | Low |
 | 4 | `BrokerUnavailable` is a *sibling* of `BrokerError` (both subclass `ExecutionError`), which is easy to get wrong: `binance_testnet`'s `health()` and `get_quote()` originally caught only `BrokerError`, so the unreachable case escaped the health probe that exists to report it. Fixed and regression-tested, but the hierarchy remains a trap for the next adapter. | Medium |
 | 5 | Streaming reconnect/backoff/gap-backfill is exercised only through `ReplayProvider`'s simulated disconnect. Real websocket failure modes — half-open sockets, silent stalls, out-of-order frames — are unexercised. | Medium |
-| 6 | No scheduler runs `monitor`/`evaluate_auto_trips`; auto-trips fire only when something calls them. | Medium |
+| 6 | No scheduler runs `monitor`/`evaluate_auto_trips`/`EvolutionCycle`; every loop fires only when something calls it. | Medium |
+| 7 | The research sandbox is a *capability* boundary, not a process boundary. An experiment cannot obtain production resources through it and `kernel.audit_evolution_modules()` proves `lab.py` has no import route to them — but arbitrary code running in the same interpreter is contained by neither. Running untrusted experiment bodies would need OS-level isolation that is not built. | Medium |
+| 8 | `champion.Contender.complexity` is an integer the author types. The parsimony tie-break is only as honest as that number and nothing validates it. | Low |
+| 9 | `evolution.measure_improvement` compares two periods handed to it; choosing favourable ones would produce a favourable verdict. Period selection is an operator decision and is not audited. | Medium |
 
 ---
 
 ## 6. Verify these claims yourself
 
 ```bash
-python -m pytest tests/test_trading_*.py -q      # 2018 passing, offline, no torch needed
-python -m pytest -q                              # 7181 passed, 30 skipped (whole repo)
+python -m pytest tests/test_trading_*.py -q      # 2427 passing, offline, no torch needed
+python -m pytest -q                              # whole repo
 python -m pytest tests/test_trading_end_to_end.py -q   # the completion standard
 python -m pytest tests/test_trading_kronos_defects.py -q  # teardown regressions
 python -m pytest tests/test_trading_boundaries.py -q   # structural guarantees
 python -m pytest tests/test_trading_cli.py -q    # the console's negative guarantees
+python -m pytest tests/test_trading_kernel.py -q # the safety kernel is unreachable
+python -m pytest tests/test_trading_self_evolution.py -q  # the 13 evolution gates
 python -m olympus capabilities --check           # Olympus's own CI guard
 python -m pytest tests/test_deps_claim.py -q     # dependency truthfulness
 ```

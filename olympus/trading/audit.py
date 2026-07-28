@@ -62,6 +62,20 @@ class EventType(str, Enum):
     RECONCILIATION = "reconciliation"
     ERROR = "error"
     HUMAN_INTERVENTION = "human_intervention"
+    # -- controlled self-evolution (docs/SELF_EVOLUTION.md) ------------------
+    # Every evolutionary change lands in the same immutable trail as every
+    # order, for the same reason: "why did Olympus change" must be answerable
+    # a year later from the log alone, not from whoever remembers.
+    OUTCOME_EVALUATED = "outcome_evaluated"
+    KNOWLEDGE_RECORDED = "knowledge_recorded"
+    KNOWLEDGE_DEPRECATED = "knowledge_deprecated"
+    DRIFT_DETECTED = "drift_detected"
+    HYPOTHESIS_PROPOSED = "hypothesis_proposed"
+    EXPERIMENT_RUN = "experiment_run"
+    PROPOSAL_SUBMITTED = "proposal_submitted"
+    CAPABILITY_CHANGED = "capability_changed"
+    DEPLOYMENT_CHANGED = "deployment_changed"
+    ROLLBACK = "rollback"
 
 
 #: The causal chain an order must be traceable along. Used by `trace()` to

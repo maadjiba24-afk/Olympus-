@@ -201,6 +201,55 @@ class GateFailure(ModeError):
     code = "GATE_FAILED"
 
 
+# --- knowledge / self-evolution ---------------------------------------------
+
+class KnowledgeError(TradingError):
+    """A knowledge record is malformed, or was used outside its warrant."""
+    code = "KNOWLEDGE_ERROR"
+
+
+class EvolutionError(TradingError):
+    """Base of the controlled-self-evolution failures."""
+    code = "EVOLUTION_ERROR"
+
+
+class SafetyKernelViolation(EvolutionError):
+    """Something in the evolution machinery reached for the safety kernel.
+
+    The kernel — risk policy, kill switches, the vault, live-mode gates, the
+    audit ledger, the permission system — is the set of components Olympus may
+    *recommend* changes to and may never *apply* changes to. An attempt is a
+    security event, not a validation error, so it raises rather than returning
+    a rejection an autonomous caller could ignore.
+    """
+    code = "SAFETY_KERNEL_VIOLATION"
+
+
+class GovernanceViolation(EvolutionError):
+    """An autonomous actor attempted an action reserved for a human operator.
+
+    Distinct from `SafetyKernelViolation`: the kernel violation is about
+    *what* was touched, this is about *who* touched it. Promoting a capability
+    is a legitimate operation — performed by an operator. Performed by the
+    evolution engine itself it is a governance breach.
+    """
+    code = "GOVERNANCE_VIOLATION"
+
+
+class PromotionDenied(EvolutionError):
+    """A capability, model or strategy did not earn the state it asked for.
+
+    Carries the specific unmet evidence requirements, because "denied" without
+    the missing evidence is an argument rather than a decision.
+    """
+    code = "PROMOTION_DENIED"
+
+
+class ExperimentError(EvolutionError):
+    """A research experiment could not be run, or tried to escape the sandbox."""
+    code = "EXPERIMENT_ERROR"
+
+
 __all__ = [
     "TradingError", "ConfigurationError", "DependencyMissing",
     "MarketDataError", "DataValidationError", "StaleDataError",
@@ -210,4 +259,6 @@ __all__ = [
     "LimitsImmutableError", "ExecutionError", "BrokerError",
     "BrokerUnavailable", "DuplicateOrderError", "ReconciliationError",
     "ModeError", "ModeNotPermitted", "GateFailure",
+    "KnowledgeError", "EvolutionError", "SafetyKernelViolation",
+    "GovernanceViolation", "PromotionDenied", "ExperimentError",
 ]
