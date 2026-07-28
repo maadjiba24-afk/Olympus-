@@ -508,67 +508,76 @@ def from_drift(signal: Any, *, clock: Clock | None = None
         triggered_by=(f"drift:{kind}:{subject}:{metric}",))
 
 
-def kronos_conditional_value(*, instrument: str = "", clock: Clock | None = None
-                             ) -> ResearchProposal:
-    """The standing hypothesis about Kronos, stated so it can fail.
+def model_conditional_value(model_name: str, *, instrument: str = "",
+                            supporting_observations: Iterable[str] = (),
+                            contradicting_evidence: Iterable[str] = (),
+                            estimated_cost_units: float = 25.0,
+                            clock: Clock | None = None) -> ResearchProposal:
+    """The standing hypothesis about any forecasting model, stated so it can fail.
 
-    Written out explicitly because it is the one hypothesis this whole project
-    exists to answer, and because the honest prior is unfavourable: the
-    teardown's §16 records upstream issues #354/#355 reporting Kronos-mini
-    underperforming a persistence baseline. That evidence is carried in
-    `contradicting_evidence` rather than omitted, so nobody reading the proposal
-    can mistake it for a promising lead.
+    Asks whether `model_name` adds value *conditionally* rather than uniformly.
+    That framing matters: a model is usually adopted or dropped wholesale, and
+    if its edge is real but confined to one volatility regime then neither
+    choice is right and the conditional rule is worth more than the model.
+
+    `contradicting_evidence` is a parameter rather than something the caller may
+    omit and forget. A standing hypothesis that carried only the case *for* a
+    model would be an advocacy document; the constructor takes both sides and
+    the proposal records them together.
+
+    Model-agnostic on purpose. The same question is asked of a third-party model
+    and of an Olympus-native one, by the same code, so neither is judged on its
+    provenance.
     """
     now = (clock or default_clock()).now()
+    label = str(model_name).strip()
+    if not label:
+        raise ConfigurationError("model_conditional_value needs a model name")
     return ResearchProposal(
-        proposal_id=_pid(f"kronos-conditional|{instrument}"),
-        hypothesis="Kronos adds measurable out-of-sample value only under "
+        proposal_id=_pid(f"conditional-value|{label}|{instrument}"),
+        hypothesis=f"{label} adds measurable out-of-sample value only under "
                    "specific volatility conditions, and adds none or negative "
                    "value elsewhere.",
-        motivation="Kronos is currently either used everywhere or nowhere. If "
-                   "its edge is conditional, the correct configuration is "
+        motivation=f"{label} is currently either used everywhere or nowhere. "
+                   "If its edge is conditional, the correct configuration is "
                    "neither, and the conditional rule is worth more than the "
                    "model.",
         created_at=now,
         experiment=ExperimentPlan(
             kind=ExperimentKind.REGIME_CONDITIONAL,
             description="Walk-forward the identical strategy with and without "
-                        "the Kronos signal, partitioned by realised-volatility "
-                        "tercile, under identical costs and risk limits.",
+                        f"the {label} signal, partitioned by "
+                        "realised-volatility tercile, under identical costs "
+                        "and risk limits.",
             required_data=("out-of-sample OHLCV for the instrument set",
-                           "a genuine pinned Kronos checkpoint"),
-            variants=("with Kronos", "without Kronos"),
+                           f"a pinned {label} checkpoint"),
+            variants=(f"with {label}", f"without {label}"),
             controls=("identical sizing code", "identical exits",
                       "identical cost model", "identical risk limits"),
-            baselines=("same strategy without Kronos", "persistence",
+            baselines=(f"same strategy without {label}", "persistence",
                        "always flat"),
             minimum_observations=100, walk_forward_windows=6,
-            estimated_cost_units=25.0),
-        success_criteria=("in at least one volatility tercile, the Kronos arm "
-                          "beats the identical non-Kronos arm on net return "
-                          "with p < 0.05 on a paired bootstrap",),
+            estimated_cost_units=estimated_cost_units),
+        success_criteria=(f"in at least one volatility tercile, the {label} arm "
+                          f"beats the identical arm without {label} on net "
+                          "return with p < 0.05 on a paired bootstrap",),
         failure_criteria=("no tercile shows a significant improvement, which "
-                          "would mean Kronos should not be used for this "
+                          f"would mean {label} should not be used for this "
                           "instrument set at all",),
         risk_level=RiskLevel.MEDIUM,
         production_impact=ProductionImpact.MODEL_SELECTION,
-        supporting_observations=("Kronos is a general-purpose K-line model with "
-                                 "no instrument-specific tuning, so a "
-                                 "conditional edge is more plausible than a "
-                                 "uniform one",),
-        contradicting_evidence=(
-            "upstream issues #354 and #355 report Kronos-mini underperforming a "
-            "persistence baseline (docs/KRONOS_TEARDOWN.md §16)",
-            "no out-of-sample evidence of Kronos value has yet been produced in "
-            "this system",),
+        supporting_observations=tuple(supporting_observations),
+        contradicting_evidence=tuple(contradicting_evidence)
+        or ("no out-of-sample evidence of this model's value has yet been "
+            "produced in this system",),
         instruments=(instrument,) if instrument else (),
-        triggered_by=("standing:kronos-value",))
+        triggered_by=(f"standing:model-value:{label}",))
 
 
 #: Templates for the hypothesis shapes the Phase 10 spec names that are not
 #: evidence-triggered. Kept as a catalogue so an operator can queue one
 #: directly, and so the set is inspectable.
-STANDING_HYPOTHESES = ("kronos_conditional_value",)
+STANDING_HYPOTHESES = ("model_conditional_value",)
 
 
 class HypothesisEngine:
@@ -699,5 +708,5 @@ class HypothesisEngine:
 
 __all__ = ["RiskLevel", "ProductionImpact", "ExperimentKind", "ProposalStatus",
            "ExperimentPlan", "ResearchProposal", "HypothesisEngine",
-           "from_weakness", "from_drift", "kronos_conditional_value",
+           "from_weakness", "from_drift", "model_conditional_value",
            "STANDING_HYPOTHESES"]

@@ -1,6 +1,6 @@
 """Market-intelligence agent schemas — the boundary where prose becomes data.
 
-Seven agents contribute to a trading decision (technical analysis, the Kronos
+Seven agents contribute to a trading decision (technical analysis, the
 forecast, regime, volatility, sentiment, portfolio analysis, strategy
 selection). Some of them are, or may be, language models. This module is the
 membrane between what they emit and what the rest of the domain consumes, and
@@ -389,14 +389,18 @@ class TechnicalAnalysisOutput(_AgentOutput):
 
 
 @dataclass(frozen=True)
-class KronosForecastOutput(_AgentOutput):
+class ForecastAgentOutput(_AgentOutput):
     """The forecaster's opinion, reduced to the numbers risk gates on.
 
-    `abstained` is a first-class field rather than an inferred state. The
-    Kronos teardown's central finding was that a model under an unsupported
-    configuration silently returns a plausible wrong answer; the counter is an
-    explicit "I declined", which a caller must handle rather than mistake for a
-    forecast of zero return.
+    Model-agnostic: whichever forecaster produced the `ForecastResult`, it
+    arrives here as the same few fields.
+
+    `abstained` is a first-class field rather than an inferred state. The Kronos
+    teardown's central finding was that a model under an unsupported
+    configuration silently returns a plausible wrong answer (that is why this
+    field exists, and the citation is the reason rather than a dependency); the
+    counter is an explicit "I declined", which a caller must handle rather than
+    mistake for a forecast of zero return.
     """
     horizon: int = 0
     expected_return: float = 0.0
@@ -430,7 +434,7 @@ class KronosForecastOutput(_AgentOutput):
                 field="confidence", got=self.confidence)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "KronosForecastOutput":
+    def from_dict(cls, data: Mapping[str, Any]) -> "ForecastAgentOutput":
         _reject_unknown(data, cls)
         return cls(
             horizon=_as_int(_require(data, "horizon"), "horizon", minimum=0),
@@ -748,12 +752,12 @@ AGENT_SPECS: tuple[AgentSpec, ...] = (
         output_schema=TechnicalAnalysisOutput,
     ),
     AgentSpec(
-        key="kronos_forecast",
-        title="Kronos Forecast",
-        purpose="Summarise the Kronos forecast into the few numbers the risk "
-                "engine gates on, preserving the abstention.",
+        key="forecast",
+        title="Forecast",
+        purpose="Summarise whichever forecaster ran into the few numbers the "
+                "risk engine gates on, preserving the abstention.",
         input_contract=("ForecastResult", "DataQualityReport"),
-        output_schema=KronosForecastOutput,
+        output_schema=ForecastAgentOutput,
     ),
     AgentSpec(
         key="regime",
@@ -892,7 +896,7 @@ class AgentOutputValidator:
 
 
 __all__ = [
-    "TechnicalAnalysisOutput", "KronosForecastOutput", "RegimeOutput",
+    "TechnicalAnalysisOutput", "ForecastAgentOutput", "RegimeOutput",
     "VolatilityOutput", "SentimentOutput", "PortfolioAnalysisOutput",
     "StrategySelectionOutput", "AgentSpec", "AGENT_SPECS",
     "AGENT_SPECS_BY_KEY", "INGESTING_AGENTS", "spec_for",

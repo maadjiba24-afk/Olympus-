@@ -31,7 +31,7 @@ import pytest
 from olympus.trading import agents as A
 from olympus.trading.agents import (AGENT_SPECS, AGENT_SPECS_BY_KEY,
                                     INGESTING_AGENTS, AgentOutputValidator,
-                                    AgentSpec, KronosForecastOutput,
+                                    AgentSpec, ForecastAgentOutput,
                                     PortfolioAnalysisOutput, RegimeOutput,
                                     SentimentOutput, StrategySelectionOutput,
                                     TechnicalAnalysisOutput, VolatilityOutput,
@@ -51,7 +51,7 @@ VALID: dict[str, dict] = {
         "resistance": [104.0], "indicators": {"rsi": 61.2},
         "evidence": ["rsi crossed 60 on the 1h"], "model_version": "ta-1",
     },
-    "kronos_forecast": {
+    "forecast": {
         "instrument": "NASDAQ:ACME", "ts": TS, "confidence": 0.6,
         "horizon": 12, "expected_return": 0.014,
         "direction_probability": 0.63, "uncertainty": 0.35,
@@ -255,31 +255,31 @@ def test_kronos_abstention_must_carry_zero_confidence():
     teardown found: a caller reading confidence without reading `abstained`
     would trade on a forecast that was never made."""
     with pytest.raises(DataValidationError):
-        _parse("kronos_forecast",
-               _mutate("kronos_forecast", abstained=True, confidence=0.6))
-    ok = _parse("kronos_forecast",
-                _mutate("kronos_forecast", abstained=True, confidence=0.0))
+        _parse("forecast",
+               _mutate("forecast", abstained=True, confidence=0.6))
+    ok = _parse("forecast",
+                _mutate("forecast", abstained=True, confidence=0.0))
     assert ok.abstained and ok.confidence == 0.0
 
 
 def test_kronos_rejects_a_stringified_abstention():
     for bad in ("false", 0, 1, None):
         with pytest.raises(DataValidationError):
-            _parse("kronos_forecast", _mutate("kronos_forecast", abstained=bad))
+            _parse("forecast", _mutate("forecast", abstained=bad))
 
 
 def test_kronos_rejects_out_of_range_probabilities():
     for field_name in ("direction_probability", "uncertainty"):
         with pytest.raises(DataValidationError):
-            _parse("kronos_forecast", _mutate("kronos_forecast",
+            _parse("forecast", _mutate("forecast",
                                               **{field_name: 1.3}))
 
 
 def test_kronos_rejects_a_negative_horizon():
     with pytest.raises(DataValidationError):
-        _parse("kronos_forecast", _mutate("kronos_forecast", horizon=-1))
+        _parse("forecast", _mutate("forecast", horizon=-1))
     with pytest.raises(DataValidationError):
-        _parse("kronos_forecast", _mutate("kronos_forecast", horizon=12.5))
+        _parse("forecast", _mutate("forecast", horizon=12.5))
 
 
 def test_regime_must_be_a_known_enum_member():

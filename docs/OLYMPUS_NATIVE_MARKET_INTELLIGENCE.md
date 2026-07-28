@@ -3,7 +3,7 @@
 The design for an Olympus-owned forecasting system that does not depend on
 Kronos, and the measurable gates it must pass before anyone may say it works.
 
-- **Status:** design only. **No implementation has begun**, by instruction.
+- **Status:** design + **P1 (decouple) complete**. No native model code exists.
 - **Companion documents:** `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` (what couples
   us to Kronos today), `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` (the honest ledger)
 - **Surveyed at:** `e8380c6`
@@ -326,7 +326,7 @@ advance, and phases 4–7 are all blocked on external access (§7).
 | Phase | Work | Exit condition |
 |---|---|---|
 | **P0 — Documentation** | These three documents | *(this deliverable)* |
-| **P1 — Decouple** | Class B + C renames per dependency-map §7 R1. Add the AST test asserting no Olympus module outside `kronos_*` references Kronos | The test passes. Full suite green. **No native code yet** |
+| **P1 — Decouple** ✅ | Class B + C renames per dependency-map §7 R1. `tests/test_trading_independence.py` asserting no Olympus module outside `kronos_*` references Kronos | ✅ **Done.** 14 independence tests pass; G1 and G5 closed; 2444 trading tests green; no native code written |
 | **P2 — Native skeleton, no learning** | `native/` package: `MarketState`, dataset windowing, checkpoint format + manifest, a `Forecaster` implementation that is a *deterministic statistical* model (no torch) | Registered in `ForecastService`, produces valid `ForecastResult`s, evaluated against the three baselines. Establishes the plumbing before the modelling |
 | **P3 — Learning, offline** | `torch` behind a `native` extra. Encoder + trunk + quantile head. Trainer with manifest, seeding, temporal split | Trains to convergence on **synthetic** series with known structure and recovers that structure. This validates the pipeline, not the market |
 | **P4 — Real data** ⛔ | Ingest real bars, build the corpus, train | **BLOCKED — B1.** No provider reachable |

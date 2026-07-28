@@ -631,7 +631,7 @@ class ForecastResult(_Contract):
 @dataclass(frozen=True)
 class Signal(_Contract):
     """One analyst's opinion. Never an order; not even a proposal."""
-    source: str                          # "kronos" | "ta.rsi" | "regime" ...
+    source: str                          # "forecast" | "ta.rsi" | "regime" ...
     instrument_key: str
     direction: SignalDirection
     #: Signed conviction in [-1, 1]; sign must agree with `direction`.

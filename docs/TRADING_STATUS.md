@@ -6,8 +6,8 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~34,000 lines across 52 modules; 55 test files; **2427 trading tests passing**
-- **Whole repository:** 7590 passed, 30 skipped, **zero regressions**
+- **Scale:** ~34,000 lines across 52 modules; 56 test files; **2444 trading tests passing**
+- **Whole repository:** 7607 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
@@ -17,7 +17,8 @@ missing. When the two disagree, this file is right.
 > twelve external-validation gates and measures the blocker host by host;
 > `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
 > `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
-> work, which is **designed and not started** — Olympus owns no trained model.
+> work: decoupling from Kronos is **done and enforced by test**, but **Olympus
+> owns no trained model** and no native model code exists.
 
 ---
 
@@ -62,7 +63,8 @@ missing. When the two disagree, this file is right.
 |---|---|---|
 | `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer. **Kronos-owned, not Olympus-owned** — see `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` |
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
-| `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy |
+| `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
+| independence | ✅ | 14 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution
@@ -81,12 +83,12 @@ missing. When the two disagree, this file is right.
 | `modes.py` | ✅ | 29 tests; default PAPER; live needs all 9 gates + token + named operator + audit event |
 | `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
 | `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross/net are *required* constructor fields so a single-cost-basis report cannot be built; per-instrument/regime/period breakdowns whose trade counts sum back to the whole |
-| `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the Kronos and non-Kronos arms, so the signal source is the only difference |
+| `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the forecast and forecast-free arms, so the signal source is the only difference. Model-agnostic since P1: `ForecastMomentumStrategy` names no model |
 | `registry.py` | ✅ | Model registry; approval requires an operator and an unpinned revision can never be approved |
 | `sentiment.py` | ✅ | Injection payloads neutralised (verified by probe: instruction text and fenced system blocks stripped, benign headlines untouched); nothing derived from a `NewsItem` can reach the limits API |
 | `monitor.py` | ✅ | Health probes and auto-trip evaluation; a failing probe reports DEGRADED rather than taking the safety system down with it |
 | `agents.py` | ✅ | Validated output schemas for the seven market-intelligence agents; malformed/out-of-range/instruction-bearing outputs rejected |
-| `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `kronos_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
+| `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `model_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
 
 ### Connectivity & operations
 

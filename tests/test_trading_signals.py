@@ -18,7 +18,7 @@ from olympus.trading.contracts import (Candle, DataQuality, ForecastPath,
                                        ForecastResult, Regime, Signal,
                                        SignalDirection)
 from olympus.trading.errors import ConfigurationError, DataValidationError
-from olympus.trading.signals import (FusedSignal, KronosSignalGenerator,
+from olympus.trading.signals import (FusedSignal, ForecastSignalGenerator,
                                      MajorityVoteFusion, RegimeSignalGenerator,
                                      SignalContext, TASignalGenerator,
                                      UnanimousFusion, VolatilitySignalGenerator,
@@ -28,6 +28,9 @@ START = datetime(2026, 3, 2, tzinfo=timezone.utc)
 NOW = START + timedelta(days=5)
 KEY = "SIM:ABC"
 TF = "1h"
+#: The forecaster the generator is told to read. Deliberately not a model's
+#: name: the generator must work for any registered forecaster.
+FORECAST_NAME = "fc"
 LONG, SHORT, FLAT = (SignalDirection.LONG, SignalDirection.SHORT,
                      SignalDirection.FLAT)
 
@@ -51,7 +54,7 @@ def forecast(*, expected_return: float = 0.02, vol: float = 0.01,
         return ForecastResult.abstain(
             instrument_key=key, timeframe=TF, input_start=START, input_end=NOW,
             created_at=NOW, horizon=horizon, reason="bad data",
-            code="DATA_INSUFFICIENT", model_version="kronos-test")
+            code="DATA_INSUFFICIENT", model_version="fc-test")
     last = 100.0
     closes = tuple(last * (1 + expected_return * (i + 1) / horizon)
                    for i in range(horizon))
@@ -63,7 +66,7 @@ def forecast(*, expected_return: float = 0.02, vol: float = 0.01,
         expected_return_path=tuple(c / last - 1 for c in closes),
         forecast_volatility=vol, realised_volatility=realised,
         uncertainty=uncertainty, data_quality=quality,
-        model_version="kronos-test")
+        model_version="fc-test")
 
 
 def signal(source: str, direction: SignalDirection, strength: float,
@@ -106,9 +109,9 @@ def test_context_refuses_to_invent_a_time():
 
 def test_context_to_dict_summarises_rather_than_dumps():
     ctx = SignalContext(as_of=NOW, candles=tuple(series([100.0] * 5)),
-                        forecasts={"kronos": forecast()})
+                        forecasts={FORECAST_NAME: forecast()})
     payload = ctx.to_dict()
-    assert payload["bars"] == 5 and payload["forecasts"] == ["kronos"]
+    assert payload["bars"] == 5 and payload["forecasts"] == [FORECAST_NAME]
     json.dumps(payload)
 
 
@@ -124,69 +127,69 @@ def make_ctx(**forecasts) -> SignalContext:
 def test_abstained_forecast_produces_no_signal_at_all():
     # Not a FLAT: a FLAT would enter the vote and dilute the sources that do
     # have an opinion.
-    gen = KronosSignalGenerator()
-    assert gen.generate(make_ctx(kronos=forecast(abstained=True))) == []
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME)
+    assert gen.generate(make_ctx(fc=forecast(abstained=True))) == []
 
 
 def test_missing_forecast_produces_no_signal():
-    assert KronosSignalGenerator().generate(make_ctx()) == []
-    assert KronosSignalGenerator().generate(make_ctx(other=forecast())) == []
+    assert ForecastSignalGenerator(forecast_name=FORECAST_NAME).generate(make_ctx()) == []
+    assert ForecastSignalGenerator(forecast_name=FORECAST_NAME).generate(make_ctx(other=forecast())) == []
 
 
 def test_unusable_data_quality_produces_no_signal():
-    gen = KronosSignalGenerator()
-    assert gen.generate(make_ctx(kronos=forecast(quality=DataQuality.UNUSABLE))) == []
-    strict = KronosSignalGenerator(min_data_quality=DataQuality.OK)
-    assert strict.generate(make_ctx(kronos=forecast(quality=DataQuality.DEGRADED))) == []
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME)
+    assert gen.generate(make_ctx(fc=forecast(quality=DataQuality.UNUSABLE))) == []
+    strict = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_data_quality=DataQuality.OK)
+    assert strict.generate(make_ctx(fc=forecast(quality=DataQuality.DEGRADED))) == []
 
 
 def test_uncertainty_gate_produces_no_signal():
-    gen = KronosSignalGenerator(max_uncertainty=0.5)
-    assert gen.generate(make_ctx(kronos=forecast(uncertainty=0.9))) == []
-    assert gen.generate(make_ctx(kronos=forecast(uncertainty=0.4)))
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, max_uncertainty=0.5)
+    assert gen.generate(make_ctx(fc=forecast(uncertainty=0.9))) == []
+    assert gen.generate(make_ctx(fc=forecast(uncertainty=0.4)))
 
 
 def test_return_inside_the_noise_band_emits_a_flat_signal():
     # The generator looked and saw nothing: that is information, unlike silence.
-    gen = KronosSignalGenerator(min_expected_return=0.01)
-    produced = gen.generate(make_ctx(kronos=forecast(expected_return=0.001)))
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.01)
+    produced = gen.generate(make_ctx(fc=forecast(expected_return=0.001)))
     assert len(produced) == 1
     assert produced[0].direction is FLAT and produced[0].strength == 0.0
 
 
 def test_direction_follows_the_threshold_in_both_directions():
-    gen = KronosSignalGenerator(min_expected_return=0.005)
-    up = gen.generate(make_ctx(kronos=forecast(expected_return=0.02)))[0]
-    down = gen.generate(make_ctx(kronos=forecast(expected_return=-0.02)))[0]
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.005)
+    up = gen.generate(make_ctx(fc=forecast(expected_return=0.02)))[0]
+    down = gen.generate(make_ctx(fc=forecast(expected_return=-0.02)))[0]
     assert up.direction is LONG and up.strength > 0
     assert down.direction is SHORT and down.strength < 0
     assert up.strength == pytest.approx(-down.strength)
 
 
 def test_strength_is_a_clamped_t_statistic():
-    gen = KronosSignalGenerator(min_expected_return=0.0, t_scale=2.0)
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.0, t_scale=2.0)
     # t = 0.02 / 0.02 = 1.0 → strength 1.0/2.0 = 0.5
-    half = gen.generate(make_ctx(kronos=forecast(expected_return=0.02, vol=0.02)))[0]
+    half = gen.generate(make_ctx(fc=forecast(expected_return=0.02, vol=0.02)))[0]
     assert half.strength == pytest.approx(0.5)
     # t = 0.2 / 0.001 = 200 → clamped, never out of contract range
-    hot = gen.generate(make_ctx(kronos=forecast(expected_return=0.2, vol=0.001)))[0]
+    hot = gen.generate(make_ctx(fc=forecast(expected_return=0.2, vol=0.001)))[0]
     assert hot.strength == 1.0
-    cold = gen.generate(make_ctx(kronos=forecast(expected_return=-0.2, vol=0.001)))[0]
+    cold = gen.generate(make_ctx(fc=forecast(expected_return=-0.2, vol=0.001)))[0]
     assert cold.strength == -1.0
 
 
 def test_realised_volatility_is_the_fallback_dispersion():
-    gen = KronosSignalGenerator(min_expected_return=0.0, t_scale=2.0)
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.0, t_scale=2.0)
     produced = gen.generate(make_ctx(
-        kronos=forecast(expected_return=0.02, vol=0.0, realised=0.02)))[0]
+        fc=forecast(expected_return=0.02, vol=0.0, realised=0.02)))[0]
     assert produced.features["dispersion_basis"] == "realised_volatility"
     assert produced.strength == pytest.approx(0.5)
 
 
 def test_no_dispersion_estimate_yields_a_deliberately_weak_conviction():
-    gen = KronosSignalGenerator(min_expected_return=0.0, undispersed_strength=0.25)
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.0, undispersed_strength=0.25)
     produced = gen.generate(make_ctx(
-        kronos=forecast(expected_return=0.05, vol=0.0, realised=0.0)))[0]
+        fc=forecast(expected_return=0.05, vol=0.0, realised=0.0)))[0]
     assert produced.direction is LONG
     assert produced.strength == pytest.approx(0.25)
     assert produced.features["dispersion_basis"] == "none"
@@ -194,35 +197,35 @@ def test_no_dispersion_estimate_yields_a_deliberately_weak_conviction():
 
 
 def test_confidence_is_the_forecasts_own_and_is_gated_by_data_quality():
-    gen = KronosSignalGenerator(degraded_confidence_factor=0.5)
-    clean = gen.generate(make_ctx(kronos=forecast(uncertainty=0.2)))[0]
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, degraded_confidence_factor=0.5)
+    clean = gen.generate(make_ctx(fc=forecast(uncertainty=0.2)))[0]
     assert clean.confidence == pytest.approx(0.8)
     degraded = gen.generate(make_ctx(
-        kronos=forecast(uncertainty=0.2, quality=DataQuality.DEGRADED)))[0]
+        fc=forecast(uncertainty=0.2, quality=DataQuality.DEGRADED)))[0]
     assert degraded.confidence == pytest.approx(0.4)
     assert degraded.data_quality is DataQuality.DEGRADED
 
 
 def test_min_confidence_gate_produces_silence():
-    gen = KronosSignalGenerator(min_confidence=0.9)
-    assert gen.generate(make_ctx(kronos=forecast(uncertainty=0.5))) == []
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_confidence=0.9)
+    assert gen.generate(make_ctx(fc=forecast(uncertainty=0.5))) == []
 
 
 def test_a_wiring_mistake_is_loud():
-    gen = KronosSignalGenerator()
+    gen = ForecastSignalGenerator(forecast_name=FORECAST_NAME)
     with pytest.raises(ConfigurationError):
-        gen.generate(make_ctx(kronos="not a forecast"))
+        gen.generate(make_ctx(fc="not a forecast"))
     with pytest.raises(ConfigurationError):
-        gen.generate(make_ctx(kronos=forecast(key="SIM:OTHER")))
+        gen.generate(make_ctx(fc=forecast(key="SIM:OTHER")))
 
 
-def test_kronos_generator_configuration_is_validated():
+def test_forecast_generator_configuration_is_validated():
     with pytest.raises(ConfigurationError):
-        KronosSignalGenerator(t_scale=0.0)
+        ForecastSignalGenerator(forecast_name=FORECAST_NAME, t_scale=0.0)
     with pytest.raises(ConfigurationError):
-        KronosSignalGenerator(max_uncertainty=1.5)
+        ForecastSignalGenerator(forecast_name=FORECAST_NAME, max_uncertainty=1.5)
     with pytest.raises(ConfigurationError):
-        KronosSignalGenerator(min_expected_return=-0.01)
+        ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=-0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +628,7 @@ def test_fusion_uses_the_injected_clock_when_no_as_of_is_given():
 def test_generators_and_fusion_compose_under_the_pipeline_call_shape():
     bars = series([100.0 + i for i in range(60)])
     when = bars[-1].ts_close
-    generators = [KronosSignalGenerator(min_expected_return=0.001),
+    generators = [ForecastSignalGenerator(forecast_name=FORECAST_NAME, min_expected_return=0.001),
                   TASignalGenerator(rules=("ma_cross", "rsi_reversion")),
                   RegimeSignalGenerator(),
                   VolatilitySignalGenerator()]
@@ -633,11 +636,11 @@ def test_generators_and_fusion_compose_under_the_pipeline_call_shape():
     for gen in generators:
         produced.extend(gen.generate(
             instrument=None, timeframe=TF, candles=bars,
-            forecasts={"kronos": forecast(expected_return=0.03, vol=0.02)},
+            forecasts={FORECAST_NAME: forecast(expected_return=0.03, vol=0.02)},
             as_of=when, quote=None))
     sources = {s.source for s in produced}
-    assert sources == {"kronos", "ta.ma_cross", "ta.rsi_reversion"}
-    fused = WeightedAverageFusion(weights={"kronos": 2.0, "ta.": 1.0}).fuse(
+    assert sources == {FORECAST_NAME, "ta.ma_cross", "ta.rsi_reversion"}
+    fused = WeightedAverageFusion(weights={FORECAST_NAME: 2.0, "ta.": 1.0}).fuse(
         produced, as_of=when)
     assert fused.instrument_key == KEY
     assert set(fused.sources) == sources

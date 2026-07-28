@@ -20,7 +20,7 @@ from olympus.trading.contracts import (Candle, DataQuality, ForecastPath,
                                        Side, SignalDirection, TradeIntent)
 from olympus.trading.errors import ConfigurationError, RiskError
 from olympus.trading.strategy import (BaselineMomentumStrategy, FlatStrategy,
-                                      KronosMomentumStrategy, Strategy,
+                                      ForecastMomentumStrategy, Strategy,
                                       StrategyContext, StrategyManager,
                                       StrategyRecord, StrategyStatus,
                                       VolatilityTargetedStrategy)
@@ -79,7 +79,7 @@ def context(candles=None, *, fc=None, pf=None, quality=DataQuality.OK,
 def test_kronos_strategy_refuses_an_abstained_forecast():
     """Abstention is the forecaster telling the truth. Overriding it here would
     convert 'I don't know' into a position."""
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=forecast(abstained=True))) == []
     assert s.last_skip_reason == "FORECAST_ABSTAINED"
 
@@ -90,32 +90,32 @@ def test_kronos_strategy_refuses_an_unusable_forecast():
         input_end=T0 + timedelta(days=60), created_at=T0 + timedelta(days=60),
         horizon=0, expected_return=0.05, uncertainty=0.1,
         data_quality=DataQuality.UNUSABLE)
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=fc)) == []
     assert s.last_skip_reason == "FORECAST_UNUSABLE"
 
 
 def test_kronos_strategy_refuses_a_forecast_for_another_instrument():
     """A mis-keyed forecast is a silent way to trade the wrong thing."""
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=forecast(instrument_key="NASDAQ:MSFT"))) == []
     assert s.last_skip_reason == "FORECAST_INSTRUMENT_MISMATCH"
 
 
 def test_kronos_strategy_refuses_a_forecast_that_is_too_uncertain():
-    s = KronosMomentumStrategy(max_uncertainty=0.5)
+    s = ForecastMomentumStrategy(max_uncertainty=0.5)
     assert s.on_bar(context(fc=forecast(uncertainty=0.9))) == []
     assert s.last_skip_reason == "FORECAST_TOO_UNCERTAIN"
 
 
 def test_no_strategy_trades_on_unusable_data_quality():
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=forecast(), quality=DataQuality.UNUSABLE)) == []
     assert s.last_skip_reason == "DATA_UNUSABLE"
 
 
 def test_strategy_stands_aside_during_warmup():
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(series(5), fc=forecast())) == []
     assert s.last_skip_reason == "WARMUP"
 
@@ -127,27 +127,27 @@ def test_strategy_will_not_stack_a_second_entry():
                                                  quantity=Decimal("10"),
                                                  average_price=Decimal("120"))},
                    marks={INST.key: 130.0})
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=forecast(), pf=pf)) == []
     assert s.last_skip_reason == "ALREADY_POSITIONED"
 
 
 def test_strategy_refuses_to_size_without_equity():
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(fc=forecast(), pf=portfolio(cash="0"))) == []
     assert s.last_skip_reason == "NO_EQUITY"
 
 
 def test_expected_return_below_threshold_is_not_traded():
-    s = KronosMomentumStrategy(min_expected_return=0.05)
+    s = ForecastMomentumStrategy(min_expected_return=0.05)
     assert s.on_bar(context(fc=forecast(expected_return=0.001))) == []
     assert s.last_skip_reason == "EXPECTED_RETURN_BELOW_THRESHOLD"
 
 
 # --- the positive path ------------------------------------------------------
 
-def test_kronos_long_intent_is_complete_and_protected():
-    s = KronosMomentumStrategy()
+def test_forecast_long_intent_is_complete_and_protected():
+    s = ForecastMomentumStrategy()
     intents = s.on_bar(context(fc=forecast(expected_return=0.03)))
     assert len(intents) == 1
     intent = intents[0]
@@ -156,16 +156,19 @@ def test_kronos_long_intent_is_complete_and_protected():
     assert intent.order_type is OrderType.MARKET
     assert intent.stop_loss is not None and intent.stop_loss < intent.intended_entry
     assert intent.take_profit is not None and intent.take_profit > intent.intended_entry
-    assert intent.strategy_id == "kronos-momentum"
+    assert intent.strategy_id == "forecast-momentum"
     # Provenance must be complete enough to explain the trade later.
+    # The *model version* is whatever the forecaster reported — that is
+    # provenance and stays verbatim. The *source label* is the strategy's, and
+    # must not name a model.
     assert intent.model_versions["forecast"] == "kronos-small/abc123"
     assert intent.data_ts_start and intent.data_ts_end
-    assert intent.supporting_signals[0].source == "kronos"
-    assert intent.reason_codes == ("KRONOS_FORECAST_DIRECTIONAL",)
+    assert intent.supporting_signals[0].source == "forecast"
+    assert intent.reason_codes == ("FORECAST_DIRECTIONAL",)
 
 
 def test_short_intent_puts_the_stop_above_the_entry():
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     ctx = context(series(60, start=140.0, step=-0.5),
                   fc=forecast(expected_return=-0.03))
     intents = s.on_bar(ctx)
@@ -196,7 +199,7 @@ def test_flat_strategy_never_trades():
 # --- sizing -----------------------------------------------------------------
 
 def test_size_is_a_quantised_decimal_on_the_lot_grid():
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     ctx = context(series(60, start=100.0, step=0.5, instrument=CRYPTO),
                   fc=forecast(instrument_key=CRYPTO.key), instrument=CRYPTO)
     intent = s.on_bar(ctx)[0]
@@ -210,7 +213,7 @@ def test_size_is_a_quantised_decimal_on_the_lot_grid():
 def test_size_respects_the_max_position_fraction_cap():
     """A low-volatility instrument sizes into an enormous notional unless the
     fraction-of-equity cap bites."""
-    s = KronosMomentumStrategy(max_position_fraction=0.05)
+    s = ForecastMomentumStrategy(max_position_fraction=0.05)
     intent = s.on_bar(context(fc=forecast()))[0]
     entry = intent.intended_entry
     assert INST.notional(intent.quantity, entry) <= Decimal("100000") * Decimal("0.05")
@@ -220,9 +223,9 @@ def test_lower_conviction_takes_a_smaller_position():
     """Sizing is scaled by conviction, not switched on and off by it."""
     # A target below the series' realised volatility keeps the vol-target
     # formula binding, rather than the leverage cap, so conviction is visible.
-    strong = KronosMomentumStrategy(target_volatility=0.001,
+    strong = ForecastMomentumStrategy(target_volatility=0.001,
                                     max_position_fraction=1.0)
-    weak = KronosMomentumStrategy(target_volatility=0.001,
+    weak = ForecastMomentumStrategy(target_volatility=0.001,
                                   max_position_fraction=1.0)
     big = strong.on_bar(context(fc=forecast(expected_return=0.05)))[0]
     small = weak.on_bar(context(fc=forecast(expected_return=0.005)))[0]
@@ -237,7 +240,7 @@ def test_zero_volatility_series_is_never_sized():
                    ts_close=T0 + timedelta(days=i + 1),
                    open=100.0, high=100.0, low=100.0, close=100.0,
                    volume=1.0) for i in range(60)]
-    s = KronosMomentumStrategy()
+    s = ForecastMomentumStrategy()
     assert s.on_bar(context(flat, fc=forecast())) == []
     assert s.last_skip_reason in ("NO_VOLATILITY", "NO_STOP")
 
@@ -249,11 +252,11 @@ def test_kronos_and_baseline_share_every_line_of_sizing_and_exit_code():
     the single free variable, so this pins the sharing structurally."""
     for name in ("_size", "_exits", "_stop_distance", "_conviction",
                  "_volatility", "on_bar"):
-        assert (getattr(KronosMomentumStrategy, name)
+        assert (getattr(ForecastMomentumStrategy, name)
                 is getattr(BaselineMomentumStrategy, name))
-        assert (getattr(KronosMomentumStrategy, name)
+        assert (getattr(ForecastMomentumStrategy, name)
                 is getattr(VolatilityTargetedStrategy, name))
-    assert getattr(KronosMomentumStrategy, "_view") is not \
+    assert getattr(ForecastMomentumStrategy, "_view") is not \
         getattr(BaselineMomentumStrategy, "_view")
 
 
@@ -261,7 +264,7 @@ def test_the_two_arms_size_identically_for_an_identical_view():
     """Same expected return, same confidence ⟹ same quantity, stop and take."""
     candles = series()
     ctx_k = context(candles, fc=forecast(expected_return=0.0833333333333))
-    kron = KronosMomentumStrategy(min_confidence=0.0, full_conviction_return=0.02)
+    kron = ForecastMomentumStrategy(min_confidence=0.0, full_conviction_return=0.02)
     base = BaselineMomentumStrategy(min_confidence=0.0, full_conviction_return=0.02)
     # The rising series gives the baseline a +8.333% momentum read with full
     # agreement (confidence 1.0); the forecast is set to match, and the Kronos
@@ -290,7 +293,7 @@ def test_strategy_instances_expose_no_route_to_a_venue_or_to_limits():
     regardless of what any policy document says."""
     banned = ("broker", "order_store", "oms", "execution", "risk_engine",
               "limits", "limits_store", "submit", "place_order", "cancel")
-    for strategy in (KronosMomentumStrategy(), BaselineMomentumStrategy(),
+    for strategy in (ForecastMomentumStrategy(), BaselineMomentumStrategy(),
                      FlatStrategy()):
         for name in banned:
             assert not hasattr(strategy, name), \
@@ -331,24 +334,24 @@ def test_coerce_accepts_the_backtester_namespace_shape():
     ctx = StrategyContext.coerce(raw)
     assert ctx.forecast is fc
     assert len(ctx.candles) == len(candles)
-    assert KronosMomentumStrategy().on_bar(raw)          # works end to end
+    assert ForecastMomentumStrategy().on_bar(raw)          # works end to end
 
 
 def test_intent_ids_are_deterministic_not_random():
     """A replayed bar must produce the same id, or a retry becomes a second
     trade."""
     ctx = context(fc=forecast())
-    a = KronosMomentumStrategy().on_bar(ctx)[0]
-    b = KronosMomentumStrategy().on_bar(ctx)[0]
+    a = ForecastMomentumStrategy().on_bar(ctx)[0]
+    b = ForecastMomentumStrategy().on_bar(ctx)[0]
     assert a.intent_id == b.intent_id
     # ...and a different bar must not collide with it.
     other = context(series(61), fc=forecast())
-    assert KronosMomentumStrategy().on_bar(other)[0].intent_id != a.intent_id
+    assert ForecastMomentumStrategy().on_bar(other)[0].intent_id != a.intent_id
 
 
 def test_describe_is_json_safe_and_names_the_signal_source():
     import json
-    for strategy in (KronosMomentumStrategy(), BaselineMomentumStrategy()):
+    for strategy in (ForecastMomentumStrategy(), BaselineMomentumStrategy()):
         described = strategy.describe()
         json.dumps(described)                            # must not raise
         assert described["id"] == strategy.id
@@ -359,11 +362,11 @@ def test_strategy_is_abstract_and_rejects_nonsense_configuration():
     with pytest.raises(TypeError):
         Strategy()                                       # abstract
     with pytest.raises(ConfigurationError):
-        KronosMomentumStrategy(target_volatility=0)
+        ForecastMomentumStrategy(target_volatility=0)
     with pytest.raises(ConfigurationError):
-        KronosMomentumStrategy(max_position_fraction=2.0)
+        ForecastMomentumStrategy(max_position_fraction=2.0)
     with pytest.raises(ConfigurationError):
-        KronosMomentumStrategy(max_uncertainty=1.5)
+        ForecastMomentumStrategy(max_uncertainty=1.5)
     with pytest.raises(ConfigurationError):
         BaselineMomentumStrategy(lookback=0)
 

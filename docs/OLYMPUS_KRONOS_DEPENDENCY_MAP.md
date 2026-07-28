@@ -3,7 +3,8 @@
 Every place Kronos touches Olympus, what kind of dependency it is, and what has
 to happen for it to become optional.
 
-- **Surveyed at:** `e8380c6` on `claude/kronos-technical-teardown-54pjna`
+- **Surveyed at:** `e8380c6`; **P1 (decouple) applied** at `658f310`+
+- **Enforced by:** `tests/test_trading_independence.py` — 14 tests, in CI
 - **Method:** case-insensitive search across `*.py`, `*.toml`, `*.md`; then
   read of every hit. At `e8380c6`, **40 files** mention Kronos: 15 Olympus
   modules, 19 test files, 5 documents, `pyproject.toml`. (This document and its
@@ -88,18 +89,21 @@ not sample paths as its primary output, so it should implement
 Olympus-owned logic whose identifiers assume Kronos is *the* model. Each is a
 rename plus a default change; none requires new behaviour.
 
-| Symbol | Location | Problem | Target |
-|---|---|---|---|
-| `KronosSignalGenerator` | `signals.py:256` | Reads whatever forecaster is registered, but is named for one | `ForecastSignalGenerator(forecast_name=…)` |
-| `forecast_name: str = "kronos"` | `signals.py:286` | Default binds the signal layer to a model name | No default; the caller names the forecaster |
-| `KronosMomentumStrategy` | `strategy.py:639` | The logic is "trade a forecast's directional view" — nothing Kronos-specific in the body | `ForecastMomentumStrategy` |
-| `id = "kronos-momentum"` | `strategy.py:662` | Strategy id, which is persisted in `StrategyRecord` and the audit trail | New id. **Not a free rename** — see §6 |
-| `source="kronos"` | `strategy.py:709` | Signal provenance string | The forecaster's registered name |
-| `reason_codes=("KRONOS_FORECAST_DIRECTIONAL",)` | `strategy.py:725` | Stable reason code in the audit trail | `FORECAST_DIRECTIONAL`. **Not a free rename** — see §6 |
-| `KronosForecastOutput` | `agents.py:392` | Agent output schema; fields are generic (direction, confidence, horizon) | `ForecastAgentOutput` |
-| `key="kronos_forecast"` | `agents.py:751` | Agent registry key | `forecast` |
-| `kronos = [torch, numpy, einops, huggingface_hub, safetensors, tqdm]` | `pyproject.toml:57` | The extra is named for the model | Keep as-is; add a separate `native` extra (§7) |
-| `"kronos_adapter"`, `"kronos_runtime"` | `__init__.py:64-65` | Lazy-import registry entries | Keep while Kronos is a benchmark |
+**All applied.** ✅
+
+| Was | Now | Note |
+|---|---|---|
+| `KronosSignalGenerator` | `ForecastSignalGenerator` | ✅ |
+| `forecast_name: str = "kronos"` | `forecast_name` **required**, no default | ✅ A signal's provenance is now the model that produced it, never a default |
+| `source = "kronos"` (class attr) | `source = "forecast"` | ✅ |
+| `KronosMomentumStrategy` | `ForecastMomentumStrategy` | ✅ |
+| `id = "kronos-momentum"` | `id = "forecast-momentum"` | ✅ A **new** strategy with a fresh performance history, not a rename. Old id recorded in `kronos_adapter.RETIRED_STRATEGY_IDS` |
+| `source="kronos"` (emitted signal) | `source=self.signal_source`, default `"forecast"` | ✅ Configurable, so a record names whichever forecaster spoke |
+| `"KRONOS_FORECAST_DIRECTIONAL"` | `strategy.REASON_FORECAST_DIRECTIONAL` = `"FORECAST_DIRECTIONAL"` | ✅ Named constant, not an inline literal. Old code recorded in `kronos_adapter.RETIRED_REASON_CODES` |
+| `KronosForecastOutput` | `ForecastAgentOutput` | ✅ |
+| `key="kronos_forecast"` | `key="forecast"` | ✅ |
+| `kronos` extra in `pyproject.toml` | unchanged | Correct: it installs *Kronos's* dependencies |
+| `__init__.py` lazy-import table | unchanged | The one enumerated exemption (§7) |
 
 ---
 
@@ -108,14 +112,21 @@ rename plus a default change; none requires new behaviour.
 Machinery built to answer *"does Kronos earn its place?"*. The question
 generalises; the vocabulary does not.
 
-| Symbol | Location | Assessment |
+**All applied.** ✅
+
+| Was | Now | Note |
 |---|---|---|
-| `StrategyComparison.kronos` | `evaluate.py:830` | The field is "the arm under test". Rename to `candidate` |
-| `run_strategy_comparison(kronos_strategy=…)` | `evaluate.py:949` | Rename the parameter to `candidate_strategy` |
-| `kronos_verdict()` | `evaluate.py:1009` | Nine criteria, none Kronos-specific. Rename to `value_verdict()` |
-| `kronos_is_valuable()` | `evaluate.py:1096` | Rename to `model_is_valuable()`; **keep the `False` default** |
-| `hypotheses.kronos_conditional_value()` | `hypotheses.py:511` | A standing research hypothesis *about Kronos*. Correctly Kronos-specific — **keep**, and add a mirror hypothesis about the native model |
-| `STANDING_HYPOTHESES` | `hypotheses.py:571` | Add the native-model hypothesis alongside |
+| `StrategyComparison.kronos` | `.candidate` | ✅ Also `.kronos_trades` → `.candidate_trades` |
+| `run_strategy_comparison(kronos_strategy=…)` | `candidate_strategy=` | ✅ Default label `"candidate vs baseline"` |
+| `kronos_verdict()` | `value_verdict()` | ✅ Criterion `kronos_traded` → `candidate_traded` |
+| `kronos_is_valuable()` | `model_is_valuable()` | ✅ **`False` default kept** — a model with no evidence has earned nothing |
+| `kronos_conditional_value()` | `model_conditional_value(model_name, …)` | ✅ Generalised rather than kept. The Kronos *evidence* moved to `kronos_adapter.kronos_value_hypothesis()`, which is a thin binding over it |
+| `STANDING_HYPOTHESES` | `("model_conditional_value",)` | ✅ One template, any model |
+
+`model_conditional_value` now takes `contradicting_evidence` as a parameter and,
+when the caller supplies none, records *the absence of evidence* as
+counter-evidence. A standing hypothesis carrying only the case for a model would
+be an advocacy document.
 
 The nine criteria in `kronos_verdict` — matched costs, matched limits, both arms
 traded, out-of-sample, minimum paired observations, significance — are exactly
@@ -185,18 +196,37 @@ several**, with nothing depending on it by default.
 | **R4 — Matched comparison** | Native and Kronos judged by the generalised `value_verdict()` under one `EvaluationHarness` | A supportable answer to "which is better", or an honest "indistinguishable" |
 | **R5 — Reclassify** | Kronos capability record moves to `external_benchmark`; native record enters the ladder at `proposed` | Kronos is a benchmark, a challenger, or an ensemble member — never the core |
 
-### The structural test for R3
+### The structural test — written, passing ✅
 
-`kernel.py` already proves a property of this shape for the self-evolution
-modules. The same technique applies:
+`tests/test_trading_independence.py`, 14 tests, in CI. It parses every trading
+module that is not part of the Kronos implementation and fails on:
 
-> Parse every module under `olympus/trading/` **except** `kronos_adapter.py`,
-> `kronos_runtime.py` and their tests. Fail if any imports either module or
-> contains the literal string `"kronos"` in a non-comment string constant.
+1. **any import** of `kronos_adapter` or `kronos_runtime`;
+2. **any identifier** — class, function, argument, assigned name, dataclass
+   field — containing "kronos";
+3. **any runtime string constant** containing "kronos", with docstrings removed
+   *by identity* rather than by heuristic.
 
-That test is the machine-checkable definition of "Olympus does not depend on
-Kronos", and it should be written **before** the native model, so the removal is
-verified independently of whether the native model turns out to be any good.
+Plus **G5, executed rather than asserted**: a subprocess installs a meta-path
+finder that raises on any import of the two Kronos modules, then imports every
+other trading module. Nothing fails, so deleting the Kronos implementation
+breaks nothing.
+
+The subprocess matters. Poisoning `sys.modules` in-process leaves every later
+test in the session holding stale module objects — a mistake this suite already
+made once, during the ingestion work, and one worth not repeating.
+
+**Why an AST test rather than a grep.** A grep cannot tell a citation from a
+coupling. `features.py` names `KRONOS_TEARDOWN §12.9` five times because that
+defect is *why* `causal_window_normalise` exists; deleting those comments would
+delete the reasoning. So the rule is scoped to the three things that make code
+actually depend on something — imports, identifiers and runtime values — and
+prose is exempt by design.
+
+**The one exemption.** `__init__.py`'s lazy-import table maps attribute names to
+module paths, so it necessarily contains the two module names. Only strings that
+are exactly a Kronos module's name or dotted path are permitted, only in that
+file, and a separate test asserts the exemption has not spread.
 
 ---
 

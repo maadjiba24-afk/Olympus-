@@ -6,7 +6,7 @@ records what actually exists. When they disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Commit surveyed:** `e8380c6`
+- **Commit surveyed:** `e8380c6`; **P1 (decouple) complete**
 
 ---
 
@@ -93,11 +93,11 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 
 | # | Gate | State |
 |---|---|---|
-| G1 | No Olympus module outside the Kronos files references Kronos | ❌ **Not met.** 6 modules carry Kronos-named symbols (dependency map §3) |
+| G1 | No Olympus module outside the Kronos files references Kronos | ✅ **Met.** `tests/test_trading_independence.py`: no import, no identifier, no runtime string. One enumerated exemption (`__init__.py`'s lazy-import table) |
 | G2 | No native module imports Kronos or a Kronos constant | ➖ Vacuous — no native module exists |
 | G3 | Native weights never initialised from foreign weights | ➖ Vacuous — no weights exist |
 | G4 | Design note per component | ✅ **Met** — all twelve in architecture doc §3 |
-| G5 | Deleting the Kronos modules breaks no Olympus module | ❌ **Not met** — `signals`, `strategy`, `agents`, `evaluate` carry Kronos-named symbols |
+| G5 | Deleting the Kronos modules breaks no Olympus module | ✅ **Met, executed.** A subprocess blocks both modules at import and every other trading module still imports |
 | G6 | No look-ahead in the training pipeline | ➖ No pipeline. `features.assert_causal` exists and is tested |
 | G7 | Training reproducible from a seed | ➖ No trainer |
 | G8 | Every checkpoint carries a complete manifest | ➖ No checkpoints |
@@ -111,10 +111,11 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G16 | Safety kernel unreachable from `native/` | ➖ Vacuous until `native/` exists; the mechanism (`kernel.audit_evolution_modules`) is built and tested |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
 
-**Score: 3 met, 2 not met, 4 blocked, 8 vacuous.**
+**Score: 5 met, 0 not met, 4 blocked, 8 vacuous.**
 
-The three met gates are all *governance* gates that were already true before
-this work started. **No value gate has been attempted.**
+G1 and G5 were closed by P1. The other three met gates are *governance* gates
+that were already true before this work started. **No value gate has been
+attempted, and none can be until B1 lifts.**
 
 ---
 
@@ -142,13 +143,15 @@ document should keep saying so.
 
 | Phase | Blocked? | Value |
 |---|---|---|
-| **P1 — Decouple from Kronos** | No | High. Independence from Kronos is achievable *today* and is worth having whether or not a native model ever trains. Closes G1 and G5 |
+| **P1 — Decouple from Kronos** | ✅ **Done** | Closed G1 and G5. 14 independence tests; 2444 trading tests green; no native code written |
 | **P2 — Native skeleton, no learning** | No | Moderate. Establishes `MarketState`, the dataset windowing, the checkpoint manifest and the `Forecaster` plug point using a deterministic statistical model. Closes G8's mechanism and G16 |
 | **P3 — Learning on synthetic data** | No | Low-moderate. Proves the training pipeline recovers known structure. Closes G6, G7. **Proves nothing about markets** and must not be reported as if it did |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
-**Recommendation.** Do P1 first and completely. It removes a real dependency, is
+**Recommendation.** P1 is done. Next is P2.
+
+**Original recommendation, kept for the record:** do P1 first and completely. It removes a real dependency, is
 independently verifiable by an AST test, and its value does not depend on the
 native model succeeding. Doing P3 before P1 would produce an unproven model
 inside a system still coupled to Kronos — the worst of both.
