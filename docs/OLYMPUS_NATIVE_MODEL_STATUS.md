@@ -236,7 +236,7 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G13 | Native vs Kronos under one matched harness | ⛔ **Blocked — B1, B2.** Kronos weights unreachable |
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11. Now measurable: `ForecastScore.parameters` is reported beside every result and `RepresentationResult.error_per_parameter` scales reconstruction error by size, so the largest model cannot win by being largest |
 | G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today |
-| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All sixteen native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. The model produces forecasts and nothing else — it cannot submit an order, change a limit, reach a credential or promote itself, and `benchmark.run_benchmark` returns numbers rather than decisions |
+| G16 | Safety kernel unreachable from `native/` | ✅ **Met.** All seventeen native modules — sixteen submodules plus the package itself — are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. The model produces forecasts and nothing else — it cannot submit an order, change a limit, reach a credential or promote itself, and `benchmark.run_benchmark` returns numbers rather than decisions |
 | G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
 
 **Score: 11 met, 2 partial, 4 blocked, 0 vacuous — unchanged by P3 and by
