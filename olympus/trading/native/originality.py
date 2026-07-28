@@ -345,6 +345,11 @@ _STDLIB: frozenset[str] = frozenset({
     "json", "math", "os", "pathlib", "platform", "random", "re", "resource",
     "statistics", "subprocess", "sys", "time", "typing", "collections",
     "functools", "itertools", "warnings", "__future__",
+    # Added by Phase 4's research isolation. `ctypes` is the notable one: it
+    # reaches libc for `unshare`, `prctl` and `mount`, which is how the worker
+    # gets a network namespace and a seccomp filter. Listing it here is the
+    # visible edit this hand-maintained set exists to force.
+    "ctypes", "shutil", "signal", "tempfile",
 })
 
 

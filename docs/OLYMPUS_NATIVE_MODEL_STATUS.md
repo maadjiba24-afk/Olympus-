@@ -8,14 +8,16 @@ records what actually exists. When they disagree, this file is right.
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
 - **Commit surveyed:** `41d8c03`; **P1 (decouple), P2 (skeleton), P3 (learning
   on synthetic data), Phase 1 (representation, dataset and baseline
-  foundations), Phase 2 (the multi-task model) and Phase 3 (capabilities beyond
-  the reference model) complete**
+  foundations), Phase 2 (the multi-task model), Phase 3 (capabilities beyond
+  the reference model) and Phase 4 (controlled self-evolution) complete**
 - **Companions:** `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` (channels and dataset
   format), `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` (encoders, baselines,
   benchmark record), `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` (the multi-task
   model, abstention, pipeline, evaluation),
   `docs/OLYMPUS_NATIVE_CAPABILITIES.md` (the nine capabilities and their
-  eight-fact reports)
+  eight-fact reports),
+  `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` (the learning loop, research
+  isolation and the twelve-stage gate)
 
 ---
 
@@ -44,6 +46,18 @@ summary**: the model still loses to persistence on the proper scoring rule, and
 its intervals are three times wider than the realised dispersion warrants while
 still covering only 68% of validation observations against a nominal 80% — too
 wide *and* mis-centred.
+
+Phase 4 connected the native models to the self-evolution framework: a forecast
+evidence journal carrying all fourteen required fields, ten weakness detectors,
+ten kinds of challenger proposal with eleven required fields each, a twelve-stage
+promotion gate whose last two stages no autonomous actor can reach, twelve
+improvement metrics with thirteen volume counters explicitly refused, and
+**OS-level research isolation** — a separate process in its own network
+namespace, under rlimits, behind a seccomp filter, with a read-only bind-mounted
+dataset, signed inputs and results, and a destroyed worker. The end-to-end
+demonstration ends in a **rejection**, on the merits: the challenger converged on
+persistence and could not be distinguished from it while carrying more
+parameters. **It did not change the one-line summary either.**
 
 Phase 3 built nine capabilities the reference model does not have — multi-scale
 bar-state tracking, a time-versioned cross-asset graph, an order-book
@@ -146,17 +160,22 @@ That row of the ledger is empty and will stay empty until B1 lifts.
 | **Order book / liquidity** | `native/microstructure.py` | ✅**S** | Snapshots, spread, depth with its band, imbalance, fill probability, slippage, square-root impact, deterioration against the book's own median — and the six-condition tradability gate. **Nothing is calibrated**; every number pairs with `Estimate.calibrated=False` |
 | **Regime specialists** | `native/specialists.py` | 🟡 | Eight specialists plus an always-registered generalist, four distinct fallback reasons, every decision recorded, and a `degenerate` check because a router that always picks the same destination is not routing. **No specialist has been trained** — they are registered slots |
 | **Scenario generation** | `native/scenarios.py` | ✅**S** | Six scenarios summing to exactly one. The unconditional two take their probabilities from the model's own quantile asymmetry; the conditional three are declared, because a return distribution contains no information about whether the exchange will halt. A scenario with no falsifier is refused |
+| **Evidence journal** | `native/evidence.py` | ✅**S** | The fourteen fields per matured forecast and ten weakness detectors. An abstention is evidence, error is `None` rather than zero when nothing was predicted, maturity is a fact about the clock with no `force`, and a finding below thirty observations is provisional rather than suppressed |
+| **Challenger proposals** | `native/challengers.py` | ✅ | Ten kinds, eleven required fields, contradicting evidence mandatory, compute budget enforced by `isolation.py` rather than declared. Every complexity-adding proposal is paired with a simplification, so the parsimony tie-break has something to break toward |
+| **Research isolation** | `native/isolation.py` | ✅**S** | Separate process, network namespace, seccomp-BPF filter, rlimits, allowlisted environment, read-only bind-mounted inputs, signed inputs and results, destroyed worker. Confinement is **observed by the worker**, not asserted by the parent, and a run whose confinement did not hold is discarded |
+| **Promotion gate** | `native/promotion.py` | 🟡 | Twelve stages in order; a missing check fails rather than passes; rejection is terminal; `promote()` calls `governance.authorise` first and has no `force`. **Stages 9 and 10 have never actually run** — no paper broker on real quotes (B3), no live stream to shadow |
+| **Improvement metrics** | `native/improvement.py` | 🟡 | The twelve Phase 4 names, with thirteen volume counters that raise rather than being ignored. **Seven of the twelve are unmeasured here** and are listed as such |
 | **Explainability** | `native/explain.py` | ✅**S** | Twenty-six reason codes in a closed set, each with a measurement. `evidence_only` is what a machine reads; `narrative()` is assembled from the codes and cannot carry a claim they do not. Rules over context, **not attribution over the model's computation** |
 
-**Native modules built: 35 files, 18,914 lines, 529 tests.** Of the 41 components
-in the table above, **33 are built and adversarially tested (15 of them also
-measured on synthetic data), 5 are partial, and 3 are untouched**: the standalone
+**Native modules built: 40 files, 22,930 lines, 659 tests.** Of the 46 components
+in the table above, **36 are built and adversarially tested (18 of them also
+measured on synthetic data), 7 are partial, and 3 are untouched**: the standalone
 conformal, regime and volatility heads. Phase 2 absorbed the regime and
 volatility heads into the multi-task model and Phase 3 built the liquidity and
 event components, so what remains untouched is the conformal layer — which
 Phase 2 gave a much sharper reason to build.
 
-All 35 are registered in `kernel.EVOLUTION_MODULES` and
+All 40 are registered in `kernel.EVOLUTION_MODULES` and
 `audit_evolution_modules()` returns zero findings.
 
 ### Infrastructure the native work will reuse — already built
@@ -365,6 +384,60 @@ the capability file:
    would also pass it. That is why abstention rates sit beside every score in
    the Phase 2 evaluation rather than "it declined" being counted as a success.
 
+### Phase 4 — what self-evolution established
+
+Full detail in `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md`. Both demonstrations run
+with `python scripts/native_evolution_demo.py`.
+
+**Phase 4 measured no forecasting number either**, and that is again the correct
+outcome: it built the loop that will measure them. What it did establish is a
+set of structural facts, each a test:
+
+- **Generated research code cannot reach a broker.** Not by import discipline —
+  by an empty network namespace, a seccomp filter denying `socket`/`connect`,
+  and an environment rebuilt from an allowlist. Fifteen of sixteen mechanisms
+  apply on this host and the sixteenth reports why it does not.
+- **The worker verifies its own confinement.** If the network namespace did not
+  apply, the probe sees a working socket and the result is discarded rather
+  than trusted.
+- **A challenger cannot skip the leakage test.** Stages are accepted only in
+  order, and a stage with no check *fails*.
+- **Olympus cannot promote.** `promote()` calls `governance.authorise` first,
+  there is no `force`, and an autonomous actor has no route to becoming an
+  operator.
+- **A failure cannot be lost.** Rejection is terminal, there is no mutator and
+  no delete, and `concealment_check()` re-reads the stored objects
+  independently of the constructor that would have refused them.
+- **Progress cannot be claimed by volume.** Thirteen counters — lines of code,
+  proposals generated, capabilities added and the rest — raise when passed to
+  `measure()` rather than being quietly dropped.
+
+Three findings from building it, kept because they are the point:
+
+1. **`chmod 0444` does not bind a uid-0 worker.** The first version shipped a
+   dataset the worker could overwrite while the manifest said read-only. It is
+   now a read-only bind mount in a private mount namespace, which the VFS
+   enforces regardless of uid.
+2. **A mis-specified baseline manufactures an improvement.** The demonstration's
+   first "persistence" arm predicted the last return again; on a random walk
+   that is √2 worse than predicting zero, so the challenger beat it by 30% on
+   pure noise. The second version compared two means with `<` and passed a 1.5%
+   difference on 160 observations. Only the third — a seeded paired bootstrap
+   plus the parsimony tie-break — rejected it.
+3. **The seccomp filter cannot precede `execve`.** It denies `execve`, so
+   installing it in `preexec_fn` means the worker never starts.
+
+Two limitations belong in this document rather than only in the capability file:
+
+- **Gate stages 9 and 10 have never run.** Paper trading needs a broker fed by
+  real quotes (B3) and shadow mode needs a live input stream. A challenger that
+  reaches `awaiting_review` here has passed eight real stages and two recorded
+  from constructed evidence, and the gate does not distinguish them.
+- **Seven of the twelve improvement metrics are unmeasured.** Robustness score,
+  failure rate, drift-detection time, rollback time, drawdown, risk-adjusted
+  return and `simpler_at_equal_performance`. Four need something outside a
+  forecast journal; three need trades that happened.
+
 ---
 
 ## 3. Completion gates — current state
@@ -389,9 +462,15 @@ Gate definitions in `docs/OLYMPUS_NATIVE_MARKET_INTELLIGENCE.md` §6.
 | G14 | Complexity earns its place (parsimony) | ⛔ Depends on G11. Now measurable: `ForecastScore.parameters` is reported beside every result and `RepresentationResult.error_per_parameter` scales reconstruction error by size, so the largest model cannot win by being largest |
 | G15 | Cannot promote itself | ✅ **Met by construction** — `capabilities.promote()` refuses an autonomous actor today, and `evaluation.run` / `benchmark.run_benchmark` return numbers rather than decisions |
 | G16 | Safety kernel unreachable from `native/` | ✅ **Met, and now on three axes.** All **thirty-five** native modules are in `kernel.EVOLUTION_MODULES` and `audit_evolution_modules()` returns zero findings. Phase 3 added two further source-level boundaries over the same set: `events.assert_event_boundary` (no event-handling code names a risk limit, credential, permission, live-mode flag, safety control or deployment gate) and `portfolio_context.assert_read_only` (no forecasting module names a portfolio or order mutator). Each has exactly one enumerated exemption — the module that declares the forbidden names — with a companion staleness test |
-| G17 | Deterioration detected and acted on | ✅ **Mechanism met** — `drift.DeteriorationMonitor` demotes autonomously today; unexercised on a native model |
+| G17 | Deterioration detected and acted on | ✅ **Mechanism met, and now exercised on a native model.** Phase 4's demonstration B runs the whole path: a measured metric regression flags the component, the monitor restricts it to `DISABLED` with no operator, an autonomous reinstatement is refused, two rollback triggers fire, the deployment ledger restores the version a named operator deployed, and a twelve-entry hash-chained audit trail verifies. On synthetic evidence, so the state does not change |
 
 **Score: 12 met, 1 partial, 4 blocked, 0 vacuous.** Phase 2 closed G9.
+**Phase 4 closed none.** G15 (cannot promote itself) and G16 (kernel
+unreachable) were already met and are now met on a wider surface — five more
+modules audited, and a promotion path that exists and refuses. G17
+(deterioration detected and acted on) moves from *mechanism met, unexercised on
+a native model* to **exercised end to end on a native model**, but on synthetic
+evidence, so it does not change state.
 **Phase 3 closed none**, and it would be wrong to claim otherwise: nine
 capabilities that cannot be evaluated on real data cannot close a gate that is
 about real data. What Phase 3 changed is G16's evidence — the audit now covers
@@ -462,6 +541,7 @@ document should keep saying so.
 | **Phase 1 — representation and dataset foundations** | ✅ **Done** | Closed no gate; moved G6, G9, G10 and G14 from asserted to measurable. 38-channel schema, dataset provenance and leakage audit, encoder contracts, 7 representation candidates, 9 baselines, 1 harness, 196 new tests. **First result: the native model loses to AR(3) and its intervals are 20 coverage points too wide** |
 | **Phase 2 — the multi-task model** | ✅ **Done** | Closed G9. Fifteen tasks (7 trainable), regime-routed mixture of experts, nine abstention reasons, 22-field contract, reproducibility computed not asserted, 14 metrics over 8 strata, 6 originality checks, self-auditing model card. 125 new tests. **First result: the model loses to persistence and its intervals are 3.1–3.4× too wide while covering only 0.68 against a nominal 0.80** |
 | **Phase 3 — capabilities beyond the reference model** | ✅ **Done** | Closed no gate; strengthened G16 on two new axes. Nine capabilities, a register whose readiness verdict is computed, thirteen adversarial conditions, 178 new tests. **First result: nine of nine are research-usable and zero are production-eligible**, which is what the evidence supports and not a placeholder |
+| **Phase 4 — controlled self-evolution** | ✅ **Done** | Closed no gate; widened G15/G16 and exercised G17 on a native model. Evidence journal, ten weakness detectors, ten challenger kinds, OS-level research isolation, a twelve-stage gate and twelve improvement metrics. 130 new tests. **First result: the end-to-end demonstration ends in a rejection**, because the challenger converged on persistence and could not be distinguished from it while carrying more parameters |
 | **P4–P7** | ⛔ Yes | — |
 | **P8 — Continuous learning wiring** | Partly | The governance wiring can be built and tested; the learning it governs cannot run |
 
@@ -548,6 +628,17 @@ python scripts/native_benchmark.py
 
 # train the multi-task model, evaluate it, and emit its model card
 python scripts/native_train_and_evaluate.py
+
+# what this host can enforce on generated research code
+python -c "import json; from olympus.trading.native.isolation import \
+isolation_report; print(json.dumps(isolation_report()['confinement'], indent=2))"
+
+# both self-evolution demonstrations, end to end
+python scripts/native_evolution_demo.py
+
+# the learning loop, the gate, the metrics, and the nine prohibitions
+python -m pytest tests/test_trading_native_evolution.py \
+                tests/test_trading_native_isolation.py -q
 
 # the nine capabilities and their readiness verdicts
 python -c "from olympus.trading.native.capability import native_capabilities;\
