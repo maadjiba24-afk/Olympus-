@@ -26,9 +26,22 @@
 
 name: Native Market Intelligence
 
+# `pull_request` covers every branch that has one open, and GitHub reports the
+# result against the pull request's head commit — which is what the merge bar
+# is written against. `push` is restricted to the default branch so a branch
+# with an open pull request does not run the whole matrix twice per commit,
+# once for each event, on a runner pool this workflow already asks a lot of.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A superseded commit's run is not evidence about the head. Cancelling it frees
+# the pool for the run that is, which matters when this workflow alone is eight
+# jobs across three operating systems.
+concurrency:
+  group: native-market-intelligence-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # -------------------------------------------------------------------------
