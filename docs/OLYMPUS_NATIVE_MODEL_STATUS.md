@@ -20,7 +20,9 @@ records what actually exists. When they disagree, this file is right.
   `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` (the learning loop, research
   isolation and the twelve-stage gate),
   `docs/OLYMPUS_VS_KRONOS.md` (the matched evaluation and its verdict),
-  `docs/OLYMPUS_NATIVE_FINAL_AUDIT.md` (the ownership and maturity audit)
+  `docs/OLYMPUS_NATIVE_FINAL_AUDIT.md` (the ownership and maturity audit),
+  `docs/OLYMPUS_NATIVE_PRE_MERGE_HARDENING.md` (the four pre-merge blockers and
+  what closing them changed)
 
 ---
 
@@ -83,12 +85,24 @@ evidence journal carrying all fourteen required fields, ten weakness detectors,
 ten kinds of challenger proposal with eleven required fields each, a twelve-stage
 promotion gate whose last two stages no autonomous actor can reach, twelve
 improvement metrics with thirteen volume counters explicitly refused, and
-**OS-level research isolation** — a separate process in its own network
-namespace, under rlimits, behind a seccomp filter, with a read-only bind-mounted
-dataset, signed inputs and results, and a destroyed worker. The end-to-end
-demonstration ends in a **rejection**, on the merits: the challenger converged on
-persistence and could not be distinguished from it while carrying more
-parameters. **It did not change the one-line summary either.**
+**OS-level research isolation**. The end-to-end demonstration ends in a
+**rejection**, on the merits: the challenger converged on persistence and could
+not be distinguished from it while carrying more parameters. **It did not change
+the one-line summary either.**
+
+**Pre-merge hardening** then closed four blockers that Phase 4's isolation and
+gate had left open, and the first two were real holes rather than tidying.
+Research isolation now bounds the whole **process tree** with a cgroup —
+`RLIMIT_*` is per-process and generated code can fork — with a sized tmpfs for a
+real disk quota and freeze-then-kill termination proven by an empty cgroup
+member list. Twenty-one adversarial tests try to escape it and each proves no
+descendant survived. Positive promotions now **fail closed**: no durable audit
+event and durable state, no permission. And the native model is **structurally
+quarantined** — eight properties enforced in code, including that setting
+`OLYMPUS_NATIVE_MODEL_ENABLED=1` changes nothing while its blockers are open.
+Full report: `docs/OLYMPUS_NATIVE_PRE_MERGE_HARDENING.md`. **It did not change
+the one-line summary either** — it made the summary structural instead of
+documentary.
 
 Phase 3 built nine capabilities the reference model does not have — multi-scale
 bar-state tracking, a time-versioned cross-asset graph, an order-book
@@ -114,6 +128,43 @@ against a nominal 0.80). That is the benchmark working, not failing.
 This line should not change until §3's gates start passing, and the phrase
 "Olympus owns a Kronos-class model" must not appear anywhere until **G7, G8,
 G11 and G13** have all passed on real data.
+
+---
+
+## 0. The quarantine
+
+The native model is not merely undeployed; it is **structurally incapable** of
+reaching production, and the enforcement is in
+`olympus/trading/native/quarantine.py` rather than in this document.
+
+| Property | Enforced |
+|---|---|
+| experimental | computed from the open blockers |
+| not the default forecaster | `forecast.py` does not name it; an AST sweep checks every module-level default |
+| not automatically registered | a subprocess watches `ModelRegistry.register` across the whole import |
+| cannot participate in live trading | refused at construction, and again by mode |
+| cannot become production eligible | computed; registry approval does not change it |
+| cannot pass the promotion gate | the gate consults the quarantine before the operator |
+| not autonomously selectable | a constant, not derived from the blockers |
+| disabled by default | needs the flag **and** zero open blockers |
+
+`OLYMPUS_NATIVE_MODEL_ENABLED=1` does not enable the model. It records an
+operator's intent; the blockers still say no. That is the difference between a
+flag and a gate.
+
+Four blockers are open, and closing one is an edit to `BLOCKERS` in a commit a
+reviewer reads:
+
+- **B8** — the error is almost entirely a constant offset: MAE 0.025636, mean
+  signed error +0.025038. Its resolution criteria exclude a post-hoc offset
+  term by name, because subtracting the measured bias would close the number
+  and change nothing about the model.
+- **B9** — loses to a gradient-boosted tree, a linear fit and persistence on
+  the matched protocol.
+- **B1** — no market data has ever been read.
+- **B3** — no broker has ever been reached.
+
+`pytest -q tests/test_trading_native_quarantine.py` — 50 tests, one per claim.
 
 ---
 

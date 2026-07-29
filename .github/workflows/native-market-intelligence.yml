@@ -1,0 +1,233 @@
+# CI for the Olympus-native market-intelligence work.
+#
+# Separate from ci.yml on purpose. This branch adds three things the main
+# workflow was never asked to cover, and each of them has a failure mode that
+# only shows up on a machine that is not this one:
+#
+#   * **Windows and macOS import smoke tests.** The pre-merge audit found
+#     `resource` — a Unix-only module — imported at module scope, which breaks
+#     `import olympus` on Windows entirely. `tests/test_trading_native_
+#     isolation_platform.py` simulates that in a subprocess on every platform,
+#     and it runs here on the real thing too, because a simulation of Windows
+#     is not Windows.
+#   * **Base versus [native] installs.** The native package is pure stdlib
+#     except for the parts behind torch, and that claim is only true until
+#     somebody adds a top-level `import torch`. The base job proves the
+#     package imports and its stdlib half runs with torch absent.
+#   * **The adversarial isolation suite.** Generated code trying to fork,
+#     detach, open sockets and exhaust the host. See scripts/
+#     isolation_ci_gate.py for why this job cannot pass vacuously on a runner
+#     that turns out to be unable to confine anything.
+#
+# The guard jobs (capabilities, threat model, dependency disclosure, Kronos
+# independence) are cheap and are duplicated from ci.yml deliberately: they are
+# the checks this work could most plausibly break, and a reviewer of this
+# workflow should be able to see them without opening another file.
+
+name: Native Market Intelligence
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Linux, the full supported range
+  # -------------------------------------------------------------------------
+  linux:
+    name: linux (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The range pyproject declares. tests/test_ci_matrix.py fails if this
+        # drifts from it.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[test]'
+      - run: python -m compileall -q olympus
+      - name: Native market-intelligence suite
+        run: |
+          pytest -q \
+            tests/test_trading_native.py \
+            tests/test_trading_native_capabilities.py \
+            tests/test_trading_native_evolution.py \
+            tests/test_trading_native_isolation.py \
+            tests/test_trading_native_isolation_platform.py \
+            tests/test_trading_native_matched.py \
+            tests/test_trading_native_pipeline.py \
+            tests/test_trading_native_promotion_durability.py \
+            tests/test_trading_native_quarantine.py \
+            tests/test_trading_native_robustness.py
+
+  # -------------------------------------------------------------------------
+  # the platforms where confinement does not exist
+  # -------------------------------------------------------------------------
+  import-smoke:
+    name: import smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      # The blocker: `import olympus` must succeed where `resource`, `fcntl`
+      # and the rest do not exist. This is the check that would have caught it.
+      - name: Import Olympus and the whole native package
+        run: >
+          python -c "import olympus, olympus.trading, olympus.trading.native as n;
+          [getattr(n, k) for k in sorted(getattr(n, '_LAZY', {}))];
+          print('imported', len(getattr(n, '_LAZY', {})), 'native modules')"
+      - name: The refusal must be typed, and the report answerable
+        run: >
+          python -c "from olympus.trading.native import isolation as i;
+          s = i.host_support();
+          print(s.to_dict());
+          assert s.can_run_generated_code is False;
+          r = i.isolation_report();
+          assert r['can_run_generated_code'] is False;
+          assert r['required_for_generated_code'];
+          print('refusal is typed and the report is answerable')"
+      - name: Platform-safety and quarantine suites
+        run: >
+          pytest -q
+          tests/test_trading_native_isolation_platform.py
+          tests/test_trading_native_quarantine.py
+
+  # -------------------------------------------------------------------------
+  # the two installations
+  # -------------------------------------------------------------------------
+  base-install:
+    # No optional native dependencies. The native package must still import and
+    # its stdlib half must still run — that is the whole reason torch is
+    # imported inside functions.
+    name: base install (no native extra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: pip install pytest
+      - name: torch must be absent, or this job proves nothing
+        run: >
+          python -c "import importlib.util, sys;
+          spec = importlib.util.find_spec('torch');
+          sys.exit(0 if spec is None else
+          print('torch is installed; the base job is not testing a base install') or 1)"
+      - name: The package imports and the stdlib half runs
+        run: >
+          python -c "import olympus.trading.native as n;
+          [getattr(n, k) for k in sorted(getattr(n, '_LAZY', {}))];
+          from olympus.trading.native import quarantine as q;
+          print(q.summary())"
+      - run: pytest -q tests/test_deps_claim.py tests/test_trading_native.py
+             tests/test_trading_native_quarantine.py
+
+  native-install:
+    name: install with [native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[native]'
+      - run: pip install pytest
+      - name: torch must be present, or this job is the base job again
+        run: python -c "import torch; print('torch', torch.__version__)"
+      - run: pytest -q tests/test_trading_native.py tests/test_trading_native_neural.py
+
+  # -------------------------------------------------------------------------
+  # the security-sensitive suite
+  # -------------------------------------------------------------------------
+  isolation-adversarial:
+    # Runs the escape attempts if the runner can enforce the controls, and
+    # asserts the fail-closed refusal if it cannot. It cannot go green having
+    # done neither — see scripts/isolation_ci_gate.py.
+    name: isolation (adversarial)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - name: Report what this runner can enforce
+        run: >
+          python -c "from olympus.trading.native import isolation as i, cgroups;
+          print('cgroups:', cgroups.probe().to_dict());
+          print('host:', i.host_support().to_dict())"
+      # Unprivileged first: this is how a developer's container sees it, and
+      # the refusal path is the one that has to hold there.
+      - name: Unprivileged — the fail-closed path
+        run: python scripts/isolation_ci_gate.py
+      # Then privileged, where the cgroup controllers and mount(2) are
+      # available and the escape attempts can actually be made.
+      - name: Privileged — the escape attempts
+        run: sudo -E "$(which python)" scripts/isolation_ci_gate.py
+
+  # -------------------------------------------------------------------------
+  # the guards
+  # -------------------------------------------------------------------------
+  guards:
+    name: guards (deps, capabilities, threat model, independence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - name: Every declared capability count matches the code
+        run: python -m olympus capabilities --check
+      - name: Every exposed tool is in the threat model
+        run: python scripts/check_threat_model.py
+      - name: Every third-party import is disclosed
+        run: pytest -q tests/test_deps_claim.py tests/test_trading_native_pipeline.py
+      - name: Nothing native reaches Kronos
+        run: pytest -q tests/test_trading_independence.py
+      - name: The CI matrix matches pyproject
+        run: pytest -q tests/test_ci_matrix.py
+
+  # -------------------------------------------------------------------------
+  # one required context
+  # -------------------------------------------------------------------------
+  native-gate:
+    name: native
+    needs: [linux, import-smoke, base-install, native-install,
+            isolation-adversarial, guards]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Every leg must have passed
+        run: |
+          failed=""
+          for pair in \
+            "linux:${{ needs.linux.result }}" \
+            "import-smoke:${{ needs.import-smoke.result }}" \
+            "base-install:${{ needs.base-install.result }}" \
+            "native-install:${{ needs.native-install.result }}" \
+            "isolation-adversarial:${{ needs.isolation-adversarial.result }}" \
+            "guards:${{ needs.guards.result }}"; do
+            name="${pair%%:*}"
+            result="${pair##*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name did not pass (result: $result)"
+              failed="$failed $name"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            exit 1
+          fi
+          echo "Every native market-intelligence leg passed."

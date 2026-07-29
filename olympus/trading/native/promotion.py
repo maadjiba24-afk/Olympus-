@@ -372,8 +372,8 @@ class PromotionRefused(ConfigurationError):
 #: promotion whose evidence cannot say which build was reviewed is a promotion
 #: of something nobody can identify afterwards.
 REQUIRED_PROMOTION_EVIDENCE: tuple[str, ...] = (
-    "model_version", "evaluation_report", "reviewed_by", "review_notes",
-    "rollback_plan",
+    "model_id", "model_version", "evaluation_report", "reviewed_by",
+    "review_notes", "rollback_plan",
 )
 
 
@@ -575,6 +575,14 @@ class GateLedger:
                 next_stage=run.next_stage.value if run.next_stage else None)
         payload = _validate_promotion_evidence(evidence,
                                                challenger_id=challenger_id)
+        # The quarantine, checked before the operator is even consulted: a
+        # model that loses to persistence is not something a signature makes
+        # promotable. See `quarantine.py` for the blockers and what would
+        # close them.
+        from . import quarantine
+        quarantine.assert_promotable(
+            quarantine.promotion_identifiers(payload)
+            + (challenger_id, run.proposal_id))
         if not isinstance(restriction, Restriction):
             raise PromotionRefused(
                 "a restricted promotion requires a Restriction; without one "

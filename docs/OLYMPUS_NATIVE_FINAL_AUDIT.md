@@ -321,7 +321,7 @@ direction.
 |---|---|---|
 | Safety kernel | 11 components, 14 modules, 3 independent mechanisms | `kernel.SAFETY_KERNEL`; `seal()` / `verify_seal()` |
 | Evolution isolation from kernel | **enforced** | `audit_evolution_modules()` → `[]` over 41 native + 13 evolution modules |
-| Research isolation | **OS-level, verified from inside** | Separate process, network namespace, seccomp-BPF, rlimits, read-only bind-mounted inputs, destroyed worker. 15 of 16 mechanisms apply; the 16th reports why not |
+| Research isolation | **OS-level, established by the parent** | Separate process, cgroup-bounded tree (`pids.max`/`memory.max`/`cpu.max`), network namespace, seccomp-BPF, sized tmpfs, read-only bind-mounted inputs, freeze-then-kill termination proven by an empty member list, destroyed worker. All 15 required controls apply on a capable Linux host and generated code is refused where any is missing. Hardened after this audit — see `docs/OLYMPUS_NATIVE_PRE_MERGE_HARDENING.md` §2, which records that the pre-hardening version reported `process_limit` as not applied and that a forged worker report could reach the manifest |
 | Credential reach from research | **none** | Environment rebuilt from an allowlist; `olympus.vault` import blocked; no network |
 | Order submission from research | **structurally impossible** | Empty network namespace + seccomp denying `socket`/`connect` + blocked imports |
 | Kernel modification | **no code path exists** | `propose_kernel_change()` returns a document; there is no `apply_kernel_change` |
@@ -350,7 +350,7 @@ against a human with a shell. Anyone who can edit the source can edit
 |---|---|
 | Evidence journal | 14 fields per matured forecast; abstentions recorded as evidence; error `None` not zero; maturity a fact about the clock with no `force` |
 | Weakness detection | 10 kinds, each with measurement, threshold, sample size; provisional below n=30 |
-| Challenger generation | 10 kinds, 11 required fields; contradicting evidence mandatory; compute budget enforced as rlimits; every complexity-adding proposal paired with a simplification |
+| Challenger generation | 10 kinds, 11 required fields; contradicting evidence mandatory; compute budget enforced by cgroup quotas over the process tree, with rlimits as defence in depth; every complexity-adding proposal paired with a simplification |
 | Isolated experiments | OS-level; a run whose confinement did not hold is **discarded** |
 | Promotion gate | 12 stages in order; a missing check **fails**; stages 11–12 require an operator token; no `force` |
 | Improvement metrics | 12 named; 13 volume counters **raise** rather than being ignored; verdict starts `UNPROVEN` |

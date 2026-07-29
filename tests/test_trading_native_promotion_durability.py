@@ -43,7 +43,10 @@ START = datetime(2028, 5, 1, tzinfo=timezone.utc)
 KEY = "SIM:BTCUSDT"
 
 REVIEW_EVIDENCE = {
-    "model_version": "native-0.1.0+test",
+    # Not a quarantined identifier: the native model cannot pass this gate at
+    # all, which `tests/test_trading_native_quarantine.py` is what proves.
+    "model_id": "incumbent-forecaster",
+    "model_version": "incumbent-2.4.0",
     "evaluation_report": "docs/OLYMPUS_VS_KRONOS.md#matched",
     "reviewed_by": "alice",
     "review_notes": "read the matched evaluation and the robustness suite",
@@ -140,7 +143,8 @@ def test_the_order_is_operator_evidence_audit_state(tmp_path, operator):
                        restriction=restriction_at(),
                        evidence={"model_version": "x"})
     assert set(raised.value.details["missing"]) == {
-        "evaluation_report", "reviewed_by", "review_notes", "rollback_plan"}
+        "model_id", "evaluation_report", "reviewed_by", "review_notes",
+        "rollback_plan"}
     assert len(ledger.audit) == before
     assert ledger.durable_state["c1"]["outcome"] != "promoted"
     assert ledger["c1"].outcome is not PR.GateOutcome.PROMOTED

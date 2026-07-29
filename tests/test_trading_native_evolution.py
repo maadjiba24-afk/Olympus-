@@ -580,7 +580,10 @@ def test_olympus_cannot_advance_a_human_stage():
 #: durable place to write the record. Both are the point of the fail-closed
 #: commit, so the helpers are named rather than inlined at each call site.
 REVIEW_EVIDENCE = {
-    "model_version": "native-0.1.0+test",
+    # Not a quarantined identifier: the native model cannot pass this gate at
+    # all, which `tests/test_trading_native_quarantine.py` is what proves.
+    "model_id": "incumbent-forecaster",
+    "model_version": "incumbent-2.4.0",
     "evaluation_report": "docs/OLYMPUS_VS_KRONOS.md#matched",
     "reviewed_by": "alice",
     "review_notes": "read the matched evaluation and the robustness suite",

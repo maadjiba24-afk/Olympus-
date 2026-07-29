@@ -102,7 +102,16 @@ class NativeForecaster(Forecaster):
     def __init__(self, checkpoint: NativeCheckpoint, *,
                  state_builder: MarketStateBuilder | None = None,
                  name: str = "olympus-native",
+                 purpose: "quarantine.Purpose | str" = None,
                  clock: Clock | None = None):
+        # The quarantine is checked *first*, before anything is built. A
+        # forecaster that exists can be handed somewhere its constructor never
+        # saw, so the refusal has to be at construction rather than at use.
+        # The default is the safest purpose, so a call site that forgets the
+        # argument gets research and not live.
+        from . import quarantine
+        self.purpose = quarantine.assert_purpose(
+            quarantine.Purpose.RESEARCH if purpose is None else purpose)
         super().__init__(name=name, clock=clock)
         if not isinstance(checkpoint, NativeCheckpoint):
             raise ConfigurationError(
@@ -170,7 +179,39 @@ class NativeForecaster(Forecaster):
         """True. Lookup and interpolation; no RNG anywhere in the path."""
         return True
 
+    @property
+    def experimental(self) -> bool:
+        """Computed from the open blockers. No argument sets this.
+
+        True today, and it will stay true until `quarantine.BLOCKERS` records
+        that the location bias is fixed and the model beats the baselines it
+        currently loses to.
+        """
+        from . import quarantine
+        return quarantine.experimental()
+
+    @property
+    def production_eligible(self) -> bool:
+        """Computed. Approving this model in a registry does not change it."""
+        from . import quarantine
+        return quarantine.production_eligible()
+
+    @property
+    def open_blockers(self) -> tuple[str, ...]:
+        from . import quarantine
+        return tuple(b.id for b in quarantine.open_blockers())
+
+    def assert_usable(self, mode: Any) -> None:
+        """Refuse a live mode. A second, independent check to `assert_purpose`.
+
+        Two checks that can each fail on their own is the difference between a
+        quarantine and one `if` somebody deletes.
+        """
+        from . import quarantine
+        quarantine.assert_not_live(mode)
+
     def _identity(self) -> dict:
+        from . import quarantine
         return {"kind": "olympus-native",
                 "model_kind": self.checkpoint.model_kind,
                 "checkpoint_id": self.checkpoint.checkpoint_id,
@@ -178,7 +219,15 @@ class NativeForecaster(Forecaster):
                 "data_hash": self.checkpoint.manifest.data_hash,
                 "seed": self.checkpoint.manifest.seed,
                 "code_version": self.checkpoint.manifest.code_version,
-                "owner": "olympus"}
+                "owner": "olympus",
+                # Carried in the identity so it reaches every audit record,
+                # every model card and every describe() a reviewer might read,
+                # rather than living only in a document nobody opens.
+                "experimental": self.experimental,
+                "production_eligible": self.production_eligible,
+                "purpose": self.purpose.value,
+                "open_blockers": list(self.open_blockers),
+                "quarantine": quarantine.summary()}
 
     # -- the one method that matters ---------------------------------------
 
