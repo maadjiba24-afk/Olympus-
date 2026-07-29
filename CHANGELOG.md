@@ -15,6 +15,30 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-07-29
+
+### Docs — Full technical audit and teardown
+
+Adds `docs/TECHNICAL_AUDIT_2026-07-29.md`: an evidence-based teardown of the
+whole repository, produced by tracing each capability from its public entry point
+to its final side effect rather than trusting names, docstrings, or the README.
+
+- **What it covers.** ~254 capabilities classified with the status labels
+  (WORKING / IMPLEMENTED_UNTESTED / PARTIAL / SCAFFOLD_ONLY / DISABLED /
+  UNREACHABLE / MOCK_ONLY / BROKEN / MISSING), a module-by-module teardown, a
+  deployment-readiness matrix, a test-quality assessment, and a P0–P4 remediation
+  plan. Full suite recorded at 8363 passed / 168 skipped / 0 failed.
+- **Findings.** 0 CRITICAL, 20 HIGH. The load-bearing ones: request state lives
+  in process memory so the app cannot scale horizontally; several advanced
+  capabilities (codegraph auto-build, ingest gate, `modelgrade.observe()`,
+  `emem.context_block`, scaffold evolution) are implemented and tested but never
+  reached on a default install; `OLYMPUS_DAILY_BUDGET=0` means *unlimited* spend;
+  and the fail-closed boot checklist runs only under `OLYMPUS_ENV=staging`, so a
+  production boot enforces none of it.
+- **No code changed.** The audit is documentation only; every remediation item is
+  left as a task with acceptance criteria, not applied.
+
+
 ### Added — Objective per-domain benchmarks: the self-improvement gate goes judge-independent
 
 Extends the objective-assertion layer (which already caps the LLM judge with
@@ -3554,7 +3578,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.25.0...v0.26.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0
