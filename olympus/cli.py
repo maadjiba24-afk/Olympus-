@@ -1049,6 +1049,17 @@ def main(argv: list[str] | None = None) -> int:
         except _config.StagingConfigError as err:
             print(f"[staging] {err}", file=sys.stderr)
             return 1
+        # Production boot invariant, operational half: the signing-seed check
+        # above proves the instance can sign authentically, but it said nothing
+        # about spend, exposure or retention — so production could boot with an
+        # UNLIMITED ceiling, no credential while bound off-loopback, or
+        # unbounded retention, all of which staging already refuses. Same
+        # fail-closed posture, same one-actionable-list error.
+        try:
+            _config.require_production_config()
+        except _config.ProductionConfigError as err:
+            print(f"[production] {err}", file=sys.stderr)
+            return 1
 
     if args.command == "setup":
         if getattr(args, "section", None):

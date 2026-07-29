@@ -9,7 +9,9 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from olympus import replaygate, usage
+import pytest
+
+from olympus import firstrun, replaygate, usage
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -17,6 +19,14 @@ _spec = importlib.util.spec_from_file_location(
 rg = importlib.util.module_from_spec(_spec)
 sys.modules["reliability_gate"] = rg
 _spec.loader.exec_module(rg)
+
+
+@pytest.fixture(autouse=True)
+def _configured(monkeypatch):
+    """The report/exit-code tests run BEHIND the provider preflight, so declare
+    the precondition rather than depending on the ambient environment. The
+    preflight itself is covered by its own test below."""
+    monkeypatch.setattr(firstrun, "configured", lambda: True)
 
 
 def _result(run_id, ok=True, skipped=False):
@@ -68,3 +78,23 @@ def test_sets_a_spend_cap(monkeypatch):
     monkeypatch.setattr(replaygate, "run_exit_check", fake_run)
     rg.main([])
     assert seen["cap"] == "5.00"                     # a cap is enforced by default
+
+
+def test_no_provider_key_is_inconclusive_before_spending_anything(
+        monkeypatch, capsys):
+    """Audit finding E25. Without a key the pipeline still answers, records
+    decisions, freezes no model call and then "diverges" — which printed a hard
+    "RELIABILITY GATE NOT MET" for what is really "the gate never ran". Refuse
+    up front instead, and never start the three runs."""
+    monkeypatch.setattr(firstrun, "configured", lambda: False)
+
+    def must_not_run(prompts=None):
+        raise AssertionError("the gate ran without a provider key")
+    monkeypatch.setattr(replaygate, "run_exit_check", must_not_run)
+
+    rc = rg.main([])
+    out = capsys.readouterr().out
+    assert rc == 0                              # inconclusive, not a failure
+    assert "INCONCLUSIVE" in out
+    assert "NOT MET" not in out                 # the bug: a false hard failure
+    assert "NOT a pass" in out                  # nor is it reported as a pass

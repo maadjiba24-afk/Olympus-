@@ -63,9 +63,9 @@ state into the shared store.
 **Is it production-ready?** **No.** Single-node only; memory persists only if an operator
 mounts a volume / sets `OLYMPUS_MEMORY_DIR` (default path lives inside the image); no metrics
 backend, log aggregation, or alerting; several security controls are **off by default**; the
-default signing seed is **public and forgeable** (integrity, not authenticity); the default
-daily budget is **unlimited** and production boot enforces no budget/credential/retention
-checklist; and the headline autonomy/verification claims lack real-model test evidence.
+default signing seed is **public and forgeable** (integrity, not authenticity); and the headline
+autonomy/verification claims lack real-model test evidence. (The unlimited-default-budget and
+unguarded-production-boot findings, E21/E22, were **fixed in 0.27.0** after this audit.)
 
 **Most serious technical risks (all HIGH; there are no CRITICAL code defects):**
 1. **Inert-by-default advanced capabilities.** Codegraph (never auto-built), ingest gate
@@ -84,10 +84,13 @@ checklist; and the headline autonomy/verification claims lack real-model test ev
 5. **Security defaults.** Public signing seed; assessment scope read from an **unsigned**
    plaintext file; single-seed "two-party" custody; sandbox `local` backend gives **no OS
    isolation**; WhatsApp/webhook endpoints unauthenticated when their optional secret is unset.
-6. **Unsafe operational defaults.** `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off**
-   (`config.py:871`); and the fail-closed boot checklist (capped budget, credential-if-off-loopback,
-   finite retention) runs only under `OLYMPUS_ENV=staging` — a plain **production boot has no such
-   check** and can start wide open on all three (`config.py:1737`).
+6. ~~**Unsafe operational defaults.**~~ **FIXED in 0.27.0.** An unset `OLYMPUS_DAILY_BUDGET` now
+   resolves to a bounded `DEFAULT_DAILY_BUDGET` ($10/day) instead of unlimited, removing the ceiling
+   is an explicit opt-in, and a malformed value no longer crashes `import olympus.config`. The
+   fail-closed boot checklist now also runs under `OLYMPUS_ENV=production`
+   (`config.production_problems` / `require_production_config`), so production refuses to boot with an
+   explicitly-unlimited budget, infinite retention, an unwritable memory dir, or an off-loopback bind
+   with no credential.
 
 **The honesty signal.** Unusually, the repository's *own* comments, ADRs, `DEFERRED.md`,
 `docs/TRUTH_STATE_*.md`, and `docs/*STATUS*.md` disclose most of these limitations directly.
@@ -338,7 +341,7 @@ image/repo** unless an operator overrides it.
 - **`trace.py` is not crash-durable mid-run by design** — it flushes the whole decision log once at
   the end (`trace.py:146`); a run killed before flush loses its decision log (exactly the gap
   `ledger.py`'s per-step durability closes for checkpointed runs).
-- **`replaygate.py` is PARTIAL — and now demonstrably mis-reports.** Its pass/fail/skip control flow
+- **`replaygate.py` was PARTIAL and demonstrably mis-reporting — E25, now FIXED in 0.27.0.** Its pass/fail/skip control flow
   is tested, but every test **mocks `orchestrator.replay_run`**, so the composed "run live, then
   replay byte-identically" claim is never exercised. **I ran the real gate**
   (`scripts/reliability_gate.py`, RELEASING.md step 4) in a keyless environment: all 3 prompts
@@ -346,11 +349,15 @@ image/repo** unless an operator overrides it.
   `model_request_hash=None, model_response_ref=None, cost=0.0` and **zero response blobs were written**
   to `memory/responses/`. Replay then attempted a real model call, recomputed a hash, found nothing,
   and raised divergence — so the gate printed **"✗ RELIABILITY GATE NOT MET"** rather than the
-  "⚠ INCONCLUSIVE" it is supposed to emit when the provider is unavailable. See E25.
+  "⚠ INCONCLUSIVE" it is supposed to emit when the provider is unavailable. **Fixed:**
+  `check_one` now classifies a run that froze no model call as a SKIP, and both operator entry
+  points (`reliability_gate.py`, `tier1_exit_check.py`) refuse up front via `firstrun.configured()`
+  — the guard `heartbeat.tick` already used. The composed live claim is still unproven (it needs a
+  real key), but the gate no longer *lies* about it. See E25.
 - **`watchdog.py` supervision is inert by default** (`OLYMPUS_WATCHDOG` unset ⇒ mode `off`), and its
   own docstring calls every threshold "PROVISIONAL… not derived from measurement of this system."
-- **Unsafe config defaults** (E21/E22): `DAILY_BUDGET=0` = **unlimited spend** (`config.py:871`); the
-  fail-closed boot checklist exists **only for staging**, not production (`config.py:1737`);
+- **Unsafe config defaults** (E21/E22) — **both fixed in 0.27.0**: an unset budget is now bounded by
+  `DEFAULT_DAILY_BUDGET` and the boot checklist now covers production too;
   `outcomes.record()` swallows exceptions **without** `errors.capture()` (`outcomes.py:43`), unlike
   every sibling module.
 - **Anomalies:** heartbeat `run_forever()` is a real loop but **not self-starting** (needs
@@ -434,10 +441,10 @@ verification (23 CONFIRMED / 16 PARTIAL-downgraded / 1 REFUTED of the 40 checked
 | E18 | MED→LOW | mandate.py:284 | Custody | Default co-signer derived from same seed as system key | vault subkey from custody seed | Single trust domain by default | "Two-party" nominal unless `OLYMPUS_MANDATE_*` set | Require a distinct co-signer key by default |
 | E19 | LOW | usermem.py:213 | Profile card | Age always 0 (reads `created` not `created_at`) | `render_card` | Key typo | Misleading age in transparency card | Fix key name |
 | E20 | INFO×~222 | many | Reliability | ~222 silent `except: pass` swallows | orchestrator(13)/memory(11)/browser(10)… | Best-effort defensiveness | Failures invisible; harder debugging/observability | Log at debug; narrow exception types |
-| E21 | HIGH | config.py:871 | Budget default | `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off** | `DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET","0") or 0)`; compose comment "0 means UNLIMITED, not off" | `0` chosen as the "off" sentinel for a safety cap | A fresh install has no spend ceiling once heartbeat LLM cadences fire | Ship a conservative non-zero default; require an explicit `unlimited` token to disable |
+| E21 | HIGH — **FIXED in 0.27.0** | config.py:871 | Budget default | `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off** | `DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET","0") or 0)`; compose comment "0 means UNLIMITED, not off" | `0` chosen as the "off" sentinel for a safety cap | A fresh install has no spend ceiling once heartbeat LLM cadences fire | Ship a conservative non-zero default; require an explicit `unlimited` token to disable |
 | E22 | HIGH | config.py:1728 | Prod boot validation | Fail-closed checklist (budget/credential/retention) runs **only** under `OLYMPUS_ENV=staging`; production boot only checks the signing seed | `staging_problems()` gated by `is_staging()`; no `require_production_config` exists (grep) | Staging hardening never extended to production | A production instance can boot with unlimited budget, no off-loopback credential, infinite retention | Run the same checklist (or a superset) under `is_production()` |
 | E23 | HIGH | store.py:70 | Postgres backend | PostgresStore has **zero test coverage**; `psycopg` not installed; "verified against live Postgres" unsubstantiated | no `PostgresStore`/`OLYMPUS_DATABASE_URL` reference in `tests/`; `import psycopg` fails | Optional lazy backend never wired into CI | The advertised scale/persistence path is unverified; bugs surface first in production | Add a testcontainers/compose Postgres integration test of the store contract |
-| E25 | HIGH | replaygate.py:151 / scripts/reliability_gate.py | Release gate | The mandatory release reliability gate **cannot produce a valid verdict without a provider key, and misclassifies that state as a genuine reliability failure** | Live run: 3/3 prompts `completed=True decisions=3` with `model_request_hash=None, resp_ref=None, cost=0.0`; `memory/responses/` empty; verdict printed `✗ RELIABILITY GATE NOT MET`. `genuine_failures()` (replaygate.py:151-153) treats every non-`skipped` failure as genuine, and a keyless degraded run is never marked `skipped` | In a keyless environment the pipeline completes with zero recorded model calls, but replay still takes the model path and diverges; the skip/INCONCLUSIVE detector only recognises provider errors, not the keyless-degraded path | RELEASING.md step 4 is unpassable and, worse, actively misleading: an operator is told the release is unreliable when the gate simply never ran. Blocks a release for the wrong reason | Mark a run with zero recorded model calls as `skipped`/INCONCLUSIVE; assert a provider key up front and refuse to run rather than emitting a hard FAIL |
+| E25 | HIGH — **FIXED in 0.27.0** | replaygate.py:151 / scripts/reliability_gate.py | Release gate | The mandatory release reliability gate **cannot produce a valid verdict without a provider key, and misclassifies that state as a genuine reliability failure** | Live run: 3/3 prompts `completed=True decisions=3` with `model_request_hash=None, resp_ref=None, cost=0.0`; `memory/responses/` empty; verdict printed `✗ RELIABILITY GATE NOT MET`. `genuine_failures()` (replaygate.py:151-153) treats every non-`skipped` failure as genuine, and a keyless degraded run is never marked `skipped` | In a keyless environment the pipeline completes with zero recorded model calls, but replay still takes the model path and diverges; the skip/INCONCLUSIVE detector only recognises provider errors, not the keyless-degraded path | RELEASING.md step 4 is unpassable and, worse, actively misleading: an operator is told the release is unreliable when the gate simply never ran. Blocks a release for the wrong reason | Mark a run with zero recorded model calls as `skipped`/INCONCLUSIVE; assert a provider key up front and refuse to run rather than emitting a hard FAIL |
 | E24 | MED | outcomes.py:43 | Error visibility | `record()` swallows all exceptions **without** `errors.capture()`, unlike sibling modules | bare `except Exception: pass` | Inconsistent error-capture convention | A broken store backend fails invisibly with no operator trace | Route through `errors.capture('outcomes.record', err)` |
 
 *(38 MEDIUM, 33 LOW, 10 INFORMATIONAL findings total across all subsystems; the table shows the load-bearing ones. Persistence-ops was re-analyzed after an initial degenerate run, adding E21–E24; E25 came from actually executing the release reliability gate.)*
@@ -588,8 +595,8 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
     assessment scope is an unsigned file; custody is single-seed.
 12. **Ship class-aware egress/PII routing, semantic recall, episodic memory, or codegraph
     verification** without operator opt-in and setup — all inert on a default install.
-13. **Boot safely by default.** The default daily budget is *unlimited* (`0` is the sentinel), and
-    a production boot enforces no budget/credential/retention checklist — only staging does.
+13. ~~Boot safely by default.~~ **Fixed in 0.27.0**: unset budget is now bounded, and production
+    boot enforces the same fail-closed checklist staging gets.
 14. **Rely on the Postgres backend.** It has zero test coverage and `psycopg` isn't even installed
     in the dev environment; a flip to `OLYMPUS_DATABASE_URL` would be its first real exercise.
 15. **Supervise wedged jobs out of the box.** The watchdog is off by default and its thresholds are

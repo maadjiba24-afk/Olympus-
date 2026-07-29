@@ -24,6 +24,17 @@ from olympus import firstrun, replaygate  # noqa: E402
 def main(argv=None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
     firstrun.load_env_file()
+    # Same preflight as scripts/reliability_gate.py: the record pass needs a real
+    # provider. Without one the pipeline answers keyless, freezes no model call,
+    # and replay "diverges" — which read as "GATE NOT MET" when the truth is
+    # "the gate never ran". `replaygate.check_one` also classifies that run as a
+    # skip now; this just refuses before spending three runs to find out.
+    if not firstrun.configured():
+        print("⚠ INCONCLUSIVE — no provider key configured, so the gate cannot "
+              "run.\n  This is NOT a pass and NOT a replay failure: nothing was "
+              "measured.\n  Set ANTHROPIC_API_KEY (or run `olympus setup`) and "
+              "re-run.")
+        return 0
     all_pass, results = replaygate.run_exit_check(argv or None)
     passed = sum(1 for r in results if replaygate._ok(r))
     skipped = sum(1 for r in results if r.get("skipped"))

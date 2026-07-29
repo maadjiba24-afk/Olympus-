@@ -347,9 +347,13 @@ def _readiness() -> tuple[bool, dict]:
     while silently dropping every journal append."""
     from . import shadow
     info = config.build_info()
-    problems = list(config.staging_problems())
+    # BOTH named modes, so the docstring's "the declared deployment mode" is
+    # true rather than staging-only. Each is a no-op outside its own mode, so at
+    # most one contributes and a dev instance is unaffected.
+    problems = list(config.staging_problems()) + list(
+        config.production_problems())
     writable = config._writable_dir(config.MEMORY_DIR)
-    if not writable:
+    if not writable and not any("not writable" in p for p in problems):
         problems.append(f"memory dir {config.MEMORY_DIR} is not writable")
     payload = {
         "status": "ready" if not problems else "not_ready",
