@@ -24,13 +24,15 @@ else. They are not the same evidence and are not reported as if they were.
 |---|---|---|
 | 1 | All four blockers closed | **yes** — sections 2–5 |
 | 2 | The branch includes current main | **yes** — merged at `da4527b` |
-| 3 | GitHub CI green on the exact head commit | **pending** — see §7 |
+| 3 | GitHub CI green on the exact head commit | **yes at `7fb1089`** — both workflows; see §7 |
 | 4 | Generated experiments cannot escape or exhaust the host | **yes on a capable Linux host**, and refused on any other — §2 |
 | 5 | Positive promotion cannot succeed without durable audit evidence | **yes** — §4 |
 | 6 | The unvalidated model is structurally incapable of reaching production | **yes** — §5 |
 
-**This is not merge-ready until condition 3 is satisfied on the pull request's
-head commit.** Local test output is not a substitute and is not offered as one.
+Condition 3 is satisfied at `7fb1089` and must be **re-satisfied on whatever
+the head is when this is read** — every commit after that one needs its own
+green run, and a green tick on an ancestor is not evidence about a descendant.
+Local test output is not a substitute and is not offered as one.
 
 ---
 
@@ -390,6 +392,27 @@ B9 already records that the model loses to persistence on the matched protocol.
 The measurement is still taken and printed; what went is the assertion that its
 sign is positive.
 
+**A breaking major release of an unpinned dependency.** Four
+`test_mcp_integration.py` tests failed on every CI run of this branch and passed
+locally, with nothing in the repository touching MCP. `mcp` 2.0.0 was released
+on 2026-07-28 at 13:45 UTC; main's last green run was 11:29 that morning. This
+branch was the first CI run after it, and `mcp>=1.5.0` in the `test` extra had
+no upper bound — and that extra is not covered by `requirements.lock`, so the
+range in `pyproject.toml` was the only bound there was.
+
+Reproduced in a venv pinned to `mcp==2.0.0`, which fails the same four tests and
+names the cause: `AttributeError: 'Server' object has no attribute
+'list_tools'`. 2.0 removed the decorator API that `olympus/mcp_client.py` and
+the test fixture both use, surfacing as the opaque "unhandled errors in a
+TaskGroup". Capped at `<2` in all three places the range appears. **This is a
+pre-existing supply-chain gap this branch surfaced, not one it introduced.**
+
+One failure genuinely *was* load: `test_usage_ledger_tail_under_concurrency`
+asserts a p99 latency bound and failed once at 664 ms against 500 ms while the
+runner pool was saturated by this workflow firing twice per commit. It passed on
+the next run, after the concurrency group was added. That one is noted rather
+than fixed — the bound is somebody else's to judge.
+
 That last one is the reason the isolation suite is gated on host capability
 rather than assumed: a test that only passes on the machine it was written on
 is a test that reports the machine.
@@ -437,9 +460,11 @@ The base-install and native-install jobs each begin by asserting the condition
 that makes them meaningful — torch absent, torch present — so neither can
 silently become a copy of the other.
 
-**CI has not yet run on the head commit of this branch.** Until it has and is
-green, condition 3 of §1 is unmet and this work is not merge-ready. Local
-results are reported above as local.
+**Both workflows were green on `7fb1089`** — `CI` (the full suite across
+Python 3.10–3.13, plus the packaging, SBOM, browser and docker-sandbox jobs) and
+`Native Market Intelligence` (the eight jobs above). That satisfies condition 3
+*for that commit*. Any commit pushed after it needs its own green run before the
+condition holds again.
 
 ---
 
