@@ -88,7 +88,7 @@ def test_nothing_in_the_forecast_layer_names_the_native_model():
     An import-graph fact, not a naming convention: the forecasting layer cannot
     resolve a default to a model it has never heard of.
     """
-    text = (REPO / "olympus" / "trading" / "forecast.py").read_text()
+    text = (REPO / "olympus" / "trading" / "forecast.py").read_text(encoding="utf-8")
     for needle in ("NativeForecaster", "olympus-native", "native.forecaster"):
         assert needle not in text, (
             f"forecast.py mentions {needle!r}; a default that can name the "
@@ -497,7 +497,7 @@ def test_the_quarantine_is_not_tuned_away_by_editing_the_number():
     status_doc = REPO / "docs" / "OLYMPUS_NATIVE_MODEL_STATUS.md"
     audit_doc = REPO / "docs" / "OLYMPUS_NATIVE_FINAL_AUDIT.md"
     assert status_doc.is_file() and audit_doc.is_file()
-    combined = status_doc.read_text() + audit_doc.read_text()
+    combined = status_doc.read_text(encoding="utf-8") + audit_doc.read_text(encoding="utf-8")
     assert "0.025636" in combined or "0.0256" in combined, (
         "the location-bias measurement is not in the documented record; the "
         "quarantine cites a number nobody can check")

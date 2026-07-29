@@ -219,7 +219,7 @@ def test_an_approved_dataset_cannot_be_written_even_as_uid_zero(dataset):
 import json, pathlib
 def run(inputs):
     path = pathlib.Path(inputs['__datasets__']['prices.json'])
-    contents = json.loads(path.read_text())
+    contents = json.loads(path.read_text(encoding="utf-8"))
     try:
         path.write_text('[]')
         writable = True
@@ -412,7 +412,7 @@ def test_no_native_evolution_module_imports_a_forbidden_module(module):
     import ast
     import importlib
 
-    source = Path(importlib.import_module(module).__file__).read_text()
+    source = Path(importlib.import_module(module).__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
     forbidden = {"olympus.trading.execution", "olympus.trading.brokers",
                  "olympus.trading.oms", "olympus.vault",

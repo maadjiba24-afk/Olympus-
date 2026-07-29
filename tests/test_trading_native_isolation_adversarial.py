@@ -397,7 +397,7 @@ def test_generated_code_cannot_modify_a_read_only_dataset(tmp_path):
     """
     dataset = tmp_path / "prices.csv"
     dataset.write_text("open,close\n1,2\n3,4\n")
-    original = dataset.read_text()
+    original = dataset.read_text(encoding="utf-8")
 
     manifest = attack("modify-dataset", MODIFY_DATASET,
                       datasets={"prices.csv": str(dataset)})
@@ -407,7 +407,7 @@ def test_generated_code_cannot_modify_a_read_only_dataset(tmp_path):
             continue
         assert outcome != "SUCCEEDED", f"the experiment could {label} a dataset"
     assert manifest.confinement.applied(ISO.Mechanism.READ_ONLY_INPUTS)
-    assert dataset.read_text() == original, "the source dataset was modified"
+    assert dataset.read_text(encoding="utf-8") == original, "the source dataset was modified"
     assert_contained(manifest)
 
 
@@ -867,7 +867,7 @@ def test_rlimit_nproc_is_measured_and_found_insufficient():
                   f"uid {uid}")
 
     # Whichever happened, the module must not be relying on it.
-    source = Path(ISO.__file__).read_text()
+    source = Path(ISO.__file__).read_text(encoding="utf-8")
     assert "RLIMIT_NPROC" not in source.split("Known limitations")[0] or True
     assert "resource.setrlimit(resource.RLIMIT_NPROC" not in source, \
         f"isolation.py sets RLIMIT_NPROC, which on this host is {reason}"
@@ -907,7 +907,7 @@ def test_generated_code_is_refused_when_a_control_is_missing(monkeypatch):
 
 def test_the_probe_experiment_is_the_only_exempted_source():
     """One exemption, named, and it is this module's own three-line function."""
-    assert "PROBE_TRUSTED_REASON" in Path(ISO.__file__).read_text()
+    assert "PROBE_TRUSTED_REASON" in Path(ISO.__file__).read_text(encoding="utf-8")
     assert "not generated" in ISO.PROBE_TRUSTED_REASON
     assert ISO.PROBE_SOURCE.strip().startswith("def run(")
     assert len(ISO.PROBE_SOURCE.splitlines()) <= 3

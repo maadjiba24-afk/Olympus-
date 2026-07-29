@@ -550,6 +550,8 @@ def test_the_baseline_question_is_unanswerable_without_an_olympus_arm():
 def test_the_published_evaluation_reproduces_its_headline_findings():
     """The script is the artefact; if it drifts from this file it stops being
     evidence. Kept small so it runs inside the suite."""
+    import importlib.util
+    import re
     import subprocess
     import sys
     from pathlib import Path
@@ -567,7 +569,18 @@ def test_the_published_evaluation_reproduces_its_headline_findings():
     assert "Kronos" in out
     assert "VERDICT              INSUFFICIENT_EVIDENCE" in out
     assert "PROMOTION            NO_PROMOTION_DECISION_POSSIBLE" in out
-    assert "arms that ran        5" in out
-    # The five arms that did run are still measured and compared.
+    # How many arms run depends on the host: the Olympus arm needs torch, and
+    # the base install deliberately does not have it. Asserting a fixed 5 made
+    # this test a statement about the machine rather than about the script, and
+    # it failed on the CI leg whose whole purpose is to have no torch. What is
+    # invariant is that the Kronos arm is the one that could not be built, and
+    # that whatever did run was measured rather than skipped.
+    ran = int(re.search(r"arms that ran\s+(\d+)", out).group(1))
+    required = int(re.search(r"arms required\s+(\d+)", out).group(1))
+    assert 4 <= ran < required, f"{ran} of {required} arms ran"
+    torch_present = importlib.util.find_spec("torch") is not None
+    assert ran == (5 if torch_present else 4), (
+        f"{ran} arms ran with torch {'present' if torch_present else 'absent'}")
+    # The arms that did run are still measured and compared.
     assert "gradient-boosted trees" in out
     assert "Holm-adjusted at alpha=0.05" in out

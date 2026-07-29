@@ -100,7 +100,9 @@ def test_no_module_imports_a_unix_only_module_at_module_scope():
     for path in sorted(PACKAGE_ROOT.joinpath("olympus").rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
-        relative = str(path.relative_to(PACKAGE_ROOT))
+        # POSIX separators: the map below is written with "/" and Windows
+        # would render this "olympus\\proclock.py", missing every exemption.
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
         if relative in GUARDED:
             continue
         found = module_scope_imports(path) & set(UNIX_ONLY + WINDOWS_ONLY)
@@ -115,7 +117,7 @@ def test_no_module_imports_a_unix_only_module_at_module_scope():
 def test_the_guarded_list_is_not_stale():
     """An entry that no longer needs its exemption is a lie about the code."""
     for relative, reason in GUARDED.items():
-        path = PACKAGE_ROOT / relative
+        path = PACKAGE_ROOT / relative      # "/" is accepted on every platform
         assert path.is_file(), f"{relative} is exempted and does not exist"
         found = module_scope_imports(path) & set(UNIX_ONLY + WINDOWS_ONLY)
         assert found, (
