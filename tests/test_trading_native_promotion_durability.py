@@ -591,9 +591,16 @@ def test_no_positive_decision_uses_the_best_effort_log():
     and the whole of this file goes back to passing while the guarantee is
     gone.
     """
-    import inspect
+    # Read the class out of the file by name rather than through
+    # `inspect.getsource`, which resolves by line number through a cache and
+    # hands back the wrong body when the file has been edited since import.
+    import ast
+    from pathlib import Path
 
-    source = inspect.getsource(PR.GateLedger)
+    tree = ast.parse(Path(PR.__file__).read_text(encoding="utf-8"))
+    node = next(n for n in tree.body
+                if isinstance(n, ast.ClassDef) and n.name == "GateLedger")
+    source = ast.unparse(node)
     positive = source.split("def _commit_positive")[1].split("\n    def ")[0]
     assert "self._log(" not in positive, (
         "the fail-closed commit calls the best-effort logger")

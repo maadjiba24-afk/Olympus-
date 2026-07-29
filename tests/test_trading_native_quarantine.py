@@ -409,9 +409,14 @@ def test_selectability_does_not_depend_on_the_blockers():
     is human-only everywhere else in Olympus. A constant here says the same
     thing rather than deriving it from a list that could empty.
     """
-    import inspect
-
-    source = inspect.getsource(Q.autonomously_selectable)
+    # Read from the file by name rather than through `inspect.getsource`,
+    # which resolves by line number through a cache and hands back a
+    # neighbouring function when the file has been edited since import.
+    tree = ast.parse(Path(Q.__file__).read_text(encoding="utf-8"))
+    body = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "autonomously_selectable")
+    source = ast.unparse(body)
     assert "return False" in source
     assert "open_blockers" not in source
 
