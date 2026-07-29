@@ -19,7 +19,23 @@ records what actually exists. When they disagree, this file is right.
   eight-fact reports),
   `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` (the learning loop, research
   isolation and the twelve-stage gate),
-  `docs/OLYMPUS_VS_KRONOS.md` (the matched evaluation and its verdict)
+  `docs/OLYMPUS_VS_KRONOS.md` (the matched evaluation and its verdict),
+  `docs/OLYMPUS_NATIVE_FINAL_AUDIT.md` (the ownership and maturity audit)
+
+---
+
+## Ownership verdict and maturity level
+
+Established by the final audit (`docs/OLYMPUS_NATIVE_FINAL_AUDIT.md`), from
+source rather than from this document.
+
+> **Ownership: (3) Olympus-native challenger exists but is unvalidated.**
+> **Maturity: research framework + backtesting system + simulated autonomous
+> trader. Not a real-broker paper trader, not a live trader, not profitable.**
+
+"Phase N complete" below means *that phase's deliverables were built and
+tested*. It does **not** mean the objective is complete. No checkpoint has seen
+a market, no broker has been reached, and no money has been risked.
 
 ---
 

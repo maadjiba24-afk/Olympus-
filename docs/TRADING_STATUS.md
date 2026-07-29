@@ -16,11 +16,18 @@ missing. When the two disagree, this file is right.
 > part of the deliverable. `docs/TRADING_EXTERNAL_VALIDATION.md` scores the
 > twelve external-validation gates and measures the blocker host by host;
 > `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
+> `docs/OLYMPUS_NATIVE_FINAL_AUDIT.md` is the ownership audit — verdict **(3)
+> Olympus-native challenger exists but is unvalidated**, maturity *research
+> framework + backtester + simulated autonomous trader*;
 > `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
-> work: decoupling from Kronos is **done and enforced by test**, and the native
-> package now trains a real network end to end and scores it against nine
-> baselines under one harness — but **Olympus owns no trained market model**,
-> having fitted only synthetic series.
+> work: decoupling from Kronos is **done and enforced by test** — 89 of 89
+> trading modules import with every Kronos module blocked, and a source
+> comparison against the genuine repository finds zero shared classes, zero
+> shared comments and zero identical AST structures. The native package trains a
+> real network end to end and scores it against nine baselines under one
+> harness — but **Olympus owns no trained market model**, having fitted only
+> synthetic series, and on those series the native model **loses to every simple
+> baseline**.
 > `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` documents the 38 observable channels and
 > the dataset manifest format; `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` documents
 > the encoder contracts, the seven representation candidates, the nine baselines
