@@ -569,15 +569,22 @@ def test_the_published_evaluation_reproduces_its_headline_findings():
     assert "Kronos" in out
     assert "VERDICT              INSUFFICIENT_EVIDENCE" in out
     assert "PROMOTION            NO_PROMOTION_DECISION_POSSIBLE" in out
-    # How many arms run depends on the host: the Olympus arm needs torch, and
-    # the base install deliberately does not have it. Asserting a fixed 5 made
-    # this test a statement about the machine rather than about the script, and
-    # it failed on the CI leg whose whole purpose is to have no torch. What is
-    # invariant is that the Kronos arm is the one that could not be built, and
-    # that whatever did run was measured rather than skipped.
+    # How many arms run depends on the host, so a fixed number made this test a
+    # statement about the machine rather than about the script. Two facts are
+    # invariant and both are asserted:
+    #
+    #   * the external reference is *always* among the arms that did not run —
+    #     its weights are behind an egress denial, which is the whole reason
+    #     the verdict is INSUFFICIENT_EVIDENCE; and
+    #   * whichever arms did run were measured rather than skipped.
+    #
+    # The count itself follows from torch: without it the Olympus arm cannot be
+    # built, and the ensemble that contains it cannot either, so three of six
+    # run instead of five.
     ran = int(re.search(r"arms that ran\s+(\d+)", out).group(1))
     required = int(re.search(r"arms required\s+(\d+)", out).group(1))
-    assert 4 <= ran < required, f"{ran} of {required} arms ran"
+    assert required == 6
+    assert "external_reference" in out.split("arms that did not:")[1][:400]
     try:
         torch_present = importlib.util.find_spec("torch") is not None
     except (ImportError, ValueError):
@@ -585,8 +592,10 @@ def test_the_published_evaluation_reproduces_its_headline_findings():
         # meta-path hook refuses it, which is how the no-torch CI simulation
         # and some vendored environments express absence.
         torch_present = False
-    assert ran == (5 if torch_present else 4), (
-        f"{ran} arms ran with torch {'present' if torch_present else 'absent'}")
+    expected = 5 if torch_present else 3
+    assert ran == expected, (
+        f"{ran} of {required} arms ran with torch "
+        f"{'present' if torch_present else 'absent'}; expected {expected}")
     # The arms that did run are still measured and compared.
     assert "gradient-boosted trees" in out
     assert "Holm-adjusted at alpha=0.05" in out
