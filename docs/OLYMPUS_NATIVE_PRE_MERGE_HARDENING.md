@@ -93,6 +93,28 @@ constructor was told. `trustworthy` additionally requires that the signature
 verifies *now*, that the work directory is gone, and that no descendant
 survived.
 
+### Why not a rootless container, gVisor or a microVM
+
+The instruction preferred one of those, "using cgroup controls such as
+`pids.max` / `memory.max` / CPU quota / filesystem size limit". What was built
+uses those controls **directly** rather than through a runtime, and the reason
+is availability rather than preference: this environment has no container
+runtime, no gVisor and no hypervisor, so a design that required one would have
+been untestable here and the adversarial suite could not have been run at all.
+
+The controls are the same ones the preferred runtimes would configure. What is
+genuinely weaker is the syscall surface: gVisor interposes on the whole of it,
+whereas here a seccomp filter denies four syscalls and the kernel is shared. A
+worker running as uid 0 is therefore not contained from the host kernel, only
+from the network, the filesystem, the process tree and the resource budget.
+That limitation is stated in `isolation.py`'s docstring and in
+`docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md` §4 rather than left to be discovered.
+
+Nothing in the design forecloses running the worker inside a rootless container
+later: `IsolatedWorker._launch` is the single place a `podman run --rm` or a
+`runsc` invocation would go, and the fifteen controls would then be probed
+inside it exactly as they are now.
+
 ### RLIMIT_NPROC: measured, not assumed
 
 The instruction was not to count it as sufficient without proving its semantics.
