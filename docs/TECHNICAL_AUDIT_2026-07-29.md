@@ -63,8 +63,9 @@ state into the shared store.
 **Is it production-ready?** **No.** Single-node only; memory persists only if an operator
 mounts a volume / sets `OLYMPUS_MEMORY_DIR` (default path lives inside the image); no metrics
 backend, log aggregation, or alerting; several security controls are **off by default**; the
-default signing seed is **public and forgeable** (integrity, not authenticity); and the
-headline autonomy/verification claims lack real-model test evidence.
+default signing seed is **public and forgeable** (integrity, not authenticity); the default
+daily budget is **unlimited** and production boot enforces no budget/credential/retention
+checklist; and the headline autonomy/verification claims lack real-model test evidence.
 
 **Most serious technical risks (all HIGH; there are no CRITICAL code defects):**
 1. **Inert-by-default advanced capabilities.** Codegraph (never auto-built), ingest gate
@@ -83,6 +84,10 @@ headline autonomy/verification claims lack real-model test evidence.
 5. **Security defaults.** Public signing seed; assessment scope read from an **unsigned**
    plaintext file; single-seed "two-party" custody; sandbox `local` backend gives **no OS
    isolation**; WhatsApp/webhook endpoints unauthenticated when their optional secret is unset.
+6. **Unsafe operational defaults.** `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off**
+   (`config.py:871`); and the fail-closed boot checklist (capped budget, credential-if-off-loopback,
+   finite retention) runs only under `OLYMPUS_ENV=staging` — a plain **production boot has no such
+   check** and can start wide open on all three (`config.py:1737`).
 
 **The honesty signal.** Unusually, the repository's *own* comments, ADRs, `DEFERRED.md`,
 `docs/TRUTH_STATE_*.md`, and `docs/*STATUS*.md` disclose most of these limitations directly.
@@ -178,13 +183,13 @@ image/repo** unless an operator overrides it.
 
 ## 3. Complete capability inventory
 
-**Classification totals (241 capabilities across 14 subsystems):**
+**Classification totals (~254 capabilities across 14 subsystems, incl. the persistence-ops re-run):**
 
 | Status | Count | Meaning |
 |---|---:|---|
-| WORKING | 162 | Real path traced end-to-end + real (non-mock) test or trivially-correct pure code |
-| IMPLEMENTED_UNTESTED | 35 | Real code, but only mock/skip coverage or opt-in path never run here |
-| PARTIAL | 32 | Real but incomplete, or works only in a narrow/conditional configuration |
+| WORKING | ~172 | Real path traced end-to-end + real (non-mock) test or trivially-correct pure code |
+| IMPLEMENTED_UNTESTED | ~36 | Real code, but only mock/skip coverage or opt-in path never run here |
+| PARTIAL | ~33 | Real but incomplete, or works only in a narrow/conditional configuration |
 | MISSING | 4 | Claimed/assigned but absent (2 are audit file-list artifacts — see note) |
 | MOCK_ONLY | 2 | Only a mock/stub path runs; tests assert against mocks |
 | UNREACHABLE | 2 | Implemented + tested but no production caller |
@@ -315,14 +320,40 @@ image/repo** unless an operator overrides it.
   no work factor** (`vault`) so weak passphrases → weak at-rest protection; `ingestgate` off
   by default.
 
-### Persistence/ops — `store.py`, `trace.py`, `replaystore.py`, `backup.py`, `heartbeat.py`, `watchdog.py`
-- **State:** **WORKING** (verified independently). Atomic file KV + Postgres KV; signed
-  hash-chained trace with **byte-identical replay** (CI `replay-gate` + `noninterference`
-  gates enforce it per-PR); deterministic encrypted tar.gz backup/restore (unit-tested).
+### Persistence/ops — `store.py`, `ledger.py`, `trace.py`, `replaystore.py`, `sessionlog.py`, `backup.py`, `heartbeat.py`, `watchdog.py`, `config.py`
+- **State:** the persistence *core* is the **strongest, most carefully engineered part of the
+  codebase**. `ledger.py` (content-addressed, Ed25519-signed, hash-chained, resume-and-diverge-refuse
+  — `test_m2_ledger.py`), `sessionlog.py` (sealed hash-linked journal with torn-tail healing /
+  corruption quarantine — `test_sessionlog_faults.py`), `backup.py` (encrypted+signed tar.gz with
+  verify-before-commit restore and traversal refusal — `test_backup.py`), and `replaystore.py`
+  (request/tool/context freezing — `test_replay_*`) are all real and exercised by real
+  (non-mock-of-subject) tests that pass.
+- **PostgresStore is unverified.** `store.py:70-110` is real code, but **no test touches it** and
+  `psycopg` isn't installed here — the docstring's "verified against a live Postgres" left no
+  artifact. The Postgres path is IMPLEMENTED_UNTESTED, so "database-ready is a config switch" is
+  unproven.
+- **`migrate.py` is a red herring** — not a DB/schema migrator but a *competitor-agent data importer*
+  (OpenClaw/Hermes to Olympus). There is **no schema-migration mechanism** for the KV table (only
+  `CREATE TABLE IF NOT EXISTS`).
+- **`trace.py` is not crash-durable mid-run by design** — it flushes the whole decision log once at
+  the end (`trace.py:146`); a run killed before flush loses its decision log (exactly the gap
+  `ledger.py`'s per-step durability closes for checkpointed runs).
+- **`replaygate.py` is PARTIAL.** Its pass/fail/skip control flow is tested, but every test **mocks
+  `orchestrator.replay_run`**, so the composed end-to-end "run live against a real provider, then
+  replay byte-identically" claim has **never actually executed** here — only its primitives
+  (replaystore, trace) are proven deterministic. CI gates run against committed fixtures, not a live
+  provider.
+- **`watchdog.py` supervision is inert by default** (`OLYMPUS_WATCHDOG` unset ⇒ mode `off`), and its
+  own docstring calls every threshold "PROVISIONAL… not derived from measurement of this system."
+- **Unsafe config defaults** (E21/E22): `DAILY_BUDGET=0` = **unlimited spend** (`config.py:871`); the
+  fail-closed boot checklist exists **only for staging**, not production (`config.py:1737`);
+  `outcomes.record()` swallows exceptions **without** `errors.capture()` (`outcomes.py:43`), unlike
+  every sibling module.
 - **Anomalies:** heartbeat `run_forever()` is a real loop but **not self-starting** (needs
-  `olympus heartbeat` or the compose `heartbeat` service); off-host backup delivery requires
-  `OLYMPUS_BACKUP_CMD` and the scheduled backup compose service is **commented out by
-  default** → default deploy is single-host, total-loss-on-droplet-failure.
+  `olympus heartbeat` or the compose `heartbeat` service — omitted from the staging compose, whose
+  header admits it "has never been brought up"); off-host backup delivery requires
+  `OLYMPUS_BACKUP_CMD` and the scheduled backup compose service is **commented out by default** →
+  default deploy is single-host, total-loss-on-droplet-failure.
 
 ### Trading core — `trading/contracts.py`, `risk.py`, `backtest.py`, `oms.py`, brokers
 - **State:** **WORKING, pure-stdlib** (claim verified — `C39`). Backtester is genuinely
@@ -399,8 +430,12 @@ verification (23 CONFIRMED / 16 PARTIAL-downgraded / 1 REFUTED of the 40 checked
 | E18 | MED→LOW | mandate.py:284 | Custody | Default co-signer derived from same seed as system key | vault subkey from custody seed | Single trust domain by default | "Two-party" nominal unless `OLYMPUS_MANDATE_*` set | Require a distinct co-signer key by default |
 | E19 | LOW | usermem.py:213 | Profile card | Age always 0 (reads `created` not `created_at`) | `render_card` | Key typo | Misleading age in transparency card | Fix key name |
 | E20 | INFO×~222 | many | Reliability | ~222 silent `except: pass` swallows | orchestrator(13)/memory(11)/browser(10)… | Best-effort defensiveness | Failures invisible; harder debugging/observability | Log at debug; narrow exception types |
+| E21 | HIGH | config.py:871 | Budget default | `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off** | `DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET","0") or 0)`; compose comment "0 means UNLIMITED, not off" | `0` chosen as the "off" sentinel for a safety cap | A fresh install has no spend ceiling once heartbeat LLM cadences fire | Ship a conservative non-zero default; require an explicit `unlimited` token to disable |
+| E22 | HIGH | config.py:1728 | Prod boot validation | Fail-closed checklist (budget/credential/retention) runs **only** under `OLYMPUS_ENV=staging`; production boot only checks the signing seed | `staging_problems()` gated by `is_staging()`; no `require_production_config` exists (grep) | Staging hardening never extended to production | A production instance can boot with unlimited budget, no off-loopback credential, infinite retention | Run the same checklist (or a superset) under `is_production()` |
+| E23 | HIGH | store.py:70 | Postgres backend | PostgresStore has **zero test coverage**; `psycopg` not installed; "verified against live Postgres" unsubstantiated | no `PostgresStore`/`OLYMPUS_DATABASE_URL` reference in `tests/`; `import psycopg` fails | Optional lazy backend never wired into CI | The advertised scale/persistence path is unverified; bugs surface first in production | Add a testcontainers/compose Postgres integration test of the store contract |
+| E24 | MED | outcomes.py:43 | Error visibility | `record()` swallows all exceptions **without** `errors.capture()`, unlike sibling modules | bare `except Exception: pass` | Inconsistent error-capture convention | A broken store backend fails invisibly with no operator trace | Route through `errors.capture('outcomes.record', err)` |
 
-*(35 MEDIUM, 32 LOW, 9 INFORMATIONAL findings total; the table shows the load-bearing ones.)*
+*(38 MEDIUM, 33 LOW, 10 INFORMATIONAL findings total across all subsystems; the table shows the load-bearing ones. Persistence-ops was re-analyzed after an initial degenerate run, adding E21–E24.)*
 
 ---
 
@@ -549,6 +584,12 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
     assessment scope is an unsigned file; custody is single-seed.
 12. **Ship class-aware egress/PII routing, semantic recall, episodic memory, or codegraph
     verification** without operator opt-in and setup — all inert on a default install.
+13. **Boot safely by default.** The default daily budget is *unlimited* (`0` is the sentinel), and
+    a production boot enforces no budget/credential/retention checklist — only staging does.
+14. **Rely on the Postgres backend.** It has zero test coverage and `psycopg` isn't even installed
+    in the dev environment; a flip to `OLYMPUS_DATABASE_URL` would be its first real exercise.
+15. **Supervise wedged jobs out of the box.** The watchdog is off by default and its thresholds are
+    self-described as uncalibrated guesses.
 
 ---
 
@@ -578,6 +619,19 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
   `sandbox.py:66,407`, `cmdguard.py`. *Acceptance:* `local` cannot run approved commands without
   an explicit `OLYMPUS_SANDBOX=local-unsafe` acknowledgement; docker/native default when
   available. *Tests:* provisioned docker-sandbox lane in CI. *Risk:* host-secret exfiltration.
+- **P0-7 Fix the unlimited-spend default.** *Files:* `config.py:871`. *Dep:* none.
+  *Acceptance:* a fresh install has a finite daily budget; disabling the cap requires an explicit
+  `unlimited` token, not `0`. *Tests:* boot with no env → budget finite; `0` no longer means
+  unlimited. *Risk if ignored:* unbounded API spend the moment heartbeat LLM cadences start.
+- **P0-8 Apply the fail-closed boot checklist to production.** *Files:* `config.py:1728-1808`
+  (`staging_problems`), `cli.py:1017-1050`. *Acceptance:* `OLYMPUS_ENV=production` refuses to boot
+  with unlimited budget, no off-loopback credential, or infinite retention — the same gate staging
+  already gets. *Tests:* production-boot refusal per condition. *Risk:* a production instance
+  starting wide open on all three.
+- **P0-9 Verify the Postgres backend before relying on it.** *Files:* `store.py:70-110`, CI.
+  *Acceptance:* a testcontainers/compose Postgres lane exercises the full store contract
+  (put/get/delete/keys, upsert, concurrency). *Risk:* the advertised scale/persistence path fails
+  first in production.
 
 ### P1 — Core functionality failures
 - **P1-1 Make the hallucination controller policy-gated + optionally fail-closed.** *Files:*
@@ -642,7 +696,7 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
 - Build/health: `python -m compileall olympus` ✓; `python -m olympus capabilities --check` ✓
   ("manifest and README match code"); `scripts/check_threat_model.py` ✓ (130 tools covered).
 - Full suite: 8,363 passed / 168 skipped / 0 failed (`python -m pytest`, 316s).
-- Analysis: 14 subsystem analyzers (one re-run) + 40 adversarial verifiers (23 CONFIRMED /
-  16 PARTIAL / 1 REFUTED); 241 capabilities classified; 94 findings (0 CRITICAL / 18 HIGH /
-  35 MEDIUM / 32 LOW / 9 INFO).
+- Analysis: 14 subsystem analyzers (persistence-ops re-run after a degenerate first pass) + 40
+  adversarial verifiers (23 CONFIRMED / 16 PARTIAL / 1 REFUTED); ~254 capabilities classified;
+  ~101 findings (0 CRITICAL / 20 HIGH / 38 MEDIUM / 33 LOW / 10 INFO).
 - No repository code was modified during this audit (report added under `docs/`).
