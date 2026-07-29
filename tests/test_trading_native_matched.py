@@ -578,7 +578,13 @@ def test_the_published_evaluation_reproduces_its_headline_findings():
     ran = int(re.search(r"arms that ran\s+(\d+)", out).group(1))
     required = int(re.search(r"arms required\s+(\d+)", out).group(1))
     assert 4 <= ran < required, f"{ran} of {required} arms ran"
-    torch_present = importlib.util.find_spec("torch") is not None
+    try:
+        torch_present = importlib.util.find_spec("torch") is not None
+    except (ImportError, ValueError):
+        # `find_spec` returns None for a missing module but *raises* when a
+        # meta-path hook refuses it, which is how the no-torch CI simulation
+        # and some vendored environments express absence.
+        torch_present = False
     assert ran == (5 if torch_present else 4), (
         f"{ran} arms ran with torch {'present' if torch_present else 'absent'}")
     # The arms that did run are still measured and compared.
