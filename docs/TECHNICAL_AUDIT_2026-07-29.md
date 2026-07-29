@@ -338,11 +338,15 @@ image/repo** unless an operator overrides it.
 - **`trace.py` is not crash-durable mid-run by design** — it flushes the whole decision log once at
   the end (`trace.py:146`); a run killed before flush loses its decision log (exactly the gap
   `ledger.py`'s per-step durability closes for checkpointed runs).
-- **`replaygate.py` is PARTIAL.** Its pass/fail/skip control flow is tested, but every test **mocks
-  `orchestrator.replay_run`**, so the composed end-to-end "run live against a real provider, then
-  replay byte-identically" claim has **never actually executed** here — only its primitives
-  (replaystore, trace) are proven deterministic. CI gates run against committed fixtures, not a live
-  provider.
+- **`replaygate.py` is PARTIAL — and now demonstrably mis-reports.** Its pass/fail/skip control flow
+  is tested, but every test **mocks `orchestrator.replay_run`**, so the composed "run live, then
+  replay byte-identically" claim is never exercised. **I ran the real gate**
+  (`scripts/reliability_gate.py`, RELEASING.md step 4) in a keyless environment: all 3 prompts
+  reported `completed=True decisions=3` yet every decision carried
+  `model_request_hash=None, model_response_ref=None, cost=0.0` and **zero response blobs were written**
+  to `memory/responses/`. Replay then attempted a real model call, recomputed a hash, found nothing,
+  and raised divergence — so the gate printed **"✗ RELIABILITY GATE NOT MET"** rather than the
+  "⚠ INCONCLUSIVE" it is supposed to emit when the provider is unavailable. See E25.
 - **`watchdog.py` supervision is inert by default** (`OLYMPUS_WATCHDOG` unset ⇒ mode `off`), and its
   own docstring calls every threshold "PROVISIONAL… not derived from measurement of this system."
 - **Unsafe config defaults** (E21/E22): `DAILY_BUDGET=0` = **unlimited spend** (`config.py:871`); the
@@ -433,9 +437,10 @@ verification (23 CONFIRMED / 16 PARTIAL-downgraded / 1 REFUTED of the 40 checked
 | E21 | HIGH | config.py:871 | Budget default | `OLYMPUS_DAILY_BUDGET=0` means **unlimited spend, not off** | `DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET","0") or 0)`; compose comment "0 means UNLIMITED, not off" | `0` chosen as the "off" sentinel for a safety cap | A fresh install has no spend ceiling once heartbeat LLM cadences fire | Ship a conservative non-zero default; require an explicit `unlimited` token to disable |
 | E22 | HIGH | config.py:1728 | Prod boot validation | Fail-closed checklist (budget/credential/retention) runs **only** under `OLYMPUS_ENV=staging`; production boot only checks the signing seed | `staging_problems()` gated by `is_staging()`; no `require_production_config` exists (grep) | Staging hardening never extended to production | A production instance can boot with unlimited budget, no off-loopback credential, infinite retention | Run the same checklist (or a superset) under `is_production()` |
 | E23 | HIGH | store.py:70 | Postgres backend | PostgresStore has **zero test coverage**; `psycopg` not installed; "verified against live Postgres" unsubstantiated | no `PostgresStore`/`OLYMPUS_DATABASE_URL` reference in `tests/`; `import psycopg` fails | Optional lazy backend never wired into CI | The advertised scale/persistence path is unverified; bugs surface first in production | Add a testcontainers/compose Postgres integration test of the store contract |
+| E25 | HIGH | replaygate.py:151 / scripts/reliability_gate.py | Release gate | The mandatory release reliability gate **cannot produce a valid verdict without a provider key, and misclassifies that state as a genuine reliability failure** | Live run: 3/3 prompts `completed=True decisions=3` with `model_request_hash=None, resp_ref=None, cost=0.0`; `memory/responses/` empty; verdict printed `✗ RELIABILITY GATE NOT MET`. `genuine_failures()` (replaygate.py:151-153) treats every non-`skipped` failure as genuine, and a keyless degraded run is never marked `skipped` | In a keyless environment the pipeline completes with zero recorded model calls, but replay still takes the model path and diverges; the skip/INCONCLUSIVE detector only recognises provider errors, not the keyless-degraded path | RELEASING.md step 4 is unpassable and, worse, actively misleading: an operator is told the release is unreliable when the gate simply never ran. Blocks a release for the wrong reason | Mark a run with zero recorded model calls as `skipped`/INCONCLUSIVE; assert a provider key up front and refuse to run rather than emitting a hard FAIL |
 | E24 | MED | outcomes.py:43 | Error visibility | `record()` swallows all exceptions **without** `errors.capture()`, unlike sibling modules | bare `except Exception: pass` | Inconsistent error-capture convention | A broken store backend fails invisibly with no operator trace | Route through `errors.capture('outcomes.record', err)` |
 
-*(38 MEDIUM, 33 LOW, 10 INFORMATIONAL findings total across all subsystems; the table shows the load-bearing ones. Persistence-ops was re-analyzed after an initial degenerate run, adding E21–E24.)*
+*(38 MEDIUM, 33 LOW, 10 INFORMATIONAL findings total across all subsystems; the table shows the load-bearing ones. Persistence-ops was re-analyzed after an initial degenerate run, adding E21–E24; E25 came from actually executing the release reliability gate.)*
 
 ---
 
@@ -457,11 +462,10 @@ mismatch." The genuinely misleading gaps:
 | 7 | AP2 "Authorize a payment" | Signs a mandate; **moves no money** (no payment rail) | `builtin_actions.py:339` | Name implies payment capability |
 | 8 | Native model trains/promotes/serves & is self-improving | Synthetic-only, loses to baselines, neural never executed, **not wired to serving** | `native/quarantine.py`, `forecaster.py:97` | Implies a live market model that doesn't exist |
 | 9 | Kronos "K-line forecasting backend" | No real model ever run; torch/weights absent; only `FakeBackend` | `kronos_runtime.py` | Overstates a forecasting capability |
-| 10 | `olympus upgrade` self-updates from PyPI | `olympus-council` is **not a published PyPI release**; git detector won't fire on real installs | `selfupdate.py` | Upgrade fails/no-ops |
-| 11 | Sandbox = "confined workspace" | Default `local` backend = no OS confinement | `sandbox.py:407` | Approved command can exfiltrate/reach net |
-| 12 | Assessment scope is a "signed fact" | Enforced from an unsigned plaintext file | `assess.py:117` | Tamper-able authorization |
-| 13 | "native-market-intelligence" workflow | A CI **pass/fail gate**; produces no forecasts/sentiment/reports | `.github/workflows/native-market-intelligence.yml` | Reader expects an intelligence product |
-| 14 | Attestation is a "provable chain to a real human" | Under the default public seed the signing key is forgeable and unpinned verification self-validates | `attest.py`; `witness.py:39` | "Provable human clearance" unmet by default |
+| 10 | Sandbox = "confined workspace" | Default `local` backend = no OS confinement | `sandbox.py:407` | Approved command can exfiltrate/reach net |
+| 11 | Assessment scope is a "signed fact" | Enforced from an unsigned plaintext file | `assess.py:117` | Tamper-able authorization |
+| 12 | "native-market-intelligence" workflow | A CI **pass/fail gate**; produces no forecasts/sentiment/reports | `.github/workflows/native-market-intelligence.yml` | Reader expects an intelligence product |
+| 13 | Attestation is a "provable chain to a real human" | Under the default public seed the signing key is forgeable and unpinned verification self-validates | `attest.py`; `witness.py:39` | "Provable human clearance" unmet by default |
 
 ---
 
@@ -486,7 +490,7 @@ mismatch." The genuinely misleading gaps:
 | Authentication | **READY** | Constant-time token compare; fail-closed off-loopback; tested |
 | Authorization | **PARTIAL** | Sound per-account isolation & fail-safe defaults; **no RBAC** |
 | Network security | **PARTIAL** | Reasonable single-box perimeter (Caddy TLS, SSRF guard); no WAF; egress guard app-layer only |
-| CI/CD | **PARTIAL** | **Rich CI** (4-version matrix, hash-pinned, compileall, capability/threat-model checks, replay/noninterference/quality gates); **no automated deploy**; package unpublished |
+| CI/CD | **PARTIAL** | **Rich CI** (4-version matrix, hash-pinned, compileall, capability/threat-model checks, replay/noninterference/quality gates) **and a working tag-triggered PyPI publish** (9 releases shipped, latest 0.26.0); the gap is **no automated *deploy*** of a running instance |
 | Rollback | **PARTIAL** | Self-improvement/skill rollback exists; infra rollback manual |
 | Data retention | **READY** | Real sweeps; honest "unset = reported blocked state"; tested |
 | Audit logs | **PARTIAL** | Decision log signed/hash-chained (tamper-evident); **action `audit.jsonl` is plain append** |
@@ -577,7 +581,7 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
    to a random walk, neural path never executed; Kronos never run.
 8. **Trade real money.** No live broker adapter; the testnet adapter has never completed a
    request.
-9. **Self-update in the wild.** `olympus upgrade` targets an unpublished PyPI package.
+9. **Self-update to un-audited code safely.** `olympus upgrade` *does* work (the package is published; see note), but it upgrades to whatever is latest with no signature check on the wheel at install time beyond `olympus verify` being run manually afterward.
 10. **Isolate untrusted code by default.** The default sandbox backend provides no OS
     confinement; docker/native backends are untested here.
 11. **Offer verified authenticity by default.** The default signing seed is public/forgeable;
@@ -685,8 +689,8 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
   research adapter).
 - **P4-3** Wire scaffold code-evolution to the Auto-Upgrade GH Action pattern (propose → PR →
   human review) so "code self-improvement" has a real, safe path.
-- **P4-4** RBAC on the admin/authorization surface; publish `olympus-council` to PyPI so
-  `olympus upgrade` works.
+- **P4-4** RBAC on the admin/authorization surface. (Publishing is already in place: the
+  tag-triggered workflow has shipped 9 PyPI releases, so `olympus upgrade` works.)
 - **P4-5** Kernel/proxy-level egress enforcement (not just app-layer) to make "provable
   zero-egress" hold against third-party sockets.
 
@@ -698,5 +702,17 @@ ready for multi-instance, HA, or untrusted-multi-tenant use.
 - Full suite: 8,363 passed / 168 skipped / 0 failed (`python -m pytest`, 316s).
 - Analysis: 14 subsystem analyzers (persistence-ops re-run after a degenerate first pass) + 40
   adversarial verifiers (23 CONFIRMED / 16 PARTIAL / 1 REFUTED); ~254 capabilities classified;
-  ~101 findings (0 CRITICAL / 20 HIGH / 38 MEDIUM / 33 LOW / 10 INFO).
+  ~102 findings (0 CRITICAL / 21 HIGH / 38 MEDIUM / 33 LOW / 10 INFO).
 - No repository code was modified during this audit (report added under `docs/`).
+- One diagnostic was executed that writes local state: `scripts/reliability_gate.py` (3 runs). It
+  wrote only into the gitignored `memory/` directory (traces + heartbeat state) — nothing tracked
+  changed, so no revert was required. Its result is finding E25.
+
+**Correction (post-publication).** An earlier revision of this report claimed
+`olympus-council` was "not a published PyPI release" and that `olympus upgrade`
+therefore fails. That was wrong: the package **is** published, with **9 releases
+(0.17.0 → 0.26.0)**, and the tag-triggered `publish.yml` workflow demonstrably
+works. The affected claim row, the CI/CD rating, the §11 entry, and remediation
+item P4-4 have been corrected. The distribution pipeline is a **working** part of
+this project; "never deployed" refers to a running cloud instance, not to
+packaging.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "olympus-council"
-version = "0.26.0"
+version = "0.27.0"
 description = "OLYMPUS — a controlled-autonomy, self-improving multi-agent AI assistant with a built-in hallucination controller"
 readme = "README.md"
 requires-python = ">=3.10"
