@@ -47,7 +47,9 @@ services:
   # It makes model calls on its own schedule, so it SPENDS TOKENS on YOUR key in
   # the background. That spend is bounded by OLYMPUS_DAILY_BUDGET in .env (set to
   # 20 = $20/day by default); once a day's budget is hit, cycles SKIP instead of
-  # spending. NOTE: OLYMPUS_DAILY_BUDGET=0 means UNLIMITED, not off.
+  # spending. NOTE: OLYMPUS_DAILY_BUDGET=0 (or `unlimited`/`none`/`off`) means
+  # UNLIMITED, not off — and under OLYMPUS_ENV=production that value now REFUSES
+  # to boot. Leaving it unset is safe: the ceiling falls back to $10/day.
   #
   # To turn the always-on learning OFF: comment this service out, or
   # `docker compose stop heartbeat`. It shares the memory volume, so whatever it

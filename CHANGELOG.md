@@ -17,6 +17,45 @@ carries a migration note here.
 
 ## [0.27.0] — 2026-07-29
 
+### Security/Changed — Safe-by-default spend ceiling and a production boot gate
+
+Closes the two unsafe defaults the technical audit found (E21/E22). Both were
+about what happens when an operator configures **nothing**.
+
+- **An unset `OLYMPUS_DAILY_BUDGET` is now BOUNDED, not unlimited.** `0` has
+  always meant UNLIMITED here, and `0` was also the *default* — so a fresh
+  install had no spend ceiling at all, while the heartbeat's cadences
+  (opportunity scan, daily learning, standing goals, agent beats) call models
+  with no human in the loop. Unset now resolves to `DEFAULT_DAILY_BUDGET`
+  (**$10/day**). **Behaviour change:** an instance that relied on unset-means-
+  unlimited is now capped — restore the old behaviour explicitly with
+  `OLYMPUS_DAILY_BUDGET=unlimited` (or `0`, `none`, `off`, all still accepted).
+  A saved `olympus budget <amount>` setting still takes precedence, and `0`
+  still means "no cap" to `usage.daily_budget()` — that contract is unchanged.
+- **A malformed budget no longer bricks the package.** `OLYMPUS_DAILY_BUDGET=abc`
+  made `float()` raise at module scope, so `import olympus.config` — and
+  therefore *all* of Olympus — failed from one env typo. A malformed or negative
+  value now falls back to the bounded default and is *reported at boot* by the
+  deployment checklist rather than silently accepted or silently widened.
+- **`OLYMPUS_ENV=production` now gets the same fail-closed boot checklist as
+  staging.** Production previously had only the signing-seed invariant, so it
+  could boot with an explicitly-unlimited ceiling, unbounded retention, an
+  unwritable memory dir, or an off-loopback bind with no credential — every one
+  of which staging already refuses. New `config.production_problems()` /
+  `require_production_config()` (wired beside the existing production, sovereign
+  and staging invariants in `cli.py`) refuse the boot with one actionable list.
+  Two checks are deliberately relaxed versus staging: an explicit
+  `OLYMPUS_MEMORY_DIR` is not required (the shipped Dockerfile/compose mount the
+  volume at the *default* path, so demanding it would refuse Olympus's own
+  documented deployment — writability is still probed), and an explicit budget is
+  not required (unset is now bounded).
+
+`StagingConfigError` and `ProductionConfigError` now share a
+`DeploymentConfigError` base; the staging type and its message are unchanged, so
+existing callers and profiles are unaffected. Dev and staging boots are
+byte-identically unaffected by the production gate. 31 new tests.
+
+
 ### Docs — Full technical audit and teardown
 
 Adds `docs/TECHNICAL_AUDIT_2026-07-29.md`: an evidence-based teardown of the
