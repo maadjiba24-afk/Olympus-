@@ -154,11 +154,13 @@ def _bar_delta(bars: Sequence[Candle], timeframe: str) -> timedelta | None:
 class Forecaster(ABC):
     """What every forecasting model must look like from outside.
 
-    Kronos, a persistence baseline, and a future ensemble are interchangeable
-    here by construction: the service, the cache, the signal layer and the
-    evaluator all depend on this interface and never on a concrete class. That
-    is what keeps "Kronos is one component" true rather than aspirational — the
-    day it stops earning its place it is removed by deleting one registry entry.
+    A persistence baseline, a third-party model and an Olympus-native model are
+    interchangeable here by construction: the service, the cache, the signal
+    layer and the evaluator all depend on this interface and never on a concrete
+    class. That is what keeps "any model is one component" true rather than
+    aspirational — the day one stops earning its place it is removed by deleting
+    a registry entry, and `tests/test_trading_independence.py` proves that
+    nothing else has to change.
     """
 
     #: Identity of the model, written into every result and into cache keys.

@@ -19,9 +19,23 @@ tomllib = pytest.importorskip("tomllib")
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _declared_dep_count() -> int:
+def _declared_deps() -> tuple[list[str], list[str]]:
+    """Runtime dependencies, split into unconditional and marker-scoped.
+
+    A dependency behind an environment marker (`; sys_platform == "win32"`) is
+    not installed everywhere, so folding it into one number would either
+    overstate the footprint on Linux or understate it on Windows. The README
+    states both and this returns both.
+    """
     data = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    return len(data["project"]["dependencies"])
+    always, conditional = [], []
+    for entry in data["project"]["dependencies"]:
+        (conditional if ";" in entry else always).append(entry)
+    return always, conditional
+
+
+def _declared_dep_count() -> int:
+    return len(_declared_deps()[0])
 
 
 def _readme_dep_count() -> int:
@@ -31,8 +45,28 @@ def _readme_dep_count() -> int:
     return int(matches[0])
 
 
+def _readme_conditional_count() -> int:
+    text = (ROOT / "README.md").read_text()
+    matches = re.findall(r"runtime deps \(\+(\d+) on ", text)
+    return int(matches[0]) if matches else 0
+
+
 def test_readme_runtime_dep_count_matches_pyproject():
     assert _readme_dep_count() == _declared_dep_count()
+
+
+def test_readme_states_any_platform_scoped_runtime_dependency():
+    """A marker-scoped dependency is still a dependency somewhere.
+
+    Leaving it out of the count would make "3 runtime deps" true on Linux and
+    quietly false on Windows, which is the kind of claim this file exists to
+    stop drifting.
+    """
+    _, conditional = _declared_deps()
+    assert _readme_conditional_count() == len(conditional), (
+        f"pyproject declares {len(conditional)} platform-scoped runtime "
+        f"dependencies ({[e.split(';')[0].strip() for e in conditional]}) and "
+        f"the README states {_readme_conditional_count()}")
 
 
 def _declared_optional_packages() -> set[str]:

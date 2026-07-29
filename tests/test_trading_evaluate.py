@@ -23,8 +23,8 @@ from olympus.trading.evaluate import (ComparisonReport, ForecastEvaluator,
                                       ForecastMetrics, ForecastSample,
                                       StrategyComparison, compare_to_baseline,
                                       coverage, crps_ensemble,
-                                      directional_accuracy, kronos_is_valuable,
-                                      kronos_verdict, mae, mape,
+                                      directional_accuracy, model_is_valuable,
+                                      value_verdict, mae, mape,
                                       paired_bootstrap, pinball_loss,
                                       quantile_level, rmse, run_strategy_comparison,
                                       sign_test, smape)
@@ -347,30 +347,30 @@ def arm(per_bar_return, *, n_trades=12, fees="150", sharpe=1.0, n=41,
 
 
 def comparison(**kw):
-    defaults = dict(label="kronos vs baseline", kronos=arm(0.002),
+    defaults = dict(label="kronos vs baseline", candidate=arm(0.002),
                     baseline=arm(0.001), out_of_sample=True, seed=3,
                     iterations=400)
     defaults.update(kw)
     return StrategyComparison(**defaults)
 
 
-def test_kronos_is_valuable_defaults_to_false_on_anything_that_is_not_evidence():
-    assert kronos_is_valuable(None) is False
-    assert kronos_is_valuable({"net_return_delta": 999}) is False
-    assert kronos_is_valuable(SimpleNamespace(net_return_delta=999)) is False
+def test_model_is_valuable_defaults_to_false_on_anything_that_is_not_evidence():
+    assert model_is_valuable(None) is False
+    assert model_is_valuable({"net_return_delta": 999}) is False
+    assert model_is_valuable(SimpleNamespace(net_return_delta=999)) is False
 
 
 def test_an_in_sample_win_is_never_valuable():
     """However large. In-sample improvement is not evidence of anything."""
     comp = comparison(out_of_sample=False)
     assert comp.net_return_delta > 0
-    assert kronos_is_valuable(comp) is False
-    assert "out-of-sample" in " ".join(kronos_verdict(comp).reasons)
+    assert model_is_valuable(comp) is False
+    assert "out-of-sample" in " ".join(value_verdict(comp).reasons)
 
 
 def test_a_costless_backtest_cannot_produce_a_verdict():
-    comp = comparison(kronos=arm(0.002, fees="0"), baseline=arm(0.001, fees="0"))
-    verdict = kronos_verdict(comp)
+    comp = comparison(candidate=arm(0.002, fees="0"), baseline=arm(0.001, fees="0"))
+    verdict = value_verdict(comp)
     assert verdict.valuable is False
     assert verdict.checks["costs_modelled"] is False
     assert any("cost" in note for note in comp.notes)
@@ -379,55 +379,55 @@ def test_a_costless_backtest_cannot_produce_a_verdict():
 def test_an_insignificant_win_does_not_pass():
     """A per-bar edge that flips sign has the right average and the wrong
     consistency — exactly what a bootstrap is for."""
-    comp = comparison(kronos=arm(0.002, alternate=0.004), baseline=arm(0.002))
-    verdict = kronos_verdict(comp)
+    comp = comparison(candidate=arm(0.002, alternate=0.004), baseline=arm(0.002))
+    verdict = value_verdict(comp)
     assert verdict.checks.get("significant") is False
     assert verdict.valuable is False
 
 
 def test_too_few_observations_cannot_pass():
-    comp = comparison(kronos=arm(0.002, n=12), baseline=arm(0.001, n=12))
-    verdict = kronos_verdict(comp)
+    comp = comparison(candidate=arm(0.002, n=12), baseline=arm(0.001, n=12))
+    verdict = value_verdict(comp)
     assert verdict.checks["enough_observations"] is False
     assert verdict.valuable is False
 
 
 def test_an_arm_that_never_traded_is_not_a_comparison():
-    comp = comparison(kronos=arm(0.002, n_trades=0))
-    assert kronos_verdict(comp).checks["kronos_traded"] is False
-    assert kronos_is_valuable(comp) is False
+    comp = comparison(candidate=arm(0.002, n_trades=0))
+    assert value_verdict(comp).checks["candidate_traded"] is False
+    assert model_is_valuable(comp) is False
 
 
 def test_misaligned_curves_are_refused_rather_than_compared():
-    comp = comparison(kronos=arm(0.002, n=41), baseline=arm(0.001, n=30))
+    comp = comparison(candidate=arm(0.002, n=41), baseline=arm(0.001, n=30))
     assert comp.comparable is False
     assert comp.significance is None
     assert any("not aligned" in note for note in comp.notes)
-    assert kronos_is_valuable(comp) is False
+    assert model_is_valuable(comp) is False
 
 
 def test_a_worse_sharpe_blocks_the_verdict():
-    comp = comparison(kronos=arm(0.002, sharpe=0.4), baseline=arm(0.001, sharpe=1.5))
-    assert kronos_verdict(comp).checks["risk_adjusted_not_worse"] is False
-    assert kronos_is_valuable(comp) is False
+    comp = comparison(candidate=arm(0.002, sharpe=0.4), baseline=arm(0.001, sharpe=1.5))
+    assert value_verdict(comp).checks["risk_adjusted_not_worse"] is False
+    assert model_is_valuable(comp) is False
 
 
 def test_a_genuine_out_of_sample_net_improvement_does_pass():
     """The rule must be capable of saying yes — otherwise it is decoration
     rather than a decision procedure."""
     comp = comparison()
-    verdict = kronos_verdict(comp)
+    verdict = value_verdict(comp)
     assert verdict.reasons == ()
     assert all(verdict.checks.values())
     assert verdict.valuable is True
-    assert kronos_is_valuable(comp) is True
+    assert model_is_valuable(comp) is True
     assert comp.net_return_delta > 0
     assert comp.significance.significant
 
 
 def test_the_verdict_records_every_criterion_it_checked():
-    verdict = kronos_verdict(comparison(out_of_sample=False))
-    for name in ("out_of_sample", "costs_modelled", "kronos_traded",
+    verdict = value_verdict(comparison(out_of_sample=False))
+    for name in ("out_of_sample", "costs_modelled", "candidate_traded",
                  "comparable", "net_return_improved", "significant"):
         assert name in verdict.checks
     assert verdict.to_dict()["valuable"] is False
@@ -457,12 +457,12 @@ def test_run_strategy_comparison_uses_one_engine_builder_for_both_arms():
     shared = {"target_volatility": 0.15, "stop_atr_multiple": 2.0}
     comp = run_strategy_comparison(
         build_engine=Engine,
-        kronos_strategy=Fake("k", {**shared, "signal_source": "kronos_forecast"}),
+        candidate_strategy=Fake("k", {**shared, "signal_source": "forecast"}),
         baseline_strategy=Fake("b", {**shared, "signal_source": "close_momentum"}),
         out_of_sample=True, seed=3, iterations=400)
     assert built == ["k", "b"]
     assert comp.notes == ()
-    assert kronos_is_valuable(comp) is True
+    assert model_is_valuable(comp) is True
 
 
 def test_arms_that_differ_beyond_the_signal_source_are_flagged():
@@ -483,7 +483,7 @@ def test_arms_that_differ_beyond_the_signal_source_are_flagged():
 
     comp = run_strategy_comparison(
         build_engine=Engine,
-        kronos_strategy=Fake("k", {"target_volatility": 0.30}),
+        candidate_strategy=Fake("k", {"target_volatility": 0.30}),
         baseline_strategy=Fake("b", {"target_volatility": 0.15}),
         out_of_sample=True)
     assert any("more than their signal source" in note for note in comp.notes)

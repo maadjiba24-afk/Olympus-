@@ -16,14 +16,14 @@ vigilance. `StrategyContext.coerce` deliberately *drops* any extra attribute it
 finds on the object handed to it, so a caller cannot widen the surface by
 passing a richer namespace.
 
-Why a Kronos strategy and a non-Kronos twin
+Why a forecast strategy and a forecast-free twin
 -------------------------------------------
-`KronosMomentumStrategy` and `BaselineMomentumStrategy` inherit their sizing,
+`ForecastMomentumStrategy` and `BaselineMomentumStrategy` inherit their sizing,
 stop placement, take-profit placement, position-stacking rule and intent
 construction from the same base class. The *only* difference between them is
 where the directional view comes from: a `ForecastResult` versus arithmetic on
 closes. That is not tidiness, it is the experimental design — `evaluate.py`
-compares the two and answers "does Kronos add anything?", and the answer is
+compares the two and answers "does the model add anything?", and the answer is
 only meaningful if the signal source is the single free variable.
 
 Sizing
@@ -66,6 +66,14 @@ from .volatility import (CALENDARS, CONTINUOUS, Calendar, annualisation_factor,
 _NS = "trading.strategy"
 
 _ZERO = Decimal("0")
+
+#: The reason code a directional forecast view carries into `RiskDecision` and
+#: the audit trail. A named constant rather than an inline literal because
+#: reason codes are permanently stable once shipped (`errors.py`) — a code that
+#: is written in one place can be retired deliberately, and one that is typed
+#: inline gets changed by accident. The code this replaced is recorded in
+#: `kronos_adapter.RETIRED_REASON_CODES`.
+REASON_FORECAST_DIRECTIONAL = "FORECAST_DIRECTIONAL"
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -304,7 +312,7 @@ class FlatStrategy(Strategy):
 class DirectionalView:
     """A strategy's directional opinion, before it becomes a size.
 
-    Split out so the Kronos and non-Kronos strategies can differ in *exactly*
+    Split out so the forecast and forecast-free strategies can differ in *exactly*
     this object and share everything downstream of it.
     """
     direction: SignalDirection
@@ -325,7 +333,7 @@ class VolatilityTargetedStrategy(Strategy):
     """Sizing, stops, take-profits and intent construction — shared.
 
     Everything here is deliberately *not* overridable by the concrete
-    strategies below: `KronosMomentumStrategy` and `BaselineMomentumStrategy`
+    strategies below: `ForecastMomentumStrategy` and `BaselineMomentumStrategy`
     implement `_view()` and nothing else, which is what makes a comparison
     between them a comparison of signal sources rather than of two whole
     trading systems.
@@ -636,8 +644,13 @@ class VolatilityTargetedStrategy(Strategy):
         return magnitude * _clamp(confidence)
 
 
-class KronosMomentumStrategy(VolatilityTargetedStrategy):
+class ForecastMomentumStrategy(VolatilityTargetedStrategy):
     """Trades the forecast's expected return, or stands aside.
+
+    Model-agnostic: it consumes a `ForecastResult` and never asks which model
+    produced it. `signal_source` names the provenance written into the emitted
+    signal, so a record says which forecaster spoke without this class knowing
+    anything about it.
 
     The refusal rules are the point of this class:
 
@@ -653,25 +666,33 @@ class KronosMomentumStrategy(VolatilityTargetedStrategy):
       There is a level of dispersion beyond which the central estimate carries
       no information, and sizing down does not fix that.
 
-    Public evidence on Kronos's directional skill is currently negative
-    (docs/KRONOS_TEARDOWN.md §16; upstream issues #354/#355), which is precisely
-    why this strategy has a non-Kronos twin and why `evaluate.kronos_is_valuable`
-    decides whether it earns its place.
+    Whichever model supplies the forecast, `evaluate.model_is_valuable` decides
+    whether it earns its place against the twin below. That question is asked
+    of every model and answered from measurement, never from a model's
+    reputation.
     """
 
-    id = "kronos-momentum"
+    #: A new id, not a rename of the previous forecast strategy. Strategy ids
+    #: are persisted in `StrategyRecord`, so reusing the old one would inherit a
+    #: performance history this strategy did not earn.
+    id = "forecast-momentum"
     version = "1"
 
-    def __init__(self, *, max_uncertainty: float = 0.6, **kwargs):
+    def __init__(self, *, max_uncertainty: float = 0.6,
+                 signal_source: str = "forecast", **kwargs):
         super().__init__(**kwargs)
         if not 0.0 <= max_uncertainty <= 1.0:
             raise ConfigurationError("max_uncertainty must be within [0, 1]",
                                      got=max_uncertainty)
+        if not str(signal_source).strip():
+            raise ConfigurationError("signal_source must be non-empty",
+                                     got=repr(signal_source))
         self.max_uncertainty = float(max_uncertainty)
+        self.signal_source = str(signal_source)
 
     def parameters(self) -> Mapping[str, Any]:
         return {**super().parameters(), "max_uncertainty": self.max_uncertainty,
-                "signal_source": "kronos_forecast"}
+                "signal_source": self.signal_source}
 
     def _view(self, ctx: StrategyContext) -> DirectionalView | None:
         forecast = ctx.forecast
@@ -706,7 +727,7 @@ class KronosMomentumStrategy(VolatilityTargetedStrategy):
         conviction = self._conviction(expected, confidence)
         strength = math.copysign(_clamp(conviction), expected)
         signal = Signal(
-            source="kronos", instrument_key=ctx.instrument_key,
+            source=self.signal_source, instrument_key=ctx.instrument_key,
             direction=direction, strength=strength, confidence=confidence,
             ts=ctx.as_of, horizon=forecast.horizon,
             rationale=(f"forecast expected return {expected:+.4%} over "
@@ -722,7 +743,7 @@ class KronosMomentumStrategy(VolatilityTargetedStrategy):
             direction=direction, expected_return=expected,
             conviction=conviction, confidence=confidence,
             rationale=signal.rationale,
-            reason_codes=("KRONOS_FORECAST_DIRECTIONAL",),
+            reason_codes=(REASON_FORECAST_DIRECTIONAL,),
             signals=(signal,),
             model_versions={"forecast": forecast.model_version},
             features={"uncertainty": forecast.uncertainty,
@@ -730,15 +751,15 @@ class KronosMomentumStrategy(VolatilityTargetedStrategy):
 
 
 class BaselineMomentumStrategy(VolatilityTargetedStrategy):
-    """The control arm: identical machinery, no Kronos.
+    """The control arm: identical machinery, no forecasting model.
 
     The directional view is `close[-1] / close[-1-lookback] - 1` and the
     confidence is the fraction of bars in that window whose return agreed with
     the overall direction. Nothing here consults a model.
 
     This class exists so `evaluate.compare_to_baseline` and
-    `evaluate.kronos_is_valuable` have something honest to compare against.
-    Comparing a Kronos strategy against "buy and hold" or against a differently
+    `evaluate.model_is_valuable` have something honest to compare against.
+    Comparing a forecast strategy against "buy and hold" or against a differently
     tuned system would confound the signal source with everything else; sharing
     `VolatilityTargetedStrategy` means the signal source is the only difference.
     """
@@ -1155,7 +1176,8 @@ class StrategyManager:
 
 __all__ = [
     "StrategyContext", "Strategy", "DirectionalView",
-    "VolatilityTargetedStrategy", "KronosMomentumStrategy",
+    "VolatilityTargetedStrategy", "ForecastMomentumStrategy",
+    "REASON_FORECAST_DIRECTIONAL",
     "BaselineMomentumStrategy", "FlatStrategy",
     "StrategyStatus", "StrategyRecord", "StrategyManager",
 ]

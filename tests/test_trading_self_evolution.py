@@ -191,7 +191,8 @@ def test_gate_3_hypotheses_are_structured_and_falsifiable(world):
 
 
 def test_gate_4_experiments_cannot_reach_production(world):
-    proposal = H.kronos_conditional_value(instrument=KEY, clock=FixedClock(T0))
+    proposal = H.model_conditional_value("olympus-native", instrument=KEY,
+                                         clock=FixedClock(T0))
 
     def greedy(sandbox):
         sandbox.request("production_order_submission")
@@ -235,12 +236,12 @@ def test_gate_5_champion_and_challenger_are_compared_on_matched_terms(clock):
 
 
 def test_gate_6_a_result_that_does_not_beat_the_baseline_is_rejected(world):
-    proposal = H.kronos_conditional_value(clock=FixedClock(T0))
+    proposal = H.model_conditional_value("olympus-native", clock=FixedClock(T0))
     result = world["lab"].run(
         proposal,
         L.ModelComparisonExperiment(
-            variants={"with kronos": lambda s: [0.001] * 200},
-            baselines={"without kronos": lambda s: [0.004] * 200,
+            variants={"with the model": lambda s: [0.001] * 200},
+            baselines={"without the model": lambda s: [0.004] * 200,
                        "always flat": lambda s: [0.0] * 200}))
     assert result.verdict is L.Verdict.REFUTED
     assert result.beat_every_baseline is False

@@ -889,4 +889,98 @@ def _assert_aggregate_coherent(paths: Sequence[Sequence[Sequence[float]]],
                 mean_low=mean[_LOW], mean_close=mean[_CLOSE])
 
 
-__all__ = ["KronosConfig", "KronosForecaster"]
+# ---------------------------------------------------------------------------
+# Kronos-specific bindings
+# ---------------------------------------------------------------------------
+# Everything below is *about* Kronos rather than part of driving it, and lives
+# here rather than in an Olympus module for one reason: an Olympus module that
+# named Kronos would be an Olympus module that depends on Kronos, and
+# `tests/test_trading_independence.py` asserts that none does.
+
+#: Reason codes Olympus emitted while Kronos was the only forecaster, and what
+#: replaced them. Reason codes are permanently stable once shipped
+#: (`errors.py`), so a code cannot simply disappear: an audit entry written
+#: before the rename still carries the old string, and an operator reading that
+#: entry a year from now needs this table to interpret it.
+RETIRED_REASON_CODES: dict[str, str] = {
+    "KRONOS_FORECAST_DIRECTIONAL": "FORECAST_DIRECTIONAL",
+}
+
+#: Strategy ids likewise. The successor is a *new* strategy with a fresh
+#: performance history, not a rename — `StrategyRecord` keys on the id, and
+#: carrying the old one over would inherit a track record the new strategy did
+#: not earn.
+RETIRED_STRATEGY_IDS: dict[str, str] = {
+    "kronos-momentum": "forecast-momentum",
+}
+
+
+def kronos_value_hypothesis(*, instrument: str = "", clock: Any = None):
+    """The standing research question about Kronos, with the evidence against it.
+
+    A thin binding over `hypotheses.model_conditional_value`, which is
+    model-agnostic. What is Kronos-specific is the *evidence*, and it is
+    unfavourable: the teardown's §16 records upstream issues #354 and #355
+    reporting Kronos-mini underperforming a persistence baseline. That is
+    carried in `contradicting_evidence` rather than omitted, so nobody reading
+    the proposal can mistake it for a promising lead.
+    """
+    from .hypotheses import model_conditional_value
+    return model_conditional_value(
+        "Kronos", instrument=instrument, clock=clock,
+        supporting_observations=(
+            "Kronos is a general-purpose K-line model with no "
+            "instrument-specific tuning, so a conditional edge is more "
+            "plausible than a uniform one",),
+        contradicting_evidence=(
+            "upstream issues #354 and #355 report Kronos-mini underperforming "
+            "a persistence baseline (docs/KRONOS_TEARDOWN.md §16)",
+            "no out-of-sample evidence of Kronos value has yet been produced "
+            "in this system",))
+
+
+def matched_reference_label() -> str:
+    """The name the Phase 5 matched evaluation prints for the incumbent arm.
+
+    Lives here rather than in `native/matched.py` for the reason gate G2
+    exists: the native evaluation module must carry no competitor identity in
+    its own vocabulary. The comparison is real and the name is real; what the
+    independence boundary forbids is the *native* package knowing it.
+    """
+    return "kronos (official checkpoint)"
+
+
+def matched_reference_blockers() -> tuple[str, ...]:
+    """Why that arm cannot be built here. Blocker ids, for the manifest."""
+    return ("B2", "B4")
+
+
+def native_benchmark_arm(*, observations: Sequence[Any] = ()):
+    """This model as an arm in a native evaluation. Usually unavailable.
+
+    Lives here rather than in `native/evaluation.py` because the native
+    evaluation module must not contain a third-party model's name — that is
+    what `tests/test_trading_independence.py` enforces, and the enforcement is
+    the point. The mechanism is generic; the identity is this adapter's, and
+    the adapter is the one file that is allowed to know it.
+
+    Returns an *unavailable* arm unless a caller supplies observations, because
+    no official checkpoint is reachable from this environment. An evaluation
+    that dropped the arm entirely would read as complete; one that carries it
+    as missing, with the reason, does not.
+    """
+    from .native.evaluation import ComparisonArm, unavailable_arm
+    if observations:
+        return ComparisonArm(name="kronos", kind="external",
+                             observations=tuple(observations))
+    return unavailable_arm(
+        "kronos",
+        "no official checkpoint is reachable from this environment "
+        "(blocker B2: the model hub returns 403 at CONNECT), and the weight "
+        "licence is unverified (blocker B4). No claim of superiority to this "
+        "model is made or can be made.")
+
+
+__all__ = ["KronosConfig", "KronosForecaster", "RETIRED_REASON_CODES",
+           "RETIRED_STRATEGY_IDS", "kronos_value_hypothesis",
+           "native_benchmark_arm"]

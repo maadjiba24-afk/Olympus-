@@ -30,11 +30,12 @@ reproducible byte for byte.
 
 The verdict rule is code
 ------------------------
-`kronos_is_valuable(comparison)` returns True only on a measurable
+`model_is_valuable(comparison)` returns True only on a measurable
 **out-of-sample** improvement **net of costs** over the *same strategy without
-Kronos*, with the significance check passing and both arms actually trading. It
+the model*, with the significance check passing and both arms actually trading. It
 defaults to False, it returns False on any error, and it is the only place in
-Olympus where "is Kronos worth it?" is answered. Marketing does not get a vote.
+Olympus where "is this model worth it?" is answered for *any* model —
+third-party or Olympus-native. Marketing does not get a vote.
 """
 
 from __future__ import annotations
@@ -807,7 +808,7 @@ def compare_to_baseline(model_results: Any, baseline_results: Any, *,
 
 
 # ---------------------------------------------------------------------------
-# strategy comparison — the same strategy with and without Kronos
+# strategy comparison — the same strategy with and without the model
 # ---------------------------------------------------------------------------
 
 def _curve_returns(curve: Sequence[Any]) -> list[float]:
@@ -828,7 +829,7 @@ def _curve_timestamps(curve: Sequence[Any]) -> list[Any]:
 
 @dataclass(frozen=True)
 class StrategyComparison:
-    """Two backtests of the *same* strategy, with and without Kronos.
+    """Two backtests of the *same* strategy, with and without the model.
 
     Both arms are duck-typed `backtest.BacktestResult`s (anything with
     `.report`, `.equity_curve` and `.trades`), so this module does not import
@@ -837,11 +838,11 @@ class StrategyComparison:
 
     The comparison is only meaningful when the two arms differ *only* in their
     signal source — which is why `strategy.BaselineMomentumStrategy` shares
-    `VolatilityTargetedStrategy` with `strategy.KronosMomentumStrategy` rather
+    `VolatilityTargetedStrategy` with `strategy.ForecastMomentumStrategy` rather
     than reimplementing sizing and exits.
     """
     label: str
-    kronos: Any
+    candidate: Any
     baseline: Any
     #: True only when these results come from data the model never saw.
     #: Defaults to False, so an in-sample comparison can never be mistaken for
@@ -857,14 +858,14 @@ class StrategyComparison:
     comparable: bool = field(default=False, init=False)
 
     def __post_init__(self):
-        k_curve = list(getattr(self.kronos, "equity_curve", ()) or ())
+        k_curve = list(getattr(self.candidate, "equity_curve", ()) or ())
         b_curve = list(getattr(self.baseline, "equity_curve", ()) or ())
         aligned = (len(k_curve) == len(b_curve) and len(k_curve) > 1
                    and _curve_timestamps(k_curve) == _curve_timestamps(b_curve))
         object.__setattr__(self, "comparable", aligned)
         notes = list(self.notes)
         if self.costs_modelled is None:
-            report = getattr(self.kronos, "report", None)
+            report = getattr(self.candidate, "report", None)
             derived = bool(report is not None
                            and (Decimal(str(getattr(report, "total_fees", 0))) > 0
                                 or Decimal(str(getattr(report, "total_slippage", 0))) > 0))
@@ -896,7 +897,7 @@ class StrategyComparison:
         return float(value)
 
     def _delta(self, name: str) -> float | None:
-        model = self._metric(self.kronos, name)
+        model = self._metric(self.candidate, name)
         base = self._metric(self.baseline, name)
         if model is None or base is None:
             return None
@@ -904,7 +905,7 @@ class StrategyComparison:
 
     @property
     def net_return_delta(self) -> float | None:
-        """Kronos minus baseline, net of costs. The number that matters."""
+        """Candidate minus baseline, net of costs. The number that matters."""
         return self._delta("total_return_net")
 
     @property
@@ -920,8 +921,8 @@ class StrategyComparison:
         return self._delta("max_drawdown")
 
     @property
-    def kronos_trades(self) -> int:
-        report = getattr(self.kronos, "report", None)
+    def candidate_trades(self) -> int:
+        report = getattr(self.candidate, "report", None)
         return int(getattr(report, "n_trades", 0) or 0)
 
     @property
@@ -937,17 +938,17 @@ class StrategyComparison:
                 "gross_return_delta": self.gross_return_delta,
                 "sharpe_delta": self.sharpe_delta,
                 "max_drawdown_delta": self.max_drawdown_delta,
-                "kronos_trades": self.kronos_trades,
+                "candidate_trades": self.candidate_trades,
                 "baseline_trades": self.baseline_trades,
                 "significance": (self.significance.to_dict()
                                  if self.significance else None),
-                "kronos_report": jsonable(getattr(self.kronos, "report", None)),
+                "candidate_report": jsonable(getattr(self.candidate, "report", None)),
                 "baseline_report": jsonable(getattr(self.baseline, "report", None)),
                 "notes": list(self.notes), "seed": self.seed}
 
 
-def run_strategy_comparison(*, build_engine, kronos_strategy, baseline_strategy,
-                            label: str = "kronos vs baseline",
+def run_strategy_comparison(*, build_engine, candidate_strategy, baseline_strategy,
+                            label: str = "candidate vs baseline",
                             out_of_sample: bool = False, seed: int = 0,
                             alpha: float = 0.05, iterations: int = 2000
                             ) -> StrategyComparison:
@@ -958,11 +959,11 @@ def run_strategy_comparison(*, build_engine, kronos_strategy, baseline_strategy,
     model and seed — the comparison is worthless otherwise, and making the
     caller construct the engine twice would let the two configurations drift.
     """
-    kronos_result = build_engine(kronos_strategy).run()
+    candidate_result = build_engine(candidate_strategy).run()
     baseline_result = build_engine(baseline_strategy).run()
 
     notes = []
-    k_params = dict(getattr(kronos_strategy, "parameters", dict)() or {})
+    k_params = dict(getattr(candidate_strategy, "parameters", dict)() or {})
     b_params = dict(getattr(baseline_strategy, "parameters", dict)() or {})
     shared = set(k_params) & set(b_params)
     differing = sorted(name for name in shared
@@ -973,7 +974,7 @@ def run_strategy_comparison(*, build_engine, kronos_strategy, baseline_strategy,
             + ", ".join(differing) + "), so this comparison does not isolate "
             "the contribution of the forecast")
     return StrategyComparison(
-        label=label, kronos=kronos_result, baseline=baseline_result,
+        label=label, candidate=candidate_result, baseline=baseline_result,
         out_of_sample=out_of_sample, seed=seed, alpha=alpha,
         iterations=iterations, notes=tuple(notes))
 
@@ -984,7 +985,7 @@ def run_strategy_comparison(*, build_engine, kronos_strategy, baseline_strategy,
 
 @dataclass(frozen=True)
 class VerdictReport:
-    """Why `kronos_is_valuable` answered the way it did.
+    """Why `model_is_valuable` answered the way it did.
 
     Every criterion is recorded, passed as well as failed, so the answer is
     auditable rather than an opinion with a boolean attached.
@@ -1006,11 +1007,11 @@ class VerdictReport:
 MIN_PAIRED_OBSERVATIONS = 30
 
 
-def kronos_verdict(comparison: Any, *, min_return_improvement: float = 0.0,
-                   alpha: float = 0.05,
-                   min_observations: int = MIN_PAIRED_OBSERVATIONS
-                   ) -> VerdictReport:
-    """Evaluate every criterion for "Kronos earned its place", and report them.
+def value_verdict(comparison: Any, *, min_return_improvement: float = 0.0,
+                  alpha: float = 0.05,
+                  min_observations: int = MIN_PAIRED_OBSERVATIONS
+                  ) -> VerdictReport:
+    """Evaluate every criterion for "this model earned its place", and report them.
 
     The criteria, all of which must hold:
 
@@ -1022,7 +1023,7 @@ def kronos_verdict(comparison: Any, *, min_return_improvement: float = 0.0,
     6. the **net** return improvement exceeds `min_return_improvement`
     7. risk-adjusted return did not get worse (Sharpe, when both are defined)
     8. enough paired observations to test
-    9. the paired bootstrap is significant at `alpha` and favours Kronos
+    9. the paired bootstrap is significant at `alpha` and favours the candidate
 
     Anything that goes wrong — a malformed comparison, a missing report —
     produces `valuable=False` with the reason recorded. There is no path through
@@ -1049,8 +1050,8 @@ def kronos_verdict(comparison: Any, *, min_return_improvement: float = 0.0,
                 "not evidence of anything")
         require("costs_modelled", bool(comparison.costs_modelled),
                 "no trading costs were modelled")
-        require("kronos_traded", comparison.kronos_trades > 0,
-                "the Kronos arm never traded")
+        require("candidate_traded", comparison.candidate_trades > 0,
+                "the candidate arm never traded")
         require("baseline_traded", comparison.baseline_trades > 0,
                 "the baseline arm never traded")
         require("comparable", bool(comparison.comparable),
@@ -1093,24 +1094,27 @@ def kronos_verdict(comparison: Any, *, min_return_improvement: float = 0.0,
     return VerdictReport(all(checks.values()), checks, tuple(reasons), evidence)
 
 
-def kronos_is_valuable(comparison: Any, *, min_return_improvement: float = 0.0,
-                       alpha: float = 0.05,
-                       min_observations: int = MIN_PAIRED_OBSERVATIONS) -> bool:
-    """Does Kronos earn its place in this strategy? Defaults to False.
+def model_is_valuable(comparison: Any, *, min_return_improvement: float = 0.0,
+                      alpha: float = 0.05,
+                      min_observations: int = MIN_PAIRED_OBSERVATIONS) -> bool:
+    """Does this model earn its place in the strategy? Defaults to False.
 
-    This function — not a README, not a benchmark table, not the upstream
-    repository's claims — is how Olympus decides whether a Kronos-driven
-    strategy is allowed to be preferred over the identical strategy without it.
-    The public evidence today is negative and unanswered
-    (docs/KRONOS_TEARDOWN.md §16; upstream issues #354/#355), so the honest
-    default is False and the burden of proof is on the model.
+    This function — not a README, not a benchmark table, not a vendor's claims
+    — is how Olympus decides whether a model-driven strategy may be preferred
+    over the identical strategy without it. It asks the same nine questions of
+    every model, third-party or Olympus-native, so no model is judged on its
+    provenance.
 
-    See `kronos_verdict` for the criteria and for why a given answer came out.
+    The default is False and the burden of proof is on the model. A model with
+    no evidence has not earned anything, and that is the honest starting state
+    rather than a pessimistic one.
+
+    See `value_verdict` for the criteria and for why a given answer came out.
     """
-    return kronos_verdict(comparison,
-                          min_return_improvement=min_return_improvement,
-                          alpha=alpha,
-                          min_observations=min_observations).valuable
+    return value_verdict(comparison,
+                         min_return_improvement=min_return_improvement,
+                         alpha=alpha,
+                         min_observations=min_observations).valuable
 
 
 __all__ = [
@@ -1120,6 +1124,6 @@ __all__ = [
     "SignificanceResult", "paired_bootstrap", "sign_test",
     "ComparisonReport", "compare_to_baseline",
     "StrategyComparison", "run_strategy_comparison",
-    "VerdictReport", "kronos_verdict", "kronos_is_valuable",
+    "VerdictReport", "value_verdict", "model_is_valuable",
     "MIN_PAIRED_OBSERVATIONS", "LOWER_IS_BETTER", "HIGHER_IS_BETTER",
 ]

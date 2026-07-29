@@ -6,8 +6,8 @@ missing. When the two disagree, this file is right.
 
 - **Last updated:** 2026-07-28
 - **Branch:** `claude/kronos-technical-teardown-54pjna`
-- **Scale:** ~34,000 lines across 52 modules; 55 test files; **2427 trading tests passing**
-- **Whole repository:** 7590 passed, 30 skipped, **zero regressions**
+- **Scale:** ~56,900 lines across 89 modules (48 top-level + 41 in `native/`); 69 test files; **3226 trading tests passing**
+- **Whole repository:** 8042 passed, 30 skipped, **zero regressions**
 - **Operating mode:** `PAPER` (the default; live is disabled)
 - **Live trading:** ❌ **DISABLED AND NOT DEMONSTRABLE HERE** — see §4
 
@@ -15,7 +15,25 @@ missing. When the two disagree, this file is right.
 > items cannot be demonstrated in this environment, and saying so plainly is
 > part of the deliverable. `docs/TRADING_EXTERNAL_VALIDATION.md` scores the
 > twelve external-validation gates and measures the blocker host by host;
-> `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates.
+> `docs/SELF_EVOLUTION.md` covers the thirteen self-evolution gates;
+> `docs/OLYMPUS_NATIVE_FINAL_AUDIT.md` is the ownership audit — verdict **(3)
+> Olympus-native challenger exists but is unvalidated**, maturity *research
+> framework + backtester + simulated autonomous trader*;
+> `docs/OLYMPUS_NATIVE_MODEL_STATUS.md` covers the Olympus-native forecasting
+> work: decoupling from Kronos is **done and enforced by test** — 89 of 89
+> trading modules import with every Kronos module blocked, and a source
+> comparison against the genuine repository finds zero shared classes, zero
+> shared comments and zero identical AST structures. The native package trains a
+> real network end to end and scores it against nine baselines under one
+> harness — but **Olympus owns no trained market model**, having fitted only
+> synthetic series, and on those series the native model **loses to every simple
+> baseline**.
+> `docs/OLYMPUS_MARKET_STATE_SCHEMA.md` documents the 38 observable channels and
+> the dataset manifest format; `docs/OLYMPUS_NATIVE_REPRESENTATIONS.md` documents
+> the encoder contracts, the seven representation candidates, the nine baselines
+> and the benchmark record; `docs/OLYMPUS_NATIVE_MODEL_ARCHITECTURE.md` documents
+> the multi-task model, its abstention policy, its training pipeline and its
+> evaluation.
 
 ---
 
@@ -58,9 +76,11 @@ missing. When the two disagree, this file is right.
 
 | Module | Status | Evidence |
 |---|---|---|
-| `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer |
+| `kronos_runtime.py` | ✅ | Checkpoint pinning; unpinned refused; `ModelBackend` boundary keeps tokens out of the forecasting layer. **Kronos-owned, not Olympus-owned** — see `docs/OLYMPUS_KRONOS_DEPENDENCY_MAP.md` |
 | `kronos_adapter.py` | ✅ | 97 tests incl. a named regression per teardown defect (§3) |
-| `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy |
+| `forecast.py` | ✅ | Service layer; an exploding forecaster becomes an abstention, never an exception into a strategy. The `Forecaster` ABC is the model-neutral plug point a native model will implement |
+| independence | ✅ | 30 tests (`test_trading_independence.py`): no Olympus module imports, names or embeds a runtime string naming Kronos; blocking both Kronos modules at import breaks nothing else; `native/` additionally carries no Kronos-imposed constant, no module-scope torch, no Kronos import at any depth, and no reference to an external weight file or codebook |
+| `native/` | 🟡 | 41 modules, 24,154 lines, 698 tests. A 38-channel market-state schema, dataset provenance with five leakage defences, stable encoder contracts, seven representation candidates, a multi-task model (fifteen registered tasks, seven trainable), nine structural abstention reasons, a reproducible training pipeline, a stratified evaluation over eight strata, nine capabilities behind a register whose readiness verdict is computed, a self-evolution loop with OS-level research isolation, and a matched six-arm evaluation harness whose verdict is computed rather than chosen. **Fitted only to synthetic series. The matched run's verdict is INSUFFICIENT EVIDENCE — the Kronos checkpoint is unreachable — and on the arms that did run the native model loses to persistence, autoregression and gradient-boosted trees on every metric: nine significant losses, zero wins** — see `docs/OLYMPUS_VS_KRONOS.md` |
 | `signals.py` | ✅ | Generation + fusion; abstained forecast produces **no** signal, not a flat one |
 
 ### Decision, safety, execution
@@ -79,12 +99,12 @@ missing. When the two disagree, this file is right.
 | `modes.py` | ✅ | 29 tests; default PAPER; live needs all 9 gates + token + named operator + audit event |
 | `backtest.py` | ✅ | 20 tests; drives the real risk engine/OMS/portfolio/broker; `assert_no_lookahead` on every window; `latency_bars >= 1` enforced; survivorship and intrabar limits disclosed in warnings; deterministic (regression-tested after a real bug) |
 | `perf.py` | ✅ | Every required metric; `None` for undefined ratios so a flat curve cannot post a Sharpe; gross/net are *required* constructor fields so a single-cost-basis report cannot be built; per-instrument/regime/period breakdowns whose trade counts sum back to the whole |
-| `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the Kronos and non-Kronos arms, so the signal source is the only difference |
+| `strategy.py` | ✅ | Concrete strategies with the sizing/exit code shared between the forecast and forecast-free arms, so the signal source is the only difference. Model-agnostic since P1: `ForecastMomentumStrategy` names no model |
 | `registry.py` | ✅ | Model registry; approval requires an operator and an unpinned revision can never be approved |
 | `sentiment.py` | ✅ | Injection payloads neutralised (verified by probe: instruction text and fenced system blocks stripped, benign headlines untouched); nothing derived from a `NewsItem` can reach the limits API |
 | `monitor.py` | ✅ | Health probes and auto-trip evaluation; a failing probe reports DEGRADED rather than taking the safety system down with it |
 | `agents.py` | ✅ | Validated output schemas for the seven market-intelligence agents; malformed/out-of-range/instruction-bearing outputs rejected |
-| `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `kronos_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
+| `evaluate.py` | ✅ | Forecast metrics (MAE/RMSE/MAPE/sMAPE/directional accuracy/pinball/CRPS/coverage) plus paired-bootstrap and sign-test significance. `model_is_valuable()` returns **False** with no evidence, and a mean-zero-noise "improvement" over 200 paired observations does not pass (p≈0.84) while a genuine effect does (p<0.001) — verified by probe |
 
 ### Connectivity & operations
 

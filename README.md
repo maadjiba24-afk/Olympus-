@@ -327,7 +327,7 @@ user-facing specialist and trains the weakest on a cadence:
 | Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
 | Models | model-agnostic | model-agnostic | **model-agnostic** — Claude first-class, plus any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama/local) with **bring-your-own-key in the web UI** |
-| Footprint | full server stack | persistent Node.js service | **single Python package · 3 runtime deps · stdlib-only interfaces** |
+| Footprint | full server stack | persistent Node.js service | **single Python package · 3 runtime deps (+1 on Windows) · stdlib-only interfaces** |
 
 ## Setup
 

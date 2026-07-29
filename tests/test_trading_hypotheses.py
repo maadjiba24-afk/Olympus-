@@ -158,29 +158,55 @@ def test_a_drift_hypothesis_distinguishes_a_regime_change_from_an_episode():
     assert generated.failure_criteria
 
 
-# --- the standing Kronos hypothesis -----------------------------------------
+# --- the standing model-value hypothesis ------------------------------------
 
-def test_the_kronos_hypothesis_carries_the_evidence_against_it():
-    """The honest prior is unfavourable and must not be omitted."""
-    standing = H.kronos_conditional_value(instrument="BINANCE:BTCUSDT",
-                                          clock=FixedClock(T0))
-    assert standing.contradicting_evidence
-    assert any("#354" in e for e in standing.contradicting_evidence)
-    assert any("no out-of-sample evidence" in e
-               for e in standing.contradicting_evidence)
+def test_the_standing_hypothesis_names_whichever_model_it_is_about():
+    """Model-agnostic: the same question, asked of anything."""
+    for name in ("Kronos", "olympus-native", "some-vendor-model"):
+        standing = H.model_conditional_value(name, instrument="BINANCE:BTCUSDT",
+                                             clock=FixedClock(T0))
+        assert name in standing.hypothesis
+        assert set(standing.experiment.variants) == {f"with {name}",
+                                                     f"without {name}"}
 
 
-def test_the_kronos_experiment_holds_everything_but_kronos_fixed():
-    standing = H.kronos_conditional_value(clock=FixedClock(T0))
-    assert set(standing.experiment.variants) == {"with Kronos", "without Kronos"}
+def test_the_standing_hypothesis_needs_a_model_name():
+    with pytest.raises(ConfigurationError):
+        H.model_conditional_value("   ")
+
+
+def test_the_experiment_holds_everything_but_the_model_fixed():
+    standing = H.model_conditional_value("any-model", clock=FixedClock(T0))
     for control in ("identical sizing code", "identical cost model",
                     "identical risk limits"):
         assert control in standing.experiment.controls
 
 
-def test_the_kronos_hypothesis_can_fail():
-    standing = H.kronos_conditional_value(clock=FixedClock(T0))
+def test_the_standing_hypothesis_can_fail():
+    standing = H.model_conditional_value("any-model", clock=FixedClock(T0))
     assert any("no tercile" in c for c in standing.failure_criteria)
+
+
+def test_a_standing_hypothesis_always_carries_a_case_against():
+    """A proposal with only the case *for* a model is an advocacy document.
+    When the caller supplies no counter-evidence, the absence of evidence is
+    recorded as counter-evidence."""
+    bare = H.model_conditional_value("unknown-model", clock=FixedClock(T0))
+    assert bare.contradicting_evidence
+    assert any("no out-of-sample evidence" in e
+               for e in bare.contradicting_evidence)
+
+
+def test_the_kronos_binding_carries_the_known_evidence_against_kronos():
+    """The Kronos-specific evidence lives with Kronos, not in an Olympus
+    module — see tests/test_trading_independence.py for why."""
+    from olympus.trading.kronos_adapter import kronos_value_hypothesis
+    standing = kronos_value_hypothesis(instrument="BINANCE:BTCUSDT",
+                                       clock=FixedClock(T0))
+    assert any("#354" in e for e in standing.contradicting_evidence)
+    assert any("no out-of-sample evidence" in e
+               for e in standing.contradicting_evidence)
+    assert "Kronos" in standing.hypothesis
 
 
 # --- the engine -------------------------------------------------------------

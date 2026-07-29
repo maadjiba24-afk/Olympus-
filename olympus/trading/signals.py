@@ -253,8 +253,13 @@ class SignalGenerator(ABC):
         return f"{type(self).__name__}(source={self.source!r})"
 
 
-class KronosSignalGenerator(SignalGenerator):
+class ForecastSignalGenerator(SignalGenerator):
     """A `ForecastResult` becomes at most one `Signal`.
+
+    Model-agnostic by construction: it reads whatever `ForecastResult` is
+    registered under `forecast_name` and never asks which model produced it.
+    A persistence baseline, a neural forecaster and a third-party model all
+    arrive here as the same contract.
 
     Every rule here exists to stop a forecast being trusted further than it
     deserves:
@@ -281,9 +286,12 @@ class KronosSignalGenerator(SignalGenerator):
     treatment of a null hypothesis.
     """
 
-    source = "kronos"
+    #: Fallback provenance label when the caller does not supply one. The
+    #: forecaster's registered name is preferred and is what `__init__` uses;
+    #: this exists only so the class attribute is never a model's name.
+    source = "forecast"
 
-    def __init__(self, *, forecast_name: str = "kronos",
+    def __init__(self, *, forecast_name: str,
                  min_expected_return: float = 0.001,
                  t_scale: float = 2.0,
                  max_uncertainty: float = 1.0,
@@ -293,6 +301,12 @@ class KronosSignalGenerator(SignalGenerator):
                  undispersed_strength: float = 0.25,
                  horizon_in_signal: bool = True,
                  source: str | None = None, clock: Clock | None = None):
+        if not str(forecast_name).strip():
+            raise ConfigurationError(
+                "forecast_name is required: a signal generator must name the "
+                "forecaster it reads, so that a signal's provenance is the "
+                "model that produced it rather than a default",
+                forecast_name=repr(forecast_name))
         super().__init__(source=source or forecast_name, clock=clock)
         for name, value in (("min_expected_return", min_expected_return),
                             ("t_scale", t_scale),
@@ -901,7 +915,7 @@ class SignalFusion(ABC):
         """Weights over the sources actually present, summing to 1.
 
         Normalising over *present* sources is what makes a missing source
-        harmless: if the Kronos forecaster abstains, the remaining sources
+        harmless: if the forecaster abstains, the remaining sources
         share the full weight rather than the fused strength being silently
         scaled down by the absent one's share.
         """
@@ -1205,7 +1219,7 @@ class UnanimousFusion(SignalFusion):
 
 
 __all__ = [
-    "SignalContext", "SignalGenerator", "KronosSignalGenerator",
+    "SignalContext", "SignalGenerator", "ForecastSignalGenerator",
     "TASignalGenerator", "RegimeSignalGenerator", "VolatilitySignalGenerator",
     "FusedSignal", "SignalFusion", "WeightedAverageFusion",
     "MajorityVoteFusion", "UnanimousFusion",

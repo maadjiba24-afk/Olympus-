@@ -7,6 +7,12 @@ it learns.
 - **Scope:** `olympus/trading/{knowledge,outcomes,drift,hypotheses,lab,proposals,capabilities,champion,rollback,evolution,governance,kernel,storekeys}.py`
 - **Tests:** 409 across 13 files; 8,466 lines of new module code; the thirteen completion gates are
   demonstrated end to end in `tests/test_trading_self_evolution.py`
+- **Native models plug into this framework** via
+  `docs/OLYMPUS_NATIVE_SELF_EVOLUTION.md`: a forecast evidence journal, ten
+  weakness detectors, ten challenger kinds, a twelve-stage promotion gate and
+  **OS-level** research isolation. That last one is the substantive addition —
+  `ResearchSandbox` below enforces by absence inside one interpreter, which is
+  not adequate for *generated* code
 
 > **What this is not.** Nothing here has been exercised against real market
 > data, a real broker, or the genuine Kronos checkpoint — those remain blocked
