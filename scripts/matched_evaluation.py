@@ -667,8 +667,12 @@ def main() -> int:
     baseline = report.baseline_verdict
     print("  The sub-question that this environment *can* answer —")
     print("  does the native model beat the simple arms?")
+    if not baseline["answerable"]:
+        # Not an error: a machine without torch cannot run the Olympus arm, and
+        # saying so is a better answer than a traceback or an invented zero.
+        print(f"    NOT ANSWERABLE     {baseline['reason']}")
     print(f"    usable comparisons {baseline['n_comparisons']} against "
-          f"{', '.join(baseline['references'])}")
+          f"{', '.join(baseline['references']) or '(none)'}")
     print(f"    significant wins   {len(baseline['significant_wins'])}")
     print(f"    significant losses {len(baseline['significant_losses'])}")
     print(f"    conclusion         {baseline['conclusion']}")

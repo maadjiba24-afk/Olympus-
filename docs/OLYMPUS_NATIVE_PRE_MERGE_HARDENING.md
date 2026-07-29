@@ -335,6 +335,45 @@ argument anyone can pass.
 
 ---
 
+## 5b. What CI found that local runs did not
+
+Four defects surfaced on GitHub's runners and nowhere else. They are listed
+because they are the argument for the CI matrix existing.
+
+**`import olympus` fails on Windows.** Not because of anything in this branch:
+`olympus/trading/instruments.py` builds its market sessions at module scope,
+and `zoneinfo.ZoneInfo("UTC")` raises on Windows because CPython ships no IANA
+time-zone database there. The whole trading package was unimportable on
+Windows. Fixed by declaring `tzdata` as a `sys_platform == "win32"` dependency,
+and the error message now distinguishes "this zone does not exist" from "this
+machine has no zone database". The README's runtime-dependency claim and its
+anti-rot guard were updated to state the platform-scoped dependency rather than
+fold it into the count.
+
+**`pipeline.capabilities()` raised when torch was absent.** A function whose
+docstring reads *"detected, never assumed"* called `torch_version()` in its
+return literal, before checking availability. Every no-torch runner hit it.
+
+**`MatchedReport.baseline_verdict` returned two different shapes.** Two keys
+when the Olympus arm did not run and seven when it did, so
+`scripts/matched_evaluation.py` raised `KeyError: 'n_comparisons'` on exactly
+the machine where the arm cannot run. One key set now, always.
+
+**A unit test asserted a superiority the matched evaluation had already
+contradicted.** `test_the_model_beats_persistence_when_structure_exists` passed
+on this container's torch build and failed on GitHub's CPU-only build at a mean
+gain of **-0.0037**. The assertion was **removed, not widened**: a claim that
+depends on which BLAS the tensor library was linked against is not a claim, and
+B9 already records that the model loses to persistence on the matched protocol.
+The measurement is still taken and printed; what went is the assertion that its
+sign is positive.
+
+That last one is the reason the isolation suite is gated on host capability
+rather than assumed: a test that only passes on the machine it was written on
+is a test that reports the machine.
+
+---
+
 ## 6. What was deliberately not done
 
 - **No further tuning of the native model.** The instruction was explicit, and

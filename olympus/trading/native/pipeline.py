@@ -72,13 +72,19 @@ UNTESTED_PATHS: tuple[str, ...] = (
 def capabilities() -> dict:
     """What this machine can actually do. Detected, never assumed."""
     from .torchutil import torch_available, torch_version
+    # `torch_version()` raises `DependencyMissing` when torch is absent, so it
+    # cannot be called before the availability check — a capability probe that
+    # raises when the capability is missing is answering a different question
+    # than the one it was asked. Found by a CI leg with no torch installed.
+    available = torch_available()
     out: dict[str, Any] = {
-        "torch": torch_available(), "torch_version": torch_version(),
+        "torch": available,
+        "torch_version": torch_version() if available else "",
         "cuda": False, "devices": 0, "amp": False, "distributed": False,
         "world_size": 1, "cpu_count": os.cpu_count() or 1,
         "platform": platform.system().lower(),
     }
-    if not out["torch"]:
+    if not available:
         return out
     try:
         import torch                                     # noqa: PLC0415

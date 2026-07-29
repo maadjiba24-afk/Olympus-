@@ -32,6 +32,12 @@ dependencies = [
     "anthropic>=0.92.0",
     "youtube-transcript-api>=1.0.0",
     "cryptography>=41.0.0",
+    # Windows ships no IANA time-zone database, so `zoneinfo.ZoneInfo("UTC")`
+    # raises there. `olympus/trading/instruments.py` builds its market sessions
+    # at module scope, which made `import olympus.trading` fail outright on
+    # Windows — found by the import-smoke CI leg, not by anyone's laptop.
+    # Marker-scoped so it is not installed where the OS already provides one.
+    'tzdata>=2024.1; sys_platform == "win32"',
 ]
 
 # Optional backends. Each is imported LAZILY and guarded (the code degrades or

@@ -25,6 +25,19 @@ privileged path in the system goes through.
 
 Every worker here is a real process, so this file is slower than the rest of
 the suite. That is the cost of testing isolation rather than asserting it.
+
+Hosts that cannot confine
+-------------------------
+Most of this file needs a host that can actually enforce the fifteen controls —
+a cgroup with delegated `pids`/`memory`/`cpu` controllers and `mount(2)` for a
+sized tmpfs. An unprivileged container has neither, and on such a host
+`run_isolated` **refuses** rather than running weakened.
+
+Those tests are therefore gated on `requires_confinement`, and the gate is not
+a way of going quiet: `test_a_host_that_cannot_confine_refuses_rather_than_
+running_weakened` runs *only* on such a host and asserts the refusal, so
+whichever kind of machine this is, something real is checked. CI runs the file
+both ways — see `.github/workflows/native-market-intelligence.yml`.
 """
 
 from __future__ import annotations
@@ -44,6 +57,23 @@ SMALL = ComputeBudget(cpu_seconds=10, wall_clock_seconds=25, memory_mb=384,
                       disk_mb=8)
 
 
+def _host_can_confine() -> bool:
+    try:
+        return ISO.host_support().can_run_generated_code
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+CAN_CONFINE = _host_can_confine()
+
+requires_confinement = pytest.mark.skipif(
+    not CAN_CONFINE,
+    reason="this host cannot enforce every required control; generated code is "
+           "refused here rather than confined, which "
+           "test_a_host_that_cannot_confine_refuses_rather_than_running_weakened "
+           "asserts instead")
+
+
 def run_source(source: str, *, name: str = "t", budget: ComputeBudget = SMALL,
                datasets=None, generated: bool = True) -> ISO.ResultManifest:
     spec = ISO.ExperimentSpec(experiment_id=name, source=source,
@@ -55,6 +85,8 @@ def run_source(source: str, *, name: str = "t", budget: ComputeBudget = SMALL,
 @pytest.fixture(scope="module")
 def confinement() -> ISO.Confinement:
     """One probe, reused. Each worker is a real process."""
+    if not CAN_CONFINE:
+        pytest.skip("this host cannot confine generated code")
     return ISO.probe_confinement(budget=SMALL)
 
 
@@ -69,6 +101,7 @@ def dataset() -> str:
 # 1. the confinement itself
 # ===========================================================================
 
+@requires_confinement
 def test_this_host_can_confine_generated_code(confinement):
     """If this fails the rest of the file is measuring nothing, so it is the
     first assertion and it names what is missing."""
@@ -76,6 +109,38 @@ def test_this_host_can_confine_generated_code(confinement):
         f"missing: {confinement.shortfall}")
 
 
+@pytest.mark.skipif(CAN_CONFINE,
+                    reason="this host can confine, so the refusal path is not "
+                           "the one under test here")
+def test_a_host_that_cannot_confine_refuses_rather_than_running_weakened():
+    """The other half of the file, and the half that runs on a laptop.
+
+    A host without cgroup delegation or `mount(2)` cannot bound a process tree.
+    The correct behaviour there is not "run it and mark the result
+    untrustworthy" — that would still have run it — but to refuse before the
+    worker starts, naming every missing control.
+    """
+    support = ISO.host_support()
+    assert support.can_run_generated_code is False
+    assert support.missing, "an incapable host must name what it is missing"
+
+    spec = ISO.ExperimentSpec(
+        experiment_id="refusal-on-an-incapable-host",
+        source="def run(inputs):\n    return {'ran': True}\n", generated=True)
+    with pytest.raises(ISO.IsolationUnavailable) as raised:
+        ISO.IsolatedWorker().run(spec)
+    assert raised.value.details.get("missing")
+
+    manifest = ISO.run_isolated(spec)
+    assert manifest.outcome is ISO.Verdict.REFUSED
+    assert manifest.verdict is ISO.Verdict.REFUSED
+    assert manifest.trustworthy is False
+    assert manifest.result == {}
+    assert manifest.destruction["workdir"] == "(never created)"
+    assert "cannot confine" in manifest.stderr
+
+
+@requires_confinement
 def test_every_mechanism_reports_how_it_was_established(confinement):
     for state in confinement.states:
         assert state.basis in ("observed", "asserted")
@@ -88,6 +153,7 @@ def test_every_mechanism_reports_how_it_was_established(confinement):
         assert confinement[mechanism].basis == "observed", mechanism
 
 
+@requires_confinement
 def test_the_worker_is_a_different_process_in_a_different_namespace(confinement):
     process = confinement[ISO.Mechanism.SEPARATE_PROCESS]
     assert process.applied and str(os.getpid()) in process.detail
@@ -96,6 +162,7 @@ def test_the_worker_is_a_different_process_in_a_different_namespace(confinement)
     assert "net:[" in network.detail
 
 
+@requires_confinement
 def test_the_network_namespace_is_judged_without_the_seccomp_filter(confinement):
     """Two mechanisms that are meant to fail independently must not share one
     observation. A silently failed `unshare` reading as success because
@@ -105,6 +172,7 @@ def test_the_network_namespace_is_judged_without_the_seccomp_filter(confinement)
     assert "['lo']" in detail or "[]" in detail
 
 
+@requires_confinement
 def test_a_generated_experiment_cannot_open_a_socket():
     manifest = run_source("""
 def run(inputs):
@@ -116,6 +184,7 @@ def run(inputs):
     assert manifest.result == {}
 
 
+@requires_confinement
 def test_a_generated_experiment_cannot_reach_the_network():
     manifest = run_source("""
 def run(inputs):
@@ -125,6 +194,7 @@ def run(inputs):
     assert manifest.verdict is ISO.Verdict.FAILED
 
 
+@requires_confinement
 def test_the_environment_is_rebuilt_from_an_allowlist_not_filtered():
     """A denylist forgets the variable somebody adds next month."""
     manifest = run_source("""
@@ -140,6 +210,7 @@ def run(inputs):
                    for name in manifest.result["env"])
 
 
+@requires_confinement
 def test_an_approved_dataset_cannot_be_written_even_as_uid_zero(dataset):
     """Mode bits do not bind uid 0 — root bypasses the DAC check. The
     guarantee is a read-only bind mount, and this asserts the guarantee rather
@@ -162,6 +233,7 @@ def run(inputs):
     assert manifest.confinement.applied(ISO.Mechanism.READ_ONLY_INPUTS)
 
 
+@requires_confinement
 def test_a_cpu_limit_fires_and_is_reported_as_a_limit_not_a_failure():
     manifest = run_source("""
 def run(inputs):
@@ -175,6 +247,7 @@ def run(inputs):
     assert manifest.wall_seconds < 25
 
 
+@requires_confinement
 def test_a_wall_clock_timeout_fires_when_the_process_sleeps():
     """CPU time does not advance while sleeping, so only the wall clock can
     end this — which is why both limits exist."""
@@ -189,6 +262,7 @@ def run(inputs):
     assert manifest.wall_seconds < 30
 
 
+@requires_confinement
 def test_a_memory_limit_bounds_an_allocation():
     manifest = run_source("""
 def run(inputs):
@@ -199,6 +273,7 @@ def run(inputs):
     assert manifest.result == {}
 
 
+@requires_confinement
 def test_the_worker_directory_is_destroyed_afterwards():
     manifest = run_source("def run(inputs):\n    return {'ok': True}\n",
                           name="destroy")
@@ -208,10 +283,20 @@ def test_the_worker_directory_is_destroyed_afterwards():
 
 
 def test_a_worker_runs_once():
+    """Single-use, whether or not the first attempt was allowed to start.
+
+    A worker that could run twice would let a second experiment inherit
+    whatever the first left behind — and that is true of a worker whose first
+    run was *refused* too, so the flag is set before the host is consulted and
+    this test does not need a host that can confine.
+    """
     spec = ISO.ExperimentSpec(experiment_id="reuse", budget=SMALL,
                               source="def run(inputs):\n    return {}\n")
     worker = ISO.IsolatedWorker()
-    worker.run(spec)
+    try:
+        worker.run(spec)
+    except ISO.IsolationUnavailable:
+        pass                     # this host refuses generated code; still used
     with pytest.raises(ConfigurationError):
         worker.run(spec)
 
@@ -233,6 +318,7 @@ def test_inputs_are_signed_and_the_signature_covers_the_dataset(dataset):
     Path(dataset).write_text(json.dumps([100.0, 101.0, 99.5]))
 
 
+@requires_confinement
 def test_a_result_manifest_is_signed_by_the_parent_not_the_worker():
     manifest = run_source("def run(inputs):\n    return {'v': 1}\n", name="sig")
     assert manifest.signed and manifest.verify()
@@ -246,6 +332,7 @@ def test_a_result_manifest_is_signed_by_the_parent_not_the_worker():
         assert secret not in ISO.ENV_ALLOWLIST
 
 
+@requires_confinement
 def test_a_tampered_payload_is_caught_inside_the_run():
     spec = ISO.ExperimentSpec(experiment_id="tamper", budget=SMALL,
                               source="def run(inputs):\n    return {}\n")
@@ -258,6 +345,7 @@ def test_a_tampered_payload_is_caught_inside_the_run():
         ISO.IsolatedWorker().run(spec, signed=forged)
 
 
+@requires_confinement
 def test_a_result_produced_under_failed_confinement_is_not_trustworthy():
     """`trustworthy` and `verdict` are computed, and neither is settable."""
     manifest = run_source("def run(inputs):\n    return {'v': 1}\n", name="trust")
@@ -386,6 +474,7 @@ def run(inputs):
 }
 
 
+@requires_confinement
 @pytest.mark.parametrize("name", sorted(PROHIBITED_ATTEMPTS))
 def test_generated_code_attempting_a_prohibited_action_does_not_succeed(name):
     manifest = run_source(PROHIBITED_ATTEMPTS[name], name=name)
@@ -394,6 +483,7 @@ def test_generated_code_attempting_a_prohibited_action_does_not_succeed(name):
     assert manifest.result == {}
 
 
+@requires_confinement
 def test_the_blocked_import_layer_is_the_weakest_and_is_documented_as_such():
     """It is defence in depth and the module says so. Asserted because the
     ordering of the four layers is a claim about which one is load-bearing."""
@@ -455,6 +545,7 @@ def test_no_module_in_the_package_can_apply_a_kernel_change():
                    for name in dir(recommendation))
 
 
+@requires_confinement
 def test_the_isolation_report_states_what_this_host_cannot_do():
     report = ISO.isolation_report()
     assert report["blocked_syscalls"] == list(ISO.BLOCKED_SYSCALLS)

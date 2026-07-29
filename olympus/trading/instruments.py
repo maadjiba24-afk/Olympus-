@@ -213,9 +213,23 @@ class MarketSession:
         try:
             ZoneInfo(self.tz_name)
         except (ZoneInfoNotFoundError, ValueError, KeyError) as exc:
-            raise ConfigurationError("unknown timezone", session=self.name,
-                                     tz_name=str(self.tz_name),
-                                     reason=str(exc)) from None
+            # Distinguish "this zone does not exist" from "this machine has no
+            # zone database at all". Windows ships none, so every named zone
+            # fails there — including UTC — and the sessions below are built at
+            # module scope, which turned a missing package into `import
+            # olympus.trading` failing outright. `tzdata` is declared as a
+            # win32-scoped dependency; this message is for the installation
+            # that somehow lacks it.
+            try:
+                ZoneInfo("UTC")
+                database = ""
+            except Exception:                            # noqa: BLE001
+                database = ("this machine has no IANA time-zone database, so "
+                            "no named zone resolves; install `tzdata`")
+            raise ConfigurationError(
+                database or "unknown timezone", session=self.name,
+                tz_name=str(self.tz_name), reason=str(exc),
+                tz_database_missing=bool(database)) from None
         days = frozenset(int(d) for d in self.weekdays)
         if not days:
             raise ConfigurationError("session must trade on at least one weekday",

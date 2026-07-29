@@ -139,7 +139,12 @@ BLOCKERS: tuple[Blocker, ...] = (
         detail="The matched evaluation named in this module's docstring: on "
                "identical data, costs, splits and metrics the native arm lost "
                "to a gradient-boosted tree, a linear fit and persistence, "
-               "returning INSUFFICIENT EVIDENCE — which is not a tie.",
+               "returning INSUFFICIENT EVIDENCE — which is not a tie. A unit "
+               "test asserted the reverse on one favourable synthetic series "
+               "and passed only on one tensor-library build; on GitHub's "
+               "CPU-only build the same fit came in 0.0037 behind "
+               "persistence. The assertion was removed rather than "
+               "widened — see tests/test_trading_native_neural.py.",
         resolution_evidence=(
             "the native arm beats persistence and the tree on the matched "
             "protocol, with the Holm-corrected p-value reported",

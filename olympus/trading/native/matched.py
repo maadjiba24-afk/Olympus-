@@ -1139,10 +1139,19 @@ class MatchedReport:
         """The question that *can* be answered here: does the native model beat
         the simple arms? Reported separately so it is never read as the answer
         to the comparison against the external reference."""
+        # One key set, whatever the answer. The first version returned two
+        # fields when the arm did not run and seven when it did, and a caller
+        # that read `n_comparisons` crashed on a machine with no torch — which
+        # is exactly the machine where the arm does not run.
+        empty = {"answerable": False, "references": [], "n_comparisons": 0,
+                 "significant_wins": [], "significant_losses": [],
+                 "conclusion": "", "reason": ""}
         olympus = self.arm(ArmKind.OLYMPUS_NATIVE)
         if olympus is None or not olympus.spec.available:
-            return {"answerable": False,
-                    "reason": "the Olympus arm did not run"}
+            return {**empty,
+                    "reason": "the Olympus arm did not run",
+                    "conclusion": "no comparison against a simple arm is "
+                                  "possible without the Olympus arm"}
         simple = [ArmKind.PERSISTENCE, ArmKind.STATISTICAL,
                   ArmKind.MACHINE_LEARNING]
         names = {self.arm(k).spec.name for k in simple
@@ -1152,7 +1161,8 @@ class MatchedReport:
         usable = [c for c in relevant if c.usable]
         wins = [c.to_dict() for c in usable if c.better is True]
         losses = [c.to_dict() for c in usable if c.better is False]
-        return {"answerable": bool(usable),
+        return {**empty,
+                "answerable": bool(usable),
                 "references": sorted(names),
                 "n_comparisons": len(usable),
                 "significant_wins": wins,
