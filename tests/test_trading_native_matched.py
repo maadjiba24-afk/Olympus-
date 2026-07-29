@@ -550,7 +550,6 @@ def test_the_baseline_question_is_unanswerable_without_an_olympus_arm():
 def test_the_published_evaluation_reproduces_its_headline_findings():
     """The script is the artefact; if it drifts from this file it stops being
     evidence. Kept small so it runs inside the suite."""
-    import importlib.util
     import re
     import subprocess
     import sys
@@ -569,33 +568,42 @@ def test_the_published_evaluation_reproduces_its_headline_findings():
     assert "Kronos" in out
     assert "VERDICT              INSUFFICIENT_EVIDENCE" in out
     assert "PROMOTION            NO_PROMOTION_DECISION_POSSIBLE" in out
-    # How many arms run depends on the host, so a fixed number made this test a
-    # statement about the machine rather than about the script. Two facts are
-    # invariant and both are asserted:
+    # No assertion here may depend on what is installed on the machine running
+    # it. This block previously hard-coded "5 arms ran", then guessed 4, then
+    # guessed 3 from `find_spec("torch")` — each attempt described the host
+    # rather than the script, and the last one was wrong twice over: the test
+    # runs the script as a *subprocess*, which does not inherit a meta-path
+    # hook, and the ensemble is absent because the reference arm is, not
+    # because of torch.
     #
-    #   * the external reference is *always* among the arms that did not run —
-    #     its weights are behind an egress denial, which is the whole reason
-    #     the verdict is INSUFFICIENT_EVIDENCE; and
-    #   * whichever arms did run were measured rather than skipped.
-    #
-    # The count itself follows from torch: without it the Olympus arm cannot be
-    # built, and the ensemble that contains it cannot either, so three of six
-    # run instead of five.
+    # So the torch probe is gone and what is asserted is what the report says
+    # about itself.
     ran = int(re.search(r"arms that ran\s+(\d+)", out).group(1))
+    running = re.search(r"arms that ran\s+\d+\s+\(([^)]*)\)", out).group(1)
     required = int(re.search(r"arms required\s+(\d+)", out).group(1))
+    missing_block = out.split("arms that did not:")[1].split("VERDICT")[0]
+    missing = {line.split()[0] for line in missing_block.splitlines()
+               if line.strip()}
+
     assert required == 6
-    assert "external_reference" in out.split("arms that did not:")[1][:400]
-    try:
-        torch_present = importlib.util.find_spec("torch") is not None
-    except (ImportError, ValueError):
-        # `find_spec` returns None for a missing module but *raises* when a
-        # meta-path hook refuses it, which is how the no-torch CI simulation
-        # and some vendored environments express absence.
-        torch_present = False
-    expected = 5 if torch_present else 3
-    assert ran == expected, (
-        f"{ran} of {required} arms ran with torch "
-        f"{'present' if torch_present else 'absent'}; expected {expected}")
-    # The arms that did run are still measured and compared.
-    assert "gradient-boosted trees" in out
+    # The reference arm can never be built here — its weights are behind an
+    # egress denial — and that is the whole reason the verdict is
+    # INSUFFICIENT_EVIDENCE rather than a comparison.
+    assert "external_reference" in missing
+    # And the ensemble needs both members, so it goes with it.
+    assert "ensemble" in missing
+    assert "the reference arm did not run" in missing_block
+
+    # The three arms that need no optional dependency always run, on every
+    # host, which is what makes the sub-question answerable at all.
+    for name in ("persistence", "autoregression", "gradient-boosted trees"):
+        assert name in running, f"{name} did not run: {running}"
+    assert 3 <= ran < required
+
+    # The candle-only and derived-feature Olympus arms share weights and differ
+    # only in what they were permitted to read, so they are built together or
+    # not at all. That pairing is the axis separating architecture quality from
+    # data advantage; one of them running alone would silently remove it.
+    assert (("olympus-native (candles only)" in running)
+            == ("olympus-native (derived features)" in running))
     assert "Holm-adjusted at alpha=0.05" in out
