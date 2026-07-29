@@ -1478,8 +1478,14 @@ class IsolatedWorker:
                         spec.budget, scope=scope,
                         read_only_dir=str(root / "inputs")
                         if spec.datasets else ""))
-        finally:
+        except BaseException:
+            # A launch that never happened still opened a pipe. Both ends are
+            # closed here because the drain thread — which would have closed
+            # the read end — was never started.
             os.close(write_fd)
+            os.close(read_fd)
+            raise
+        os.close(write_fd)
         # Drained on a thread. The pipe holds 64KB; a report larger than that
         # would block the runner mid-write while the parent sat in `wait()`,
         # and the deadlock would surface as a timeout — a confinement failure
