@@ -576,9 +576,28 @@ def test_olympus_cannot_advance_a_human_stage():
                 evidence={"reviewed": True}), actor=actor)
 
 
-def test_olympus_cannot_promote_and_there_is_no_force():
+#: A promotion now needs every field a reviewer must have answered, and a
+#: durable place to write the record. Both are the point of the fail-closed
+#: commit, so the helpers are named rather than inlined at each call site.
+REVIEW_EVIDENCE = {
+    "model_version": "native-0.1.0+test",
+    "evaluation_report": "docs/OLYMPUS_VS_KRONOS.md#matched",
+    "reviewed_by": "alice",
+    "review_notes": "read the matched evaluation and the robustness suite",
+    "rollback_plan": "revert to the incumbent and rerun shadow mode",
+}
+
+
+def durable_ledger(tmp_path, **kwargs):
+    """A gate whose positive decisions have somewhere durable to land."""
+    return PR.GateLedger(audit_log=PR.AuditLog(tmp_path / "audit.jsonl"),
+                         state=PR.StateStore(tmp_path / "state.json"),
+                         **kwargs)
+
+
+def test_olympus_cannot_promote_and_there_is_no_force(tmp_path):
     import inspect
-    ledger = PR.GateLedger()
+    ledger = durable_ledger(tmp_path)
     entered(ledger)
     PR.run_autonomous_stages(ledger, "c1", checks=passing_checks(), at=START)
     operator = Actor.operator("alice", token="tok")
@@ -590,17 +609,17 @@ def test_olympus_cannot_promote_and_there_is_no_force():
                                          at=START)
     with pytest.raises(GovernanceViolation):
         ledger.promote("c1", actor=Actor.autonomous("engine"), at=START,
-                       restriction=restriction, evidence={"signed": False})
+                       restriction=restriction, evidence=REVIEW_EVIDENCE)
     signature = inspect.signature(ledger.promote)
     assert not any(name in signature.parameters
                    for name in ("force", "skip_review", "override"))
     promoted = ledger.promote("c1", actor=operator, at=START,
-                              restriction=restriction, evidence={"signed": True})
+                              restriction=restriction, evidence=REVIEW_EVIDENCE)
     assert promoted.outcome is PR.GateOutcome.PROMOTED
 
 
-def test_a_promotion_is_restricted_and_expires():
-    ledger = PR.GateLedger()
+def test_a_promotion_is_restricted_and_expires(tmp_path):
+    ledger = durable_ledger(tmp_path)
     entered(ledger)
     PR.run_autonomous_stages(ledger, "c1", checks=passing_checks(), at=START)
     operator = Actor.operator("alice", token="tok")
@@ -610,7 +629,7 @@ def test_a_promotion_is_restricted_and_expires():
     run = ledger.promote("c1", actor=operator, at=START,
                          restriction=PR.default_restriction(
                              instruments=(KEY,), max_notional=500.0, at=START),
-                         evidence={"signed": True})
+                         evidence=REVIEW_EVIDENCE)
     assert run.active_at(START) is True
     assert run.active_at(START + timedelta(days=31)) is False, (
         "an approval outlived its expiry")

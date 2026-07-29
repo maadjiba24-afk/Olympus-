@@ -49,6 +49,31 @@ Nothing here can hide a failure
 under the same challenger id, and there is no delete. `concealment_check()`
 walks the ledger and reports any challenger whose recorded stages do not form
 the prefix of `STAGE_ORDER` — which is what a removed failure would look like.
+
+Positive decisions fail closed; negative ones fail safe
+-------------------------------------------------------
+The pre-merge audit found this module logging its audit events through a bare
+`except Exception: pass`, with the comment *"an audit sink that fails must not
+stop the gate"*. That reasoning is right in one direction and inverted in the
+other, so the two directions are now separated:
+
+* **Human review, restricted promotion** — any decision that *expands*
+  permission — commits through `durable.py` in a fixed order: verify the
+  operator and token, validate every piece of evidence and the restriction,
+  write and verify the immutable audit event, write and verify the durable
+  state, and only then update the in-memory ledger. A failure at any step
+  raises and the challenger stays exactly where it was. **There is no
+  permission expansion without a durable record of who granted it.**
+* **Rejection, restriction, demotion, rollback, emergency shutdown** — anything
+  that *reduces* permission — still proceeds when the sink is unavailable,
+  because refusing to stop a deteriorating model because the audit disk is full
+  is the wrong way to fail. The missing record is reported rather than
+  swallowed: `unrecorded_safety_actions` lists them.
+
+The two durable writes cannot be made atomic together, so the order is chosen
+so the surviving half is the safe one — audit first, state second. A crash
+between them leaves evidence that a promotion was attempted and no state saying
+it happened, and `reconstruct()` reads the state. See `durable.py`.
 """
 
 from __future__ import annotations
@@ -61,6 +86,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from ..contracts import ensure_utc, jsonable
 from ..errors import ConfigurationError
+from .durable import AuditLog, DurabilityError, StateStore, TamperedRecord
 
 #: Bumped when the stage list or its ordering changes.
 PROMOTION_SCHEMA_VERSION = 1
@@ -341,6 +367,36 @@ class PromotionRefused(ConfigurationError):
     """Raised when the gate declines to advance or promote."""
 
 
+#: Fields a promotion's evidence must carry before an operator can grant it.
+#: Not a formality: each one is a question a reviewer must have answered, and a
+#: promotion whose evidence cannot say which build was reviewed is a promotion
+#: of something nobody can identify afterwards.
+REQUIRED_PROMOTION_EVIDENCE: tuple[str, ...] = (
+    "model_version", "evaluation_report", "reviewed_by", "review_notes",
+    "rollback_plan",
+)
+
+
+def _validate_promotion_evidence(evidence: Mapping[str, Any],
+                                 *, challenger_id: str) -> dict:
+    """Step 2 of the commit. Raises rather than filling in a default.
+
+    A default here would be a reviewer's answer invented by the code, which is
+    the one kind of missing evidence that reads as present.
+    """
+    payload = dict(evidence or {})
+    missing = [name for name in REQUIRED_PROMOTION_EVIDENCE
+               if not str(payload.get(name, "")).strip()]
+    if missing:
+        raise PromotionRefused(
+            "a restricted promotion must carry every piece of review "
+            "evidence; a promotion that cannot say what was reviewed is not "
+            "reviewable afterwards",
+            challenger_id=challenger_id, missing=missing,
+            required=list(REQUIRED_PROMOTION_EVIDENCE))
+    return payload
+
+
 class GateLedger:
     """Every challenger's passage, appended. Nothing here removes a result.
 
@@ -349,14 +405,32 @@ class GateLedger:
     `to_dict` is how it is persisted by a caller who has somewhere to put it.
     """
 
-    __slots__ = ("_runs", "_ledger", "_audit")
+    __slots__ = ("_runs", "_ledger", "_audit", "_log_store", "_state",
+                 "_unrecorded", "allow_volatile_promotion")
 
-    def __init__(self, *, ledger: Any = None, audit: Any = None):
+    def __init__(self, *, ledger: Any = None, audit: Any = None,
+                 audit_log: AuditLog | None = None,
+                 state: StateStore | None = None,
+                 allow_volatile_promotion: bool = False):
         self._runs: dict[str, ChallengerRun] = {}
         #: Optional `evolution.EvolutionLedger`, so a gate decision joins the
         #: same record as everything else Olympus does.
         self._ledger = ledger
+        #: The legacy best-effort sink, used for *negative* actions only.
         self._audit = audit
+        #: The durable, hash-chained record every positive decision goes
+        #: through. In-memory when no path was given, which is what
+        #: `allow_volatile_promotion` exists to make an explicit choice.
+        self._log_store = audit_log if audit_log is not None else AuditLog()
+        self._state = state if state is not None else StateStore()
+        #: Safety actions whose record could not be written. Reported, never
+        #: swallowed — the action still happened, and a reader is entitled to
+        #: know the audit is incomplete.
+        self._unrecorded: list[dict] = []
+        #: Promoting through an in-memory audit log is a test and demo
+        #: affordance. Off by default, so a production ledger constructed
+        #: without a path refuses to promote rather than promoting into RAM.
+        self.allow_volatile_promotion = bool(allow_volatile_promotion)
 
     # -- reading -----------------------------------------------------------
 
@@ -433,13 +507,22 @@ class GateLedger:
                 "test gets dropped under time pressure",
                 challenger_id=challenger_id, expected=expected.value,
                 got=result.stage.value)
-        if result.stage in HUMAN_STAGES:
-            self._require_operator(result.stage, actor)
-
         advanced = ChallengerRun(
             challenger_id=run.challenger_id, proposal_id=run.proposal_id,
             created_at=run.created_at, results=run.results + (result,),
             restriction=run.restriction)
+
+        if result.stage in HUMAN_STAGES:
+            # Positive: a human stage expands what the challenger may do next,
+            # so it commits durably or it does not happen. Note the ordering —
+            # the operator check runs inside `_commit_positive` as its first
+            # step, before anything is written anywhere.
+            return self._commit_positive(
+                kind="stage", stage=result.stage, actor=actor, run=advanced,
+                result=result, at=result.at,
+                detail={"stage": result.stage.value, "passed": result.passed,
+                        "evidence": jsonable(dict(result.evidence))})
+
         self._runs[challenger_id] = advanced
         self._log("stage", advanced, result)
         return advanced
@@ -467,7 +550,18 @@ class GateLedger:
     def promote(self, challenger_id: str, *, actor: Any,
                 restriction: Restriction, at: datetime,
                 evidence: Mapping[str, Any]) -> ChallengerRun:
-        """Human-only. The first act is `governance.authorise`.
+        """Human-only, and fail-closed. Five steps, in this order:
+
+        1. verify the named operator and the token they are carrying;
+        2. validate every piece of promotion evidence and the restriction;
+        3. write **and verify** the immutable audit event;
+        4. write **and verify** the durable promotion state;
+        5. return only once both durable records have succeeded.
+
+        A failure at any step raises, and the challenger stays unpromoted. It
+        is not "promoted but unrecorded", which is the state the pre-merge
+        audit found reachable and which nothing afterwards can distinguish from
+        a promotion nobody authorised.
 
         There is no `force` and no autonomous path. Everything up to stage 10
         is Olympus's; this is not.
@@ -479,19 +573,84 @@ class GateLedger:
                 "only after human review",
                 challenger_id=challenger_id,
                 next_stage=run.next_stage.value if run.next_stage else None)
-        self._require_operator(GateStage.RESTRICTED_PROMOTION, actor)
+        payload = _validate_promotion_evidence(evidence,
+                                               challenger_id=challenger_id)
+        if not isinstance(restriction, Restriction):
+            raise PromotionRefused(
+                "a restricted promotion requires a Restriction; without one "
+                "there is no instrument list, no size cap and no expiry",
+                challenger_id=challenger_id, got=type(restriction).__name__)
+        if not restriction.active_at(ensure_utc(at, field_name="at")):
+            raise PromotionRefused(
+                "the restriction has already expired at the moment of "
+                "promotion, so this would promote nothing that could trade",
+                challenger_id=challenger_id, at=jsonable(at),
+                expires_at=jsonable(restriction.expires_at))
         result = StageResult(
             stage=GateStage.RESTRICTED_PROMOTION, passed=True, at=at,
-            evidence={**dict(evidence),
-                      "restriction": restriction.to_dict()},
+            evidence={**payload, "restriction": restriction.to_dict()},
             actor=getattr(actor, "name", str(actor)))
         promoted = ChallengerRun(
             challenger_id=run.challenger_id, proposal_id=run.proposal_id,
             created_at=run.created_at, results=run.results + (result,),
             restriction=restriction)
-        self._runs[challenger_id] = promoted
-        self._log("promote", promoted, result)
-        return promoted
+        return self._commit_positive(
+            kind="promote", stage=GateStage.RESTRICTED_PROMOTION, actor=actor,
+            run=promoted, result=result, at=at,
+            detail={"restriction": restriction.to_dict(),
+                    "evidence": jsonable(payload)})
+
+    # -- the fail-closed commit -------------------------------------------
+
+    def _commit_positive(self, *, kind: str, stage: GateStage, actor: Any,
+                         run: ChallengerRun, result: StageResult,
+                         at: datetime, detail: Mapping[str, Any]
+                         ) -> ChallengerRun:
+        """The only way a permission expansion reaches the ledger.
+
+        Every step raises on failure and nothing is written to `self._runs`
+        until both durable records exist. The ordering is the guarantee, so it
+        is written out rather than implied by the call sites.
+        """
+        # 1. the operator and their token.
+        operator = self._require_operator(stage, actor)
+        name = getattr(operator, "name", str(operator))
+
+        # 2. the durable channel itself. An in-memory audit log records
+        #    nothing that survives the process, so promoting through one is a
+        #    decision a caller makes explicitly or not at all.
+        if not (self._log_store.durable and self._state.durable) \
+                and not self.allow_volatile_promotion:
+            raise DurabilityError(
+                "this gate has no durable audit log or state store, so a "
+                "promotion through it would leave no record after the process "
+                "exits; construct GateLedger with audit_log= and state= paths, "
+                "or pass allow_volatile_promotion=True to say the volatility "
+                "is intended",
+                challenger_id=run.challenger_id, stage=stage.value,
+                audit_durable=self._log_store.durable,
+                state_durable=self._state.durable)
+
+        # 3. the immutable audit event, written and read back. First, because
+        #    a crash after this and before step 4 must leave evidence of the
+        #    attempt and no permission granted.
+        event = self._log_store.commit(
+            event=f"native.promotion.{kind}", subject=run.challenger_id,
+            at=at, actor=name,
+            detail={**dict(detail), "stage": stage.value,
+                    "outcome": run.outcome.value,
+                    "proposal_id": run.proposal_id})
+
+        # 4. the durable state, written and read back.
+        snapshot = self._state.load()
+        snapshot[run.challenger_id] = {**run.to_dict(),
+                                       "audit_digest": event.digest,
+                                       "committed_at": jsonable(at)}
+        self._state.save(snapshot)
+
+        # 5. only now does the in-memory ledger agree.
+        self._runs[run.challenger_id] = run
+        return run
 
     # -- governance --------------------------------------------------------
 
@@ -508,20 +667,93 @@ class GateLedger:
         authorise(action, actor, subject=f"gate stage {stage.value}")
         return actor
 
+    @property
+    def unrecorded_safety_actions(self) -> tuple[dict, ...]:
+        """Safety actions whose audit record could not be written.
+
+        Empty in normal operation. Non-empty means the gate stopped something
+        and the audit does not know — which is the right way round to fail, and
+        still a thing an operator needs told.
+        """
+        return tuple(self._unrecorded)
+
     def _log(self, kind: str, run: ChallengerRun, result: StageResult | None,
              extra: Mapping[str, Any] | None = None) -> None:
-        if self._audit is None:
-            return
+        """Best-effort recording for actions that *reduce* permission.
+
+        Still swallows the failure, and that is deliberate: refusing to reject a
+        deteriorating challenger because the audit disk is full would leave it
+        running. Unlike the version this replaced, the swallowed failure is
+        recorded in `unrecorded_safety_actions` instead of vanishing — and
+        nothing that expands permission comes through here.
+        """
+        detail = {**(dict(extra) if extra else {}),
+                  "outcome": run.outcome.value,
+                  "stage": result.stage.value if result else None,
+                  "passed": result.passed if result else None}
+        failures: list[str] = []
         try:
-            self._audit.record(
-                event=f"native.promotion.{kind}",
-                subject=run.challenger_id,
-                detail={**(dict(extra) if extra else {}),
-                        "outcome": run.outcome.value,
-                        "stage": result.stage.value if result else None,
-                        "passed": result.passed if result else None})
-        except Exception:                                # noqa: BLE001
-            pass          # an audit sink that fails must not stop the gate
+            self._log_store.commit(
+                event=f"native.promotion.{kind}", subject=run.challenger_id,
+                at=result.at if result else run.created_at, actor="olympus",
+                detail=detail)
+        except (DurabilityError, TamperedRecord, OSError) as error:
+            failures.append(f"durable log: {type(error).__name__}: {error}")
+        if self._audit is not None:
+            try:
+                self._audit.record(event=f"native.promotion.{kind}",
+                                   subject=run.challenger_id, detail=detail)
+            except Exception as error:                   # noqa: BLE001
+                failures.append(f"audit sink: {type(error).__name__}: {error}")
+        if failures:
+            self._unrecorded.append({"kind": kind,
+                                     "challenger_id": run.challenger_id,
+                                     "failures": failures, "detail": detail})
+
+    # -- restart -----------------------------------------------------------
+
+    def reconstruct(self) -> tuple[str, ...]:
+        """Rebuild promoted state after a restart. The state file is the truth.
+
+        The audit log says what was *attempted*; the state file says what was
+        *granted*. A challenger with an audit event and no state entry — the
+        crash-between-writes window — comes back unpromoted, and is reported
+        here so the gap is visible rather than merely safe.
+        """
+        self._log_store.require_intact()
+        state = self._state.load()
+        findings: list[str] = []
+        for challenger_id, stored in sorted(state.items()):
+            events = self._log_store.for_subject(challenger_id)
+            digest = str(stored.get("audit_digest", ""))
+            if digest and not any(e.digest == digest for e in events):
+                findings.append(
+                    f"{challenger_id}: the promotion state names audit event "
+                    f"{digest[:12]}, which is not in the log")
+        # The other direction: an audit event saying a promotion was granted,
+        # with no state entry pointing back at it. That is the crash window —
+        # the promotion did not take effect, and saying so is more useful than
+        # merely being safe about it.
+        latest: dict[str, Any] = {}
+        for event in self._log_store.events:
+            if event.event == "native.promotion.promote":
+                latest[event.subject] = event
+        for subject, event in sorted(latest.items()):
+            stored = state.get(subject)
+            if stored is None or str(stored.get("audit_digest", "")) != event.digest:
+                findings.append(
+                    f"{subject}: audit event {event.digest[:12]} records a "
+                    f"promotion attempt with no durable state naming it, so "
+                    f"it is not promoted")
+        return tuple(findings)
+
+    @property
+    def durable_state(self) -> dict:
+        return self._state.load()
+
+    @property
+    def audit(self) -> AuditLog:
+        return self._log_store
 
     # -- reporting ---------------------------------------------------------
 
@@ -647,5 +879,7 @@ def describe_gate() -> str:                              # pragma: no cover
 __all__ = ["PROMOTION_SCHEMA_VERSION", "GateStage", "STAGE_ORDER",
            "AUTONOMOUS_STAGES", "HUMAN_STAGES", "STAGE_NOTES", "GateOutcome",
            "next_stage", "StageResult", "Restriction", "ChallengerRun",
-           "PromotionRefused", "GateLedger", "stage_id",
-           "run_autonomous_stages", "default_restriction", "describe_gate"]
+           "PromotionRefused", "REQUIRED_PROMOTION_EVIDENCE", "GateLedger",
+           "AuditLog", "StateStore", "DurabilityError", "TamperedRecord",
+           "stage_id", "run_autonomous_stages", "default_restriction",
+           "describe_gate"]

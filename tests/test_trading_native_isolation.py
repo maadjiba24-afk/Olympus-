@@ -133,9 +133,8 @@ def run(inputs):
     return {'env': sorted(os.environ)}
 """, name="env")
     assert manifest.verdict is ISO.Verdict.COMPLETED
-    leaked = set(manifest.result["env"]) - set(ISO.ENV_ALLOWLIST) - {
-        "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "OLYMPUS_RESEARCH_WORKER",
-        "LC_CTYPE"}
+    leaked = (set(manifest.result["env"]) - set(ISO.ENV_ALLOWLIST)
+              - set(ISO.ENV_SET_BY_PARENT) - {"LC_CTYPE"})
     assert not leaked, f"the worker inherited {sorted(leaked)}"
     assert not any("TOKEN" in name or "SECRET" in name or "KEY" in name
                    for name in manifest.result["env"])
@@ -260,16 +259,22 @@ def test_a_tampered_payload_is_caught_inside_the_run():
 
 
 def test_a_result_produced_under_failed_confinement_is_not_trustworthy():
-    """`trustworthy` is computed from three facts and none of them is settable."""
+    """`trustworthy` and `verdict` are computed, and neither is settable."""
     manifest = run_source("def run(inputs):\n    return {'v': 1}\n", name="trust")
     assert manifest.trustworthy
     broken = ISO.ResultManifest(
-        experiment_id="x", verdict=ISO.Verdict.COMPLETED,
+        experiment_id="x", outcome=ISO.Verdict.COMPLETED,
         started_at=manifest.started_at, finished_at=manifest.finished_at,
         confinement=ISO.Confinement(), input_digest="d",
         result={"looks": "fine"}, destruction={"workdir_removed": True})
+    # The caller asked for COMPLETED and got CONFINEMENT_FAILED, because the
+    # verdict is derived from the confinement rather than accepted from the
+    # constructor.
+    assert broken.outcome is ISO.Verdict.COMPLETED
+    assert broken.verdict is ISO.Verdict.CONFINEMENT_FAILED
     assert broken.trustworthy is False
     assert broken.confinement.shortfall
+    assert "verdict is confinement_failed" in broken.untrustworthy_because
 
 
 def test_a_spec_supplies_exactly_one_of_source_and_entrypoint():
@@ -457,9 +462,11 @@ def test_the_isolation_report_states_what_this_host_cannot_do():
         m.value for m in ISO.REQUIRED_FOR_GENERATED_CODE}
     shortfall = report["confinement"]["shortfall"]
     assert shortfall == [], f"this host cannot confine generated code: {shortfall}"
-    # The mechanisms that are known not to apply are named rather than hidden.
-    missing = report["confinement"]["missing"]
-    assert "process_limit" in missing
+    assert report["can_run_generated_code"] is True
+    # The process limit is a cgroup fact, and the detail says so — including
+    # why the obvious-looking alternative is not one.
     detail = next(s["detail"] for s in report["confinement"]["states"]
                   if s["mechanism"] == "process_limit")
-    assert "per real UID" in detail
+    assert "pids.max" in detail
+    assert "per real UID" in detail        # why RLIMIT_NPROC is not counted
+    assert "member of cgroup" in detail    # and that membership was observed

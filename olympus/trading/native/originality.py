@@ -350,6 +350,12 @@ _STDLIB: frozenset[str] = frozenset({
     # gets a network namespace and a seccomp filter. Listing it here is the
     # visible edit this hand-maintained set exists to force.
     "ctypes", "shutil", "signal", "tempfile",
+    # Added by the pre-merge hardening. `errno` and `threading` come with the
+    # cgroup scope and the report pipe — the drain runs on a thread so a
+    # runner writing a large report cannot deadlock against a parent sitting in
+    # `wait()`. `secrets` generates the per-run nonce that makes a report line
+    # forged by generated code discardable.
+    "errno", "secrets", "threading",
 })
 
 
