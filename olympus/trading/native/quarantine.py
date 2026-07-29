@@ -131,10 +131,15 @@ BLOCKERS: tuple[Blocker, ...] = (
     Blocker(
         id="B9",
         title="the native model loses to every simple matched baseline",
-        detail="docs/OLYMPUS_VS_KRONOS.md: on identical data, costs, splits "
-               "and metrics the native arm lost to a gradient-boosted tree, a "
-               "linear fit and persistence. The matched evaluation returned "
-               "INSUFFICIENT EVIDENCE, which is not a tie.",
+        # The report's path is in this module's docstring and deliberately not
+        # here: `tests/test_trading_independence.py` confines every mention of
+        # the external reference model to a native module's docstring, and the
+        # report is named after it. The guard is right and this is the shape
+        # that satisfies it without weakening the statement.
+        detail="The matched evaluation named in this module's docstring: on "
+               "identical data, costs, splits and metrics the native arm lost "
+               "to a gradient-boosted tree, a linear fit and persistence, "
+               "returning INSUFFICIENT EVIDENCE — which is not a tie.",
         resolution_evidence=(
             "the native arm beats persistence and the tree on the matched "
             "protocol, with the Holm-corrected p-value reported",
