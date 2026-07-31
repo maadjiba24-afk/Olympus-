@@ -15,6 +15,45 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — The chat cost controls now actually bind (E27–E30)
+
+Investigating P0-1 (share request state across instances) surfaced that the
+quota it was meant to protect **did not hold on a single node**. Four defects on
+the path that spends the OPERATOR's API key:
+
+- **The quota identity was caller-chosen (E27, critical).** `_principal` falls
+  back to `_user_for(sid)` = ``web-<sid>`` whenever `accounts.require_login()` is
+  false — the default — and the sid comes from the caller's own cookie. Burning
+  the `OLYMPUS_FREE_CHATS` allowance and then clearing the cookie returned a
+  brand-new allowance, forever. A keyless visitor could spend the operator's key
+  without bound, with no second replica involved. Fixed with a per-IP ceiling on
+  operator-funded chats (`OLYMPUS_FREE_CHATS_PER_IP`, default 3x the per-user
+  allowance, `<=0` disables) — the peer address is the part a caller cannot mint,
+  and it is what the per-minute limiter already trusts. The multiple leaves room
+  for genuine users behind one NAT.
+- **`/v1` had no throttle at all (E28).** `/v1/chat/completions` and
+  `/v1/messages` returned before the per-IP limiter, so the most expensive
+  endpoint in the process — a full council run — was the only unthrottled one.
+  Given its own budget (`OLYMPUS_V1_RATE_LIMIT`, default 120/min) rather than the
+  browser-chat 8/min, because /v1 is programmatic and real clients burst.
+- **Quota was charged before validation (E29).** The code promised "a rejected
+  request must not burn one of the user's OLYMPUS_DAILY_CHATS", but
+  `settings.validate()` ran *after* the charge, so a 400 still cost a chat — and
+  a free, operator-funded one. Settings are now built and validated first.
+- **The free allowance was check-then-act (E30).** `_daily_count` and
+  `_daily_bump` were separate operations, so concurrent requests all read the
+  same pre-charge count and each got a free chat. Now one atomic
+  `_daily_limited` check-and-consume; a 40-thread test pins it.
+
+11 tests, each verified to fail without its fix.
+
+**Not fixed here:** P0-1 itself — sharing these counters across replicas. It is
+the *next* layer, and doing it first would have been fortifying a quota that any
+visitor could reset with a cookie. Also unfixed: `/healthz` reads the usage
+ledger through `metrics.snapshot()` despite its docstring forbidding disk access
+(E31).
+
+
 ## [0.27.1] — 2026-07-30
 
 ### Fixed — Published wheels failed their own `olympus verify` (E26)
