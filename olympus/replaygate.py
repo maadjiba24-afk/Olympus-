@@ -98,6 +98,25 @@ def check_one(prompt: str, make_bot, report) -> dict:
         rec["detail"] = "completed but recorded no decisions"
         return rec
 
+    # A run can COMPLETE and record decisions while making no model call at all:
+    # the keyless/degraded path answers without reaching a provider, so
+    # `replaystore` freezes nothing. Replay then takes the model path anyway,
+    # recomputes a request hash, finds no recorded response and raises
+    # divergence — which looks exactly like a determinism regression but is a
+    # missing PRECONDITION. Classify it as a SKIP: reporting it as a genuine
+    # failure tells an operator their release is unreliable when the gate simply
+    # never ran. (Audit finding E25 — this is how it presented: 3/3 prompts
+    # `completed=True decisions=3`, every decision `model_request_hash=None`,
+    # `memory/responses/` empty, and a hard "RELIABILITY GATE NOT MET".)
+    if not any(d.get("model_request_hash") for d in run.get("decisions", [])):
+        rec["skipped"] = True
+        rec["detail"] = (
+            f"skipped — {rec['decisions']} decision(s) recorded but NO model "
+            f"call was frozen, so there is nothing to replay. The pipeline "
+            f"answered without reaching a provider; configure a key "
+            f"(`olympus doctor`) and re-run.")
+        return rec
+
     try:
         _original, _fresh, diffs = orchestrator.replay_run(rec["run_id"])
     except replaystore.ReplayDivergence as err:

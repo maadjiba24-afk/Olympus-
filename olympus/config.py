@@ -866,9 +866,47 @@ def inrun_keep_recent() -> int:
 MAX_CONCURRENT_CALLS = int(os.environ.get("OLYMPUS_MAX_CONCURRENT_CALLS", "6"))
 
 # Budget guard: max estimated USD/day on the user's own API key before Olympus
-# pauses new requests (0 = no cap). Protects the BYOK bill; can also be set at
-# runtime with `olympus budget <amount>`, which takes precedence.
-DAILY_BUDGET = float(os.environ.get("OLYMPUS_DAILY_BUDGET", "0") or 0)
+# pauses new requests. Protects the BYOK bill; can also be set at runtime with
+# `olympus budget <amount>`, which takes precedence.
+#
+#: The ceiling applied when OLYMPUS_DAILY_BUDGET is UNSET. This is deliberately
+#: non-zero: `0` has always meant UNLIMITED here, so an unset budget used to
+#: mean an unbounded bill on a fresh install — and Olympus spends without a
+#: human in the loop (the heartbeat's opportunity scan, daily learning, standing
+#: goals and agent beats all call models on a cadence). "Unset" must therefore
+#: mean "bounded"; removing the ceiling is now an explicit, deliberate act.
+DEFAULT_DAILY_BUDGET = 10.0
+
+#: Values that explicitly REMOVE the ceiling. `0` is kept because it has always
+#: meant unlimited and an operator who typed it made a choice; the words exist
+#: because "0 means unlimited" reads like "off" to anyone who has not read this
+#: file, which is exactly how an unbounded bill happens.
+_UNLIMITED_BUDGET = frozenset({"0", "0.0", "unlimited", "none", "off"})
+
+
+def resolve_daily_budget(raw: str | None) -> float:
+    """The daily USD ceiling from an env value. `0.0` means NO cap.
+
+    Unset ⇒ `DEFAULT_DAILY_BUDGET` (bounded). An explicit unlimited spelling ⇒
+    `0.0`. A malformed or negative value ⇒ the default, because it must fail
+    SAFE: a typo previously raised `ValueError` at module scope and made
+    `import olympus.config` — and therefore the whole package — unimportable,
+    and it must not silently widen the ceiling either. The malformed value is
+    still reported at boot by `staging_problems()` / `production_problems()`,
+    so it is never silently accepted."""
+    value = (raw or "").strip().lower()
+    if not value:
+        return DEFAULT_DAILY_BUDGET
+    if value in _UNLIMITED_BUDGET:
+        return 0.0
+    try:
+        parsed = float(value)
+    except ValueError:
+        return DEFAULT_DAILY_BUDGET
+    return parsed if parsed > 0 else DEFAULT_DAILY_BUDGET
+
+
+DAILY_BUDGET = resolve_daily_budget(os.environ.get("OLYMPUS_DAILY_BUDGET"))
 
 
 # Per-run spend ceiling: max estimated USD a SINGLE council run may add before
@@ -1696,18 +1734,38 @@ def is_staging() -> bool:
     return deployment_env() == "staging"
 
 
-class StagingConfigError(RuntimeError):
-    """A staging deployment is missing configuration it cannot safely infer.
+class DeploymentConfigError(RuntimeError):
+    """A named deployment (staging or production) is missing configuration it
+    cannot safely infer.
 
     Raised at BOOT, never at first request: an instance that would have served
     one unsafe response must not start at all. Carries every problem found, not
     just the first, so an operator fixes the profile in one pass."""
 
+    _MODE = "deployment"
+
     def __init__(self, problems: list[str]):
         self.problems = list(problems)
         super().__init__(
-            "staging configuration is incomplete — refusing to start:\n"
+            f"{self._MODE} configuration is incomplete — refusing to start:\n"
             + "\n".join(f"  - {p}" for p in self.problems))
+
+
+class StagingConfigError(DeploymentConfigError):
+    """`OLYMPUS_ENV=staging` is incomplete (P5-A2)."""
+
+    _MODE = "staging"
+
+
+class ProductionConfigError(DeploymentConfigError):
+    """`OLYMPUS_ENV=production` is incomplete.
+
+    Production used to get only the signing-seed invariant, so a production
+    instance could boot with an unlimited spend ceiling, no credential while
+    bound off-loopback, and unbounded retention — the very misconfigurations
+    staging already refuses. This closes that asymmetry."""
+
+    _MODE = "production"
 
 
 def _writable_dir(path) -> bool:
@@ -1725,22 +1783,30 @@ def _writable_dir(path) -> bool:
         return False
 
 
-def staging_problems(*, bind_host: str | None = None) -> list[str]:
-    """Everything wrong with this staging configuration, as operator-actionable
-    lines. Empty list = the profile is complete. PURE: reads config and probes
-    the memory dir; changes no state and never raises.
+def _deployment_problems(mode: str, *, bind_host: str | None = None,
+                         require_explicit_memory_dir: bool = True,
+                         require_explicit_budget: bool = True) -> list[str]:
+    """The boot checks EVERY named deployment mode shares, as
+    operator-actionable lines. PURE: reads config and probes the memory dir;
+    changes no state and never raises.
 
     Each check exists because getting it wrong produces a specific, known
     failure — the rationale is in the message, so the operator does not have to
-    find this file to understand the refusal."""
-    problems: list[str] = []
-    if not is_staging():
-        return problems
+    find this file to understand the refusal.
 
-    # 1. Durable state must be on an explicit, writable, persistent path.
-    #    The default lands inside the image; a container restart would silently
-    #    destroy every journal, ledger and account.
-    if not os.environ.get("OLYMPUS_MEMORY_DIR", "").strip():
+    `require_explicit_memory_dir` is False for production on purpose: the
+    shipped Dockerfile declares `VOLUME /app/memory` and the compose file mounts
+    the named volume THERE, so a correct production deploy relies on the default
+    path already being the mounted volume. Demanding the env var would refuse to
+    boot the project's own documented deployment. Writability is still probed,
+    which is what actually catches a read-only or mis-owned mount."""
+    problems: list[str] = []
+
+    # 1. Durable state must be on a writable, persistent path. The default lands
+    #    inside the image; a container restart would silently destroy every
+    #    journal, ledger and account.
+    if require_explicit_memory_dir and not os.environ.get(
+            "OLYMPUS_MEMORY_DIR", "").strip():
         problems.append(
             "OLYMPUS_MEMORY_DIR is unset: durable state would default into the "
             "image and be destroyed on container restart. Point it at a mounted "
@@ -1751,28 +1817,42 @@ def staging_problems(*, bind_host: str | None = None) -> list[str]:
             f"journals, ledgers and accounts would all fail to persist. Check "
             f"volume ownership and permissions.")
 
-    # 2. Spend must be bounded. OLYMPUS_DAILY_BUDGET=0 means UNLIMITED (see
-    #    deploy/docker-compose.yml), which is exactly the wrong default for an
-    #    environment whose whole purpose is unattended evidence collection.
+    # 2. Spend must be bounded. `OLYMPUS_DAILY_BUDGET=0` (and the `unlimited` /
+    #    `none` / `off` spellings) mean UNLIMITED, not off — which is exactly
+    #    wrong for an instance that spends on a cadence with no human watching.
+    #    An UNSET budget is now bounded by DEFAULT_DAILY_BUDGET, so it is only a
+    #    problem where the mode demands an explicit, deliberate number.
     raw_budget = os.environ.get("OLYMPUS_DAILY_BUDGET", "").strip()
     if not raw_budget:
+        if require_explicit_budget:
+            problems.append(
+                f"OLYMPUS_DAILY_BUDGET is unset: {mode} runs unattended, so the "
+                f"ceiling must be a deliberate number, not the "
+                f"${DEFAULT_DAILY_BUDGET:g}/day default.")
+    elif raw_budget.lower() in _UNLIMITED_BUDGET:
         problems.append(
-            "OLYMPUS_DAILY_BUDGET is unset: staging runs unattended, so an "
-            "unbounded spend is a denial-of-wallet waiting to happen.")
+            f"OLYMPUS_DAILY_BUDGET={raw_budget!r} means UNLIMITED, not off. "
+            f"{mode.capitalize()} requires a positive cap.")
     else:
+        # Anything left that is not a positive number is MALFORMED, not
+        # unlimited: `resolve_daily_budget` falls back to the bounded default
+        # for it. Say that, rather than claiming a cap was removed.
         try:
             if float(raw_budget) <= 0:
                 problems.append(
-                    "OLYMPUS_DAILY_BUDGET=0 means UNLIMITED, not off. Staging "
-                    "requires a positive cap.")
+                    f"OLYMPUS_DAILY_BUDGET={raw_budget!r} is not a positive "
+                    f"number, so the ceiling fell back to "
+                    f"${DEFAULT_DAILY_BUDGET:g}/day. {mode.capitalize()} "
+                    f"requires an explicit positive cap.")
         except ValueError:
             problems.append(
-                f"OLYMPUS_DAILY_BUDGET={raw_budget!r} is not a number.")
+                f"OLYMPUS_DAILY_BUDGET={raw_budget!r} is not a number, so the "
+                f"ceiling silently fell back to ${DEFAULT_DAILY_BUDGET:g}/day.")
 
     # 3. Exposure must be authenticated. `_authorized` and `_v1_authorized`
     #    already refuse an off-box caller with no credential (Phase-4 F4/F2),
-    #    but a staging instance that would refuse EVERY request is a
-    #    misconfiguration, not a safety win — catch it at boot instead.
+    #    but an instance that would refuse EVERY request is a misconfiguration,
+    #    not a safety win — catch it at boot instead.
     host = bind_host if bind_host is not None else os.environ.get(
         "OLYMPUS_BIND_HOST", "")
     off_loopback = bool(host) and host not in (
@@ -1787,18 +1867,28 @@ def staging_problems(*, bind_host: str | None = None) -> list[str]:
             f"OLYMPUS_REQUIRE_LOGIN (for the browser API). Without one every "
             f"request is refused, which is safe but useless.")
 
-    # 4. Retention must be finite. An unbounded staging store accumulates
-    #    prompts and tool arguments forever (PRIVACY_RETENTION_REVIEW.md).
+    # 4. Retention must be finite. An unbounded store accumulates prompts and
+    #    tool arguments forever (PRIVACY_RETENTION_REVIEW.md).
     if RETAIN_DAYS <= 0:
         problems.append(
             f"OLYMPUS_RETAIN_DAYS={RETAIN_DAYS} disables retention sweeps: "
             f"traces, usage and the absorption evidence ledgers would grow "
             f"without bound.")
+    return problems
 
-    # 5. Production-only settings must not leak into a staging profile. These
-    #    are not merely redundant — a shared production volume or a live
-    #    off-droplet backup destination would put staging artifacts into
-    #    production storage.
+
+def staging_problems(*, bind_host: str | None = None) -> list[str]:
+    """Everything wrong with this staging configuration, as operator-actionable
+    lines. Empty list = the profile is complete. PURE: reads config and probes
+    the memory dir; changes no state and never raises."""
+    if not is_staging():
+        return []
+    problems = _deployment_problems("staging", bind_host=bind_host)
+
+    # Staging-only: production settings must not leak into a staging profile.
+    # These are not merely redundant — a shared production volume or a live
+    # off-droplet backup destination would put staging artifacts into production
+    # storage.
     if os.environ.get("OLYMPUS_BACKUP_CMD", "").strip() and \
             not os.environ.get("OLYMPUS_STAGING_ALLOW_BACKUP_CMD", "").strip():
         problems.append(
@@ -1806,6 +1896,41 @@ def staging_problems(*, bind_host: str | None = None) -> list[str]:
             "would be delivered to the production destination. Unset it, or "
             "set OLYMPUS_STAGING_ALLOW_BACKUP_CMD=1 with a staging-only target.")
     return problems
+
+
+def production_problems(*, bind_host: str | None = None) -> list[str]:
+    """Everything wrong with this PRODUCTION configuration, same contract as
+    `staging_problems`. Empty list = the profile is complete.
+
+    Production previously got only the signing-seed invariant
+    (`witness.require_production_seed`), so it could boot with an unlimited
+    spend ceiling, no credential while bound off-loopback, or unbounded
+    retention — exactly what staging already refuses. Two checks are relaxed
+    relative to staging because a correct production deploy legitimately does
+    them differently:
+
+      * `OLYMPUS_MEMORY_DIR` need not be set — the shipped Dockerfile/compose
+        mount the named volume at the DEFAULT path, so requiring the env var
+        would refuse the project's own documented deployment. Writability is
+        still probed.
+      * `OLYMPUS_DAILY_BUDGET` need not be set — unset now resolves to the
+        bounded `DEFAULT_DAILY_BUDGET`. An explicitly UNLIMITED value is still
+        refused, which is the actual hazard."""
+    if not is_production():
+        return []
+    return _deployment_problems("production", bind_host=bind_host,
+                                require_explicit_memory_dir=False,
+                                require_explicit_budget=False)
+
+
+def require_production_config(*, bind_host: str | None = None) -> None:
+    """Fail closed on an unsafe production profile.
+
+    No-op unless OLYMPUS_ENV names production, so dev and staging boots are
+    byte-identically unaffected."""
+    problems = production_problems(bind_host=bind_host)
+    if problems:
+        raise ProductionConfigError(problems)
 
 
 def require_staging_config(*, bind_host: str | None = None) -> None:

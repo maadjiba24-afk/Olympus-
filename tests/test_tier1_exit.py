@@ -123,9 +123,12 @@ def test_self_check_escalates_on_divergence(monkeypatch):
         def ask(self, prompt):
             return "a real answer"
 
-    # make it look completed-but-not-replayable
-    monkeypatch.setattr(harness, "trace",
-                        types.SimpleNamespace(load_run=lambda rid: {"decisions": [{}]}))
+    # make it look completed-but-not-replayable: a REAL recorded run, so its
+    # decision carries the frozen `model_request_hash` a recorded model call
+    # stamps. Without one the run is "nothing was recorded" — inconclusive, not
+    # a divergence — and must NOT escalate (see test_replaygate.py, E25).
+    monkeypatch.setattr(harness, "trace", types.SimpleNamespace(
+        load_run=lambda rid: {"decisions": [{"model_request_hash": "h1"}]}))
     monkeypatch.setattr(harness.orchestrator, "replay_run",
                         lambda rid: (_ for _ in ()).throw(
                             harness.replaystore.ReplayDivergence("h", {"model": "m"})))
@@ -200,3 +203,35 @@ def test_gate_bot_pins_cheaper_model(monkeypatch):
     monkeypatch.setattr(config, "GATE_MODEL", "claude-sonnet-4-6")
     bot = harness._gate_bot()
     assert bot.pool.primary().model == "claude-sonnet-4-6"
+
+
+def test_self_check_does_not_escalate_when_nothing_was_recorded(monkeypatch):
+    """E25's blast radius on the automatic tripwire: a keyless/degraded run
+    freezes no model call, so it is INCONCLUSIVE. It must not file a GitHub
+    issue or page anyone — a false divergence alert on a cadence is exactly how
+    an operator learns to ignore the tripwire."""
+    from olympus import github, memory, telegram
+
+    class _Stub:
+        last_run_id = "r1"
+
+        def ask(self, prompt):
+            return "a real answer"
+
+    monkeypatch.setattr(config, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(harness, "trace", types.SimpleNamespace(
+        load_run=lambda rid: {"decisions": [{"model_request_hash": None}]}))
+
+    alerts = {}
+    monkeypatch.setattr(telegram, "notify",
+                        lambda msg: alerts.setdefault("tg", msg))
+    monkeypatch.setattr(github, "configured", lambda: True)
+    monkeypatch.setattr(github, "create_issue",
+                        lambda t, b: alerts.setdefault("issue", t))
+    monkeypatch.setattr(memory, "save",
+                        lambda cat, title, body: alerts.setdefault("mem", cat))
+
+    res = harness.self_check(["a", "b", "c"], make_bot=lambda: _Stub(),
+                             report=lambda *a: None)
+    assert res["passed"] is not True            # not a pass either
+    assert alerts == {}, alerts                 # nothing escalated

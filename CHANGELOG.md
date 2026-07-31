@@ -15,6 +15,144 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.27.1] — 2026-07-30
+
+### Fixed — Published wheels failed their own `olympus verify` (E26)
+
+`pip install olympus-council && olympus verify` — the exact command
+`RELEASING.md` hands an auditor to confirm a release — **failed on every
+published version**:
+
+    [verify] missing tracked file: profiles/README.md
+
+Confirmed on 0.25.0, 0.26.0 and 0.27.0 by installing each from PyPI. Nothing was
+tampered with: the signed manifest simply described a file the wheel did not
+contain, so the integrity check could never pass.
+
+**Root cause.** `witness.tracked_files()` vouches for **every** `.py`/`.md`/
+`.json` under the package, but `[tool.setuptools.package-data]` shipped only
+`prompts/*.md` and a top-level `*.json`. `olympus/profiles/README.md` matched
+neither, so it was signed but never packaged. The manifest and the wheel were
+built from two different notions of "the package's files".
+
+**Fix.** The globs now express the tracked-files *rule* instead of enumerating
+today's directories, so a new `.md`/`.json` in a new subdirectory cannot silently
+break verification again. Both a top-level and a recursive form of each is
+listed: `**/*.json` requires a separator and therefore matches only *nested*
+files — using it alone would have dropped `capabilities.json`,
+`benchmarks.json`, `experiments.json` and `quality_baseline.json`. (That mistake
+was caught by the new test before it shipped.)
+
+**Guard.** `tests/test_package_data.py` asserts *signed ⊆ shipped* — every file
+`tracked_files()` returns must be covered by a declared package-data pattern (or
+be a `.py` in an importable package). It also pins the specific regression, and
+fails if `tracked_files()` ever starts vouching for a suffix the globs don't
+cover. Deliberately regex-parsed rather than `tomllib`-parsed: tomllib is stdlib
+only on 3.11+, and a packaging guard that skips on the oldest supported Python
+has a hole exactly where it is least likely to be noticed.
+
+Verified end-to-end: a wheel built from this commit contains all **328** tracked
+files (previously 327 of 328), and an install of it reports
+`✓ verified: every tracked file matches the signed manifest and the signature is
+from the trusted key.`
+
+
+## [0.27.0] — 2026-07-29
+
+### Fixed — The release reliability gate no longer reports a false failure (E25)
+
+`scripts/reliability_gate.py` (RELEASING.md step 4) and
+`scripts/tier1_exit_check.py` told operators their release was **unreliable**
+when the truth was that the gate **never ran**.
+
+Without a provider key the pipeline still answers (the keyless/degraded path),
+records decisions and returns a reply — but reaches no provider, so
+`replaystore` freezes nothing. The replay pass then takes the model path anyway,
+recomputes a request hash, finds no recorded response and raises divergence.
+Observed on a real run: 3/3 prompts `completed=True decisions=3`, every decision
+`model_request_hash=None, cost=0.0`, `memory/responses/` empty — and a hard
+`✗ RELIABILITY GATE NOT MET`. `genuine_failures()` treats every non-`skipped`
+failure as genuine, and this state was never marked `skipped`.
+
+- **`replaygate.check_one` now classifies it correctly.** A run whose decisions
+  froze no model call is a SKIP (inconclusive) with an actionable reason, not a
+  divergence — and replay is not even attempted. This fixes every entry point at
+  once, including the heartbeat's `self_check` tripwire, which would otherwise
+  file a GitHub issue and send a Telegram alert for a phantom divergence on a
+  cadence. (A run where *some* decision froze a call is still replayed, and a
+  divergence there is still a genuine failure.)
+- **Both operator scripts now preflight the provider** with
+  `firstrun.configured()` — the guard `heartbeat.tick` has always applied to its
+  replay self-check — so they refuse in one line instead of spending three runs
+  to produce a false verdict.
+
+Exit codes are unchanged: INCONCLUSIVE stays `0` (it is not a failure), and the
+message states plainly that it is **not a pass** either. Four test fixtures that
+stood in for a recorded run were given the `model_request_hash` they always
+implied; assertions were not weakened. 4 new tests.
+
+
+### Security/Changed — Safe-by-default spend ceiling and a production boot gate
+
+Closes the two unsafe defaults the technical audit found (E21/E22). Both were
+about what happens when an operator configures **nothing**.
+
+- **An unset `OLYMPUS_DAILY_BUDGET` is now BOUNDED, not unlimited.** `0` has
+  always meant UNLIMITED here, and `0` was also the *default* — so a fresh
+  install had no spend ceiling at all, while the heartbeat's cadences
+  (opportunity scan, daily learning, standing goals, agent beats) call models
+  with no human in the loop. Unset now resolves to `DEFAULT_DAILY_BUDGET`
+  (**$10/day**). **Behaviour change:** an instance that relied on unset-means-
+  unlimited is now capped — restore the old behaviour explicitly with
+  `OLYMPUS_DAILY_BUDGET=unlimited` (or `0`, `none`, `off`, all still accepted).
+  A saved `olympus budget <amount>` setting still takes precedence, and `0`
+  still means "no cap" to `usage.daily_budget()` — that contract is unchanged.
+- **A malformed budget no longer bricks the package.** `OLYMPUS_DAILY_BUDGET=abc`
+  made `float()` raise at module scope, so `import olympus.config` — and
+  therefore *all* of Olympus — failed from one env typo. A malformed or negative
+  value now falls back to the bounded default and is *reported at boot* by the
+  deployment checklist rather than silently accepted or silently widened.
+- **`OLYMPUS_ENV=production` now gets the same fail-closed boot checklist as
+  staging.** Production previously had only the signing-seed invariant, so it
+  could boot with an explicitly-unlimited ceiling, unbounded retention, an
+  unwritable memory dir, or an off-loopback bind with no credential — every one
+  of which staging already refuses. New `config.production_problems()` /
+  `require_production_config()` (wired beside the existing production, sovereign
+  and staging invariants in `cli.py`) refuse the boot with one actionable list.
+  Two checks are deliberately relaxed versus staging: an explicit
+  `OLYMPUS_MEMORY_DIR` is not required (the shipped Dockerfile/compose mount the
+  volume at the *default* path, so demanding it would refuse Olympus's own
+  documented deployment — writability is still probed), and an explicit budget is
+  not required (unset is now bounded).
+
+`StagingConfigError` and `ProductionConfigError` now share a
+`DeploymentConfigError` base; the staging type and its message are unchanged, so
+existing callers and profiles are unaffected. Dev and staging boots are
+byte-identically unaffected by the production gate. 31 new tests.
+
+
+### Docs — Full technical audit and teardown
+
+Adds `docs/TECHNICAL_AUDIT_2026-07-29.md`: an evidence-based teardown of the
+whole repository, produced by tracing each capability from its public entry point
+to its final side effect rather than trusting names, docstrings, or the README.
+
+- **What it covers.** ~254 capabilities classified with the status labels
+  (WORKING / IMPLEMENTED_UNTESTED / PARTIAL / SCAFFOLD_ONLY / DISABLED /
+  UNREACHABLE / MOCK_ONLY / BROKEN / MISSING), a module-by-module teardown, a
+  deployment-readiness matrix, a test-quality assessment, and a P0–P4 remediation
+  plan. Full suite recorded at 8363 passed / 168 skipped / 0 failed.
+- **Findings.** 0 CRITICAL, 20 HIGH. The load-bearing ones: request state lives
+  in process memory so the app cannot scale horizontally; several advanced
+  capabilities (codegraph auto-build, ingest gate, `modelgrade.observe()`,
+  `emem.context_block`, scaffold evolution) are implemented and tested but never
+  reached on a default install; `OLYMPUS_DAILY_BUDGET=0` means *unlimited* spend;
+  and the fail-closed boot checklist runs only under `OLYMPUS_ENV=staging`, so a
+  production boot enforces none of it.
+- **No code changed.** The audit is documentation only; every remediation item is
+  left as a task with acceptance criteria, not applied.
+
+
 ### Added — Objective per-domain benchmarks: the self-improvement gate goes judge-independent
 
 Extends the objective-assertion layer (which already caps the LLM judge with
@@ -3554,7 +3692,9 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.25.0...v0.26.0
 [0.21.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.19.0...v0.20.0

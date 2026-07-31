@@ -33,6 +33,22 @@ def main(argv=None) -> int:
     from olympus import firstrun, replaygate, usage
     firstrun.load_env_file()
 
+    # Preflight: the gate needs a real provider. Without one the pipeline still
+    # answers (keyless/degraded), records decisions, freezes NO model call, and
+    # then "diverges" on replay — which used to print a hard
+    # "RELIABILITY GATE NOT MET" for what is actually "the gate never ran".
+    # `heartbeat.tick` has always guarded its replay self-check this way
+    # (heartbeat.py, replay_gate cadence); this is the same guard for the
+    # operator-run entry point, checked BEFORE spending three runs on it.
+    if not firstrun.configured():
+        print("⚠ INCONCLUSIVE — no provider key configured, so the gate cannot "
+              "run.\n"
+              "  This is NOT a pass and NOT a reliability failure: nothing was "
+              "measured.\n"
+              "  Set ANTHROPIC_API_KEY (or run `olympus setup`) and re-run — see "
+              "RELEASING.md step 4.")
+        return 0
+
     cap = float(os.environ.get("OLYMPUS_DAILY_BUDGET") or 0)
     before = usage.today_spend()
     all_pass, results = replaygate.run_exit_check(argv or None)

@@ -21,6 +21,14 @@ def _quiet(*_a):
     pass
 
 
+def _recorded(h="reqhash1"):
+    """One decision from a REAL recorded run: it froze a model call, so it
+    carries `model_request_hash`. A decision WITHOUT one means the pipeline
+    answered without reaching a provider — see the E25 tests below."""
+    return {"decision_type": "route", "model_request_hash": h,
+            "model_response_ref": h}
+
+
 def test_gate_disables_memory_learning_during_run(monkeypatch):
     """The gate must run with the background learner OFF, so a write between a
     run's record and replay passes can't cause a false divergence — and it must
@@ -48,7 +56,7 @@ def test_gate_bot_uses_isolated_memory_namespace(monkeypatch):
 
 
 def test_clean_run_passes(monkeypatch):
-    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [{}, {}]})
+    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [_recorded(), _recorded()]})
     monkeypatch.setattr(replaygate.orchestrator, "replay_run", lambda rid: ({}, {}, []))
     all_pass, results = replaygate.run_exit_check(
         ["a", "b", "c"], make_bot=lambda: _Bot(), report=_quiet)
@@ -58,7 +66,7 @@ def test_clean_run_passes(monkeypatch):
 
 
 def test_divergent_run_fails(monkeypatch):
-    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [{}]})
+    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [_recorded()]})
     monkeypatch.setattr(replaygate.orchestrator, "replay_run",
                         lambda rid: ({}, {}, [{"index": 0, "original": {}, "replayed": {}}]))
     all_pass, results = replaygate.run_exit_check(
@@ -69,7 +77,7 @@ def test_divergent_run_fails(monkeypatch):
 
 
 def test_replay_divergence_exception_fails(monkeypatch):
-    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [{}]})
+    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [_recorded()]})
 
     def diverge(rid):
         raise replaystore.ReplayDivergence("h", {"model": "m"})
@@ -94,7 +102,7 @@ def test_unexpected_error_fails_loudly_and_is_logged(monkeypatch):
     captured = []
     monkeypatch.setattr(errors, "capture",
                         lambda where, exc, context="": captured.append((where, repr(exc))))
-    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [{}]})
+    monkeypatch.setattr(replaygate.trace, "load_run", lambda rid: {"decisions": [_recorded()]})
 
     def boom(rid):
         raise RuntimeError("internal kaboom")
@@ -118,3 +126,42 @@ def test_unexpected_ask_error_fails_and_is_logged(monkeypatch):
     assert all_pass is False
     assert not any(r.get("skipped") for r in results)       # genuine fail, not skip
     assert captured and any("pipeline blew up" in r for r in captured)
+
+
+# --- E25: "the gate never ran" must not masquerade as a reliability failure ---
+
+def test_run_with_no_frozen_model_call_skips_instead_of_failing(monkeypatch):
+    """The audit's E25. Keyless/degraded, the pipeline still answers and records
+    decisions, but freezes NO model call — so replay recomputes a hash, finds
+    nothing, and "diverges". That is a missing precondition, not a determinism
+    regression, and reporting it as a genuine failure tells an operator their
+    release is broken when the gate simply never ran."""
+    monkeypatch.setattr(replaygate.trace, "load_run",
+                        lambda rid: {"decisions": [{"decision_type": "route",
+                                                    "model_request_hash": None,
+                                                    "cost": 0.0}] * 3})
+
+    def must_not_replay(rid):                    # replay must not even be tried
+        raise AssertionError("replay attempted on a run with no frozen call")
+    monkeypatch.setattr(replaygate.orchestrator, "replay_run", must_not_replay)
+
+    all_pass, results = replaygate.run_exit_check(
+        ["a", "b", "c"], make_bot=lambda: _Bot(), report=_quiet)
+    assert all_pass is False
+    assert all(r["skipped"] for r in results)
+    assert replaygate.genuine_failures(results) == []     # inconclusive, not FAIL
+    assert all("nothing to replay" in r["detail"] for r in results)
+
+
+def test_a_partially_recorded_run_is_still_replayed(monkeypatch):
+    """Only a run with NO frozen call at all is inconclusive. If any decision
+    froze one, the run is replayable and a divergence is a genuine failure."""
+    monkeypatch.setattr(replaygate.trace, "load_run",
+                        lambda rid: {"decisions": [{"model_request_hash": None},
+                                                   _recorded()]})
+    monkeypatch.setattr(replaygate.orchestrator, "replay_run",
+                        lambda rid: ({}, {}, [{"index": 0}]))
+    _all_pass, results = replaygate.run_exit_check(
+        ["a", "b", "c"], make_bot=lambda: _Bot(), report=_quiet)
+    assert not any(r.get("skipped") for r in results)
+    assert replaygate.genuine_failures(results)
