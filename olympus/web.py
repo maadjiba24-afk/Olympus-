@@ -229,6 +229,21 @@ def _chat_limit() -> int:
     return int(os.environ.get("OLYMPUS_RATE_LIMIT", "8"))
 
 
+def _v1_limit() -> int:
+    """Per-IP per-minute ceiling for the /v1 dialects (OLYMPUS_V1_RATE_LIMIT).
+
+    Deliberately far looser than `_chat_limit()`: /v1 is a PROGRAMMATIC surface
+    and real clients burst (the compatibility campaign alone issues ~40 requests
+    in a few seconds, including an 8-way concurrent case), so the browser-chat
+    budget of 8/min would refuse legitimate use. This is a DoS/abuse ceiling,
+    not a cost control — spend is bounded by the budget guard. <= 0 disables it,
+    matching the other limiters in this module."""
+    try:
+        return int(os.environ.get("OLYMPUS_V1_RATE_LIMIT", "120"))
+    except ValueError:
+        return 120
+
+
 # per-user daily counter (cost/abuse cap, separate from the per-minute limiter)
 _DAILY: dict[str, int] = {}
 _DAILY_LOCK = threading.Lock()
@@ -2287,6 +2302,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path in ("/v1/chat/completions", "/v1/messages"):
+            # Both /v1 dialects run the SAME council pipeline as /api/chat, but
+            # they returned here before ever reaching the per-IP limiter below,
+            # so the most expensive endpoint in the process was the only one
+            # with no throttle at all. Same key space and budget as /api/chat.
+            if _rate_limited("v1:" + self.client_address[0], _v1_limit()):
+                self._v1_error(429, "rate limit exceeded — slow down")
+                return
         if path == "/v1/chat/completions":
             self._handle_v1_chat()
             return
@@ -2547,6 +2570,9 @@ class Handler(BaseHTTPRequestHandler):
         # then continue on their own. With no allowance, OLYMPUS_REQUIRE_BYOK
         # makes it all-or-nothing.
         brought = _brought_own_key(pset)
+        # Read-only pre-check, so an exhausted/blocked caller gets the right
+        # message before anything is charged. The AUTHORITATIVE consume happens
+        # below, after validation, as one atomic check-and-increment.
         decision = _key_decision(brought, _daily_count("free:" + user))
         if decision == "over_free":
             self._json({"error": f"You've used your {config.free_chats()} free "
@@ -2558,6 +2584,15 @@ class Handler(BaseHTTPRequestHandler):
                                  "Open ⚙ model and add your provider key.",
                         "need_key": True}, 402)
             return
+        # Validate BEFORE charging. The quota comment below has always said a
+        # rejected request must not burn quota, but `settings.validate()` used to
+        # run *after* the charge, so a 400 here still cost the user a chat (and a
+        # free, operator-funded one). Build and validate first; charge second.
+        settings = config.Settings.from_env().merged(pset)
+        error = settings.validate()
+        if error:
+            self._json({"error": error}, 400)
+            return
         # Charge the per-account daily quota only now that the request has passed
         # validation and the key/free-allowance wall — a rejected request (400 /
         # 402) must not burn one of the user's OLYMPUS_DAILY_CHATS.
@@ -2566,12 +2601,32 @@ class Handler(BaseHTTPRequestHandler):
                                  "try again tomorrow."}, 429)
             return
         if not brought and config.free_chats() > 0:
-            _daily_bump("free:" + user)         # consume one free, operator-funded chat
-        settings = config.Settings.from_env().merged(pset)
-        error = settings.validate()
-        if error:
-            self._json({"error": error}, 400)
-            return
+            # A free chat spends the OPERATOR's key, so it needs a limit the
+            # caller cannot mint. `user` is `web-<sid>` for an anonymous visitor
+            # and the sid is their own cookie, so clearing it used to hand out a
+            # fresh allowance indefinitely. The per-IP ceiling is checked first
+            # and read-only: it is a coarse abuse ceiling rather than a precise
+            # quota, and peeking keeps a legitimate user from being charged for
+            # a request the ceiling is about to refuse.
+            ip_cap = config.free_chats_per_ip()
+            if ip_cap > 0 and _daily_count(
+                    "ipfree:" + self.client_address[0]) >= ip_cap:
+                self._json({"error": "the free allowance for your network has "
+                                     "been used up today — add your own API key "
+                                     "(⚙ model) to keep going.",
+                            "need_key": True}, 402)
+                return
+            # Atomic check-and-consume: `_daily_count` above and a later
+            # `_daily_bump` were two separate operations, so concurrent requests
+            # each read the same pre-charge count and every one of them got a
+            # free chat. `_daily_limited` decides and charges under one lock.
+            if _daily_limited("free:" + user, config.free_chats()):
+                self._json({"error": f"You've used your {config.free_chats()} "
+                                     "free chats for today — add your own API "
+                                     "key (⚙ model) to keep going.",
+                            "need_key": True}, 402)
+                return
+            _daily_bump("ipfree:" + self.client_address[0])
 
         # Optional second frontier model — used together with the first, each
         # stage on its strongest. Build a pool; invalid second model is ignored.
