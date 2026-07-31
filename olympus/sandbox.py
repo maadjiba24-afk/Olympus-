@@ -503,8 +503,46 @@ def run_python(code: str, *, timeout: int | None = None,
     if _PY_HEREDOC in code:
         return Result(False, 2, "code may not contain the reserved marker "
                       f"{_PY_HEREDOC!r}")
-    command = f"python3 - <<'{_PY_HEREDOC}'\n{code}\n{_PY_HEREDOC}"
-    return run(command, timeout=timeout, be=be, watch=watch, root=root)
+    selected_backend = (be or backend()).lower()
+    posix_command = (
+        f"python3 - <<'{_PY_HEREDOC}'\n{code}\n{_PY_HEREDOC}"
+    )
+
+    if os.name == "nt" and selected_backend == "local":
+        import base64
+        import sys
+
+        from . import cmdguard
+
+        allowed, verdict = cmdguard.check(posix_command)
+        if not allowed:
+            return Result(
+                False,
+                126,
+                f"blocked by the command security gate — {verdict.reason} "
+                f"[rule: {verdict.rule}]. Set OLYMPUS_EXEC_SECURITY=off to "
+                "override (not recommended).",
+            )
+
+        payload = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        runner = (
+            "import base64;"
+            f"exec(compile(base64.b64decode('{payload}'),"
+            "'<olympus>','exec'))"
+        )
+        command = subprocess.list2cmdline(
+            [sys.executable, "-c", runner]
+        )
+    else:
+        command = posix_command
+
+    return run(
+        command,
+        timeout=timeout,
+        be=selected_backend,
+        watch=watch,
+        root=root,
+    )
 
 
 def check_written(target: Path, content: str) -> str:
@@ -730,7 +768,7 @@ def glob_files(pattern: str, path: str = ".") -> str:
         return f"Error: no such directory in workspace: {path}"
     base, hits = workdir(), []
     for p in _walk_files(root):
-        rel = str(p.relative_to(base))
+        rel = p.relative_to(base).as_posix()
         if _glob_match(rel, p.name, pattern):
             try:
                 hits.append((p.stat().st_mtime, rel))

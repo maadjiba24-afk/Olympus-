@@ -170,7 +170,7 @@ class _Walk(ast.NodeVisitor):
 
 def extract_file(project: str, path: Path, root: Path):
     """Pass A for one file: returns its module info, or None if unparseable."""
-    rel = str(path.relative_to(root))
+    rel = path.relative_to(root).as_posix()
     try:
         src = path.read_text(encoding="utf-8")
         tree = ast.parse(src, filename=rel)

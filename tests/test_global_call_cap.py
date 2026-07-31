@@ -64,7 +64,10 @@ _WORKER = textwrap.dedent(
     """
 )
 
-
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="machine-global call cap requires POSIX fcntl",
+)
 @pytest.mark.timeout(120)
 def test_two_processes_never_exceed_global_cap(tmp_path):
     cap = 2

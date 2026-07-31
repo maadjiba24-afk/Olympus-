@@ -249,15 +249,21 @@ def context_block(user: str, query: str, limit: int = 2,
 
 # --- dreaming (nightly consolidation) ----------------------------------------
 
-def _recent_material(user: str, since: float) -> str:
+def _recent_material(user: str, since: float, seen_ids: set[str] | None = None) -> str:
     """What accumulated since the last dream: active typed memories and the
     latest lessons/corrections/feedback notes. Bounded — a dream reads a
     digest, not the archive."""
     parts: list[str] = []
     try:
         from . import usermem
-        fresh = [m for m in usermem.active_memories(user)
-                 if m.get("updated_at", m.get("created_at", 0)) >= since]
+        seen_ids = seen_ids or set()
+        fresh = []
+        for m in usermem.active_memories(user):
+            stamp = m.get("updated_at", m.get("created_at", 0))
+            memory_id = str(m.get("id") or "")
+            if stamp > since or (
+                    stamp == since and memory_id not in seen_ids):
+                fresh.append(m)
         if fresh:
             parts.append("Typed memories:\n" + "\n".join(
                 f"- [{m.get('type')}] {m.get('content', '')[:300]}"
@@ -280,17 +286,49 @@ def _dream_state_path(user: str) -> Path:
     return _dir(user) / ".dream_state.json"
 
 
+def _dream_state(user: str) -> dict:
+    try:
+        state = json.loads(
+            _dream_state_path(user).read_text(encoding="utf-8")
+        )
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def last_dream(user: str) -> float:
     try:
-        return float(json.loads(_dream_state_path(user).read_text(
-            encoding="utf-8")).get("last_dream", 0.0))
-    except (OSError, ValueError):
+        return float(_dream_state(user).get("last_dream", 0.0))
+    except (ValueError, TypeError):
         return 0.0
 
 
-def _mark_dreamed(user: str, now: float) -> None:
+def _last_dream_memory_ids(user: str) -> set[str]:
+    ids = _dream_state(user).get("memory_ids", [])
+    return {str(memory_id) for memory_id in ids}
+
+
+def _active_memory_ids(user: str) -> set[str]:
+    try:
+        from . import usermem
+        return {
+            str(m["id"])
+            for m in usermem.active_memories(user)
+            if m.get("id")
+        }
+    except Exception:
+        return set()
+
+
+def _mark_dreamed(
+        user: str, now: float, memory_ids: set[str]) -> None:
     _dream_state_path(user).write_text(
-        json.dumps({"last_dream": now}), encoding="utf-8")
+        json.dumps({
+            "last_dream": now,
+            "memory_ids": sorted(memory_ids),
+        }),
+        encoding="utf-8",
+    )
 
 
 def dream(user: str, runner=None, now: float | None = None) -> str:
@@ -299,10 +337,12 @@ def dream(user: str, runner=None, now: float | None = None) -> str:
     `runner(system, prompt, schema) -> dict` is injectable for tests."""
     now = now if now is not None else time.time()
     since = last_dream(user)
-    material = _recent_material(user, since)
+    seen_ids = _last_dream_memory_ids(user)
+    checkpoint_ids = _active_memory_ids(user)
+    material = _recent_material(user, since, seen_ids)
     issues = lint(user, now)
     if not material.strip() and not issues:
-        _mark_dreamed(user, now)
+        _mark_dreamed(user, now, checkpoint_ids)
         return "nothing new to consolidate"
 
     index = "\n".join(f"- {p['slug']}: {p['title']} "
@@ -349,7 +389,7 @@ def dream(user: str, runner=None, now: float | None = None) -> str:
                                      or REVIEW_DEFAULT_DAYS),
                durable=bool(page.get("durable", False)), now=now)
         written += 1
-    _mark_dreamed(user, now)
+    _mark_dreamed(user, now, checkpoint_ids)
     return f"consolidated: {written} page(s) written, {retired} retired"
 
 

@@ -1,7 +1,19 @@
 """Sandbox execution: confinement, command running, file write/undo, and that
 run_command / write_file are approval-gated actions."""
 
+import os
+import shlex
+import subprocess
+import sys
+
 import pytest
+
+
+def _python_cmd(code: str) -> str:
+    argv = [sys.executable, "-c", code]
+    if os.name == "nt":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 from olympus import actions, builtin_actions, sandbox  # noqa: F401
 
@@ -22,7 +34,10 @@ def test_run_command_nonzero_exit_is_reported_not_raised(monkeypatch, tmp_path):
 
 def test_run_command_times_out(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
-    res = sandbox.run("sleep 5", timeout=1)
+    res = sandbox.run(
+    _python_cmd("import time; time.sleep(5)"),
+    timeout=1,
+)
     assert not res.ok and res.code == 124
 
 
@@ -188,7 +203,14 @@ def test_active_command_outlives_its_idle_timeout(monkeypatch, tmp_path):
     # Emits a line every 0.5s for ~2.5s: silent-idle never exceeds the 1s
     # timeout, so the command completes even though it runs past 1s total.
     res = sandbox.run(
-        "for i in 1 2 3 4 5; do echo tick$i; sleep 0.5; done", timeout=1)
+    _python_cmd(
+        "import time; "
+        "[(print(f'tick{i}', flush=True), time.sleep(0.5)) "
+        "for i in range(1, 6)]"
+    ),
+    timeout=1,
+)
+
     assert res.ok
     assert "tick5" in res.output
 
@@ -196,7 +218,12 @@ def test_active_command_outlives_its_idle_timeout(monkeypatch, tmp_path):
 def test_timeout_returns_partial_output(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
     monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
-    res = sandbox.run("echo started; sleep 5", timeout=1)
+    res = sandbox.run(
+    _python_cmd(
+        "import time; print('started', flush=True); time.sleep(5)"
+    ),
+    timeout=1,
+)
     assert not res.ok and res.code == 124
     assert "timed out" in res.output
     assert "started" in res.output          # partial output preserved
@@ -205,8 +232,12 @@ def test_timeout_returns_partial_output(monkeypatch, tmp_path):
 def test_watch_pattern_collects_matching_lines(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
     monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
-    res = sandbox.run("echo ok; echo 'ERROR: disk full'; echo done",
-                      watch=r"ERROR")
+    res = sandbox.run(
+        _python_cmd(
+            "print('ok'); print('ERROR: disk full'); print('done')"
+        ),
+        watch=r"ERROR",
+    )
     assert res.ok
     assert res.watched == ("ERROR: disk full",)
     assert "[watch] ERROR: disk full" in res.render()

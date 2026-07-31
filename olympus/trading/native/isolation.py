@@ -386,11 +386,15 @@ def require_platform() -> None:
     `import olympus` fail on Windows, which is a different and worse bug.
     """
     if not platform_supported():
+        support = host_support()
         raise IsolationUnavailable(
             "generated research code can only be confined on Linux; this host "
             "offers no process-count limit, no descendant termination and no "
             "bounded writable filesystem",
-            platform=sys.platform, required=SUPPORTED_PLATFORM)
+            platform=sys.platform,
+            required=SUPPORTED_PLATFORM,
+            missing=list(support.missing),
+        )
 
 
 def _tmpfs_probe() -> tuple[bool, str]:

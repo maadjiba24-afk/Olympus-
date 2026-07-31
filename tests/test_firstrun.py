@@ -67,7 +67,8 @@ def test_wizard_anthropic_saves_and_restricts(monkeypatch):
     text = firstrun.CONFIG_ENV.read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-wizard" in text
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-wizard"
-    assert (firstrun.CONFIG_ENV.stat().st_mode & 0o777) == 0o600
+    if os.name != "nt":
+        assert (firstrun.CONFIG_ENV.stat().st_mode & 0o777) == 0o600
 
 
 def test_wizard_empty_key_cancels(monkeypatch):

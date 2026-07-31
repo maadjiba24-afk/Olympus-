@@ -97,7 +97,9 @@ def test_orchestrator_decision_path_does_not_consult_wave2_policy():
     text, by `test_disabled_watchdog_is_never_consulted` below (and in full, on
     a complete run, by tests/test_watchdog_wiring.py).
     """
-    src = Path(config.__file__).with_name("orchestrator.py").read_text()
+    src = Path(config.__file__).with_name("orchestrator.py").read_text(
+    encoding="utf-8"
+)
     for name in ("modelgrade", "ctxheat", "routesub"):
         for call in (f"import {name}", f"from .{name}", f"{name}."):
             assert call not in src, (
@@ -138,7 +140,9 @@ def test_wave2_routing_flags_are_paired_into_meta_and_replay():
     recorded with substitution on must replay against the same routing, a run
     recorded under enforce must replay under enforce, and a run recorded with
     any of them off must not pick up a later operator's flag."""
-    src = Path(config.__file__).with_name("orchestrator.py").read_text()
+    src = Path(config.__file__).with_name("orchestrator.py").read_text(
+        encoding="utf-8"
+    )
     meta, replay = src.split("def replay_run(", 1)
     for flag, key in (("OLYMPUS_ROUTESUB", "routesub_mode"),
                       ("OLYMPUS_MODELGRADE", "modelgrade_enabled"),

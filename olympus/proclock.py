@@ -36,6 +36,13 @@ except ImportError:                    # pragma: no cover - non-POSIX
     fcntl = None
 
 _LOCAL = threading.local()
+
+_THREAD_LOCKS = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+_SLOT_LOCKS = {}
+_SLOT_LOCKS_GUARD = threading.Lock()
+
 _WARNED = False
 
 
@@ -86,18 +93,44 @@ def lock(name: str, timeout: float | None = DEFAULT_TIMEOUT):
         finally:
             depths[key] -= 1
         return
-    if fcntl is None:                  # pragma: no cover - non-POSIX
+    if fcntl is None:                  # Windows: thread-safe fallback
+        _lock_path(name).touch(exist_ok=True)
+
         if not _WARNED:
             _WARNED = True
             from . import errors
-            errors.capture("proclock", OSError(
-                "fcntl unavailable — cross-process locking degraded to "
-                "single-process (see ADR 0005)"), context=name)
+            errors.capture(
+                "proclock",
+                OSError(
+                    "fcntl unavailable ? cross-process locking degraded "
+                    "to in-process thread locking"
+                ),
+                context=name,
+            )
+
+        with _THREAD_LOCKS_GUARD:
+            thread_lock = _THREAD_LOCKS.setdefault(
+                key, threading.Lock()
+            )
+
+        if timeout is None:
+            acquired = thread_lock.acquire()
+        else:
+            acquired = thread_lock.acquire(
+                timeout=max(0.0, timeout)
+            )
+
+        if not acquired:
+            raise TimeoutError(
+                f"proclock {name!r} not acquired in {timeout}s"
+            )
+
         depths[key] = 1
         try:
             yield
         finally:
             depths[key] = 0
+            thread_lock.release()
         return
     fh = open(_lock_path(name), "a+b")
     try:
@@ -139,14 +172,43 @@ def slot(name: str, count: int, timeout: float | None = DEFAULT_TIMEOUT):
     where fcntl is unavailable (Windows — DEFERRED #10 stays)."""
     global _WARNED
     count = max(1, int(count))
-    if fcntl is None:                          # pragma: no cover - non-POSIX
+    if fcntl is None:                          # Windows fallback
         if not _WARNED:
             _WARNED = True
             from . import errors
-            errors.capture("proclock", OSError(
-                "fcntl unavailable — machine-global cap degraded to per-process "
-                "(see ADR 0005 / DEFERRED #10)"), context=name)
-        yield
+            errors.capture(
+                "proclock",
+                OSError(
+                    "fcntl unavailable ? machine-global cap degraded "
+                    "to per-process"
+                ),
+                context=name,
+            )
+
+        slot_key = (_safe(name), count)
+        with _SLOT_LOCKS_GUARD:
+            semaphore = _SLOT_LOCKS.setdefault(
+                slot_key,
+                threading.BoundedSemaphore(count),
+            )
+
+        if timeout is None:
+            acquired = semaphore.acquire()
+        else:
+            acquired = semaphore.acquire(
+                timeout=max(0.0, timeout)
+            )
+
+        if not acquired:
+            raise TimeoutError(
+                f"no free {name!r} slot (cap {count}) "
+                f"in {timeout}s"
+            )
+
+        try:
+            yield
+        finally:
+            semaphore.release()
         return
     d = config.MEMORY_DIR / "locks"
     d.mkdir(parents=True, exist_ok=True)

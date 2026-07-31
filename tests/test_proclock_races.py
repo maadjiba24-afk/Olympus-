@@ -483,6 +483,7 @@ def test_wedged_ledger_lock_never_breaks_a_reply(monkeypatch):
     try/except — a wedged usage-ledger lock must be swallowed (captured),
     never raised into the reply path. Session totals still update."""
     from olympus import errors, usage
+    monkeypatch.setattr(proclock, "_WARNED", True)
     monkeypatch.setattr(usage, "_LEDGER_LOCK_TIMEOUT", 0.2)
     captured = []
     monkeypatch.setattr(errors, "capture",

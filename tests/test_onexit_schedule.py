@@ -3,15 +3,19 @@ process exits, once, and asks to be polled while the process lives."""
 
 import os
 import subprocess
+import sys
 
 import pytest
+
 
 from olympus import gateway, scheduler
 
 
 @pytest.fixture
 def sleeper():
-    proc = subprocess.Popen(["sleep", "300"])
+    proc = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(300)"]
+)
     yield proc
     proc.kill()
     proc.wait()

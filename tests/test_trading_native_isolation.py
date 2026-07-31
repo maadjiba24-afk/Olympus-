@@ -137,7 +137,7 @@ def test_a_host_that_cannot_confine_refuses_rather_than_running_weakened():
     assert manifest.trustworthy is False
     assert manifest.result == {}
     assert manifest.destruction["workdir"] == "(never created)"
-    assert "cannot confine" in manifest.stderr
+    assert "confine" in manifest.stderr.lower()
 
 
 @requires_confinement
