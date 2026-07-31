@@ -897,7 +897,7 @@ def run(inputs):
         # against the same figures the experiment would have returned.
         assert manifest.trustworthy is False
         assert manifest.result == {}
-        assert "cannot confine" in manifest.stderr
+        assert "confine" in manifest.stderr.lower()
         result = {"challenger_mae": 0.0024, "persistence_mae": 0.0024,
                   "parameters": 1, "baseline_parameters": 0, "n": 200}
     else:

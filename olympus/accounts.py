@@ -119,7 +119,7 @@ def account_for_token(token: str) -> dict | None:
         sess = json.loads(blob)
     except (ValueError, json.JSONDecodeError):
         return None
-    if time.time() - sess.get("created_at", 0) > _session_ttl():
+    if time.time() - sess.get("created_at", 0) >= _session_ttl():
         store.backend().delete(_SESSIONS, token)      # expired
         return None
     return sess

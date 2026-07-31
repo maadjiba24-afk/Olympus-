@@ -27,7 +27,7 @@ def main() -> int:
             print(f"    {p}", file=sys.stderr)
         return 1
     n = len(threatmodel.exposed_tools())
-    print(f"✓ threat model covers all {n} exposed tools.")
+    print(f"[OK] threat model covers all {n} exposed tools.")
     return 0
 
 

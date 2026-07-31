@@ -379,8 +379,9 @@ def test_pinned_specialist_still_wins_over_everything(monkeypatch):
 # --- the flag-pairing invariant --------------------------------------------
 
 def _orchestrator_source() -> str:
-    return Path(config.__file__).with_name("orchestrator.py").read_text()
-
+    return Path(config.__file__).with_name("orchestrator.py").read_text(
+        encoding="utf-8"
+    )
 
 @pytest.mark.parametrize("flag,key", [
     ("OLYMPUS_ROUTESUB", "routesub_mode"),

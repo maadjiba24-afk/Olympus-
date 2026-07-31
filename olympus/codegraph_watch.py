@@ -22,11 +22,15 @@ _MAX_SETTLE_ROUNDS = 30            # cap the debounce wait so constant churn
                                   # still eventually rebuilds (no livelock)
 
 
-def _snapshot(root: Path, include_docs: bool) -> dict[str, float]:
-    snap: dict[str, float] = {}
+def _snapshot(root: Path, include_docs: bool) -> dict[str, tuple[int, int]]:
+    snap: dict[str, tuple[int, int]] = {}
     for p in codegraph_build.collect_files(root, include_docs):
         try:
-            snap[str(p.relative_to(root))] = p.stat().st_mtime
+            stat = p.stat()
+            snap[str(p.relative_to(root))] = (
+                stat.st_mtime_ns,
+                stat.st_size,
+            )
         except OSError:
             pass
     return snap

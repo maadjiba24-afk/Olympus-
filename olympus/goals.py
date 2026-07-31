@@ -156,15 +156,44 @@ def note_progress(goal_id: str, note: str) -> None:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        error_access_denied = 5
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+
+        return ctypes.get_last_error() == error_access_denied
+
     try:
-        os.kill(pid, 0)            # signal 0: existence check, no effect
-        return True
+        os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True                # exists, owned by someone else
+        return True
     except OSError:
         return False
+    return True
 
 
 def wait_on(goal_id: str, pid: int) -> str:

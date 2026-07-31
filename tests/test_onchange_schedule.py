@@ -1,7 +1,27 @@
 """Change-triggered scheduling: the on_change job kind fires when a watched
 command's output changes, recurring, throttled, and only after a baseline."""
 
+import os
+import shlex
+import subprocess
+import sys
+
 import pytest
+
+
+def _read_file_cmd(path) -> str:
+    argv = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; import sys; "
+            "print(Path(sys.argv[1]).read_text(encoding='utf-8'), end='')"
+        ),
+        str(path),
+    ]
+    if os.name == "nt":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 from olympus import gateway, scheduler
 
@@ -15,7 +35,11 @@ def _fast_poll(monkeypatch):
 def test_add_captures_baseline_and_does_not_fire_immediately(tmp_path):
     f = tmp_path / "watched.txt"
     f.write_text("v1", encoding="utf-8")
-    job = scheduler.add_on_change("w", f"cat {f}", "summarize it")
+    job = scheduler.add_on_change(
+    "w",
+    _read_file_cmd(f),
+    "summarize it",
+)
     assert job.kind == "on_change" and job.last_hash          # baseline set
     assert scheduler.changed(now=job.created + 1) == []       # no change yet
 
@@ -23,7 +47,7 @@ def test_add_captures_baseline_and_does_not_fire_immediately(tmp_path):
 def test_fires_once_per_change(tmp_path):
     f = tmp_path / "watched.txt"
     f.write_text("v1", encoding="utf-8")
-    scheduler.add_on_change("w", f"cat {f}", "summarize", now=0.0)
+    scheduler.add_on_change("w", _read_file_cmd(f), "summarize", now=0.0)
 
     ran = []
     runner = lambda p, u: ran.append(p) or "ok"
@@ -60,7 +84,7 @@ def test_poll_is_throttled(monkeypatch, tmp_path):
     monkeypatch.setattr(scheduler, "ON_CHANGE_POLL", 3600)
     f = tmp_path / "w.txt"
     f.write_text("a", encoding="utf-8")
-    scheduler.add_on_change("w", f"cat {f}", "do", now=0.0)
+    scheduler.add_on_change("w", _read_file_cmd(f), "do", now=0.0)
     f.write_text("b", encoding="utf-8")
     # within the throttle window → not re-polled, so no fire
     assert scheduler.changed(now=100.0) == []
@@ -71,7 +95,7 @@ def test_poll_is_throttled(monkeypatch, tmp_path):
 def test_summary_and_nextdue_render_on_change(tmp_path):
     f = tmp_path / "w.txt"
     f.write_text("a", encoding="utf-8")
-    scheduler.add_on_change("w", f"cat {f}", "do", label="my file", now=0.0)
+    scheduler.add_on_change("w", _read_file_cmd(f), "do", label="my file", now=0.0)
     assert "when my file changes" in scheduler.summary()
     assert scheduler.next_due_in(now=0.0) == 0.0     # ON_CHANGE_POLL patched to 0
 

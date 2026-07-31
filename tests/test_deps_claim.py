@@ -27,7 +27,7 @@ def _declared_deps() -> tuple[list[str], list[str]]:
     overstate the footprint on Linux or understate it on Windows. The README
     states both and this returns both.
     """
-    data = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     always, conditional = [], []
     for entry in data["project"]["dependencies"]:
         (conditional if ";" in entry else always).append(entry)
@@ -39,14 +39,14 @@ def _declared_dep_count() -> int:
 
 
 def _readme_dep_count() -> int:
-    text = (ROOT / "README.md").read_text()
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
     matches = re.findall(r"(\d+)\s+runtime deps", text)
     assert matches, "README does not state a 'N runtime deps' claim"
     return int(matches[0])
 
 
 def _readme_conditional_count() -> int:
-    text = (ROOT / "README.md").read_text()
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
     matches = re.findall(r"runtime deps \(\+(\d+) on ", text)
     return int(matches[0]) if matches else 0
 

@@ -18,7 +18,7 @@ def _dir(monkeypatch, tmp_path):
 def _plugin_file(tmp_path, body="# a plugin\n"):
     f = tmp_path / "myplugin.py"
     f.write_text(body, encoding="utf-8")
-    return f, hashlib.sha256(body.encode()).hexdigest()
+    return f, hashlib.sha256(f.read_bytes()).hexdigest()
 
 
 # --- provenance ------------------------------------------------------------

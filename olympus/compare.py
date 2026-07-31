@@ -97,12 +97,33 @@ def _load(user: str, cid: str) -> dict | None:
 
 
 def _prune(user: str) -> None:
-    files = sorted((p for p in _dir(user).glob("*.json")
-                    if p.name != "_tally.json"),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in files[_MAX_STORED:]:
+    def created_key(path: Path) -> tuple[float, int, str]:
         try:
-            p.unlink()
+            record = json.loads(path.read_text(encoding="utf-8"))
+            created = float(record.get("created", 0.0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            created = 0.0
+
+        try:
+            modified = path.stat().st_mtime_ns
+        except OSError:
+            modified = 0
+
+        return created, modified, path.name
+
+    files = sorted(
+        (
+            path
+            for path in _dir(user).glob("*.json")
+            if path.name != "_tally.json"
+        ),
+        key=created_key,
+        reverse=True,
+    )
+
+    for path in files[_MAX_STORED:]:
+        try:
+            path.unlink()
         except OSError:
             pass
 

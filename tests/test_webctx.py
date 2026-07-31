@@ -267,11 +267,22 @@ def test_web_tools_trigger_action_stripping():
 
 # --- hardening: parser DoS resistance --------------------------------------
 
-@pytest.mark.parametrize("html,label", [
-    ("<ul>" * 50000 + "<li>x</li>" * 50000, "nested-list indent bomb"),
-    ("<tr>" + "<th>a</th>" * 3000 + "</tr>" * 40000, "table-separator bomb"),
-    ("<pre>" + " " * 399000 + "Z</pre>", "pre whitespace bomb"),
-])
+@pytest.mark.parametrize(
+    "html,label",
+    [
+        ("<ul>" * 50000 + "<li>x</li>" * 50000,
+         "nested-list indent bomb"),
+        ("<tr>" + "<th>a</th>" * 3000 + "</tr>" * 40000,
+         "table-separator bomb"),
+        ("<pre>" + " " * 399000 + "Z</pre>",
+         "pre whitespace bomb"),
+    ],
+    ids=[
+        "nested-list-indent-bomb",
+        "table-separator-bomb",
+        "pre-whitespace-bomb",
+    ],
+)
 def test_to_markdown_bounds_adversarial_output(html, label):
     # A ~400 KB hostile page must not amplify into gigabytes of markdown or spin
     # the CPU: output is capped and pathological input finishes quickly.

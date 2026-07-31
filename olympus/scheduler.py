@@ -96,16 +96,54 @@ def _watch_hash(cmd: str) -> str | None:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    import os
+
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        error_access_denied = 5
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if handle:
+            exit_code = wintypes.DWORD()
+            checked = kernel32.GetExitCodeProcess(
+                handle,
+                ctypes.byref(exit_code),
+            )
+            kernel32.CloseHandle(handle)
+            return bool(checked and exit_code.value == 259)
+
+        return ctypes.get_last_error() == error_access_denied
+
     try:
-        os.kill(pid, 0)            # signal 0: existence check, no effect
-        return True
+        os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True                # exists, owned by someone else
+        return True
     except OSError:
         return False
+    return True
 
 
 @dataclass
