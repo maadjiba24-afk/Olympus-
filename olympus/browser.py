@@ -790,20 +790,130 @@ def _resolve_page_ws(value: str) -> str:  # pragma: no cover - needs a browser
 
 
 def _find_chrome() -> str | None:
-    """Locate a Chrome/Chromium binary to launch (env override, PATH, then the
-    bundled Playwright Chromium)."""
+    """Locate a Chromium-compatible browser binary.
+
+    Supports Chrome, Chromium, Edge, Brave, Vivaldi, Opera, and compatible
+    Playwright Chromium installations.
+    """
     import os
     import shutil
+    import sys
     from glob import glob
-    if os.environ.get("OLYMPUS_BROWSER_BIN"):
-        return os.environ["OLYMPUS_BROWSER_BIN"]
-    for name in ("google-chrome", "google-chrome-stable", "chromium",
-                 "chromium-browser"):
+
+    override = os.environ.get("OLYMPUS_BROWSER_BIN")
+    if override:
+        return override
+
+    executable_names = (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "chrome.exe",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "msedge",
+        "msedge.exe",
+        "brave-browser",
+        "brave-browser-stable",
+        "brave",
+        "brave.exe",
+        "vivaldi",
+        "vivaldi-stable",
+        "vivaldi.exe",
+        "opera",
+        "opera.exe",
+    )
+
+    for name in executable_names:
         path = shutil.which(name)
         if path:
             return path
+
+    candidates = []
+
+    if sys.platform.startswith("win"):
+        pf86 = os.environ.get("ProgramFiles(x86)")
+        pf = os.environ.get("ProgramFiles")
+        local = os.environ.get("LOCALAPPDATA")
+
+        locations = (
+            (pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            (pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+            (local, "Microsoft", "Edge", "Application", "msedge.exe"),
+
+            (local, "Google", "Chrome", "Application", "chrome.exe"),
+            (pf, "Google", "Chrome", "Application", "chrome.exe"),
+            (pf86, "Google", "Chrome", "Application", "chrome.exe"),
+
+            (local, "Chromium", "Application", "chrome.exe"),
+            (pf, "Chromium", "Application", "chrome.exe"),
+            (pf86, "Chromium", "Application", "chrome.exe"),
+
+            (local, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+            (pf, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+            (pf86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+
+            (local, "Vivaldi", "Application", "vivaldi.exe"),
+            (pf, "Vivaldi", "Application", "vivaldi.exe"),
+            (pf86, "Vivaldi", "Application", "vivaldi.exe"),
+
+            (local, "Programs", "Opera", "opera.exe"),
+            (local, "Programs", "Opera GX", "opera.exe"),
+        )
+
+        candidates.extend(
+            os.path.join(root, *parts)
+            for root, *parts in locations
+            if root
+        )
+
+    elif sys.platform == "darwin":
+        candidates.extend((
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+            "/Applications/Opera.app/Contents/MacOS/Opera",
+        ))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+
     root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
-    hits = sorted(glob(os.path.join(root, "chromium-*/chrome-linux/chrome")))
+    patterns = (
+        os.path.join(root, "chromium-*", "chrome-linux", "chrome"),
+        os.path.join(root, "chromium-*", "chrome-win", "chrome.exe"),
+        os.path.join(root, "chromium-*", "chrome-win64", "chrome.exe"),
+        os.path.join(
+            root,
+            "chromium-*",
+            "chrome-mac",
+            "Chromium.app",
+            "Contents",
+            "MacOS",
+            "Chromium",
+        ),
+        os.path.join(
+            root,
+            "chromium-*",
+            "chrome-mac-arm64",
+            "Chromium.app",
+            "Contents",
+            "MacOS",
+            "Chromium",
+        ),
+    )
+
+    hits = sorted(
+        path
+        for pattern in patterns
+        for path in glob(pattern)
+        if os.path.isfile(path)
+    )
     return hits[-1] if hits else None
 
 

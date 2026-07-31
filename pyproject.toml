@@ -76,7 +76,7 @@ kronos = ["torch>=2.0.0", "numpy>=1.24", "einops>=0.8.0",
 # torch is imported lazily inside functions and its absence raises
 # errors.DependencyMissing; the rest of native/ (state, windowing, checkpoint
 # format, the statistical estimator) is pure stdlib and runs without it.
-native = ["torch>=2.0.0"]
+native = ["torch>=2.0.0", "numpy>=1.24"]
 # CI-only test tooling (NOT shipped runtime deps): the packages that let the
 # opt-in integration tests actually run instead of self-skipping — `openai`
 # drives the OpenAI-compatible server test, `websockets` the real-Chromium CDP
