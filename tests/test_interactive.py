@@ -132,6 +132,7 @@ def test_find_chrome_uses_bundled(monkeypatch, tmp_path):
 
 
 def test_find_chrome_uses_windows_edge(monkeypatch, tmp_path):
+    import ntpath
     import os
     import shutil
     import sys
@@ -143,6 +144,7 @@ def test_find_chrome_uses_windows_edge(monkeypatch, tmp_path):
     monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Test\AppData\Local")
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os.path, "join", ntpath.join)
 
     expected = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     monkeypatch.setattr(os.path, "isfile", lambda path: path == expected)
