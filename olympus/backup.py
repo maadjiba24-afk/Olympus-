@@ -363,7 +363,12 @@ def restore(archive_path: str, into: str | Path | None = None, *,
     import io
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
         members = list(_safe_members(tar, dest))
-        tar.extractall(dest, members=members)
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(dest, members=members, filter="data")
+        else:
+            # Older supported Python versions lack extraction filters.
+            # _safe_members above still blocks path traversal.
+            tar.extractall(dest, members=members)
 
     # Move the extracted data/ tree into place. Two safety properties:
     #  1. Every manifest path is checked for traversal — the tar layer is

@@ -97,42 +97,55 @@ def _load_index(user: str) -> dict:
 
 
 def build_index(user: str) -> dict:
-    """(Re)build the per-document chunk index, re-embedding only documents whose
-    file changed since last time. Returns {slug: {mtime, name, chunks,
-    embeddings|None}}. Best-effort — never raises."""
+    """(Re)build the per-document chunk index, re-embedding only documents
+    whose content changed. Returns {slug: {sha256, name, chunks,
+    embeddings|None}}. Best-effort; never raises."""
     cache = _load_index(user)
     fresh: dict = {}
+
     for meta in documents.listing(user):
         slug = meta["slug"]
-        path = documents.path_for(user, meta["name"])
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
+        body = documents.read(user, meta["name"])
+        if body is None:
             continue
+
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
         cached = cache.get(slug)
-        if cached and cached.get("mtime") == mtime:
-            fresh[slug] = cached                 # unchanged — reuse
+
+        if cached and cached.get("sha256") == digest:
+            fresh[slug] = cached
             continue
-        body = documents.read(user, meta["name"]) or ""
+
         chunks = chunk(body)
         embeddings = None
         if embed.available() and chunks:
-            embeddings = embed.embed(chunks)     # None on failure → lexical
-        fresh[slug] = {"mtime": mtime, "name": meta["name"],
-                       "chunks": chunks, "embeddings": embeddings}
+            embeddings = embed.embed(chunks)
+
+        fresh[slug] = {
+            "sha256": digest,
+            "name": meta["name"],
+            "chunks": chunks,
+            "embeddings": embeddings,
+        }
+
     try:
-        _index_path(user).write_text(json.dumps(fresh), encoding="utf-8")
+        _index_path(user).write_text(
+            json.dumps(fresh),
+            encoding="utf-8",
+        )
     except OSError:
         pass
+
     return fresh
 
 
 def _corpus_signature(index: dict) -> bytes:
-    """A cheap fingerprint of the embedded corpus — per-doc mtime + chunk count.
-    Changes exactly when a document is added, removed, or re-embedded, so it is
-    the right key for "is my persistent index still valid?"."""
-    parts = [f"{slug}:{e.get('mtime')}:{len(e.get('chunks') or [])}"
-             for slug, e in sorted(index.items())]
+    """Fingerprint the embedded corpus using content, legacy mtime, and chunks."""
+    parts = [
+        f"{slug}:{entry.get('sha256')}:{entry.get('mtime')}:"
+        f"{len(entry.get('chunks') or [])}"
+        for slug, entry in sorted(index.items())
+    ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest().encode()
 
 

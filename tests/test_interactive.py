@@ -117,13 +117,39 @@ def test_chrome_args_headed_vs_headless():
 
 def test_find_chrome_uses_bundled(monkeypatch, tmp_path):
     import shutil
+    import sys
+
     monkeypatch.delenv("OLYMPUS_BROWSER_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda n: None)
+    monkeypatch.setattr(sys, "platform", "linux")
+
     fake = tmp_path / "chromium-9/chrome-linux/chrome"
     fake.parent.mkdir(parents=True)
     fake.write_text("")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+
     assert browser._find_chrome() == str(fake)
+
+
+def test_find_chrome_uses_windows_edge(monkeypatch, tmp_path):
+    import ntpath
+    import os
+    import shutil
+    import sys
+
+    monkeypatch.delenv("OLYMPUS_BROWSER_BIN", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "missing"))
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Test\AppData\Local")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os.path, "join", ntpath.join)
+
+    expected = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    monkeypatch.setattr(os.path, "isfile", lambda path: path == expected)
+
+    assert browser._find_chrome() == expected
 
 
 def test_autolaunch_off_by_default(monkeypatch):
