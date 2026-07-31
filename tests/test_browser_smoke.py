@@ -18,13 +18,11 @@ transport itself, not the gate.
 
 import json
 import os
-import shutil
 import socket
 import subprocess
 import threading
 import time
 import urllib.request
-from glob import glob
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -47,16 +45,9 @@ def _free_port() -> int:
 
 
 def _find_chrome() -> str | None:
-    for name in ("google-chrome", "google-chrome-stable", "chromium",
-                 "chromium-browser"):
-        path = shutil.which(name)
-        if path:
-            return path
-    if os.environ.get("OLYMPUS_BROWSER_BIN"):
-        return os.environ["OLYMPUS_BROWSER_BIN"]
-    root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers")
-    hits = sorted(glob(os.path.join(root, "chromium-*/chrome-linux/chrome")))
-    return hits[-1] if hits else None
+    """Use Olympus's shared cross-platform Chromium browser detection."""
+    return browser._find_chrome()
+
 
 
 def _wait_devtools(port: int, timeout: float = 20.0) -> None:
