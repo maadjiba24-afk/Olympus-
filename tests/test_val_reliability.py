@@ -35,8 +35,8 @@ import httpx
 import pytest
 
 from olympus import (backend, config, doctor, errors, ledger, llm, memory,
-                     openai_compat, orchestrator, proclock, sessionlog,
-                     trace as trace_mod, usage, watchdog)
+                     openai_compat, orchestrator, proclock, replaystore,
+                     sessionlog, trace as trace_mod, usage, watchdog)
 
 ENOSPC = OSError(errno.ENOSPC, "No space left on device")
 
@@ -542,6 +542,45 @@ def test_connection_error_retries_are_bounded_and_never_hang(monkeypatch,
     assert seen == ["k1"] * 4                    # bounded attempt count
     assert no_sleep == [1, 2, 4]                 # disclosed exponential backoff
     assert time.monotonic() - started < 1.0      # nothing actually slept
+
+
+def test_exhausted_connection_error_is_frozen_and_replayed_without_network(
+        monkeypatch, no_sleep):
+    """A terminal provider transport failure is part of the recorded path.
+    Replay must raise it again, not misclassify it as a changed request."""
+    err = anthropic.APIConnectionError(
+        message="connection error",
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    seen: list = []
+    settings = config.Settings(provider="anthropic", model="claude-x",
+                               api_key="k1")
+
+    replaystore.set_run("provider-failure-run")
+    try:
+        monkeypatch.setattr(
+            llm, "client",
+            lambda s=None: _client_factory(seen, {"k1"}, err)(
+                s.api_key if s else None))
+
+        with pytest.raises(anthropic.APIConnectionError):
+            llm.complete("sys", [{"role": "user", "content": "q"}],
+                         settings=settings)
+
+        assert seen == ["k1"] * 4
+        assert list((config.MEMORY_DIR / "provider_failures").glob("*.json"))
+
+        monkeypatch.setenv("OLYMPUS_REPLAY", "provider-failure-run")
+        monkeypatch.setattr(
+            llm, "client",
+            lambda settings=None: (_ for _ in ()).throw(
+                AssertionError("network accessed during failure replay")))
+
+        with pytest.raises(replaystore.RecordedProviderError,
+                           match="(?i)connection error"):
+            llm.complete("sys", [{"role": "user", "content": "q"}],
+                         settings=settings)
+    finally:
+        replaystore.set_run(None)
 
 
 def test_provider_failure_at_synthesis_degrades_with_disclosure(monkeypatch):

@@ -85,6 +85,15 @@ class ReplayDivergence(RuntimeError):
             "decision's request since the recorded run.")
 
 
+class RecordedProviderError(RuntimeError):
+    """A provider failure captured during the live run and raised again during
+    replay so the orchestration follows the same failover/degraded path."""
+
+    def __init__(self, error_type: str, message: str):
+        self.error_type = error_type
+        super().__init__(message or error_type or "recorded provider failure")
+
+
 def _canonical_default(obj):
     """Serialize a value json can't handle. SDK response blocks (thinking,
     tool_use, web_search_tool_result, …) get re-sent in later requests; their
@@ -129,6 +138,38 @@ def get(h: str) -> "anthropic.types.Message | None":
         return None
     return anthropic.types.Message.model_validate_json(
         path.read_text(encoding="utf-8"))
+
+
+def _failure_dir() -> Path:
+    d = config.MEMORY_DIR / "provider_failures"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _failure_path(h: str) -> Path:
+    # Failures must be scoped to the run. The same content-addressed request can
+    # fail in one run and succeed in another; a global <hash>.json would make
+    # one run's transport outcome overwrite the other's replay behaviour.
+    rid = _current_run() or ""
+    key = hashlib.sha256(f"{rid}:{h}".encode("utf-8")).hexdigest()
+    return _failure_dir() / f"{key}.json"
+
+
+def put_failure(h: str, err: Exception) -> None:
+    payload = {
+        "request_hash": h,
+        "type": f"{type(err).__module__}.{type(err).__name__}",
+        "message": str(err),
+    }
+    _failure_path(h).write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def get_failure(h: str) -> dict | None:
+    path = _failure_path(h)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def replaying() -> str | None:
@@ -434,7 +475,7 @@ def export_fixture(run_id: str, dest) -> Path:
     blobs: dict[str, bytes] = {}
     for h in refs:
         blobs[f"responses/{h}.json"] = (resp_dir / f"{h}.json").read_bytes()
-    for sub in ("tool_results", "context"):
+    for sub in ("tool_results", "context", "provider_failures"):
         base = config.MEMORY_DIR / sub
         if base.exists():
             for p in sorted(base.glob("*.json")):
@@ -504,7 +545,7 @@ def import_fixture(src, *, force: bool = False) -> str:
         raise FixtureError("fixture manifest has no run_id")
 
     entries = manifest.get("files") or []
-    allowed_roots = ("responses/", "tool_results/", "context/")
+    allowed_roots = ("responses/", "tool_results/", "context/", "provider_failures/")
     mismatches: list[str] = []
     contents: dict[str, bytes] = {}
     for entry in entries:

@@ -1403,6 +1403,29 @@ def free_chats() -> int:
     except ValueError:
         return 0
 
+
+def free_chats_per_ip() -> int:
+    """Ceiling on operator-funded free chats per client IP per day
+    (OLYMPUS_FREE_CHATS_PER_IP; <= 0 disables the ceiling).
+
+    `free_chats()` is charged to the caller's *identity*, and for an anonymous
+    visitor that identity is `web-<sid>` — where the sid comes from the caller's
+    own cookie (`web._resolve_sid`). Clearing the cookie therefore minted a
+    fresh allowance, so a keyless visitor could spend the operator's key without
+    limit. This ceiling is the part a caller cannot mint: it is keyed on the
+    peer address, which is the same thing the per-minute limiter already trusts.
+
+    Defaults to 3x the per-user allowance, so a handful of genuine users behind
+    one NAT still work while cookie-clearing stops multiplying the bill. Set it
+    explicitly for a busy shared egress."""
+    raw = os.environ.get("OLYMPUS_FREE_CHATS_PER_IP", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass                       # fall through to the derived default
+    return free_chats() * 3
+
 # The gate proves *replay determinism*, which is model-independent — set
 # OLYMPUS_GATE_MODEL to run it on a cheaper model than your main one. Unset,
 # the gate uses your configured model unchanged: Olympus assumes no model.
