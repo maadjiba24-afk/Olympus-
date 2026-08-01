@@ -62,26 +62,65 @@ malformed entries on load.
 
 ## Attaching a real browser
 
-By default no browser is attached and the tools say so honestly. To attach one:
+By default no browser is attached and the tools say so honestly. Install the
+optional browser dependencies first:
 
 ```bash
-# 1. start Chrome with remote debugging
+pip install "olympus-council[browser]"
+```
+
+### Chromium or Chrome
+
+Chromium remains the default engine and uses the Chrome DevTools Protocol
+transport.
+
+Let Olympus launch a local headed Chromium browser:
+
+```bash
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+Or attach to a Chrome/Chromium instance that you started yourself:
+
+```bash
 google-chrome --remote-debugging-port=9222
-# 2. install the optional transport dep and point Olympus at the DevTools base
-pip install websockets
 export OLYMPUS_BROWSER_CDP_URL=http://127.0.0.1:9222
 ```
 
-`OLYMPUS_BROWSER_CDP_URL` accepts either a DevTools HTTP base (`http://host:port`
-— Olympus discovers a page target via `/json`) or a ready `ws://` page-target
-URL. The SSRF + egress gate still applies to every navigation.
+`OLYMPUS_BROWSER_CDP_URL` accepts either a DevTools HTTP base or a ready
+`ws://` page-target URL. It is supported only by the Chromium engine.
 
-Tests never need any of this — they inject `browser.FakeTransport`, so the whole
-suite runs offline. A real end-to-end check lives in
-[`tests/test_browser_smoke.py`](../tests/test_browser_smoke.py), opt-in via
-`OLYMPUS_BROWSER_SMOKE=1` (launches headless Chrome, drives the real transport):
+### Firefox
+
+Install Playwright's Firefox browser, then select the engine:
 
 ```bash
-pip install websockets
+python -m playwright install firefox
+export OLYMPUS_BROWSER_ENGINE=firefox
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+### WebKit / Safari-compatible testing
+
+Install Playwright WebKit, then select `webkit` or its operator-friendly
+`safari` alias:
+
+```bash
+python -m playwright install webkit
+export OLYMPUS_BROWSER_ENGINE=webkit
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+`OLYMPUS_BROWSER_ENGINE=safari` selects the same Playwright WebKit engine.
+It does not launch Apple's Safari application directly.
+
+Set `OLYMPUS_BROWSER_HEADLESS=1` for any auto-launched engine when no visible
+browser window is required. Olympus's SSRF, subresource, capability-separation,
+and audit-ledger protections continue to apply across all transports.
+
+The existing real-browser smoke suites currently exercise Chromium/CDP:
+
+```bash
 OLYMPUS_BROWSER_SMOKE=1 pytest tests/test_browser_smoke.py -q
+OLYMPUS_BROWSER_REAL=1 pytest tests/test_browser_real.py -q
 ```

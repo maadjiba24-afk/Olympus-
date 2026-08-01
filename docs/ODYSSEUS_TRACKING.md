@@ -68,7 +68,7 @@ curated `main` merge is expected to be a hardening release (likely v1.0.2).
   drafts**), documents editor, notes/todos/reminders, CalDAV calendar/contacts,
   Compare (blind A/B), gallery/image editing.
 - **Search** — pluggable providers: SearXNG, Brave, DuckDuckGo, Google PSE,
-  Tavily, Serper.
+  Tavily, Serper, Bing through SerpApi.
 - **Integrations** — MCP client + 4 MCP servers; scoped external-agent APIs
   (Claude Code, Codex); STT/TTS; ntfy; webhooks; Vaultwarden; LAN pairing.
 - **Security** — bcrypt + 2FA, admin/non-admin split, prompt-injection wrapping,
@@ -106,7 +106,7 @@ reporting, image editing). What remains ➖ is genuinely off-mission
 | Per-request RAG tool index (context-bloat) | ✅ `toolselect` (lexical, deterministic) | drops-only, strictly after security filters |
 | Teacher escalation (weak→strong + write a skill) | ✅ `teacher.py` | escalates a failed rework to the strongest pool member; benchmark-gated skill |
 | Deep Research (IterResearch) | ✅ `research.py` + `olympus research` + `trigger_research` tool | pool-staged; Aletheia-style verification section |
-| Pluggable search providers | ✅ `websearch.py` | SearXNG/Brave/Tavily/Serper/PSE + DDG fallback |
+| Pluggable search providers | ✅ `websearch.py` | SearXNG/Brave/Tavily/Serper/PSE/Bing + DDG fallback |
 | Skill import from GitHub URLs | ✅ `skillpack.import_url` | in-memory tarball, always provisional + scanned |
 | `ask_user` (mid-run question) | ✅ `interaction.py` | TUI blocks; web/gateways surface-and-proceed; headless proceeds with a stated assumption |
 | Style-matched email drafting | ✅ `emailstyle.py` | Angelos learns voice from sent mail (Gmail) |
@@ -141,8 +141,9 @@ Env vars introduced while adopting the above (all optional, safe defaults):
 | `OLYMPUS_EMAIL_STYLE_TTL_DAYS` | `30` | when a cached style profile is considered stale |
 | `OLYMPUS_SEARCH_PROVIDERS` | (auto) | explicit provider order, e.g. `tavily,ddg` |
 | `OLYMPUS_SEARXNG_URL` | — | self-hosted SearXNG endpoint (sovereignty-friendly) |
-| `BRAVE_SEARCH_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` | — | keyed search providers |
+| `BRAVE_SEARCH_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` | — | Brave, Tavily, and Google-through-Serper providers |
 | `GOOGLE_PSE_KEY` + `GOOGLE_PSE_CX` | — | Google Programmable Search |
+| `SERPAPI_API_KEY` | — | Bing results through SerpApi |
 | `NTFY_TOPIC` | — | ntfy topic to publish to (required for the ntfy channel) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy base URL (set for a self-hosted server) |
 | `NTFY_TOKEN` | — | bearer token for a protected ntfy topic |

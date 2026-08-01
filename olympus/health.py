@@ -89,6 +89,7 @@ def _search() -> dict:
         "brave": os.environ.get("BRAVE_SEARCH_API_KEY"),
         "tavily": os.environ.get("TAVILY_API_KEY"),
         "serper": os.environ.get("SERPER_API_KEY"),
+        "bing": os.environ.get("SERPAPI_API_KEY"),
         "google-pse": os.environ.get("GOOGLE_PSE_KEY"),
         "searxng": os.environ.get("OLYMPUS_SEARXNG_URL"),
     }.items() if v]

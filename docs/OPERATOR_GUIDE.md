@@ -83,14 +83,42 @@ overrides a built-in one. Templates are fixed step lists (`click` / `fill` /
 
 ## Attaching a browser
 
-Manual login needs a visible browser you can drive. Point Olympus at one with:
+Install the optional browser support:
 
 ```bash
-export OLYMPUS_BROWSER_AUTOLAUNCH=1     # let Olympus open a headed Chrome, or
-export OLYMPUS_BROWSER_CDP_URL=...      # attach to a Chrome you already run
+pip install "olympus-council[browser]"
 ```
 
-(Chromium is bundled via Playwright if you don't set `OLYMPUS_BROWSER_BIN`.)
+Chromium is the default engine:
+
+```bash
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+To attach to an already-running Chrome/Chromium instance instead:
+
+```bash
+export OLYMPUS_BROWSER_CDP_URL=http://127.0.0.1:9222
+```
+
+To use Firefox:
+
+```bash
+python -m playwright install firefox
+export OLYMPUS_BROWSER_ENGINE=firefox
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+To use Safari-compatible Playwright WebKit:
+
+```bash
+python -m playwright install webkit
+export OLYMPUS_BROWSER_ENGINE=safari
+export OLYMPUS_BROWSER_AUTOLAUNCH=1
+```
+
+The `safari` value is an alias for Playwright WebKit; Olympus does not
+directly launch Apple's Safari application.
 
 ## Turning it all the way off
 

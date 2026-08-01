@@ -32,10 +32,12 @@ first-class citizen of Olympus's existing governance instead of a bypass of it:
     bound to code like every other Olympus capability. (moat: a verified,
     scored corpus is a data network effect a copier starts at zero on.)
 
-The CDP transport is pluggable. The real transport talks to Chrome over a
-WebSocket and is built lazily (optional `websockets` dependency); tests and any
-host without a browser use the in-memory FakeTransport. Nothing here imports
-`websockets` at module load, so Olympus's core dependency set is unchanged.
+The browser transport is pluggable. Chromium can attach over CDP using the
+optional `websockets` dependency. Firefox and WebKit use the optional Playwright
+transport; the `safari` engine name is a WebKit compatibility alias, not Apple's
+Safari application. Tests and hosts without a browser can use the in-memory
+FakeTransport. Optional browser dependencies are imported lazily, so Olympus's
+core dependency set is unchanged.
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -757,6 +760,300 @@ class _RealTransport:
 _TRANSPORT_FACTORY: Callable[[], Transport] | None = None
 
 
+class _PlaywrightTransport:
+    """Playwright-backed transport for Firefox and WebKit.
+
+    It preserves Olympus's small CDP-shaped ``send`` contract while translating
+    operations into Playwright calls. Playwright is imported lazily so the core
+    package remains usable without the optional browser dependency.
+    """
+
+    def __init__(self, engine: str, *, headless: bool = False) -> None:
+        if engine not in ("firefox", "webkit"):
+            raise BrowserUnavailable(
+                f"Playwright transport does not support engine {engine!r}"
+            )
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as err:
+            raise BrowserUnavailable(
+                "Firefox and WebKit support requires Playwright; install the "
+                "Olympus browser extra and the selected Playwright browser"
+            ) from err
+
+        self._engine = engine
+        self._closed = False
+        self._blocked_urls: list[str] = []
+        self._route_installed = False
+        self._mouse_position: tuple[float, float] = (0, 0)
+        self._handles: dict[str, Any] = {}
+        self._next_handle_id = 0
+        self._download_dir: Path | None = None
+        self._download_listener_pages: set[int] = set()
+        self.console: deque[dict] = deque(maxlen=_CONSOLE_MAX)
+        self._playwright = sync_playwright().start()
+
+        try:
+            browser_type = getattr(self._playwright, engine)
+            self._browser = browser_type.launch(headless=headless)
+            self._context = self._browser.new_context(
+                accept_downloads=True,
+                service_workers="block",
+            )
+            self._page = self._context.new_page()
+        except Exception:
+            self._playwright.stop()
+            raise
+
+    def send(
+        self,
+        method: str,
+        params: dict | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        if self._closed:
+            raise RuntimeError("Playwright transport is closed")
+        if session_id is not None:
+            raise RuntimeError(
+                "cross-process frame sessions are unavailable through Playwright"
+            )
+
+        values = params or {}
+
+        if method in ("Network.enable", "Runtime.enable", "Log.enable"):
+            return {}
+
+        if method == "Network.setBlockedURLs":
+            self._blocked_urls = [
+                str(pattern)
+                for pattern in values.get("urls", [])
+                if pattern
+            ]
+            if not self._route_installed:
+                self._context.route("**/*", self._route_request)
+                self._route_installed = True
+            return {}
+
+        if method == "Target.getTargets":
+            target_infos = []
+
+            for page in self._context.pages:
+                try:
+                    title = page.title()
+                except Exception:
+                    title = ""
+
+                target_infos.append(
+                    {
+                        "targetId": self._page_target_id(page),
+                        "type": "page",
+                        "title": str(title),
+                        "url": str(getattr(page, "url", "")),
+                    }
+                )
+
+            return {"targetInfos": target_infos}
+
+        if method == "Target.activateTarget":
+            target_id = str(values.get("targetId", ""))
+            page = self._page_for_target(target_id)
+
+            if page is None:
+                raise RuntimeError(
+                    f"unknown Playwright page target {target_id!r}"
+                )
+
+            page.bring_to_front()
+            self._page = page
+            return {}
+
+        if method == "Input.dispatchMouseEvent":
+            event_type = str(values.get("type", ""))
+            x = values.get("x", self._mouse_position[0])
+            y = values.get("y", self._mouse_position[1])
+
+            if event_type == "mouseMoved":
+                self._page.mouse.move(x, y)
+                self._mouse_position = (x, y)
+                return {}
+
+            if event_type in ("mousePressed", "mouseReleased"):
+                if self._mouse_position != (x, y):
+                    self._page.mouse.move(x, y)
+                    self._mouse_position = (x, y)
+
+                options = {
+                    "button": str(values.get("button", "left")),
+                    "click_count": int(values.get("clickCount", 1)),
+                }
+
+                if event_type == "mousePressed":
+                    self._page.mouse.down(**options)
+                else:
+                    self._page.mouse.up(**options)
+                return {}
+
+            raise RuntimeError(
+                f"unsupported Playwright mouse event {event_type!r}"
+            )
+
+        if method == "Input.insertText":
+            self._page.keyboard.insert_text(str(values.get("text", "")))
+            return {}
+
+        if method == "Page.setDownloadBehavior":
+            if values.get("behavior") != "allow":
+                raise RuntimeError(
+                    "Playwright transport only supports allowed downloads"
+                )
+
+            directory = Path(str(values.get("downloadPath", "")))
+            directory.mkdir(parents=True, exist_ok=True)
+            self._download_dir = directory
+
+            page_key = id(self._page)
+            if page_key not in self._download_listener_pages:
+                self._page.on("download", self._persist_download)
+                self._download_listener_pages.add(page_key)
+
+            return {}
+
+        if method == "Page.navigate":
+            self._page.goto(values.get("url", "about:blank"))
+            return {}
+
+        if method == "Storage.getCookies":
+            return {"cookies": self._context.cookies()}
+
+        if method == "Network.setCookies":
+            cookies = list(values.get("cookies", []) or [])
+            if cookies:
+                self._context.add_cookies(cookies)
+            return {}
+
+        if method == "Page.captureScreenshot":
+            import base64
+
+            options: dict[str, Any] = {
+                "type": str(values.get("format", "png")),
+            }
+
+            clip = values.get("clip")
+            if isinstance(clip, dict):
+                options["clip"] = {
+                    key: clip[key]
+                    for key in ("x", "y", "width", "height")
+                    if key in clip
+                }
+
+            raw = self._page.screenshot(**options)
+            return {
+                "data": base64.b64encode(raw).decode("ascii")
+            }
+
+        if method == "Runtime.evaluate":
+            expression = str(values.get("expression", ""))
+
+            if values.get("returnByValue", True):
+                value = self._page.evaluate(expression)
+                return {"result": {"value": value}}
+
+            handle = self._page.evaluate_handle(expression)
+            self._next_handle_id += 1
+            object_id = f"playwright-handle-{self._next_handle_id}"
+            self._handles[object_id] = handle
+            return {"result": {"objectId": object_id}}
+
+        if method == "DOM.setFileInputFiles":
+            object_id = str(values.get("objectId", ""))
+            handle = self._handles.pop(object_id, None)
+
+            if handle is None:
+                raise RuntimeError(
+                    f"unknown Playwright object handle {object_id!r}"
+                )
+
+            try:
+                element = handle.as_element()
+                if element is None:
+                    raise RuntimeError(
+                        "Playwright object handle is not a file-input element"
+                    )
+
+                element.set_input_files(
+                    list(values.get("files", []) or [])
+                )
+            finally:
+                handle.dispose()
+
+            return {}
+
+        raise RuntimeError(
+            f"Playwright transport does not yet implement {method}"
+        )
+
+    def _persist_download(self, download: Any) -> None:
+        """Save a Playwright download inside the configured workspace path."""
+        if self._download_dir is None:
+            return
+
+        raw_name = str(
+            getattr(download, "suggested_filename", "") or "download"
+        )
+        safe_name = raw_name.replace("\\", "/").rsplit("/", 1)[-1]
+        destination = self._download_dir / (safe_name or "download")
+        download.save_as(str(destination))
+
+    @staticmethod
+    def _page_target_id(page: Any) -> str:
+        return f"playwright-page-{id(page)}"
+
+    def _page_for_target(self, target_id: str) -> Any | None:
+        for page in self._context.pages:
+            if self._page_target_id(page) == target_id:
+                return page
+        return None
+
+    def reattach(self, target_id: str) -> None:
+        """Rebind subsequent Olympus operations to the selected page."""
+        page = self._page_for_target(str(target_id))
+
+        if page is None:
+            raise RuntimeError(
+                f"unknown Playwright page target {target_id!r}"
+            )
+
+        self._page = page
+
+    def _route_request(self, route: Any) -> None:
+        """Apply Olympus's blocked-URL patterns to every browser request."""
+        import fnmatch
+
+        url = str(route.request.url)
+        if any(
+            fnmatch.fnmatchcase(url, pattern)
+            for pattern in self._blocked_urls
+        ):
+            route.abort(error_code="blockedbyclient")
+            return
+
+        route.continue_()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        try:
+            self._context.close()
+        finally:
+            try:
+                self._browser.close()
+            finally:
+                self._playwright.stop()
+
+
 def set_transport_factory(factory: Callable[[], Transport] | None) -> None:
     """Install (or clear) the transport factory used by the global session.
     Tests pass a FakeTransport factory; clearing falls back to env detection."""
@@ -1016,25 +1313,77 @@ def _autolaunch_enabled() -> bool:
         "1", "true", "yes", "on")
 
 
+def _browser_engine() -> str:
+    """Return the normalized browser engine selected by the operator.
+
+    Chromium keeps the existing CDP transport. Firefox and WebKit use the
+    optional Playwright transport. ``safari`` is an operator-friendly alias for
+    Playwright WebKit; it does not launch Apple's Safari application directly.
+    """
+    configured = os.environ.get(
+        "OLYMPUS_BROWSER_ENGINE", "chromium"
+    ).strip().lower()
+
+    aliases = {
+        "": "chromium",
+        "chrome": "chromium",
+        "chromium": "chromium",
+        "firefox": "firefox",
+        "safari": "webkit",
+        "webkit": "webkit",
+    }
+
+    try:
+        return aliases[configured]
+    except KeyError as err:
+        supported = "chromium, firefox, webkit, safari"
+        raise BrowserUnavailable(
+            f"unsupported browser engine {configured!r}; choose {supported}"
+        ) from err
+
+
 def _build_transport() -> Transport:
     if _TRANSPORT_FACTORY is not None:
         return _TRANSPORT_FACTORY()
+
+    engine = _browser_engine()
     endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
+    headless = os.environ.get("OLYMPUS_BROWSER_HEADLESS", "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+    if engine != "chromium":
+        if endpoint:
+            raise BrowserUnavailable(
+                "OLYMPUS_BROWSER_CDP_URL only supports the Chromium engine"
+            )
+        if not _autolaunch_enabled():
+            raise BrowserUnavailable(
+                f"no {engine} browser attached ? set "
+                "OLYMPUS_BROWSER_AUTOLAUNCH=1 to launch it through Playwright"
+            )
+        return _PlaywrightTransport(engine, headless=headless)
+
     if not endpoint and _autolaunch_enabled():
-        # Consumer convenience: bring a browser up automatically so the user
-        # never starts Chrome with debug flags themselves. Headed so manual
-        # sign-in is visible (OLYMPUS_BROWSER_HEADLESS forces headless).
-        headless = os.environ.get("OLYMPUS_BROWSER_HEADLESS", "").strip().lower() \
-            in ("1", "true", "yes", "on")
+        # Consumer convenience: bring Chromium up automatically so the user
+        # never starts it with remote-debugging flags themselves.
         endpoint = launch_local(headless=headless)
+
     if endpoint:
-        # Keep the DevTools HTTP base (when the endpoint is one) so the transport
-        # can reattach to another tab on switch_tab().
-        http_base = endpoint if endpoint.startswith(("http://", "https://")) else ""
-        return _RealTransport(_resolve_page_ws(endpoint), http_base=http_base)
+        # Keep the DevTools HTTP base so the transport can reattach to tabs.
+        http_base = (
+            endpoint
+            if endpoint.startswith(("http://", "https://"))
+            else ""
+        )
+        return _RealTransport(
+            _resolve_page_ws(endpoint),
+            http_base=http_base,
+        )
+
     raise BrowserUnavailable(
-        "no browser attached — set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
-        "open one, or OLYMPUS_BROWSER_CDP_URL to attach to your own.")
+        "no browser attached ? set OLYMPUS_BROWSER_AUTOLAUNCH=1 to let Olympus "
+        "open Chromium, or OLYMPUS_BROWSER_CDP_URL to attach to your own."
+    )
 
 
 # --- session -------------------------------------------------------------

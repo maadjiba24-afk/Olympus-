@@ -157,6 +157,55 @@ def test_autolaunch_off_by_default(monkeypatch):
     assert browser._autolaunch_enabled() is False
 
 
+def test_browser_engine_defaults_to_chromium(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_BROWSER_ENGINE", raising=False)
+    assert browser._browser_engine() == "chromium"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("chromium", "chromium"),
+        ("chrome", "chromium"),
+        ("firefox", "firefox"),
+        ("webkit", "webkit"),
+        ("safari", "webkit"),
+    ],
+)
+def test_browser_engine_aliases(monkeypatch, configured, expected):
+    monkeypatch.setenv("OLYMPUS_BROWSER_ENGINE", configured)
+    assert browser._browser_engine() == expected
+
+
+def test_build_transport_uses_playwright_for_firefox(monkeypatch):
+    sentinel = object()
+    seen = {}
+
+    monkeypatch.setenv("OLYMPUS_BROWSER_ENGINE", "firefox")
+    monkeypatch.setenv("OLYMPUS_BROWSER_AUTOLAUNCH", "1")
+    monkeypatch.setenv("OLYMPUS_BROWSER_HEADLESS", "1")
+    monkeypatch.delenv("OLYMPUS_BROWSER_CDP_URL", raising=False)
+
+    def fake_playwright_transport(engine, *, headless):
+        seen["engine"] = engine
+        seen["headless"] = headless
+        return sentinel
+
+    monkeypatch.setattr(
+        browser, "_PlaywrightTransport", fake_playwright_transport, raising=False
+    )
+    monkeypatch.setattr(
+        browser,
+        "launch_local",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("Chromium launcher must not be used for Firefox")
+        ),
+    )
+
+    assert browser._build_transport() is sentinel
+    assert seen == {"engine": "firefox", "headless": True}
+
+
 # --- the new tools --------------------------------------------------------
 
 def test_remember_login_tool_sets_pending_not_password():

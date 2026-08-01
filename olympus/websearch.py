@@ -14,6 +14,7 @@ Providers (each active only when its configuration is present):
   tavily      TAVILY_API_KEY               api.tavily.com (search-for-LLMs)
   serper      SERPER_API_KEY               google.serper.dev (Google SERP)
   google_pse  GOOGLE_PSE_KEY+GOOGLE_PSE_CX Google Programmable Search
+  bing        SERPAPI_API_KEY               Bing results through SerpApi
   ddg         (always available)           DuckDuckGo HTML, no key
 
 Order defaults to the list above filtered to what's configured;
@@ -133,6 +134,23 @@ def _google_pse(query: str, limit: int) -> list[dict]:
     return [r for r in out if r]
 
 
+def _bing(query: str, limit: int) -> list[dict]:
+    """Bing web results through SerpApi.
+
+    Microsoft's standalone Bing Search APIs are retired, so this provider uses
+    SerpApi's maintained Bing engine while preserving Olympus's normalized
+    search-result shape and provider-fallback behavior.
+    """
+    data = _request(
+        "https://serpapi.com/search?engine=bing"
+        + "&q=" + urllib.parse.quote(query)
+        + "&count=" + str(max(1, limit))
+        + "&api_key=" + urllib.parse.quote(os.environ["SERPAPI_API_KEY"]))
+    out = [_norm(r.get("title"), r.get("link"), r.get("snippet"))
+           for r in (data.get("organic_results") or [])[:limit]]
+    return [r for r in out if r]
+
+
 def _ddg(query: str, limit: int) -> list[dict]:
     from . import tools
     return tools.ddg_results(query, limit)
@@ -145,6 +163,7 @@ _PROVIDERS: dict[str, tuple[tuple[str, ...], Callable[[str, int], list[dict]]]] 
     "tavily": (("TAVILY_API_KEY",), _tavily),
     "serper": (("SERPER_API_KEY",), _serper),
     "google_pse": (("GOOGLE_PSE_KEY", "GOOGLE_PSE_CX"), _google_pse),
+    "bing": (("SERPAPI_API_KEY",), _bing),
     "ddg": ((), _ddg),
 }
 

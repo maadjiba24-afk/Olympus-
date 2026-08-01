@@ -12,7 +12,8 @@ from olympus import config, health
 def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     for k in ("BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY",
-              "GOOGLE_PSE_KEY", "OLYMPUS_SEARXNG_URL", "TELEGRAM_BOT_TOKEN",
+              "SERPAPI_API_KEY", "GOOGLE_PSE_KEY", "OLYMPUS_SEARXNG_URL",
+              "TELEGRAM_BOT_TOKEN",
               "DISCORD_WEBHOOK_URL", "SLACK_BOT_TOKEN", "SIGNAL_CLI_REST_URL",
               "NTFY_TOPIC"):
         monkeypatch.delenv(k, raising=False)
@@ -85,6 +86,12 @@ def test_keyed_search_reported(env, monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tv")
     c = health._search()
     assert c["status"] == "ok" and "tavily" in c["detail"]
+
+
+def test_bing_search_reported(env, monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "secret")
+    c = health._search()
+    assert c["status"] == "ok" and "bing" in c["detail"]
 
 
 def test_ntfy_counts_as_notification_channel(env, monkeypatch):
