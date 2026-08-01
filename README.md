@@ -19,9 +19,10 @@ what's actually built.
 **Headless-first and lightweight.** Olympus installs with three pure-Python
 dependencies and runs anywhere Python does — a server, a droplet, WSL, a CI job,
 an SSH session — with no bundled browser or media stack and no OAuth dance to
-get started (the optional operator harness can attach your own Chrome). Optional
-backends (Postgres store, the browser CDP transport, sandbox config) are lazily
-imported and declared as extras — install only what you use, e.g.
+get started. The optional operator harness can attach Chromium through CDP or
+launch Firefox and WebKit through Playwright. Optional backends (Postgres store,
+browser transports, sandbox config) are lazily imported and declared as extras;
+install only what you use, e.g.
 `pip install olympus-council[all]`; the three deps above are the whole required
 footprint. Web access is server-side (with a client-side fallback),
 the sandbox is confined and approval-gated, and every command is screened by a
@@ -324,7 +325,7 @@ user-facing specialist and trains the weakest on a cadence:
 | Hallucination control | none | none | **built-in verification gate** — factual answers are web-checked (the supervisor flags what needs checking) before you see them |
 | Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->13<!--/cap--> permanent domain experts** with crafted identities |
 | Self-improvement | memory + skills | memory files | memory **plus a dedicated evolution agent** that audits the system and rewrites its own prompts |
-| Internet access | via tools/skills | via skills/browser | server-side web search on Claude (zero connectors, zero MCP); built-in DuckDuckGo fallback on every other provider |
+| Internet access | via tools/skills | via skills/browser | server-side web search on Claude; configurable DuckDuckGo, Bing, Google, Brave, Tavily, and SearXNG providers elsewhere |
 | Parallelism | yes | n/a | **yes** — specialists run concurrently |
 | Models | model-agnostic | model-agnostic | **model-agnostic** — Claude first-class, plus any OpenAI-compatible endpoint (OpenAI, Gemini, Groq, OpenRouter, Ollama/local) with **bring-your-own-key in the web UI** |
 | Footprint | full server stack | persistent Node.js service | **single Python package · 3 runtime deps (+1 on Windows) · stdlib-only interfaces** |
@@ -839,9 +840,12 @@ export OLYMPUS_PROVIDER=openai OLYMPUS_MODEL=llama3 \
        OLYMPUS_BASE_URL=http://localhost:11434/v1
 ```
 
-On non-Claude providers, web access automatically falls back to a built-in
-client-side DuckDuckGo search — the architecture (and the hallucination
-gate) works identically everywhere.
+On non-Claude providers, web access uses Olympus's configurable search-provider
+registry. DuckDuckGo works without a key. Keyed options include Bing through
+SerpApi (`SERPAPI_API_KEY`), Google through Serper (`SERPER_API_KEY`) or Google
+Programmable Search (`GOOGLE_PSE_KEY` and `GOOGLE_PSE_CX`), plus Brave and
+Tavily. Self-hosted SearXNG is also supported. Set `OLYMPUS_SEARCH_PROVIDERS`
+to control the provider and fallback order.
 
 **Run on a Claude subscription instead of API credits (`claude-code`).** If you
 have a Claude Pro/Max plan and the [Claude Code](https://claude.com/claude-code)

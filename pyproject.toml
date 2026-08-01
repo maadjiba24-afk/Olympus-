@@ -47,7 +47,7 @@ dependencies = [
 # undeclared. Install what you use, e.g. `pip install olympus-council[all]`.
 [project.optional-dependencies]
 postgres = ["psycopg>=3.1"]        # olympus/store.py + codegraph_introspect — Postgres
-browser = ["websockets>=12.0"]     # olympus/browser.py — CDP-over-WebSocket transport
+browser = ["websockets>=12.0", "playwright>=1.61,<2"]  # Chromium CDP + Firefox/WebKit
 sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsing
 # Upper bound added deliberately. `mcp` 2.0.0 (released 2026-07-28) removed
 # `Server.list_tools()` and reworked the session API; `olympus/mcp_client.py`
@@ -83,7 +83,7 @@ native = ["torch>=2.0.0", "numpy>=1.24"]
 # transport, `mcp` the native MCP client integration, `pyyaml` the ABC drift
 # guard. CI installs `.[test]` so this list is the single source of truth.
 test = ["pytest", "openai", "websockets>=12.0", "mcp>=1.5.0,<2", "pyyaml>=6.0"]
-all = ["psycopg>=3.1", "websockets>=12.0", "pyyaml>=6.0", "mcp>=1.5.0,<2",
+all = ["psycopg>=3.1", "websockets>=12.0", "playwright>=1.61,<2", "pyyaml>=6.0", "mcp>=1.5.0,<2",
        "neo4j>=5.0", "falkordb>=1.0", "pypdf>=4.0", "python-docx>=1.0",
        "boto3>=1.34"]
 

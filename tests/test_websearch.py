@@ -14,7 +14,7 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(websearch, "_cooling", {})
     for var in ("OLYMPUS_SEARCH_PROVIDERS", "OLYMPUS_SEARXNG_URL",
                 "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY",
-                "GOOGLE_PSE_KEY", "GOOGLE_PSE_CX"):
+                "GOOGLE_PSE_KEY", "GOOGLE_PSE_CX", "SERPAPI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -28,6 +28,43 @@ def test_default_order_is_configured_then_ddg(monkeypatch):
 def test_explicit_order_wins(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SEARCH_PROVIDERS", "tavily, ddg, bogus")
     assert websearch.configured() == ["tavily", "ddg"]
+
+
+def test_bing_serpapi_parse(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "secret")
+    monkeypatch.setenv("OLYMPUS_SEARCH_PROVIDERS", "bing")
+    seen = {}
+
+    def fake_request(url, payload=None, headers=None):
+        seen["url"] = url
+        return {
+            "organic_results": [
+                {
+                    "title": "Bing result",
+                    "link": "https://example.com/result",
+                    "snippet": "A result returned by Bing.",
+                },
+                {
+                    "title": "Invalid",
+                    "link": "ftp://example.com/invalid",
+                    "snippet": "Must be discarded.",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(websearch, "_request", fake_request)
+
+    assert websearch.results("olympus search", limit=5) == [
+        {
+            "title": "Bing result",
+            "url": "https://example.com/result",
+            "snippet": "A result returned by Bing.",
+        }
+    ]
+    assert "https://serpapi.com/search?" in seen["url"]
+    assert "engine=bing" in seen["url"]
+    assert "q=olympus%20search" in seen["url"]
+    assert "api_key=secret" in seen["url"]
 
 
 def test_searxng_parse(monkeypatch):
