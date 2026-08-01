@@ -15,6 +15,34 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.27.2] — 2026-08-01
+
+### Changed
+
+- Expanded automatic Chromium-browser discovery across Windows, macOS, and
+  Linux for Chrome, Chromium, Edge, Brave, Vivaldi, Opera, and Playwright
+  installations.
+- Added NumPy to the `native` optional dependency set alongside PyTorch.
+
+### Fixed
+
+- Document indexing now uses SHA-256 content hashes instead of file modification
+  times, preventing stale embeddings when document contents change without a
+  reliable timestamp change.
+- Browser detection tests now simulate Windows path handling correctly when
+  executed by Linux CI.
+- Comparison-history pruning now preserves the newest record reliably on
+  Windows and OneDrive-backed filesystems.
+- Exhausted provider connection failures are now frozen and reproduced during
+  replay, preventing transient network faults from being misreported as request
+  divergence by the reliability gate.
+
+### Security
+
+- Backup restoration now uses Python's safe tar extraction filter when
+  available, while retaining path-traversal validation on older supported
+  Python versions.
+
 ### Security — The chat cost controls now actually bind (E27–E30)
 
 Investigating P0-1 (share request state across instances) surfaced that the
@@ -52,7 +80,6 @@ the *next* layer, and doing it first would have been fortifying a quota that any
 visitor could reset with a cookie. Also unfixed: `/healthz` reads the usage
 ledger through `metrics.snapshot()` despite its docstring forbidding disk access
 (E31).
-
 
 ## [0.27.1] — 2026-07-30
 
@@ -3731,7 +3758,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.2...HEAD
+[0.27.2]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.1...v0.27.2
 [0.27.1]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.25.0...v0.26.0

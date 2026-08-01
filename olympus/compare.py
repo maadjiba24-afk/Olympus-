@@ -80,10 +80,11 @@ def available_models() -> list[config.Settings]:
     return out
 
 
-def _save(user: str, cid: str, rec: dict) -> None:
-    (_dir(user) / f"{cid}.json").write_text(json.dumps(rec, indent=2),
-                                            encoding="utf-8")
-    _prune(user)
+def _save(user: str, cid: str, rec: dict, *, new_record: bool = False) -> None:
+    path = _dir(user) / f"{cid}.json"
+    path.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+    if new_record:
+        _prune(user, preserve=path.name)
 
 
 def _load(user: str, cid: str) -> dict | None:
@@ -96,7 +97,7 @@ def _load(user: str, cid: str) -> dict | None:
         return None
 
 
-def _prune(user: str) -> None:
+def _prune(user: str, *, preserve: str = "") -> None:
     def created_key(path: Path) -> tuple[float, int, str]:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -121,7 +122,17 @@ def _prune(user: str) -> None:
         reverse=True,
     )
 
-    for path in files[_MAX_STORED:]:
+    limit = max(0, int(_MAX_STORED))
+    if preserve and limit:
+        protected = [path for path in files if path.name == preserve]
+        others = [path for path in files if path.name != preserve]
+        victims = others[max(0, limit - len(protected)):]
+    elif limit:
+        victims = files[limit:]
+    else:
+        victims = files
+
+    for path in victims:
         try:
             path.unlink()
         except OSError:
@@ -153,7 +164,8 @@ def run(user: str, prompt: str, *, effort: str = "high",
         mapping[label] = model_label(m)
     cid = uuid.uuid4().hex[:12]
     _save(user, cid, {"id": cid, "prompt": prompt, "created": time.time(),
-                      "mapping": mapping, "revealed": False, "choice": None})
+                      "mapping": mapping, "revealed": False, "choice": None},
+          new_record=True)
     return {"id": cid, "prompt": prompt, "answers": answers}
 
 

@@ -327,6 +327,11 @@ def complete(
     # diverged from the recorded run. In record mode we store the response below.
     req_hash = replaystore.request_hash(params)
     if replaystore.replaying():
+        failure = replaystore.get_failure(req_hash)
+        if failure is not None:
+            raise replaystore.RecordedProviderError(
+                str(failure.get("type") or "provider error"),
+                str(failure.get("message") or ""))
         message = replaystore.get(req_hash)
         if message is None:
             raise replaystore.ReplayDivergence(req_hash, params)
@@ -412,8 +417,12 @@ def complete(
                 last_err = err
                 key_idx += 1
                 continue
+            replaystore.put_failure(req_hash, err)
             raise
-    raise last_err  # type: ignore[misc]
+    if last_err is None:
+        raise RuntimeError("provider retry loop ended without an error")
+    replaystore.put_failure(req_hash, last_err)
+    raise last_err
 
 
 def stream_text(
