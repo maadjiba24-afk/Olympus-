@@ -57,3 +57,24 @@ def test_ci_still_hash_pins_dependencies():
     text = _CI.read_text(encoding="utf-8")
     assert "--require-hashes -r requirements.lock" in text, (
         "CI must install with --require-hashes (no unpinned installs)")
+
+
+
+def test_ci_runs_real_search_provider_probe():
+    """CI must exercise at least the keyless provider against the real network."""
+    text = _CI.read_text(encoding="utf-8")
+
+    match = re.search(
+        r"(?ms)^  search-live:\s*\n"
+        r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
+        text,
+    )
+    assert match, "ci.yml has no dedicated `search-live` job"
+
+    body = match.group("body")
+    assert 'OLYMPUS_SEARCH_LIVE: "1"' in body, (
+        "search-live must explicitly enable real provider requests")
+    assert "tests/test_websearch_live.py" in body, (
+        "search-live must run the live provider end-to-end tests")
+    assert "pytest" in body, (
+        "search-live must execute the test through pytest")
