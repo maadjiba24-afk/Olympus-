@@ -167,3 +167,72 @@ def test_search_text_renders_blocks(monkeypatch):
     monkeypatch.setattr(websearch, "_cache", {})
     monkeypatch.setitem(websearch._PROVIDERS, "ddg", ((), lambda q, n: []))
     assert websearch.search_text("q2") == "No results found."
+
+
+# --- provider diagnostics --------------------------------------------------
+
+
+def test_diagnostics_config_only_never_contacts_provider(monkeypatch):
+    calls = []
+
+    monkeypatch.setitem(
+        websearch._PROVIDERS,
+        "ddg",
+        ((), lambda query, limit: calls.append((query, limit)) or []),
+    )
+
+    report = websearch.diagnostics(live=False)
+
+    assert report["live"] is False
+    assert report["ok"] is None
+    assert report["providers"]["ddg"]["configured"] is True
+    assert report["providers"]["ddg"]["status"] == "unverified"
+    assert report["providers"]["tavily"]["configured"] is False
+    assert report["providers"]["tavily"]["status"] == "unconfigured"
+    assert calls == []
+
+
+def test_diagnostics_live_probes_every_configured_provider(monkeypatch):
+    secret = "top-secret-provider-key"
+    monkeypatch.setenv("TAVILY_API_KEY", secret)
+
+    monkeypatch.setitem(
+        websearch._PROVIDERS,
+        "tavily",
+        (
+            ("TAVILY_API_KEY",),
+            lambda query, limit: [
+                {
+                    "title": "Live result",
+                    "url": "https://example.com/live",
+                    "snippet": "Provider answered.",
+                }
+            ],
+        ),
+    )
+
+    def dead_ddg(query, limit):
+        raise RuntimeError("provider offline")
+
+    monkeypatch.setitem(websearch._PROVIDERS, "ddg", ((), dead_ddg))
+
+    report = websearch.diagnostics(live=True)
+
+    assert report["live"] is True
+    assert report["ok"] is True
+    assert report["providers"]["tavily"]["status"] == "ok"
+    assert report["providers"]["tavily"]["result_count"] == 1
+    assert report["providers"]["ddg"]["status"] == "down"
+    assert secret not in repr(report)
+
+
+def test_diagnostics_distinguishes_rate_limiting(monkeypatch):
+    def limited(query, limit):
+        raise websearch.RateLimited("https://provider.example/search")
+
+    monkeypatch.setitem(websearch._PROVIDERS, "ddg", ((), limited))
+
+    report = websearch.diagnostics(live=True)
+
+    assert report["ok"] is False
+    assert report["providers"]["ddg"]["status"] == "rate_limited"

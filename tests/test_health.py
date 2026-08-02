@@ -82,16 +82,22 @@ def test_unwritable_memory_is_down(env, monkeypatch):
     assert c["status"] == "down"
 
 
-def test_keyed_search_reported(env, monkeypatch):
+def test_keyed_search_reported_as_unverified(env, monkeypatch):
     monkeypatch.setenv("TAVILY_API_KEY", "tv")
     c = health._search()
-    assert c["status"] == "ok" and "tavily" in c["detail"]
+    assert c["status"] == "degraded"
+    assert "tavily" in c["detail"]
+    assert "unverified" in c["detail"]
+    assert c["providers"]["tavily"]["status"] == "unverified"
 
 
-def test_bing_search_reported(env, monkeypatch):
+def test_bing_search_reported_as_unverified(env, monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "secret")
     c = health._search()
-    assert c["status"] == "ok" and "bing" in c["detail"]
+    assert c["status"] == "degraded"
+    assert "bing" in c["detail"]
+    assert "unverified" in c["detail"]
+    assert c["providers"]["bing"]["status"] == "unverified"
 
 
 def test_ntfy_counts_as_notification_channel(env, monkeypatch):
@@ -138,3 +144,134 @@ def test_render_degraded_header(env, monkeypatch):
         "ok": False, "down": ["models"], "degraded": [],
         "components": {"models": {"status": "down", "detail": "x"}}})
     assert "DEGRADED" in health.render()
+
+
+# --- live search diagnostics -----------------------------------------------
+
+
+def test_search_health_config_only_is_unverified(env, monkeypatch):
+    from olympus import websearch
+
+    monkeypatch.setattr(websearch, "diagnostics", lambda live=False: {
+        "live": False,
+        "ok": None,
+        "providers": {
+            "ddg": {
+                "configured": True,
+                "status": "unverified",
+                "result_count": 0,
+            },
+        },
+    })
+
+    component = health._search(live=False)
+
+    assert component["status"] == "degraded"
+    assert "unverified" in component["detail"]
+    assert component["providers"]["ddg"]["status"] == "unverified"
+
+
+def test_search_health_live_is_ok_when_a_provider_answers(env, monkeypatch):
+    from olympus import websearch
+
+    monkeypatch.setattr(websearch, "diagnostics", lambda live=False: {
+        "live": True,
+        "ok": True,
+        "providers": {
+            "tavily": {
+                "configured": True,
+                "status": "ok",
+                "result_count": 1,
+                "latency_ms": 20.0,
+            },
+            "ddg": {
+                "configured": True,
+                "status": "down",
+                "result_count": 0,
+                "latency_ms": 10.0,
+                "error_type": "RuntimeError",
+            },
+        },
+    })
+
+    component = health._search(live=True)
+
+    assert component["status"] == "degraded"
+    assert "tavily" in component["detail"]
+    assert "ddg" in component["detail"]
+
+
+def test_search_health_live_is_down_when_no_provider_answers(env, monkeypatch):
+    from olympus import websearch
+
+    monkeypatch.setattr(websearch, "diagnostics", lambda live=False: {
+        "live": True,
+        "ok": False,
+        "providers": {
+            "ddg": {
+                "configured": True,
+                "status": "down",
+                "result_count": 0,
+                "latency_ms": 10.0,
+                "error_type": "RuntimeError",
+            },
+        },
+    })
+
+    component = health._search(live=True)
+
+    assert component["status"] == "down"
+    assert "no search provider answered" in component["detail"]
+
+
+def test_report_can_request_live_search_probe(env, monkeypatch):
+    seen = []
+
+    monkeypatch.setattr(
+        health,
+        "_search",
+        lambda live=False: seen.append(live) or {
+            "status": "ok",
+            "detail": "live",
+        },
+    )
+
+    health.report(live_search=True)
+
+    assert seen == [True]
+
+
+# --- health CLI live-search flag -------------------------------------------
+
+
+def test_health_parser_accepts_live_search():
+    from olympus import cli
+
+    args = cli.build_parser().parse_args(["health", "--live-search"])
+
+    assert args.command == "health"
+    assert args.live_search is True
+
+
+def test_health_cli_requests_live_search(monkeypatch, capsys):
+    from olympus import cli
+
+    seen = []
+
+    monkeypatch.setattr(
+        health,
+        "report",
+        lambda *, live_search=False: seen.append(live_search) or {
+            "ok": True,
+            "down": [],
+            "degraded": [],
+            "components": {},
+        },
+    )
+    monkeypatch.setattr(health, "render", lambda report: "health rendered")
+
+    result = cli.main(["health", "--live-search"])
+
+    assert result == 0
+    assert seen == [True]
+    assert "health rendered" in capsys.readouterr().out
