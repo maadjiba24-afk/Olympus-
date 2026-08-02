@@ -791,6 +791,12 @@ class _PlaywrightTransport:
         self._next_handle_id = 0
         self._download_dir: Path | None = None
         self._download_listener_pages: set[int] = set()
+        self._page_listener_pages: set[int] = set()
+        self._context_events = False
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._dialog_accept = False
+        self._dialog_text = ""
         self.console: deque[dict] = deque(maxlen=_CONSOLE_MAX)
         self._playwright = sync_playwright().start()
 
@@ -801,7 +807,17 @@ class _PlaywrightTransport:
                 accept_downloads=True,
                 service_workers="block",
             )
+
+            context_on = getattr(self._context, "on", None)
+            if callable(context_on):
+                self._context_events = True
+                context_on("page", self._on_context_page)
+                context_on("request", self._on_request)
+                context_on("requestfinished", self._on_request_done)
+                context_on("requestfailed", self._on_request_done)
+
             self._page = self._context.new_page()
+            self._wire_page(self._page)
         except Exception:
             self._playwright.stop()
             raise
@@ -836,9 +852,12 @@ class _PlaywrightTransport:
             return {}
 
         if method == "Target.getTargets":
+            # Dispatch pending popup/page events before reading context.pages.
+            self.pump_events(150)
             target_infos = []
 
             for page in self._context.pages:
+                self._wire_page(page)
                 try:
                     title = page.title()
                 except Exception:
@@ -912,11 +931,7 @@ class _PlaywrightTransport:
             directory.mkdir(parents=True, exist_ok=True)
             self._download_dir = directory
 
-            page_key = id(self._page)
-            if page_key not in self._download_listener_pages:
-                self._page.on("download", self._persist_download)
-                self._download_listener_pages.add(page_key)
-
+            self._wire_downloads(self._page)
             return {}
 
         if method == "Page.navigate":
@@ -992,6 +1007,102 @@ class _PlaywrightTransport:
         raise RuntimeError(
             f"Playwright transport does not yet implement {method}"
         )
+
+    def pump_events(self, milliseconds: int = 0) -> None:
+        """Allow Playwright to dispatch pending browser events synchronously."""
+        waiter = getattr(self._page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(max(0, int(milliseconds)))
+
+    def inflight(self) -> int:
+        """Return the number of browser requests that have not completed."""
+        self.pump_events(0)
+        with self._inflight_lock:
+            return max(0, self._inflight)
+
+    def set_dialog_policy(self, accept: bool, text: str = "") -> None:
+        """Set the automatic response for JavaScript dialogs."""
+        self._dialog_accept = bool(accept)
+        self._dialog_text = text or ""
+
+    def _wire_page(self, page: Any) -> None:
+        """Attach console, error, dialog, and download handlers once per page."""
+        if not self._context_events:
+            return
+
+        page_key = id(page)
+        if page_key in self._page_listener_pages:
+            return
+
+        page_on = getattr(page, "on", None)
+        if not callable(page_on):
+            return
+
+        page_on("console", self._on_console)
+        page_on("pageerror", self._on_page_error)
+        page_on("dialog", self._on_dialog)
+        self._page_listener_pages.add(page_key)
+
+        if self._download_dir is not None:
+            self._wire_downloads(page)
+
+    def _wire_downloads(self, page: Any) -> None:
+        """Attach the download saver once to a Playwright page."""
+        page_key = id(page)
+        if page_key in self._download_listener_pages:
+            return
+
+        page_on = getattr(page, "on", None)
+        if not callable(page_on):
+            return
+
+        page_on("download", self._persist_download)
+        self._download_listener_pages.add(page_key)
+
+    def _on_context_page(self, page: Any) -> None:
+        self._wire_page(page)
+        if self._download_dir is not None:
+            self._wire_downloads(page)
+
+    def _on_request(self, _request: Any) -> None:
+        with self._inflight_lock:
+            self._inflight += 1
+
+    def _on_request_done(self, _request: Any) -> None:
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    @staticmethod
+    def _event_value(event: Any, name: str, default: str = "") -> str:
+        value = getattr(event, name, default)
+        if callable(value):
+            value = value()
+        return str(value if value is not None else default)
+
+    def _on_console(self, message: Any) -> None:
+        self.console.append(
+            {
+                "level": self._event_value(message, "type", "log"),
+                "text": self._event_value(message, "text", ""),
+            }
+        )
+
+    def _on_page_error(self, error: Any) -> None:
+        self.console.append({"level": "error", "text": str(error)})
+
+    def _on_dialog(self, dialog: Any) -> None:
+        try:
+            if self._dialog_accept:
+                if self._dialog_text:
+                    dialog.accept(self._dialog_text)
+                else:
+                    dialog.accept()
+            else:
+                dialog.dismiss()
+        except Exception as err:
+            self.console.append(
+                {"level": "error", "text": f"dialog handling failed: {err}"}
+            )
 
     def _persist_download(self, download: Any) -> None:
         """Save a Playwright download inside the configured workspace path."""
@@ -1654,7 +1765,13 @@ class BrowserSession:
             if out.startswith("Error:"):
                 return out
         deadline = time.monotonic() + timeout
+        pump_events = getattr(self._t, "pump_events", None)
         while time.monotonic() < deadline:
+            if callable(pump_events):
+                try:
+                    pump_events(50)
+                except Exception:
+                    pass
             try:
                 fresh = [f for f in set(os.listdir(root)) - before
                          if not f.endswith(".crdownload")]
