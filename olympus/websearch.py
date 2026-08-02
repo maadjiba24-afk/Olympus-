@@ -180,6 +180,77 @@ def configured() -> list[str]:
     return active + ["ddg"]
 
 
+def diagnostics(
+    *,
+    live: bool = False,
+    query: str = "Olympus agent framework GitHub",
+    limit: int = 1,
+) -> dict:
+    """Report configuration and optional live reachability for every provider.
+
+    With ``live=False`` this performs no network access. With ``live=True`` it
+    probes each configured provider directly, without fallback or cache, so a
+    broken provider cannot be hidden by another provider succeeding.
+
+    Credentials, endpoint URLs, queries, and raw exception messages are never
+    included in the returned report.
+    """
+    providers: dict[str, dict] = {}
+
+    for name, (required_env, fetch) in _PROVIDERS.items():
+        missing = [var for var in required_env if not os.environ.get(var)]
+        configured_provider = not missing
+
+        item = {
+            "configured": configured_provider,
+            "status": "unconfigured" if missing else "unverified",
+            "result_count": 0,
+        }
+
+        if missing:
+            item["missing"] = list(missing)
+            providers[name] = item
+            continue
+
+        if not live:
+            providers[name] = item
+            continue
+
+        started = time.monotonic()
+        try:
+            found = fetch(query, max(1, int(limit)))
+        except RateLimited:
+            item["status"] = "rate_limited"
+            item["error_type"] = "RateLimited"
+        except Exception as err:
+            item["status"] = "down"
+            item["error_type"] = type(err).__name__
+        else:
+            item["result_count"] = len(found)
+            item["status"] = "ok" if found else "empty"
+        finally:
+            item["latency_ms"] = round(
+                (time.monotonic() - started) * 1000,
+                1,
+            )
+
+        providers[name] = item
+
+    if not live:
+        overall: bool | None = None
+    else:
+        configured_items = [
+            item for item in providers.values() if item["configured"]
+        ]
+        overall = any(item["status"] == "ok" for item in configured_items)
+
+    return {
+        "live": bool(live),
+        "ok": overall,
+        "providers": providers,
+    }
+
+
 def results(query: str, limit: int = 8) -> list[dict]:
     """Search `query` across the configured providers. Returns
     [{title, url, snippet}] from the first provider that delivers; a failing

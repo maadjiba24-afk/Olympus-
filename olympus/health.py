@@ -82,19 +82,74 @@ def _gateway() -> dict:
             "channels": channels}
 
 
-def _search() -> dict:
-    """DuckDuckGo always works keyless, so search is never 'down'; report any
-    keyed providers as an upgrade."""
-    keyed = [n for n, v in {
-        "brave": os.environ.get("BRAVE_SEARCH_API_KEY"),
-        "tavily": os.environ.get("TAVILY_API_KEY"),
-        "serper": os.environ.get("SERPER_API_KEY"),
-        "bing": os.environ.get("SERPAPI_API_KEY"),
-        "google-pse": os.environ.get("GOOGLE_PSE_KEY"),
-        "searxng": os.environ.get("OLYMPUS_SEARXNG_URL"),
-    }.items() if v]
-    detail = ("keyed: " + ", ".join(keyed)) if keyed else "keyless (DuckDuckGo)"
-    return {"status": OK, "detail": detail}
+def _search(*, live: bool = False) -> dict:
+    """Report provider configuration or actively verify provider reachability.
+
+    Configuration alone is never treated as proof that search works. A live
+    probe tests each configured provider independently so fallback cannot hide
+    broken credentials, rate limits, or unreachable endpoints.
+    """
+    from . import websearch
+
+    diagnostics = websearch.diagnostics(live=live)
+    providers = diagnostics["providers"]
+    configured = {
+        name: state
+        for name, state in providers.items()
+        if state.get("configured")
+    }
+
+    if not live:
+        names = ", ".join(configured) or "none"
+        return {
+            "status": DEGRADED,
+            "detail": (
+                f"configured but unverified: {names}; "
+                "run a live search health probe to verify reachability"
+            ),
+            "live": False,
+            "providers": providers,
+        }
+
+    healthy = [
+        name
+        for name, state in configured.items()
+        if state.get("status") == "ok"
+    ]
+    impaired = [
+        f"{name} ({state.get('status', 'unknown')})"
+        for name, state in configured.items()
+        if state.get("status") != "ok"
+    ]
+
+    if not healthy:
+        detail = "no search provider answered"
+        if impaired:
+            detail += ": " + ", ".join(impaired)
+        return {
+            "status": DOWN,
+            "detail": detail,
+            "live": True,
+            "providers": providers,
+        }
+
+    if impaired:
+        return {
+            "status": DEGRADED,
+            "detail": (
+                "live: " + ", ".join(healthy)
+                + "; impaired: " + ", ".join(impaired)
+            ),
+            "live": True,
+            "providers": providers,
+        }
+
+    return {
+        "status": OK,
+        "detail": "live: " + ", ".join(healthy),
+        "live": True,
+        "providers": providers,
+    }
 
 
 def _notifications() -> dict:
@@ -159,12 +214,19 @@ _COMPONENTS = ("models", "memory", "gateway", "search", "notifications",
                "connections", "config")
 
 
-def report() -> dict:
-    """Full structured health report. `ok` is False only if something is DOWN."""
+def report(*, live_search: bool = False) -> dict:
+    """Full structured health report. `ok` is False only if something is DOWN.
+
+    ``live_search=True`` performs real provider requests. The default remains
+    network-free and explicitly reports search providers as unverified.
+    """
     components = {}
     for name in _COMPONENTS:
         try:
-            components[name] = globals()[f"_{name}"]()
+            if name == "search":
+                components[name] = _search(live=live_search)
+            else:
+                components[name] = globals()[f"_{name}"]()
         except Exception as err:            # a probe must never crash the report
             components[name] = {"status": DEGRADED,
                                 "detail": f"probe error: {str(err)[:120]}"}

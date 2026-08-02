@@ -860,6 +860,11 @@ def build_parser() -> argparse.ArgumentParser:
              "search, push, connections); exits non-zero if anything is down")
     p_health.add_argument("--json", action="store_true", dest="as_json",
                           help="emit the structured report as JSON")
+    p_health.add_argument(
+        "--live-search",
+        action="store_true",
+        help="contact every configured search provider and verify it responds",
+    )
 
     p_triage = sub.add_parser(
         "triage",
@@ -2582,7 +2587,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cleared {n} done item(s).")
     elif args.command == "health":
         from . import health
-        rep = health.report()
+        rep = health.report(live_search=args.live_search)
         if args.as_json:
             import json as _json
             print(_json.dumps(rep, indent=2))
