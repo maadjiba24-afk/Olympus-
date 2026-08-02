@@ -188,6 +188,32 @@ jobs:
           OLYMPUS_BROWSER_ENGINE: ${{ matrix.browser }}
         run: python -m pytest -q tests/test_browser_playwright_real.py
 
+  search-live:
+    # Exercise the real search-provider adapters against external services.
+    # DuckDuckGo is keyless and therefore always runs. Providers requiring
+    # credentials run automatically when their repository secrets are present;
+    # otherwise their individual tests report as skipped.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - run: pip install pytest
+      - name: Run real search-provider end-to-end tests
+        env:
+          OLYMPUS_SEARCH_LIVE: "1"
+          OLYMPUS_SEARXNG_URL: ${{ secrets.OLYMPUS_SEARXNG_URL }}
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          GOOGLE_PSE_KEY: ${{ secrets.GOOGLE_PSE_KEY }}
+          GOOGLE_PSE_CX: ${{ secrets.GOOGLE_PSE_CX }}
+          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+        run: python -m pytest -q tests/test_websearch_live.py
+
   docker-sandbox:
     # The default `test` job has no Docker daemon, so the sandbox-hardening
     # integration tests (tests/test_sandbox_docker_integration.py) self-skip
