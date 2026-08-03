@@ -78,3 +78,36 @@ def test_ci_runs_real_search_provider_probe():
         "search-live must run the live provider end-to-end tests")
     assert "pytest" in body, (
         "search-live must execute the test through pytest")
+
+
+
+def test_ci_runs_self_hosted_searxng_probe():
+    """CI must verify Olympus against a real, locally hosted SearXNG server."""
+    text = _CI.read_text(encoding="utf-8")
+
+    match = re.search(
+        r"(?ms)^  search-live:\s*\n"
+        r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
+        text,
+    )
+    assert match, "ci.yml has no dedicated `search-live` job"
+
+    body = match.group("body")
+    assert "searxng/searxng:" in body, (
+        "search-live must launch the official SearXNG container")
+    assert "OLYMPUS_SEARXNG_URL: http://127.0.0.1:8888" in body, (
+        "search-live must point Olympus at the local SearXNG instance")
+    assert ".github/searxng/settings.yml" in body, (
+        "search-live must mount the committed SearXNG configuration")
+    assert "format=json" in body and "curl" in body, (
+        "search-live must wait for the JSON search API before testing")
+
+    settings_path = _ROOT / ".github" / "searxng" / "settings.yml"
+    assert settings_path.exists(), (
+        "the SearXNG CI settings file is missing")
+
+    settings = settings_path.read_text(encoding="utf-8")
+    assert "use_default_settings: true" in settings
+    assert "formats:" in settings
+    assert re.search(r"(?m)^\s*-\s*json\s*$", settings), (
+        "SearXNG JSON output must be explicitly enabled")

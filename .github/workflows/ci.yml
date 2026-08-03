@@ -189,11 +189,13 @@ jobs:
         run: python -m pytest -q tests/test_browser_playwright_real.py
 
   search-live:
-    # Exercise the real search-provider adapters against external services.
-    # DuckDuckGo is keyless and therefore always runs. Providers requiring
-    # credentials run automatically when their repository secrets are present;
-    # otherwise their individual tests report as skipped.
+    # Exercise Olympus against real external search services. This job always
+    # launches a pinned, local SearXNG instance and also tests keyless DDG.
+    # Credentialed providers run when their repository secrets are available.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -202,10 +204,41 @@ jobs:
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
       - run: pip install pytest
+
+      - name: Start pinned local SearXNG
+        run: |
+          docker run --detach \
+            --name olympus-searxng \
+            --publish 127.0.0.1:8888:8080 \
+            --env FORCE_OWNERSHIP=false \
+            --volume "$PWD/.github/searxng/settings.yml:/etc/searxng/settings.yml:ro" \
+            searxng/searxng:2026.7.26-b060c780d
+
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --get \
+              --data-urlencode "q=Olympus agent framework GitHub" \
+              --data "format=json" \
+              --output /tmp/searxng-ready.json \
+              http://127.0.0.1:8888/search \
+              && python -c "import json; data=json.load(open('/tmp/searxng-ready.json', encoding='utf-8')); raise SystemExit(0 if data.get('results') else 1)"
+            then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::SearXNG JSON search API did not become operational"
+            docker logs olympus-searxng
+            exit 1
+          fi
+
       - name: Run real search-provider end-to-end tests
         env:
           OLYMPUS_SEARCH_LIVE: "1"
-          OLYMPUS_SEARXNG_URL: ${{ secrets.OLYMPUS_SEARXNG_URL }}
+          OLYMPUS_SEARXNG_URL: http://127.0.0.1:8888
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
@@ -213,6 +246,10 @@ jobs:
           GOOGLE_PSE_CX: ${{ secrets.GOOGLE_PSE_CX }}
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
         run: python -m pytest -q tests/test_websearch_live.py
+
+      - name: Stop local SearXNG
+        if: always()
+        run: docker rm --force olympus-searxng || true
 
   docker-sandbox:
     # The default `test` job has no Docker daemon, so the sandbox-hardening

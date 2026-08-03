@@ -1,0 +1,17 @@
+# Ephemeral SearXNG configuration for Olympus CI only.
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Olympus CI SearXNG"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "olympus-ci-only-not-for-production"
+  limiter: false
+  image_proxy: false
