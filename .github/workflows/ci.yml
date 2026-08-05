@@ -52,6 +52,25 @@ jobs:
       - run: python scripts/check_threat_model.py
       - run: pytest -q
 
+  windows-test:
+    name: test (windows-py3.12)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --require-hashes -r requirements.lock
+      - run: python -m pip install -e . --no-deps
+      - run: python -m pip install -e ".[test]"
+      - run: python scripts/check_no_prerelease.py requirements.lock
+      - run: python -m compileall -q olympus
+      - run: python -m olympus capabilities --check
+      - run: python scripts/check_threat_model.py
+      - run: python scripts/noninterference_gate.py
+      - name: Run the complete non-live suite on Windows
+        run: python -m pytest -q
+
   noninterference:
     # Observability non-interference gate (Wave 1 C3). Keyless, no secrets, no
     # network: it imports the committed replay fixture into a throwaway store and
@@ -79,7 +98,7 @@ jobs:
   # branch protection enforces it too without a second settings pin.
   test-gate:
     name: test
-    needs: [test, noninterference]
+    needs: [test, windows-test, noninterference]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -91,6 +110,14 @@ jobs:
             exit 1
           fi
           echo "All test (py3.x) matrix legs passed."
+      - name: Require the Windows Python 3.12 suite to pass
+        run: |
+          result="${{ needs.windows-test.result }}"
+          if [ "$result" != "success" ]; then
+            echo "::error::Windows Python 3.12 suite did not pass (result: $result)"
+            exit 1
+          fi
+          echo "Windows Python 3.12 suite passed."
       - name: Require the non-interference gate to pass
         run: |
           result="${{ needs.noninterference.result }}"

@@ -34,11 +34,12 @@ regression, not to police normal machine-to-machine variance.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
-import resource
 import shutil
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
@@ -46,6 +47,11 @@ import time
 import types
 import uuid
 from pathlib import Path
+
+try:
+    import resource
+except ImportError:
+    resource = None
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -91,19 +97,133 @@ def dir_bytes(path: Path) -> int:
     return total
 
 
+class MemoryMeasurementError(RuntimeError):
+    """Raised when the host cannot provide an honest process-memory sample."""
+
+
+def memory_backend() -> str:
+    """Return the active process-memory measurement backend."""
+    if os.name == "nt":
+        return "windows-psapi"
+    if sys.platform.startswith("linux"):
+        return "unix-getrusage+/proc"
+    return "unix-getrusage+ps"
+
+
+def _windows_process_memory_kb() -> tuple[int, int]:
+    """Return peak/current working-set memory for this process in KiB."""
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PROCESS_MEMORY_COUNTERS),
+        wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(counters)
+    process = kernel32.GetCurrentProcess()
+    if not psapi.GetProcessMemoryInfo(
+        process, ctypes.byref(counters), counters.cb
+    ):
+        code = ctypes.get_last_error()
+        message = ctypes.FormatError(code).strip()
+        raise MemoryMeasurementError(
+            f"GetProcessMemoryInfo failed with WinError {code}: {message}"
+        )
+
+    peak_kb = int(counters.PeakWorkingSetSize // 1024)
+    current_kb = int(counters.WorkingSetSize // 1024)
+    if peak_kb < 0 or current_kb < 0:
+        raise MemoryMeasurementError(
+            "Windows returned negative working-set values: "
+            f"peak={peak_kb}, current={current_kb}"
+        )
+    return peak_kb, current_kb
+
+
+def _unix_peak_rss_kb() -> int:
+    if resource is None:
+        raise MemoryMeasurementError(
+            "resource.getrusage is unavailable on this non-Windows platform"
+        )
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    # CPython exposes bytes on macOS and KiB on Linux/other supported Unix.
+    if sys.platform == "darwin":
+        value //= 1024
+    if value < 0:
+        raise MemoryMeasurementError(
+            f"resource.getrusage returned negative RSS: {value}"
+        )
+    return value
+
+
+def _proc_current_rss_kb() -> int:
+    with open("/proc/self/statm", encoding="ascii") as fh:
+        fields = fh.read().split()
+    if len(fields) < 2:
+        raise MemoryMeasurementError("/proc/self/statm did not contain RSS")
+    pages = int(fields[1])
+    page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    if pages < 0 or page_size <= 0:
+        raise MemoryMeasurementError(
+            f"invalid /proc RSS sample: pages={pages}, page_size={page_size}"
+        )
+    return int((pages * page_size) // 1024)
+
+
+def _ps_current_rss_kb() -> int:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        value = int(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise MemoryMeasurementError(
+            "current RSS is unavailable: both /proc and `ps` measurement failed"
+        ) from exc
+    if value < 0:
+        raise MemoryMeasurementError(f"`ps` returned negative RSS: {value}")
+    return value
+
+
 def rss_kb() -> int:
-    """Peak RSS in KiB (getrusage; ru_maxrss is KiB on Linux)."""
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    """Peak resident working set for this process in KiB."""
+    if os.name == "nt":
+        return _windows_process_memory_kb()[0]
+    return _unix_peak_rss_kb()
 
 
 def current_rss_kb() -> int:
-    """Current (not peak) RSS in KiB from /proc, 0 where unavailable."""
+    """Current resident working set for this process in KiB."""
+    if os.name == "nt":
+        return _windows_process_memory_kb()[1]
     try:
-        with open("/proc/self/statm", encoding="ascii") as fh:
-            pages = int(fh.read().split()[1])
-        return pages * (os.sysconf("SC_PAGE_SIZE") // 1024)
-    except (OSError, IndexError, ValueError):
-        return 0
+        return _proc_current_rss_kb()
+    except (OSError, ValueError, MemoryMeasurementError):
+        return _ps_current_rss_kb()
 
 
 class env:

@@ -26,6 +26,12 @@ from pathlib import Path
 import pytest
 
 
+def test_timeout_plugin_is_installed_and_active(pytestconfig):
+    """The timeout marker must be enforced, not merely registered."""
+    assert pytestconfig.pluginmanager.hasplugin("timeout"), (
+        "pytest-timeout is not active; timeout markers would provide no protection")
+
+
 # A standalone worker: N threads each acquire usage.slot(), then — under a
 # SEPARATE proclock — bump a shared cross-process counter file and record the
 # running max. The counter reflects live usage.slot() holders across BOTH

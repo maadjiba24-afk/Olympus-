@@ -28,6 +28,17 @@ def _ci_matrix_versions() -> set[str]:
     return set(re.findall(r"3\.\d+", m.group(1)))
 
 
+def _job_body(name: str) -> str:
+    text = _CI.read_text(encoding="utf-8")
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\s*\n"
+        rf"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
+        text,
+    )
+    assert match, f"ci.yml has no `{name}` job"
+    return match.group("body")
+
+
 def test_ci_matrix_covers_every_declared_version():
     declared = _declared_versions()
     assert declared, "pyproject declares no Python classifiers"
@@ -111,3 +122,43 @@ def test_ci_runs_self_hosted_searxng_probe():
     assert "formats:" in settings
     assert re.search(r"(?m)^\s*-\s*json\s*$", settings), (
         "SearXNG JSON output must be explicitly enabled")
+
+
+def test_ci_runs_complete_windows_python_312_suite():
+    body = _job_body("windows-test")
+    assert "runs-on: windows-latest" in body
+    assert 'python-version: "3.12"' in body
+    assert "--require-hashes -r requirements.lock" in body
+    assert 'python -m pip install -e ".[test]"' in body
+
+    for command in (
+        "python scripts/check_no_prerelease.py requirements.lock",
+        "python -m compileall -q olympus",
+        "python -m olympus capabilities --check",
+        "python scripts/check_threat_model.py",
+        "python scripts/noninterference_gate.py",
+        "python -m pytest -q",
+    ):
+        assert command in body, f"Windows CI is missing `{command}`"
+
+    forbidden = (
+        "continue-on-error",
+        "--ignore",
+        "--continue-on-collection-errors",
+    )
+    for token in forbidden:
+        assert token not in body, (
+            f"Windows CI must not suppress full-suite failures with `{token}`")
+    assert not re.search(r"(?m)(?:^|\s)-k(?:\s|$)", body), (
+        "Windows CI must not filter the complete suite with -k")
+
+
+def test_aggregate_gate_requires_windows_suite():
+    body = _job_body("test-gate")
+    match = re.search(r"needs:\s*\[([^\]]*)\]", body)
+    assert match, "aggregate test gate has no inline needs list"
+    needs = {item.strip() for item in match.group(1).split(",")}
+    assert "windows-test" in needs, (
+        "aggregate test gate does not require the Windows suite")
+    assert "needs.windows-test.result" in body, (
+        "aggregate test gate does not enforce the Windows result")
