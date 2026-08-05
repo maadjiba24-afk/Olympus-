@@ -9,6 +9,8 @@ What these prove:
 """
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -78,6 +80,52 @@ def test_main_fails_on_prerelease_lock(tmp_path, capsys):
 
 def test_main_errors_when_lock_missing(tmp_path):
     assert cnp.main([str(tmp_path / "nope.lock")]) == 2
+
+
+def _run_cli_with_cp1252(lock: Path) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "cp1252"
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_no_prerelease.py"),
+         str(lock)],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="cp1252",
+        errors="strict",
+        check=False,
+    )
+
+
+def _assert_ascii_output(result: subprocess.CompletedProcess[str]) -> None:
+    (result.stdout + result.stderr).encode("ascii")
+
+
+def test_cli_cp1252_clean_lock_is_ascii_safe(tmp_path):
+    lock = tmp_path / "clean-cp1252.lock"
+    lock.write_text("anthropic==0.111.0\ncryptography==49.0.0\n",
+                    encoding="utf-8")
+
+    result = _run_cli_with_cp1252(lock)
+
+    assert result.returncode == 0, result.stderr
+    assert "[OK]" in result.stdout
+    assert result.stderr == ""
+    _assert_ascii_output(result)
+
+
+def test_cli_cp1252_prerelease_lock_is_ascii_safe(tmp_path):
+    lock = tmp_path / "bad-cp1252.lock"
+    lock.write_text("anthropic==0.111.0\nshady==9.9.9rc1\n",
+                    encoding="utf-8")
+
+    result = _run_cli_with_cp1252(lock)
+
+    assert result.returncode == 1
+    assert "[FAIL]" in result.stderr
+    assert "shady==9.9.9rc1" in result.stderr
+    _assert_ascii_output(result)
 
 
 # --- 3. the real lockfile is sound ---------------------------------------
