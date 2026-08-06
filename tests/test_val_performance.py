@@ -303,9 +303,10 @@ def test_usage_ledger_tail_under_concurrency():
     a safety property, not a metric.
 
     Two things must stay true for that acceptance to hold, and both are
-    asserted here: the MEDIAN must not degrade with concurrency (so ordinary
-    calls are unaffected), and the tail at the documented operating bound of 16
-    concurrent calls must stay well inside a provider call's own latency."""
+    asserted here: the MEDIAN must not degrade beyond what serialising on that
+    lock already explains (so ordinary calls pay the lock and nothing more),
+    and the tail at the documented operating bound of 16 concurrent calls must
+    stay well inside a provider call's own latency."""
     # Best of three samples, and the bound is unchanged at 500 ms.
     #
     # `p99` over 200 observations is the *second worst* one, and the healthy
@@ -323,14 +324,34 @@ def test_usage_ledger_tail_under_concurrency():
     # of the noise, which is the wrong one to give up.
     attempts = [pv.bench_usage_contention(levels=(1, 8), per_thread=25)
                 for _ in range(3)]
-    rows = min(attempts, key=lambda r: r[1]["p99"])
-    single, many = rows[0], rows[1]
-    assert single["threads"] == 1 and many["threads"] == 8
-    # the median is what every ordinary call pays
-    assert many["p50"] < max(2.0, single["p50"] * 8), (
-        f"median accounting cost now degrades with concurrency: {rows}")
+    for rows in attempts:
+        assert rows[0]["threads"] == 1 and rows[1]["threads"] == 8
+
+    # Each guarantee is judged against its own best sample. Selecting one
+    # sample by `p99` and then reading its `p50` left the median assertion
+    # riding on a statistic nothing had selected for, so the best-of-three
+    # protected the tail and not the median.
+    median = min(attempts, key=lambda r: r[1]["p50"] / max(r[0]["p50"], 1e-9))
+    tail = min(attempts, key=lambda r: r[1]["p99"])
+
+    # The median is what every ordinary call pays. `usage.record` serialises on
+    # a cross-process lock by design, so at N threads the median rises towards
+    # N x the single-thread median — that shape is the accepted cost, not a
+    # regression, and the bound has to sit above it. Windows file locking makes
+    # one call ~6x more expensive than Linux (p50 1.38 ms vs 0.24 ms), which
+    # lifts the whole curve clear of the 2 ms floor and left the old
+    # `single["p50"] * 8` bound sitting exactly on the fully serialised value:
+    # the same commit failed it by 0.7% on one CI run and passed on another.
+    # Half again on top of the serialisation factor still catches a median
+    # degrading faster than the lock explains.
+    single, many = median[0], median[1]
+    bound = max(2.0, single["p50"] * many["threads"] * 1.5)
+    assert many["p50"] < bound, (
+        f"median accounting cost now degrades with concurrency beyond what "
+        f"serialising on the ledger lock explains (bound {bound:.3f} ms): "
+        f"{median}")
     # and the tail stays far below a provider call (~1-5 s)
-    assert many["p99"] < 500.0, (
+    assert tail[1]["p99"] < 500.0, (
         f"ledger tail regressed across all {len(attempts)} samples; best was "
-        f"{many}, all p99s {[a[1]['p99'] for a in attempts]}")
+        f"{tail[1]}, all p99s {[a[1]['p99'] for a in attempts]}")
     assert many["calls_per_s"] > 100.0, f"throughput collapsed: {many}"
