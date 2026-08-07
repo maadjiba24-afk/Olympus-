@@ -8,11 +8,14 @@ council pipeline is never actually run against a provider here.
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
 import pytest
+
+import openai            # test-extra dependency, present whenever tests run
 
 from olympus import config, openai_server, orchestrator, web
 
@@ -295,3 +298,164 @@ def test_config_api_keys_parsing(monkeypatch):
     assert config.api_keys() == ["a", "b", "c"]
     monkeypatch.delenv("OLYMPUS_API_KEYS")
     assert config.api_keys() == []
+
+
+# --- Step 1E: a refusal must reach the client, and must not wait for the body -
+#
+# `Handler` speaks HTTP/1.0, so `close_connection` is true for every request and
+# the socket is closed the moment the response is written. The /v1 refusal paths
+# answer BEFORE reading the request body, so that close used to happen with the
+# body still queued in the receive buffer — and closing a TCP socket with unread
+# bytes makes the stack send RST instead of FIN (RFC 1122 §4.2.2.13). An arriving
+# reset lets the peer discard data it has not read yet, so a correctly written
+# 401 could be destroyed in flight. The real OpenAI SDK reported
+# `APIConnectionError: Connection error.` for a wrong-key request the server had
+# in fact refused with a well-formed 401.
+#
+# The two tests below pin the two halves of the fix, and they pull in opposite
+# directions on purpose:
+#   * the SDK test proves the 401 SURVIVES a large unread body (someone deleting
+#     the drain fails it);
+#   * the slow-client test proves the 401 is EMITTED BEFORE the body finishes
+#     (someone "fixing" it by reading the body first fails it — that would be a
+#     slowloris reachable with no credential at all).
+# Neither can be satisfied by weakening the other.
+
+# Materially large, and deliberately well under `web._MAX_BODY`, so this is a
+# permitted request rather than an oversize-refusal test. A tiny body hides the
+# defect: it rides in with the headers and leaves nothing unread on the socket.
+_LARGE_BODY_CHARS = 512 * 1024
+
+# Ceiling for "the refusal arrived promptly". Loose enough not to flake on a
+# loaded runner, tight enough that a server blocking on the body cannot pass:
+# that server would never answer at all, because the test never sends the rest.
+_REFUSAL_DEADLINE_S = 5.0
+
+
+def _hostport(base: str) -> tuple[str, int]:
+    host, _, port = base.removeprefix("http://").partition(":")
+    return host, int(port)
+
+
+def _recv_headers(sock) -> bytes:
+    """Read until the end of the response headers; returns everything read."""
+    raw = b""
+    while b"\r\n\r\n" not in raw:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
+def _recv_rest_of_body(sock, head: bytes, body: bytes) -> bytes:
+    """Keep reading until the advertised Content-Length has all arrived.
+
+    `\\r\\n\\r\\n` can land in a segment before the body does, so a reader that
+    stops at the header terminator sees an empty body and would wrongly report a
+    truncated refusal.
+    """
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(body) < length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    assert len(body) == length, (len(body), length, body[:200])
+    return body
+
+
+def test_large_unread_body_still_yields_a_401_to_the_real_openai_sdk(server):
+    """The real SDK, a wrong key, and real unread-body pressure on the socket.
+
+    `max_retries=0` so nothing papers over a transport failure — a single
+    connection error is a failure, which is the whole point. An
+    `APIConnectionError` here means the server refused correctly and the
+    connection died before the client could read the refusal.
+    """
+    filler = "x" * _LARGE_BODY_CHARS
+    payload = [{"role": "user", "content": filler}]
+    assert len(json.dumps(payload)) < web._MAX_BODY, (
+        "this regression must send a PERMITTED body; above _MAX_BODY it would "
+        "be testing the oversize guard instead")
+
+    client = openai.OpenAI(api_key="wrong-key", base_url=server + "/v1",
+                           max_retries=0, timeout=30.0)
+    try:
+        try:
+            with pytest.raises(openai.AuthenticationError) as caught:
+                client.chat.completions.create(model="olympus-council",
+                                               messages=payload)
+        except openai.APIConnectionError as err:
+            raise AssertionError(
+                "the server refused with 401 but the connection died before "
+                "the SDK could read it — the HTTP/1.0 close is resetting the "
+                "connection with the request body still unread, destroying a "
+                f"response that was correctly written: {err!r}") from err
+    finally:
+        client.close()
+
+    # ...and the envelope on the wire is still the OpenAI shape, unchanged by
+    # Step 1E. Asserted from the raw response rather than `err.body`, which the
+    # SDK unwraps to the inner error object.
+    assert caught.value.status_code == 401
+    envelope = caught.value.response.json()
+    assert set(envelope) == {"error"}, envelope
+    assert envelope["error"]["type"] == "invalid_request_error", envelope
+    assert envelope["error"]["message"], envelope
+
+
+def test_refusal_is_written_before_the_client_finishes_its_body(server):
+    """A slow unauthenticated sender must be refused promptly.
+
+    This exists specifically to stop a later "fix" that reads the whole body
+    before answering. Such a server would hand any unauthenticated client a
+    thread-pinning slowloris: advertise a large Content-Length, dribble it out,
+    and hold a handler for as long as you like. Here the client advertises a
+    large body, sends a sliver of it, and then never sends another byte — so a
+    server that waits for the body can never answer, and this fails.
+    """
+    host, port = _hostport(server)
+    sliver = b'{"messages": [{"role": "user", "content": "'
+    raw = b""
+    with socket.create_connection((host, port), timeout=_REFUSAL_DEADLINE_S) \
+            as sock:
+        sock.sendall(
+            f"POST /v1/chat/completions HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Authorization: Bearer wrong-key\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {_LARGE_BODY_CHARS}\r\n"
+            f"\r\n".encode())
+        sock.sendall(sliver)             # a fraction of the advertised body
+        owed = _LARGE_BODY_CHARS - len(sliver)
+
+        started = time.perf_counter()
+        sock.settimeout(_REFUSAL_DEADLINE_S)
+        try:
+            raw = _recv_headers(sock)
+            # The timing claim is about the REFUSAL becoming readable, so it is
+            # measured here — before the body is drained off the socket.
+            elapsed = time.perf_counter() - started
+            head, _, rest = raw.partition(b"\r\n\r\n")
+            rest = _recv_rest_of_body(sock, head, rest)
+        except (TimeoutError, OSError) as err:
+            raise AssertionError(
+                f"no refusal arrived within {_REFUSAL_DEADLINE_S}s while the "
+                f"client still owed {owed} body bytes it never sent — the "
+                f"server is waiting for the request body before answering, "
+                f"which is exactly the unauthenticated slowloris the "
+                f"response-first design exists to prevent: {err!r}") from err
+
+    assert b"401" in head.split(b"\r\n")[0], raw[:400]
+    assert elapsed < _REFUSAL_DEADLINE_S, (
+        f"the 401 took {elapsed:.3f}s to become readable while the body was "
+        f"still owed")
+    # ...and it is a complete, OpenAI-shaped envelope, not a truncated dribble.
+    envelope = json.loads(rest)
+    assert set(envelope) == {"error"}, envelope
+    assert envelope["error"]["type"] == "invalid_request_error", envelope

@@ -179,6 +179,21 @@ _HITS_LOCK = threading.Lock()
 _MAX_BODY = 1_000_000          # 1 MB cap on request bodies (DoS guard)
 _SID_RE = re.compile(r"olympus_sid=([A-Za-z0-9_-]{8,128})")
 
+# Bounds for `Handler._drain_refused_body` — the post-refusal socket cleanup
+# that keeps an HTTP/1.0 close from turning a written 401 into a TCP reset.
+# Both bounds are needed and neither may be removed:
+#   * _REFUSAL_DRAIN_READ_SECONDS caps ONE recv, so a sender that stops dead
+#     cannot park the thread;
+#   * _REFUSAL_DRAIN_SECONDS caps the WHOLE drain, so a sender that dribbles a
+#     byte every few milliseconds — never tripping the per-read timeout —
+#     cannot park it either.
+# The refusal is already on the wire before any of this runs, so these budgets
+# buy a clean connection close and nothing else; exceeding them costs only the
+# courtesy, never the response.
+_REFUSAL_DRAIN_SECONDS = 0.5          # total wall-clock budget for one drain
+_REFUSAL_DRAIN_READ_SECONDS = 0.1     # per-recv budget inside that total
+_REFUSAL_DRAIN_CHUNK = 65536          # bytes per recv
+
 
 def _resolve_sid(handler: BaseHTTPRequestHandler,
                  provided: str | None) -> tuple[str, str | None]:
@@ -2028,6 +2043,95 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def _drain_refused_body(self) -> None:
+        """Best-effort, strictly bounded cleanup AFTER a pre-body refusal.
+
+        WHY THIS EXISTS. `Handler` inherits `protocol_version = "HTTP/1.0"`, so
+        `close_connection` is true for every request and the socket is closed as
+        soon as the response is written. Closing a TCP socket that still has
+        unread bytes in its receive queue makes the stack send RST instead of
+        FIN (RFC 1122 §4.2.2.13), and an arriving RST lets the peer discard data
+        already sitting in its own receive buffer. A correctly written 401 could
+        therefore be destroyed in flight: the real OpenAI SDK intermittently
+        reported `APIConnectionError: Connection error.` for a wrong-key request
+        that the server had in fact refused with a well-formed 401. Reading the
+        abandoned body off the socket first lets the close emit a clean FIN.
+
+        WHY IT RUNS AFTER THE RESPONSE, NEVER BEFORE. The obvious "read the body
+        before answering" would hand an UNAUTHENTICATED client a slowloris: it
+        could advertise a large Content-Length, dribble it out a byte at a time,
+        and pin a handler thread for as long as it liked — turning a reliability
+        fix into resource exhaustion, reachable with no credential at all. The
+        refusal is fully written and flushed before this is called, so a slow or
+        hostile sender is answered promptly and merely forfeits the clean close.
+        Draining is cleanup, never a precondition.
+
+        Every bound here is fixed, cheap and auditable:
+          * only a valid, positive `Content-Length` is drained — no header, a
+            malformed one, or a non-positive one means there is nothing to do;
+          * never more than `_MAX_BODY`, the same ceiling `_read_json` enforces;
+          * a small per-recv timeout AND a total wall-clock deadline, so neither
+            a stalled sender nor a dribbling one can extend this;
+          * the connection's previous timeout is restored;
+          * only transport/timeout failures are swallowed;
+          * nothing is parsed, no orchestrator or provider is touched, and no
+            failure in here can turn a 401/429 into a 500.
+        """
+        raw = self.headers.get("Content-Length")
+        if not raw:
+            return
+        try:
+            length = int(raw)
+        except (TypeError, ValueError):
+            return                      # malformed header: nothing to trust
+        if length <= 0:
+            return
+        remaining = min(length, _MAX_BODY)
+
+        conn = getattr(self, "connection", None)
+        rfile = getattr(self, "rfile", None)
+        if conn is None or rfile is None:
+            return
+        # `read1` performs at most ONE underlying recv, which is what makes the
+        # deadline below real; `read` would loop inside the buffered reader and
+        # could outrun it. Resolved up front so a handler whose `rfile` is not a
+        # BufferedReader returns quietly instead of raising an AttributeError
+        # that would turn this cleanup into a 500.
+        read1 = getattr(rfile, "read1", None)
+        if read1 is None:
+            return
+
+        # The refusal is already written; make that explicit and ordered even if
+        # `wbufsize` ever changes from its unbuffered default, so the client can
+        # never be waiting on bytes we are holding while we read from it.
+        try:
+            self.wfile.flush()
+        except (OSError, ValueError):
+            return                      # peer already gone: nothing to drain
+
+        try:
+            previous = conn.gettimeout()
+        except OSError:
+            return
+        deadline = time.monotonic() + _REFUSAL_DRAIN_SECONDS
+        try:
+            while remaining > 0:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break               # total deadline: stop, never retry
+                conn.settimeout(min(_REFUSAL_DRAIN_READ_SECONDS, budget))
+                chunk = read1(min(remaining, _REFUSAL_DRAIN_CHUNK))
+                if not chunk:
+                    break               # clean EOF, or peer stopped sending
+                remaining -= len(chunk)
+        except (OSError, EOFError, ValueError):
+            pass                        # transport gave up first — that is fine
+        finally:
+            try:
+                conn.settimeout(previous)
+            except OSError:
+                pass
+
     def _session_id(self, provided: str | None = None) -> str:
         """Resolve the session id (cookie-preferred) and arrange to set the
         cookie on the response if a fresh one was minted."""
@@ -2309,6 +2413,10 @@ class Handler(BaseHTTPRequestHandler):
             # with no throttle at all. Same key space and budget as /api/chat.
             if _rate_limited("v1:" + self.client_address[0], _v1_limit()):
                 self._v1_error(429, "rate limit exceeded — slow down")
+                # Refused before the body was read, so the same HTTP/1.0
+                # close-with-unread-bytes reset that could destroy a 401 can
+                # destroy this 429. Bounded cleanup, after the response.
+                self._drain_refused_body()
                 return
         if path == "/v1/chat/completions":
             self._handle_v1_chat()
@@ -2880,7 +2988,11 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_v1_chat(self) -> None:
         ok, code, msg = self._v1_authorized()
         if not ok:
+            # Auth stays BEFORE any parsing, and the refusal goes out FIRST.
+            # The drain is bounded post-response cleanup so the HTTP/1.0 close
+            # emits FIN rather than a reset that would destroy this 401.
             self._v1_error(code, msg)
+            self._drain_refused_body()
             return
         payload = self._read_json()
         if not isinstance(payload, dict) or not isinstance(
@@ -2942,7 +3054,11 @@ class Handler(BaseHTTPRequestHandler):
         (W3-I1)."""
         ok, code, msg = self._v1_authorized()
         if not ok:
+            # Same structural hazard as the OpenAI dialect, same treatment:
+            # refuse first in the NATIVE Anthropic envelope, then drain within
+            # fixed bounds so the close is a FIN and the 401 survives.
             self._anthropic_fail(code, msg)
+            self._drain_refused_body()
             return
         payload = self._read_json()
         if payload is None:
