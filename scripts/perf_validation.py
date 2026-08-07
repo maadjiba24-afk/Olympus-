@@ -1123,7 +1123,106 @@ def bench_storage_per_turn(turns: int = 25) -> dict:
 # 12. concurrency limits
 # --------------------------------------------------------------------------
 
-def bench_usage_contention(levels=(1, 2, 4, 8, 16), per_thread: int = 40) -> list[dict]:
+# Calls issued by EACH worker. Fixed rather than scaled by --quick: the
+# median-versus-threads curve only resolves once every worker has queued on the
+# ledger lock many times over, and a scaled-down run would publish a different
+# curve under the same name.
+CONTENTION_PER_THREAD = 50
+
+# NO WARM-UP, BY DECISION. An earlier revision issued untimed calls before each
+# level and then wiped the day ledger, which made the 1-thread baseline look
+# tidy. It also deleted a real number: the first `usage.record` against a FRESH
+# SCRATCH TREE costs far more than a steady-state one (creating the tree, the
+# OS's first touch of a new directory, and — the first time it happens in a
+# given process — the one-time proclock "fcntl unavailable" capture on Windows).
+# Measured at 592-710 ms on the reference box. So the harness times it instead
+# of hiding it; it lands in the 1-thread row's `max`, guarded on its own terms
+# by the pinning test rather than folded into the contention percentiles.
+#
+# SCOPE, precisely. What this measures is a fresh-scratch-tree first touch, NOT
+# necessarily the first `usage.record` of the Python process: whether the
+# process is genuinely cold depends on what ran before, and under a full pytest
+# session earlier tests will already have imported and exercised
+# `usage.record`/`proclock`. The authoritative process-restart guarantee is
+# owned by a separate fresh-interpreter test
+# (test_val_performance.py::test_first_usage_record_after_process_start_is_bounded),
+# which launches its own `sys.executable` against its own MEMORY_DIR.
+
+# One model string across every level, so `estimate_cost` does identical work
+# and the only variable between rows is the thread count.
+_CONTENTION_MODEL = "claude-opus-4-8"
+
+# The published operating policy (finding F1): council fan-out stays at or below
+# 16 concurrent provider calls per host. The pinning test asserts
+# `MAX_CONCURRENT_CALLS <= 16` so raising the cap past the bound the docs commit
+# to cannot pass silently.
+CONTENTION_OPERATING_BOUND = 16
+
+# The full report's concurrency curve. The powers of two are what make the shape
+# legible as a CURVE rather than three points; `MAX_CONCURRENT_CALLS` is folded
+# in so the cap this process actually enforces is always one of the measured
+# points. With the default cap of 6 that is 1 / 2 / 4 / 6 / 8 / 16.
+REPORT_LEVELS = (1, 2, 4, 8, 16)
+
+
+def contention_levels() -> tuple[int, ...]:
+    """The three levels the FOCUSED CI gate measures.
+
+    1 thread is the uncontended baseline every other level is judged against,
+    `config.MAX_CONCURRENT_CALLS` is the cap this process actually enforces, and
+    `CONTENTION_OPERATING_BOUND` is the fan-out ceiling finding F1 publishes.
+    With the default cap that is 1 / 6 / 16.
+
+    This is the gate's set, deliberately narrower than `report_levels()`: the
+    gate has to answer "does the guarantee still hold at the three levels the
+    documentation commits to", not "what is the shape of the curve".
+    """
+    return tuple(sorted({1, max(1, int(config.MAX_CONCURRENT_CALLS)),
+                         CONTENTION_OPERATING_BOUND}))
+
+
+def report_levels() -> tuple[int, ...]:
+    """The full report's levels — the published curve, plus the enforced cap.
+
+    Never a subset of the historical 1/2/4/8/16: the report's job is to show
+    scaling, and dropping intermediate points would flatten a curve into a
+    slope nobody can check.
+    """
+    return tuple(sorted(set(REPORT_LEVELS)
+                        | {max(1, int(config.MAX_CONCURRENT_CALLS))}))
+
+
+def _persisted_ledger_calls(root: Path) -> tuple[int, list[str]]:
+    """`__all__.calls` summed over every persisted day ledger under `root`.
+
+    Summed across days rather than read from today's file: a run that straddles
+    midnight splits its calls over two ledgers, and reading one would report a
+    phantom accounting loss. Read failures are RETURNED rather than swallowed —
+    an unreadable ledger is itself an accounting defect, and the caller has to
+    be able to say so instead of silently under-counting.
+    """
+    total = 0
+    problems: list[str] = []
+    base = root / "usage"
+    if not base.exists():
+        return 0, [f"no usage ledger directory at {base}"]
+    for path in sorted(base.glob("*.json")):
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            problems.append(f"{path.name}: {type(err).__name__}: {err}")
+            continue
+        row = blob.get("__all__")
+        if not isinstance(row, dict):
+            problems.append(f"{path.name}: no __all__ row")
+            continue
+        total += int(row.get("calls", 0) or 0)
+    return total, problems
+
+
+def bench_usage_contention(levels=None,
+                           per_thread: int = CONTENTION_PER_THREAD,
+                           join_timeout: float = 120.0) -> list[dict]:
     """The scalability shape behind Stage-D finding F1.
 
     F1 was first reported as a percentage: observability costs +72..90% of a
@@ -1134,41 +1233,141 @@ def bench_usage_contention(levels=(1, 2, 4, 8, 16), per_thread: int = 40) -> lis
     What IS decision-relevant is the shape of the dominant component under
     concurrency. `usage.record` runs after EVERY provider call and takes a
     cross-process lock around a read-modify-write of the day ledger, so the
-    council's parallel specialist fan-out serialises there. Median cost is
-    unaffected by concurrency; the TAIL and the throughput ceiling are what
-    move, and only a threaded measurement shows it.
+    council's parallel specialist fan-out serialises there.
 
-    Reports per-call latency percentiles and achieved throughput at each
-    concurrency level. Same-process threads only — this understates the real
-    ceiling, which is shared across every Olympus process on the host.
+    CORRECTION — this docstring, and finding F1 with it, used to say "median
+    cost is unaffected by concurrency; the TAIL and the throughput ceiling are
+    what move". That was wrong, and the harness's own numbers always
+    contradicted it. Serialising N callers behind one lock means the MEDIAN
+    caller waits out roughly N-1 other holders, so the median rises about
+    LINEARLY in the thread count. Measured here (Windows, per-call medians):
+
+        threads      1        6       16
+        p50     0.63 ms  3.47 ms  9.28 ms      (1.0x, 5.5x, 14.8x)
+
+    The tail and the ceiling move too, but the median was never flat — and the
+    pinning test's own bound, single-thread p50 x threads x 1.5, has always
+    encoded linear growth. The guarantee is that the median stays at the
+    SERIALISATION curve and no worse, not that it stays flat.
+
+    Reports, per level: per-call latency percentiles, achieved throughput, and
+    the accounting evidence — how many samples were timed and how many calls
+    actually reached the persisted ledger. The ledger count is the point of the
+    exercise as much as the latency is: `usage.record` swallows a lock timeout
+    by design (losing a row beats re-billing the user), so contention could in
+    principle buy its latency by dropping spend, and only counting the persisted
+    rows would show that.
+
+    FIRST TOUCH IS INCLUDED, NOT HIDDEN. There is no warm-up and the ledger is
+    never wiped: every call this function makes is timed and every call it times
+    is in the ledger it checks. So the first call at each level absorbs that
+    level's fresh-scratch-tree costs — directory creation, the OS's first touch
+    of a new tree, and, if this happens to be the process's first ledger write,
+    the one-time proclock `fcntl` capture on Windows. Measured at 592-710 ms.
+    It lands in the 1-thread row's `max`, where the pinning test guards it on
+    its own terms instead of letting it masquerade as a contention tail.
+
+    That is a fresh-SCRATCH-TREE first touch, and this function does not and
+    cannot claim it is the process's first `usage.record` — a caller that
+    already exercised the ledger leaves the module, the lock table and the
+    proclock warning warm. The process-restart guarantee belongs to the
+    fresh-interpreter test named in the module comment above, not to this row.
+
+    Each level runs in its own scratch tree and starts every worker from a
+    `threading.Barrier` — without that barrier the early threads finish their
+    run before the last one is spawned and the "contended" row measures far less
+    contention than it claims. The realised skew is reported (`start_skew_ms`)
+    so a caller can reject a level where synchronisation did not hold. A worker
+    that raises makes the whole level VOID (RuntimeError), never a fast row: the
+    cheapest way to look fast under contention is to not do the work.
+
+    Same-process threads only — this understates the real ceiling, which is
+    shared across every Olympus process on the host.
     """
     from olympus import memory, usage
-    isolate("usage-contention")
-    memory.set_user("perf")
-    rows = []
-    for threads in levels:
-        lat: list[float] = []
-        guard = threading.Lock()
+    levels = (contention_levels() if levels is None
+              else tuple(sorted({int(t) for t in levels})))
+    if not levels or levels[0] != 1:
+        raise ValueError("contention levels must include an uncontended "
+                         f"1-thread baseline to judge the rest against: {levels}")
+    if per_thread < 1:
+        raise ValueError(f"per_thread must be >= 1, got {per_thread}")
 
-        def worker():
-            local: list[float] = []
-            for _ in range(per_thread):
-                t0 = time.perf_counter()
-                usage.record("claude-opus-4-8", 100, 50)
-                local.append((time.perf_counter() - t0) * 1000.0)
+    rows: list[dict] = []
+    for threads in levels:
+        root = isolate(f"usage-contention-{threads}t")
+        memory.set_user("perf")
+
+        lat: list[float] = []
+        begins: list[float] = []
+        ends: list[float] = []
+        failures: list[str] = []
+        tripped: list[float] = []
+        guard = threading.Lock()
+        # `action` runs once, in whichever worker trips the barrier, before any
+        # of them are released — so this stamp is the true start of the
+        # contended window and excludes thread spawn.
+        gate = threading.Barrier(
+            threads, action=lambda: tripped.append(time.perf_counter()),
+            timeout=join_timeout)
+
+        def worker() -> None:
+            try:
+                # Threads start with a fresh contextvar context, so the user
+                # namespace has to be set here or the ledger attributes the
+                # worker's calls to the default namespace.
+                memory.set_user("perf")
+                gate.wait()
+                begin = time.perf_counter()
+                local = [0.0] * per_thread
+                for i in range(per_thread):
+                    t0 = time.perf_counter()
+                    usage.record(_CONTENTION_MODEL, 100, 50)
+                    local[i] = (time.perf_counter() - t0) * 1000.0
+                end = time.perf_counter()
+            except BaseException as exc:                        # noqa: BLE001
+                gate.abort()      # never strand the other workers on the gate
+                with guard:
+                    failures.append(f"{type(exc).__name__}: {exc}")
+                return
             with guard:
                 lat.extend(local)
+                begins.append(begin)
+                ends.append(end)
 
-        pool = [threading.Thread(target=worker) for _ in range(threads)]
-        t0 = time.perf_counter()
+        pool = [threading.Thread(target=worker, name=f"contend-{threads}-{i}")
+                for i in range(threads)]
         for t in pool:
             t.start()
         for t in pool:
-            t.join()
-        wall = time.perf_counter() - t0
+            t.join(join_timeout)
+        stuck = [t.name for t in pool if t.is_alive()]
+
+        if failures or stuck or not tripped or len(ends) != threads:
+            raise RuntimeError(
+                f"bench_usage_contention: the {threads}-thread measurement is "
+                f"VOID, not slow — worker errors: {failures or 'none'}; "
+                f"threads still running after {join_timeout}s: "
+                f"{stuck or 'none'}; start barrier tripped {len(tripped)} "
+                f"time(s), expected 1; {len(ends)}/{threads} workers finished; "
+                f"{len(lat)}/{threads * per_thread} samples collected")
+
+        wall = max(ends) - tripped[0]
+        ledger_calls, ledger_problems = _persisted_ledger_calls(root)
         row = summarize(lat)
-        row.update({"threads": threads, "wall_ms": wall * 1000.0,
-                    "calls_per_s": len(lat) / wall if wall > 0 else 0.0})
+        row.update({
+            "threads": threads,
+            "per_thread": per_thread,
+            "wall_ms": wall * 1000.0,
+            "calls_per_s": len(lat) / wall if wall > 0 else 0.0,
+            "expected_samples": threads * per_thread,
+            "expected_calls": threads * per_thread,
+            "ledger_calls": ledger_calls,
+            "ledger_read_errors": ledger_problems,
+            "barrier_parties": threads,
+            "workers_started": len(begins),
+            "start_skew_ms": (max(begins) - min(begins)) * 1000.0,
+        })
         rows.append(row)
     return rows
 
@@ -1444,10 +1643,21 @@ FINDINGS = [
      "not a user-visible latency regression, and the >20% threshold that "
      "raised this finding does not apply to a zero-latency denominator. "
      "The concurrency concern IS real and is now MEASURED rather than "
-     "asserted (harness row 12, bench_usage_contention). usage.record, "
-     "1->16 threads: p50 flat at ~0.20 ms, but p99 0.63 -> 122.9 ms, max "
-     "0.63 -> 224.2 ms, throughput ceiling ~2000 calls/s and falling. Median "
-     "cost does not degrade; the TAIL and the ceiling do. "
+     "asserted (harness row 12, bench_usage_contention). "
+     "CORRECTION: this entry used to read 'p50 flat at ~0.20 ms ... median "
+     "cost does not degrade; the TAIL and the ceiling do'. That was wrong. "
+     "Serialising N callers behind one lock makes the MEDIAN caller wait out "
+     "roughly N-1 other holders, so the median rises about LINEARLY in the "
+     "thread count -- measured at 1 / 6 (MAX_CONCURRENT_CALLS) / 16 threads: "
+     "p50 0.63 -> 3.47 -> 9.28 ms, i.e. 5.5x and 14.8x the uncontended "
+     "median. The tail and the ceiling move as well (p99 into the tens of ms, "
+     "throughput plateauing ~1300-1700 calls/s), but 'the median is flat' was "
+     "never true and should never have been published: the pinning test's own "
+     "bound -- single-thread p50 x threads x 1.5 -- has always encoded linear "
+     "growth, so the claim contradicted the assertion guarding it. What is "
+     "guaranteed is that the median tracks the SERIALISATION curve and no "
+     "worse, that the tail stays far inside a provider call, and that no call "
+     "is lost from the ledger while doing so. "
      "ACCEPTED, NOT FIXED, and deliberately so: the obvious fix -- batching or "
      "deferring ledger writes -- would make spend non-durable between "
      "flushes, and the spend cap is a governance SAFETY property. Trading a "
@@ -1456,10 +1666,20 @@ FINDINGS = [
      "format, which every reader and CLI report depends on; that is a "
      "designed change, not Phase-4 triage. "
      "OPERATING BOUND for canary/production: council fan-out must stay at or "
-     "below 16 concurrent provider calls per host, where the accounting tail "
-     "is ~123 ms against multi-second provider calls. Above that the ledger "
-     "lock, not the provider, becomes the limiter. Pinned by "
-     "test_val_performance.py::test_usage_ledger_tail_under_concurrency."),
+     "below 16 concurrent provider calls per host, where accounting costs a "
+     "~9 ms median and a tail in the tens of ms against multi-second provider "
+     "calls. Above that the ledger lock, not the provider, becomes the "
+     "limiter -- and because the median grows linearly, it degrades for EVERY "
+     "call, not just the unlucky ones. Pinned by "
+     "test_val_performance.py::test_usage_ledger_tail_under_concurrency, "
+     "which measures 1 / MAX_CONCURRENT_CALLS / 16 threads at 50 calls each "
+     "over 5 independent repetitions, asserts MAX_CONCURRENT_CALLS <= 16 so "
+     "this bound cannot be exceeded silently, and verifies that every call "
+     "reached the persisted ledger. Stated at its true strength: the LATENCY "
+     "bounds carry a 3-of-5 noise tolerance, so a regression firing on fewer "
+     "than three repetitions in five can pass that gate; the ACCOUNTING check "
+     "carries none and must hold 5/5. The gate measures three levels, not the "
+     "curve -- the curve is this report's row 12."),
     ("F2", "OBSERVATION",
      "streamguard costs 21.9 us/delta (43.7 ms on a 2000-delta stream)",
      "OFF (NullMonitor) 0.03 us/delta vs ON 21.88 us/delta.",
@@ -1538,8 +1758,11 @@ def run_all(quick: bool = False) -> dict:
     results["ladder"] = bench_ladder(s(40, 5))
     results["memory"] = bench_memory_growth(s(1000, 100))
     results["storage"] = bench_storage_per_turn(s(25, 5))
-    results["usage_contention"] = bench_usage_contention(
-        (1, 2, 4, 8, 16), s(40, 8))
+    # Deliberately NOT scaled by --quick: the report publishes a CURVE, and
+    # 50 calls/thread is what makes the serialisation shape resolve. The levels
+    # are the historical 1/2/4/8/16 plus whatever cap this process enforces, so
+    # the report never loses a point the previous revision published.
+    results["usage_contention"] = bench_usage_contention(report_levels())
     results["concurrency"] = bench_concurrency_limit()
     results["harness_seconds"] = time.perf_counter() - t_start
     cleanup()
@@ -1741,7 +1964,8 @@ def render(r: dict) -> None:
              f"{row['threads']} thread" + ("" if row["threads"] == 1 else "s"),
              f"{row['p50']:.3f} ms",
              f"p99 {row['p99']:.1f} ms  max {row['max']:.1f} ms  "
-             f"{row['calls_per_s']:.0f} calls/s")
+             f"{row['calls_per_s']:.0f} calls/s  "
+             f"ledger {row['ledger_calls']}/{row['expected_calls']} calls")
     print(_rule())
 
     cc = r["concurrency"]
