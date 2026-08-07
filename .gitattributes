@@ -1,0 +1,2 @@
+# SHA-pinned replay fixtures are byte artifacts; never rewrite line endings.
+tests/fixtures/replay/** -text

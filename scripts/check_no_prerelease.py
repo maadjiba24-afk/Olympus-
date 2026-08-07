@@ -64,12 +64,12 @@ def main(argv: list[str] | None = None) -> int:
         offenders = scan(path.read_text(encoding="utf-8"))
         if offenders:
             total += len(offenders)
-            print(f"✗ {path}: {len(offenders)} pre-release dependency(ies):",
+            print(f"[FAIL] {path}: {len(offenders)} pre-release dependency(ies):",
                   file=sys.stderr)
             for name, version in offenders:
                 print(f"    {name}=={version}", file=sys.stderr)
         else:
-            print(f"✓ {path}: no pre-release dependencies.")
+            print(f"[OK] {path}: no pre-release dependencies.")
     if total:
         print(f"\nRefusing pre-release dependencies ({total} found). Pin a "
               "stable release instead.", file=sys.stderr)

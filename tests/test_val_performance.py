@@ -18,7 +18,10 @@ Nothing here needs a provider, a key, or a network.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,91 @@ sys.path.insert(0, str(_REPO / "scripts"))
 import perf_validation as pv  # noqa: E402
 
 from olympus import config  # noqa: E402
+
+
+def test_perf_validation_imports_with_platform_memory_backend():
+    """Import collection must select a real backend on every supported OS."""
+    assert pv.memory_backend() in {
+        "windows-psapi",
+        "unix-getrusage+/proc",
+        "unix-getrusage+ps",
+    }
+    if sys.platform == "win32":
+        assert pv.memory_backend() == "windows-psapi"
+
+
+def test_rss_measurements_are_non_negative_integers():
+    for sample in (pv.rss_kb(), pv.current_rss_kb()):
+        assert isinstance(sample, int)
+        assert sample >= 0
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="requires the Windows PSAPI process-memory backend",
+)
+def test_windows_memory_backend_is_a_live_process_measurement():
+    """A fresh child process must report live PSAPI working-set growth."""
+    probe = textwrap.dedent(
+        """
+        import json
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path.cwd() / "scripts"))
+        import perf_validation as pv
+
+        if pv.memory_backend() != "windows-psapi":
+            raise AssertionError(f"unexpected backend: {pv.memory_backend()}")
+
+        peak_before, current_before = pv._windows_process_memory_kb()
+        blocks = []
+        peak_after, current_after = peak_before, current_before
+
+        for _ in range(8):
+            block = bytearray(8 * 1024 * 1024)
+            for offset in range(0, len(block), 4096):
+                block[offset] = 1
+            blocks.append(block)
+            peak_after, current_after = pv._windows_process_memory_kb()
+            if peak_after > peak_before and current_after > current_before:
+                break
+
+        print(json.dumps({
+            "backend": pv.memory_backend(),
+            "peak_before_kb": peak_before,
+            "current_before_kb": current_before,
+            "peak_after_kb": peak_after,
+            "current_after_kb": current_after,
+            "allocated_mib": len(blocks) * 8,
+            "touch_checksum": sum(block[0] for block in blocks),
+        }))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, (
+        "isolated Windows PSAPI probe failed:\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+
+    sample = json.loads(completed.stdout)
+    assert sample["backend"] == "windows-psapi"
+    assert sample["peak_before_kb"] > 0
+    assert sample["current_before_kb"] > 0
+    assert sample["peak_before_kb"] >= sample["current_before_kb"]
+    assert sample["peak_after_kb"] >= sample["current_after_kb"]
+    assert sample["peak_after_kb"] > sample["peak_before_kb"], sample
+    assert sample["current_after_kb"] > sample["current_before_kb"], sample
+    assert 8 <= sample["allocated_mib"] <= 64
+    assert sample["touch_checksum"] == sample["allocated_mib"] // 8
 
 
 # --- 1. sealed session journal ---------------------------------------------
@@ -223,8 +311,14 @@ def test_toolcall_ladder_per_call_cost():
 def test_memory_growth_bounded():
     """Reference: 3.2 MiB peak-RSS delta for 3x1000 records."""
     r = pv.bench_memory_growth(n=200)
+    for key in (
+        "journal_peak_kb", "journal_cur_kb", "heat_peak_kb", "heat_cur_kb",
+        "usage_peak_kb", "usage_cur_kb", "total_peak_kb", "total_cur_kb",
+    ):
+        assert isinstance(r[key], int)
     assert r["total_peak_kb"] >= 0
     assert r["total_peak_kb"] < 200_000, f"RSS growth regressed: {r}"
+    assert r["disk_bytes"] > 0
 
 
 def test_storage_per_turn_bounded_and_extrapolated():
