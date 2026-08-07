@@ -842,10 +842,9 @@ export OLYMPUS_PROVIDER=openai OLYMPUS_MODEL=llama3 \
 
 On non-Claude providers, web access uses Olympus's configurable search-provider
 registry. DuckDuckGo works without a key. Keyed options include Bing through
-SerpApi (`SERPAPI_API_KEY`), Google through Serper (`SERPER_API_KEY`) or Google
-Programmable Search (`GOOGLE_PSE_KEY` and `GOOGLE_PSE_CX`), plus Brave and
-Tavily. Self-hosted SearXNG is also supported. Set `OLYMPUS_SEARCH_PROVIDERS`
-to control the provider and fallback order.
+SerpApi (`SERPAPI_API_KEY`), Google results through Serper (`SERPER_API_KEY`),
+plus Brave and Tavily. Self-hosted SearXNG is also supported. Set
+`OLYMPUS_SEARCH_PROVIDERS` to control the provider and fallback order.
 
 **Run on a Claude subscription instead of API credits (`claude-code`).** If you
 have a Claude Pro/Max plan and the [Claude Code](https://claude.com/claude-code)

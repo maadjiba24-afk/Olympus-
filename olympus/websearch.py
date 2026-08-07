@@ -13,7 +13,6 @@ Providers (each active only when its configuration is present):
   brave       BRAVE_SEARCH_API_KEY         api.search.brave.com
   tavily      TAVILY_API_KEY               api.tavily.com (search-for-LLMs)
   serper      SERPER_API_KEY               google.serper.dev (Google SERP)
-  google_pse  GOOGLE_PSE_KEY+GOOGLE_PSE_CX Google Programmable Search
   bing        SERPAPI_API_KEY               Bing results through SerpApi
   ddg         (always available)           DuckDuckGo HTML, no key
 
@@ -49,6 +48,20 @@ _cooling: dict[str, float] = {}       # provider name -> retry-not-before
 
 class RateLimited(RuntimeError):
     pass
+
+
+class SearchConfigurationError(RuntimeError):
+    """Raised when an explicitly selected search provider is invalid."""
+
+    pass
+
+
+_RETIRED_PROVIDERS = {
+    "google_pse": (
+        "The google_pse provider is no longer supported by Olympus. "
+        "Use serper, brave, tavily, bing, searxng, or ddg."
+    ),
+}
 
 
 def _request(url: str, payload: dict | None = None,
@@ -123,17 +136,6 @@ def _serper(query: str, limit: int) -> list[dict]:
     return [r for r in out if r]
 
 
-def _google_pse(query: str, limit: int) -> list[dict]:
-    data = _request(
-        "https://www.googleapis.com/customsearch/v1?key="
-        + urllib.parse.quote(os.environ["GOOGLE_PSE_KEY"])
-        + "&cx=" + urllib.parse.quote(os.environ["GOOGLE_PSE_CX"])
-        + "&q=" + urllib.parse.quote(query))
-    out = [_norm(r.get("title"), r.get("link"), r.get("snippet"))
-           for r in (data.get("items") or [])[:limit]]
-    return [r for r in out if r]
-
-
 def _bing(query: str, limit: int) -> list[dict]:
     """Bing web results through SerpApi.
 
@@ -162,23 +164,53 @@ _PROVIDERS: dict[str, tuple[tuple[str, ...], Callable[[str, int], list[dict]]]] 
     "brave": (("BRAVE_SEARCH_API_KEY",), _brave),
     "tavily": (("TAVILY_API_KEY",), _tavily),
     "serper": (("SERPER_API_KEY",), _serper),
-    "google_pse": (("GOOGLE_PSE_KEY", "GOOGLE_PSE_CX"), _google_pse),
     "bing": (("SERPAPI_API_KEY",), _bing),
     "ddg": ((), _ddg),
 }
 
 
 def configured() -> list[str]:
-    """Provider order: explicit OLYMPUS_SEARCH_PROVIDERS, else every
-    configured provider in preference order, DDG always last-resort."""
-    explicit = os.environ.get("OLYMPUS_SEARCH_PROVIDERS", "")
-    if explicit.strip():
-        names = [n.strip().lower() for n in explicit.split(",") if n.strip()]
-        return [n for n in names if n in _PROVIDERS]
-    active = [name for name, (env, _) in _PROVIDERS.items()
-              if name != "ddg" and all(os.environ.get(v) for v in env)]
-    return active + ["ddg"]
+    """Return the configured search-provider order.
 
+    Explicitly configured retired providers fail loudly instead of silently
+    disabling search.
+    """
+    explicit = os.environ.get("OLYMPUS_SEARCH_PROVIDERS", "")
+
+    if explicit.strip():
+        names = [
+            name.strip().lower()
+            for name in explicit.split(",")
+            if name.strip()
+        ]
+
+        retired = [
+            name
+            for name in names
+            if name in _RETIRED_PROVIDERS
+        ]
+        if retired:
+            provider = retired[0]
+            raise SearchConfigurationError(
+                _RETIRED_PROVIDERS[provider]
+            )
+
+        return [
+            name
+            for name in names
+            if name in _PROVIDERS
+        ]
+
+    active = [
+        name
+        for name, (required_env, _) in _PROVIDERS.items()
+        if name != "ddg"
+        and all(
+            os.environ.get(variable)
+            for variable in required_env
+        )
+    ]
+    return active + ["ddg"]
 
 def diagnostics(
     *,

@@ -12,7 +12,7 @@ from olympus import config, health
 def env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     for k in ("BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY",
-              "SERPAPI_API_KEY", "GOOGLE_PSE_KEY", "OLYMPUS_SEARXNG_URL",
+              "SERPAPI_API_KEY", "OLYMPUS_SEARXNG_URL",
               "TELEGRAM_BOT_TOKEN",
               "DISCORD_WEBHOOK_URL", "SLACK_BOT_TOKEN", "SIGNAL_CLI_REST_URL",
               "NTFY_TOPIC"):

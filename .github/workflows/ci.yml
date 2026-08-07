@@ -269,8 +269,6 @@ jobs:
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
-          GOOGLE_PSE_KEY: ${{ secrets.GOOGLE_PSE_KEY }}
-          GOOGLE_PSE_CX: ${{ secrets.GOOGLE_PSE_CX }}
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
         run: python -m pytest -q tests/test_websearch_live.py
 
