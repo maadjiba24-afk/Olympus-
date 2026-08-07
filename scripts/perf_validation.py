@@ -525,6 +525,12 @@ def _seed_journal(cid: str, records: int) -> None:
         sessionlog._append_records(sid, entries, (0, ""))    # empty-chain tail
 
 
+def _depth_turn(i: int) -> list[dict]:
+    """One conversation turn of fixed size, identical for both cache arms."""
+    return [{"role": "user", "content": f"q{i} " + "u" * 200},
+            {"role": "assistant", "content": f"a{i} " + "a" * 400}]
+
+
 def bench_sync_depth_scaling(depths=(100, 1500), samples: int = 25) -> dict:
     """How steeply per-turn journaling cost grows with session depth — the
     property Stage-D defect D1 was actually about.
@@ -534,55 +540,160 @@ def bench_sync_depth_scaling(depths=(100, 1500), samples: int = 25) -> dict:
     and at small `turns` the noise swamps it (it produced a genuinely flaky
     assertion). This measures the thing directly instead: grow a session to a
     given depth, then time further syncs AT that depth, for two depths and both
-    cache arms. The slope between the two depths is the depth-scaling
-    coefficient, in microseconds of added cost per turn already in the session.
+    cache arms.
 
-    Reported for both arms so the comparison is a controlled A/B on one machine
-    rather than a ratio against a remembered constant.
+    PAIRED AND ORDER-BALANCED, and this is the part that had to be fixed. An
+    earlier revision measured the two arms in four SEQUENTIAL phases — all of
+    cache-ON at both depths, then all of cache-OFF at both depths, each in its
+    own scratch tree. The depth SLOPE survives that, because each arm is
+    compared against itself. The absolute ON-versus-OFF ratio does not: the two
+    arms are then minutes apart in wall-clock, and any ambient load that lands
+    on one phase and not the other goes straight into the ratio. A Windows PR
+    runner produced a result with that signature — cache ON measured 29.31 ms at
+    depth 100 but 25.34 ms at depth 900, i.e. *cheaper at greater depth*. That
+    is inconsistent with the scaling shape this code produces under stable
+    measurement conditions, and it is evidence consistent with phase-separated
+    ambient-load contamination. Which runner activity actually caused it cannot
+    be determined from these timings alone: the inference is that the ON phase
+    absorbed load the later OFF phase did not, but that is an inference from the
+    shape of the numbers, not a demonstrated cause. What can be said without
+    inference is that the ratio between two phases measured minutes apart is not
+    a controlled comparison, and it collapsed to 1.55x against an absolute 2x
+    assertion.
+
+    So at each depth this now runs BOTH arms as two independent sessions in ONE
+    environment, and interleaves them sample by sample with alternating order:
+
+        sample 0: ON then OFF     sample 2: ON then OFF
+        sample 1: OFF then ON     sample 3: OFF then ON     ...
+
+    Alternation matters because within a pair the second call is not equivalent
+    to the first — it runs with the other arm's page-cache and allocator state
+    still warm. Fixing the order would hand that advantage to the same arm every
+    time; alternating splits it evenly and the counts are reported so a reader
+    can check it happened.
+
+    The two arms are separate CONVERSATIONS, so they share only the machine:
+    different `_sid`, different journal path, different session lock, and
+    different `_CACHE` key (`_CACHE_MAX` is 64, so neither evicts the other).
+
+    Setup is never timed. Both sessions are grown turn-by-turn to the same
+    depth, interleaved, so neither is built during a quiet stretch the other did
+    not get. Setup runs with the cache ON for both arms: what the OFF arm
+    measures is a `sync` that must re-`_scan` and re-`_replay` a depth-N
+    journal, and the journal bytes are identical however they were written — so
+    building the OFF session the slow way would only lengthen the run.
+
+    Reports, per depth: each arm's median, and — the statistic the absolute
+    claim is now made on — the MEDIAN OF THE PER-PAIR OFF/ON RATIOS.
+
+    What that statistic does and does not buy, stated precisely. Pairing makes
+    the two observations in a ratio time-local — microseconds apart rather than
+    minutes — which removes multi-minute phase-separation bias from the
+    comparison. Alternating the order balances first/second-position effects
+    between the arms. The median then tolerates isolated outlying pairs. It is
+    NOT immune to scheduler or load stalls: a stall that disturbs both members
+    of a pair still perturbs that ratio, and enough disturbed pairs will still
+    move the median. The claim is that the dominant, systematic error mode of
+    the previous design has been removed and the residual one is bounded by how
+    many pairs a disturbance can reach — not that the measurement is now noise
+    proof.
     """
     from olympus import memory, sessionlog
     real_cache_get = sessionlog._cache_get
-    out: dict = {"depths": list(depths), "samples": samples}
 
-    def at(depth: int, cached: bool) -> float:
-        isolate(f"depthscale-{depth}-{int(cached)}")
-        memory.set_user("perf")
-        sessionlog._cache_get = (real_cache_get if cached
-                                 else (lambda sid, path: None))
+    def _forced_miss(sid, path):
+        """The pre-D1-fix read path: always a miss, so `sync` falls through to
+        the full `_scan` + `_replay` of the whole journal."""
+        return None
+
+    def _timed_sync(cid: str, history: list, *, cached: bool) -> float:
+        """One `sync`, timed, under exactly ONE arm's cache regime.
+
+        The seam is a module attribute, so only one regime can be live at a
+        time — which is precisely why it is installed around THIS call and
+        restored in `finally`, rather than around a whole phase. That is what
+        makes a per-sample interleave possible without a production change, and
+        it means a raising `sync` cannot leave the cache disabled for whatever
+        runs next.
+        """
+        if not cached:
+            sessionlog._cache_get = _forced_miss
         try:
-            cid = f"depth-{depth}"
-            history: list[dict] = []
-            with env(OLYMPUS_SESSION_JOURNAL="on",
-                     OLYMPUS_SESSION_FSYNC="auto"):
-                for i in range(depth):
-                    history += [{"role": "user", "content": f"q{i} " + "u" * 200},
-                                {"role": "assistant",
-                                 "content": f"a{i} " + "a" * 400}]
-                    sessionlog.sync(cid, history)
-                lat: list[float] = []
-                for i in range(samples):
-                    history += [{"role": "user", "content": f"x{i} " + "u" * 200},
-                                {"role": "assistant",
-                                 "content": f"y{i} " + "a" * 400}]
-                    t0 = time.perf_counter()
-                    sessionlog.sync(cid, history)
-                    lat.append((time.perf_counter() - t0) * 1000.0)
-            return pct(lat, 0.5)
+            t0 = time.perf_counter()
+            sessionlog.sync(cid, history)
+            return (time.perf_counter() - t0) * 1000.0
         finally:
             sessionlog._cache_get = real_cache_get
 
+    def paired_at(depth: int) -> dict:
+        isolate(f"depthscale-{depth}")
+        memory.set_user("perf")
+        cid = {"on": f"depth{depth}-on", "off": f"depth{depth}-off"}
+        hist: dict[str, list] = {"on": [], "off": []}
+        lat: dict[str, list] = {"on": [], "off": []}
+        ratios: list[float] = []
+        order_counts = {"on_first": 0, "off_first": 0}
+
+        with env(OLYMPUS_SESSION_JOURNAL="on", OLYMPUS_SESSION_FSYNC="auto"):
+            for i in range(depth):                     # setup — NEVER timed
+                for arm in ("on", "off"):
+                    hist[arm] += _depth_turn(i)
+                    sessionlog.sync(cid[arm], hist[arm])
+
+            for i in range(samples):                   # measurement — paired
+                order = ("on", "off") if i % 2 == 0 else ("off", "on")
+                order_counts["on_first" if order[0] == "on"
+                             else "off_first"] += 1
+                one: dict[str, float] = {}
+                for arm in order:
+                    hist[arm] += _depth_turn(depth + i)
+                    one[arm] = _timed_sync(cid[arm], hist[arm],
+                                           cached=(arm == "on"))
+                    lat[arm].append(one[arm])
+                if one["on"] > 0:
+                    ratios.append(one["off"] / one["on"])
+
+        return {
+            "depth": depth,
+            "on_p50_ms": pct(lat["on"], 0.5),
+            "off_p50_ms": pct(lat["off"], 0.5),
+            "on_samples": len(lat["on"]),
+            "off_samples": len(lat["off"]),
+            "paired_samples": len(ratios),
+            "order_counts": dict(order_counts),
+            "paired_speedup": statistics.median(ratios) if ratios else None,
+            "paired_ratio_min": min(ratios) if ratios else None,
+            "paired_ratio_max": max(ratios) if ratios else None,
+        }
+
     lo, hi = min(depths), max(depths)
     span = max(1, hi - lo)
-    for arm, cached in (("on", True), ("off", False)):
-        c_lo, c_hi = at(lo, cached), at(hi, cached)
-        out[f"{arm}_ms_at_{lo}"] = c_lo
-        out[f"{arm}_ms_at_{hi}"] = c_hi
-        out[f"{arm}_us_per_turn_of_depth"] = (c_hi - c_lo) / span * 1000.0
+    measured = {d: paired_at(d) for d in sorted({lo, hi})}
+
+    out: dict = {"depths": list(depths), "samples": samples,
+                 "paired": True, "per_depth": measured}
+    for arm in ("on", "off"):
+        out[f"{arm}_ms_at_{lo}"] = measured[lo][f"{arm}_p50_ms"]
+        out[f"{arm}_ms_at_{hi}"] = measured[hi][f"{arm}_p50_ms"]
+        out[f"{arm}_us_per_turn_of_depth"] = (
+            (out[f"{arm}_ms_at_{hi}"] - out[f"{arm}_ms_at_{lo}"])
+            / span * 1000.0)
     on_slope = out["on_us_per_turn_of_depth"]
     off_slope = out["off_us_per_turn_of_depth"]
     out["slope_reduction_x"] = (off_slope / on_slope) if on_slope > 0 else None
-    out["speedup_at_max_depth"] = (out[f"off_ms_at_{hi}"] / out[f"on_ms_at_{hi}"]
-                                   if out[f"on_ms_at_{hi}"] > 0 else None)
+
+    deep = measured[hi]
+    # Kept for the report and for continuity with earlier runs: the ratio of the
+    # two arms' medians. It is the UNPAIRED statistic — the one the Windows PR
+    # run reported as 1.55x under phase-separated measurement — so nothing
+    # asserts on it any more.
+    out["speedup_at_max_depth"] = (deep["off_p50_ms"] / deep["on_p50_ms"]
+                                   if deep["on_p50_ms"] > 0 else None)
+    # The statistic the absolute operator-benefit claim is made on.
+    out["paired_speedup_at_max_depth"] = deep["paired_speedup"]
+    out["paired_samples_at_max_depth"] = deep["paired_samples"]
+    out["order_counts_at_max_depth"] = deep["order_counts"]
     return out
 
 
@@ -1618,9 +1729,30 @@ FINDINGS = [
      "the contract. The term is invisible below ~1000 turns and reaches ~6.6 ms "
      "at 3000. RESIDUAL 2: sessionlog.compact() still has zero callers in "
      "olympus/, so journal SIZE remains bounded only by the 64 MB cap. "
+     "METHODOLOGY (corrected): the two cache arms are measured PAIRED at each "
+     "depth -- two independent sessions in one environment, interleaved sample "
+     "by sample with alternating ON-first/OFF-first order -- and the absolute "
+     "operator speedup is the MEDIAN OF THE PER-PAIR OFF/ON RATIOS. Measuring "
+     "the arms in separate sequential phases (the earlier method) leaves the "
+     "depth slope intact but exposes the absolute ratio to ambient load: a "
+     "Windows CI runner reported cache-ON as 29.31 ms at depth 100 and "
+     "25.34 ms at depth 900 -- cheaper at greater depth, which is inconsistent "
+     "with the scaling shape this code produces under stable measurement "
+     "conditions and is evidence consistent with phase-separated ambient-load "
+     "contamination. Which runner activity caused it cannot be determined from "
+     "those timings alone. The resulting 1.55x ratio failed a 2x assertion "
+     "that the scaling evidence does not support treating as a regression. "
+     "The threshold was kept and the measurement fixed. Pairing makes the two "
+     "observations in a ratio time-local and removes multi-minute "
+     "phase-separation bias; alternating order balances first/second-position "
+     "effects; the median tolerates isolated outlying pairs but is NOT immune "
+     "to scheduler or load stalls, and enough disturbed pairs will still move "
+     "it. "
      "Pinned by tests/test_sessionlog_cache.py (13 correctness tests) and "
      "test_val_performance.py::"
-     "test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated."),
+     "test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated, plus "
+     "test_sync_depth_scaling_measures_the_two_arms_paired_and_order_balanced "
+     "which fails if the A/B ever returns to sequential phases."),
     ("F1", "FINDING -- RE-CHARACTERISED, ACCEPTED WITH A MEASURED BOUND",
      "Observability roughly DOUBLES fake-pipeline wall time (+1.5 to +2.1 ms/run)",
      "Interleaved A/B over 20 iterations: OFF 1.61 ms -> ON 3.64 ms, paired "
@@ -1808,6 +1940,16 @@ def render(r: dict) -> None:
          f"{ds['off_us_per_turn_of_depth']:.2f} us/turn",
          f"reduction {ds['slope_reduction_x']:.1f}x" if ds["slope_reduction_x"]
          else "")
+    _paired = ds.get("paired_speedup_at_max_depth")
+    _orders = ds.get("order_counts_at_max_depth", {})
+    _row("    operator speedup at depth", f"paired, depth {hi}",
+         f"{_paired:.2f}x" if _paired else "n/a",
+         f"median of {ds.get('paired_samples_at_max_depth', 0)} PAIRED "
+         f"OFF/ON ratios, order-balanced "
+         f"(ON-first {_orders.get('on_first', 0)} / "
+         f"OFF-first {_orders.get('off_first', 0)}) — the unpaired ratio of "
+         f"medians is {ds['speedup_at_max_depth']:.2f}x"
+         if _paired and ds.get("speedup_at_max_depth") else "")
     print(_rule())
 
     sy = r["sessionlog_sync"]

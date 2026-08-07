@@ -182,14 +182,57 @@ def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated():
     effects; at 150 turns the noise swamped it and the test flaked in a full
     suite run. This measures the coefficient directly at two depths.
 
+    METHODOLOGY CORRECTION — why the absolute claim is now made on a paired
+    statistic. The benchmark used to measure the arms in separate sequential
+    phases. The SLOPE assertions tolerate that, because each arm is compared
+    against itself; the absolute ON-versus-OFF ratio does not, because the two
+    arms then sit minutes apart in wall-clock and any ambient load landing on
+    one phase goes straight into the ratio. A Windows PR runner reported cache
+    ON as 29.3105 ms at depth 100 and 25.3359 ms at depth 900 — cheaper at
+    greater depth — giving on_slope -4.97 us/turn against off_slope
+    +39.75 us/turn. A negative depth slope is inconsistent with the scaling
+    shape this code produces under stable measurement conditions, and the
+    pattern is evidence consistent with phase-separated ambient-load
+    contamination; which runner activity produced it cannot be determined from
+    those timings alone, so the reading that the ON phase absorbed load the
+    later OFF phase did not is an inference, not an established cause. What the
+    run does show without inference: both scaling invariants passed, and only
+    the 2x absolute assertion failed, at 1.5547x, on a comparison between two
+    phases measured minutes apart.
+
+    The bound was NOT lowered to fit that number. The measurement was fixed:
+    both arms now run as independent sessions in one environment, interleaved
+    sample by sample with alternating ON-first/OFF-first order, and the
+    absolute claim is asserted on the median of the PER-PAIR OFF/ON ratios.
+    Pairing makes the two observations in each ratio time-local — microseconds
+    apart rather than minutes — which removes the multi-minute
+    phase-separation bias; alternating order balances first/second-position
+    effects between the arms; and the median tolerates isolated outlying pairs.
+    None of that makes the statistic immune to scheduler or load stalls: a
+    stall spanning both members of a pair still perturbs that ratio, and enough
+    disturbed pairs will still move the median. The systematic error mode was
+    removed; the residual random one was reduced, not eliminated.
+
+    Three independent invariants, each able to fail alone:
+
+      * the uncached arm must reproduce D1 (off_slope > 5 us/turn), else the
+        A/B is void and proves nothing;
+      * cached scaling must stay at least 5x gentler (on_slope < off_slope/5);
+      * the paired operator speedup at maximum depth must exceed 2x.
+
     Bounds are loose because the point is the ORDER of the effect, not the
-    constant: the uncached arm must reproduce the defect (else the A/B is void
-    and proves nothing), and the cached arm must scale at least 5x more gently
-    against a measured 15.8x."""
-    r = pv.bench_sync_depth_scaling(depths=(100, 900), samples=12)
+    constant, against a measured 15.8x slope reduction."""
     lo, hi = 100, 900
+    r = pv.bench_sync_depth_scaling(depths=(lo, hi), samples=12)
     off_slope = r["off_us_per_turn_of_depth"]
     on_slope = r["on_us_per_turn_of_depth"]
+
+    # The measurement must be the paired one, and must have produced usable
+    # pairs — a silent fallback to zero pairs would make the third assertion
+    # vacuous rather than failing.
+    assert r["paired"] is True, f"the A/B is no longer paired: {r}"
+    assert r["paired_samples_at_max_depth"] > 0, (
+        f"no paired observations at depth {hi}: {r}")
 
     assert off_slope > 5.0, (
         f"the pre-fix arm did not reproduce the D1 depth scaling — the A/B is "
@@ -197,8 +240,115 @@ def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated():
     assert on_slope < off_slope / 5.0, (
         f"per-turn cost is scaling with depth again: {r}")
     # and the absolute win at the deeper end is what an operator actually feels
-    assert r[f"on_ms_at_{hi}"] < r[f"off_ms_at_{hi}"] / 2.0, (
-        f"the cached path is no cheaper at depth: {r}")
+    paired = r["paired_speedup_at_max_depth"]
+    assert paired is not None and paired > 2.0, (
+        f"the cached path is less than 2x cheaper at depth {hi} on the paired "
+        f"measurement (median of {r['paired_samples_at_max_depth']} per-pair "
+        f"OFF/ON ratios = {paired}); unpaired ratio of medians was "
+        f"{r['speedup_at_max_depth']}: {r}")
+
+
+def test_sync_depth_scaling_measures_the_two_arms_paired_and_order_balanced():
+    """The A/B must not drift back to sequential, order-biased phases.
+
+    This is the anti-regression for the methodology fix above, and it is
+    deliberately STRUCTURAL rather than timing-based: it observes the actual
+    `sessionlog.sync` calls the benchmark makes and the cache regime in force
+    at each one. No sleeps, no wall-clock thresholds, nothing that can flake on
+    a loaded runner — the properties asserted are true or false regardless of
+    how fast the machine is.
+
+    What it pins, and what each would catch:
+
+      * the two arms are DIFFERENT conversations — one shared session would
+        make the arms contend on one journal and one lock;
+      * within the timed window each arm is sampled equally and no arm ever
+        runs more than twice in a row — a sequential implementation produces
+        one run of `samples` per arm, which fails this immediately;
+      * both ON-first and OFF-first orders actually occur, balanced to within
+        one — a fixed order hands the second-position warm-cache advantage to
+        the same arm every time;
+      * the cache bypass is applied to the OFF timed calls ONLY, and the real
+        `_cache_get` is in force for every other call, including after the
+        benchmark returns.
+    """
+    from olympus import sessionlog
+
+    real_cache_get = sessionlog._cache_get
+    real_sync = sessionlog.sync
+    depth, samples = 4, 4
+    calls: list[tuple[str, bool]] = []
+
+    def spy(conversation_id, history):
+        # Record the cache regime AT THE MOMENT OF THE CALL — that is the thing
+        # the benchmark is supposed to be toggling per sample.
+        calls.append((conversation_id,
+                      sessionlog._cache_get is not real_cache_get))
+        return real_sync(conversation_id, history)
+
+    sessionlog.sync = spy
+    try:
+        r = pv.bench_sync_depth_scaling(depths=(depth, depth + 2),
+                                        samples=samples)
+    finally:
+        sessionlog.sync = real_sync
+
+    assert sessionlog._cache_get is real_cache_get, (
+        "the benchmark left the cache seam patched — a later test would run "
+        "against a disabled sessionlog cache")
+    assert r["paired"] is True, r
+
+    for d in (depth, depth + 2):
+        arms = {"on": f"depth{d}-on", "off": f"depth{d}-off"}
+        assert arms["on"] != arms["off"]
+        mine = [c for c in calls if c[0] in arms.values()]
+        # setup is 2 x depth syncs, measurement is 2 x samples; the timed
+        # window is therefore exactly the tail.
+        assert len(mine) == 2 * d + 2 * samples, (d, len(mine))
+        window = mine[-2 * samples:]
+
+        seq = ["on" if cid == arms["on"] else "off" for cid, _ in window]
+        assert seq.count("on") == samples, (d, seq)
+        assert seq.count("off") == samples, (d, seq)
+
+        # No arm may run more than twice consecutively. Sequential phases give
+        # a run of `samples`; a fixed ON-then-OFF order gives runs of 2 but
+        # would fail the order-count check below.
+        longest, run = 1, 1
+        for prev, cur in zip(seq, seq[1:]):
+            run = run + 1 if cur == prev else 1
+            longest = max(longest, run)
+        assert longest <= 2, (
+            f"depth {d}: the arms are measured in blocks of {longest}, not "
+            f"interleaved — this is the sequential, order-biased A/B the "
+            f"paired design replaced: {seq}")
+
+        # Order alternates: the first element of each pair must not always be
+        # the same arm.
+        firsts = seq[0::2]
+        assert firsts.count("on") > 0 and firsts.count("off") > 0, (
+            f"depth {d}: only {set(firsts)} ever ran first, so one arm always "
+            f"pays first-position cost: {seq}")
+        assert abs(firsts.count("on") - firsts.count("off")) <= 1, (
+            f"depth {d}: measurement order is unbalanced: {seq}")
+
+        # The cache bypass is per-sample and per-arm: every OFF timed call ran
+        # with `_cache_get` replaced, every ON timed call did not, and no setup
+        # call did either.
+        for cid, bypassed in window:
+            assert bypassed == (cid == arms["off"]), (d, cid, bypassed)
+        assert not any(bypassed for _cid, bypassed in mine[:-2 * samples]), (
+            f"depth {d}: setup syncs ran with the cache bypassed; setup is "
+            f"untimed and must not be part of the A/B")
+
+    # The reported metadata must agree with what actually happened.
+    orders = r["order_counts_at_max_depth"]
+    assert orders["on_first"] + orders["off_first"] == samples, orders
+    assert orders["on_first"] > 0 and orders["off_first"] > 0, orders
+    assert abs(orders["on_first"] - orders["off_first"]) <= 1, orders
+    assert r["paired_samples_at_max_depth"] == samples, r
+    deep = r["per_depth"][depth + 2]
+    assert deep["on_samples"] == deep["off_samples"] == samples, deep
 
 
 def test_journal_recovery_scales_linearly_and_stays_bounded():
