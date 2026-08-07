@@ -14,7 +14,7 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(websearch, "_cooling", {})
     for var in ("OLYMPUS_SEARCH_PROVIDERS", "OLYMPUS_SEARXNG_URL",
                 "BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY",
-                "GOOGLE_PSE_KEY", "GOOGLE_PSE_CX", "SERPAPI_API_KEY"):
+                "SERPAPI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -28,6 +28,14 @@ def test_default_order_is_configured_then_ddg(monkeypatch):
 def test_explicit_order_wins(monkeypatch):
     monkeypatch.setenv("OLYMPUS_SEARCH_PROVIDERS", "tavily, ddg, bogus")
     assert websearch.configured() == ["tavily", "ddg"]
+
+
+def test_retired_google_pse_cannot_be_reenabled(monkeypatch):
+    monkeypatch.setenv("GOOGLE_PSE_KEY", "legacy")
+    monkeypatch.setenv("GOOGLE_PSE_CX", "legacy")
+
+    assert "google_pse" not in websearch._PROVIDERS
+    assert "google_pse" not in websearch.configured()
 
 
 def test_bing_serpapi_parse(monkeypatch):
@@ -236,3 +244,15 @@ def test_diagnostics_distinguishes_rate_limiting(monkeypatch):
 
     assert report["ok"] is False
     assert report["providers"]["ddg"]["status"] == "rate_limited"
+
+def test_retired_google_pse_explicit_config_fails_loudly(monkeypatch):
+    monkeypatch.setenv(
+        "OLYMPUS_SEARCH_PROVIDERS",
+        "google_pse",
+    )
+
+    with pytest.raises(
+        websearch.SearchConfigurationError,
+        match="google_pse",
+    ):
+        websearch.configured()

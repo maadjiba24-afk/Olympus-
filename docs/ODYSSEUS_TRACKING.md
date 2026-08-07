@@ -142,7 +142,6 @@ Env vars introduced while adopting the above (all optional, safe defaults):
 | `OLYMPUS_SEARCH_PROVIDERS` | (auto) | explicit provider order, e.g. `tavily,ddg` |
 | `OLYMPUS_SEARXNG_URL` | — | self-hosted SearXNG endpoint (sovereignty-friendly) |
 | `BRAVE_SEARCH_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` | — | Brave, Tavily, and Google-through-Serper providers |
-| `GOOGLE_PSE_KEY` + `GOOGLE_PSE_CX` | — | Google Programmable Search |
 | `SERPAPI_API_KEY` | — | Bing results through SerpApi |
 | `NTFY_TOPIC` | — | ntfy topic to publish to (required for the ntfy channel) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy base URL (set for a self-hosted server) |
