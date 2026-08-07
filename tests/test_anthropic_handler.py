@@ -22,6 +22,7 @@ import inspect
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -691,3 +692,136 @@ def test_openai_dialect_is_unchanged(server):
         path="/v1/chat/completions").read())
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["message"]["content"] == CANNED
+
+
+# --- 9. Step 1E: the refusal reaches the client, and never waits for the body -
+#
+# `/v1/messages` refuses on exactly the same structural path as
+# `/v1/chat/completions`: `_v1_authorized` fails, the envelope is written, and
+# the handler returns without ever reading the request body. `Handler` speaks
+# HTTP/1.0, so the socket is then closed with those bytes still queued — and
+# closing a TCP socket with unread data makes the stack send RST rather than FIN
+# (RFC 1122 §4.2.2.13), which can destroy a response the peer has not read yet.
+# The Anthropic dialect gets the same two-sided guard as the OpenAI one: the
+# refusal must SURVIVE a large unread body, and must be EMITTED BEFORE the body
+# finishes arriving. See tests/test_openai_endpoint.py for the full rationale.
+
+_LARGE_BODY_CHARS = 512 * 1024      # materially large, well under _MAX_BODY
+_REFUSAL_DEADLINE_S = 5.0
+
+
+def _recv_headers(sock) -> bytes:
+    """Read until the end of the response headers; returns everything read."""
+    raw = b""
+    while b"\r\n\r\n" not in raw:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        raw += chunk
+    return raw
+
+
+def _recv_rest_of_body(sock, head: bytes, body: bytes) -> bytes:
+    """Keep reading until the advertised Content-Length has all arrived.
+
+    `\\r\\n\\r\\n` can land in a segment before the body does, so a reader that
+    stops at the header terminator sees an empty body and would wrongly report a
+    truncated refusal.
+    """
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(body) < length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        body += chunk
+    assert len(body) == length, (len(body), length, body[:200])
+    return body
+
+
+def test_large_unread_body_still_yields_a_401_to_the_real_anthropic_sdk(server):
+    """The real SDK, a wrong key, and real unread-body pressure on the socket.
+
+    `max_retries=0`, so a single connection error is a failure rather than
+    something a retry hides.
+    """
+    filler = "x" * _LARGE_BODY_CHARS
+    messages = [{"role": "user", "content": filler}]
+    assert len(json.dumps(messages)) < web._MAX_BODY, (
+        "this regression must send a PERMITTED body; above _MAX_BODY it would "
+        "be testing the oversize guard instead")
+
+    client = anthropic.Anthropic(api_key="wrong-key", base_url=server,
+                                 max_retries=0, timeout=30.0)
+    try:
+        try:
+            with pytest.raises(anthropic.AuthenticationError) as caught:
+                client.messages.create(model="olympus-council", max_tokens=64,
+                                       messages=messages)
+        except anthropic.APIConnectionError as err:
+            raise AssertionError(
+                "the server refused with 401 but the connection died before "
+                "the SDK could read it — the HTTP/1.0 close is resetting the "
+                "connection with the request body still unread, destroying a "
+                f"response that was correctly written: {err!r}") from err
+    finally:
+        client.close()
+
+    # ...and the envelope on the wire is still the NATIVE Anthropic shape, not
+    # the OpenAI one and not something Step 1E reshaped. Asserted from the raw
+    # response rather than `err.body`, which the SDK unwraps.
+    assert caught.value.status_code == 401
+    envelope = caught.value.response.json()
+    assert envelope["type"] == "error", envelope
+    assert envelope["error"]["type"] == "authentication_error", envelope
+
+
+def test_messages_refusal_is_written_before_the_client_finishes_its_body(server):
+    """A slow unauthenticated sender on `/v1/messages` is refused promptly.
+
+    The mirror of the OpenAI slow-client regression: it fails if anyone ever
+    "fixes" the reset by reading the body before answering, which would hand an
+    unauthenticated caller a thread-pinning slowloris.
+    """
+    host, _, port = server.removeprefix("http://").partition(":")
+    sliver = b'{"model": "m", "max_tokens": 16, "messages": [{"role": "user"'
+    raw = b""
+    with socket.create_connection((host, int(port)),
+                                  timeout=_REFUSAL_DEADLINE_S) as sock:
+        sock.sendall(
+            f"POST /v1/messages HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"x-api-key: wrong-key\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {_LARGE_BODY_CHARS}\r\n"
+            f"\r\n".encode())
+        sock.sendall(sliver)             # a fraction of the advertised body
+        owed = _LARGE_BODY_CHARS - len(sliver)
+
+        started = time.perf_counter()
+        sock.settimeout(_REFUSAL_DEADLINE_S)
+        try:
+            raw = _recv_headers(sock)
+            # The timing claim is about the REFUSAL becoming readable, so it is
+            # measured here — before the body is drained off the socket.
+            elapsed = time.perf_counter() - started
+            head, _, rest = raw.partition(b"\r\n\r\n")
+            rest = _recv_rest_of_body(sock, head, rest)
+        except (TimeoutError, OSError) as err:
+            raise AssertionError(
+                f"no refusal arrived within {_REFUSAL_DEADLINE_S}s while the "
+                f"client still owed {owed} body bytes it never sent — the "
+                f"server is waiting for the request body before answering, "
+                f"which is exactly the unauthenticated slowloris the "
+                f"response-first design exists to prevent: {err!r}") from err
+
+    assert b"401" in head.split(b"\r\n")[0], raw[:400]
+    assert elapsed < _REFUSAL_DEADLINE_S, (
+        f"the 401 took {elapsed:.3f}s to become readable while the body was "
+        f"still owed")
+    envelope = json.loads(rest)
+    assert envelope["type"] == "error", envelope
+    assert envelope["error"]["type"] == "authentication_error", envelope
