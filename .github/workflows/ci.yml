@@ -262,6 +262,14 @@ jobs:
             exit 1
           fi
 
+      # `-s` disables pytest's stdout capture so the sanitized
+      # `SEARCH_LIVE provider=... status=...` health lines reach this job log.
+      # Without it pytest only replays captured output for FAILING tests, so a
+      # provider that completed successfully with zero results — a state the
+      # live gate now tolerates, because production falls through to the next
+      # provider — would be entirely invisible. This changes visibility only:
+      # no test is suppressed, no failure is downgraded, and the step still
+      # fails the job on a non-zero pytest exit.
       - name: Run real search-provider end-to-end tests
         env:
           OLYMPUS_SEARCH_LIVE: "1"
@@ -270,7 +278,7 @@ jobs:
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
-        run: python -m pytest -q tests/test_websearch_live.py
+        run: python -m pytest -q -s tests/test_websearch_live.py
 
       - name: Stop local SearXNG
         if: always()
