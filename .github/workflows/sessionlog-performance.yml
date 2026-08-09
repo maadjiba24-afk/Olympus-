@@ -1,0 +1,56 @@
+name: Sessionlog performance telemetry
+
+# Absolute session-journal append latency, measured on a real Windows runner.
+#
+# WHY THIS IS NOT PART OF CI. The p50/p99 bounds this job enforces used to live
+# in the required pytest suite. On uncontrolled GitHub-hosted runners that gate
+# cannot tell an Olympus regression from host load, and on 2026-08-08 it blocked
+# a merge (p50 88.11 ms against a 60 ms bound) on a commit whose failing test
+# function and benchmark are byte-identical to a commit whose push job passed.
+# The measured series decayed rather than rising with journal depth. The failure
+# is consistent with uncontrolled runner variance and was not attributable to
+# the Step 1D diff, but the precise external cause was not proven.
+#
+# The thresholds are NOT relaxed here: scripts/sessionlog_latency_telemetry.py
+# enforces exactly the numbers the required test used. What changed is only
+# what a breach blocks. This job goes red on a breach and that red is real
+# evidence; it simply does not hold an unrelated pull request shut.
+#
+# It is deliberately absent from the required `CI / test` aggregate context,
+# and it runs on schedule and on demand only — never on push or pull_request.
+# Windows is the platform where the defect was exposed, so it is the platform
+# measured here.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"        # weekly, Monday 08:00 UTC
+  workflow_dispatch:           # and on demand
+
+jobs:
+  sessionlog-latency:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+
+      # Exactly one execution. No retry, no repetition, no sample selection,
+      # and no `continue-on-error`: a non-zero exit fails this job.
+      - name: Measure session-journal append latency
+        run: >
+          python scripts/sessionlog_latency_telemetry.py
+          --out sessionlog-latency-telemetry.json
+
+      # Uploaded even when the step above failed, because a red run is exactly
+      # when the numbers are worth reading.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sessionlog-latency-telemetry
+          path: sessionlog-latency-telemetry.json

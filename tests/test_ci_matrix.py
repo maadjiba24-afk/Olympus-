@@ -162,3 +162,106 @@ def test_aggregate_gate_requires_windows_suite():
         "aggregate test gate does not require the Windows suite")
     assert "needs.windows-test.result" in body, (
         "aggregate test gate does not enforce the Windows result")
+
+
+# --- session-journal latency telemetry: red-capable, but never PR-blocking ---
+#
+# The absolute p50/p99 append bounds moved out of the required suite because a
+# shared GitHub runner cannot tell an Olympus regression from host load. They
+# are enforced unchanged by a dedicated workflow instead. That relocation is
+# only honest if the workflow really can go red AND really cannot block a PR,
+# so both halves are pinned here rather than trusted.
+
+_PERF_WF = _ROOT / ".github" / "workflows" / "sessionlog-performance.yml"
+
+
+def test_sessionlog_latency_telemetry_workflow_exists():
+    assert _PERF_WF.is_file(), (
+        "the absolute append-latency contract was removed from the required "
+        "suite, so its dedicated workflow must exist to still enforce it")
+
+
+def test_sessionlog_latency_telemetry_never_runs_on_push_or_pull_request():
+    """The whole point: a breach must not hold an unrelated PR shut."""
+    text = _PERF_WF.read_text(encoding="utf-8")
+    trigger = re.search(r"(?ms)^on:\s*\n(?P<body>.*?)(?=^jobs:\s*$)", text)
+    assert trigger, "telemetry workflow has no parsable `on:` block"
+    body = trigger.group("body")
+
+    assert re.search(r"(?m)^\s{2}schedule:\s*$", body), (
+        "telemetry must run on a schedule so a regression is still caught")
+    assert re.search(r"(?m)^\s{2}workflow_dispatch:", body), (
+        "telemetry must be runnable on demand")
+    assert not re.search(r"(?m)^\s{2}push:", body), (
+        "telemetry must NOT run on push")
+    assert not re.search(r"(?m)^\s{2}pull_request:", body), (
+        "telemetry must NOT run on pull_request — that would recreate the "
+        "PR-blocking gate this design removed")
+
+
+def test_sessionlog_latency_telemetry_is_red_capable():
+    """Relocating the contract must not have quietly disarmed it."""
+    text = _PERF_WF.read_text(encoding="utf-8")
+
+    # Directive-level, not word-level: the hazard is a YAML key or a shell
+    # escape hatch, and the workflow is allowed to EXPLAIN in prose why it has
+    # none of them.
+    assert not re.search(r"(?mi)^\s*continue-on-error\s*:", text), (
+        "telemetry must stay red on a breach; `continue-on-error:` disarms it")
+    assert not re.search(r"(?mi)^\s*uses:.*retry", text), (
+        "telemetry must never retry a timing measurement")
+    for token in ("|| true", "exit 0", "if: failure()"):
+        assert token not in text, (
+            f"telemetry must stay red on a breach; `{token}` would weaken it")
+    assert "scripts/sessionlog_latency_telemetry.py" in text, (
+        "telemetry workflow does not run the telemetry script")
+    assert "runs-on: windows-latest" in text, (
+        "the defect was exposed on Windows; measure it there")
+    assert 'python-version: "3.12"' in text
+    assert "pip install --require-hashes -r requirements.lock" in text, (
+        "telemetry must install through the repository's pinned procedure")
+
+    # Exactly one measurement per run. Counts INVOCATIONS, not mentions — the
+    # header comment names the script when explaining the design, and that
+    # must not read as a second execution.
+    assert text.count("python scripts/sessionlog_latency_telemetry.py") == 1, (
+        "the telemetry script must be executed exactly once per run")
+
+    # The artifact must survive a red run — that is when it is worth reading.
+    assert "actions/upload-artifact@v4" in text
+    upload = text.index("actions/upload-artifact@v4")
+    assert "if: always()" in text[upload:upload + 200], (
+        "the telemetry artifact must upload with `if: always()`")
+
+
+def test_sessionlog_latency_telemetry_is_not_in_the_required_gate():
+    """It must not be wired into the required `CI / test` aggregate context."""
+    ci = _CI.read_text(encoding="utf-8")
+    assert "sessionlog-performance" not in ci
+    assert "sessionlog_latency_telemetry" not in ci
+    needs = re.search(r"needs:\s*\[([^\]]*)\]", _job_body("test-gate"))
+    assert needs and "sessionlog" not in needs.group(1), (
+        "telemetry must not be a dependency of the required aggregate gate")
+
+
+def test_required_suite_no_longer_asserts_absolute_append_latency():
+    """The moved contract must not still be collected by the default suite.
+
+    Guards against the old assertions surviving by accident, which would leave
+    the PR gate exposed to host load exactly as before.
+    """
+    perf = (_ROOT / "tests" / "test_val_performance.py").read_text(
+        encoding="utf-8")
+    for gone in ("def test_sessionlog_append_latency_within_loose_bounds",
+                 "def test_sessionlog_append_fsync_always_within_loose_bounds"):
+        assert gone not in perf, (
+            f"{gone} still exists in the required suite; its absolute "
+            f"wall-clock contract belongs to the telemetry runner now")
+
+    # ...and the numbers themselves must still be enforced somewhere.
+    telemetry = (_ROOT / "scripts" / "sessionlog_latency_telemetry.py"
+                 ).read_text(encoding="utf-8")
+    for preserved in ("60.0", "200.0", "100.0", "400.0", "120"):
+        assert preserved in telemetry, (
+            f"preserved threshold {preserved} is missing from the telemetry "
+            f"contract — the bound must be moved, never dropped")
