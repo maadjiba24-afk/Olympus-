@@ -447,13 +447,35 @@ def bench_sessionlog_append(n: int = 500, fsync: str = "auto") -> dict:
     # project the per-append cost at deeper journals.
     span = max(1.0, float(n) - k)
     slope_ms_per_record = (tail - head) / span
+    # A projection is only meaningful when the series actually grows. When the
+    # early samples happen to be slower than the late ones the fitted slope is
+    # NEGATIVE, and `head + slope * 50000` then published -60073 ms at 50k
+    # records on a real CI run. Negative latency is not a measurement. Clamp
+    # the projected TERM, exactly as `bench_sessionlog_sync` already does, and
+    # keep the raw slope visible so the inversion itself stays diagnosable.
+    growth = max(0.0, slope_ms_per_record)
     out = summarize(lat)
     out.update({"fsync": fsync, "first_decile_mean": head,
                 "last_decile_mean": tail,
                 "growth_ratio": (tail / head) if head else 0.0,
                 "slope_ms_per_record": slope_ms_per_record,
-                "projected_ms_at_10k": head + slope_ms_per_record * 10000,
-                "projected_ms_at_50k": head + slope_ms_per_record * 50000})
+                "projected_ms_at_10k": head + growth * 10000,
+                "projected_ms_at_50k": head + growth * 50000})
+    # Integrity accounting, reported on EVERY measurement. Latency figures for
+    # a run that did not do the work are worse than useless — they are fast.
+    # The telemetry evaluator refuses a result whose record count or journal
+    # status is wrong, so "fast because it skipped" can never read as a pass.
+    records, status = sessionlog.read_verified(cid)
+    path = sessionlog._journal_path(sessionlog._sid(cid))
+    out.update({
+        "records_verified": len(records),
+        "journal_status": status,
+        "journal_bytes": path.stat().st_size if path.exists() else 0,
+        # Exposed so a caller can re-verify the journal independently rather
+        # than trusting this function's own accounting. Deliberately NOT in the
+        # telemetry artifact's published allowlist.
+        "conversation_id": cid,
+    })
     return out
 
 
