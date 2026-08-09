@@ -15,6 +15,56 @@ carries a migration note here.
 
 ## [Unreleased]
 
+## [0.27.3] — 2026-08-09
+
+### Added
+
+- Added Bing/SerpApi search support and expanded the Playwright browser
+  harness across Chromium, Firefox, and WebKit with real-browser integration
+  coverage.
+- Added live search-provider diagnostics, a repository-pinned SearXNG
+  end-to-end CI anchor, and production fallback-chain verification.
+- Added scheduled and manually dispatched Windows session-log latency
+  telemetry with fail-closed evaluation and sanitized JSON artifacts.
+
+### Changed
+
+- Search-live evaluation now distinguishes structurally valid empty provider
+  results from malformed responses, follows the public `websearch.results()`
+  fallback behavior, and keeps SearXNG as a hard integration requirement.
+- Reworked `usage.record` concurrency and sync-depth evaluations with
+  synchronized starts, exact accounting, worker-failure propagation, five-run
+  quorums, and paired order-balanced A/B measurements.
+- Replaced required hosted-runner wall-clock checks for the non-production
+  `sessionlog.append_turn` path with deterministic integrity and
+  work-accounting contracts while preserving the absolute thresholds in
+  scheduled telemetry.
+- Hardened the release baseline across Linux Python 3.10–3.13 and Windows
+  Python 3.12 with supply-chain, packaging, noninterference, browser,
+  sandbox, SBOM, and console-encoding checks.
+- Retired Google Programmable Search (`google_pse`); explicit selection now
+  fails with an actionable configuration error while stale credentials are
+  ignored.
+
+### Fixed
+
+- Ensured early OpenAI- and Anthropic-compatible `/v1` authentication and
+  rate-limit refusals reliably deliver HTTP 401/429 under HTTP/1.0 before
+  bounded request-body cleanup, preventing unread-body connection resets.
+- Prevented valid empty Tavily responses from failing the live gate when the
+  production fallback chain remains healthy.
+- Prevented worker failures or partial benchmark work from producing
+  misleadingly fast successful measurements.
+
+### Security
+
+- Restricted `SEARCH_LIVE` output to closed subject and status allowlists
+  and withheld rejected secret-shaped values from logs and exception text.
+- Kept authentication before JSON parsing and bounded post-refusal
+  request-body cleanup by time and bytes.
+- Made concurrency, session-log, and telemetry gates fail closed on corrupt,
+  partial, malformed, or unaccounted work.
+
 ## [0.27.2] — 2026-08-01
 
 ### Changed
@@ -3758,7 +3808,8 @@ in the git log and pull requests #1–#49.
 - `Trace.decision(status=...)` is mandatory, so a failure path can no longer
   silently record success and poison per-agent trust scoring.
 
-[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.3...HEAD
+[0.27.3]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.2...v0.27.3
 [0.27.2]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.1...v0.27.2
 [0.27.1]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/maadjiba24-afk/Olympus-/compare/v0.26.0...v0.27.0
