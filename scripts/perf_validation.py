@@ -547,6 +547,12 @@ def _seed_journal(cid: str, records: int) -> None:
         sessionlog._append_records(sid, entries, (0, ""))    # empty-chain tail
 
 
+def _depth_turn(i: int) -> list[dict]:
+    """One conversation turn of fixed size, identical for both cache arms."""
+    return [{"role": "user", "content": f"q{i} " + "u" * 200},
+            {"role": "assistant", "content": f"a{i} " + "a" * 400}]
+
+
 def bench_sync_depth_scaling(depths=(100, 1500), samples: int = 25) -> dict:
     """How steeply per-turn journaling cost grows with session depth — the
     property Stage-D defect D1 was actually about.
@@ -556,55 +562,160 @@ def bench_sync_depth_scaling(depths=(100, 1500), samples: int = 25) -> dict:
     and at small `turns` the noise swamps it (it produced a genuinely flaky
     assertion). This measures the thing directly instead: grow a session to a
     given depth, then time further syncs AT that depth, for two depths and both
-    cache arms. The slope between the two depths is the depth-scaling
-    coefficient, in microseconds of added cost per turn already in the session.
+    cache arms.
 
-    Reported for both arms so the comparison is a controlled A/B on one machine
-    rather than a ratio against a remembered constant.
+    PAIRED AND ORDER-BALANCED, and this is the part that had to be fixed. An
+    earlier revision measured the two arms in four SEQUENTIAL phases — all of
+    cache-ON at both depths, then all of cache-OFF at both depths, each in its
+    own scratch tree. The depth SLOPE survives that, because each arm is
+    compared against itself. The absolute ON-versus-OFF ratio does not: the two
+    arms are then minutes apart in wall-clock, and any ambient load that lands
+    on one phase and not the other goes straight into the ratio. A Windows PR
+    runner produced a result with that signature — cache ON measured 29.31 ms at
+    depth 100 but 25.34 ms at depth 900, i.e. *cheaper at greater depth*. That
+    is inconsistent with the scaling shape this code produces under stable
+    measurement conditions, and it is evidence consistent with phase-separated
+    ambient-load contamination. Which runner activity actually caused it cannot
+    be determined from these timings alone: the inference is that the ON phase
+    absorbed load the later OFF phase did not, but that is an inference from the
+    shape of the numbers, not a demonstrated cause. What can be said without
+    inference is that the ratio between two phases measured minutes apart is not
+    a controlled comparison, and it collapsed to 1.55x against an absolute 2x
+    assertion.
+
+    So at each depth this now runs BOTH arms as two independent sessions in ONE
+    environment, and interleaves them sample by sample with alternating order:
+
+        sample 0: ON then OFF     sample 2: ON then OFF
+        sample 1: OFF then ON     sample 3: OFF then ON     ...
+
+    Alternation matters because within a pair the second call is not equivalent
+    to the first — it runs with the other arm's page-cache and allocator state
+    still warm. Fixing the order would hand that advantage to the same arm every
+    time; alternating splits it evenly and the counts are reported so a reader
+    can check it happened.
+
+    The two arms are separate CONVERSATIONS, so they share only the machine:
+    different `_sid`, different journal path, different session lock, and
+    different `_CACHE` key (`_CACHE_MAX` is 64, so neither evicts the other).
+
+    Setup is never timed. Both sessions are grown turn-by-turn to the same
+    depth, interleaved, so neither is built during a quiet stretch the other did
+    not get. Setup runs with the cache ON for both arms: what the OFF arm
+    measures is a `sync` that must re-`_scan` and re-`_replay` a depth-N
+    journal, and the journal bytes are identical however they were written — so
+    building the OFF session the slow way would only lengthen the run.
+
+    Reports, per depth: each arm's median, and — the statistic the absolute
+    claim is now made on — the MEDIAN OF THE PER-PAIR OFF/ON RATIOS.
+
+    What that statistic does and does not buy, stated precisely. Pairing makes
+    the two observations in a ratio time-local — microseconds apart rather than
+    minutes — which removes multi-minute phase-separation bias from the
+    comparison. Alternating the order balances first/second-position effects
+    between the arms. The median then tolerates isolated outlying pairs. It is
+    NOT immune to scheduler or load stalls: a stall that disturbs both members
+    of a pair still perturbs that ratio, and enough disturbed pairs will still
+    move the median. The claim is that the dominant, systematic error mode of
+    the previous design has been removed and the residual one is bounded by how
+    many pairs a disturbance can reach — not that the measurement is now noise
+    proof.
     """
     from olympus import memory, sessionlog
     real_cache_get = sessionlog._cache_get
-    out: dict = {"depths": list(depths), "samples": samples}
 
-    def at(depth: int, cached: bool) -> float:
-        isolate(f"depthscale-{depth}-{int(cached)}")
-        memory.set_user("perf")
-        sessionlog._cache_get = (real_cache_get if cached
-                                 else (lambda sid, path: None))
+    def _forced_miss(sid, path):
+        """The pre-D1-fix read path: always a miss, so `sync` falls through to
+        the full `_scan` + `_replay` of the whole journal."""
+        return None
+
+    def _timed_sync(cid: str, history: list, *, cached: bool) -> float:
+        """One `sync`, timed, under exactly ONE arm's cache regime.
+
+        The seam is a module attribute, so only one regime can be live at a
+        time — which is precisely why it is installed around THIS call and
+        restored in `finally`, rather than around a whole phase. That is what
+        makes a per-sample interleave possible without a production change, and
+        it means a raising `sync` cannot leave the cache disabled for whatever
+        runs next.
+        """
+        if not cached:
+            sessionlog._cache_get = _forced_miss
         try:
-            cid = f"depth-{depth}"
-            history: list[dict] = []
-            with env(OLYMPUS_SESSION_JOURNAL="on",
-                     OLYMPUS_SESSION_FSYNC="auto"):
-                for i in range(depth):
-                    history += [{"role": "user", "content": f"q{i} " + "u" * 200},
-                                {"role": "assistant",
-                                 "content": f"a{i} " + "a" * 400}]
-                    sessionlog.sync(cid, history)
-                lat: list[float] = []
-                for i in range(samples):
-                    history += [{"role": "user", "content": f"x{i} " + "u" * 200},
-                                {"role": "assistant",
-                                 "content": f"y{i} " + "a" * 400}]
-                    t0 = time.perf_counter()
-                    sessionlog.sync(cid, history)
-                    lat.append((time.perf_counter() - t0) * 1000.0)
-            return pct(lat, 0.5)
+            t0 = time.perf_counter()
+            sessionlog.sync(cid, history)
+            return (time.perf_counter() - t0) * 1000.0
         finally:
             sessionlog._cache_get = real_cache_get
 
+    def paired_at(depth: int) -> dict:
+        isolate(f"depthscale-{depth}")
+        memory.set_user("perf")
+        cid = {"on": f"depth{depth}-on", "off": f"depth{depth}-off"}
+        hist: dict[str, list] = {"on": [], "off": []}
+        lat: dict[str, list] = {"on": [], "off": []}
+        ratios: list[float] = []
+        order_counts = {"on_first": 0, "off_first": 0}
+
+        with env(OLYMPUS_SESSION_JOURNAL="on", OLYMPUS_SESSION_FSYNC="auto"):
+            for i in range(depth):                     # setup — NEVER timed
+                for arm in ("on", "off"):
+                    hist[arm] += _depth_turn(i)
+                    sessionlog.sync(cid[arm], hist[arm])
+
+            for i in range(samples):                   # measurement — paired
+                order = ("on", "off") if i % 2 == 0 else ("off", "on")
+                order_counts["on_first" if order[0] == "on"
+                             else "off_first"] += 1
+                one: dict[str, float] = {}
+                for arm in order:
+                    hist[arm] += _depth_turn(depth + i)
+                    one[arm] = _timed_sync(cid[arm], hist[arm],
+                                           cached=(arm == "on"))
+                    lat[arm].append(one[arm])
+                if one["on"] > 0:
+                    ratios.append(one["off"] / one["on"])
+
+        return {
+            "depth": depth,
+            "on_p50_ms": pct(lat["on"], 0.5),
+            "off_p50_ms": pct(lat["off"], 0.5),
+            "on_samples": len(lat["on"]),
+            "off_samples": len(lat["off"]),
+            "paired_samples": len(ratios),
+            "order_counts": dict(order_counts),
+            "paired_speedup": statistics.median(ratios) if ratios else None,
+            "paired_ratio_min": min(ratios) if ratios else None,
+            "paired_ratio_max": max(ratios) if ratios else None,
+        }
+
     lo, hi = min(depths), max(depths)
     span = max(1, hi - lo)
-    for arm, cached in (("on", True), ("off", False)):
-        c_lo, c_hi = at(lo, cached), at(hi, cached)
-        out[f"{arm}_ms_at_{lo}"] = c_lo
-        out[f"{arm}_ms_at_{hi}"] = c_hi
-        out[f"{arm}_us_per_turn_of_depth"] = (c_hi - c_lo) / span * 1000.0
+    measured = {d: paired_at(d) for d in sorted({lo, hi})}
+
+    out: dict = {"depths": list(depths), "samples": samples,
+                 "paired": True, "per_depth": measured}
+    for arm in ("on", "off"):
+        out[f"{arm}_ms_at_{lo}"] = measured[lo][f"{arm}_p50_ms"]
+        out[f"{arm}_ms_at_{hi}"] = measured[hi][f"{arm}_p50_ms"]
+        out[f"{arm}_us_per_turn_of_depth"] = (
+            (out[f"{arm}_ms_at_{hi}"] - out[f"{arm}_ms_at_{lo}"])
+            / span * 1000.0)
     on_slope = out["on_us_per_turn_of_depth"]
     off_slope = out["off_us_per_turn_of_depth"]
     out["slope_reduction_x"] = (off_slope / on_slope) if on_slope > 0 else None
-    out["speedup_at_max_depth"] = (out[f"off_ms_at_{hi}"] / out[f"on_ms_at_{hi}"]
-                                   if out[f"on_ms_at_{hi}"] > 0 else None)
+
+    deep = measured[hi]
+    # Kept for the report and for continuity with earlier runs: the ratio of the
+    # two arms' medians. It is the UNPAIRED statistic — the one the Windows PR
+    # run reported as 1.55x under phase-separated measurement — so nothing
+    # asserts on it any more.
+    out["speedup_at_max_depth"] = (deep["off_p50_ms"] / deep["on_p50_ms"]
+                                   if deep["on_p50_ms"] > 0 else None)
+    # The statistic the absolute operator-benefit claim is made on.
+    out["paired_speedup_at_max_depth"] = deep["paired_speedup"]
+    out["paired_samples_at_max_depth"] = deep["paired_samples"]
+    out["order_counts_at_max_depth"] = deep["order_counts"]
     return out
 
 
@@ -1145,7 +1256,106 @@ def bench_storage_per_turn(turns: int = 25) -> dict:
 # 12. concurrency limits
 # --------------------------------------------------------------------------
 
-def bench_usage_contention(levels=(1, 2, 4, 8, 16), per_thread: int = 40) -> list[dict]:
+# Calls issued by EACH worker. Fixed rather than scaled by --quick: the
+# median-versus-threads curve only resolves once every worker has queued on the
+# ledger lock many times over, and a scaled-down run would publish a different
+# curve under the same name.
+CONTENTION_PER_THREAD = 50
+
+# NO WARM-UP, BY DECISION. An earlier revision issued untimed calls before each
+# level and then wiped the day ledger, which made the 1-thread baseline look
+# tidy. It also deleted a real number: the first `usage.record` against a FRESH
+# SCRATCH TREE costs far more than a steady-state one (creating the tree, the
+# OS's first touch of a new directory, and — the first time it happens in a
+# given process — the one-time proclock "fcntl unavailable" capture on Windows).
+# Measured at 592-710 ms on the reference box. So the harness times it instead
+# of hiding it; it lands in the 1-thread row's `max`, guarded on its own terms
+# by the pinning test rather than folded into the contention percentiles.
+#
+# SCOPE, precisely. What this measures is a fresh-scratch-tree first touch, NOT
+# necessarily the first `usage.record` of the Python process: whether the
+# process is genuinely cold depends on what ran before, and under a full pytest
+# session earlier tests will already have imported and exercised
+# `usage.record`/`proclock`. The authoritative process-restart guarantee is
+# owned by a separate fresh-interpreter test
+# (test_val_performance.py::test_first_usage_record_after_process_start_is_bounded),
+# which launches its own `sys.executable` against its own MEMORY_DIR.
+
+# One model string across every level, so `estimate_cost` does identical work
+# and the only variable between rows is the thread count.
+_CONTENTION_MODEL = "claude-opus-4-8"
+
+# The published operating policy (finding F1): council fan-out stays at or below
+# 16 concurrent provider calls per host. The pinning test asserts
+# `MAX_CONCURRENT_CALLS <= 16` so raising the cap past the bound the docs commit
+# to cannot pass silently.
+CONTENTION_OPERATING_BOUND = 16
+
+# The full report's concurrency curve. The powers of two are what make the shape
+# legible as a CURVE rather than three points; `MAX_CONCURRENT_CALLS` is folded
+# in so the cap this process actually enforces is always one of the measured
+# points. With the default cap of 6 that is 1 / 2 / 4 / 6 / 8 / 16.
+REPORT_LEVELS = (1, 2, 4, 8, 16)
+
+
+def contention_levels() -> tuple[int, ...]:
+    """The three levels the FOCUSED CI gate measures.
+
+    1 thread is the uncontended baseline every other level is judged against,
+    `config.MAX_CONCURRENT_CALLS` is the cap this process actually enforces, and
+    `CONTENTION_OPERATING_BOUND` is the fan-out ceiling finding F1 publishes.
+    With the default cap that is 1 / 6 / 16.
+
+    This is the gate's set, deliberately narrower than `report_levels()`: the
+    gate has to answer "does the guarantee still hold at the three levels the
+    documentation commits to", not "what is the shape of the curve".
+    """
+    return tuple(sorted({1, max(1, int(config.MAX_CONCURRENT_CALLS)),
+                         CONTENTION_OPERATING_BOUND}))
+
+
+def report_levels() -> tuple[int, ...]:
+    """The full report's levels — the published curve, plus the enforced cap.
+
+    Never a subset of the historical 1/2/4/8/16: the report's job is to show
+    scaling, and dropping intermediate points would flatten a curve into a
+    slope nobody can check.
+    """
+    return tuple(sorted(set(REPORT_LEVELS)
+                        | {max(1, int(config.MAX_CONCURRENT_CALLS))}))
+
+
+def _persisted_ledger_calls(root: Path) -> tuple[int, list[str]]:
+    """`__all__.calls` summed over every persisted day ledger under `root`.
+
+    Summed across days rather than read from today's file: a run that straddles
+    midnight splits its calls over two ledgers, and reading one would report a
+    phantom accounting loss. Read failures are RETURNED rather than swallowed —
+    an unreadable ledger is itself an accounting defect, and the caller has to
+    be able to say so instead of silently under-counting.
+    """
+    total = 0
+    problems: list[str] = []
+    base = root / "usage"
+    if not base.exists():
+        return 0, [f"no usage ledger directory at {base}"]
+    for path in sorted(base.glob("*.json")):
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            problems.append(f"{path.name}: {type(err).__name__}: {err}")
+            continue
+        row = blob.get("__all__")
+        if not isinstance(row, dict):
+            problems.append(f"{path.name}: no __all__ row")
+            continue
+        total += int(row.get("calls", 0) or 0)
+    return total, problems
+
+
+def bench_usage_contention(levels=None,
+                           per_thread: int = CONTENTION_PER_THREAD,
+                           join_timeout: float = 120.0) -> list[dict]:
     """The scalability shape behind Stage-D finding F1.
 
     F1 was first reported as a percentage: observability costs +72..90% of a
@@ -1156,41 +1366,141 @@ def bench_usage_contention(levels=(1, 2, 4, 8, 16), per_thread: int = 40) -> lis
     What IS decision-relevant is the shape of the dominant component under
     concurrency. `usage.record` runs after EVERY provider call and takes a
     cross-process lock around a read-modify-write of the day ledger, so the
-    council's parallel specialist fan-out serialises there. Median cost is
-    unaffected by concurrency; the TAIL and the throughput ceiling are what
-    move, and only a threaded measurement shows it.
+    council's parallel specialist fan-out serialises there.
 
-    Reports per-call latency percentiles and achieved throughput at each
-    concurrency level. Same-process threads only — this understates the real
-    ceiling, which is shared across every Olympus process on the host.
+    CORRECTION — this docstring, and finding F1 with it, used to say "median
+    cost is unaffected by concurrency; the TAIL and the throughput ceiling are
+    what move". That was wrong, and the harness's own numbers always
+    contradicted it. Serialising N callers behind one lock means the MEDIAN
+    caller waits out roughly N-1 other holders, so the median rises about
+    LINEARLY in the thread count. Measured here (Windows, per-call medians):
+
+        threads      1        6       16
+        p50     0.63 ms  3.47 ms  9.28 ms      (1.0x, 5.5x, 14.8x)
+
+    The tail and the ceiling move too, but the median was never flat — and the
+    pinning test's own bound, single-thread p50 x threads x 1.5, has always
+    encoded linear growth. The guarantee is that the median stays at the
+    SERIALISATION curve and no worse, not that it stays flat.
+
+    Reports, per level: per-call latency percentiles, achieved throughput, and
+    the accounting evidence — how many samples were timed and how many calls
+    actually reached the persisted ledger. The ledger count is the point of the
+    exercise as much as the latency is: `usage.record` swallows a lock timeout
+    by design (losing a row beats re-billing the user), so contention could in
+    principle buy its latency by dropping spend, and only counting the persisted
+    rows would show that.
+
+    FIRST TOUCH IS INCLUDED, NOT HIDDEN. There is no warm-up and the ledger is
+    never wiped: every call this function makes is timed and every call it times
+    is in the ledger it checks. So the first call at each level absorbs that
+    level's fresh-scratch-tree costs — directory creation, the OS's first touch
+    of a new tree, and, if this happens to be the process's first ledger write,
+    the one-time proclock `fcntl` capture on Windows. Measured at 592-710 ms.
+    It lands in the 1-thread row's `max`, where the pinning test guards it on
+    its own terms instead of letting it masquerade as a contention tail.
+
+    That is a fresh-SCRATCH-TREE first touch, and this function does not and
+    cannot claim it is the process's first `usage.record` — a caller that
+    already exercised the ledger leaves the module, the lock table and the
+    proclock warning warm. The process-restart guarantee belongs to the
+    fresh-interpreter test named in the module comment above, not to this row.
+
+    Each level runs in its own scratch tree and starts every worker from a
+    `threading.Barrier` — without that barrier the early threads finish their
+    run before the last one is spawned and the "contended" row measures far less
+    contention than it claims. The realised skew is reported (`start_skew_ms`)
+    so a caller can reject a level where synchronisation did not hold. A worker
+    that raises makes the whole level VOID (RuntimeError), never a fast row: the
+    cheapest way to look fast under contention is to not do the work.
+
+    Same-process threads only — this understates the real ceiling, which is
+    shared across every Olympus process on the host.
     """
     from olympus import memory, usage
-    isolate("usage-contention")
-    memory.set_user("perf")
-    rows = []
-    for threads in levels:
-        lat: list[float] = []
-        guard = threading.Lock()
+    levels = (contention_levels() if levels is None
+              else tuple(sorted({int(t) for t in levels})))
+    if not levels or levels[0] != 1:
+        raise ValueError("contention levels must include an uncontended "
+                         f"1-thread baseline to judge the rest against: {levels}")
+    if per_thread < 1:
+        raise ValueError(f"per_thread must be >= 1, got {per_thread}")
 
-        def worker():
-            local: list[float] = []
-            for _ in range(per_thread):
-                t0 = time.perf_counter()
-                usage.record("claude-opus-4-8", 100, 50)
-                local.append((time.perf_counter() - t0) * 1000.0)
+    rows: list[dict] = []
+    for threads in levels:
+        root = isolate(f"usage-contention-{threads}t")
+        memory.set_user("perf")
+
+        lat: list[float] = []
+        begins: list[float] = []
+        ends: list[float] = []
+        failures: list[str] = []
+        tripped: list[float] = []
+        guard = threading.Lock()
+        # `action` runs once, in whichever worker trips the barrier, before any
+        # of them are released — so this stamp is the true start of the
+        # contended window and excludes thread spawn.
+        gate = threading.Barrier(
+            threads, action=lambda: tripped.append(time.perf_counter()),
+            timeout=join_timeout)
+
+        def worker() -> None:
+            try:
+                # Threads start with a fresh contextvar context, so the user
+                # namespace has to be set here or the ledger attributes the
+                # worker's calls to the default namespace.
+                memory.set_user("perf")
+                gate.wait()
+                begin = time.perf_counter()
+                local = [0.0] * per_thread
+                for i in range(per_thread):
+                    t0 = time.perf_counter()
+                    usage.record(_CONTENTION_MODEL, 100, 50)
+                    local[i] = (time.perf_counter() - t0) * 1000.0
+                end = time.perf_counter()
+            except BaseException as exc:                        # noqa: BLE001
+                gate.abort()      # never strand the other workers on the gate
+                with guard:
+                    failures.append(f"{type(exc).__name__}: {exc}")
+                return
             with guard:
                 lat.extend(local)
+                begins.append(begin)
+                ends.append(end)
 
-        pool = [threading.Thread(target=worker) for _ in range(threads)]
-        t0 = time.perf_counter()
+        pool = [threading.Thread(target=worker, name=f"contend-{threads}-{i}")
+                for i in range(threads)]
         for t in pool:
             t.start()
         for t in pool:
-            t.join()
-        wall = time.perf_counter() - t0
+            t.join(join_timeout)
+        stuck = [t.name for t in pool if t.is_alive()]
+
+        if failures or stuck or not tripped or len(ends) != threads:
+            raise RuntimeError(
+                f"bench_usage_contention: the {threads}-thread measurement is "
+                f"VOID, not slow — worker errors: {failures or 'none'}; "
+                f"threads still running after {join_timeout}s: "
+                f"{stuck or 'none'}; start barrier tripped {len(tripped)} "
+                f"time(s), expected 1; {len(ends)}/{threads} workers finished; "
+                f"{len(lat)}/{threads * per_thread} samples collected")
+
+        wall = max(ends) - tripped[0]
+        ledger_calls, ledger_problems = _persisted_ledger_calls(root)
         row = summarize(lat)
-        row.update({"threads": threads, "wall_ms": wall * 1000.0,
-                    "calls_per_s": len(lat) / wall if wall > 0 else 0.0})
+        row.update({
+            "threads": threads,
+            "per_thread": per_thread,
+            "wall_ms": wall * 1000.0,
+            "calls_per_s": len(lat) / wall if wall > 0 else 0.0,
+            "expected_samples": threads * per_thread,
+            "expected_calls": threads * per_thread,
+            "ledger_calls": ledger_calls,
+            "ledger_read_errors": ledger_problems,
+            "barrier_parties": threads,
+            "workers_started": len(begins),
+            "start_skew_ms": (max(begins) - min(begins)) * 1000.0,
+        })
         rows.append(row)
     return rows
 
@@ -1441,9 +1751,30 @@ FINDINGS = [
      "the contract. The term is invisible below ~1000 turns and reaches ~6.6 ms "
      "at 3000. RESIDUAL 2: sessionlog.compact() still has zero callers in "
      "olympus/, so journal SIZE remains bounded only by the 64 MB cap. "
+     "METHODOLOGY (corrected): the two cache arms are measured PAIRED at each "
+     "depth -- two independent sessions in one environment, interleaved sample "
+     "by sample with alternating ON-first/OFF-first order -- and the absolute "
+     "operator speedup is the MEDIAN OF THE PER-PAIR OFF/ON RATIOS. Measuring "
+     "the arms in separate sequential phases (the earlier method) leaves the "
+     "depth slope intact but exposes the absolute ratio to ambient load: a "
+     "Windows CI runner reported cache-ON as 29.31 ms at depth 100 and "
+     "25.34 ms at depth 900 -- cheaper at greater depth, which is inconsistent "
+     "with the scaling shape this code produces under stable measurement "
+     "conditions and is evidence consistent with phase-separated ambient-load "
+     "contamination. Which runner activity caused it cannot be determined from "
+     "those timings alone. The resulting 1.55x ratio failed a 2x assertion "
+     "that the scaling evidence does not support treating as a regression. "
+     "The threshold was kept and the measurement fixed. Pairing makes the two "
+     "observations in a ratio time-local and removes multi-minute "
+     "phase-separation bias; alternating order balances first/second-position "
+     "effects; the median tolerates isolated outlying pairs but is NOT immune "
+     "to scheduler or load stalls, and enough disturbed pairs will still move "
+     "it. "
      "Pinned by tests/test_sessionlog_cache.py (13 correctness tests) and "
      "test_val_performance.py::"
-     "test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated."),
+     "test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated, plus "
+     "test_sync_depth_scaling_measures_the_two_arms_paired_and_order_balanced "
+     "which fails if the A/B ever returns to sequential phases."),
     ("F1", "FINDING -- RE-CHARACTERISED, ACCEPTED WITH A MEASURED BOUND",
      "Observability roughly DOUBLES fake-pipeline wall time (+1.5 to +2.1 ms/run)",
      "Interleaved A/B over 20 iterations: OFF 1.61 ms -> ON 3.64 ms, paired "
@@ -1466,10 +1797,21 @@ FINDINGS = [
      "not a user-visible latency regression, and the >20% threshold that "
      "raised this finding does not apply to a zero-latency denominator. "
      "The concurrency concern IS real and is now MEASURED rather than "
-     "asserted (harness row 12, bench_usage_contention). usage.record, "
-     "1->16 threads: p50 flat at ~0.20 ms, but p99 0.63 -> 122.9 ms, max "
-     "0.63 -> 224.2 ms, throughput ceiling ~2000 calls/s and falling. Median "
-     "cost does not degrade; the TAIL and the ceiling do. "
+     "asserted (harness row 12, bench_usage_contention). "
+     "CORRECTION: this entry used to read 'p50 flat at ~0.20 ms ... median "
+     "cost does not degrade; the TAIL and the ceiling do'. That was wrong. "
+     "Serialising N callers behind one lock makes the MEDIAN caller wait out "
+     "roughly N-1 other holders, so the median rises about LINEARLY in the "
+     "thread count -- measured at 1 / 6 (MAX_CONCURRENT_CALLS) / 16 threads: "
+     "p50 0.63 -> 3.47 -> 9.28 ms, i.e. 5.5x and 14.8x the uncontended "
+     "median. The tail and the ceiling move as well (p99 into the tens of ms, "
+     "throughput plateauing ~1300-1700 calls/s), but 'the median is flat' was "
+     "never true and should never have been published: the pinning test's own "
+     "bound -- single-thread p50 x threads x 1.5 -- has always encoded linear "
+     "growth, so the claim contradicted the assertion guarding it. What is "
+     "guaranteed is that the median tracks the SERIALISATION curve and no "
+     "worse, that the tail stays far inside a provider call, and that no call "
+     "is lost from the ledger while doing so. "
      "ACCEPTED, NOT FIXED, and deliberately so: the obvious fix -- batching or "
      "deferring ledger writes -- would make spend non-durable between "
      "flushes, and the spend cap is a governance SAFETY property. Trading a "
@@ -1478,10 +1820,20 @@ FINDINGS = [
      "format, which every reader and CLI report depends on; that is a "
      "designed change, not Phase-4 triage. "
      "OPERATING BOUND for canary/production: council fan-out must stay at or "
-     "below 16 concurrent provider calls per host, where the accounting tail "
-     "is ~123 ms against multi-second provider calls. Above that the ledger "
-     "lock, not the provider, becomes the limiter. Pinned by "
-     "test_val_performance.py::test_usage_ledger_tail_under_concurrency."),
+     "below 16 concurrent provider calls per host, where accounting costs a "
+     "~9 ms median and a tail in the tens of ms against multi-second provider "
+     "calls. Above that the ledger lock, not the provider, becomes the "
+     "limiter -- and because the median grows linearly, it degrades for EVERY "
+     "call, not just the unlucky ones. Pinned by "
+     "test_val_performance.py::test_usage_ledger_tail_under_concurrency, "
+     "which measures 1 / MAX_CONCURRENT_CALLS / 16 threads at 50 calls each "
+     "over 5 independent repetitions, asserts MAX_CONCURRENT_CALLS <= 16 so "
+     "this bound cannot be exceeded silently, and verifies that every call "
+     "reached the persisted ledger. Stated at its true strength: the LATENCY "
+     "bounds carry a 3-of-5 noise tolerance, so a regression firing on fewer "
+     "than three repetitions in five can pass that gate; the ACCOUNTING check "
+     "carries none and must hold 5/5. The gate measures three levels, not the "
+     "curve -- the curve is this report's row 12."),
     ("F2", "OBSERVATION",
      "streamguard costs 21.9 us/delta (43.7 ms on a 2000-delta stream)",
      "OFF (NullMonitor) 0.03 us/delta vs ON 21.88 us/delta.",
@@ -1560,8 +1912,11 @@ def run_all(quick: bool = False) -> dict:
     results["ladder"] = bench_ladder(s(40, 5))
     results["memory"] = bench_memory_growth(s(1000, 100))
     results["storage"] = bench_storage_per_turn(s(25, 5))
-    results["usage_contention"] = bench_usage_contention(
-        (1, 2, 4, 8, 16), s(40, 8))
+    # Deliberately NOT scaled by --quick: the report publishes a CURVE, and
+    # 50 calls/thread is what makes the serialisation shape resolve. The levels
+    # are the historical 1/2/4/8/16 plus whatever cap this process enforces, so
+    # the report never loses a point the previous revision published.
+    results["usage_contention"] = bench_usage_contention(report_levels())
     results["concurrency"] = bench_concurrency_limit()
     results["harness_seconds"] = time.perf_counter() - t_start
     cleanup()
@@ -1607,6 +1962,16 @@ def render(r: dict) -> None:
          f"{ds['off_us_per_turn_of_depth']:.2f} us/turn",
          f"reduction {ds['slope_reduction_x']:.1f}x" if ds["slope_reduction_x"]
          else "")
+    _paired = ds.get("paired_speedup_at_max_depth")
+    _orders = ds.get("order_counts_at_max_depth", {})
+    _row("    operator speedup at depth", f"paired, depth {hi}",
+         f"{_paired:.2f}x" if _paired else "n/a",
+         f"median of {ds.get('paired_samples_at_max_depth', 0)} PAIRED "
+         f"OFF/ON ratios, order-balanced "
+         f"(ON-first {_orders.get('on_first', 0)} / "
+         f"OFF-first {_orders.get('off_first', 0)}) — the unpaired ratio of "
+         f"medians is {ds['speedup_at_max_depth']:.2f}x"
+         if _paired and ds.get("speedup_at_max_depth") else "")
     print(_rule())
 
     sy = r["sessionlog_sync"]
@@ -1763,7 +2128,8 @@ def render(r: dict) -> None:
              f"{row['threads']} thread" + ("" if row["threads"] == 1 else "s"),
              f"{row['p50']:.3f} ms",
              f"p99 {row['p99']:.1f} ms  max {row['max']:.1f} ms  "
-             f"{row['calls_per_s']:.0f} calls/s")
+             f"{row['calls_per_s']:.0f} calls/s  "
+             f"ledger {row['ledger_calls']}/{row['expected_calls']} calls")
     print(_rule())
 
     cc = r["concurrency"]
