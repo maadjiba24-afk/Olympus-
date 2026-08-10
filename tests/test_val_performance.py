@@ -828,15 +828,356 @@ def test_projected_append_cost_is_never_negative():
     assert "slope_ms_per_record" in r
 
 
-def test_sessionlog_sync_is_the_live_per_turn_path_and_is_bounded():
-    """`memory.save_conversation` calls `sessionlog.sync`, not `append_turn`.
+# --- 1b. sessionlog.sync: the LIVE per-turn path, DETERMINISTIC contracts ----
+#
+# WHAT MOVED, AND WHY. This test used to assert `p50 < 60 ms` and
+# `p99 < 250 ms` inside the REQUIRED suite, which runs on uncontrolled
+# GitHub-hosted runners. On 2026-08-09 run 31377790256 it failed the Windows
+# 3.12 leg at p99 284.429 ms, on a commit whose failing test function
+# (sha256 86dcc0bdce5e69df) and benchmark (0c348439ff53962b) are byte-identical
+# to its base, whose diff touched no file under olympus/, and whose local
+# Windows full suite passed. Linux 3.10-3.13 passed the same commit. The series
+# DECAYED (first decile 74.406 ms -> last decile 9.273 ms) where the cached path
+# should be roughly flat in depth. Consistent with uncontrolled runner variance
+# or an early-run transient; the precise external cause is NOT proven.
+#
+# The thresholds were not raised, scaled or deleted. They live unchanged in
+# scripts/sessionlog_sync_telemetry.py on a scheduled/manual workflow.
+#
+# `sync` IS production, so deleting a timing bound without replacing it would
+# be indefensible. What is required here now is strictly stronger than a clock
+# and independent of host speed: routing, one record per extending turn, dense
+# sequences, a verified hash chain, replayed-history equality, and exact
+# scan/fsync/byte accounting including the cached-vs-uncached D1 property.
 
-    Reference (post-D1-fix): p50 1.47 ms over 400 turns, flat in depth.
+def test_save_conversation_routes_the_turn_to_sessionlog_sync(monkeypatch,
+                                                              tmp_path):
+    """The routing claim, asserted instead of merely documented.
+
+    The old docstring said "`memory.save_conversation` calls `sessionlog.sync`,
+    not `append_turn`" and nothing verified it. If that routing ever changed,
+    every guarantee below would be measuring a path production does not use.
     """
-    r = pv.bench_sessionlog_sync(turns=60)
-    assert r["turns"] == 60 and r["cache"] is True
-    assert r["p50"] < 60.0, f"sync p50 regressed: {r}"
-    assert r["p99"] < 250.0, f"sync p99 regressed: {r}"
+    from olympus import config, memory, sessionlog
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    memory.set_user("perf")
+    seen = {}
+    real_sync = sessionlog.sync
+
+    def spy(conversation_id, history):
+        seen["cid"] = conversation_id
+        seen["history"] = [dict(m) for m in history]
+        seen["calls"] = seen.get("calls", 0) + 1
+        return real_sync(conversation_id, history)
+
+    monkeypatch.setattr(sessionlog, "sync", spy)
+    monkeypatch.setattr(sessionlog, "append_turn", _refuse_append_turn)
+
+    history = [{"role": "user", "content": "one"},
+               {"role": "assistant", "content": "two"}]
+    with pv.env(OLYMPUS_SESSION_JOURNAL="on", OLYMPUS_SESSION_FSYNC="auto"):
+        memory.save_conversation("route-probe", history)
+
+    assert seen.get("calls") == 1, "save_conversation did not reach sync once"
+    assert seen["cid"] == "route-probe", seen["cid"]
+    assert seen["history"] == history, "sync received a different history"
+
+
+def _refuse_append_turn(*_a, **_k):
+    raise AssertionError(
+        "memory.save_conversation used append_turn; the live per-turn path is "
+        "sessionlog.sync and every contract below assumes it")
+
+
+def test_sync_journals_every_turn_with_a_verified_chain():
+    """Integrity of the live path. Host-independent; no wall-clock anywhere.
+
+    Real syncs against a real journal — nothing about the work under test is
+    mocked. `sync` captures its own exceptions and returns 0 by design, so a
+    journal that silently stopped being written would produce excellent
+    timings; this is what makes that impossible to report as success.
+    """
+    from olympus import sessionlog
+
+    turns = 60
+    r = pv.bench_sessionlog_sync(turns=turns)
+
+    # The benchmark's own accounting.
+    assert r["turns"] == turns and r["cache"] is True
+    assert r["n"] == turns, r
+    assert r["records_verified"] == turns, r
+    assert r["journal_status"] == "ok", r
+    assert r["journal_bytes"] > 0, r
+    assert r["seqs_dense"] is True, r
+    assert r["chain_verified"] is True, r
+    assert r["replayed_history_matches"] is True, r
+
+    # ...and an independent re-read confirms it, chain and all.
+    records, status = sessionlog.read_verified(r["conversation_id"])
+    assert status == "ok"
+    assert len(records) == turns
+    assert [rec["seq"] for rec in records] == list(range(1, turns + 1)), (
+        "sequence numbers must be exactly 1..turns, dense, no gaps")
+    prev = ""
+    for rec in records:
+        assert rec["kind"] == "turn", rec["kind"]
+        assert rec["prev"] == prev, f"chain break at seq {rec['seq']}"
+        assert rec["sha"] == sessionlog._seal(rec), (
+            f"record {rec['seq']} does not verify against its own seal")
+        prev = rec["sha"]
+
+
+def test_a_swallowed_sync_failure_voids_the_measurement(monkeypatch):
+    """`sync` returns 0 on failure instead of raising — that must not be fast.
+
+    `_open_append` is the module's documented fault-injection seam. With it
+    failing, `sync` captures the error and returns 0, so the benchmark sees a
+    turn that journaled nothing. It must raise rather than summarise the
+    samples it collected: the cheapest way to look fast is to stop working.
+    """
+    from olympus import sessionlog
+
+    calls = {"n": 0}
+    real_open = sessionlog._open_append
+
+    def failing_open(path):
+        calls["n"] += 1
+        if calls["n"] > 5:
+            raise OSError("simulated journal write fault")
+        return real_open(path)
+
+    monkeypatch.setattr(sessionlog, "_open_append", failing_open)
+
+    with pytest.raises(RuntimeError, match="measurement void"):
+        pv.bench_sessionlog_sync(turns=20)
+    assert calls["n"] > 5, "the fault never fired, so this asserted nothing"
+
+
+def test_an_unexpected_sync_return_is_reported_without_echoing_it(monkeypatch):
+    """The void message must be constant — the returned value is caller-shaped.
+
+    A patched or faulty `sync` can return anything, including an object whose
+    `__str__`/`__repr__` carries a credential. Interpolating it would put that
+    into a traceback and from there into a CI log.
+    """
+    from olympus import sessionlog
+
+    secret = "sk_live_9f3a21_TAVILY_API_KEY"
+
+    class _SecretSeq:
+        def __eq__(self, other):
+            return False
+
+        def __repr__(self):
+            return f"<seq {secret}>"
+
+        def __str__(self):
+            return secret
+
+    monkeypatch.setattr(sessionlog, "sync", lambda cid, hist: _SecretSeq())
+
+    with pytest.raises(RuntimeError) as caught:
+        pv.bench_sessionlog_sync(turns=5)
+
+    rendered = f"{caught.value!r} {caught.value}"
+    assert "measurement void" in rendered
+    assert secret not in rendered, "the returned value leaked into the error"
+    assert "_SecretSeq" not in rendered, "the type name leaked into the error"
+
+
+def test_sync_corruption_is_detected_not_silently_accepted(tmp_path,
+                                                           monkeypatch):
+    """A mutated journal must not verify.
+
+    Guards the chain assertions above against being vacuous: if
+    `read_verified` accepted anything, they would prove nothing.
+    """
+    from olympus import config, memory, sessionlog
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    memory.set_user("perf")
+    cid = "sync-corrupt-probe"
+    history = []
+    with pv.env(OLYMPUS_SESSION_JOURNAL="on", OLYMPUS_SESSION_FSYNC="auto"):
+        for i in range(5):
+            history.append({"role": "user", "content": f"q{i}"})
+            assert sessionlog.sync(cid, history) == i + 1
+        records, status = sessionlog.read_verified(cid)
+        assert status == "ok" and len(records) == 5
+
+        # Flip a byte inside the FIRST record — mid-file, so it cannot be
+        # excused as a torn tail.
+        path = sessionlog._journal_path(sessionlog._sid(cid))
+        raw = path.read_bytes()
+        first_nl = raw.index(b"\n")
+        mutated = raw[:first_nl].replace(b'"content":"q0"',
+                                         b'"content":"q9"', 1)
+        assert mutated != raw[:first_nl], "the probe failed to mutate anything"
+        path.write_bytes(mutated + raw[first_nl:])
+
+        after, after_status = sessionlog.read_verified(cid)
+    assert after_status != "ok" or len(after) < 5, (
+        "a mid-file mutation was accepted as a verified journal")
+
+
+def _sync_work(turns, *, cache, monkeypatch):
+    """Run one isolated arm and return its operation/byte accounting.
+
+    Only the module's own narrow seams are used — `_scan`, `_open_append`
+    (documented as a test seam) and `os.fsync`. `Path.read_bytes` is counted
+    only for the journal under test, so unrelated filesystem activity is never
+    attributed to the benchmark. No production file is modified.
+    """
+    from pathlib import Path as _Path
+
+    from olympus import sessionlog
+
+    scans: list[dict] = []
+    reads: list[int] = []
+    writes: list[int] = []
+    targets: set = set()
+    fsyncs = {"n": 0}
+    opens = {"n": 0}
+
+    verification_at = {"index": None}
+
+    real_scan = sessionlog._scan
+    real_open = sessionlog._open_append
+    real_fsync = sessionlog.os.fsync
+    real_read_bytes = _Path.read_bytes
+    real_read_verified = sessionlog.read_verified
+
+    def marking_read_verified(cid):
+        # The benchmark's own integrity read is NOT part of the sync path. Mark
+        # where it starts so its scan is never charged to the 60 syncs.
+        verification_at["index"] = len(scans)
+        return real_read_verified(cid)
+
+    def counting_read_bytes(self):
+        data = real_read_bytes(self)
+        if self in targets:
+            reads.append(len(data))
+        return data
+
+    def counting_scan(sid):
+        path = sessionlog._journal_path(sid)
+        targets.add(path)
+        size = path.stat().st_size if path.exists() else 0
+        before = len(reads)
+        try:
+            return real_scan(sid)
+        finally:
+            scans.append({"journal_size_at_scan_start": size,
+                          "actual_bytes_read": sum(reads[before:])})
+
+    class _CountingHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, data):
+            writes.append(len(data))
+            return self._handle.write(data)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def counting_open(path):
+        opens["n"] += 1
+        return _CountingHandle(real_open(path))
+
+    def counting_fsync(fd):
+        fsyncs["n"] += 1
+        return real_fsync(fd)
+
+    monkeypatch.setattr(sessionlog, "_scan", counting_scan)
+    monkeypatch.setattr(sessionlog, "_open_append", counting_open)
+    monkeypatch.setattr(sessionlog.os, "fsync", counting_fsync)
+    monkeypatch.setattr(_Path, "read_bytes", counting_read_bytes)
+    monkeypatch.setattr(sessionlog, "read_verified", marking_read_verified)
+
+    result = pv.bench_sessionlog_sync(turns=turns, cache=cache)
+
+    monkeypatch.undo()
+    boundary = verification_at["index"]
+    assert boundary is not None, (
+        "the benchmark never performed its integrity read, so its record "
+        "count and status are unsubstantiated")
+    return {"result": result,
+            "sync_scans": scans[:boundary],
+            "verification_scans": scans[boundary:],
+            "writes": writes, "fsyncs": fsyncs["n"], "opens": opens["n"]}
+
+
+def test_sync_does_a_bounded_and_exactly_durable_amount_of_work(monkeypatch):
+    """Work accounting in operations and bytes, not time.
+
+    This is what replaces the wall-clock gate as the REQUIRED signal, and it is
+    strictly stronger against the regressions a clock was meant to catch: a lost
+    cache, an extra scan, a lost fsync or a second pass over the journal each
+    change a count here, deterministically, on any host at any speed.
+
+    It also expresses the D1 property — the reason the cache exists — WITHOUT a
+    stopwatch: the cached arm must not rescan the journal on every turn, and
+    the uncached arm must.
+    """
+    turns = 60
+
+    cached = _sync_work(turns, cache=True, monkeypatch=monkeypatch)
+    uncached = _sync_work(turns, cache=False, monkeypatch=monkeypatch)
+
+    for arm, label in ((cached, "cached"), (uncached, "uncached")):
+        r = arm["result"]
+        assert r["records_verified"] == turns, (label, r)
+        assert r["journal_status"] == "ok", (label, r)
+        assert r["seqs_dense"] and r["chain_verified"], (label, r)
+        assert r["replayed_history_matches"], (label, r)
+
+        # Durability is EXACT: one extending sync must leave one durable
+        # record. `fsync='auto'` still fsyncs once per append
+        # (sessionlog._append_records: `if not always: os.fsync(...)`).
+        assert arm["fsyncs"] == turns, (
+            f"{label}: expected exactly {turns} fsyncs, got {arm['fsyncs']} — "
+            f"durability per turn is a correctness property")
+        # One sealed line per turn, one open per turn.
+        assert len(arm["writes"]) == turns, (label, len(arm["writes"]))
+        assert arm["opens"] == turns, (label, arm["opens"])
+        # Bytes written must equal the journal on disk — derived from the bytes
+        # actually presented to the write seam, never an assumed record size.
+        assert r["journal_bytes"] == sum(arm["writes"]), (
+            f"{label}: journal is {r['journal_bytes']} bytes but "
+            f"{sum(arm['writes'])} were written")
+        # A scan can never read more than the file held at the time.
+        for i, scan in enumerate(arm["sync_scans"] + arm["verification_scans"]):
+            assert (scan["actual_bytes_read"]
+                    <= scan["journal_size_at_scan_start"]), (label, i, scan)
+        # The integrity read really happened.
+        assert len(arm["verification_scans"]) >= 1, label
+
+    # --- the D1 property, counted rather than timed -------------------------
+    # Counted over the SYNC phase only: the benchmark's own `read_verified`
+    # scan is not part of the path under test and is excluded above.
+    #
+    # The cached arm's one scan is the cold first turn — there is no cache
+    # entry to hit before the first write, which `sessionlog.sync` documents
+    # ("On any miss — first turn of a process, ... — it falls through"). Turns
+    # 2..60 must all hit.
+    cached_scans = len(cached["sync_scans"])
+    uncached_scans = len(uncached["sync_scans"])
+    assert cached_scans <= 1, (
+        f"the cached arm performed {cached_scans} full journal scans across "
+        f"{turns} syncs; the cache exists so per-turn cost stops scaling with "
+        f"depth, so only the unavoidable cold first turn may scan")
+    assert uncached_scans == turns, (
+        f"the uncached arm performed {uncached_scans} scans, expected exactly "
+        f"{turns} — it must reproduce the pre-D1 rescan-per-turn behaviour, or "
+        f"this A/B proves nothing")
+    assert cached_scans < uncached_scans, (
+        f"cached scans ({cached_scans}) must be strictly fewer than uncached "
+        f"({uncached_scans})")
+    assert (sum(s["actual_bytes_read"] for s in cached["sync_scans"])
+            < sum(s["actual_bytes_read"] for s in uncached["sync_scans"])), (
+        "the cached arm must also read strictly fewer journal bytes")
 
 
 def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated():
