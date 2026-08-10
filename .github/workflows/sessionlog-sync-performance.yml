@@ -20,6 +20,16 @@ name: Sessionlog sync performance telemetry
 # This job goes red on a breach and that red is real evidence; it simply does
 # not hold an unrelated pull request shut.
 #
+# A SECOND relocated contract runs here too: the D1 depth-scaling A/B, at
+# depths=(100, 900) and samples=12, with its original strict bounds —
+# uncached slope > 5.0 us/turn, cached slope < uncached/5.0, and paired
+# speedup at the maximum depth > 2.0. It was left in required pytest by the
+# first pass of this correction and duly failed push run 31427036314 on the
+# Windows 3.12 leg (reduction 1.935x, paired speedup 1.638x) on a branch that
+# changed no production code. Both contracts are measured once per leg, in
+# separate protected steps, so a breach in one still yields the other's
+# evidence.
+#
 # `sessionlog.sync` IS production (orchestrator -> memory.save_conversation ->
 # sync), so moving a timing bound is only defensible because the deterministic
 # integrity contract that replaced it in the required suite is strictly
@@ -67,19 +77,36 @@ jobs:
       - run: pip install --require-hashes -r requirements.lock
       - run: pip install -e . --no-deps
 
-      # Exactly one execution per matrix leg. No retry, no resampling, no
-      # sample selection, and no `continue-on-error`: a non-zero exit fails
-      # this job.
+      # TWO relocated contracts, each measured EXACTLY ONCE per matrix leg. No
+      # retry, no resampling, no sample selection, and no `continue-on-error`:
+      # a non-zero exit from either step fails this job.
       - name: Measure sessionlog.sync latency
         run: >
           python scripts/sessionlog_sync_telemetry.py
-          --out sessionlog-sync-telemetry.json
+          --measure latency
+          --out sessionlog-sync-latency.json
 
-      # Uploaded even when the step above failed, because a red run is exactly
-      # when the numbers are worth reading. The name carries the matrix leg so
-      # the five jobs cannot collide on one artifact.
+      # `if: always()` so a latency breach cannot suppress the depth-scaling
+      # evidence. It does NOT soften the verdict — the job is already red from
+      # the step above, and this step's own exit code is honoured too.
+      - name: Measure sessionlog.sync depth scaling
+        if: always()
+        run: >
+          python scripts/sessionlog_sync_telemetry.py
+          --measure depth
+          --out sessionlog-sync-depth.json
+
+      # Uploaded even when a measurement failed, because a red run is exactly
+      # when the numbers are worth reading. Each name carries both the contract
+      # and the matrix leg, so ten uploads cannot collide.
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sessionlog-sync-telemetry-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: sessionlog-sync-telemetry.json
+          name: sessionlog-sync-latency-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: sessionlog-sync-latency.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sessionlog-sync-depth-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: sessionlog-sync-depth.json

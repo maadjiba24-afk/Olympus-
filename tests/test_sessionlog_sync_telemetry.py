@@ -399,8 +399,15 @@ def test_a_valid_measurement_is_published_unchanged():
 
 
 
+# "no result supplied" and "supplied None on purpose" are different things, and
+# `result=None` used to mean the first. That made the second untestable: a
+# benchmark that silently returns `None` was exactly the false-green path the
+# runner had to be hardened against, and no fake could express it.
+_UNSET = object()
+
+
 class _FakeHarness:
-    def __init__(self, *, result=None, bench_error=None, cleanup_error=None):
+    def __init__(self, *, result=_UNSET, bench_error=None, cleanup_error=None):
         self._result = result
         self._bench_error = bench_error
         self._cleanup_error = cleanup_error
@@ -409,7 +416,7 @@ class _FakeHarness:
     def bench_sessionlog_sync(self, turns, cache):
         if self._bench_error is not None:
             raise self._bench_error
-        return self._result if self._result is not None else _result()
+        return _result() if self._result is _UNSET else self._result
 
     def cleanup(self):
         self.cleanup_calls += 1
@@ -475,8 +482,8 @@ def test_a_serialization_failure_still_writes_a_minimal_red_artifact(
     """`allow_nan=False` plus an unserialisable payload must not lose the run."""
     original = sst._published
 
-    def poisoned(result):
-        published = original(result)
+    def poisoned(result, contract=None):
+        published = original(result, contract)
         published["poison"] = _Unserializable()
         return published
 
@@ -906,3 +913,841 @@ def test_failure_stages_are_a_closed_vocabulary():
                                "publication", "cleanup", "serialization"}
     for stage in sst.STAGES:
         assert stage.isascii() and stage.islower()
+
+
+def test_the_benchmark_and_measurement_vocabularies_are_closed():
+    assert set(sst.BENCHMARKS) == {"sessionlog.sync",
+                                   "sessionlog.sync depth scaling"}
+    assert set(sst.MEASUREMENTS) == {"latency", "depth"}
+
+
+# =============================================================================
+# The SECOND relocated contract: D1 depth scaling
+# =============================================================================
+#
+# `test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated` asserted
+# three wall-clock bounds on the same production path and was left in required
+# pytest by the first pass of this correction. Push run 31427036314 failed the
+# Windows 3.12 leg on it — cached slope 18.320 us/turn, uncached 35.444,
+# reduction 1.935x against a required 5x, paired speedup 1.638x against a
+# required 2x — on a branch that changed no production code.
+#
+# The bounds are unchanged and the strict comparisons are unchanged; only the
+# place a breach blocks has moved.
+
+_DEPTHS = sst.DEPTH_CONTRACT["depths"]
+_LO, _HI = min(_DEPTHS), max(_DEPTHS)
+_SAMPLES = sst.DEPTH_CONTRACT["samples"]
+
+
+def _depth_row(depth, over=None):
+    """One coherent per-depth row.
+
+    Overrides arrive as a dict rather than `**kwargs` so a test can poison
+    `depth` itself without colliding with this function's own parameter.
+    """
+    on = 1.0 + depth * 0.001
+    off = 1.0 + depth * 0.040
+    row = {
+        "depth": depth,
+        "on_p50_ms": on,
+        "off_p50_ms": off,
+        "on_samples": _SAMPLES,
+        "off_samples": _SAMPLES,
+        "paired_samples": _SAMPLES,
+        "order_counts": {"on_first": _SAMPLES // 2,
+                         "off_first": _SAMPLES - _SAMPLES // 2},
+        "paired_speedup": off / on,
+        "paired_ratio_min": off / on * 0.9,
+        "paired_ratio_max": off / on * 1.1,
+    }
+    row.update(over or {})
+    return row
+
+
+def _depth_result(*, rows=None, **over):
+    """A structurally perfect, comfortably passing depth measurement.
+
+    Derived fields are computed with the benchmark's own formulas so the
+    baseline satisfies every identity; a test that wants an inconsistency pins
+    the field itself.
+    """
+    per_depth = rows if rows is not None else {d: _depth_row(d)
+                                               for d in (_LO, _HI)}
+    span = max(1, _HI - _LO)
+    out = {"depths": list(_DEPTHS), "samples": _SAMPLES, "paired": True,
+           "per_depth": per_depth}
+    for arm in ("on", "off"):
+        out[f"{arm}_ms_at_{_LO}"] = per_depth[_LO][f"{arm}_p50_ms"]
+        out[f"{arm}_ms_at_{_HI}"] = per_depth[_HI][f"{arm}_p50_ms"]
+        out[f"{arm}_us_per_turn_of_depth"] = (
+            (out[f"{arm}_ms_at_{_HI}"] - out[f"{arm}_ms_at_{_LO}"])
+            / span * 1000.0)
+    on_slope = out["on_us_per_turn_of_depth"]
+    off_slope = out["off_us_per_turn_of_depth"]
+    out["slope_reduction_x"] = (off_slope / on_slope) if on_slope > 0 else None
+    deep = per_depth[_HI]
+    # A test may pin a row value to something impossible (0.0, a subclass, a
+    # string) to exercise a rejection; the helper must still build a dict
+    # rather than raising, or the case under test never reaches the evaluator.
+    on_deep = deep["on_p50_ms"]
+    out["speedup_at_max_depth"] = (
+        deep["off_p50_ms"] / on_deep
+        if type(on_deep) in (int, float) and on_deep else 0.0)
+    out["paired_speedup_at_max_depth"] = deep["paired_speedup"]
+    out["paired_samples_at_max_depth"] = deep["paired_samples"]
+    out["order_counts_at_max_depth"] = deep["order_counts"]
+    out.update(over)
+    return out
+
+
+def _set_paired_speedup(result, value):
+    """Set the deepest row's paired speedup, keeping its ratio range coherent.
+
+    The median must lie inside the range the per-pair ratios spanned. A test
+    that lowers the median to exercise the 2.0 bound must move the range with
+    it, or it builds an arithmetically impossible row and trips the coherence
+    check instead of the threshold it meant to test.
+    """
+    deep = result["per_depth"][_HI]
+    deep["paired_speedup"] = value
+    deep["paired_ratio_min"] = value * 0.9
+    deep["paired_ratio_max"] = value * 1.1
+    result["paired_speedup_at_max_depth"] = value
+    return result
+
+
+def test_the_depth_parameters_and_thresholds_are_the_preserved_ones():
+    c = sst.DEPTH_CONTRACT
+    assert c["depths"] == (100, 900)
+    assert c["samples"] == 12
+    assert c["min_uncached_slope_us_per_turn"] == 5.0
+    assert c["slope_reduction_factor"] == 5.0
+    assert c["min_paired_speedup_at_max_depth"] == 2.0
+    assert c["benchmark"] == "sessionlog.sync depth scaling"
+
+
+def test_a_healthy_depth_measurement_passes():
+    assert sst.evaluate_depth(_depth_result()) == []
+
+
+# --- the three preserved bounds, with their original strict comparisons ------
+
+def test_the_reported_ci_failure_shape_is_rejected():
+    """The exact numbers from push run 31427036314."""
+    result = _depth_result(on_us_per_turn_of_depth=18.32037499994499,
+                           off_us_per_turn_of_depth=35.444375000110995,
+                           slope_reduction_x=1.9346970244996309)
+    # Recompute the medians so the slope identity still holds.
+    span = max(1, _HI - _LO)
+    for arm, slope in (("on", 18.32037499994499),
+                       ("off", 35.444375000110995)):
+        result[f"{arm}_ms_at_{_HI}"] = (result[f"{arm}_ms_at_{_LO}"]
+                                        + slope * span / 1000.0)
+        result["per_depth"][_HI][f"{arm}_p50_ms"] = result[f"{arm}_ms_at_{_HI}"]
+    deep = result["per_depth"][_HI]
+    deep["paired_speedup"] = 1.6382275114582876
+    deep["paired_ratio_min"] = 1.5
+    deep["paired_ratio_max"] = 1.8
+    result["paired_speedup_at_max_depth"] = 1.6382275114582876
+    result["speedup_at_max_depth"] = deep["off_p50_ms"] / deep["on_p50_ms"]
+
+    reasons = sst.evaluate_depth(result)
+    assert any("cached slope" in r for r in reasons), reasons
+    assert any("paired speedup" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("off_slope, why", [
+    (5.0, "exactly on the floor must fail, as `> 5.0` did"),
+    (4.999999, "below the floor"),
+    (0.0, "a flat pre-fix arm reproduces nothing"),
+])
+def test_the_uncached_slope_floor_is_strict(off_slope, why):
+    span = max(1, _HI - _LO)
+    result = _depth_result()
+    result["off_ms_at_900"] = (result[f"off_ms_at_{_LO}"]
+                               + off_slope * span / 1000.0)
+    result["per_depth"][_HI]["off_p50_ms"] = result["off_ms_at_900"]
+    result["off_us_per_turn_of_depth"] = off_slope
+    result["speedup_at_max_depth"] = (result["per_depth"][_HI]["off_p50_ms"]
+                                      / result["per_depth"][_HI]["on_p50_ms"])
+    result["slope_reduction_x"] = (
+        off_slope / result["on_us_per_turn_of_depth"]
+        if result["on_us_per_turn_of_depth"] > 0 else None)
+    reasons = sst.evaluate_depth(result)
+    assert any("uncached slope" in r for r in reasons), (why, reasons)
+
+
+def test_the_slope_reduction_factor_is_strict():
+    """`on_slope < off_slope / 5.0` — equality must fail."""
+    result = _depth_result()
+    off_slope = result["off_us_per_turn_of_depth"]
+    exactly = off_slope / sst.DEPTH_CONTRACT["slope_reduction_factor"]
+    span = max(1, _HI - _LO)
+    result["on_ms_at_900"] = (result[f"on_ms_at_{_LO}"]
+                              + exactly * span / 1000.0)
+    result["per_depth"][_HI]["on_p50_ms"] = result["on_ms_at_900"]
+    result["on_us_per_turn_of_depth"] = exactly
+    result["slope_reduction_x"] = off_slope / exactly
+    deep = result["per_depth"][_HI]
+    result["speedup_at_max_depth"] = deep["off_p50_ms"] / deep["on_p50_ms"]
+    deep["paired_speedup"] = result["paired_speedup_at_max_depth"]
+    reasons = sst.evaluate_depth(result)
+    assert any("cached slope" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("speedup, why", [
+    (2.0, "exactly on the bound must fail, as `> 2.0` did"),
+    (1.9999999, "below the bound"),
+    (1.6382275114582876, "the exact value from run 31427036314"),
+])
+def test_the_paired_speedup_bound_is_strict(speedup, why):
+    result = _set_paired_speedup(_depth_result(), speedup)
+    reasons = sst.evaluate_depth(result)
+    assert any("paired speedup" in r for r in reasons), (why, reasons)
+
+
+def test_all_three_depth_breaches_are_collected_together():
+    """One breach must never mask another."""
+    span = max(1, _HI - _LO)
+    result = _depth_result()
+    # off slope exactly on its floor, on slope not 5x gentler, speedup at bound
+    result["off_us_per_turn_of_depth"] = 5.0
+    result["on_us_per_turn_of_depth"] = 5.0
+    for arm in ("on", "off"):
+        result[f"{arm}_ms_at_{_HI}"] = (result[f"{arm}_ms_at_{_LO}"]
+                                        + 5.0 * span / 1000.0)
+        result["per_depth"][_HI][f"{arm}_p50_ms"] = result[f"{arm}_ms_at_{_HI}"]
+    result["slope_reduction_x"] = 1.0
+    deep = result["per_depth"][_HI]
+    result["speedup_at_max_depth"] = deep["off_p50_ms"] / deep["on_p50_ms"]
+    _set_paired_speedup(result, 2.0)
+
+    reasons = sst.evaluate_depth(result)
+    assert any("uncached slope" in r for r in reasons), reasons
+    assert any("cached slope" in r for r in reasons), reasons
+    assert any("paired speedup" in r for r in reasons), reasons
+    assert len(reasons) >= 3, reasons
+
+
+# --- structural validation runs first and fails closed -----------------------
+
+def test_depth_thresholds_are_applied_only_after_structural_validation():
+    reasons = sst.evaluate_depth(_depth_result(paired=False))
+    assert any("paired" in r for r in reasons), reasons
+    assert all("slope" not in r and "speedup" not in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"paired": False}, "an unpaired A/B"),
+    ({"paired": 1}, "a truthy non-True paired flag"),
+    ({"depths": [100, 800]}, "the wrong depths"),
+    ({"depths": [900, 100]}, "depths out of order"),
+    ({"depths": _SECRET}, "a secret-shaped depths value"),
+    ({"samples": 11}, "the wrong sample count"),
+    ({"samples": True}, "a boolean sample count"),
+    ({"samples": _HUGE}, "an unrepresentable sample count"),
+    ({"paired_samples_at_max_depth": 0}, "no paired observations"),
+    ({"on_us_per_turn_of_depth": float("nan")}, "a NaN slope"),
+    ({"off_us_per_turn_of_depth": float("inf")}, "an infinite slope"),
+    ({"paired_speedup_at_max_depth": _SecretFloat(9.0)}, "a float subclass"),
+    ({"on_ms_at_100": 0.0}, "a non-positive median"),
+    ({"on_ms_at_100": -1.0}, "a negative median"),
+    ({"per_depth": "not a mapping"}, "a malformed per_depth"),
+    ({"slope_reduction_x": 1.0}, "an inconsistent reduction"),
+    ({"speedup_at_max_depth": 99.0}, "an inconsistent unpaired speedup"),
+    ({"paired_speedup_at_max_depth": 99.0}, "an inconsistent paired speedup"),
+    ({"on_us_per_turn_of_depth": 999.0}, "a slope that is not the fitted one"),
+])
+def test_depth_structural_invalidity_fails_closed(over, why):
+    assert sst.evaluate_depth(_depth_result(**over)), why
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"on_samples": 11}, "an arm sample-count mismatch"),
+    ({"paired_samples": 11}, "a paired sample-count mismatch"),
+    ({"order_counts": {"on_first": 12, "off_first": 0}}, "one ordering only"),
+    ({"order_counts": {"on_first": 0, "off_first": 12}}, "the other ordering"),
+    ({"order_counts": {"on_first": 10, "off_first": 2}}, "unbalanced ordering"),
+    ({"order_counts": {"on_first": 6, "off_first": 5}}, "counts not summing"),
+    ({"order_counts": {"on_first": True, "off_first": 6}}, "a boolean count"),
+    ({"order_counts": "not a mapping"}, "a malformed order_counts"),
+    ({"on_p50_ms": 0.0}, "a non-positive arm median"),
+    ({"paired_speedup": -1.0}, "a negative paired speedup"),
+])
+def test_depth_per_row_incoherence_fails_closed(over, why):
+    rows = {_LO: _depth_row(_LO), _HI: _depth_row(_HI, over)}
+    assert sst.evaluate_depth(_depth_result(rows=rows)), why
+
+
+def test_a_balanced_odd_sample_count_is_accepted():
+    """`|on_first - off_first| <= 1` — an odd count cannot split evenly.
+
+    A genuine 11-sample case against a matching contract. An earlier revision
+    named itself "odd" while using the contract's 12 samples and a 6/6 split,
+    which is even and exercises none of the tolerance this rule exists for.
+    """
+    samples = 11
+    assert samples % 2 == 1, "the point of this test is an odd count"
+    contract = dict(sst.DEPTH_CONTRACT, samples=samples)
+
+    rows = {d: _depth_row(d, {"on_samples": samples, "off_samples": samples,
+                              "paired_samples": samples,
+                              "order_counts": {"on_first": 5,
+                                               "off_first": 6}})
+            for d in (_LO, _HI)}
+    result = _depth_result(rows=rows, samples=samples)
+    assert result["order_counts_at_max_depth"] == {"on_first": 5,
+                                                   "off_first": 6}
+    assert sst.evaluate_depth(result, contract) == []
+
+    # ...and a two-apart split at the same odd count is still rejected.
+    unbalanced = {d: _depth_row(d, {"on_samples": samples, "off_samples": samples,
+                                    "paired_samples": samples,
+                                    "order_counts": {"on_first": 4,
+                                                     "off_first": 7}})
+                  for d in (_LO, _HI)}
+    assert sst.evaluate_depth(_depth_result(rows=unbalanced, samples=samples),
+                              contract)
+
+
+# --- the paired-ratio identity ------------------------------------------------
+#
+# `paired_speedup` is the MEDIAN of the per-pair ratios, so it must lie inside
+# the range those ratios spanned. A median outside its own min/max is
+# arithmetically impossible, and without this it would still be compared
+# against the 2.0 bound as though it were a real statistic.
+
+@pytest.mark.parametrize("over, why", [
+    ({"paired_ratio_min": 25.0}, "paired_ratio_min above paired_speedup"),
+    ({"paired_ratio_max": 0.5}, "paired_speedup above paired_ratio_max"),
+    ({"paired_ratio_min": 8.0, "paired_ratio_max": 2.0},
+     "paired_ratio_min above paired_ratio_max"),
+    ({"paired_ratio_min": 5.0, "paired_ratio_max": 6.0,
+      "paired_speedup": 1.5}, "a median below a coherent range"),
+    ({"paired_ratio_min": 1.0, "paired_ratio_max": 1.2,
+      "paired_speedup": 9.0}, "a median above a coherent range"),
+])
+def test_contradictory_paired_ratios_fail_closed(over, why):
+    rows = {_LO: _depth_row(_LO), _HI: _depth_row(_HI, over)}
+    result = _depth_result(rows=rows)
+    reasons = sst.evaluate_depth(result)
+    assert reasons, why
+    assert any("paired_ratio" in r or "paired_speedup" in r
+               for r in reasons), reasons
+    # every value involved is positive and finite — this is a coherence
+    # failure, not a domain failure
+    for key in ("paired_ratio_min", "paired_ratio_max", "paired_speedup"):
+        assert rows[_HI][key] > 0
+    assert sst._published_depth(result) is None, why
+
+
+def test_the_paired_ratio_identity_accepts_the_boundary():
+    """min == median == max is coherent and must pass."""
+    rows = {_LO: _depth_row(_LO),
+            _HI: _depth_row(_HI, {"paired_ratio_min": 4.0, "paired_speedup": 4.0,
+                             "paired_ratio_max": 4.0})}
+    result = _depth_result(rows=rows)
+    result["paired_speedup_at_max_depth"] = 4.0
+    assert sst.evaluate_depth(result) == []
+
+
+# --- per-row depth identity ---------------------------------------------------
+
+@pytest.mark.parametrize("depth_value, why", [
+    (_LO, "a row filed under the wrong key"),
+    (901, "a depth that matches neither key"),
+    (True, "a boolean depth"),
+    ("900", "a string depth"),
+    (900.0, "a float depth"),
+    (_SECRET, "a secret-shaped depth"),
+    (_SecretInt(900), "an int subclass that compares equal"),
+    (_HUGE, "an unrepresentable depth"),
+    (None, "a missing depth"),
+])
+def test_a_row_depth_that_disagrees_with_its_key_fails_closed(depth_value, why):
+    rows = {_LO: _depth_row(_LO), _HI: _depth_row(_HI, {"depth": depth_value})}
+    result = _depth_result(rows=rows)
+    reasons = sst.evaluate_depth(result)
+    assert reasons, why
+    assert any("depth" in r for r in reasons), reasons
+    assert _SECRET not in " ".join(reasons)
+    assert sst._published_depth(result) is None, why
+
+
+def test_a_missing_row_depth_fails_closed():
+    row = _depth_row(_HI)
+    del row["depth"]
+    result = _depth_result(rows={_LO: _depth_row(_LO), _HI: row})
+    assert sst.evaluate_depth(result)
+    assert sst._published_depth(result) is None
+
+
+# --- order_counts_at_max_depth ------------------------------------------------
+
+@pytest.mark.parametrize("value, why", [
+    (None, "a missing summary"),
+    ("not a mapping", "a string summary"),
+    (["on_first", "off_first"], "a list summary"),
+    ({}, "an empty summary"),
+    ({"on_first": 6}, "a summary missing off_first"),
+    ({"on_first": 6, "off_first": True}, "a boolean count"),
+    ({"on_first": 6, "off_first": -1}, "a negative count"),
+    ({"on_first": 6, "off_first": _SECRET}, "a secret-shaped count"),
+    ({"on_first": 6, "off_first": _HUGE}, "an unrepresentable count"),
+    ({"on_first": 5, "off_first": 7}, "counts that are not the deepest row's"),
+    ({"on_first": 6, "off_first": 6, "extra": 1}, "an unexpected key"),
+])
+def test_a_bad_max_depth_order_summary_fails_closed(value, why):
+    result = _depth_result(order_counts_at_max_depth=value)
+    reasons = sst.evaluate_depth(result)
+    assert reasons, why
+    assert any("order_counts_at_max_depth" in r for r in reasons), reasons
+    assert _SECRET not in " ".join(reasons)
+    assert sst._published_depth(result) is None, why
+
+
+def test_the_max_depth_order_summary_must_equal_the_deepest_row():
+    """A balanced summary must not vouch for an unbalanced measurement."""
+    rows = {_LO: _depth_row(_LO),
+            _HI: _depth_row(_HI, {"order_counts": {"on_first": 11,
+                                              "off_first": 1}})}
+    result = _depth_result(rows=rows)
+    result["order_counts_at_max_depth"] = {"on_first": 6, "off_first": 6}
+    reasons = sst.evaluate_depth(result)
+    assert any("order_counts_at_max_depth" in r for r in reasons), reasons
+    assert sst._published_depth(result) is None
+
+
+# --- the newly validated fields are published in normalised form --------------
+
+def test_the_row_depth_and_max_depth_order_counts_are_published():
+    published = sst._published_depth(_depth_result())
+    assert published is not None
+    assert published["per_depth"]["100"]["depth"] == 100
+    assert published["per_depth"]["900"]["depth"] == 900
+    assert type(published["per_depth"]["900"]["depth"]) is int
+    assert published["order_counts_at_max_depth"] == {"on_first": 6,
+                                                      "off_first": 6}
+    for value in published["order_counts_at_max_depth"].values():
+        assert type(value) is int
+    json.dumps(published)          # provably serialisable
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"rows": {_LO: _depth_row(_LO),
+               _HI: _depth_row(_HI, {"depth": _SECRET})}}, "a bad row depth"),
+    ({"rows": {_LO: _depth_row(_LO),
+               _HI: _depth_row(_HI, {"paired_ratio_min": 25.0})}},
+     "a contradictory ratio range"),
+    ({"order_counts_at_max_depth": {"on_first": 6, "off_first": _SECRET}},
+     "a bad order summary"),
+])
+def test_the_new_rejections_never_leak_through_any_channel(over, why,
+                                                           monkeypatch,
+                                                           tmp_path, capsys):
+    result = _depth_result(**over)
+    reasons = sst.evaluate_depth(result)
+    assert reasons, why
+
+    harness = _FakeDepthHarness(result=result)
+    code, out = _run_depth(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err),
+                          ("reasons", " ".join(reasons)),
+                          ("reasons repr", repr(reasons))):
+        assert _SECRET not in text, f"the secret leaked into {channel}"
+        assert "<Unserializable" not in text, f"a repr leaked into {channel}"
+    assert json.loads(blob)["measurement"] is None
+    assert captured.err == ""
+
+
+# --- publication --------------------------------------------------------------
+
+@pytest.mark.parametrize("over", [
+    {"paired": False}, {"samples": 11}, {"depths": [100, 800]},
+    {"on_us_per_turn_of_depth": float("nan")}, {"on_ms_at_100": -1.0},
+    {"paired_samples_at_max_depth": 0}, {"slope_reduction_x": 1.0},
+])
+def test_a_structurally_invalid_depth_result_publishes_nothing(over):
+    assert sst._published_depth(_depth_result(**over)) is None
+
+
+def test_a_depth_threshold_breach_publishes_the_whole_measurement():
+    """A valid measurement that missed a bound is exactly what to publish."""
+    result = _set_paired_speedup(_depth_result(), 1.6382275114582876)
+
+    assert sst.evaluate_depth(result), "this must be a breach, not a pass"
+    published = sst._published_depth(result)
+    assert published is not None, "an operator must be able to read the slopes"
+    assert published["depths"] == [100, 900]
+    assert published["samples"] == 12
+    assert published["paired"] is True
+    assert published["paired_speedup_at_max_depth"] == pytest.approx(
+        1.6382275114582876)
+    assert set(published["per_depth"]) == {"100", "900"}
+    assert published["per_depth"]["900"]["order_counts"]["on_first"] == 6
+    assert type(published["on_us_per_turn_of_depth"]) is float
+    assert _SECRET not in json.dumps(published)
+
+
+# --- the runner, driven end to end -------------------------------------------
+
+class _FakeDepthHarness:
+    def __init__(self, *, result=_UNSET, bench_error=None, cleanup_error=None):
+        self._result = result
+        self._bench_error = bench_error
+        self._cleanup_error = cleanup_error
+        self.calls = 0
+        self.cleanup_calls = 0
+
+    def bench_sync_depth_scaling(self, depths, samples):
+        self.calls += 1
+        assert tuple(depths) == _DEPTHS and samples == _SAMPLES
+        if self._bench_error is not None:
+            raise self._bench_error
+        return _depth_result() if self._result is _UNSET else self._result
+
+    def bench_sessionlog_sync(self, turns, cache):     # pragma: no cover
+        raise AssertionError("the depth measurement must not run the latency "
+                             "benchmark")
+
+    def cleanup(self):
+        self.cleanup_calls += 1
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
+
+
+def _run_depth(monkeypatch, tmp_path, loader):
+    monkeypatch.setattr(sst, "_load_benchmark", loader)
+    out = tmp_path / "nested" / "sync-depth.json"
+    code = sst.main(["--measure", "depth", "--out", str(out)])
+    return code, out
+
+
+def test_a_healthy_depth_run_exits_zero_and_measures_once(monkeypatch,
+                                                          tmp_path, capsys):
+    harness = _FakeDepthHarness()
+    code, out = _run_depth(monkeypatch, tmp_path, lambda: harness)
+
+    assert code == 0
+    assert harness.calls == 1, "the benchmark must run exactly once"
+    assert harness.cleanup_calls == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "pass"
+    assert data["benchmark"] == "sessionlog.sync depth scaling"
+    assert data["measurement_kind"] == "depth"
+    assert data["contract"]["depths"] == [100, 900]
+    assert data["measurement"]["samples"] == 12
+    captured = capsys.readouterr()
+    assert captured.out == out.read_text(encoding="utf-8")
+    assert captured.err == ""
+
+
+def test_a_depth_breach_is_red_and_publishes_its_measurement(monkeypatch,
+                                                             tmp_path, capsys):
+    result = _set_paired_speedup(_depth_result(), 1.6382275114582876)
+    code, out = _run_depth(monkeypatch, tmp_path,
+                           lambda: _FakeDepthHarness(result=result))
+
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["measurement"] is not None
+    assert any("paired speedup" in r for r in data["failure_reasons"])
+    captured = capsys.readouterr()
+    assert captured.out == blob and captured.err == ""
+
+
+def test_a_structurally_invalid_depth_run_publishes_measurement_null(
+        monkeypatch, tmp_path, capsys):
+    code, out = _run_depth(
+        monkeypatch, tmp_path,
+        lambda: _FakeDepthHarness(result=_depth_result(paired=False)))
+
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["measurement"] is None
+    assert data["failed_stages"] == [], "a rejected row is not a crash"
+    captured = capsys.readouterr()
+    assert captured.out == blob and captured.err == ""
+
+
+@pytest.mark.parametrize("stage, loader_factory", [
+    ("setup", lambda: (lambda: (_ for _ in ()).throw(_LoudFailure(_SECRET)))),
+    ("benchmark", lambda: (lambda: _FakeDepthHarness(
+        bench_error=_LoudFailure(_SECRET)))),
+    ("cleanup", lambda: (lambda: _FakeDepthHarness(
+        cleanup_error=_LoudFailure(_SECRET)))),
+])
+def test_depth_operational_failures_still_write_a_red_artifact(
+        stage, loader_factory, monkeypatch, tmp_path, capsys):
+    code, out = _run_depth(monkeypatch, tmp_path, loader_factory())
+    assert code == 1
+    assert out.is_file()
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == stage for s in data["failed_stages"]), data
+    captured = capsys.readouterr()
+    for text in (out.read_text(encoding="utf-8"), captured.out, captured.err):
+        assert _SECRET not in text
+    assert captured.err == ""
+
+
+def test_a_depth_publication_failure_is_contained(monkeypatch, tmp_path,
+                                                  capsys):
+    boom = type(f"DepthPubErr_{_SECRET}", (Exception,), {})
+
+    def exploding(_result, _contract=None):
+        raise boom(_SECRET)
+
+    monkeypatch.setattr(sst, "_published_depth", exploding)
+    harness = _FakeDepthHarness()
+    code, out = _run_depth(monkeypatch, tmp_path, lambda: harness)
+
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert data["measurement"] is None
+    assert harness.cleanup_calls == 1
+    captured = capsys.readouterr()
+    for text in (out.read_text(encoding="utf-8"), captured.out, captured.err):
+        assert _SECRET not in text and "DepthPubErr_" not in text
+
+
+_DEPTH_LEAK_FIELDS = ("samples", "paired_samples_at_max_depth",
+                      "on_us_per_turn_of_depth", "off_us_per_turn_of_depth",
+                      "speedup_at_max_depth", "paired_speedup_at_max_depth",
+                      "on_ms_at_100", "off_ms_at_900", "slope_reduction_x",
+                      "depths", "paired", "per_depth")
+
+_DEPTH_LEAK_SHAPES = (
+    ("secret_str", _SECRET),
+    ("secret_in_list", [_SECRET]),
+    ("secret_repr_object", _Unserializable()),
+    ("nan", float("nan")),
+    ("secret_float_subclass", _SecretFloat(1.0)),
+    ("secret_int_subclass", _SecretInt(12)),
+    ("oversized_int", _HUGE),
+)
+
+_DEPTH_LEAK_CASES = [(f"{field}-{shape}", field, value)
+                     for field in _DEPTH_LEAK_FIELDS
+                     for shape, value in _DEPTH_LEAK_SHAPES]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [(field, value) for _id, field, value in _DEPTH_LEAK_CASES],
+    ids=[_id for _id, _f, _v in _DEPTH_LEAK_CASES])
+def test_a_rejected_depth_value_never_reaches_any_channel(field, value,
+                                                          monkeypatch,
+                                                          tmp_path, capsys):
+    reasons = sst.evaluate_depth(_depth_result(**{field: value}))
+    assert reasons, f"{field} accepted a rejected shape"
+
+    harness = _FakeDepthHarness(result=_depth_result(**{field: value}))
+    code, out = _run_depth(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err),
+                          ("reasons", " ".join(reasons))):
+        assert _SECRET not in text, f"the secret leaked into {channel}"
+        assert "<Unserializable" not in text, f"a repr leaked into {channel}"
+        assert "0000000000" not in text, f"an oversized int reached {channel}"
+    assert json.loads(blob)["measurement"] is None
+    assert captured.err == ""
+
+
+def test_the_two_measurements_are_independent(monkeypatch, tmp_path):
+    """A depth run must not execute the latency benchmark, or vice versa.
+
+    `_FakeDepthHarness.bench_sessionlog_sync` raises, so a selector that ran
+    the wrong contract would fail loudly rather than silently measuring the
+    wrong thing.
+    """
+    harness = _FakeDepthHarness()
+    code, _out = _run_depth(monkeypatch, tmp_path, lambda: harness)
+    assert code == 0 and harness.calls == 1
+
+    latency = _FakeHarness()
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: latency)
+    out = tmp_path / "latency.json"
+    assert sst.main(["--measure", "latency", "--out", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["measurement_kind"] \
+        == "latency"
+
+
+# =============================================================================
+# A STAGE THAT RETURNS None IS A FAILED STAGE
+# =============================================================================
+#
+# The runner used `if value is not None:` as its success guard, so a stage that
+# returned `None` WITHOUT raising recorded nothing, added no reason, and let
+# the run exit 0 with `verdict: pass` and `measurement: null`. That is a false
+# green on setup, benchmark, evaluation and publication alike — a telemetry job
+# reporting success while having measured nothing at all.
+#
+# Every case below drives `main()` end to end for BOTH selectors and proves the
+# run is red, the stage is named exactly once, and nothing leaks.
+
+def _assert_missing_stage(code, out, capsys, stage, *, kind):
+    blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    data = json.loads(blob)
+
+    assert code == 1, f"{kind}/{stage}: a stage that produced nothing is red"
+    assert data["verdict"] == "fail", data
+    assert data["measurement"] is None, data["measurement"]
+    assert data["measurement_kind"] == kind
+
+    named = [s for s in data["failed_stages"] if s["stage"] == stage]
+    assert len(named) == 1, (
+        f"{kind}: stage {stage!r} must appear exactly once, got "
+        f"{data['failed_stages']}")
+    assert all(s["stage"] in sst.STAGES for s in data["failed_stages"])
+    assert data["failure_reasons"], "a red run must say why"
+
+    assert captured.out == blob, "stdout must equal the artifact byte for byte"
+    assert captured.err == "", "a handled failure must not write to stderr"
+    for text in (blob, captured.out, captured.err):
+        assert _SECRET not in text
+        assert "<Unserializable" not in text
+        assert "Traceback" not in text
+    return data
+
+
+def _none_returning_loader():
+    """A loader that hands back nothing at all, without raising."""
+    return None
+
+
+@pytest.mark.parametrize("kind", ["latency", "depth"])
+def test_a_loader_returning_none_is_a_setup_failure(kind, monkeypatch,
+                                                    tmp_path, capsys):
+    monkeypatch.setattr(sst, "_load_benchmark", _none_returning_loader)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+    _assert_missing_stage(code, out, capsys, "setup", kind=kind)
+
+
+@pytest.mark.parametrize("kind, harness_factory", [
+    ("latency", lambda: _FakeHarness(result=None)),
+    ("depth", lambda: _FakeDepthHarness(result=None)),
+])
+def test_a_benchmark_returning_none_is_a_benchmark_failure(
+        kind, harness_factory, monkeypatch, tmp_path, capsys):
+    harness = harness_factory()
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: harness)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+    _assert_missing_stage(code, out, capsys, "benchmark", kind=kind)
+    # Cleanup still runs — a benchmark that produced nothing must not also
+    # leave the scratch tree behind.
+    assert harness.cleanup_calls == 1
+
+
+@pytest.mark.parametrize("kind, evaluator, harness_factory", [
+    ("latency", "evaluate", lambda: _FakeHarness()),
+    ("depth", "evaluate_depth", lambda: _FakeDepthHarness()),
+])
+def test_an_evaluator_returning_none_is_an_evaluation_failure(
+        kind, evaluator, harness_factory, monkeypatch, tmp_path, capsys):
+    harness = harness_factory()
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: harness)
+    monkeypatch.setattr(sst, evaluator, lambda *_a, **_k: None)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+    _assert_missing_stage(code, out, capsys, "evaluation", kind=kind)
+    assert harness.cleanup_calls == 1
+
+
+@pytest.mark.parametrize("kind, publisher, harness_factory", [
+    ("latency", "_published", lambda: _FakeHarness()),
+    ("depth", "_published_depth", lambda: _FakeDepthHarness()),
+])
+def test_a_publisher_returning_none_for_a_healthy_result_is_a_failure(
+        kind, publisher, harness_factory, monkeypatch, tmp_path, capsys):
+    """`None` is correct for an INVALID result and for nothing else.
+
+    The harness supplies a result the evaluator finds no fault with, so the
+    publisher must produce numbers. `None` there means the publisher and the
+    evaluator disagree about validity — a defect in the runner — and it must
+    not read as a pass with no measurement.
+    """
+    harness = harness_factory()
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: harness)
+    monkeypatch.setattr(sst, publisher, lambda *_a, **_k: None)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+    _assert_missing_stage(code, out, capsys, "publication", kind=kind)
+    assert harness.cleanup_calls == 1
+
+
+@pytest.mark.parametrize("kind, over", [
+    ("latency", {"journal_bytes": 0}),
+    ("depth", {"paired": False}),
+])
+def test_a_publisher_returning_none_for_an_invalid_result_is_not_a_failure(
+        kind, over, monkeypatch, tmp_path):
+    """The converse: `None` for a structurally invalid result is correct.
+
+    Without this the new publication guard would fire on every rejected row and
+    turn one honest reason into two, misattributing a measurement defect to the
+    runner.
+    """
+    if kind == "depth":
+        harness = _FakeDepthHarness(result=_depth_result(**over))
+    else:
+        harness = _FakeHarness(result=_result(**over))
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: harness)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert code == 1 and data["measurement"] is None
+    assert not any(s["stage"] == "publication"
+                   for s in data["failed_stages"]), data["failed_stages"]
+    assert data["failed_stages"] == [], "a rejected row is not a runner defect"
+
+
+@pytest.mark.parametrize("kind, harness_factory", [
+    ("latency", lambda: _FakeHarness(bench_error=_LoudFailure(_SECRET))),
+    ("depth", lambda: _FakeDepthHarness(bench_error=_LoudFailure(_SECRET))),
+])
+def test_a_raising_stage_is_recorded_exactly_once(kind, harness_factory,
+                                                  monkeypatch, tmp_path,
+                                                  capsys):
+    """A stage that raised must not ALSO be counted as a `None` return."""
+    monkeypatch.setattr(sst, "_load_benchmark", harness_factory)
+    out = tmp_path / "nested" / f"{kind}.json"
+    code = sst.main(["--measure", kind, "--out", str(out)])
+    data = _assert_missing_stage(code, out, capsys, "benchmark", kind=kind)
+    assert len(data["failed_stages"]) == 1, data["failed_stages"]
+
+
+@pytest.mark.parametrize("kind", ["latency", "depth"])
+def test_a_healthy_run_records_no_stage_at_all(kind, monkeypatch, tmp_path):
+    """The guard must not fire on the success path.
+
+    `evaluate` returns `[]` — falsy but not None — and that distinction is the
+    whole basis of the fix, so a clean run must still be green.
+    """
+    harness = (_FakeDepthHarness() if kind == "depth" else _FakeHarness())
+    monkeypatch.setattr(sst, "_load_benchmark", lambda: harness)
+    out = tmp_path / "nested" / f"{kind}.json"
+    assert sst.main(["--measure", kind, "--out", str(out)]) == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "pass"
+    assert data["failed_stages"] == []
+    assert data["failure_reasons"] == []
+    assert data["measurement"] is not None
+    assert harness.cleanup_calls == 1

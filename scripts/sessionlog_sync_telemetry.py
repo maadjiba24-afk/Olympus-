@@ -70,6 +70,33 @@ CONTRACT = {
     "p99_max_ms": 250.0,
 }
 
+# The SECOND relocated contract: the D1 depth-scaling A/B.
+#
+# `test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated` was left in
+# required pytest by the first pass of this correction, which made the
+# correction incomplete: it is a shared-runner wall-clock gate on the same
+# production path, and its own docstring conceded that scheduler stalls can
+# perturb the median. Push CI run 31427036314 failed the Windows 3.12 leg on
+# it — cached slope 18.320 us/turn, uncached 35.444, reduction 1.935x against
+# a required 5x, and a paired speedup of 1.638x against a required 2x.
+#
+# Every value below is the original, unchanged. Only the place a breach blocks
+# has moved.
+DEPTH_CONTRACT = {
+    "benchmark": "sessionlog.sync depth scaling",
+    "depths": (100, 900),
+    "samples": 12,
+    "min_uncached_slope_us_per_turn": 5.0,
+    "slope_reduction_factor": 5.0,
+    "min_paired_speedup_at_max_depth": 2.0,
+}
+
+# Closed benchmark vocabulary — the only two values `benchmark` may ever take.
+BENCHMARKS = (CONTRACT["benchmark"], DEPTH_CONTRACT["benchmark"])
+
+# Closed measurement selector. The workflow runs each exactly once per leg.
+MEASUREMENTS = ("latency", "depth")
+
 # Closed vocabulary of stage names. A failure publishes one of these and a
 # count — never anything derived from the failure itself. `type(name, (), {})`
 # makes `__name__` caller-controlled, and an exception message can carry a path
@@ -337,6 +364,307 @@ def _published(result, contract=None):
     return out
 
 
+# --- the depth-scaling contract ---------------------------------------------
+
+# Per-depth rows carry these counts and these millisecond medians.
+_DEPTH_ROW_COUNTS = ("on_samples", "off_samples", "paired_samples")
+_DEPTH_ROW_MEASUREMENTS = ("on_p50_ms", "off_p50_ms", "paired_speedup",
+                           "paired_ratio_min", "paired_ratio_max")
+# Slopes are microseconds-per-turn and may legitimately be NEGATIVE on a noisy
+# arm — the original test did not reject that, it let the threshold decide, and
+# relocating the bound must not smuggle in a new rejection.
+_DEPTH_SIGNED = ("on_us_per_turn_of_depth", "off_us_per_turn_of_depth")
+
+
+def depth_structural_violations(result, contract) -> list[str]:
+    """Everything that makes a depth result unusable, before any bound.
+
+    Reasons name FIELDS only. A rejected value contributes no text — not its
+    repr, not its type name — because these strings reach the console and the
+    artifact.
+    """
+    out: list[str] = []
+    if not isinstance(result, dict):
+        return ["result is not a mapping"]
+
+    lo, hi = min(contract["depths"]), max(contract["depths"])
+    samples = contract["samples"]
+
+    if result.get("paired") is not True:
+        out.append("paired is not True — the A/B is not the paired one")
+    if not isinstance(result.get("depths"), (list, tuple)):
+        out.append("depths is not a sequence (value withheld)")
+    elif [d for d in result["depths"]] != list(contract["depths"]):
+        out.append("depths does not equal the contracted depths")
+    if not _count(result.get("samples")):
+        out.append("samples is not a valid count (value withheld)")
+    elif result["samples"] != samples:
+        out.append("samples does not equal the contracted sample count")
+
+    for key in ("paired_samples_at_max_depth",):
+        if key not in result:
+            out.append(f"missing {key}")
+        elif not _count(result[key]):
+            out.append(f"{key} is not a valid count (value withheld)")
+    for key in _DEPTH_SIGNED + ("speedup_at_max_depth",
+                                "paired_speedup_at_max_depth"):
+        if key not in result:
+            out.append(f"missing {key}")
+        elif not _finite(result[key]):
+            out.append(f"{key} is not a finite number (value withheld)")
+    for depth in (lo, hi):
+        for arm in ("on", "off"):
+            key = f"{arm}_ms_at_{depth}"
+            if key not in result:
+                out.append(f"missing {key}")
+            elif not _positive(result[key]):
+                out.append(f"{key} is not a valid measurement (value withheld)")
+
+    per_depth = result.get("per_depth")
+    if not isinstance(per_depth, dict):
+        out.append("per_depth is not a mapping (value withheld)")
+    else:
+        for depth in (lo, hi):
+            row = per_depth.get(depth)
+            if not isinstance(row, dict):
+                out.append(f"per_depth[{depth}] is not a mapping "
+                           f"(value withheld)")
+                continue
+            # The row must know which depth it is, and agree with the key it
+            # is filed under. A row whose `depth` disagrees with its key means
+            # the two arms were not compared at the depth the contract names.
+            if not _count(row.get("depth")):
+                out.append(f"per_depth[{depth}].depth is not a valid count "
+                           f"(value withheld)")
+            elif int(row["depth"]) != int(depth):
+                out.append(f"per_depth[{depth}].depth does not equal its "
+                           f"per_depth key")
+            for key in _DEPTH_ROW_COUNTS:
+                if not _count(row.get(key)):
+                    out.append(f"per_depth[{depth}].{key} is not a valid count "
+                               f"(value withheld)")
+            for key in _DEPTH_ROW_MEASUREMENTS:
+                if not _positive(row.get(key)):
+                    out.append(f"per_depth[{depth}].{key} is not a valid "
+                               f"measurement (value withheld)")
+            counts = row.get("order_counts")
+            if not isinstance(counts, dict):
+                out.append(f"per_depth[{depth}].order_counts is not a mapping "
+                           f"(value withheld)")
+            else:
+                for key in ("on_first", "off_first"):
+                    if not _count(counts.get(key)):
+                        out.append(f"per_depth[{depth}].order_counts.{key} is "
+                                   f"not a valid count (value withheld)")
+
+    deep_counts = result.get("order_counts_at_max_depth")
+    if not isinstance(deep_counts, dict):
+        out.append("order_counts_at_max_depth is not a mapping "
+                   "(value withheld)")
+    else:
+        for key in ("on_first", "off_first"):
+            if not _count(deep_counts.get(key)):
+                out.append(f"order_counts_at_max_depth.{key} is not a valid "
+                           f"count (value withheld)")
+    if out:
+        return out                      # nothing below is meaningful yet
+
+    # Past this gate every value is a validated built-in. All comparisons use
+    # normalised built-ins and every reason is a CONSTANT naming fields only.
+    if int(result["paired_samples_at_max_depth"]) <= 0:
+        out.append("no paired observations at the maximum depth — the paired "
+                   "speedup would be vacuous")
+
+    for depth in (lo, hi):
+        row = per_depth[depth]
+        if int(row["on_samples"]) != samples or \
+                int(row["off_samples"]) != samples:
+            out.append(f"per_depth[{depth}] arm sample counts do not equal the "
+                       f"contracted sample count")
+        if int(row["paired_samples"]) != samples:
+            out.append(f"per_depth[{depth}] paired sample count does not equal "
+                       f"the contracted sample count")
+        counts = row["order_counts"]
+        on_first, off_first = int(counts["on_first"]), int(counts["off_first"])
+        if on_first + off_first != samples:
+            out.append(f"per_depth[{depth}] order counts do not sum to the "
+                       f"contracted sample count")
+        if on_first <= 0 or off_first <= 0:
+            out.append(f"per_depth[{depth}] measured only one ordering, so one "
+                       f"arm always paid the first-position cost")
+        if abs(on_first - off_first) > 1:
+            out.append(f"per_depth[{depth}] ON-first and OFF-first orderings "
+                       f"are not balanced")
+        # The paired speedup is the MEDIAN of the per-pair ratios, so it must
+        # lie inside the range those ratios spanned. A median outside its own
+        # min/max is arithmetically impossible and would otherwise be compared
+        # against the 2.0 bound as if it were a real statistic.
+        low = float(row["paired_ratio_min"])
+        high = float(row["paired_ratio_max"])
+        median = float(row["paired_speedup"])
+        if low > high:
+            out.append(f"per_depth[{depth}] paired_ratio_min exceeds "
+                       f"paired_ratio_max")
+        if median < low:
+            out.append(f"per_depth[{depth}] paired_speedup is below "
+                       f"paired_ratio_min")
+        if median > high:
+            out.append(f"per_depth[{depth}] paired_speedup is above "
+                       f"paired_ratio_max")
+
+    # Derived-field identities, recomputed from the benchmark's own formulas
+    # (perf_validation.bench_sync_depth_scaling).
+    span = max(1, hi - lo)
+    for arm in ("on", "off"):
+        implied = ((float(result[f"{arm}_ms_at_{hi}"])
+                    - float(result[f"{arm}_ms_at_{lo}"])) / span * 1000.0)
+        if not math.isclose(float(result[f"{arm}_us_per_turn_of_depth"]),
+                            implied, rel_tol=_REL_TOL, abs_tol=1e-12):
+            out.append(f"{arm}_us_per_turn_of_depth does not equal the slope "
+                       f"between the two measured depths")
+
+    on_slope = float(result["on_us_per_turn_of_depth"])
+    off_slope = float(result["off_us_per_turn_of_depth"])
+    reduction = result.get("slope_reduction_x")
+    if on_slope > 0:
+        if not _finite(reduction):
+            out.append("slope_reduction_x is not a finite number "
+                       "(value withheld)")
+        elif not math.isclose(float(reduction), off_slope / on_slope,
+                              rel_tol=_REL_TOL):
+            out.append("slope_reduction_x does not equal off/on slope")
+    elif reduction is not None:
+        out.append("slope_reduction_x must be null when the cached slope is "
+                   "not positive")
+
+    deep = per_depth[hi]
+    if not math.isclose(float(result["speedup_at_max_depth"]),
+                        float(deep["off_p50_ms"]) / float(deep["on_p50_ms"]),
+                        rel_tol=_REL_TOL):
+        out.append("speedup_at_max_depth does not equal the ratio of the two "
+                   "arms' medians at the maximum depth")
+    if not math.isclose(float(result["paired_speedup_at_max_depth"]),
+                        float(deep["paired_speedup"]), rel_tol=_REL_TOL):
+        out.append("paired_speedup_at_max_depth does not equal the deepest "
+                   "row's paired speedup")
+    if int(result["paired_samples_at_max_depth"]) != int(
+            deep["paired_samples"]):
+        out.append("paired_samples_at_max_depth does not equal the deepest "
+                   "row's paired sample count")
+    # The top-level ordering summary must be the deepest row's, exactly. A
+    # summary that disagreed with the row it summarises would let a balanced
+    # top-level figure vouch for an unbalanced measurement.
+    deep_row_counts = deep["order_counts"]
+    for key in ("on_first", "off_first"):
+        if int(deep_counts[key]) != int(deep_row_counts[key]):
+            out.append(f"order_counts_at_max_depth.{key} does not equal the "
+                       f"deepest row's order count")
+    if set(deep_counts) != {"on_first", "off_first"}:
+        out.append("order_counts_at_max_depth carries unexpected keys")
+    return out
+
+
+def depth_threshold_violations(result, contract) -> list[str]:
+    """The three preserved depth bounds. Applied ONLY after structural checks.
+
+    All three are collected, so one breach can never mask another. Each keeps
+    the ORIGINAL strict comparison, so a value exactly on its bound still
+    fails exactly as it did in the required test.
+    """
+    out: list[str] = []
+    on_slope = float(result["on_us_per_turn_of_depth"])
+    off_slope = float(result["off_us_per_turn_of_depth"])
+    paired = float(result["paired_speedup_at_max_depth"])
+    floor = contract["min_uncached_slope_us_per_turn"]
+    factor = contract["slope_reduction_factor"]
+    speedup_floor = contract["min_paired_speedup_at_max_depth"]
+
+    # `off_slope > 5.0` — the pre-fix arm must reproduce the D1 depth scaling,
+    # or the A/B is void and proves nothing.
+    if not off_slope > floor:
+        out.append(f"uncached slope {off_slope:.6f} us/turn <= {floor} us/turn "
+                   f"— the pre-fix arm did not reproduce the D1 depth scaling, "
+                   f"so the A/B is void")
+    # `on_slope < off_slope / 5.0`
+    if not on_slope < off_slope / factor:
+        out.append(f"cached slope {on_slope:.6f} us/turn >= uncached "
+                   f"{off_slope:.6f} / {factor} — per-turn cost is scaling "
+                   f"with depth again")
+    # `paired > 2.0`
+    if not paired > speedup_floor:
+        out.append(f"paired speedup at maximum depth {paired:.6f}x <= "
+                   f"{speedup_floor}x — the cached path is not materially "
+                   f"cheaper at depth on the paired measurement")
+    return out
+
+
+def evaluate_depth(result, contract=None) -> list[str]:
+    """Every reason a depth result fails; empty means it passed.
+
+    Staged exactly like the latency evaluator: structural validation first and
+    return early, then all three thresholds together.
+    """
+    contract = contract or DEPTH_CONTRACT
+    structural = depth_structural_violations(result, contract)
+    if structural:
+        return structural
+    return depth_threshold_violations(result, contract)
+
+
+def _published_depth(result, contract=None):
+    """The sanitized depth measurement, or `None` if it is not a measurement.
+
+    Same rule as the latency publisher: a structurally invalid result is not a
+    partial measurement, it is not a measurement, and it publishes as `null`.
+    A threshold breach is a valid measurement that exceeded a limit and
+    publishes in full so an operator can read the slopes.
+    """
+    contract = contract or DEPTH_CONTRACT
+    if not isinstance(result, dict):
+        return None
+    if depth_structural_violations(result, contract):
+        return None
+
+    lo, hi = min(contract["depths"]), max(contract["depths"])
+    out: dict = {
+        "depths": [int(lo), int(hi)],
+        "samples": int(result["samples"]),
+        "paired": True,
+        "paired_samples_at_max_depth": int(
+            result["paired_samples_at_max_depth"]),
+    }
+    for key in _DEPTH_SIGNED + ("speedup_at_max_depth",
+                                "paired_speedup_at_max_depth"):
+        out[key] = float(result[key])
+    for depth in (lo, hi):
+        for arm in ("on", "off"):
+            out[f"{arm}_ms_at_{depth}"] = float(result[f"{arm}_ms_at_{depth}"])
+    reduction = result.get("slope_reduction_x")
+    out["slope_reduction_x"] = float(reduction) if _finite(reduction) else None
+    rows = {}
+    for depth in (lo, hi):
+        row = result["per_depth"][depth]
+        # `depth` is validated above as an exact int equal to its key, so it is
+        # published in normalised built-in form alongside the counts.
+        published_row = {"depth": int(row["depth"])}
+        published_row.update({key: int(row[key])
+                              for key in _DEPTH_ROW_COUNTS})
+        published_row.update(
+            {key: float(row[key]) for key in _DEPTH_ROW_MEASUREMENTS})
+        published_row["order_counts"] = {
+            "on_first": int(row["order_counts"]["on_first"]),
+            "off_first": int(row["order_counts"]["off_first"]),
+        }
+        rows[str(int(depth))] = published_row
+    out["per_depth"] = rows
+    deep_counts = result["order_counts_at_max_depth"]
+    out["order_counts_at_max_depth"] = {
+        "on_first": int(deep_counts["on_first"]),
+        "off_first": int(deep_counts["off_first"]),
+    }
+    return out
+
+
 def _load_benchmark():
     """Import the benchmark harness.
 
@@ -351,20 +679,31 @@ def _load_benchmark():
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--measure", choices=MEASUREMENTS, default="latency",
+                        help="which relocated contract to measure")
     parser.add_argument("--out", default="sessionlog-sync-telemetry.json",
                         help="path for the JSON artifact")
     args = parser.parse_args(argv)
+
+    # One selector, one contract, one measurement per invocation. The workflow
+    # calls this twice per matrix leg — once per contract — so a failure in one
+    # never prevents the other from producing its own evidence.
+    depth = args.measure == "depth"
+    contract = DEPTH_CONTRACT if depth else CONTRACT
+    assert contract["benchmark"] in BENCHMARKS
 
     # Built BEFORE anything that can fail, so every operational failure below
     # still has an artifact to be recorded in.
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "benchmark": CONTRACT["benchmark"],
+        "benchmark": contract["benchmark"],
+        "measurement_kind": args.measure,
         # Closed identifiers only: built from integers and a fixed map, never
         # from free-form platform strings.
         "python_version": _python_id(),
         "platform": _platform_id(),
-        "contract": {k: v for k, v in CONTRACT.items()},
+        "contract": {k: (list(v) if isinstance(v, tuple) else v)
+                     for k, v in contract.items()},
         "measurement": None,
         "failed_stages": [],
         "verdict": "unknown",
@@ -381,39 +720,76 @@ def main(argv=None) -> int:
         reasons.append(f"stage '{stage}' failed ({count} error(s)); details "
                        f"withheld from the artifact by design")
 
-    pv = None
-    try:
-        pv = _load_benchmark()
-    except Exception:                                           # noqa: BLE001
-        _stage_failed("setup")
+    def _guarded(stage, call):
+        """Run one stage. Returns `(value, ok)`, recording failure ONCE.
 
-    if pv is not None:
-        result = None
+        A stage that RAISES and a stage that silently returns `None` are the
+        same kind of failure: neither produced what the next step needs. An
+        earlier revision used `if value is not None:` as the success guard, so
+        a `None` return recorded nothing, added no reason, and let the run exit
+        0 with `verdict: pass` and `measurement: null` -- a false green on
+        setup, benchmark and evaluation alike.
+
+        Exactly one stage entry is recorded per failure: the `except` branch
+        returns immediately, so a raising stage is never also counted as a
+        `None` return.
+        """
         try:
-            # Measured ONCE. Never retried, never resampled, and no sample is
-            # selected or discarded.
-            result = pv.bench_sessionlog_sync(turns=CONTRACT["turns"],
-                                              cache=CONTRACT["cache"])
+            value = call()
         except Exception:                                       # noqa: BLE001
-            _stage_failed("benchmark")
+            _stage_failed(stage)
+            return None, False
+        if value is None:
+            _stage_failed(stage)
+            return None, False
+        return value, True
 
-        if result is not None:
-            found = None
-            try:
-                found = evaluate(result, CONTRACT)
-            except Exception:                                   # noqa: BLE001
-                _stage_failed("evaluation")
-            if found is not None:
+    pv, ok = _guarded("setup", _load_benchmark)
+    if ok:
+        # Measured ONCE. Never retried, never resampled, and no sample is
+        # selected or discarded.
+        if depth:
+            def _measure():
+                return pv.bench_sync_depth_scaling(
+                    depths=contract["depths"], samples=contract["samples"])
+        else:
+            def _measure():
+                return pv.bench_sessionlog_sync(turns=contract["turns"],
+                                                cache=contract["cache"])
+
+        result, ok = _guarded("benchmark", _measure)
+        if ok:
+            # `evaluate` returns `[]` on success -- falsy but NOT None, which
+            # is exactly the distinction the guard draws, so a clean result
+            # still proceeds.
+            found, ok = _guarded(
+                "evaluation",
+                (lambda: evaluate_depth(result, contract)) if depth
+                else (lambda: evaluate(result, contract)))
+            if ok:
                 reasons.extend(found)
-                # Publication is protected on its own: `_published` walks
+                # Publication is protected on its own: the publisher walks
                 # caller-supplied values, and a hostile `__eq__`/`__float__`
                 # can raise from inside it. That must produce a red artifact
                 # with a closed stage name, not an unhandled traceback that
                 # would print an exception message no validator ever saw.
+                healthy = not found
                 try:
-                    payload["measurement"] = _published(result)
+                    payload["measurement"] = (
+                        _published_depth(result, contract) if depth
+                        else _published(result, contract))
                 except Exception:                               # noqa: BLE001
                     _stage_failed("publication")
+                else:
+                    # `None` from the publisher is CORRECT for a structurally
+                    # invalid result and for nothing else. A result the
+                    # evaluator found no fault with MUST publish; `None` there
+                    # means the publisher and the evaluator disagree about
+                    # validity -- a defect in this runner, not a property of
+                    # the measurement -- and it must never read as a pass with
+                    # no numbers.
+                    if healthy and payload["measurement"] is None:
+                        _stage_failed("publication")
 
         # Cleanup is protected SEPARATELY: failing to remove a scratch tree
         # must not discard a measurement already taken, nor escape before the
@@ -446,8 +822,10 @@ def main(argv=None) -> int:
                        "sanitized")
         payload = {
             "schema_version": SCHEMA_VERSION,
-            "benchmark": CONTRACT["benchmark"],
-            "contract": {k: v for k, v in CONTRACT.items()},
+            "benchmark": contract["benchmark"],
+            "measurement_kind": args.measure,
+            "contract": {k: (list(v) if isinstance(v, tuple) else v)
+                         for k, v in contract.items()},
             "measurement": None,
             "failed_stages": stages,
             "failure_reasons": reasons,

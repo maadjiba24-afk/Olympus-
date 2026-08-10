@@ -1180,101 +1180,32 @@ def test_sync_does_a_bounded_and_exactly_durable_amount_of_work(monkeypatch):
         "the cached arm must also read strictly fewer journal bytes")
 
 
-def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated():
-    """Stage-D DEFECT D1, fixed — stated at its true strength.
-
-    `sync` re-scanned, re-verified and re-replayed the WHOLE journal on every
-    turn, so a conversation's per-turn journaling cost grew with its own depth.
-    `_cache_get` removes the dominant O(journal bytes) parse-and-sha256 term.
-
-    It does NOT make the path flat, and an earlier version of this test claimed
-    it did. An O(history length) term remains — `sync` must still compare the
-    caller's history against the journal's replayed prefix to classify the
-    delta as an extension rather than a rewrite, and `_cache_put` takes a
-    defensive copy so a caller mutating a message in place cannot silently
-    de-sync the cache. Both are inherent to the contract, not oversights.
-
-    Measured (medians of syncs taken AT depth, 100 -> 3000 turns):
-
-        depth   cached    uncached
-          100    1.68 ms     4.36 ms
-          500    1.73 ms    14.56 ms
-         1500    2.53 ms    38.31 ms
-         3000    6.61 ms    82.20 ms
-
-        depth-scaling coefficient: 1.70 us/turn cached, 26.84 us/turn
-        uncached — a 15.8x reduction, not an elimination.
-
-    The previous assertion fitted a slope from the first/last decile of one
-    growing run, which conflates the signal with warm-up and page-cache
-    effects; at 150 turns the noise swamped it and the test flaked in a full
-    suite run. This measures the coefficient directly at two depths.
-
-    METHODOLOGY CORRECTION — why the absolute claim is now made on a paired
-    statistic. The benchmark used to measure the arms in separate sequential
-    phases. The SLOPE assertions tolerate that, because each arm is compared
-    against itself; the absolute ON-versus-OFF ratio does not, because the two
-    arms then sit minutes apart in wall-clock and any ambient load landing on
-    one phase goes straight into the ratio. A Windows PR runner reported cache
-    ON as 29.3105 ms at depth 100 and 25.3359 ms at depth 900 — cheaper at
-    greater depth — giving on_slope -4.97 us/turn against off_slope
-    +39.75 us/turn. A negative depth slope is inconsistent with the scaling
-    shape this code produces under stable measurement conditions, and the
-    pattern is evidence consistent with phase-separated ambient-load
-    contamination; which runner activity produced it cannot be determined from
-    those timings alone, so the reading that the ON phase absorbed load the
-    later OFF phase did not is an inference, not an established cause. What the
-    run does show without inference: both scaling invariants passed, and only
-    the 2x absolute assertion failed, at 1.5547x, on a comparison between two
-    phases measured minutes apart.
-
-    The bound was NOT lowered to fit that number. The measurement was fixed:
-    both arms now run as independent sessions in one environment, interleaved
-    sample by sample with alternating ON-first/OFF-first order, and the
-    absolute claim is asserted on the median of the PER-PAIR OFF/ON ratios.
-    Pairing makes the two observations in each ratio time-local — microseconds
-    apart rather than minutes — which removes the multi-minute
-    phase-separation bias; alternating order balances first/second-position
-    effects between the arms; and the median tolerates isolated outlying pairs.
-    None of that makes the statistic immune to scheduler or load stalls: a
-    stall spanning both members of a pair still perturbs that ratio, and enough
-    disturbed pairs will still move the median. The systematic error mode was
-    removed; the residual random one was reduced, not eliminated.
-
-    Three independent invariants, each able to fail alone:
-
-      * the uncached arm must reproduce D1 (off_slope > 5 us/turn), else the
-        A/B is void and proves nothing;
-      * cached scaling must stay at least 5x gentler (on_slope < off_slope/5);
-      * the paired operator speedup at maximum depth must exceed 2x.
-
-    Bounds are loose because the point is the ORDER of the effect, not the
-    constant, against a measured 15.8x slope reduction."""
-    lo, hi = 100, 900
-    r = pv.bench_sync_depth_scaling(depths=(lo, hi), samples=12)
-    off_slope = r["off_us_per_turn_of_depth"]
-    on_slope = r["on_us_per_turn_of_depth"]
-
-    # The measurement must be the paired one, and must have produced usable
-    # pairs — a silent fallback to zero pairs would make the third assertion
-    # vacuous rather than failing.
-    assert r["paired"] is True, f"the A/B is no longer paired: {r}"
-    assert r["paired_samples_at_max_depth"] > 0, (
-        f"no paired observations at depth {hi}: {r}")
-
-    assert off_slope > 5.0, (
-        f"the pre-fix arm did not reproduce the D1 depth scaling — the A/B is "
-        f"void and this test proves nothing: {r}")
-    assert on_slope < off_slope / 5.0, (
-        f"per-turn cost is scaling with depth again: {r}")
-    # and the absolute win at the deeper end is what an operator actually feels
-    paired = r["paired_speedup_at_max_depth"]
-    assert paired is not None and paired > 2.0, (
-        f"the cached path is less than 2x cheaper at depth {hi} on the paired "
-        f"measurement (median of {r['paired_samples_at_max_depth']} per-pair "
-        f"OFF/ON ratios = {paired}); unpaired ratio of medians was "
-        f"{r['speedup_at_max_depth']}: {r}")
-
+# --- 1c. D1 depth scaling: the wall-clock arm lives in telemetry ------------
+#
+# `test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated` USED to live
+# here and asserted three wall-clock bounds on `sessionlog.sync`:
+#
+#     off_slope > 5.0 us/turn
+#     on_slope  < off_slope / 5.0
+#     paired speedup at depth 900 > 2.0
+#
+# It is the same class of gate as the p50/p99 bounds already relocated: a
+# shared-runner timing verdict on the live per-turn path. Its own docstring
+# conceded that a scheduler stall can move the median. Push CI run 31427036314
+# duly failed the Windows 3.12 leg on it — cached slope 18.320 us/turn,
+# uncached 35.444, reduction 1.935x against a required 5x, and a paired
+# speedup of 1.638x against a required 2x — on a branch that changed no
+# production code. Leaving it behind made the earlier correction incomplete.
+#
+# All three bounds are preserved EXACTLY, with their original strict
+# comparisons, in scripts/sessionlog_sync_telemetry.py (`DEPTH_CONTRACT`), run
+# by the scheduled/manual workflow at depths=(100, 900) and samples=12.
+#
+# What stays REQUIRED is the deterministic half, immediately below: the paired,
+# order-balanced STRUCTURE of the A/B — that the two arms are separate
+# conversations, interleaved, order-balanced, and that the cache bypass is
+# applied per-arm and restored. That is host-independent and is what stops the
+# measurement silently becoming a sequential, order-biased comparison again.
 
 def test_sync_depth_scaling_measures_the_two_arms_paired_and_order_balanced():
     """The A/B must not drift back to sequential, order-biased phases.
