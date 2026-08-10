@@ -265,3 +265,209 @@ def test_required_suite_no_longer_asserts_absolute_append_latency():
         assert preserved in telemetry, (
             f"preserved threshold {preserved} is missing from the telemetry "
             f"contract — the bound must be moved, never dropped")
+
+
+# --- sessionlog.sync latency telemetry: the LIVE per-turn path ---------------
+#
+# `sessionlog.sync` is production (orchestrator -> memory.save_conversation ->
+# sync), so relocating its p50/p99 bounds out of the required suite is only
+# defensible if the workflow really can go red, really cannot block a PR, and
+# really covers the platforms that used to enforce the contract. All three are
+# pinned here rather than trusted.
+
+_SYNC_WF = _ROOT / ".github" / "workflows" / "sessionlog-sync-performance.yml"
+
+
+def test_sessionlog_sync_telemetry_workflow_exists():
+    assert _SYNC_WF.is_file(), (
+        "the absolute sync-latency contract was removed from the required "
+        "suite, so its dedicated workflow must exist to still enforce it")
+
+
+def test_sessionlog_sync_telemetry_never_runs_on_push_or_pull_request():
+    """The whole point: a breach must not hold an unrelated PR shut."""
+    text = _SYNC_WF.read_text(encoding="utf-8")
+    trigger = re.search(r"(?ms)^on:\s*\n(?P<body>.*?)(?=^jobs:\s*$)", text)
+    assert trigger, "sync telemetry workflow has no parsable `on:` block"
+    body = trigger.group("body")
+
+    assert re.search(r"(?m)^\s{2}schedule:\s*$", body), (
+        "telemetry must run on a schedule so a regression is still caught")
+    assert re.search(r"(?m)^\s{2}workflow_dispatch:", body), (
+        "telemetry must be runnable on demand")
+    assert not re.search(r"(?m)^\s{2}push:", body), (
+        "sync telemetry must NOT run on push")
+    assert not re.search(r"(?m)^\s{2}pull_request:", body), (
+        "sync telemetry must NOT run on pull_request — that would recreate "
+        "the PR-blocking gate this design removed")
+
+
+def test_sessionlog_sync_telemetry_has_its_own_schedule_slot():
+    """Monday 10:00 UTC — no collision with the other weekly gates."""
+    text = _SYNC_WF.read_text(encoding="utf-8")
+    assert 'cron: "0 10 * * 1"' in text, (
+        "sync telemetry must run weekly at Monday 10:00 UTC")
+
+    taken = {}
+    for wf in sorted((_ROOT / ".github" / "workflows").glob("*.yml")):
+        for cron in re.findall(r'cron:\s*"([^"]+)"',
+                               wf.read_text(encoding="utf-8")):
+            taken.setdefault(cron, []).append(wf.name)
+    for cron, owners in taken.items():
+        assert len(owners) == 1, (
+            f"schedule {cron!r} is shared by {owners}; overlapping telemetry "
+            f"runs contend for runners and muddy each other's measurements")
+
+
+def test_sessionlog_sync_telemetry_covers_every_previously_enforcing_platform():
+    """Relocating the bound must not silently drop platform coverage.
+
+    The required suite ran this contract on Ubuntu 3.10-3.13 and Windows 3.12.
+    Telemetry has to run it on all five, or the move loses coverage rather
+    than relocating it.
+    """
+    text = _SYNC_WF.read_text(encoding="utf-8")
+    legs = set(re.findall(
+        r"-\s*os:\s*(?P<os>[a-z0-9-]+)\s*\n\s*python-version:\s*\"(?P<py>3\.\d+)\"",
+        text))
+    expected = {("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.11"),
+                ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.13"),
+                ("windows-latest", "3.12")}
+    assert legs == expected, f"matrix is {sorted(legs)}, expected {sorted(expected)}"
+    assert "fail-fast: false" in text, (
+        "one red leg must not cancel the others' evidence")
+
+
+def test_sessionlog_sync_telemetry_is_red_capable():
+    """Relocating the contract must not have quietly disarmed it."""
+    text = _SYNC_WF.read_text(encoding="utf-8")
+
+    assert not re.search(r"(?mi)^\s*continue-on-error\s*:", text), (
+        "telemetry must stay red on a breach; `continue-on-error:` disarms it")
+    assert not re.search(r"(?mi)^\s*uses:.*retry", text), (
+        "telemetry must never retry a timing measurement")
+    for token in ("|| true", "exit 0", "if: failure()"):
+        assert token not in text, (
+            f"telemetry must stay red on a breach; `{token}` would weaken it")
+
+    assert "scripts/sessionlog_sync_telemetry.py" in text
+    assert "pip install --require-hashes -r requirements.lock" in text, (
+        "telemetry must install through the repository's pinned procedure")
+    assert "pip install -e . --no-deps" in text
+
+
+def test_both_relocated_contracts_run_exactly_once_per_leg():
+    """Two contracts, two measurements, neither able to suppress the other."""
+    text = _SYNC_WF.read_text(encoding="utf-8")
+
+    # Counts INVOCATIONS, not mentions — the header comment names the script
+    # and both contracts when explaining the design.
+    invocations = text.count("python scripts/sessionlog_sync_telemetry.py")
+    assert invocations == 2, (
+        f"expected exactly 2 telemetry invocations per leg (latency + depth), "
+        f"found {invocations}")
+    for selector in ("--measure latency", "--measure depth"):
+        assert text.count(selector) == 1, (
+            f"{selector!r} must be measured exactly once per matrix leg")
+
+    # The second measurement must still run when the first one failed, or a
+    # latency breach would silently destroy the depth-scaling evidence.
+    depth_step = text.index("--measure depth")
+    head = text[max(0, depth_step - 400):depth_step]
+    assert "if: always()" in head, (
+        "the depth-scaling measurement must run even when the latency step "
+        "failed, so both artifacts exist")
+
+
+def test_both_telemetry_artifacts_upload_with_if_always():
+    text = _SYNC_WF.read_text(encoding="utf-8")
+    uploads = [m.start() for m in
+               re.finditer(r"actions/upload-artifact@v4", text)]
+    assert len(uploads) == 2, (
+        f"expected one artifact per relocated contract, found {len(uploads)}")
+
+    names = re.findall(r"name:\s*(sessionlog-sync-[a-z]+)-\$\{\{ matrix\.os "
+                       r"\}\}-py\$\{\{ matrix\.python-version \}\}", text)
+    assert set(names) == {"sessionlog-sync-latency", "sessionlog-sync-depth"}, (
+        f"artifact names must distinguish the two contracts and carry the "
+        f"matrix leg; found {names}")
+
+    for start in uploads:
+        block = text[start:start + 260]
+        assert "if: always()" in block, (
+            "every telemetry artifact must upload with `if: always()` — a red "
+            "run is exactly when the numbers are worth reading")
+
+
+def test_sessionlog_sync_telemetry_is_not_in_the_required_gate():
+    ci = _CI.read_text(encoding="utf-8")
+    assert "sessionlog-sync-performance" not in ci
+    assert "sessionlog_sync_telemetry" not in ci
+    needs = re.search(r"needs:\s*\[([^\]]*)\]", _job_body("test-gate"))
+    assert needs and "sync" not in needs.group(1), (
+        "telemetry must not be a dependency of the required aggregate gate")
+
+
+def test_sync_thresholds_survive_unchanged_in_telemetry():
+    telemetry = (_ROOT / "scripts" / "sessionlog_sync_telemetry.py"
+                 ).read_text(encoding="utf-8")
+    for preserved in (
+            # absolute latency contract
+            '"turns": 60', '"cache": True',
+            '"p50_max_ms": 60.0', '"p99_max_ms": 250.0',
+            # D1 depth-scaling contract
+            '"depths": (100, 900)', '"samples": 12',
+            '"min_uncached_slope_us_per_turn": 5.0',
+            '"slope_reduction_factor": 5.0',
+            '"min_paired_speedup_at_max_depth": 2.0'):
+        assert preserved in telemetry, (
+            f"preserved sync contract {preserved!r} is missing — the bound "
+            f"must be moved, never dropped or changed")
+
+
+def test_required_suite_no_longer_asserts_absolute_sync_latency():
+    """The moved contract must not still be collected by the default suite.
+
+    Guards against the old assertions surviving by accident, which would leave
+    the PR gate exposed to host load exactly as before — while confirming the
+    deterministic contract that replaced them is present.
+    """
+    perf = (_ROOT / "tests" / "test_val_performance.py").read_text(
+        encoding="utf-8")
+    assert "def test_sessionlog_sync_is_the_live_per_turn_path_and_is_bounded" \
+        not in perf, ("the old wall-clock sync test still exists in the "
+                      "required suite")
+    assert "def test_sync_depth_scaling_is_sharply_reduced_but_not_eliminated" \
+        not in perf, ("the wall-clock depth-scaling test still exists in the "
+                      "required suite; it is the same class of shared-runner "
+                      "timing gate and belongs in telemetry")
+    # Scans ASSERTION lines only. The file is allowed — and expected — to
+    # explain in prose which bounds moved and why; forbidding the words would
+    # forbid the documentation along with the gate.
+    assertions = [line.strip() for line in perf.splitlines()
+                  if line.strip().startswith("assert ")]
+    for gone in ('r["p50"] < 60.0', 'r["p99"] < 250.0',
+                 "off_slope > 5.0", "off_slope / 5.0", "paired > 2.0"):
+        offending = [line for line in assertions if gone in line]
+        assert not offending, (
+            f"the sessionlog.sync wall-clock assertion {gone!r} is still in "
+            f"required pytest: {offending}")
+
+    for required in (
+            "def test_save_conversation_routes_the_turn_to_sessionlog_sync",
+            "def test_sync_journals_every_turn_with_a_verified_chain",
+            "def test_a_swallowed_sync_failure_voids_the_measurement",
+            "def test_sync_does_a_bounded_and_exactly_durable_amount_of_work"):
+        assert required in perf, (
+            f"{required} is missing; deleting the timing bound without the "
+            f"deterministic contract that replaced it is not acceptable")
+
+    # The DETERMINISTIC half of the sync-depth A/B stays required: that the two
+    # arms are separate conversations, interleaved and order-balanced, with the
+    # cache bypass applied per-arm and restored. Only its wall-clock verdict
+    # moved to telemetry, so this must survive the move intact.
+    assert ("def test_sync_depth_scaling_measures_the_two_arms_paired_"
+            "and_order_balanced") in perf, (
+        "the paired/order-balanced structural contract must remain required — "
+        "without it the A/B could silently become sequential and order-biased "
+        "again, and only the telemetry job would ever notice")
