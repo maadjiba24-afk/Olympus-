@@ -266,6 +266,158 @@ def test_required_suite_no_longer_asserts_absolute_append_latency():
             f"preserved threshold {preserved} is missing from the telemetry "
             f"contract — the bound must be moved, never dropped")
 
+# --- usage-contention telemetry: red-capable, but never PR-blocking ----------
+#
+# The wall-clock verdicts on `usage.record` contention moved out of the required
+# suite after the v0.27.3 Linux 3.11 leg failed on p99 outliers while every
+# deterministic guarantee held. That relocation is only honest if the workflow
+# really can go red, really cannot block a PR, and really still covers every
+# platform that used to enforce the contract — so all three are pinned rather
+# than trusted.
+
+_UCT_WF = _ROOT / ".github" / "workflows" / "usage-contention-performance.yml"
+_UCT_SCRIPT = _ROOT / "scripts" / "usage_contention_telemetry.py"
+
+
+def test_usage_contention_telemetry_workflow_exists():
+    assert _UCT_WF.is_file(), (
+        "the contention wall-clock verdicts were removed from the required "
+        "suite, so their dedicated workflow must exist to still enforce them")
+    assert _UCT_SCRIPT.is_file()
+
+
+def test_usage_contention_telemetry_never_runs_on_push_or_pull_request():
+    """The whole point: a breach must not hold an unrelated PR shut."""
+    text = _UCT_WF.read_text(encoding="utf-8")
+    trigger = re.search(r"(?ms)^on:\s*\n(?P<body>.*?)(?=^jobs:\s*$)", text)
+    assert trigger, "telemetry workflow has no parsable `on:` block"
+    body = trigger.group("body")
+
+    assert re.search(r"(?m)^\s{2}schedule:\s*$", body)
+    assert re.search(r"(?m)^\s{2}workflow_dispatch:", body)
+    assert not re.search(r"(?m)^\s{2}push:", body), (
+        "telemetry must NOT run on push")
+    assert not re.search(r"(?m)^\s{2}pull_request:", body), (
+        "telemetry must NOT run on pull_request — that would recreate the "
+        "PR-blocking gate this design removed")
+
+
+def test_usage_contention_telemetry_does_not_collide_with_sessionlog_schedule():
+    """Two weekly telemetry jobs must not contend for the same runners."""
+    def _crons(path):
+        return set(re.findall(r'cron:\s*"([^"]+)"',
+                              path.read_text(encoding="utf-8")))
+
+    mine = _crons(_UCT_WF)
+    assert mine == {"0 9 * * 1"}, f"expected Monday 09:00 UTC, got {mine}"
+    assert not (mine & _crons(_PERF_WF)), (
+        "usage-contention telemetry shares a cron slot with the sessionlog "
+        "telemetry; they must not overlap")
+
+
+def test_usage_contention_telemetry_covers_every_previously_enforcing_platform():
+    """Relocating the contract must not silently drop a matrix leg."""
+    text = _UCT_WF.read_text(encoding="utf-8")
+    body = re.search(r"(?ms)^  usage-contention:\s*\n(?P<b>.*)", text)
+    assert body, "no `usage-contention` job"
+    legs = set(re.findall(
+        r'os:\s*(\S+)\s*\n\s*python-version:\s*"(\d+\.\d+)"', body.group("b")))
+    assert legs == {
+        ("ubuntu-latest", "3.10"),
+        ("ubuntu-latest", "3.11"),      # the leg that exposed the defect
+        ("ubuntu-latest", "3.12"),
+        ("ubuntu-latest", "3.13"),
+        ("windows-latest", "3.12"),
+    }, legs
+    assert "fail-fast: false" in body.group("b"), (
+        "one red leg must not cancel the others; every platform's evidence "
+        "matters")
+
+
+def test_usage_contention_telemetry_is_red_capable():
+    """Relocating the contract must not have quietly disarmed it."""
+    text = _UCT_WF.read_text(encoding="utf-8")
+
+    # Directive-level, not word-level: the workflow is allowed to EXPLAIN in
+    # prose why it has none of these.
+    assert not re.search(r"(?mi)^\s*continue-on-error\s*:", text), (
+        "telemetry must stay red on a breach; `continue-on-error:` disarms it")
+    assert not re.search(r"(?mi)^\s*uses:.*retry", text), (
+        "telemetry must never retry a timing measurement")
+    for token in ("|| true", "exit 0", "if: failure()"):
+        assert token not in text, (
+            f"telemetry must stay red on a breach; `{token}` would weaken it")
+
+    assert "scripts/usage_contention_telemetry.py" in text
+    assert "pip install --require-hashes -r requirements.lock" in text, (
+        "telemetry must install through the repository's pinned procedure")
+    assert "pip install -e . --no-deps" in text
+
+    # Exactly one invocation per job. Counts INVOCATIONS, not mentions — the
+    # header comment names the script when explaining the design.
+    assert text.count("python scripts/usage_contention_telemetry.py") == 1
+
+    assert "actions/upload-artifact@v4" in text
+    upload = text.index("actions/upload-artifact@v4")
+    assert "if: always()" in text[upload:upload + 200], (
+        "the telemetry artifact must upload with `if: always()`")
+    # Five matrix legs write the same filename, so the artifact NAME must vary.
+    assert "${{ matrix.os }}" in text[upload:upload + 400], (
+        "the artifact name must carry the matrix leg or the jobs collide")
+
+
+def test_usage_contention_telemetry_is_not_in_the_required_gate():
+    ci = _CI.read_text(encoding="utf-8")
+    assert "usage-contention" not in ci
+    assert "usage_contention_telemetry" not in ci
+    needs = re.search(r"needs:\s*\[([^\]]*)\]", _job_body("test-gate"))
+    assert needs and "usage-contention" not in needs.group(1), (
+        "telemetry must not be a dependency of the required aggregate gate")
+
+
+def test_usage_contention_thresholds_and_repetitions_survive_in_telemetry():
+    """Every moved number must still be enforced somewhere."""
+    telemetry = _UCT_SCRIPT.read_text(encoding="utf-8")
+    for preserved in ('"repetitions": 5', '"quorum": 3', '"per_thread": 50',
+                      '"max_start_skew_ms": 100.0', '"p50_floor_ms": 2.0',
+                      '"p50_serialisation_factor": 1.5',
+                      '"p99_max_ms": 500.0', '"min_calls_per_s": 100.0',
+                      '"first_touch_max_ms": 2000.0'):
+        assert preserved in telemetry, (
+            f"preserved contract term `{preserved}` is missing — the bound "
+            f"must be moved, never dropped")
+    # The levels still come from the shared helper, so 1 / cap / 16 is pinned.
+    assert "contention_levels()" in telemetry
+
+
+def test_required_suite_no_longer_renders_contention_wall_clock_verdicts():
+    """The moved verdicts must not still be decided by the required suite."""
+    perf = (_ROOT / "tests" / "test_val_performance.py").read_text(
+        encoding="utf-8")
+    assert "def test_usage_ledger_tail_under_concurrency" not in perf, (
+        "the wall-clock-named contention test still exists in the required "
+        "suite; its verdicts belong to the telemetry runner now")
+    assert "def test_usage_ledger_accounting_under_concurrency_is_exact" in perf, (
+        "the deterministic accounting/integrity contract must remain required")
+    for gone in ("_CONTENTION_QUORUM", "_MAX_START_SKEW_MS",
+                 "_contention_failures"):
+        assert gone not in perf, (
+            f"{gone} still drives a decision in the required suite")
+    # `_FIRST_TOUCH_MAX_MS` deliberately REMAINS: it is owned by the
+    # fresh-interpreter subprocess test, which measures a genuinely cold first
+    # `usage.record` and is out of scope here. What was removed is its use as a
+    # verdict on the in-process contention sweep's 1-thread row.
+    assert "_FIRST_TOUCH_MAX_MS" in perf
+    assert perf.count("_FIRST_TOUCH_MAX_MS") == 3, (
+        "the first-touch ceiling must be used only by the fresh-interpreter "
+        "test (one definition plus its two references)")
+
+    # The deterministic guarantees must all still be required there.
+    for kept in ("ledger_read_errors", "ledger_calls", "expected_calls",
+                 "expected_samples", "barrier_parties", "workers_started",
+                 "_CONTENTION_REPS", "_CONTENTION_PER_THREAD"):
+        assert kept in perf, (
+            f"{kept} must remain a required deterministic guarantee")
 
 # --- sessionlog.sync latency telemetry: the LIVE per-turn path ---------------
 #
