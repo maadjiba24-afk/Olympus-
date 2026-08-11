@@ -510,8 +510,25 @@ def bench_sessionlog_sync(turns: int = 300, *, cache: bool = True) -> dict:
                 history.append({"role": "assistant",
                                 "content": f"a{i} " + "a" * 400})
                 t0 = time.perf_counter()
-                sessionlog.sync(cid, history)
+                seq = sessionlog.sync(cid, history)
                 lat.append((time.perf_counter() - t0) * 1000.0)
+                # Every turn here strictly EXTENDS the history, so `sync` must
+                # seal exactly one record and return its seq — the i-th turn
+                # returns i+1. A 0 means the journal write failed and `sync`
+                # swallowed it (it captures and returns 0 by design, so a fault
+                # is otherwise invisible); anything else means the delta was
+                # classified as a rewrite. Either way the timings below would
+                # describe work that did not happen, which is worse than slow
+                # because it is FAST. Void the measurement instead.
+                # CONSTANT message. The returned value is caller-shaped — it
+                # comes back from a patched or faulty `sync` — and a
+                # `__str__`/`__repr__` on it could smuggle arbitrary text into
+                # a traceback that reaches a CI log. Neither the value, the
+                # turn index, nor the type is reported.
+                if seq != i + 1:
+                    raise RuntimeError(
+                        "journal sync returned an unexpected sequence number "
+                        "— measurement void")
     finally:
         sessionlog._cache_get = real_cache_get
     k = max(5, turns // 10)
@@ -528,6 +545,35 @@ def bench_sessionlog_sync(turns: int = 300, *, cache: bool = True) -> dict:
                 "slope_ms_per_turn": slope,
                 "projected_ms_at_1k": head + max(0.0, slope) * 1000,
                 "projected_ms_at_10k": head + max(0.0, slope) * 10000})
+    # Integrity accounting, reported on EVERY measurement — the same block the
+    # append benchmark already carries. Without it a caller can only see how
+    # fast this run was, never whether it did the work: `sync` captures its own
+    # exceptions and returns 0 (sessionlog.sync, `except Exception` -> 0), so a
+    # journal that silently stopped being written produces excellent timings.
+    # The telemetry evaluator refuses a result whose record count, chain or
+    # replayed history is wrong, so "fast because it skipped" cannot read green.
+    records, status = sessionlog.read_verified(cid)
+    path = sessionlog._journal_path(sessionlog._sid(cid))
+    seqs = [rec.get("seq") for rec in records]
+    prev_sha = ""
+    chain_ok = True
+    for rec in records:
+        if rec.get("prev") != prev_sha or rec.get("sha") != sessionlog._seal(rec):
+            chain_ok = False
+            break
+        prev_sha = rec.get("sha")
+    out.update({
+        "records_verified": len(records),
+        "journal_status": status,
+        "journal_bytes": path.stat().st_size if path.exists() else 0,
+        "seqs_dense": seqs == list(range(1, len(records) + 1)),
+        "chain_verified": chain_ok,
+        "replayed_history_matches": sessionlog._replay(records) == history,
+        # Exposed so a caller can re-verify independently rather than trusting
+        # this function's own accounting. Deliberately NOT in the telemetry
+        # artifact's published allowlist — a conversation id is not publishable.
+        "conversation_id": cid,
+    })
     return out
 
 
