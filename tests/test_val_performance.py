@@ -601,28 +601,160 @@ def test_zero_append_scan_case_really_supplies_no_scan_records():
     assert append_work_violations(**case) == []
 
 
-# --- 1a-evaluator: synthetic regressions for the telemetry judge ------------
+# --- 1a-evaluator: the relocated append contracts must fail CLOSED ----------
 #
-# The preserved 60/200 contract now lives in the telemetry runner, which the
-# required suite does not execute. Its EVALUATOR is pure and is therefore
-# tested here deterministically, with injected timing series and no wall-clock
-# at all — so the moved contract cannot rot unnoticed.
+# The preserved 60/200 (fsync=auto) and 100/400 (fsync=always) contracts now
+# live in the telemetry runner, which the required suite does not execute. Its
+# evaluator, publisher and runner are therefore pinned here deterministically,
+# with injected results and injected failures — no wall-clock, no filesystem
+# benchmark — so the moved contract cannot rot unnoticed. Two properties carry
+# the design and are hammered accordingly:
+#
+#   * the evaluator and the runner FAIL CLOSED. An impossible measurement is
+#     not a fast one, and an unexpected `None` from any stage is a failure,
+#     never a pass. Only the real `cleanup()`'s None return is normal.
+#   * the artifact LEAKS NOTHING. It is published to a CI run, so a rejected
+#     value, an exception message, a repr, a path or a caller-controlled type
+#     name must never reach it — and stdout is exactly the artifact bytes.
 
 def _slt():
     import sessionlog_latency_telemetry as slt
     return slt
 
 
-def _sample(**over):
-    base = {"n": 120, "p50": 5.0, "p90": 8.0, "p99": 13.0, "max": 20.0,
-            "mean": 6.0, "records_verified": 120, "journal_status": "ok"}
-    base.update(over)
-    return base
+_TELEMETRY_SECRET = "sk_live_9f3a21_TAVILY_API_KEY"
+
+_LEAKY = ("TAVILY_API_KEY=sk_live_9f3a21 "
+          "C:/Users/someone/AppData/Local/Temp/olymperf-abc/journal")
+
+# Python ints are arbitrary precision, so `math.isfinite(10**400)` raises
+# rather than returning False. A validator that crashes is not fail-closed.
+_HUGE_INT = 10 ** 400
+
+_APPEND_N = 120
+
+_APPEND_MEASUREMENT_FIELDS = ("p50", "p90", "p99", "max", "mean",
+                              "first_decile_mean", "last_decile_mean",
+                              "growth_ratio", "slope_ms_per_record",
+                              "projected_ms_at_10k", "projected_ms_at_50k")
+_APPEND_COUNT_FIELDS = ("n", "records_verified", "journal_bytes")
+
+
+class _TelemetryFailure(Exception):
+    """Carries a credential-and-path-shaped message, as a real one might."""
+
+
+class _UnserializablePoison:
+    def __repr__(self):
+        return f"<Unserializable {_TELEMETRY_SECRET}>"
+
+
+class _SecretInt(int):
+    """Passes `isinstance(x, int)`; overrides everything that could print it,
+    and lies about every comparison."""
+
+    def __format__(self, spec):
+        return _TELEMETRY_SECRET
+
+    def __repr__(self):
+        return _TELEMETRY_SECRET
+
+    def __str__(self):
+        return _TELEMETRY_SECRET
+
+    def __lt__(self, other):
+        return True
+
+    def __le__(self, other):
+        return True
+
+    def __gt__(self, other):
+        return False
+
+    def __ge__(self, other):
+        return False
+
+
+class _SecretFloat(float):
+    def __format__(self, spec):
+        return _TELEMETRY_SECRET
+
+    def __repr__(self):
+        return _TELEMETRY_SECRET
+
+    def __str__(self):
+        return _TELEMETRY_SECRET
+
+    def __lt__(self, other):
+        return True
+
+    def __le__(self, other):
+        return True
+
+    def __gt__(self, other):
+        return False
+
+    def __ge__(self, other):
+        return False
+
+
+class _SecretStr(str):
+    """Answers `== anything` truthfully-looking while carrying the canary."""
+
+    def __new__(cls):
+        return super().__new__(cls, _TELEMETRY_SECRET)
+
+    def __eq__(self, other):
+        return True
+
+    def __ne__(self, other):
+        return False
+
+    def __hash__(self):
+        return hash("ok")
+
+    def __repr__(self):
+        return _TELEMETRY_SECRET
+
+    def __str__(self):
+        return _TELEMETRY_SECRET
 
 
 def _auto_contract():
     slt = _slt()
     return next(c for c in slt.CONTRACTS if c["fsync"] == "auto")
+
+
+def _always_contract():
+    slt = _slt()
+    return next(c for c in slt.CONTRACTS if c["fsync"] == "always")
+
+
+def _sample(**over):
+    """One structurally perfect measurement inside the auto thresholds.
+
+    Derived fields are computed with the benchmark's own formulas
+    (perf_validation.bench_sessionlog_append), so the baseline satisfies every
+    identity; a test that wants an inconsistency pins the field itself.
+    """
+    n = _APPEND_N
+    head, tail = 2.0, 1.0               # a decaying series, like the CI run
+    k = max(5, n // 10)
+    span = max(1.0, float(n) - k)
+    slope = (tail - head) / span
+    growth = max(0.0, slope)
+    base = {"n": n, "fsync": "auto",
+            "p50": 5.0, "p90": 8.0, "p99": 13.0, "max": 20.0, "mean": 6.0,
+            "first_decile_mean": head, "last_decile_mean": tail,
+            "growth_ratio": tail / head,
+            "slope_ms_per_record": slope,
+            "projected_ms_at_10k": head + growth * 10000,
+            "projected_ms_at_50k": head + growth * 50000,
+            "records_verified": n, "journal_status": "ok",
+            "journal_bytes": 74640,
+            "conversation_id": "perf-auto-deadbeef"}
+    base.update(over)
+    return base
 
 
 def test_telemetry_contract_thresholds_are_the_preserved_ones():
@@ -638,31 +770,54 @@ def test_telemetry_contract_thresholds_are_the_preserved_ones():
 
 
 def test_telemetry_evaluator_passes_a_result_inside_both_thresholds():
-    assert _slt().evaluate(_sample(), _auto_contract()) == []
+    slt = _slt()
+    assert slt.evaluate(_sample(), _auto_contract()) == []
+    assert slt.evaluate(_sample(fsync="always"), _always_contract()) == []
 
 
 @pytest.mark.parametrize("over, needle", [
-    ({"p50": 60.0}, "p50"),
-    ({"p50": 88.1122}, "p50"),          # the exact 2026-08-08 CI value
-    ({"p99": 200.0}, "p99"),
-    ({"p99": 459.9876}, "p99"),         # the exact 2026-08-08 CI value
+    ({"p50": 60.0, "p90": 60.0, "p99": 60.0, "max": 60.0}, "p50"),
+    # the exact 2026-08-08 CI values
+    ({"p50": 88.1122, "p90": 90.0, "p99": 95.0, "max": 99.0}, "p50"),
+    ({"p99": 200.0, "max": 200.0}, "p99"),
+    ({"p99": 459.9876, "max": 460.0}, "p99"),
 ])
 def test_telemetry_evaluator_fails_a_breach(over, needle):
     reasons = _slt().evaluate(_sample(**over), _auto_contract())
     assert reasons and any(needle in r for r in reasons), reasons
 
 
+def test_the_always_contract_enforces_its_own_thresholds():
+    """100/400, not 60/200 — a mode mix-up must not borrow the wrong bound."""
+    slt = _slt()
+    inside = _sample(fsync="always", p50=88.0, p90=90.0, p99=95.0, max=99.0)
+    assert slt.evaluate(inside, _always_contract()) == []
+    breach = _sample(fsync="always", p50=100.0, p90=150.0, p99=400.0,
+                     max=400.0)
+    reasons = slt.evaluate(breach, _always_contract())
+    assert any("p50" in r for r in reasons), reasons
+    assert any("p99" in r for r in reasons), reasons
+
+
 def test_a_breach_is_not_hidden_by_another_passing_statistic():
     """A p99 breach must fail even when p50 is comfortably inside its bound.
 
-    The evaluator collects every reason instead of short-circuiting, so one
+    The evaluator collects both thresholds instead of short-circuiting, so one
     healthy statistic can never mask a broken one.
     """
     slt = _slt()
-    reasons = slt.evaluate(_sample(p50=1.0, p99=1000.0), _auto_contract())
+    reasons = slt.evaluate(_sample(p99=1000.0, max=1000.0), _auto_contract())
     assert any("p99" in r for r in reasons)
-    both = slt.evaluate(_sample(p50=1000.0, p99=1000.0), _auto_contract())
+    both = slt.evaluate(_sample(p50=1000.0, p90=1000.0, p99=1000.0,
+                                max=1000.0), _auto_contract())
     assert sum(1 for r in both if "p50" in r or "p99" in r) >= 2, both
+
+
+def test_thresholds_are_applied_only_after_structural_validation():
+    """A structurally broken result reports its defect, not a bound."""
+    reasons = _slt().evaluate(_sample(p50=float("nan")), _auto_contract())
+    assert all("ms >=" not in r for r in reasons), reasons
+    assert any("p50" in r and "withheld" in r for r in reasons), reasons
 
 
 @pytest.mark.parametrize("over, why", [
@@ -671,23 +826,318 @@ def test_a_breach_is_not_hidden_by_another_passing_statistic():
     ({"p50": float("inf")}, "infinite p50"),
     ({"p99": float("-inf")}, "negative-infinite p99"),
     ({"n": 119}, "wrong sample count"),
+    ({"n": 121}, "sample count above the contract"),
     ({"n": "120"}, "non-int sample count"),
     ({"p50": 0.0}, "zero p50 — no real work measured"),
     ({"records_verified": 119}, "a partial journal"),
     ({"records_verified": None}, "missing integrity accounting"),
     ({"journal_status": "torn_tail_truncated"}, "a damaged journal"),
+    ({"journal_bytes": 0}, "an empty journal"),
+    ({"fsync": "always"}, "the wrong fsync mode for the contract"),
 ])
 def test_telemetry_evaluator_fails_closed_on_unusable_measurements(over, why):
     """An unusable measurement is a failure, never a pass."""
     assert _slt().evaluate(_sample(**over), _auto_contract()), why
 
 
-@pytest.mark.parametrize("missing", ["n", "p50", "p99"])
+@pytest.mark.parametrize("missing", sorted(
+    _APPEND_MEASUREMENT_FIELDS + _APPEND_COUNT_FIELDS
+    + ("fsync", "journal_status")))
 def test_telemetry_evaluator_fails_on_incomplete_results(missing):
     sample = _sample()
     del sample[missing]
     reasons = _slt().evaluate(sample, _auto_contract())
     assert any(missing in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", _APPEND_MEASUREMENT_FIELDS)
+def test_non_finite_measurements_fail_closed(field, value):
+    assert _slt().evaluate(_sample(**{field: value}), _auto_contract()), (
+        field, value)
+
+
+@pytest.mark.parametrize("field", [f for f in _APPEND_MEASUREMENT_FIELDS
+                                   if f != "slope_ms_per_record"])
+@pytest.mark.parametrize("value", [0.0, 0, -1.0, -0.000001])
+def test_non_positive_durations_fail_closed(field, value):
+    """A latency at or below zero is impossible, not fast — `-1 < 200` is True."""
+    assert _slt().evaluate(_sample(**{field: value}), _auto_contract()), (
+        field, value)
+
+
+def test_a_negative_slope_is_legitimate():
+    """A decaying series is exactly the shape worth reporting, not rejecting."""
+    base = _sample()
+    assert base["slope_ms_per_record"] < 0.0
+    assert _slt().evaluate(base, _auto_contract()) == []
+
+
+@pytest.mark.parametrize("field", _APPEND_COUNT_FIELDS)
+@pytest.mark.parametrize("value", [True, False, "120", 120.0, -1, None])
+def test_boolean_and_non_integer_counts_fail_closed(field, value):
+    assert _slt().evaluate(_sample(**{field: value}), _auto_contract()), (
+        field, value)
+
+
+@pytest.mark.parametrize("value", ["absent", "torn_tail_truncated",
+                                   "quarantined", "oversize", "OK", "", None])
+def test_a_journal_that_is_not_ok_fails_closed(value):
+    assert _slt().evaluate(_sample(journal_status=value), _auto_contract()), \
+        value
+
+
+@pytest.mark.parametrize("value", ["auto ", "AUTO", "always", "", None, True,
+                                   1])
+def test_a_wrong_fsync_mode_fails_closed(value):
+    assert _slt().evaluate(_sample(fsync=value), _auto_contract()), value
+
+
+def test_the_result_must_be_a_mapping():
+    for bad in (None, [], "result", 7, object()):
+        assert _slt().evaluate(bad, _auto_contract())
+
+
+# --- internal consistency ----------------------------------------------------
+
+@pytest.mark.parametrize("over, needle", [
+    ({"p50": 9.0, "p90": 8.5}, "p50"),                 # p50 > p90
+    ({"p90": 14.0, "p99": 13.5}, "p90"),               # p90 > p99
+    ({"p99": 21.0}, "p99"),                            # p99 > max
+    ({"mean": 25.0}, "mean"),                          # mean > max
+    ({"first_decile_mean": 99.0}, "first_decile_mean"),
+])
+def test_inverted_percentiles_fail_closed(over, needle):
+    reasons = _slt().evaluate(_sample(**over), _auto_contract())
+    assert reasons and any(needle in r for r in reasons), reasons
+
+
+def test_the_whole_inverted_set_is_rejected():
+    """Every value under its bound, yet the measurement is impossible."""
+    assert _slt().evaluate(_sample(p50=1.0, p90=0.8, p99=0.5, max=0.4,
+                                   mean=0.3), _auto_contract())
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"growth_ratio": 0.123}, "growth_ratio"),
+    ({"slope_ms_per_record": 5.0}, "slope"),
+    ({"projected_ms_at_10k": 12.5}, "projected_ms_at_10k"),
+    ({"projected_ms_at_50k": 12.5}, "projected_ms_at_50k"),
+])
+def test_derived_identities_are_recomputed(over, needle):
+    reasons = _slt().evaluate(_sample(**over), _auto_contract())
+    assert reasons and any(needle in r for r in reasons), reasons
+
+
+def test_derived_identities_tolerate_only_float_noise():
+    slt = _slt()
+    base = _sample()
+    for nudge in (1.0, 1 + 1e-13, 1 - 1e-13):
+        assert slt.evaluate(
+            _sample(growth_ratio=base["growth_ratio"] * nudge),
+            _auto_contract()) == [], nudge
+    assert slt.evaluate(_sample(growth_ratio=base["growth_ratio"] * 1.001),
+                        _auto_contract())
+
+
+def test_a_growing_series_projects_upward_and_still_passes():
+    """The documented O(n^2) append shape must not be rejected by the
+    identities — a rising series with clamped projections is the healthy
+    case, not an anomaly."""
+    n = _APPEND_N
+    head, tail = 1.0, 3.0
+    k = max(5, n // 10)
+    span = max(1.0, float(n) - k)
+    slope = (tail - head) / span
+    row = _sample(first_decile_mean=head, last_decile_mean=tail,
+                  growth_ratio=tail / head, slope_ms_per_record=slope,
+                  projected_ms_at_10k=head + slope * 10000,
+                  projected_ms_at_50k=head + slope * 50000)
+    assert _slt().evaluate(row, _auto_contract()) == []
+
+
+# --- numeric subclasses are not safe numbers ---------------------------------
+
+@pytest.mark.parametrize("field", _APPEND_COUNT_FIELDS)
+def test_int_subclasses_are_rejected(field):
+    """`isinstance` is not enough — a subclass lies about every comparison."""
+    reasons = _slt().evaluate(_sample(**{field: _SecretInt(120)}),
+                              _auto_contract())
+    assert reasons, f"{field} accepted an int subclass"
+    assert _TELEMETRY_SECRET not in " ".join(reasons)
+
+
+@pytest.mark.parametrize("field", _APPEND_MEASUREMENT_FIELDS)
+def test_float_subclasses_are_rejected(field):
+    reasons = _slt().evaluate(_sample(**{field: _SecretFloat(1.0)}),
+                              _auto_contract())
+    assert reasons, f"{field} accepted a float subclass"
+    assert _TELEMETRY_SECRET not in " ".join(reasons)
+
+
+def test_a_comparison_lying_subclass_cannot_satisfy_a_threshold():
+    """`__lt__` returning True would otherwise walk straight past both bounds."""
+    liar = _SecretFloat(9999.0)
+    assert liar < 1.0 and liar < 60.0        # it really does lie
+    reasons = _slt().evaluate(_sample(p50=liar, p99=liar), _auto_contract())
+    assert reasons
+    assert _TELEMETRY_SECRET not in " ".join(reasons)
+
+
+def test_a_status_subclass_impersonating_ok_is_rejected():
+    slt = _slt()
+    impostor = _SecretStr()
+    assert impostor == "ok", "the impostor does not actually lie; test is void"
+    reasons = slt.evaluate(_sample(journal_status=impostor), _auto_contract())
+    assert any("journal_status" in r for r in reasons), reasons
+    assert _TELEMETRY_SECRET not in " ".join(reasons)
+    assert slt._published(_sample(journal_status=impostor),
+                          _auto_contract()) is None
+
+
+def test_an_fsync_subclass_impersonating_the_mode_is_rejected():
+    impostor = _SecretStr()
+    assert impostor == "auto", "the impostor does not actually lie"
+    reasons = _slt().evaluate(_sample(fsync=impostor), _auto_contract())
+    assert any("fsync" in r for r in reasons), reasons
+    assert _TELEMETRY_SECRET not in " ".join(reasons)
+
+
+# --- an oversized int must be rejected, not raise ----------------------------
+
+def test_the_validators_never_raise_on_an_oversized_int():
+    """The primitives themselves must return False, not explode."""
+    slt = _slt()
+    assert slt._finite(_HUGE_INT) is False
+    assert slt._finite(-_HUGE_INT) is False
+    assert slt._positive(_HUGE_INT) is False
+    assert slt._count(_HUGE_INT) is False
+    assert slt._count(120) is True and slt._count(0) is True
+    assert slt._count(sys.maxsize) is True
+    assert slt._count(sys.maxsize + 1) is False
+    assert slt._count(-1) is False
+
+
+@pytest.mark.parametrize("field",
+                         _APPEND_COUNT_FIELDS + _APPEND_MEASUREMENT_FIELDS)
+def test_an_oversized_int_is_rejected_and_never_rendered(field):
+    slt = _slt()
+    reasons = slt.evaluate(_sample(**{field: _HUGE_INT}), _auto_contract())
+    assert reasons, f"{field} accepted 10**400"
+    assert "0000000000" not in " ".join(reasons)
+    assert slt._published(_sample(**{field: _HUGE_INT}),
+                          _auto_contract()) is None
+
+
+# --- publication is type-validated, not merely key-filtered ------------------
+
+def test_a_structurally_invalid_result_publishes_nothing():
+    """Not a partial measurement — no measurement.
+
+    A field-by-field sanitized view of an invalid row reads as a measurement
+    with gaps, when in fact nothing about it can be trusted.
+    """
+    assert _slt()._published(
+        _sample(p50=_TELEMETRY_SECRET, n=_TELEMETRY_SECRET,
+                journal_bytes=True, slope_ms_per_record=float("nan")),
+        _auto_contract()) is None
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"p50": _TELEMETRY_SECRET}, "a secret-shaped measurement"),
+    ({"n": _TELEMETRY_SECRET}, "a secret-shaped count"),
+    ({"journal_bytes": True}, "a boolean count"),
+    ({"slope_ms_per_record": float("nan")}, "NaN"),
+    ({"p99": float("inf")}, "infinity"),
+    ({"p50": _SecretFloat(1.0)}, "a float subclass"),
+    ({"n": _SecretInt(120)}, "an int subclass"),
+    ({"journal_status": "absent"}, "a journal that is not ok"),
+    ({"fsync": "always"}, "the wrong fsync mode"),
+    ({"n": _HUGE_INT}, "an unrepresentable count"),
+    ({"n": 121}, "a sample-count mismatch"),
+    ({"records_verified": 119}, "a record-count mismatch"),
+    ({"journal_bytes": 0}, "an empty journal"),
+    ({"p50": 21.0}, "p50 above max"),
+    ({"projected_ms_at_10k": 12.5}, "an inconsistent projection"),
+    ({"growth_ratio": 0.123}, "an inconsistent growth ratio"),
+])
+def test_published_returns_none_for_every_structurally_invalid_case(over, why):
+    assert _slt()._published(_sample(**over), _auto_contract()) is None, why
+
+
+def test_a_valid_measurement_is_published_type_normalised():
+    slt = _slt()
+    published = slt._published(_sample(), _auto_contract())
+    assert published is not None
+    assert type(published["p50"]) is float and published["p50"] == 5.0
+    assert type(published["records_verified"]) is int
+    assert published["records_verified"] == _APPEND_N
+    assert published["fsync"] == "auto"
+    assert published["journal_status_ok"] is True
+    assert _TELEMETRY_SECRET not in json.dumps(published)
+
+
+def test_the_conversation_id_and_status_string_are_never_published():
+    published = _slt()._published(_sample(), _auto_contract())
+    assert "conversation_id" not in published
+    assert "journal_status" not in published        # only the boolean
+    assert "perf-auto-deadbeef" not in json.dumps(published)
+
+
+def test_extra_result_keys_are_never_published():
+    """The published artifact carries numbers, not environment or paths."""
+    dirty = _sample(secret_env="TAVILY_API_KEY=abc",
+                    path="C:/Users/someone/AppData/Local/Temp/x",
+                    payload={"messages": ["..."]})
+    published = _slt()._published(dirty, _auto_contract())
+    assert published is not None
+    blob = json.dumps(published)
+    for needle in ("secret_env", "TAVILY_API_KEY", "path", "AppData",
+                   "payload", "messages"):
+        assert needle not in blob, needle
+
+
+# --- exactly one measurement per contract, or the run is unverified ----------
+
+def test_measurement_completeness_requires_exactly_one_entry_per_contract():
+    slt = _slt()
+    good = [{"fsync": "auto"}, {"fsync": "always"}]
+    assert slt.measurement_completeness_violations(good) == []
+    for bad in ([],                                        # nothing measured
+                [{"fsync": "auto"}],                       # always missing
+                [{"fsync": "always"}],                     # auto missing
+                [{"fsync": "always"}, {"fsync": "auto"}],  # out of order
+                [{"fsync": "auto"}, {"fsync": "auto"}],    # duplicated
+                [{"fsync": "auto"}, {"fsync": "always"},
+                 {"fsync": "always"}],                     # a third run
+                [{"fsync": "auto"}, {}],                   # no mode at all
+                [{"fsync": "auto"}, "not an entry"],       # malformed entry
+                "not a list"):
+        assert slt.measurement_completeness_violations(bad), bad
+
+
+def test_measurement_completeness_rejects_an_impersonating_mode():
+    impostor = _SecretStr()
+    assert impostor == "always", "the impostor does not actually lie"
+    violations = _slt().measurement_completeness_violations(
+        [{"fsync": "auto"}, {"fsync": impostor}])
+    assert violations
+    assert _TELEMETRY_SECRET not in " ".join(violations)
+
+
+def test_the_runner_really_enforces_measurement_completeness(monkeypatch,
+                                                             tmp_path):
+    """main() must call the completeness check on what it publishes."""
+    slt = _slt()
+    sentinel = "completeness sentinel violation"
+    monkeypatch.setattr(slt, "measurement_completeness_violations",
+                        lambda measurements: [sentinel])
+    code, out = _run_telemetry(monkeypatch, tmp_path,
+                               lambda: _FakeAppendHarness())
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert sentinel in data["failure_reasons"]
 
 
 # --- the telemetry runner must go red WITH evidence, never red in silence ---
@@ -697,33 +1147,42 @@ def test_telemetry_evaluator_fails_on_incomplete_results(missing):
 # `main()` end to end against a temporary path, with the benchmark harness
 # replaced at a named seam — so no real timing measurement runs.
 
-_LEAKY = ("TAVILY_API_KEY=sk_live_9f3a21 "
-          "C:/Users/someone/AppData/Local/Temp/olymperf-abc/journal")
+class _FakeAppendHarness:
+    """Stands in for `perf_validation` at the `_load_benchmark` seam.
 
+    `results` maps an fsync mode to what `bench_sessionlog_append` returns for
+    it; a mode absent from the map returns a healthy row for that mode. Every
+    call is recorded, so the exact one-call-per-contract behaviour is asserted
+    rather than assumed. The real `cleanup()` returns None, and so does this
+    one — that None is a normal success and must never read as a failure.
+    """
 
-class _LoudFailure(Exception):
-    """Carries a credential-shaped message, as a real exception might."""
-
-
-class _FakeHarness:
-    """Stands in for `perf_validation` at the `_load_benchmark` seam."""
-
-    def __init__(self, *, bench_error=None, cleanup_error=None):
+    def __init__(self, *, results=None, bench_error=None, bench_error_on=None,
+                 bench_returns_none_on=None, cleanup_error=None):
+        self._results = results or {}
         self._bench_error = bench_error
+        self._bench_error_on = bench_error_on
+        self._bench_returns_none_on = bench_returns_none_on
         self._cleanup_error = cleanup_error
+        self.calls = []
         self.cleanup_calls = 0
 
     def bench_sessionlog_append(self, n, fsync):
-        if self._bench_error is not None:
+        self.calls.append((n, fsync))
+        if self._bench_error is not None and \
+                self._bench_error_on in (None, fsync):
             raise self._bench_error
-        return {"n": n, "fsync": fsync, "p50": 1.0, "p90": 2.0, "p99": 3.0,
-                "max": 4.0, "mean": 1.5, "records_verified": n,
-                "journal_status": "ok", "journal_bytes": 1}
+        if self._bench_returns_none_on in ("*", fsync):
+            return None
+        if fsync in self._results:
+            return self._results[fsync]
+        return _sample(fsync=fsync)
 
     def cleanup(self):
         self.cleanup_calls += 1
         if self._cleanup_error is not None:
             raise self._cleanup_error
+        return None
 
 
 def _run_telemetry(monkeypatch, tmp_path, loader):
@@ -734,83 +1193,863 @@ def _run_telemetry(monkeypatch, tmp_path, loader):
     return code, out
 
 
-def test_setup_failure_still_writes_a_red_artifact(monkeypatch, tmp_path):
-    """An import/setup failure must not leave the upload with nothing."""
-    def exploding_loader():
-        raise _LoudFailure(_LEAKY)
-
-    code, out = _run_telemetry(monkeypatch, tmp_path, exploding_loader)
-
-    assert code == 1
-    assert out.is_file(), "no artifact was written for a failed setup"
-    data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["verdict"] == "fail"
-    assert data["failure_reasons"]
-    assert any("_LoudFailure" in reason for reason in data["failure_reasons"])
-    assert data["measurements"] == []
-
-
-def test_cleanup_failure_still_writes_a_red_artifact(monkeypatch, tmp_path):
-    """A cleanup fault must be reported, not raised past the artifact write."""
-    harness = _FakeHarness(cleanup_error=_LoudFailure(_LEAKY))
+def test_a_healthy_run_exits_zero_and_cleanup_none_is_not_a_failure(
+        monkeypatch, tmp_path):
+    """The green path — including the real cleanup()'s legitimate None."""
+    harness = _FakeAppendHarness()
     code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
-
-    assert code == 1
-    assert out.is_file(), "no artifact was written for a failed cleanup"
+    assert code == 0
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["verdict"] == "fail"
-    assert any("cleanup" in reason and "_LoudFailure" in reason
-               for reason in data["failure_reasons"])
-    # The measurements it DID take survive the cleanup fault.
-    assert len(data["measurements"]) == len(_slt().CONTRACTS)
-    assert harness.cleanup_calls == 1, "cleanup must not be retried"
-
-
-def test_benchmark_failure_still_writes_a_red_artifact(monkeypatch, tmp_path):
-    harness = _FakeHarness(bench_error=_LoudFailure(_LEAKY))
-    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
-
-    assert code == 1
-    assert out.is_file()
-    data = json.loads(out.read_text(encoding="utf-8"))
-    assert data["verdict"] == "fail"
-    assert any("_LoudFailure" in reason for reason in data["failure_reasons"])
-    # Cleanup still ran even though the benchmark raised.
+    assert data["verdict"] == "pass"
+    assert data["failure_reasons"] == [] and data["failed_stages"] == []
+    assert [m["fsync"] for m in data["measurements"]] == ["auto", "always"]
+    for entry in data["measurements"]:
+        assert entry["passed"] is True
+        assert entry["violation_count"] == 0
+        assert entry["measurement"]["records_verified"] == _APPEND_N
+        assert entry["measurement"]["fsync"] == entry["fsync"]
     assert harness.cleanup_calls == 1
 
 
-@pytest.mark.parametrize("loader_factory", [
-    lambda: (lambda: (_ for _ in ()).throw(_LoudFailure(_LEAKY))),
-    lambda: (lambda: _FakeHarness(bench_error=_LoudFailure(_LEAKY))),
-    lambda: (lambda: _FakeHarness(cleanup_error=_LoudFailure(_LEAKY))),
-])
-def test_failure_artifacts_never_carry_the_exception_message(
-        monkeypatch, tmp_path, loader_factory):
-    """Only the exception TYPE reaches the artifact — never its message.
+def test_each_contract_is_measured_exactly_once_and_never_retried(monkeypatch,
+                                                                  tmp_path):
+    slt = _slt()
+    expected_calls = [(c["n"], c["fsync"]) for c in slt.CONTRACTS]
 
-    A real exception message can carry a credential or a scratch path, and this
-    file is published as a CI artifact.
+    harness = _FakeAppendHarness()
+    code, _out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 0
+    assert harness.calls == expected_calls
+
+    # A breach is NOT retried either: still one call per contract.
+    breach = _FakeAppendHarness(
+        results={"auto": _sample(p99=459.9876, max=460.0)})
+    code, _out = _run_telemetry(monkeypatch, tmp_path, lambda: breach)
+    assert code == 1
+    assert breach.calls == expected_calls
+
+
+def test_a_benchmark_fault_in_one_contract_does_not_retry_or_skip_the_other(
+        monkeypatch, tmp_path):
+    harness = _FakeAppendHarness(
+        bench_error=_TelemetryFailure(_LEAKY), bench_error_on="auto")
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    assert harness.calls == [(120, "auto"), (120, "always")], (
+        "a fault must neither retry the failed contract nor skip the other")
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "benchmark" and s.get("fsync") == "auto"
+               for s in data["failed_stages"]), data["failed_stages"]
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["measurement"] is None
+    assert by_mode["auto"]["passed"] is False
+    assert by_mode["always"]["passed"] is True
+    assert by_mode["always"]["measurement"] is not None
+    assert harness.cleanup_calls == 1
+
+
+@pytest.mark.parametrize("stage, loader_factory", [
+    ("setup", lambda: (lambda: (_ for _ in ()).throw(
+        _TelemetryFailure(_LEAKY)))),
+    ("benchmark", lambda: (lambda: _FakeAppendHarness(
+        bench_error=_TelemetryFailure(_LEAKY)))),
+    ("cleanup", lambda: (lambda: _FakeAppendHarness(
+        cleanup_error=_TelemetryFailure(_LEAKY)))),
+])
+def test_a_raising_stage_writes_a_red_artifact_with_a_closed_stage_name(
+        stage, loader_factory, monkeypatch, tmp_path):
+    code, out = _run_telemetry(monkeypatch, tmp_path, loader_factory())
+    assert code == 1
+    assert out.is_file(), f"no artifact was written for a failed {stage}"
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == stage for s in data["failed_stages"]), data
+    slt = _slt()
+    assert all(s["stage"] in slt.STAGES for s in data["failed_stages"])
+    assert all(isinstance(s["error_count"], int)
+               for s in data["failed_stages"])
+
+
+def test_a_raising_evaluator_is_a_red_evaluation_stage(monkeypatch, tmp_path):
+    slt = _slt()
+
+    def exploding_evaluate(result, contract):
+        raise _TelemetryFailure(_LEAKY)
+
+    monkeypatch.setattr(slt, "evaluate", exploding_evaluate)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "evaluation" for s in data["failed_stages"])
+    assert harness.cleanup_calls == 1, "cleanup must still run"
+
+
+def test_a_raising_publisher_is_a_red_publication_stage(monkeypatch, tmp_path,
+                                                        capsys):
+    """`_published` walks caller data and can raise; that must be contained.
+
+    A hostile `__eq__`/`__float__` can raise from inside publication, after
+    evaluation has already succeeded. Unprotected, that would escape as a
+    traceback carrying an exception message no validator ever inspected.
+    """
+    slt = _slt()
+    boom = type(f"PubErr_{_TELEMETRY_SECRET}", (Exception,), {})
+
+    def exploding_publish(result, contract):
+        raise boom(_TELEMETRY_SECRET)
+
+    monkeypatch.setattr(slt, "_published", exploding_publish)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert all(m["measurement"] is None for m in data["measurements"])
+    assert harness.cleanup_calls == 1, "cleanup must still run"
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err)):
+        assert _TELEMETRY_SECRET not in text, f"leak into {channel}"
+        assert "PubErr_" not in text, f"class name leaked into {channel}"
+
+
+@pytest.mark.parametrize("stage, loader_factory", [
+    ("setup", lambda: (lambda: None)),
+    ("benchmark", lambda: (lambda: _FakeAppendHarness(
+        bench_returns_none_on="*"))),
+])
+def test_an_unexpected_none_return_fails_closed(stage, loader_factory,
+                                                monkeypatch, tmp_path):
+    """A stage that silently returns None produced nothing — never a pass."""
+    code, out = _run_telemetry(monkeypatch, tmp_path, loader_factory())
+    assert code == 1, f"a None return from {stage} exited green"
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == stage for s in data["failed_stages"]), data
+
+
+def test_an_evaluator_returning_none_fails_closed(monkeypatch, tmp_path):
+    slt = _slt()
+    monkeypatch.setattr(slt, "evaluate", lambda result, contract: None)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert any(s["stage"] == "evaluation" for s in data["failed_stages"])
+    assert harness.cleanup_calls == 1
+
+
+def test_a_healthy_result_that_publishes_none_is_a_publication_failure(
+        monkeypatch, tmp_path):
+    """If evaluation reports healthy, `None` from the publisher is a runner
+    defect — it must never read as a pass with no numbers."""
+    slt = _slt()
+    monkeypatch.setattr(slt, "_published", lambda result, contract: None)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert all(m["passed"] is False for m in data["measurements"])
+
+
+def test_a_threshold_breach_still_publishes_the_whole_measurement(
+        monkeypatch, tmp_path, capsys):
+    """A valid measurement that exceeded a limit is exactly what to publish."""
+    harness = _FakeAppendHarness(
+        results={"auto": _sample(p50=88.1122, p90=90.0, p99=95.0, max=99.0)})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["failed_stages"] == [], "a breach is not a crash"
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    auto = by_mode["auto"]
+    assert auto["passed"] is False
+    assert auto["measurement"] is not None, "operators must see the numbers"
+    # The published numbers are the AUTHENTIC source numbers — the same
+    # values the evaluator judged, rebuilt from the source result.
+    assert auto["measurement"]["p50"] == pytest.approx(88.1122)
+    assert auto["measurement"]["p99"] == pytest.approx(95.0)
+    assert auto["measurement"]["records_verified"] == _APPEND_N
+    # Only the mode and the violation count are published as reasons — the
+    # breach itself is read from the published measurement.
+    assert auto["violation_count"] == 1
+    assert any("fsync=auto" in r and "1 violation" in r
+               for r in data["failure_reasons"])
+    assert by_mode["always"]["passed"] is True
+    captured = capsys.readouterr()
+    assert captured.out == blob
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("over, why", [
+    ({"journal_bytes": 0}, "an empty journal"),
+    ({"p50": 1.0, "p90": 0.8, "p99": 0.5, "max": 0.4, "mean": 0.3},
+     "an inverted but positive percentile set"),
+    ({"projected_ms_at_10k": 12.5}, "an inconsistent projection"),
+    ({"fsync": "always"}, "a result from the wrong fsync mode"),
+    ({"records_verified": 119}, "a partial run"),
+])
+def test_a_structurally_invalid_result_publishes_measurement_null(
+        over, why, monkeypatch, tmp_path, capsys):
+    harness = _FakeAppendHarness(results={"auto": _sample(**over)})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, why
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["failed_stages"] == [], "a rejected row is not a crash"
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["measurement"] is None, why
+    assert by_mode["auto"]["passed"] is False
+    captured = capsys.readouterr()
+    assert captured.out == blob, "stdout must remain exactly the artifact"
+    assert captured.err == ""
+
+
+def test_a_benchmark_returning_a_non_mapping_is_red_not_a_crash(monkeypatch,
+                                                                tmp_path):
+    harness = _FakeAppendHarness(results={"auto": ["not", "a", "mapping"]})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["failed_stages"] == [], "a rejected row is not a crash"
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["measurement"] is None
+    assert by_mode["auto"]["passed"] is False
+    assert by_mode["auto"]["violation_count"] == 1
+    assert any("fsync=auto" in r for r in data["failure_reasons"])
+
+
+def test_a_serialization_failure_still_writes_a_minimal_red_artifact(
+        monkeypatch, tmp_path, capsys):
+    """`allow_nan=False` plus an unserialisable payload must not lose the run.
+
+    The poison is injected DOWNSTREAM of the publication schema gate — at the
+    `_validated_published` seam — because that gate now rejects a poisoned
+    publisher return before it can reach the payload. This exercises the
+    serializer backstop itself: the last line of defence when a runner defect
+    puts something unserialisable into the payload anyway.
+    """
+    slt = _slt()
+    original = slt._validated_published
+
+    def poisoned(published, result, contract):
+        clean = original(published, result, contract)
+        clean["poison"] = _UnserializablePoison()
+        return clean
+
+    monkeypatch.setattr(slt, "_validated_published", poisoned)
+    code, out = _run_telemetry(monkeypatch, tmp_path,
+                               lambda: _FakeAppendHarness())
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["measurements_withheld"] is True
+    assert any(s["stage"] == "serialization" for s in data["failed_stages"])
+    assert _TELEMETRY_SECRET not in blob and "Unserializable" not in blob
+    captured = capsys.readouterr()
+    assert captured.out == blob
+    assert captured.err == ""
+
+
+def test_the_artifact_is_valid_json_without_nan(monkeypatch, tmp_path):
+    harness = _FakeAppendHarness(
+        results={"auto": _sample(p50=float("nan"), mean=float("inf"))})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    for token in ("NaN", "Infinity", "-Infinity"):
+        assert token not in blob, f"{token} is not valid JSON"
+    json.loads(blob)
+
+
+@pytest.mark.parametrize("loader_factory, expected_code", [
+    (lambda: (lambda: _FakeAppendHarness()), 0),
+    (lambda: (lambda: _FakeAppendHarness(
+        results={"auto": _sample(p99=459.9876, max=460.0)})), 1),
+    (lambda: (lambda: _FakeAppendHarness(
+        cleanup_error=_TelemetryFailure(_LEAKY))), 1),
+])
+def test_stdout_is_exactly_the_artifact_and_stderr_is_empty(
+        loader_factory, expected_code, monkeypatch, tmp_path, capsys):
+    """Byte-for-byte equality, on green AND on handled-failure runs.
+
+    Substring containment was too weak: it permitted the extra `verdict:` and
+    `FAIL:` lines the runner used to print, one of which echoed the
+    caller-supplied `--out` pathname.
+    """
+    code, out = _run_telemetry(monkeypatch, tmp_path, loader_factory())
+    assert code == expected_code
+    captured = capsys.readouterr()
+    artifact = out.read_text(encoding="utf-8")
+    assert captured.out == artifact, "stdout is not exactly the artifact bytes"
+    assert artifact.endswith("}\n") and not artifact.endswith("}\n\n")
+    assert captured.err == "", "a handled failure must not write to stderr"
+
+
+def test_the_output_pathname_never_appears_on_any_channel(monkeypatch,
+                                                          tmp_path, capsys):
+    """`--out` is caller-supplied; echoing it publishes whatever it contains."""
+    slt = _slt()
+    out = tmp_path / f"dir_{_TELEMETRY_SECRET}" / f"{_TELEMETRY_SECRET}.json"
+    monkeypatch.setattr(slt, "_load_benchmark", lambda: _FakeAppendHarness())
+    code = slt.main(["--out", str(out)])
+
+    assert code == 0
+    assert out.is_file()
+    captured = capsys.readouterr()
+    assert _TELEMETRY_SECRET not in captured.out, "the pathname leaked"
+    assert captured.err == ""
+    assert _TELEMETRY_SECRET not in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("loader_factory", [
+    lambda: (lambda: (_ for _ in ()).throw(_TelemetryFailure(_LEAKY))),
+    lambda: (lambda: _FakeAppendHarness(
+        bench_error=_TelemetryFailure(_LEAKY))),
+    lambda: (lambda: _FakeAppendHarness(
+        cleanup_error=_TelemetryFailure(_LEAKY))),
+])
+def test_failure_artifacts_carry_no_exception_type_message_or_path(
+        loader_factory, monkeypatch, tmp_path, capsys):
+    """Neither the exception TYPE nor its message reaches any channel.
+
+    A real exception message can carry a credential or a scratch path, and
+    `type(name, (), {})` makes even `__name__` caller-controlled — so a
+    failure publishes a closed stage name and nothing derived from the
+    exception at all.
     """
     code, out = _run_telemetry(monkeypatch, tmp_path, loader_factory())
     assert code == 1
     blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err)):
+        for secret in ("TAVILY_API_KEY", "sk_live_9f3a21", "AppData",
+                       "C:/Users/someone", "olymperf-abc"):
+            assert secret not in text, f"{secret!r} leaked into {channel}"
+        assert "_TelemetryFailure" not in text, (
+            f"the exception type leaked into {channel}")
+    json.loads(blob)
 
-    for secret in ("TAVILY_API_KEY", "sk_live_9f3a21", "AppData",
-                   "C:/Users/someone", "olymperf-abc"):
-        assert secret not in blob, f"{secret!r} leaked into the artifact"
-    assert "_LoudFailure" in blob, "the exception type must still be reported"
+
+def test_a_dynamic_class_name_carrying_the_secret_never_leaks(monkeypatch,
+                                                              tmp_path,
+                                                              capsys):
+    poison_cls = type(f"Cls_{_TELEMETRY_SECRET}", (Exception,), {})
+    harness = _FakeAppendHarness(bench_error=poison_cls(_TELEMETRY_SECRET))
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err)):
+        assert _TELEMETRY_SECRET not in text, f"leak into {channel}"
+        assert "Cls_" not in text, f"the class name leaked into {channel}"
+    json.loads(blob)
 
 
-def test_telemetry_artifact_is_sanitized():
-    """The published artifact carries numbers, not environment or paths."""
+def test_failure_stages_are_a_closed_vocabulary():
+    """Only fixed stage names and contract modes may ever be published."""
     slt = _slt()
-    dirty = _sample(secret_env="TAVILY_API_KEY=abc",
-                    path="C:/Users/someone/AppData/Local/Temp/x",
-                    payload={"messages": ["..."]})
-    clean = slt._sanitized(dirty)
-    assert "secret_env" not in clean and "path" not in clean
-    assert "payload" not in clean
-    assert clean["p50"] == 5.0 and clean["records_verified"] == 120
+    assert set(slt.STAGES) == {"setup", "benchmark", "evaluation",
+                               "publication", "cleanup", "serialization"}
+    for stage in slt.STAGES:
+        assert stage.isascii() and stage.islower()
+    assert slt.FSYNC_MODES == ("auto", "always")
+
+
+def test_cleanup_failure_keeps_the_already_collected_evidence(monkeypatch,
+                                                              tmp_path):
+    """Cleanup is protected separately, so measurements survive its fault."""
+    harness = _FakeAppendHarness(cleanup_error=_TelemetryFailure(_LEAKY))
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "cleanup" for s in data["failed_stages"])
+    assert len(data["measurements"]) == len(_slt().CONTRACTS)
+    for entry in data["measurements"]:
+        assert entry["passed"] is True
+        assert entry["measurement"] is not None, (
+            "measurements taken before the cleanup fault must survive it")
+    assert harness.cleanup_calls == 1, "cleanup must not be retried"
+
+
+# --- evaluator output is data, never trusted code ----------------------------
+#
+# `evaluate` is a module global a fault or a patch can replace. Its return
+# value therefore gets the same treatment as a benchmark result: only an
+# exact built-in list is a verdict, only its LENGTH is used, and the published
+# reason is a closed constant carrying the contract mode and the count — never
+# the evaluator's own strings.
+
+@pytest.mark.parametrize("evil, why", [
+    (False, "False is not a violations list (iterating it would crash)"),
+    (True, "True is not a violations list"),
+    (object(), "an arbitrary object"),
+    (_TELEMETRY_SECRET, "a secret-shaped string"),
+    ((), "a tuple is not the exact list type"),
+    ({}, "a mapping is not a violations list"),
+])
+def test_a_non_list_evaluator_return_fails_closed_without_crashing(
+        evil, why, monkeypatch, tmp_path, capsys):
+    slt = _slt()
+    monkeypatch.setattr(slt, "evaluate", lambda result, contract: evil)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, why
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail", "a broken evaluator must never pass"
+    assert any(s["stage"] == "evaluation" for s in data["failed_stages"])
+    assert all(m["measurement"] is None for m in data["measurements"])
+    assert all(m["passed"] is False for m in data["measurements"])
+    assert harness.cleanup_calls == 1, "cleanup must still run"
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+    assert captured.out == blob and captured.err == ""
+
+
+@pytest.mark.parametrize("evil_list, why", [
+    ([_TELEMETRY_SECRET], "a fabricated secret-shaped violation"),
+    ([object(), object()], "fabricated object violations"),
+    ([{"env": _TELEMETRY_SECRET}], "a fabricated mapping violation"),
+])
+def test_a_fake_violation_for_a_healthy_result_is_an_evaluation_failure(
+        evil_list, why, monkeypatch, tmp_path, capsys):
+    """The canonical judges find nothing; an evaluator claiming otherwise is
+    a count disagreement — one closed evaluation-stage failure — and the
+    list's contents never reach any channel."""
+    slt = _slt()
+    monkeypatch.setattr(slt, "evaluate",
+                        lambda result, contract: list(evil_list))
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, why
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "evaluation" for s in data["failed_stages"])
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["violation_count"] is None
+    assert by_mode["auto"]["passed"] is False
+    assert by_mode["auto"]["measurement"] is None
+    assert harness.cleanup_calls == 1, "cleanup must still run"
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+    assert captured.out == blob and captured.err == ""
+
+
+def test_an_evaluator_returning_empty_for_a_breach_cannot_pass(monkeypatch,
+                                                               tmp_path,
+                                                               capsys):
+    """The v2 false-green: `[]` for a breaching result suppressed the breach.
+
+    The canonical judges find one threshold violation; an evaluator claiming
+    zero is a count disagreement, so the run goes red on the evaluation stage
+    of exactly the contract whose breach was being hidden.
+    """
+    slt = _slt()
+    monkeypatch.setattr(slt, "evaluate", lambda result, contract: [])
+    harness = _FakeAppendHarness(
+        results={"auto": _sample(p99=459.9876, max=460.0)})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, "a lying evaluator produced a green run on a breach"
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "evaluation" and s.get("fsync") == "auto"
+               for s in data["failed_stages"]), data["failed_stages"]
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["passed"] is False
+    assert by_mode["auto"]["measurement"] is None
+    # The always contract really is healthy, so `[]` agrees there.
+    assert by_mode["always"]["passed"] is True
+    captured = capsys.readouterr()
+    assert captured.out == blob and captured.err == ""
+
+
+def test_an_agreeing_but_hostile_violation_list_is_counted_never_published(
+        monkeypatch, tmp_path, capsys):
+    """When the evaluator's COUNT agrees with the canonical judges, only that
+    count is used — the strings still never reach any channel."""
+    slt = _slt()
+    real_evaluate = slt.evaluate
+
+    def hostile(result, contract):
+        return [_TELEMETRY_SECRET] * len(real_evaluate(result, contract))
+
+    monkeypatch.setattr(slt, "evaluate", hostile)
+    harness = _FakeAppendHarness(
+        results={"auto": _sample(p99=459.9876, max=460.0)})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["failed_stages"] == [], "an agreed count is not a crash"
+    by_mode = {m["fsync"]: m for m in data["measurements"]}
+    assert by_mode["auto"]["violation_count"] == 1
+    assert by_mode["auto"]["passed"] is False
+    assert by_mode["always"]["passed"] is True
+    assert any("fsync=auto" in r and "1 violation" in r
+               for r in data["failure_reasons"])
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+    assert captured.out == blob and captured.err == ""
+
+
+# --- publication output is schema-validated, never trusted -------------------
+
+@pytest.mark.parametrize("evil, why", [
+    ({}, "an empty mapping"),
+    ([], "a list"),
+    (["p50", 5.0], "a list of fragments"),
+    (object(), "an arbitrary object"),
+    (_TELEMETRY_SECRET, "a serializable secret string"),
+])
+def test_a_malformed_publisher_return_is_a_publication_failure(
+        evil, why, monkeypatch, tmp_path, capsys):
+    """A serializable-but-wrong publisher return must never enter a passing
+    artifact — it is one publication-stage failure and measurement: null."""
+    slt = _slt()
+    monkeypatch.setattr(slt, "_published", lambda result, contract: evil)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, why
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail", "a malformed publication must never pass"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert all(m["measurement"] is None for m in data["measurements"])
+    assert all(m["passed"] is False for m in data["measurements"])
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+    assert captured.out == blob and captured.err == ""
+
+
+def test_a_publisher_forging_every_latency_value_is_a_publication_failure(
+        monkeypatch, tmp_path, capsys):
+    """The v3 false-green: a SCHEMA-VALID forgery. A publisher that replaces
+    every latency statistic with 999.0 used to exit 0 with verdict pass and
+    p50 999.0 against a 60.0 threshold; publication now requires every
+    published value to equal the source result's, so the forgery is one
+    publication-stage failure with measurement: null."""
+    slt = _slt()
+    real_published = slt._published
+
+    def forging(result, contract):
+        published = real_published(result, contract)
+        for key in ("p50", "p90", "p99", "max", "mean"):
+            published[key] = 999.0
+        return published
+
+    monkeypatch.setattr(slt, "_published", forging)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, "a forged publication produced a green run"
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert all(m["measurement"] is None for m in data["measurements"])
+    assert all(m["passed"] is False for m in data["measurements"])
+    assert "999.0" not in blob, "a forged number reached the artifact"
+    captured = capsys.readouterr()
+    assert captured.out == blob and captured.err == ""
+
+
+@pytest.mark.parametrize("key, forged", [
+    ("journal_bytes", 1),
+    ("n", 240),
+    ("records_verified", 119),
+    ("slope_ms_per_record", 0.0),
+    ("projected_ms_at_50k", 1.5),
+])
+def test_a_publisher_forging_a_single_field_is_a_publication_failure(
+        key, forged, monkeypatch, tmp_path, capsys):
+    """One validly typed field that disagrees with the source is enough."""
+    slt = _slt()
+    real_published = slt._published
+
+    def forging(result, contract):
+        published = real_published(result, contract)
+        published[key] = forged
+        return published
+
+    monkeypatch.setattr(slt, "_published", forging)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, (key, forged)
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "fail"
+    assert any(s["stage"] == "publication" for s in data["failed_stages"])
+    assert all(m["measurement"] is None for m in data["measurements"])
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_an_unchanged_publisher_still_succeeds(monkeypatch, tmp_path):
+    """The source-equality gate must not reject honest publication."""
+    slt = _slt()
+    real_published = slt._published
+    monkeypatch.setattr(
+        slt, "_published",
+        lambda result, contract: real_published(result, contract))
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdict"] == "pass"
+    for entry in data["measurements"]:
+        assert entry["passed"] is True
+        assert entry["measurement"] is not None
+        assert entry["measurement"]["records_verified"] == _APPEND_N
+
+
+def test_published_schema_is_exact_source_checked_and_rebuilt():
+    slt = _slt()
+    contract = _auto_contract()
+    result = _sample()
+    good = slt._published(result, contract)
+    clean = slt._validated_published(good, result, contract)
+    assert clean == good
+    assert clean is not good, "the measurement must be rebuilt from source"
+
+    # Schema violations.
+    missing = dict(good)
+    del missing["p50"]
+    assert slt._validated_published(missing, result, contract) is None
+    assert slt._validated_published(dict(good, poison=1.0), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, p50="5.0"), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, p50=5), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, n=120.0), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, n=True), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, journal_status_ok=1), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, fsync="always"), result,
+                                    contract) is None
+    assert slt._validated_published(
+        dict(good, slope_ms_per_record=float("nan")), result,
+        contract) is None
+
+    class _DictSubclass(dict):
+        pass
+
+    assert slt._validated_published(_DictSubclass(good), result,
+                                    contract) is None
+
+    # Source disagreement: perfect schema and types, fabricated values.
+    assert slt._validated_published(dict(good, p50=999.0), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, journal_bytes=1), result,
+                                    contract) is None
+    assert slt._validated_published(dict(good, slope_ms_per_record=0.0),
+                                    result, contract) is None
+
+    # A structurally invalid source can never publish, whatever is claimed.
+    bad_source = _sample(records_verified=119)
+    assert slt._validated_published(good, bad_source, contract) is None
+
+
+def test_a_hostile_key_impersonating_a_schema_key_is_rejected():
+    """A str-subclass key can hash and compare like 'p50' while its actual
+    text is a secret; json would serialize the actual text."""
+    slt = _slt()
+    contract = _auto_contract()
+    good = slt._published(_sample(), contract)
+
+    class _KeyImpostor(str):
+        def __new__(cls):
+            return super().__new__(cls, _TELEMETRY_SECRET)
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+        def __hash__(self):
+            return hash("p50")
+
+    bad = {(_KeyImpostor() if key == "p50" else key): value
+           for key, value in good.items()}
+    assert slt._validated_published(bad, _sample(), contract) is None
+
+
+# --- the contract table cannot vouch for itself ------------------------------
+
+def test_the_real_contract_table_matches_the_immutable_specification():
+    slt = _slt()
+    assert slt.contract_configuration_violations() == []
+    assert slt.EXPECTED_CONTRACT_SPEC == (("auto", 120, 60.0, 200.0),
+                                          ("always", 120, 100.0, 400.0))
+    assert slt.EXPECTED_MODES == ("auto", "always")
+
+
+def _spec_contract(fsync, n, p50, p99):
+    return {"benchmark": "sessionlog.append_turn", "fsync": fsync, "n": n,
+            "p50_max_ms": p50, "p99_max_ms": p99}
+
+
+@pytest.mark.parametrize("broken, why", [
+    ((), "an empty contract table"),
+    ((_spec_contract("auto", 120, 60.0, 200.0),), "a missing contract"),
+    ((_spec_contract("auto", 120, 60.0, 200.0),) * 2, "a duplicated contract"),
+    ((_spec_contract("always", 120, 100.0, 400.0),
+      _spec_contract("auto", 120, 60.0, 200.0)), "a reordered table"),
+    ((_spec_contract("auto", 120, 61.0, 200.0),
+      _spec_contract("always", 120, 100.0, 400.0)), "a softened p50 bound"),
+    ((_spec_contract("auto", 120, 60.0, 200.0),
+      _spec_contract("always", 100, 100.0, 400.0)), "an altered sample count"),
+    ((_spec_contract("auto", 120, 60.0, 200.0),
+      _spec_contract("always", 120, 100.0, _TELEMETRY_SECRET)),
+     "a secret-shaped threshold"),
+    (("not a contract",
+      _spec_contract("always", 120, 100.0, 400.0)), "a malformed entry"),
+    ("not a sequence", "a non-sequence table"),
+])
+def test_a_mutated_contract_table_fails_closed_without_executing(
+        broken, why, monkeypatch, tmp_path, capsys):
+    slt = _slt()
+    monkeypatch.setattr(slt, "CONTRACTS", broken)
+    harness = _FakeAppendHarness()
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1, why
+    assert harness.calls == [], (
+        "a broken contract table must refuse to execute the benchmark")
+    assert harness.cleanup_calls == 0
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail", why
+    assert data["measurements"] == []
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+    assert captured.out == blob and captured.err == ""
+
+
+def test_completeness_is_independent_of_contract_table_mutation(monkeypatch):
+    """Emptying CONTRACTS must not shrink what completeness demands."""
+    slt = _slt()
+    monkeypatch.setattr(slt, "CONTRACTS", ())
+    assert slt.measurement_completeness_violations([]) != []
+    assert slt.measurement_completeness_violations(
+        [{"fsync": "auto"}, {"fsync": "always"}]) == []
+
+
+# --- serialization catches every exception type ------------------------------
+
+def test_a_custom_serialization_exception_still_writes_the_fallback(
+        monkeypatch, tmp_path, capsys):
+    """The backstop must catch EVERY exception, not just TypeError/ValueError,
+    and publish nothing derived from it — neither its type nor its message."""
+    slt = _slt()
+    boom = type(f"Ser_{_TELEMETRY_SECRET}", (Exception,), {})
+
+    class _ClassLookupBomb:
+        """json's failure path reads `o.__class__`; make that raise a custom
+        exception carrying the canary, so a TypeError-only handler dies."""
+
+        @property
+        def __class__(self):
+            raise boom(_TELEMETRY_SECRET)
+
+    original = slt._validated_published
+
+    def poisoned(published, result, contract):
+        clean = original(published, result, contract)
+        clean["poison"] = _ClassLookupBomb()
+        return clean
+
+    monkeypatch.setattr(slt, "_validated_published", poisoned)
+    code, out = _run_telemetry(monkeypatch, tmp_path,
+                               lambda: _FakeAppendHarness())
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    data = json.loads(blob)
+    assert data["verdict"] == "fail"
+    assert data["measurements_withheld"] is True
+    assert any(s["stage"] == "serialization" for s in data["failed_stages"])
+    captured = capsys.readouterr()
+    for text in (blob, captured.out, captured.err):
+        assert _TELEMETRY_SECRET not in text
+        assert "Ser_" not in text
+    assert captured.out == blob and captured.err == ""
+
+
+# --- nothing sensitive may reach any channel ---------------------------------
+
+# Every field is poisoned only with shapes that are genuinely WRONG for it.
+# Booleans are invalid for every append field (there are no flag fields in
+# this result), so `True` needs no special-casing here.
+_APPEND_LEAK_FIELDS = (_APPEND_MEASUREMENT_FIELDS + _APPEND_COUNT_FIELDS
+                       + ("journal_status", "fsync"))
+
+# (shape-name, value) — the NAME is what pytest prints. A pytest node id lands
+# in CI logs and JUnit XML, so a raw secret-shaped value must never become one.
+_APPEND_LEAK_SHAPES = (
+    ("secret_str", _TELEMETRY_SECRET),
+    ("secret_in_list", [_TELEMETRY_SECRET]),
+    ("secret_in_dict", {"env": _TELEMETRY_SECRET}),
+    ("secret_repr_object", _UnserializablePoison()),
+    ("nan", float("nan")),
+    ("inf", float("inf")),
+    ("bool", True),
+    ("secret_int_subclass", _SecretInt(120)),
+    ("secret_float_subclass", _SecretFloat(1.0)),
+    ("secret_str_subclass", _SecretStr()),
+    ("oversized_int", 10 ** 400),
+)
+
+_APPEND_LEAK_CASES = [(f"{field}-{shape}", field, value)
+                      for field in _APPEND_LEAK_FIELDS
+                      for shape, value in _APPEND_LEAK_SHAPES]
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [(field, value) for _id, field, value in _APPEND_LEAK_CASES],
+    ids=[_id for _id, _f, _v in _APPEND_LEAK_CASES])
+def test_a_rejected_value_never_reaches_any_channel(field, value, monkeypatch,
+                                                    tmp_path, capsys):
+    """Every field x every rejected shape, on every channel a CI run reads."""
+    slt = _slt()
+    reasons = slt.evaluate(_sample(**{field: value}), _auto_contract())
+    assert reasons, f"{field} must reject this shape"
+
+    harness = _FakeAppendHarness(results={"auto": _sample(**{field: value})})
+    code, out = _run_telemetry(monkeypatch, tmp_path, lambda: harness)
+    assert code == 1
+    blob = out.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    for channel, text in (("artifact", blob), ("stdout", captured.out),
+                          ("stderr", captured.err),
+                          ("reasons", " ".join(reasons))):
+        assert _TELEMETRY_SECRET not in text, (
+            f"the secret leaked into {channel}")
+        assert "<Unserializable" not in text, f"a repr leaked into {channel}"
+    json.loads(blob)
 
 
 def test_projected_append_cost_is_never_negative():
