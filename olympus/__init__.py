@@ -15,6 +15,6 @@ try:
     try:
         __version__ = _pkg_version("olympus-council")
     except PackageNotFoundError:
-        __version__ = "0.27.2"
+        __version__ = "0.27.3"
 except Exception:  # pragma: no cover - importlib.metadata always present on 3.10+
-    __version__ = "0.27.2"
+    __version__ = "0.27.3"
