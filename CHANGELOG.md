@@ -15,7 +15,7 @@ carries a migration note here.
 
 ## [Unreleased]
 
-## [0.27.3] — 2026-08-09
+## [0.27.3] — 2026-08-12
 
 ### Added
 
@@ -26,6 +26,13 @@ carries a migration note here.
   end-to-end CI anchor, and production fallback-chain verification.
 - Added scheduled and manually dispatched Windows session-log latency
   telemetry with fail-closed evaluation and sanitized JSON artifacts.
+- Added scheduled and manually dispatched `usage.record` contention telemetry
+  across Linux Python 3.10–3.13 and Windows Python 3.12, preserving the
+  original five-run quorum and absolute thresholds in red-capable sanitized
+  JSON artifacts.
+- Added scheduled and manually dispatched `sessionlog.sync` latency and
+  depth-scaling telemetry across the same platform matrix, with independent
+  red-capable artifacts for both contracts.
 
 ### Changed
 
@@ -39,6 +46,10 @@ carries a migration note here.
   `sessionlog.append_turn` path with deterministic integrity and
   work-accounting contracts while preserving the absolute thresholds in
   scheduled telemetry.
+- Moved absolute hosted-runner wall-clock verdicts for `usage.record`
+  contention and `sessionlog.sync` out of required pull-request CI while
+  retaining exact accounting, chain/replay integrity, work-completeness, and
+  scan/fsync/byte contracts as deterministic required gates.
 - Hardened the release baseline across Linux Python 3.10–3.13 and Windows
   Python 3.12 with supply-chain, packaging, noninterference, browser,
   sandbox, SBOM, and console-encoding checks.
@@ -63,7 +74,10 @@ carries a migration note here.
 - Kept authentication before JSON parsing and bounded post-refusal
   request-body cleanup by time and bytes.
 - Made concurrency, session-log, and telemetry gates fail closed on corrupt,
-  partial, malformed, or unaccounted work.
+  partial, malformed, or unaccounted work; scheduled latency publishers now
+  pin contracts independently, recompute canonical violations, cross-check
+  source measurements, rebuild allowlisted payloads, and emit sanitized red
+  artifacts on serialization failures.
 
 ## [0.27.2] — 2026-08-01
 
