@@ -19,6 +19,7 @@ Nothing here needs a provider, a key, or a network.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -2562,20 +2563,1235 @@ def test_journal_recovery_scales_linearly_and_stays_bounded():
 
 
 # --- 2. observability non-interference cost ---------------------------------
+#
+# WHAT CHANGED, AND WHY. CI run 31544926530 failed this contract at
+# abs_overhead_ms 35.877 with 16.335 ms of reported noise and a "metrics"
+# attribution of -84.879 ms inside 125.967 ms of noise — numbers no stable
+# overhead could produce. The benchmark's `_interleaved` helper alternated
+# arms run-for-run but executed every pair in a FIXED A->B order, so
+# chronological runner drift landed systematically on the second position and
+# was reported as instrumentation cost; the test then read six pairs' raw
+# median as conclusive even though the 25 ms boundary sat inside the
+# measurement's own noise interval.
+#
+# The 25.0 ms limit is UNCHANGED. What changed is the evidence: pairs are now
+# counterbalanced (A->B, B->A, ...) over three independent batches, and the
+# verdict is TRI-STATE on the uncertainty band [max(0, delta - noise),
+# max(0, delta + noise)]:
+#
+#   * BREACH — the lower edge reaches 25.0 ms: the evidence supports the
+#     limit even after subtracting its own noise;
+#   * PASS — only when the UPPER edge is strictly below 25.0 ms: the whole
+#     band clears the limit;
+#   * INCONCLUSIVE, and FAILING — everything in between, including exact
+#     boundary equality, plus any measurement whose own noise reaches
+#     25.0 ms. A band that crosses the threshold proves nothing in either
+#     direction, and a result that proves nothing is never treated as
+#     evidence of health.
+#
+# Counterbalancing removes systematic first/second-position bias and robust
+# pairing resists isolated stalls, but hosted-runner noise is still possible;
+# the lower edge is a conservative breach test, not proof that the raw
+# overhead is below 25 ms.
+
+_OBS_PAIRS = 18
+_OBS_BATCHES = 3
+_OBS_LIMIT_MS = 25.0        # the preserved contract limit — not softened
+_OBS_COMPONENTS = {"usage", "ctx", "otel", "metrics", "guard"}
+
+
+def _obs_finite(value) -> bool:
+    """A finite built-in number: bools and non-numerics are not."""
+    return (type(value) in (int, float)
+            and math.isfinite(float(value)))
+
+
+def observability_gate_violations(r, *, pairs=_OBS_PAIRS,
+                                  batches=_OBS_BATCHES,
+                                  limit_ms=_OBS_LIMIT_MS) -> list[str]:
+    """Tri-state, uncertainty-aware verdict on one observability measurement.
+    Pure, so the deterministic regressions below can drive it synthetically.
+
+    Fails when the structure is incomplete or unbalanced, a count is wrong,
+    a value is non-finite or impossibly negative, the noise reaches the
+    limit (inconclusive), the lower edge of the uncertainty band reaches the
+    limit (breach), or the band crosses the limit at all (inconclusive — a
+    result that proves nothing is failed, never passed). A result passes
+    ONLY when its entire band [lower edge, upper edge] sits strictly below
+    the limit. Raw overhead, noise, both edges, and the threshold appear in
+    every verdict message.
+    """
+    out: list[str] = []
+    if not isinstance(r, dict):
+        return ["result is not a mapping"]
+
+    for key in ("off_p50_ms", "on_p50_ms", "abs_overhead_ms", "noise_ms",
+                "overhead_pct", "overhead_lower_bound_ms",
+                "overhead_upper_bound_ms", "position_effect_ms"):
+        if not _obs_finite(r.get(key)):
+            out.append(f"{key} is not a finite built-in number")
+    for key in ("iters", "paired_samples", "batches",
+                "counterbalanced_blocks"):
+        if type(r.get(key)) is not int or r.get(key) <= 0:
+            out.append(f"{key} is not a positive built-in int")
+    if type(r.get("significant")) is not bool:
+        out.append("significant is not a bool")
+    if r.get("order_balanced") is not True:
+        out.append("order_balanced is not True")
+
+    counts = r.get("order_counts")
+    if not isinstance(counts, dict) or set(counts) != {"a_first", "b_first"} \
+            or any(type(counts[k]) is not int or counts[k] < 0
+                   for k in ("a_first", "b_first")):
+        out.append("order_counts is malformed")
+    rows = r.get("batch_summaries")
+    if not isinstance(rows, list) or len(rows) != batches:
+        out.append(f"batch_summaries does not hold exactly {batches} batches")
+        rows = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            out.append(f"batch {i} is not a mapping")
+            continue
+        for key in ("pairs", "a_first", "b_first", "counterbalanced_blocks"):
+            if type(row.get(key)) is not int or row.get(key) < 0:
+                out.append(f"batch {i} {key} is not a valid count")
+        for key in ("delta_ms", "noise_ms", "position_effect_ms"):
+            if not _obs_finite(row.get(key)):
+                out.append(f"batch {i} {key} is not finite")
+    if out:
+        return out              # the cross-checks below assume valid scalars
+
+    if r["paired_samples"] != pairs or r["iters"] != pairs:
+        out.append(f"expected {pairs} measured pairs, got paired_samples="
+                   f"{r['paired_samples']} iters={r['iters']}")
+    if r["batches"] != batches:
+        out.append(f"expected {batches} batches, got {r['batches']}")
+    if r["counterbalanced_blocks"] != pairs // 2:
+        out.append(f"counterbalanced_blocks does not equal pairs // 2 "
+                   f"({pairs // 2})")
+    if sum(row["counterbalanced_blocks"] for row in rows) \
+            != r["counterbalanced_blocks"]:
+        out.append("batch block counts do not sum to the total block count")
+    a_first, b_first = counts["a_first"], counts["b_first"]
+    if a_first + b_first != pairs:
+        out.append("order counts do not sum to the pair count")
+    if a_first != b_first:
+        out.append(f"execution order is unbalanced: {a_first} A-first vs "
+                   f"{b_first} B-first")
+    if sum(row["pairs"] for row in rows) != pairs:
+        out.append("batch pair counts do not sum to the total")
+    for i, row in enumerate(rows):
+        if row["pairs"] < 2:
+            out.append(f"batch {i} holds no measured pairs — an empty batch "
+                       f"is a batch that never ran")
+        if row["pairs"] % 2:
+            out.append(f"batch {i} holds an odd number of pairs, which "
+                       f"cannot balance A-first against B-first")
+        if row["a_first"] + row["b_first"] != row["pairs"]:
+            out.append(f"batch {i} order counts do not sum to its pairs")
+        if row["a_first"] != row["b_first"]:
+            out.append(f"batch {i} is order-unbalanced")
+        if row["counterbalanced_blocks"] != row["pairs"] // 2:
+            out.append(f"batch {i} block count does not equal its own "
+                       f"pairs // 2")
+        if row["noise_ms"] < 0.0:
+            out.append(f"batch {i} reports negative noise, which no real "
+                       f"measurement produces")
+    if not r["off_p50_ms"] > 0.0 or not r["on_p50_ms"] > 0.0:
+        out.append("arm medians are not positive — nothing was measured")
+
+    if r["noise_ms"] < 0.0:
+        out.append("noise_ms is negative, which no real measurement produces")
+    if r["overhead_lower_bound_ms"] < 0.0 \
+            or r["overhead_upper_bound_ms"] < 0.0:
+        out.append("a band edge is negative, which max(0, ...) cannot "
+                   "produce")
+    # Both band edges must be DERIVED from the raw evidence, not asserted.
+    expected_lower = max(0.0, r["abs_overhead_ms"] - r["noise_ms"])
+    if abs(r["overhead_lower_bound_ms"] - expected_lower) > 1e-9:
+        out.append("overhead_lower_bound_ms does not equal "
+                   "max(0, abs_overhead_ms - noise_ms)")
+    expected_upper = max(0.0, r["abs_overhead_ms"] + r["noise_ms"])
+    if abs(r["overhead_upper_bound_ms"] - expected_upper) > 1e-9:
+        out.append("overhead_upper_bound_ms does not equal "
+                   "max(0, abs_overhead_ms + noise_ms)")
+    # Derived verdict fields must AGREE with the evidence they claim to
+    # summarise — a well-typed but contradictory flag is forged evidence.
+    if r["significant"] is not (abs(r["abs_overhead_ms"]) > r["noise_ms"]):
+        out.append("significant contradicts its own delta and noise")
+    if r["off_p50_ms"] > 0.0:
+        expected_pct = r["abs_overhead_ms"] / r["off_p50_ms"] * 100.0
+        if not math.isclose(r["overhead_pct"], expected_pct,
+                            rel_tol=1e-9, abs_tol=1e-9):
+            out.append("overhead_pct does not equal "
+                       "abs_overhead_ms / off_p50_ms * 100")
+
+    comps = r.get("components_ms")
+    if not isinstance(comps, dict) or set(comps) != _OBS_COMPONENTS:
+        out.append("components_ms does not cover every component")
+    else:
+        for name, comp in sorted(comps.items()):
+            if not isinstance(comp, dict):
+                out.append(f"component {name} is not a mapping")
+                continue
+            numeric_ok = all(_obs_finite(comp.get(key))
+                             for key in ("ms", "noise_ms", "lower_bound_ms",
+                                         "upper_bound_ms",
+                                         "position_effect_ms"))
+            if not numeric_ok:
+                out.append(f"component {name} carries a non-finite value")
+            else:
+                if comp["noise_ms"] < 0.0:
+                    out.append(f"component {name} reports negative noise")
+                if comp["lower_bound_ms"] < 0.0 \
+                        or comp["upper_bound_ms"] < 0.0:
+                    out.append(f"component {name} carries a negative band "
+                               f"edge")
+                if abs(comp["lower_bound_ms"]
+                       - max(0.0, comp["ms"] - comp["noise_ms"])) > 1e-9:
+                    out.append(f"component {name} lower bound does not match "
+                               f"its own raw evidence")
+                if abs(comp["upper_bound_ms"]
+                       - max(0.0, comp["ms"] + comp["noise_ms"])) > 1e-9:
+                    out.append(f"component {name} upper bound does not match "
+                               f"its own raw evidence")
+            if type(comp.get("resolved")) is not bool:
+                out.append(f"component {name} resolved is not a bool")
+            elif numeric_ok and comp["resolved"] is not (
+                    abs(comp["ms"]) > comp["noise_ms"]):
+                out.append(f"component {name} resolved contradicts its own "
+                           f"delta and noise")
+            # Exact built-in ints: 18.0 compares equal to 18 and must still
+            # be rejected — a float count is not a count.
+            if type(comp.get("paired_samples")) is not int \
+                    or comp["paired_samples"] != pairs:
+                out.append(f"component {name} did not measure exactly "
+                           f"{pairs} pairs as a built-in int")
+            if type(comp.get("batches")) is not int \
+                    or comp["batches"] != batches:
+                out.append(f"component {name} did not use exactly {batches} "
+                           f"batches as a built-in int")
+            if type(comp.get("counterbalanced_blocks")) is not int \
+                    or comp["counterbalanced_blocks"] != pairs // 2:
+                out.append(f"component {name} block count is not exactly "
+                           f"pairs // 2 as a built-in int")
+            if comp.get("order_balanced") is not True:
+                out.append(f"component {name} is order-unbalanced")
+            ccounts = comp.get("order_counts")
+            if not isinstance(ccounts, dict) \
+                    or set(ccounts) != {"a_first", "b_first"} \
+                    or any(type(ccounts.get(k)) is not int
+                           for k in ("a_first", "b_first")) \
+                    or ccounts["a_first"] + ccounts["b_first"] != pairs \
+                    or ccounts["a_first"] != ccounts["b_first"]:
+                out.append(f"component {name} order accounting is malformed "
+                           f"or unbalanced")
+
+    # --- the preserved 25 ms contract: a TRI-STATE verdict on the band -----
+    # BREACH when the lower edge reaches the limit; PASS only when the upper
+    # edge is strictly below it; everything in between — including exact
+    # boundary equality — is INCONCLUSIVE and FAILS, because a band that
+    # crosses the threshold proves nothing in either direction.
+    raw = r["abs_overhead_ms"]
+    noise = r["noise_ms"]
+    lower = r["overhead_lower_bound_ms"]
+    upper = r["overhead_upper_bound_ms"]
+    if lower >= limit_ms:
+        out.append(
+            f"BREACH: overhead lower edge {lower:.3f} ms >= {limit_ms} ms — "
+            f"the evidence supports at least the limit even after "
+            f"subtracting its own noise (raw abs_overhead_ms={raw:.3f} ms, "
+            f"noise_ms={noise:.3f} ms, upper edge {upper:.3f} ms)")
+    elif noise >= limit_ms:
+        out.append(
+            f"INCONCLUSIVE: measurement noise {noise:.3f} ms reaches the "
+            f"{limit_ms} ms limit, so this run can prove nothing either way "
+            f"(raw abs_overhead_ms={raw:.3f} ms, lower edge {lower:.3f} ms, "
+            f"upper edge {upper:.3f} ms)")
+    elif not upper < limit_ms:
+        out.append(
+            f"INCONCLUSIVE: the uncertainty band crosses the {limit_ms} ms "
+            f"limit — raw abs_overhead_ms={raw:.3f} ms, noise_ms="
+            f"{noise:.3f} ms, lower edge {lower:.3f} ms, upper edge "
+            f"{upper:.3f} ms — this run proves neither a pass nor a breach, "
+            f"and a result that proves nothing is failed, not trusted")
+    return out
+
 
 def test_observability_overhead_absolute_cost_bounded():
     """Reference: +2.10 ms/run absolute on a fake pipeline (+100.9% of a
-    denominator containing ~0 ms of provider time).
+    denominator containing ~0 ms of provider time). The assertion is on the
+    ABSOLUTE cost, which is the portable number.
 
-    The assertion is on the ABSOLUTE cost, which is the portable number: the
-    percentage is meaningless when the baseline run has no inference latency.
+    The verdict is the tri-state gate above: 18 counterbalanced pairs over 3
+    independent batches, judged against the unchanged 25.0 ms limit. It
+    passes only when the entire uncertainty band sits strictly below the
+    limit; a band that reaches or crosses it is inconclusive and fails, and
+    a lower edge at or above it is a breach. The failure message keeps the
+    raw overhead, noise, and both band edges visible.
     """
-    r = pv.bench_observability_overhead(iters=6)
-    assert r["on_p50_ms"] > 0.0 and r["off_p50_ms"] > 0.0
-    assert r["abs_overhead_ms"] < 25.0, f"observability cost regressed: {r}"
-    # every named component must be accounted for
-    assert set(r["components_ms"]) == {"usage", "ctx", "otel", "metrics",
-                                       "guard"}
+    r = pv.bench_observability_overhead(iters=_OBS_PAIRS,
+                                        batches=_OBS_BATCHES)
+    violations = observability_gate_violations(r)
+    assert violations == [], (
+        f"observability wall-clock contract violated: {violations}\n"
+        f"raw abs_overhead_ms={r['abs_overhead_ms']} "
+        f"noise_ms={r['noise_ms']} "
+        f"overhead_lower_bound_ms={r['overhead_lower_bound_ms']} "
+        f"overhead_upper_bound_ms={r['overhead_upper_bound_ms']}\n"
+        f"full result: {r}")
+
+
+# --- 2a. deterministic regressions for the counterbalanced primitive ---------
+#
+# Driven by fake runners over a fake clock, so nothing here depends on actual
+# wall-clock scheduling. The fakes price each MEASURED run through a
+# `cost_ms(pair_index, position)` callable — position 0 is the run executed
+# first within its pair — which is exactly the knob needed to prove that
+# position bias no longer becomes arm bias.
+
+class _FakeClock:
+    """Deterministic monotonic clock; advances only when told."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _FakeObsArm:
+    """One logical arm for `counterbalanced_ab`: records every call.
+
+    The first run() after each make() is the batch warmup (the primitive
+    warms immediately after constructing fresh runners). Measured runs
+    append (arm, pair_index, position) to the shared `trace`; every run
+    appends (arm, kind) to the shared `chronology`.
+    """
+
+    def __init__(self, name, clock, trace, chronology, cost_ms,
+                 raise_on_call=None):
+        self.name = name
+        self.clock = clock
+        self.trace = trace
+        self.chronology = chronology
+        self.cost_ms = cost_ms
+        self.raise_on_call = raise_on_call
+        self.run_calls = 0
+        self.warmups = 0
+        self.enters = 0
+        self.leaves = 0
+        self._fresh = False
+
+    def make(self):
+        self._fresh = True
+
+        def enter():
+            self.enters += 1
+
+        def run():
+            self.run_calls += 1
+            if self.raise_on_call is not None \
+                    and self.run_calls == self.raise_on_call:
+                raise RuntimeError("simulated arm fault")
+            if self._fresh:
+                self._fresh = False
+                self.warmups += 1
+                self.chronology.append((self.name, "warm"))
+                self.clock.advance(0.001)
+                return
+            position = len(self.trace) % 2
+            pair_index = len(self.trace) // 2
+            self.trace.append((self.name, pair_index, position))
+            self.chronology.append((self.name, "measured"))
+            self.clock.advance(self.cost_ms(pair_index, position) / 1000.0)
+
+        def leave():
+            self.leaves += 1
+
+        return enter, run, leave
+
+
+def _fake_counterbalanced(cost_a, cost_b, *, pairs=_OBS_PAIRS,
+                          batches=_OBS_BATCHES):
+    clock = _FakeClock()
+    trace: list = []
+    chronology: list = []
+    a = _FakeObsArm("A", clock, trace, chronology, cost_a)
+    b = _FakeObsArm("B", clock, trace, chronology, cost_b)
+    result = pv.counterbalanced_ab(a.make, b.make, pairs=pairs,
+                                   batches=batches, tag="fake-obs",
+                                   clock=clock)
+    return result, a, b, trace, chronology
+
+
+def test_counterbalanced_orders_are_exactly_balanced_at_18_pairs():
+    """18 pairs / 3 batches: exactly 9 A-first and 9 B-first, 3/3 per batch."""
+    result, _a, _b, trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0, lambda pair, pos: 1.0)
+
+    assert result["paired_samples"] == 18
+    assert result["batches"] == 3
+    assert result["order_counts"] == {"a_first": 9, "b_first": 9}
+    assert result["order_balanced"] is True
+    assert [row["pairs"] for row in result["batch_summaries"]] == [6, 6, 6]
+    for row in result["batch_summaries"]:
+        assert row["a_first"] == 3 and row["b_first"] == 3
+
+    # Ground truth from the execution trace, not from the metadata.
+    a_first_pairs = {p for arm, p, pos in trace if arm == "A" and pos == 0}
+    b_first_pairs = {p for arm, p, pos in trace if arm == "B" and pos == 0}
+    assert a_first_pairs == {0, 2, 4, 6, 8, 10, 12, 14, 16}
+    assert b_first_pairs == {1, 3, 5, 7, 9, 11, 13, 15, 17}
+
+
+def test_each_arm_runs_exactly_18_measured_times_excluding_warmups():
+    _result, a, b, trace, chronology = _fake_counterbalanced(
+        lambda pair, pos: 1.0, lambda pair, pos: 1.0)
+
+    for arm in (a, b):
+        assert arm.warmups == 3, "one warmup per batch per arm"
+        assert arm.run_calls - arm.warmups == 18, (
+            "each arm must contribute exactly one measured run per pair")
+        assert arm.enters == arm.leaves == arm.run_calls, (
+            "every run must be bracketed by its own enter/leave")
+    assert len(trace) == 36
+
+    # The warmup STARTING order alternates between batches: each batch is
+    # 2 warmups + 12 measured runs = 14 chronology entries.
+    assert chronology[0] == ("A", "warm") and chronology[1] == ("B", "warm")
+    assert chronology[14] == ("B", "warm") and chronology[15] == ("A", "warm")
+    assert chronology[28] == ("A", "warm") and chronology[29] == ("B", "warm")
+
+
+def test_pairs_stay_matched_when_execution_order_reverses():
+    """Samples are stored by LOGICAL arm and every delta is B minus A.
+
+    Arm costs vary per pair (so a positional mix-up could not cancel out),
+    with B always exactly 5 ms above A. If B-first pairs were paired by
+    execution position instead of by logical arm, their deltas would come
+    out as -5; the paired median and every batch median must be exactly +5.
+    """
+    result, _a, _b, _trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0 + pair, lambda pair, pos: 6.0 + pair)
+
+    assert result["paired_delta_ms"] == pytest.approx(5.0, abs=1e-9)
+    assert result["noise_ms"] == pytest.approx(0.0, abs=1e-6)
+    for row in result["batch_summaries"]:
+        assert row["delta_ms"] == pytest.approx(5.0, abs=1e-9)
+    assert result["lower_bound_ms"] == pytest.approx(5.0, abs=1e-6)
+
+
+def _positional_cost(base):
+    """Cost model: `base` ms plus a +30 ms penalty on the SECOND run of
+    each executed pair — the CI failure mode, deterministically."""
+    return lambda pair, pos: base + (30.0 if pos == 1 else 0.0)
+
+
+def _executed_pair_deltas(trace, cost_a, cost_b, pairs):
+    """Recompute every raw pair delta (B - A) from the EXECUTED positions in
+    the trace, so a test's claim about the raw deltas is grounded in what
+    actually ran rather than in the model that generated it."""
+    deltas = []
+    for pair in range(pairs):
+        pos_a = next(pos for arm, p, pos in trace
+                     if arm == "A" and p == pair)
+        pos_b = next(pos for arm, p, pos in trace
+                     if arm == "B" and p == pair)
+        deltas.append(cost_b(pair, pos_b) - cost_a(pair, pos_a))
+    return deltas
+
+
+def test_second_position_slowdown_is_not_reported_as_b_overhead():
+    """The CI failure mode, reproduced deterministically — and now PASSING.
+
+    Both arms cost the same; whichever run executes SECOND in its pair pays
+    +30 ms — pure position bias, zero real overhead. Under the old fixed
+    A->B order B was always second, so this measured as a rock-steady
+    +30 ms B overhead with near-zero noise: a proven false breach.
+
+    Counterbalancing exists to ESTIMATE AND REMOVE exactly this controlled
+    effect. The raw pair deltas alternate +30, -30; each two-pair block
+    averages one of each, so every block treatment effect is 0 and the ±30
+    swing resolves into `position_effect_ms = 30` — measured, cancelled,
+    and published, not laundered into noise. The result is delta 0 with
+    ZERO residual noise, and the gate PASSES: a stable additive order
+    effect is not uncertainty about the overhead.
+    """
+    cost = _positional_cost(1.0)
+    result, _a, _b, trace, _chron = _fake_counterbalanced(cost, cost)
+
+    raw = _executed_pair_deltas(trace, cost, cost, 18)
+    assert raw == [30.0 if p % 2 == 0 else -30.0 for p in range(18)], (
+        "the raw pair deltas must alternate +30, -30")
+
+    assert result["counterbalanced_blocks"] == 9
+    assert result["paired_delta_ms"] == pytest.approx(0.0, abs=1e-9)
+    assert result["noise_ms"] == pytest.approx(0.0, abs=1e-9)
+    assert result["position_effect_ms"] == pytest.approx(30.0, abs=1e-9)
+    assert result["lower_bound_ms"] == pytest.approx(0.0, abs=1e-9)
+    assert result["upper_bound_ms"] == pytest.approx(0.0, abs=1e-9)
+    assert result["order_counts"] == {"a_first": 9, "b_first": 9}
+    for row in result["batch_summaries"]:
+        assert row["position_effect_ms"] == pytest.approx(30.0, abs=1e-9)
+        assert row["delta_ms"] == pytest.approx(0.0, abs=1e-9)
+
+    violations = observability_gate_violations(_obs_result(
+        abs_overhead_ms=result["paired_delta_ms"],
+        noise_ms=result["noise_ms"],
+        overhead_lower_bound_ms=result["lower_bound_ms"],
+        overhead_upper_bound_ms=result["upper_bound_ms"],
+        position_effect_ms=result["position_effect_ms"]))
+    assert violations == [], (
+        "a measured-and-cancelled order effect with zero residual noise "
+        "is a legitimate pass, not a failure: " + repr(violations))
+
+
+def test_a_real_overhead_riding_a_position_effect_is_not_hidden():
+    """Genuine +40 ms B overhead PLUS the same +30 ms second-position bias.
+
+    The raw pair deltas alternate +70 (A-first) and +10 (B-first). Every
+    two-pair block averages one of each: block treatment effects are all
+    exactly +40, the position effect resolves to +30, and the residual
+    noise is ZERO — so the lower edge is 40 and the gate declares a proven
+    BREACH. This must never pass, and it must not soften into
+    INCONCLUSIVE: the order effect was controlled and cancelled, so it
+    cannot launder a real regression into uncertainty.
+    """
+    cost_a = _positional_cost(1.0)
+    cost_b = _positional_cost(41.0)
+    result, _a, _b, trace, _chron = _fake_counterbalanced(cost_a, cost_b)
+
+    raw = _executed_pair_deltas(trace, cost_a, cost_b, 18)
+    assert raw == [70.0 if p % 2 == 0 else 10.0 for p in range(18)], (
+        "the raw pair deltas must alternate +70, +10")
+
+    assert result["counterbalanced_blocks"] == 9
+    assert result["paired_delta_ms"] == pytest.approx(40.0, abs=1e-9)
+    assert result["noise_ms"] == pytest.approx(0.0, abs=1e-9)
+    assert result["position_effect_ms"] == pytest.approx(30.0, abs=1e-9)
+    assert result["lower_bound_ms"] == pytest.approx(40.0, abs=1e-9)
+
+    violations = observability_gate_violations(_obs_result(
+        abs_overhead_ms=result["paired_delta_ms"],
+        noise_ms=result["noise_ms"],
+        overhead_lower_bound_ms=result["lower_bound_ms"],
+        overhead_upper_bound_ms=result["upper_bound_ms"],
+        position_effect_ms=result["position_effect_ms"]))
+    assert any("BREACH" in v for v in violations), violations
+    assert all("INCONCLUSIVE" not in v for v in violations), (
+        "a cancelled order effect must not soften a real breach into "
+        "inconclusive: " + repr(violations))
+
+
+def test_a_block_local_position_drift_does_not_inflate_noise():
+    """The position penalty CHANGES between blocks but is stable inside
+    each block: pen(k) = 5 + 7k for block k, on top of a genuine +10 ms B
+    overhead. Every block still cancels its own penalty exactly, so the
+    treatment estimate stays 10 ms with ZERO residual noise; the drifting
+    controlled effect lands in the position metadata (median 33, per-batch
+    medians 12/33/54), not in the uncertainty band. The gate passes."""
+    def pen(pair):
+        return 5.0 + 7.0 * (pair // 2)
+
+    def cost_a(pair, pos):
+        return 1.0 + (pen(pair) if pos == 1 else 0.0)
+
+    def cost_b(pair, pos):
+        return 11.0 + (pen(pair) if pos == 1 else 0.0)
+
+    result, _a, _b, _trace, _chron = _fake_counterbalanced(cost_a, cost_b)
+
+    assert result["paired_delta_ms"] == pytest.approx(10.0, abs=1e-9), (
+        "the treatment estimate must remain the known true overhead")
+    assert result["noise_ms"] == pytest.approx(0.0, abs=1e-9), (
+        "a controlled, locally-paired position effect is not residual noise")
+    assert result["position_effect_ms"] == pytest.approx(33.0, abs=1e-9)
+    assert [row["position_effect_ms"] for row in result["batch_summaries"]] \
+        == [pytest.approx(v, abs=1e-9) for v in (12.0, 33.0, 54.0)]
+
+    violations = observability_gate_violations(_obs_result(
+        abs_overhead_ms=result["paired_delta_ms"],
+        noise_ms=result["noise_ms"],
+        overhead_lower_bound_ms=result["lower_bound_ms"],
+        overhead_upper_bound_ms=result["upper_bound_ms"],
+        position_effect_ms=result["position_effect_ms"]))
+    assert violations == [], violations
+
+
+def test_one_extreme_outlier_cannot_fake_a_breach():
+    """A single 1000 ms stall in one B run poisons ONE two-pair block (its
+    treatment estimate jumps to 500 ms), but eight of nine blocks still say
+    zero — the block median stays at zero and cannot be dragged across the
+    25 ms threshold by one stall."""
+    result, _a, _b, _trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0,
+        lambda pair, pos: 1.0 + (1000.0 if pair == 7 else 0.0))
+
+    assert result["counterbalanced_blocks"] == 9
+    assert result["paired_delta_ms"] == pytest.approx(0.0, abs=1e-6)
+    assert result["lower_bound_ms"] < 1e-6
+    assert observability_gate_violations(_obs_result(
+        abs_overhead_ms=result["paired_delta_ms"],
+        noise_ms=result["noise_ms"],
+        overhead_lower_bound_ms=result["lower_bound_ms"],
+        overhead_upper_bound_ms=result["upper_bound_ms"],
+        position_effect_ms=result["position_effect_ms"])) == []
+
+
+def test_a_raw_estimate_above_the_limit_inside_its_noise_fails_inconclusive():
+    """GENUINE stochastic variation in the treatment itself stays noise.
+
+    The per-pair deltas ramp 22..39 ms, so the block treatment effects ramp
+    22.5, 24.5, ... 38.5 — real run-to-run variation in the estimate, not a
+    controlled order effect (the position effect is a constant -0.5 ms and
+    is published, not subtracted from the noise). The MAD of the block
+    treatments is 4.0, noise ~5.930 ms, band ~[24.570, 36.430] ms: it
+    CROSSES the unchanged 25.0 ms threshold, proving neither a breach nor
+    health. It cannot be declared a proven breach — and it must NOT pass
+    either: it fails as INCONCLUSIVE, with the raw overhead, noise, both
+    edges, and the threshold in the message.
+    """
+    result, _a, _b, _trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0,
+        lambda pair, pos: 23.0 + pair)          # paired deltas 22..39 ms
+
+    assert result["paired_delta_ms"] == pytest.approx(30.5, abs=1e-6)
+    assert result["noise_ms"] == pytest.approx(1.4826 * 4.0, abs=1e-6), (
+        "the MAD must reflect variation of the treatment estimates")
+    assert result["position_effect_ms"] == pytest.approx(-0.5, abs=1e-9)
+    assert result["lower_bound_ms"] < _OBS_LIMIT_MS \
+        < result["upper_bound_ms"]
+
+    r = _obs_result(abs_overhead_ms=result["paired_delta_ms"],
+                    noise_ms=result["noise_ms"],
+                    overhead_lower_bound_ms=result["lower_bound_ms"],
+                    overhead_upper_bound_ms=result["upper_bound_ms"],
+                    position_effect_ms=result["position_effect_ms"])
+    violations = observability_gate_violations(r)
+    assert any("INCONCLUSIVE" in v for v in violations), violations
+    assert all("BREACH" not in v for v in violations), (
+        "a band crossing the limit is not a proven breach")
+    message = next(v for v in violations if "INCONCLUSIVE" in v)
+    for needle in ("30.500", "5.930", "24.570", "36.430", "25.0"):
+        assert needle in message, (needle, message)
+
+
+def test_noise_at_or_above_the_limit_is_inconclusive_not_passing():
+    """A measurement that cannot resolve 25 ms proves nothing — fail.
+
+    Block treatments ramp 4..132 ms: median 68, MAD 32, noise ~47.4 ms with
+    a lower edge ~20.6 ms — below the limit, so the noise safeguard (not
+    the breach rule) is what fails this run.
+    """
+    result, _a, _b, _trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0,
+        lambda pair, pos: 1.0 + 8.0 * pair)     # paired deltas 0..136 ms
+
+    assert result["noise_ms"] >= _OBS_LIMIT_MS
+    assert result["lower_bound_ms"] < _OBS_LIMIT_MS
+    violations = observability_gate_violations(_obs_result(
+        abs_overhead_ms=result["paired_delta_ms"],
+        noise_ms=result["noise_ms"],
+        overhead_lower_bound_ms=result["lower_bound_ms"],
+        overhead_upper_bound_ms=result["upper_bound_ms"]))
+    assert any("INCONCLUSIVE" in v for v in violations), violations
+
+    # Exactly on the limit is still inconclusive.
+    exactly = observability_gate_violations(_obs_result(
+        abs_overhead_ms=10.0, noise_ms=25.0, overhead_lower_bound_ms=0.0,
+        overhead_upper_bound_ms=35.0))
+    assert any("INCONCLUSIVE" in v for v in exactly), exactly
+
+
+def test_non_divisible_pairs_distribute_as_complete_two_pair_units():
+    """20 pairs / 3 batches is 8+6+6 — never 7+7+6.
+
+    An odd-sized batch cannot hold equal A-first and B-first counts, so the
+    remainder over the even base moves in whole two-pair units and every
+    batch stays INDEPENDENTLY balanced: 4/4, 3/3, 3/3. The requested total
+    and batch count are preserved exactly.
+    """
+    result, a, b, _trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0, lambda pair, pos: 1.0, pairs=20, batches=3)
+
+    assert [row["pairs"] for row in result["batch_summaries"]] == [8, 6, 6]
+    assert [(row["a_first"], row["b_first"])
+            for row in result["batch_summaries"]] == [(4, 4), (3, 3), (3, 3)]
+    assert result["paired_samples"] == 20
+    assert result["batches"] == 3
+    assert result["order_counts"] == {"a_first": 10, "b_first": 10}
+    assert result["order_balanced"] is True
+    for arm in (a, b):
+        assert arm.run_calls - arm.warmups == 20
+
+
+@pytest.mark.parametrize("pairs, batches, sizes", [
+    (18, 3, [6, 6, 6]),
+    (20, 3, [8, 6, 6]),
+    (20, 4, [6, 6, 4, 4]),
+    (10, 3, [4, 4, 2]),
+    (14, 4, [4, 4, 4, 2]),
+    (12, 5, [4, 2, 2, 2, 2]),
+    (8, 3, [4, 2, 2]),
+    (24, 4, [6, 6, 6, 6]),
+    (6, 3, [2, 2, 2]),
+    (4, 1, [4]),
+    (2, 1, [2]),
+])
+def test_valid_distributions_are_even_balanced_and_complete(pairs, batches,
+                                                            sizes):
+    """Every accepted batch size is even, every batch is exactly balanced,
+    and every requested pair is measured exactly once per arm."""
+    result, a, b, trace, _chron = _fake_counterbalanced(
+        lambda pair, pos: 1.0, lambda pair, pos: 1.0,
+        pairs=pairs, batches=batches)
+
+    assert [row["pairs"] for row in result["batch_summaries"]] == sizes
+    assert sum(sizes) == pairs
+    for row in result["batch_summaries"]:
+        assert row["pairs"] % 2 == 0
+        assert row["a_first"] == row["b_first"] == row["pairs"] // 2
+    assert result["paired_samples"] == pairs
+    assert result["order_counts"] == {"a_first": pairs // 2,
+                                      "b_first": pairs // 2}
+    assert result["order_balanced"] is True
+    # No sample dropped, none duplicated: every pair index appears exactly
+    # once per arm in the measured trace.
+    for arm_name in ("A", "B"):
+        seen = [p for arm, p, _pos in trace if arm == arm_name]
+        assert sorted(seen) == list(range(pairs))
+    for arm in (a, b):
+        assert arm.run_calls - arm.warmups == pairs
+        assert arm.warmups == batches
+
+
+@pytest.mark.parametrize("pairs, batches", [
+    (0, 3), (-1, 3), (True, 3), ("18", 3), (18.0, 3),
+    (18, 0), (18, -1), (18, True), (18, "3"),
+    (2, 3),                  # pairs < 2 * batches
+    (6, 4),                  # pairs < 2 * batches
+    (3, 2),                  # odd total can never balance
+    (7, 3),                  # odd total can never balance
+])
+def test_malformed_sample_counts_are_rejected(pairs, batches):
+    """Counts must be positive built-in ints (bools rejected), even in
+    total, and large enough for one A-first and one B-first pair per batch.
+
+    Any even total meeting `pairs >= 2 * batches` IS distributable into
+    nonempty even batches by two-pair units — 20/4 and 10/3 included — so
+    only genuinely impossible combinations are rejected."""
+    with pytest.raises(ValueError):
+        pv.counterbalanced_ab(lambda: None, lambda: None,
+                              pairs=pairs, batches=batches, tag="bad")
+
+
+def test_a_raising_enter_still_runs_leave_and_restores_state():
+    """`enter()` can raise AFTER partially modifying state; `leave()` must
+    still run so the partial state is undone, the original exception must
+    propagate, and no partial measurement may be returned."""
+    sentinel = {"installed": False}
+    leaves = {"n": 0}
+
+    def make_bad_runner():
+        def enter():
+            sentinel["installed"] = True        # partial state, then fail
+            raise RuntimeError("simulated enter fault")
+
+        def run():
+            raise AssertionError(
+                "run() must never execute after a failed enter()")
+
+        def leave():
+            leaves["n"] += 1
+            sentinel["installed"] = False
+
+        return enter, run, leave
+
+    clock = _FakeClock()
+    trace: list = []
+    chronology: list = []
+    good = _FakeObsArm("A", clock, trace, chronology, lambda pair, pos: 1.0)
+
+    with pytest.raises(RuntimeError, match="simulated enter fault"):
+        pv.counterbalanced_ab(good.make, make_bad_runner, pairs=6, batches=3,
+                              tag="enter-fault", clock=clock)
+    assert leaves["n"] == 1, "leave() must run when enter() raises"
+    assert sentinel["installed"] is False, (
+        "the partially installed enter() state was not undone")
+    assert trace == [], "no measurement may survive a failed enter()"
+
+
+def test_a_cleanup_base_exception_cannot_mask_a_failed_enter():
+    """`leave()` raising KeyboardInterrupt during fault cleanup must not
+    replace the original RuntimeError from `enter()`.
+
+    `except Exception` around the secondary cleanup would let a
+    BaseException — KeyboardInterrupt, SystemExit — escape and MASK the
+    fault that actually broke the run. The outward exception must remain
+    the original, the sentinel state must still be restored, and no partial
+    result may be returned.
+    """
+    sentinel = {"installed": False}
+    leaves = {"n": 0}
+
+    def make_bad_runner():
+        def enter():
+            sentinel["installed"] = True        # partial state, then fail
+            raise RuntimeError("simulated enter fault")
+
+        def run():
+            raise AssertionError(
+                "run() must never execute after a failed enter()")
+
+        def leave():
+            leaves["n"] += 1
+            sentinel["installed"] = False
+            raise KeyboardInterrupt             # hostile cleanup
+
+        return enter, run, leave
+
+    clock = _FakeClock()
+    trace: list = []
+    chronology: list = []
+    good = _FakeObsArm("A", clock, trace, chronology, lambda pair, pos: 1.0)
+
+    with pytest.raises(RuntimeError, match="simulated enter fault"):
+        pv.counterbalanced_ab(good.make, make_bad_runner, pairs=6, batches=3,
+                              tag="enter-mask", clock=clock)
+    assert leaves["n"] == 1, "leave() must still run when enter() raises"
+    assert sentinel["installed"] is False, (
+        "the partially installed enter() state was not undone")
+    assert trace == [], "no measurement may survive a failed enter()"
+
+
+def test_a_cleanup_base_exception_cannot_mask_a_measured_run_fault():
+    """The measured path has the same guarantee as the warmup path: a
+    cleanup KeyboardInterrupt raised while a measured `run()` fault is
+    active must not replace it."""
+    state = {"installed": False, "faulted": False}
+    calls = {"run": 0, "leave": 0}
+
+    def make_bad_runner():
+        def enter():
+            state["installed"] = True
+
+        def run():
+            calls["run"] += 1
+            if calls["run"] > 1:        # the warmup succeeds; a MEASURED
+                state["faulted"] = True  # run raises mid-batch
+                raise RuntimeError("simulated measured fault")
+
+        def leave():
+            calls["leave"] += 1
+            state["installed"] = False
+            if state["faulted"]:
+                state["faulted"] = False
+                raise KeyboardInterrupt         # hostile cleanup mid-fault
+
+        return enter, run, leave
+
+    clock = _FakeClock()
+    trace: list = []
+    chronology: list = []
+    good = _FakeObsArm("A", clock, trace, chronology, lambda pair, pos: 1.0)
+
+    with pytest.raises(RuntimeError, match="simulated measured fault"):
+        pv.counterbalanced_ab(good.make, make_bad_runner, pairs=6, batches=3,
+                              tag="run-mask", clock=clock)
+    assert calls["run"] == 2, "the fault must fire on the first measured run"
+    assert calls["leave"] == 2, "leave() must run for warmup AND the fault"
+    assert state["installed"] is False, "patched state was left installed"
+
+
+def test_a_raising_arm_still_balances_enter_and_leave():
+    """A fault mid-measurement must not leave an arm entered."""
+    clock = _FakeClock()
+    trace: list = []
+    chronology: list = []
+    a = _FakeObsArm("A", clock, trace, chronology,
+                    lambda pair, pos: 1.0, raise_on_call=10)
+    b = _FakeObsArm("B", clock, trace, chronology, lambda pair, pos: 1.0)
+
+    with pytest.raises(RuntimeError, match="simulated arm fault"):
+        pv.counterbalanced_ab(a.make, b.make, pairs=18, batches=3,
+                              tag="fake-raise", clock=clock)
+    assert a.enters == a.leaves > 0
+    assert b.enters == b.leaves > 0
+
+
+def test_a_raising_arm_restores_patches_and_environment(monkeypatch):
+    """The REAL runners: a raising pipeline must leave no env var and no
+    monkeypatch installed, and the fault must propagate (measurement void,
+    never a silent partial result)."""
+    from olympus import llm, otel, streamguard, usage
+
+    real_record = usage.record
+    real_observe = llm._observe_ctx
+    real_guard = streamguard.check_usage_evidence
+    real_client = llm.client
+    real_post = otel._post
+    env_keys = ("OLYMPUS_OTLP_ENDPOINT", "OLYMPUS_ADMISSION",
+                "OLYMPUS_STREAMGUARD", "OLYMPUS_CTX_BUDGET")
+    env_before = {key: os.environ.get(key) for key in env_keys}
+
+    def exploding(*_a, **_k):
+        raise RuntimeError("simulated pipeline fault")
+
+    monkeypatch.setattr(pv, "provider_pipeline", exploding)
+    with pytest.raises(RuntimeError, match="simulated pipeline fault"):
+        pv.bench_observability_overhead(iters=6, batches=3)
+
+    assert usage.record is real_record
+    assert llm._observe_ctx is real_observe
+    assert streamguard.check_usage_evidence is real_guard
+    assert llm.client is real_client
+    assert otel._post is real_post
+    assert {key: os.environ.get(key) for key in env_keys} == env_before
+
+
+def test_a_patch_restore_fault_still_restores_the_environment(monkeypatch):
+    """`_obs_runner.leave()` runs `pat.__exit__()` THEN `ctx.__exit__()`.
+
+    If restoring the monkeypatches raises, the environment restore must not
+    be skipped: `leave()` needs `try: pat.__exit__() finally: ctx.__exit__()`.
+    This drives the REAL `_obs_runner` composition through
+    `counterbalanced_ab`: the pipeline raises a RuntimeError, and the real
+    `patched` context manager performs its genuine restoration and then
+    raises KeyboardInterrupt from `__exit__`. The outward exception must
+    remain the ORIGINAL RuntimeError, every patched Olympus attribute must
+    be back, and every OLYMPUS_* variable must hold its pre-benchmark
+    sentinel — a skipped `ctx.__exit__()` leaves them popped.
+    """
+    from olympus import llm, otel, streamguard, usage
+
+    real_record = usage.record
+    real_observe = llm._observe_ctx
+    real_guard = streamguard.check_usage_evidence
+    real_client = llm.client
+    real_post = otel._post
+
+    sentinels = {"OLYMPUS_OTLP_ENDPOINT": "sentinel-otlp",
+                 "OLYMPUS_ADMISSION": "sentinel-admission",
+                 "OLYMPUS_STREAMGUARD": "sentinel-streamguard",
+                 "OLYMPUS_CTX_BUDGET": "sentinel-ctx-budget"}
+    for key, value in sentinels.items():
+        monkeypatch.setenv(key, value)
+
+    real_patched = pv.patched
+
+    class _ExplodingRestore(real_patched):
+        """The real restoration, then a hostile BaseException."""
+
+        def __exit__(self, *args):
+            real_patched.__exit__(self, *args)
+            raise KeyboardInterrupt
+
+    def exploding_pipeline(*_a, **_k):
+        raise RuntimeError("simulated pipeline fault")
+
+    monkeypatch.setattr(pv, "patched", _ExplodingRestore)
+    monkeypatch.setattr(pv, "provider_pipeline", exploding_pipeline)
+
+    result = None
+    with pytest.raises(RuntimeError, match="simulated pipeline fault"):
+        result = pv.counterbalanced_ab(
+            lambda: pv._obs_runner(**pv._ALL_OFF),
+            lambda: pv._obs_runner(**pv._ALL_ON),
+            pairs=6, batches=3, tag="leave-compose")
+
+    assert result is None, "no partial benchmark result may survive"
+    assert usage.record is real_record
+    assert llm._observe_ctx is real_observe
+    assert streamguard.check_usage_evidence is real_guard
+    assert llm.client is real_client
+    assert otel._post is real_post
+    assert {key: os.environ.get(key) for key in sentinels} == sentinels, (
+        "a raising patch restore skipped the environment restore")
+
+
+# --- 2b. the gate itself, driven synthetically -------------------------------
+
+def _obs_component(**over):
+    base = {"ms": 0.5, "noise_ms": 0.1, "resolved": True,
+            "lower_bound_ms": 0.4, "upper_bound_ms": 0.6,
+            "paired_samples": _OBS_PAIRS,
+            "counterbalanced_blocks": _OBS_PAIRS // 2,
+            "position_effect_ms": 0.0,
+            "batches": _OBS_BATCHES,
+            "order_counts": {"a_first": 9, "b_first": 9},
+            "order_balanced": True}
+    base.update(over)
+    return base
+
+
+def _obs_result(**over):
+    """A complete, balanced, comfortably passing measurement."""
+    base = {
+        "off_p50_ms": 1.0, "on_p50_ms": 11.0,
+        "abs_overhead_ms": 10.0, "noise_ms": 0.5,
+        "significant": True, "overhead_pct": 1000.0,
+        "iters": _OBS_PAIRS, "paired_samples": _OBS_PAIRS,
+        "counterbalanced_blocks": _OBS_PAIRS // 2,
+        "position_effect_ms": 0.0,
+        "batches": _OBS_BATCHES,
+        "order_counts": {"a_first": 9, "b_first": 9},
+        "order_balanced": True,
+        "batch_summaries": [
+            {"pairs": 6, "counterbalanced_blocks": 3,
+             "a_first": 3, "b_first": 3,
+             "delta_ms": 10.0, "noise_ms": 0.5,
+             "position_effect_ms": 0.0} for _ in range(_OBS_BATCHES)],
+        "overhead_lower_bound_ms": 9.5,
+        "overhead_upper_bound_ms": 10.5,
+        "components_ms": {name: _obs_component()
+                          for name in sorted(_OBS_COMPONENTS)},
+    }
+    base.update(over)
+    # Dependent verdict fields stay consistent with whatever raw evidence a
+    # test injected — unless the test poisons them EXPLICITLY, which is how
+    # the forged-evidence cases below are expressed.
+    if "significant" not in over and _obs_finite(base["abs_overhead_ms"]) \
+            and _obs_finite(base["noise_ms"]):
+        base["significant"] = abs(base["abs_overhead_ms"]) > base["noise_ms"]
+    if "overhead_pct" not in over and _obs_finite(base["abs_overhead_ms"]) \
+            and _obs_finite(base["off_p50_ms"]) and base["off_p50_ms"] > 0.0:
+        base["overhead_pct"] = (base["abs_overhead_ms"]
+                                / base["off_p50_ms"] * 100.0)
+    return base
+
+
+def test_the_observability_gate_accepts_a_complete_balanced_measurement():
+    assert observability_gate_violations(_obs_result()) == []
+
+
+def test_a_proven_breach_message_carries_the_raw_evidence():
+    """Lower edge 40 >= 25 fails, and the message keeps every raw number:
+    raw overhead, noise, lower edge, upper edge, and the threshold."""
+    r = _obs_result(abs_overhead_ms=40.0, noise_ms=0.0,
+                    overhead_lower_bound_ms=40.0,
+                    overhead_upper_bound_ms=40.0)
+    violations = observability_gate_violations(r)
+    breach = [v for v in violations if "BREACH" in v]
+    assert breach, violations
+    assert "40.000" in breach[0] and "25.0" in breach[0]
+    assert "noise_ms=0.000" in breach[0]
+    assert "upper edge 40.000" in breach[0]
+
+
+@pytest.mark.parametrize("raw, noise, verdict", [
+    (20.0, 4.0, "pass"),           # band [16, 24] entirely below the limit
+    (20.0, 5.0, "inconclusive"),   # upper edge exactly on the boundary
+    (30.0, 5.93, "inconclusive"),  # the band crosses 25: not a pass
+    (40.0, 5.0, "breach"),         # lower edge 35 >= 25
+    (10.0, 0.0, "pass"),           # stable genuine overhead below the limit
+    (40.0, 0.0, "breach"),         # stable genuine overhead above the limit
+])
+def test_the_tri_state_threshold_policy(raw, noise, verdict):
+    """BREACH on the lower edge, PASS only strictly under the limit with the
+    whole band, INCONCLUSIVE-and-failing for everything between."""
+    r = _obs_result(abs_overhead_ms=raw, noise_ms=noise,
+                    overhead_lower_bound_ms=max(0.0, raw - noise),
+                    overhead_upper_bound_ms=max(0.0, raw + noise))
+    violations = observability_gate_violations(r)
+    if verdict == "pass":
+        assert violations == [], violations
+    elif verdict == "breach":
+        assert any("BREACH" in v for v in violations), violations
+        assert all("INCONCLUSIVE" not in v for v in violations), violations
+    else:
+        assert any("INCONCLUSIVE" in v for v in violations), violations
+        assert all("BREACH" not in v for v in violations), violations
+
+
+@pytest.mark.parametrize("mutate, why", [
+    (lambda r: r.update(abs_overhead_ms=float("nan")), "a NaN overhead"),
+    (lambda r: r.update(noise_ms=float("inf")), "infinite noise"),
+    (lambda r: r.update(overhead_lower_bound_ms=float("-inf")),
+     "a non-finite lower bound"),
+    (lambda r: r.update(abs_overhead_ms=True), "a boolean overhead"),
+    (lambda r: r.update(paired_samples=17), "a lost pair"),
+    (lambda r: r.update(paired_samples=True), "a boolean pair count"),
+    (lambda r: r.update(iters=6), "an iters/pairs mismatch"),
+    (lambda r: r.update(batches=2), "a missing batch"),
+    (lambda r: r.update(order_counts={"a_first": 10, "b_first": 8}),
+     "an unbalanced execution order"),
+    (lambda r: r.update(order_counts={"a_first": 9}),
+     "a missing order count"),
+    (lambda r: r.update(order_counts={"a_first": 9.0, "b_first": 9.0}),
+     "non-integer order counts"),
+    (lambda r: r.update(order_balanced=False), "order_balanced not True"),
+    (lambda r: r.pop("batch_summaries"), "missing batch summaries"),
+    (lambda r: r.update(batch_summaries=r["batch_summaries"][:2]),
+     "a dropped batch summary"),
+    (lambda r: r["batch_summaries"][0].update(pairs=5),
+     "batch pairs that do not sum to the total"),
+    (lambda r: r["batch_summaries"][0].update(a_first=5, b_first=1),
+     "an order-unbalanced batch"),
+    (lambda r: r["batch_summaries"][0].update(pairs=7, a_first=4, b_first=3),
+     "an odd-sized batch, which cannot balance"),
+    (lambda r: r.update(batch_summaries=[
+        {"pairs": 0, "counterbalanced_blocks": 0, "a_first": 0, "b_first": 0,
+         "delta_ms": 10.0, "noise_ms": 0.5, "position_effect_ms": 0.0},
+        {"pairs": 8, "counterbalanced_blocks": 4, "a_first": 4, "b_first": 4,
+         "delta_ms": 10.0, "noise_ms": 0.5, "position_effect_ms": 0.0},
+        {"pairs": 10, "counterbalanced_blocks": 5, "a_first": 5, "b_first": 5,
+         "delta_ms": 10.0, "noise_ms": 0.5, "position_effect_ms": 0.0}]),
+     "a zero-sized batch hidden inside a correct total"),
+    (lambda r: r.update(counterbalanced_blocks=9.0),
+     "a float total block count that compares equal to 9"),
+    (lambda r: r.update(counterbalanced_blocks=8),
+     "a forged total block count"),
+    (lambda r: r.pop("counterbalanced_blocks"),
+     "a missing total block count"),
+    (lambda r: r["batch_summaries"][0].update(counterbalanced_blocks=2),
+     "a batch block count that is not its own pairs // 2"),
+    (lambda r: r["batch_summaries"][1].update(counterbalanced_blocks=3.0),
+     "a float batch block count"),
+    (lambda r: r["batch_summaries"][2].update(counterbalanced_blocks=-3),
+     "a negative batch block count"),
+    (lambda r: r["components_ms"]["usage"].update(counterbalanced_blocks=9.0),
+     "a float component block count that compares equal to 9"),
+    (lambda r: r["components_ms"]["ctx"].update(counterbalanced_blocks=8),
+     "a forged component block count"),
+    (lambda r: r.update(position_effect_ms=float("nan")),
+     "a NaN total position effect"),
+    (lambda r: r["batch_summaries"][0].pop("position_effect_ms"),
+     "a missing batch position effect"),
+    (lambda r: r["components_ms"]["metrics"].update(
+        position_effect_ms=float("inf")),
+     "an infinite component position effect"),
+    (lambda r: r["batch_summaries"][0].update(noise_ms=-1.0),
+     "a negative batch noise"),
+    (lambda r: r.update(noise_ms=-5.0, overhead_lower_bound_ms=15.0,
+                        overhead_upper_bound_ms=5.0),
+     "negative noise with forged bounds that satisfy both identities"),
+    (lambda r: r.update(overhead_upper_bound_ms=99.0),
+     "an upper bound that does not match the raw evidence"),
+    (lambda r: r["components_ms"]["usage"].update(paired_samples=18.0),
+     "a component pair count that is a float, not a built-in int"),
+    (lambda r: r["components_ms"]["ctx"].update(batches=3.0),
+     "a component batch count that is a float, not a built-in int"),
+    (lambda r: r["components_ms"]["otel"].update(
+        noise_ms=-0.1, lower_bound_ms=0.6, upper_bound_ms=0.4),
+     "a component with negative noise and forged matching bounds"),
+    (lambda r: r.update(significant=False),
+     "a well-typed significant flag contradicting delta > noise"),
+    (lambda r: r["components_ms"]["guard"].update(resolved=False),
+     "a well-typed component resolved flag contradicting its evidence"),
+    (lambda r: r.update(overhead_pct=1.0),
+     "a finite but forged overhead percentage"),
+    (lambda r: r["batch_summaries"][0].update(noise_ms=float("nan")),
+     "a NaN batch noise"),
+    (lambda r: r.update(overhead_lower_bound_ms=0.0),
+     "a lower bound that does not match the raw evidence"),
+    (lambda r: r.update(significant="yes"), "a non-bool significance"),
+    (lambda r: r.update(off_p50_ms=0.0), "a zero baseline median"),
+    (lambda r: r.pop("components_ms"), "missing components"),
+    (lambda r: r["components_ms"].pop("usage"), "a missing component"),
+    (lambda r: r["components_ms"]["ctx"].update(paired_samples=6),
+     "a component measured with fewer pairs"),
+    (lambda r: r["components_ms"]["otel"].update(order_balanced=False),
+     "an order-unbalanced component"),
+    (lambda r: r["components_ms"]["metrics"].update(ms=float("nan")),
+     "a NaN component attribution"),
+    (lambda r: r["components_ms"]["guard"].update(
+        order_counts={"a_first": 18, "b_first": 0}),
+     "a component that never alternated"),
+    (lambda r: r["components_ms"]["usage"].update(lower_bound_ms=99.0),
+     "a component lower bound that does not match its raw evidence"),
+])
+def test_observability_gate_fails_closed_on_malformed_measurements(mutate,
+                                                                   why):
+    r = _obs_result()
+    mutate(r)
+    assert observability_gate_violations(r), why
+
+
+# --- 2c. the gate over the REAL bench with deterministic fake runners --------
+
+def _fake_bench(monkeypatch, cost_ms_by_flags, *, iters=_OBS_PAIRS,
+                batches=_OBS_BATCHES, tags=None):
+    """Run the REAL `bench_observability_overhead` end to end over fake
+    runners and a fake clock: `cost_ms_by_flags(flags)` prices one pipeline
+    run for one instrumentation configuration. Nothing sleeps and nothing
+    depends on the host's scheduler."""
+    clock = _FakeClock()
+    real = pv.counterbalanced_ab
+
+    def with_fake_clock(make_a, make_b, **kw):
+        if tags is not None:
+            tags.append(kw.get("tag"))
+        kw["clock"] = clock
+        return real(make_a, make_b, **kw)
+
+    def fake_runner(**flags):
+        cost = cost_ms_by_flags(flags)
+
+        def run():
+            clock.advance(cost / 1000.0)
+
+        return (lambda: None), run, (lambda: None)
+
+    monkeypatch.setattr(pv, "counterbalanced_ab", with_fake_clock)
+    monkeypatch.setattr(pv, "_obs_runner", fake_runner)
+    return pv.bench_observability_overhead(iters=iters, batches=batches)
+
+
+def test_a_stable_genuine_overhead_below_the_limit_passes(monkeypatch):
+    """OFF 1 ms, ON 11 ms, zero noise: a real 10 ms overhead passes."""
+    r = _fake_bench(monkeypatch,
+                    lambda flags: 11.0 if all(flags.values()) else 1.0)
+    assert observability_gate_violations(r) == []
+    assert r["abs_overhead_ms"] == pytest.approx(10.0, abs=1e-6)
+    assert r["overhead_lower_bound_ms"] == pytest.approx(10.0, abs=1e-6)
+    assert r["overhead_upper_bound_ms"] == pytest.approx(10.0, abs=1e-6)
+    assert r["overhead_upper_bound_ms"] < _OBS_LIMIT_MS, (
+        "the whole uncertainty band must clear the limit for a pass")
+    assert r["order_counts"] == {"a_first": 9, "b_first": 9}
+
+
+def test_a_stable_genuine_overhead_above_the_limit_fails(monkeypatch):
+    """OFF 1 ms, ON 41 ms, zero noise: a real 40 ms overhead is a breach —
+    counterbalancing must never absolve a genuine regression."""
+    r = _fake_bench(monkeypatch,
+                    lambda flags: 41.0 if all(flags.values()) else 1.0)
+    violations = observability_gate_violations(r)
+    assert any("BREACH" in v for v in violations), violations
+    assert r["abs_overhead_ms"] == pytest.approx(40.0, abs=1e-6)
+    assert r["overhead_lower_bound_ms"] >= _OBS_LIMIT_MS
+
+
+def test_every_component_is_counterbalanced_with_complete_accounting(
+        monkeypatch):
+    """One counterbalanced measurement per component, after the total, each
+    publishing its full order/noise/lower-bound accounting."""
+    tags: list = []
+    r = _fake_bench(monkeypatch,
+                    lambda flags: 3.5 if all(flags.values())
+                    else (1.0 if not any(flags.values()) else 3.0),
+                    tags=tags)
+
+    assert tags == ["obs-ab", "obs-no-usage", "obs-no-ctx", "obs-no-otel",
+                    "obs-no-metrics", "obs-no-guard"]
+    assert set(r["components_ms"]) == _OBS_COMPONENTS
+    for name, comp in r["components_ms"].items():
+        assert comp["paired_samples"] == _OBS_PAIRS, name
+        assert comp["counterbalanced_blocks"] == _OBS_PAIRS // 2, name
+        assert comp["batches"] == _OBS_BATCHES, name
+        assert comp["order_counts"] == {"a_first": 9, "b_first": 9}, name
+        assert comp["order_balanced"] is True, name
+        assert comp["ms"] == pytest.approx(0.5, abs=1e-6), name
+        assert comp["noise_ms"] == pytest.approx(0.0, abs=1e-6), name
+        assert comp["lower_bound_ms"] == pytest.approx(0.5, abs=1e-6), name
+        assert comp["upper_bound_ms"] == pytest.approx(0.5, abs=1e-6), name
+        assert comp["position_effect_ms"] == pytest.approx(0.0,
+                                                           abs=1e-6), name
+        assert isinstance(comp["resolved"], bool), name
+    assert observability_gate_violations(r) == []
 
 
 # --- 3. context budgeting ----------------------------------------------------

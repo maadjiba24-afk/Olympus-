@@ -840,8 +840,14 @@ def _obs_runner(*, usage_on: bool, ctx_on: bool, otel_on: bool,
         provider_pipeline(metrics_hook=hook)
 
     def leave():
-        pat.__exit__()
-        ctx.__exit__()
+        # `finally`, not sequence: if restoring the monkeypatches raises,
+        # the environment restore must still run — otherwise a fault during
+        # patch restoration leaves OLYMPUS_* variables modified even though
+        # the caller's cleanup guard preserved the original exception.
+        try:
+            pat.__exit__()
+        finally:
+            ctx.__exit__()
 
     return enter, run, leave
 
@@ -850,6 +856,234 @@ _ALL_OFF = dict(usage_on=False, ctx_on=False, otel_on=False,
                 metrics_on=False, guard_on=False)
 _ALL_ON = dict(usage_on=True, ctx_on=True, otel_on=True,
                metrics_on=True, guard_on=True)
+
+
+def _counterbalanced_summary(a_all: list[float],
+                             b_all: list[float]) -> dict:
+    """Two-pair-block summary for counterbalanced matched pairs.
+
+    The deltas MUST arrive in executed pair order with even indices A-first
+    and odd indices B-first — exactly what `counterbalanced_ab` produces.
+    Each adjacent (A-first, B-first) pair of deltas forms one
+    COUNTERBALANCED BLOCK, and within a block the controlled order effect
+    cancels EXACTLY instead of being mistaken for uncertainty:
+
+        treatment_effect = (d_a_first + d_b_first) / 2   # order cancels
+        position_effect  = (d_a_first - d_b_first) / 2   # overhead cancels
+
+    A stable +s second-position penalty puts +s into every A-first delta
+    and -s into every B-first delta; the block treatment effect is the true
+    overhead with the penalty REMOVED, and the penalty itself is published
+    as `position_effect_ms` rather than laundered into noise. That is the
+    point of counterbalancing: the order effect is deliberately controlled,
+    so it is estimated and cancelled, not treated as random scatter. The
+    residual `noise_ms` is the MAD of the block treatment effects — actual
+    run-to-run variation in the estimate, the only honest uncertainty.
+
+    Interpolated medians (`statistics.median`) throughout: the global
+    `pct()` helper is nearest-rank, which picks one middle observation for
+    even counts and one mode of a bimodal set — unrelated performance
+    contracts pin its behaviour, so it is deliberately not used here.
+
+    Every dependent field — delta, noise, significance, percentage, and
+    both band edges — derives from the SAME block treatment effects in one
+    place, so the summary cannot be internally contradictory.
+    """
+    deltas = [b - a for a, b in zip(a_all, b_all)]
+    treatments = [(deltas[i] + deltas[i + 1]) / 2.0
+                  for i in range(0, len(deltas) - 1, 2)]
+    positions = [(deltas[i] - deltas[i + 1]) / 2.0
+                 for i in range(0, len(deltas) - 1, 2)]
+    delta = statistics.median(treatments) if treatments else 0.0
+    noise = (1.4826 * statistics.median([abs(t - delta) for t in treatments])
+             if treatments else 0.0)
+    position = statistics.median(positions) if positions else 0.0
+    a50 = statistics.median(a_all) if a_all else 0.0
+    b50 = statistics.median(b_all) if b_all else 0.0
+    return {"a_p50_ms": a50, "b_p50_ms": b50,
+            "paired_delta_ms": delta,
+            "noise_ms": noise,
+            "significant": abs(delta) > noise,
+            "overhead_pct": (delta / a50 * 100.0) if a50 else 0.0,
+            "n": len(deltas),
+            "counterbalanced_blocks": len(treatments),
+            "position_effect_ms": position,
+            # The two edges of the uncertainty band, both derived from the
+            # raw evidence. The LOWER edge is the conservative breach test:
+            # what the evidence still supports after subtracting its own
+            # noise. The UPPER edge is what a pass must clear: only a band
+            # entirely below a limit is evidence of being under it — a band
+            # that crosses the limit proves nothing in either direction.
+            "lower_bound_ms": max(0.0, delta - noise),
+            "upper_bound_ms": max(0.0, delta + noise)}
+
+
+def counterbalanced_ab(make_runner_a, make_runner_b, *, pairs: int,
+                       batches: int, tag: str, clock=None) -> dict:
+    """Measure two arms as COUNTERBALANCED matched pairs.
+
+    WHAT THIS FIXES. The previous `_interleaved` helper alternated the two
+    arms run-for-run but executed every pair in a FIXED A->B order, so
+    chronological runner drift, filesystem stalls, cache effects and
+    noisy-neighbour interference landed systematically on the second
+    position — always B — and were reported as B's overhead. CI run
+    31544926530 failed exactly that way: +35.877 ms attributed to
+    instrumentation with 16.335 ms of reported noise, alongside a "metrics"
+    attribution of -84.879 ms inside 125.967 ms of noise from the same
+    evidence — numbers no stable overhead could produce.
+
+    WHAT IS AND IS NOT PROVEN:
+
+      * counterbalancing (A->B, B->A, A->B, ...) ESTIMATES AND CANCELS the
+        controlled first/second-position effect: each adjacent (A-first,
+        B-first) two-pair block averages the two orders, so a cost that
+        lands on whichever run executes second cancels EXACTLY out of the
+        treatment estimate and is published separately as
+        `position_effect_ms` — it is a deliberately controlled variable,
+        not residual noise, and it neither biases the delta nor inflates
+        the uncertainty band;
+      * the robust block median/MAD REDUCES SENSITIVITY to isolated stalls:
+        one arbitrarily large outlier moves one block, never the median;
+      * hosted-runner noise is STILL POSSIBLE. Nothing here controls the
+        host, and interference correlated with one arm's own work remains
+        attributable to that arm. The noise figure is published precisely so
+        a caller can refuse to treat an inconclusive measurement as
+        evidence, in either direction.
+
+    Mechanics, all deterministic — no randomness, no sleeping:
+
+      * `pairs` measured pairs are distributed over `batches` independent
+        batches in COMPLETE TWO-PAIR UNITS: the `pairs // 2` units are
+        dealt out as evenly as possible (`divmod(units, batches)`), so
+        every batch size is even and every batch holds EXACTLY equal
+        A-first and B-first counts — 20 pairs over 3 batches is 8+6+6,
+        20 over 4 is 6+6+4+4, 10 over 3 is 4+4+2. Nothing is dropped or
+        duplicated and the requested totals are never silently changed:
+        both counts must be positive built-in ints (bools rejected),
+        `pairs` must be even — an odd total can never balance — and at
+        least `2 * batches`, so no batch is ever empty;
+      * each batch gets a FRESH isolated scratch directory and FRESH runners
+        from the two factories;
+      * both arms are warmed once per batch, untimed, and the warmup order
+        alternates between batches (A,B / B,A / A,B ...);
+      * pair execution order alternates by GLOBAL pair index (A->B, B->A,
+        ...); every batch spans an even run of that alternation, so each
+        batch — and the total — contains exactly equal A-first and B-first
+        counts;
+      * samples are stored by LOGICAL arm, never by execution position, and
+        every paired delta is B minus A regardless of which arm ran first;
+      * every run — warmup or measured — attempts `leave()` on ANY fault,
+        including an `enter()` that raises after partially modifying state,
+        so a raising arm cannot leave environment variables or monkeypatches
+        installed. The original fault always propagates; a secondary cleanup
+        failure of ANY kind — BaseException included — never masks it.
+    """
+    if type(pairs) is not int or pairs <= 0:
+        raise ValueError("pairs must be a positive built-in int")
+    if type(batches) is not int or batches <= 0:
+        raise ValueError("batches must be a positive built-in int")
+    if pairs % 2:
+        raise ValueError("pairs must be even: every batch must hold exactly "
+                         "equal A-first and B-first counts")
+    if pairs < 2 * batches:
+        raise ValueError("every batch needs at least one A-first and one "
+                         "B-first pair, so pairs must be >= 2 * batches")
+    tick = time.perf_counter if clock is None else clock
+
+    def _invoke(runner, *, timed: bool):
+        """ONE invocation path for warmup and measured runs, so their
+        cleanup semantics cannot drift apart.
+
+        `enter` sits INSIDE the protected region: it can raise after
+        partially installing env vars or monkeypatches, and `leave` must
+        still be attempted — the context managers behind it restore exactly
+        what was applied. While the ORIGINAL exception is active, a cleanup
+        failure of ANY kind is swallowed — `except BaseException`, because a
+        KeyboardInterrupt or SystemExit raised from `leave` would otherwise
+        REPLACE the original fault. On the clean path a `leave` failure
+        propagates normally.
+        """
+        enter, run, leave = runner
+        try:
+            enter()
+            if timed:
+                t0 = tick()
+                run()
+                ms = (tick() - t0) * 1000.0
+            else:
+                run()
+                ms = None
+        except BaseException:
+            try:
+                leave()
+            except BaseException:
+                pass
+            raise
+        leave()
+        return ms
+
+    # Two-pair units dealt out as evenly as possible: any even total with at
+    # least one unit per batch distributes — 20/3 -> 8+6+6, 20/4 -> 6+6+4+4,
+    # 10/3 -> 4+4+2 — every batch even, nonempty, and exactly balanced.
+    units = pairs // 2
+    base_units, extra_units = divmod(units, batches)
+    a_all: list[float] = []
+    b_all: list[float] = []
+    summaries: list[dict] = []
+    pair_index = 0
+    for b in range(batches):
+        batch_pairs = 2 * (base_units + (1 if b < extra_units else 0))
+        isolate(f"{tag}-b{b}")
+        runner_a = make_runner_a()
+        runner_b = make_runner_b()
+        first, second = ((runner_a, runner_b) if b % 2 == 0
+                         else (runner_b, runner_a))
+        _invoke(first, timed=False)
+        _invoke(second, timed=False)
+        start = len(a_all)
+        a_first = b_first = 0
+        for _ in range(batch_pairs):
+            if pair_index % 2 == 0:
+                a_first += 1
+                a_ms = _invoke(runner_a, timed=True)
+                b_ms = _invoke(runner_b, timed=True)
+            else:
+                b_first += 1
+                b_ms = _invoke(runner_b, timed=True)
+                a_ms = _invoke(runner_a, timed=True)
+            a_all.append(a_ms)
+            b_all.append(b_ms)
+            pair_index += 1
+        # Every batch is allocated in complete two-pair units and starts on
+        # an even global pair index, so its slice is self-contained blocks:
+        # the SAME block summary prices each batch, and batch and total can
+        # never disagree about what a block means.
+        batch_s = _counterbalanced_summary(a_all[start:], b_all[start:])
+        summaries.append({"pairs": batch_pairs,
+                          "counterbalanced_blocks":
+                              batch_s["counterbalanced_blocks"],
+                          "a_first": a_first, "b_first": b_first,
+                          "delta_ms": batch_s["paired_delta_ms"],
+                          "noise_ms": batch_s["noise_ms"],
+                          "position_effect_ms":
+                              batch_s["position_effect_ms"]})
+
+    # The matched pairs are aggregated as BLOCKS over the whole run — never
+    # as an average of per-batch medians — by the same block summary.
+    s = _counterbalanced_summary(a_all, b_all)
+    a_first_total = sum(row["a_first"] for row in summaries)
+    b_first_total = sum(row["b_first"] for row in summaries)
+    balanced = (a_first_total == b_first_total
+                and all(row["a_first"] == row["b_first"]
+                        for row in summaries))
+    s.update({
+        "paired_samples": len(a_all),
+        "batches": batches,
+        "order_counts": {"a_first": a_first_total, "b_first": b_first_total},
+        "order_balanced": balanced,
+        "batch_summaries": summaries,
+    })
+    return s
 
 
 def _timed_config(iters: int, tag: str, **flags) -> list[float]:
@@ -868,58 +1102,85 @@ def _timed_config(iters: int, tag: str, **flags) -> list[float]:
         leave()
 
 
-def bench_observability_overhead(iters: int = 20) -> dict:
-    """Full fake-LLM pipeline run with ALL instrumentation off vs on, plus a
-    per-component attribution (each component removed from the fully-ON
-    configuration, so the delta is that component's marginal cost).
+def bench_observability_overhead(iters: int = 18, batches: int = 3) -> dict:
+    """Full fake-LLM pipeline with ALL instrumentation off vs on, measured as
+    COUNTERBALANCED matched pairs over independent batches, plus a
+    per-component attribution measured with the same primitive (each
+    component removed from the fully-ON configuration, so the delta is that
+    component's marginal cost).
 
-    HONESTY NOTE on the percentage: the denominator is a pipeline whose
-    provider calls take ~0 ms. Under real traffic the same absolute overhead
-    sits against seconds of inference time, so the PERCENTAGE here is an upper
-    bound that will collapse by orders of magnitude. The absolute ms/run is the
-    portable number.
+    `iters` is the TOTAL number of measured pairs — callers supplying the old
+    positional sample count get exactly that many pairs, distributed over
+    `batches` fresh-directory batches without dropping or duplicating one.
+    The distribution is subject to `counterbalanced_ab`'s even-batch
+    validation: a combination that cannot form non-empty, even-sized,
+    exactly balanced batches raises ValueError rather than silently changing
+    the request.
+
+    HONESTY NOTES:
+
+      * the PERCENTAGE denominator is a pipeline whose provider calls take
+        ~0 ms. Under real traffic the same absolute overhead sits against
+        seconds of inference, so the percentage is an upper bound that will
+        collapse by orders of magnitude. The absolute ms/run is the portable
+        number;
+      * counterbalancing estimates and CANCELS the controlled
+        first/second-position effect inside each two-pair block — the
+        effect itself is published as `position_effect_ms`, never laundered
+        into the uncertainty band — and the robust block median resists
+        isolated stalls, but hosted-runner noise is STILL POSSIBLE:
+        `noise_ms` is the MAD of the block treatment estimates, the
+        caller's evidence of how much;
+      * `overhead_lower_bound_ms` = max(0, abs_overhead_ms - noise_ms) and
+        `overhead_upper_bound_ms` = max(0, abs_overhead_ms + noise_ms) are
+        the two edges of the uncertainty band, both derived from the raw
+        evidence. The lower edge is the conservative breach test; the upper
+        edge is what a pass must clear. A band that crosses a limit proves
+        NOTHING in either direction — such a result is INCONCLUSIVE, never
+        a pass — and the raw estimate and noise are always published
+        alongside the edges so a caller can say exactly that;
+      * components contend on the same locks and filesystem, so they do NOT
+        sum to the total; a value at or below its own noise floor is
+        reported as not-resolvable rather than as a number.
     """
-    def _interleaved(flags_a: dict, flags_b: dict, tag: str) -> dict:
-        """Interleave two instrumentation configurations run-for-run."""
-        isolate(f"obs-{tag}")
-        e_a, r_a, l_a = _obs_runner(**flags_a)
-        e_b, r_b, l_b = _obs_runner(**flags_b)
-        a_lat: list[float] = []
-        b_lat: list[float] = []
-        e_a(); r_a(); l_a()                       # warm both arms
-        e_b(); r_b(); l_b()
-        for _ in range(iters):
-            e_a()
-            t0 = time.perf_counter(); r_a()
-            a_lat.append((time.perf_counter() - t0) * 1000.0)
-            l_a()
-            e_b()
-            t0 = time.perf_counter(); r_b()
-            b_lat.append((time.perf_counter() - t0) * 1000.0)
-            l_b()
-        return ab_summary(a_lat, b_lat)
+    s = counterbalanced_ab(
+        lambda: _obs_runner(**_ALL_OFF), lambda: _obs_runner(**_ALL_ON),
+        pairs=iters, batches=batches, tag="obs-ab")
 
-    s = _interleaved(_ALL_OFF, _ALL_ON, "ab")
-    off_p50, on_p50 = s["a_p50_ms"], s["b_p50_ms"]
-
-    # Per-component attribution: each component is removed from the fully-ON
-    # configuration and the two are interleaved, so the paired median delta is
-    # that component's marginal cost. Components contend on the same locks and
-    # filesystem, so they do NOT sum to the total; a value at or below its own
-    # noise floor is reported as not-resolvable rather than as a number.
     components = {}
     for name in ("usage", "ctx", "otel", "metrics", "guard"):
         flags = dict(_ALL_ON)
         flags[f"{name}_on"] = False
-        cs = _interleaved(flags, _ALL_ON, f"no-{name}")
-        components[name] = {"ms": cs["paired_delta_ms"],
-                            "noise_ms": cs["noise_ms"],
-                            "resolved": cs["significant"]}
-    return {"off_p50_ms": off_p50, "on_p50_ms": on_p50,
+        cs = counterbalanced_ab(
+            lambda f=flags: _obs_runner(**f),
+            lambda: _obs_runner(**_ALL_ON),
+            pairs=iters, batches=batches, tag=f"obs-no-{name}")
+        components[name] = {
+            "ms": cs["paired_delta_ms"], "noise_ms": cs["noise_ms"],
+            "resolved": cs["significant"],
+            "lower_bound_ms": cs["lower_bound_ms"],
+            "upper_bound_ms": cs["upper_bound_ms"],
+            "paired_samples": cs["paired_samples"],
+            "counterbalanced_blocks": cs["counterbalanced_blocks"],
+            "position_effect_ms": cs["position_effect_ms"],
+            "batches": cs["batches"],
+            "order_counts": cs["order_counts"],
+            "order_balanced": cs["order_balanced"],
+        }
+    return {"off_p50_ms": s["a_p50_ms"], "on_p50_ms": s["b_p50_ms"],
             "abs_overhead_ms": s["paired_delta_ms"],
             "noise_ms": s["noise_ms"], "significant": s["significant"],
             "overhead_pct": s["overhead_pct"],
-            "components_ms": components, "iters": iters}
+            "components_ms": components, "iters": iters,
+            "paired_samples": s["paired_samples"],
+            "counterbalanced_blocks": s["counterbalanced_blocks"],
+            "position_effect_ms": s["position_effect_ms"],
+            "batches": s["batches"],
+            "order_counts": s["order_counts"],
+            "order_balanced": s["order_balanced"],
+            "batch_summaries": s["batch_summaries"],
+            "overhead_lower_bound_ms": s["lower_bound_ms"],
+            "overhead_upper_bound_ms": s["upper_bound_ms"]}
 
 
 # --------------------------------------------------------------------------
@@ -1947,7 +2208,11 @@ def run_all(quick: bool = False) -> dict:
         (100, s(1500, 300)), s(25, 8))
     results["journal_recovery"] = bench_journal_recovery(
         (100, 1000, 5000) if not quick else (100, 500))
-    results["observability"] = bench_observability_overhead(s(20, 4))
+    # Floor 6, not 4: the counterbalanced measurement needs at least one
+    # A-first and one B-first pair in each of its 3 batches (2 * 3 = 6), and
+    # a quick run may not silently shrink the batch count instead. 6 >= the
+    # old quick floor of 4, so quick mode loses no measurement strength.
+    results["observability"] = bench_observability_overhead(s(20, 6))
     results["ctxbudget"] = bench_ctxbudget(s(2000, 200))
     results["ctxbudget_pipeline"] = bench_ctxbudget_pipeline(s(12, 4))
     results["streamguard"] = bench_streamguard(s(2000, 400), s(5, 2))
