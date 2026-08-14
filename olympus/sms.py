@@ -1,6 +1,6 @@
 """Olympus SMS channel — inbound texts in, replies out, over Twilio's webhook.
 
-This is the *buildable* slice of OpenClaw's telephony surface. A live voice call
+This is the *buildable* slice of the surveyed gateway's telephony surface. A live voice call
 needs an audio/media stack (streaming speech in and out) that Olympus
 deliberately doesn't carry; an SMS, by contrast, is plain text — so it drops
 straight onto the same untrusted-by-default access spine every other channel

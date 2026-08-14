@@ -5,10 +5,10 @@ records its request (method / url / redacted headers) and response (status /
 size / redacted body) to a local, operator-only store, so an operator can SEE
 what an agent actually sent and RECEIVED, and REPLAY a request to check whether
 the resource changed. Valuable for debugging and for forensic audit of
-assessment runs (DEFERRED #18 / Strix watchlist — the capture-proxy value
+assessment runs (DEFERRED #18 / the surveyed agent watchlist — the capture-proxy value
 *without* the open box).
 
-It carries none of the Kali / `NET_RAW` / open-egress risk that the full Strix
+It carries none of the Kali / `NET_RAW` / open-egress risk that the full the surveyed agent
 scanner sandbox would: it only OBSERVES the already-governed fetch path
 (SSRF-pinned, egress-confined, secret-exfil-scanned) — it opens no new socket
 and relaxes no gate. Stored bodies and headers are secret-redacted

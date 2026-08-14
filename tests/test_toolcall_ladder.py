@@ -125,7 +125,7 @@ def test_corpus_covers_every_required_class():
         "digit_string_stays_string", "int_coercion", "float_coercion",
         "bool_coercion", "missing_required_rejected", "unknown_tool_refused",
         "shape_a_nested", "shape_b_tool_name_params",
-        "shape_b_action_input_encoded", "shape_c_page_agent_fenced",
+        "shape_b_action_input_encoded", "shape_c_dom_agent_fenced",
         "salvage_on_lone_payload", "salvage_off_lone_payload",
         "array_param_valid", "object_param_valid",
         "unknown_extra_key_allowed", "non_object_json_refused",

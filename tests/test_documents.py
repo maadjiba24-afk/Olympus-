@@ -1,4 +1,4 @@
-"""Phase 3 (Odysseus workspace) — the user document store + agent tools.
+"""Phase 3 (the surveyed framework workspace) — the user document store + agent tools.
 Writes ride the always-hold approval spine (reversible, never silent); reads
 are free. Storage is per-user Markdown files under memory/users/<id>/documents.
 """

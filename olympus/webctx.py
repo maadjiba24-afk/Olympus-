@@ -1,16 +1,16 @@
 """Web Context — Olympus's native answer to a hosted "web data API".
 
-A survey of Firecrawl (a large TypeScript/Go/Rust web-scraping SaaS) surfaced a
+A survey of the surveyed scraper (a large TypeScript/Go/Rust web-scraping SaaS) surfaced a
 capable feature surface — scrape, map, crawl, batch, schema-guided extraction,
 llms.txt, change-diffing, document parsing — sitting on a security model Olympus
 already beats. This module absorbs the *capabilities* natively, in Olympus's own
-idioms and safety spine, and turns each of Firecrawl's weaknesses into a
+idioms and safety spine, and turns each of the surveyed scraper's weaknesses into a
 structural strength (see docs/adr/0010):
 
   * **SSRF closed by construction.** Every outbound fetch here — page, sitemap,
     robots.txt, document, crawl hop — goes through `tools._http_get`, the
     egress-gated, DNS-rebinding-PINNED path (`security.resolve_pinned_ip` pins
-    the validated IP into the socket; redirects re-checked per hop). Firecrawl's
+    the validated IP into the socket; redirects re-checked per hop). The surveyed scraper's
     guard is a single fail-open socket hook; Olympus's is input-agnostic and
     pins the connection.
   * **Injection isolated structurally.** Any scraped bytes that reach a model
@@ -19,8 +19,8 @@ structural strength (see docs/adr/0010):
   * **Extraction is verified.** `extract()` runs schema-guided extraction on the
     pool's cheap `general` member, then a second `verify` member re-reads the
     values against the wrapped source and flags anything unsupported — a
-    fact-check Firecrawl ships none of.
-  * **Zero-dependency.** `to_markdown` is pure-stdlib (`html.parser`) — Firecrawl
+    fact-check the surveyed scraper ships none of.
+  * **Zero-dependency.** `to_markdown` is pure-stdlib (`html.parser`) — the surveyed scraper
     needs a Go library over FFI plus a Rust addon for the same job.
 
 Everything is `urllib`-only and **degrades gracefully**: a blocked/failed fetch
@@ -44,7 +44,7 @@ from . import security
 
 # ---------------------------------------------------------------------------
 # Bounds — a scrape/crawl can never run away with the token budget or the wall
-# clock. Every limit is small and explicit (contrast Firecrawl's
+# clock. Every limit is small and explicit (contrast the surveyed scraper's
 # maxRedirections:5000 / unbounded response buffering).
 # ---------------------------------------------------------------------------
 _PAGE_BYTE_CAP = 400_000          # raw HTML per page fed to the parser
@@ -60,7 +60,7 @@ _BATCH_MAX_URLS = 25
 _EXTRACT_MAX_SOURCES = 10
 _EXTRACT_DATA_CAP = 200_000       # serialized extracted-object ceiling
 _LLMSTXT_MAX_URLS = 30
-_DOC_BYTE_CAP = 12_000_000        # 12 MB, matched to Firecrawl's parse cap
+_DOC_BYTE_CAP = 12_000_000        # 12 MB, matched to the surveyed scraper's parse cap
 _DOC_MAX_UNITS = 5_000            # PDF pages / DOCX paragraphs iterated (early-exit)
 _MAX_DIFF_LINES = 20_000          # lines diffed per side (difflib is ~O(N×M))
 
@@ -423,7 +423,7 @@ def to_markdown(html: str, base_url: str = "") -> tuple[str, list[str], str]:
 
 def branding_of(meta: dict[str, str], title: str) -> dict[str, str]:
     """Derive brand signals from head metadata: site name, theme color, favicon,
-    social preview image, description. Firecrawl's `branding` format, pure-Python."""
+    social preview image, description. The surveyed scraper's `branding` format, pure-Python."""
     def pick(*keys: str) -> str:
         for k in keys:
             if meta.get(k):
@@ -669,7 +669,7 @@ def _assemble(url: str, html: str, formats, schema, prompt,
 # Interactive-scrape verbs allowed BEFORE reading a page. Deliberately excludes
 # `executeJavascript`: Olympus routes browser actuation only through the
 # governed harness (SSRF-gated navigation, ledgered CDP, capability separation)
-# and never exposes ungoverned JS eval — the exact anti-pattern the Firecrawl
+# and never exposes ungoverned JS eval — the exact anti-pattern the surveyed scraper
 # analysis flagged. Unknown/rejected verbs are reported, not silently run.
 _ACTION_VERBS = {"click", "scroll", "type", "write", "press", "hover",
                  "select", "wait", "wait_for", "back"}
@@ -774,7 +774,7 @@ _COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
 
 def _clean_html(html: str) -> str:
     """A lightweight 'cleaned HTML' — the raw document with script/style/svg
-    blocks and comments removed. Firecrawl's `html` (vs `rawHtml`) format, done
+    blocks and comments removed. The surveyed scraper's `html` (vs `rawHtml`) format, done
     with bounded regexes over the already byte-capped input."""
     html = _SCRIPT_STYLE_RE.sub("", html or "")
     html = _COMMENT_RE.sub("", html)
@@ -1095,7 +1095,7 @@ def extract(source: str | list[str], schema: dict, prompt: str = "",
     Content is wrapped untrusted before it reaches the model. When verification
     is on (default; OLYMPUS_WEB_EXTRACT_VERIFY), a second `verify` pool member
     re-reads the values against the source and flags anything unsupported —
-    Olympus extracts *verified* structure; Firecrawl ships no fact-check.
+    Olympus extracts *verified* structure; the surveyed scraper ships no fact-check.
     """
     from . import config
     if backend is None:
@@ -1281,8 +1281,7 @@ def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
     """CONSUME a site's own ``/llms.txt`` as governed page context — the site's
     author-curated map/guidance for agents.
 
-    Absorbs page-agent's `experimentalLlmsTxt` (docs/PAGE_AGENT_TRACKING.md §3.6 /
-    ADR 0014 (e)) and inverts its ungoverned fetch: page-agent does a raw
+    Absorbs the surveyed DOM agent's `experimentalLlmsTxt` (ADR 0014 (e)) and inverts its ungoverned fetch: the surveyed DOM agent does a raw
     `fetch(origin + '/llms.txt')` with no SSRF check, no egress confinement, no
     secret-exfil scan, and folds the result into the prompt unwrapped. Olympus
     fetches through the SSRF/egress-gated, DNS-rebinding-pinned `tools._http_get`
@@ -1340,7 +1339,7 @@ def content_hash(markdown: str) -> str:
 def diff(url: str, previous_markdown: str = "",
          schema: dict | None = None, previous_json: dict | None = None,
          **extract_kw) -> dict[str, Any]:
-    """Detect change on a page. Two modes, mirroring Firecrawl:
+    """Detect change on a page. Two modes, mirroring the surveyed scraper:
 
     * **git-diff** (default): fetch the page as markdown and unified-diff it
       against `previous_markdown`.

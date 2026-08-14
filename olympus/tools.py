@@ -521,7 +521,7 @@ class _SafeRedirectHandler(_urlreq.HTTPRedirectHandler):
     An explicit low redirect ceiling makes the bound self-documenting instead of
     relying on urllib's inherited default — each hop is SSRF-re-checked, but a
     long chain is still latency/resource amplification (contrast the
-    maxRedirections:5000 the Firecrawl analysis criticized)."""
+    maxRedirections:5000 the scraper analysis criticized)."""
 
     max_redirections = 5
 
@@ -628,7 +628,7 @@ def _egress_confinement_reason(url: str) -> str:
     """Assessment egress confinement, evaluated BEFORE any DNS work: a NO-OP
     unless an assessment is confining egress (`assess.confined_egress`), in which
     case a host outside the signed scope is refused here at the fetch layer —
-    fail-closed, closing Strix's open-egress blast radius even for a hijacked
+    fail-closed, closing the surveyed agent's open-egress blast radius even for a hijacked
     run. Deliberately checked ahead of the SSRF `url_block_reason` resolve so an
     out-of-scope host is never even resolved, and the refusal reason is
     deterministic (the confinement message) whether or not the host resolves."""
@@ -2035,7 +2035,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "crawl_site": lambda url, depth=1, max_pages=10, same_domain=True,
         include=None, exclude=None:
         _media().crawl_site(url, depth, max_pages, same_domain, include, exclude),
-    # Web Context suite (native Firecrawl-absorption; olympus/webctx.py).
+    # Web Context suite (native the surveyed scraper-absorption; olympus/webctx.py).
     # browse_page/crawl_site remain the quick readers; web_scrape is the
     # full-featured scrape (formats/actions/mobile/location/attributes).
     "web_scrape": lambda url, formats=None, schema=None, prompt="",
@@ -2055,7 +2055,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "web_monitor_add": lambda url, interval_minutes=60, schema=None:
         _web_monitor_add(url, interval_minutes, schema),
     "web_monitor_list": lambda: _web_monitor_list(),
-    # Aegis Assessment suite (native Strix-absorption; olympus/assess.py).
+    # Aegis Assessment suite (native the surveyed agent-absorption; olympus/assess.py).
     "assess_scope": lambda: _assess_scope(),
     "assess_recon": lambda target: _assess_recon(target),
     "assess_http_audit": lambda target: _assess_http_audit(target),
@@ -2739,7 +2739,7 @@ CRAWL_SITE = {
     },
 }
 
-# === Web Context tools (native Firecrawl-absorption; see olympus/webctx.py) ===
+# === Web Context tools (native the surveyed scraper-absorption; see olympus/webctx.py) ===
 # Every one of these fetches through tools._http_get (SSRF/egress/rebinding
 # gate) and wraps any model-bound content untrusted. They are INGESTION tools
 # (classified in security.INGESTION_TOOLS) except the two monitor-management
@@ -3109,7 +3109,7 @@ WEB_MONITOR_LIST = {
     "input_schema": {"type": "object", "properties": {}},
 }
 
-# === Aegis Assessment tools (native Strix-absorption; see olympus/assess.py) ===
+# === Aegis Assessment tools (native the surveyed agent-absorption; see olympus/assess.py) ===
 # Authorized, evidence-producing security assessment. Scope is enforced IN CODE:
 # every target-touching tool fails closed against a signed authorize_assessment
 # grant (agents cannot self-authorize). recon/http_audit fetch through the gated

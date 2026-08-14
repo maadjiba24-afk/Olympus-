@@ -540,7 +540,7 @@ outbound fetch (`tools._http_get`) records its request (method / url / a safe
 header subset) and response (status / size / body) to a local, operator-only
 store, so an operator can **see** exactly what an agent sent and received and
 **replay** a request to check whether the resource changed — valuable for
-debugging and for forensic audit of assessment runs (the deferred Strix/Caido
+debugging and for forensic audit of assessment runs (the deferred the surveyed agent/Caido
 capture-proxy value, `DEFERRED.md` #18, delivered *without* the open box).
 
 - **No new risk surface.** It only OBSERVES the already-governed fetch path
@@ -657,22 +657,22 @@ during the wait it fails FAST with the exit code and a tail of Chrome's stderr,
 so a genuine launch failure (missing `--no-sandbox`, missing libs) is diagnosable
 instead of a blind timeout. No behavior change to the CDP path itself.
 
-### Added — Absorb Page Agent's capabilities natively (ADR 0014, complete: (a)–(e))
+### Added — Absorb the surveyed DOM agent's capabilities natively (ADR 0014, complete: (a)–(e))
 
-Begins absorbing [alibaba/page-agent](https://github.com/alibaba/page-agent)'s
+Begins absorbing [alibaba/the surveyed DOM agent](https://github.com/alibaba/the surveyed DOM agent)'s
 capability surface as native Olympus features, each built on the security spine
-with the corresponding page-agent weakness inverted into a structural strength
+with the corresponding the surveyed DOM agent weakness inverted into a structural strength
 (analysis in `docs/PAGE_AGENT_TRACKING.md`, design in ADR 0014).
 
 - **Refusal-safe tool-call repair** (§3.1). New pure module
-  `olympus/toolcall_repair.py` absorbs page-agent's `autoFixer` malformed-tool-call
+  `olympus/toolcall_repair.py` absorbs the surveyed DOM agent's `autoFixer` malformed-tool-call
   salvage — double-encoded arguments, ```json-fenced / prose-wrapped objects, and
   a tool call emitted as JSON in `content` with an empty `tool_calls` array — for
   the weak-model backends (`openai_compat`: Ollama/vLLM/LM Studio/Mistral/DeepSeek/
   OpenRouter/Gemini; `bedrock_converse`: Titan/Nova/Llama/Mistral/Cohere). Wired
   into `openai_compat.run_agent`; a shared brace-balanced JSON extractor now backs
   `openai_compat.extract_json` and `bedrock_converse.complete_json` too (ad-hoc
-  regexes removed). **The inversion:** page-agent's fixer will reconstruct a tool
+  regexes removed). **The inversion:** the surveyed DOM agent's fixer will reconstruct a tool
   call from *any* content JSON — which can mask a refusal or fake an action from a
   final answer. `recover_tool_call` fires **only when the content names a tool the
   model was actually offered**, so a refusal or plain answer is returned untouched
@@ -681,7 +681,7 @@ with the corresponding page-agent weakness inverted into a structural strength
 
 - **Perception deltas + scroll geometry in `browser.observe()`** (§3.2/§3.3,
   decision (b)). The numbered element map now carries two model-useful signals
-  page-agent has and Olympus lacked: a `*[i]` marker on elements that are *new
+  The surveyed DOM agent has and Olympus lacked: a `*[i]` marker on elements that are *new
   since the last observe()* on the same URL (keyed on the durable `__olySel`
   selector, so it survives re-indexing; a navigation or the first look marks
   nothing), a geometry header (`Page WxH, viewport WxH at N% (…px above, …px
@@ -699,7 +699,7 @@ with the corresponding page-agent weakness inverted into a structural strength
   `browser.act('click', selector=…)` now probes the target — resolve, scroll to
   center, `elementFromPoint` — before acting. On a clear point it fires a
   **trusted**, coordinate-accurate CDP click (mouseMoved→Pressed→Released),
-  stronger than page-agent's untrusted in-page dispatch. On an obscured or
+  stronger than the surveyed DOM agent's untrusted in-page dispatch. On an obscured or
   off-screen point it does **not** fire a blind coordinate click (which would hit
   the covering overlay); it dispatches a faithful pointer→mouse→click sequence to
   the *intended* element and flags that the point was obscured so a modal/cookie
@@ -709,7 +709,7 @@ with the corresponding page-agent weakness inverted into a structural strength
 
 ### Security — Default-on pre-prompt secret redaction (ADR 0014 (d), §3.5)
 
-Inverts page-agent's biggest risk (it streams cleaned page HTML to the LLM with
+Inverts the surveyed DOM agent's biggest risk (it streams cleaned page HTML to the LLM with
 redaction left to an opt-in hook its own docs say "does not guarantee removal of
 sensitive information"). New `security.sanitize_for_prompt` redacts secrets —
 whole private-key PEM blocks (key material, not just the header — new
@@ -766,10 +766,10 @@ page* (origin sharing), `eval()` of model code in a live origin, an
 unauthenticated localhost control socket behind a reusable dialog, and sending
 unredacted page HTML to the model behind only an opt-in hook.
 
-### Docs — Competitive analysis: alibaba/page-agent (analysis-only)
+### Docs — Competitive analysis: alibaba/the surveyed DOM agent (analysis-only)
 
 Added `docs/PAGE_AGENT_TRACKING.md`, a complete feature/capability inventory and
-security/design critique of [alibaba/page-agent](https://github.com/alibaba/page-agent)
+security/design critique of [alibaba/the surveyed DOM agent](https://github.com/alibaba/the surveyed DOM agent)
 (the zero-install in-page GUI agent, npm 1.12.2), mapped to Olympus's own
 browser harness and web-context suite. Verdict: **nothing adopted** — Page
 Agent's in-page DOM-automation surface is already matched or exceeded by
@@ -892,7 +892,7 @@ with a 24 h TTL (bounded); any failure degrades silently to the bundled index
 (offline-first preserved); off during replay. Default behaviour is unchanged
 (bundled index) unless opted in. No new tool/action/command. Tests: 7 new.
 
-### Added — Blast-radius containment: own each of Strix's damage vectors
+### Added — Blast-radius containment: own each of the surveyed agent's damage vectors
 
 Made the assessment guardrails **owned, active, and demonstrable** (ADR 0013).
 Two additions to `olympus/assess.py`:
@@ -903,11 +903,11 @@ Two additions to `olympus/assess.py`:
   `assess.egress_confined_reason` after their SSRF preamble). A host outside the
   signed scope is refused at the socket layer, fail-closed — so even a hijacked
   assessment cannot reach the operator's LAN, a metadata endpoint, or any
-  out-of-scope host (the inversion of Strix's open-egress sandbox). A strict
+  out-of-scope host (the inversion of the surveyed agent's open-egress sandbox). A strict
   **no-op** when no assessment is active, so ordinary fetches are unchanged;
   `run_assessment` runs inside it.
 - **A containment self-check.** `containment()` / `olympus assess containment`
-  maps each of Strix's five blast-radius vectors (prompt-only scope, open
+  maps each of the surveyed agent's five blast-radius vectors (prompt-only scope, open
   egress, refusal-suppression, arbitrary payloads, removed audit trail) to its
   owning Olympus control and PROVES each is contained — live checks where it
   can. `test_assess.py` asserts all five stay contained, so a regression that
@@ -933,7 +933,7 @@ the existing "improve what we have" machinery (Prometheus prompts, Metis skills,
   (`outcomes.insights`) becomes structured proposals on the existing upgrade
   store (surfaced in the digest and `olympus discover`), for the operator to
   review — the native, recurring form of the "analyze the landscape → propose
-  what to absorb" pattern that produced the Firecrawl/Strix absorptions. Nothing
+  what to absorb" pattern that produced the scraper and security-agent absorptions. Nothing
   is auto-built.
 
 1 new tool (125 total): `note_knowledge_gap` (TRUSTED / own-state). 1 new command
@@ -1003,8 +1003,8 @@ change. Tests: 3 new. Current score: 8 samples, precision/recall/F1 = 1.0.
 Added `assess_validate` (10th assess tool, 124 total; `olympus assess validate`)
 — a **scope-locked, non-destructive** active-validation layer that upgrades a
 finding from "potential (static)" to "confirmed (observed)". It is the deployable
-superset of Strix's exploitation phase and the moat's answer to "make it stronger
-than Strix": it confirms with a BENIGN marker sent only to a parameter the
+superset of the surveyed agent's exploitation phase and the moat's answer to "make it stronger
+than the surveyed agent": it confirms with a BENIGN marker sent only to a parameter the
 operator named (never guessed/sprayed), only against a code-authorized target,
 through the SSRF-pinned gated fetch, hard-capped (≤20 probes) — so it produces a
 real proof while remaining safe to run unattended. Checks live in an extensible
@@ -1018,9 +1018,9 @@ access — those stay declined (ADR 0011 Decision (f); `DEFERRED.md` #16/#18).
 Tests: 7 new (`tests/test_assess.py`). THREAT_MODEL, capabilities.json, README,
 and ADR 0011 updated.
 
-### Added — Native "Aegis Assessment" suite (Strix absorbed as a moat)
+### Added — Native "Aegis Assessment" suite (the surveyed agent absorbed as a moat)
 
-Absorbed [Strix](https://github.com/usestrix/strix)'s security-assessment
+Absorbed the surveyed agent's security-assessment
 capability surface as native Olympus capabilities — turning each of its
 weaknesses into a structural strength (design locked in ADR 0011, analysis in
 `docs/STRIX_TRACKING.md`). New modules `olympus/assess.py` (code-enforced scope,
@@ -1043,11 +1043,11 @@ command group** (126 total):
 
 The moat inversions: **scope enforced in code** (`require_scope()` fails closed
 against a signed grant — not a prompt); **a signed authorization** instead of
-Strix's refusal-suppression (agents cannot self-authorize); **untrusted target
+The surveyed agent's refusal-suppression (agents cannot self-authorize); **untrusted target
 content isolated structurally** (recon/audit fetch via the IP-pinned
 `tools._http_probe`, INGESTION-classified → wrapped + actuators stripped);
 **findings with CVSS computed from a vector** + SARIF 2.1.0 + fingerprint dedup +
-a ledger note (the audit trail Strix removed); **secret evidence redacted** so a
+a ledger note (the audit trail the surveyed agent removed); **secret evidence redacted** so a
 report can't leak the secret. Pure-stdlib — no new dependencies. Tests:
 `tests/test_assess.py`, `tests/test_sarif.py` (49 new). THREAT_MODEL.md,
 `capabilities.json`, and README markers updated; the tool classification stays
@@ -1141,9 +1141,9 @@ a data network effect a copier starts at zero:
 Internal capabilities + new formats + one new command. New tests:
 `test_domainlore.py`, `test_webreflect.py`, plus jsonld/feed coverage.
 
-### Added — Web Context: the previously-declined Firecrawl features, built native
+### Added — Web Context: the previously-declined the surveyed scraper features, built native
 
-The Firecrawl capabilities ADR 0010 had declined are now first-class — built in
+The the surveyed scraper capabilities ADR 0010 had declined are now first-class — built in
 Olympus's idioms, without importing the anti-patterns:
 
 - **New scrape formats** on a new `web_scrape` tool (the advanced sibling of the
@@ -1202,9 +1202,9 @@ defense-in-depth, extraction/monitor robustness) on `webctx`/`webmonitor`:
 
 25 hardening tests added (`test_webctx.py`, `test_webmonitor.py`).
 
-### Added — Native "Web Context" suite (Firecrawl absorbed as a moat)
+### Added — Native "Web Context" suite (the surveyed scraper absorbed as a moat)
 
-Absorbed [Firecrawl](https://github.com/firecrawl/firecrawl)'s full web-data
+Absorbed [the surveyed scraper](https://github.com/firecrawl/firecrawl)'s full web-data
 surface as native Olympus capabilities — turning each of its weaknesses into a
 structural strength (design locked in ADR 0010). New module `olympus/webctx.py`
 (pure-stdlib readability→markdown, scrape, map, crawl, batch, verified
@@ -1219,7 +1219,7 @@ extraction, llms.txt, diff, PDF/DOCX parse) and `olympus/webmonitor.py`
   clean-markdown (readability-grade, zero-dependency) rather than shipping a
   duplicate scrape/crawl surface; `crawl_site` gains `include`/`exclude` filters.
 
-Every Firecrawl weakness answered natively: **SSRF** — every fetch (page,
+Every the surveyed scraper weakness answered natively: **SSRF** — every fetch (page,
 sitemap, robots, crawl hop, document, diff, monitor) routes through the
 IP-pinned `tools._http_get`/new `tools._http_get_bytes` (no fail-open socket
 hook, no rebinding window); **injection** — every model hop wraps scraped bytes
@@ -1234,7 +1234,7 @@ AST import-scan test enforces the "3 required deps" claim so no lazy import can
 ship undeclared. New tests: `tests/test_webctx.py`, `tests/test_webmonitor.py`.
 
 Analysis that motivated this ships in `docs/FIRECRAWL_TRACKING.md` (inventory +
-security critique + adoption watchlist; no Firecrawl code used).
+security critique + adoption watchlist; no the surveyed scraper code used).
 
 ### Added — Absorbed capabilities as a native, self-evolving moat
 
@@ -2803,7 +2803,7 @@ fast with an actionable message (`config.require_model`), is flagged by
 `OLYMPUS_GATE_MODEL` is now purely optional: unset, the replay gate runs on
 your configured model.
 
-### Added — workspace, operator, and gateway (Odysseus/Hermes/OpenClaw study)
+### Added — workspace, operator, and gateway (the surveyed framework/Hermes/the surveyed gateway study)
 
 A three-phase build extending Olympus toward the archetypes it was closest to.
 
@@ -2883,9 +2883,9 @@ A three-phase build extending Olympus toward the archetypes it was closest to.
   supervised process with auto-restart + backoff and a cross-process health
   file (`gateway --status`). `docs/GATEWAY.md`.
 
-### Added — capabilities studied from Odysseus
+### Added — capabilities studied from the surveyed framework
 
-A batch distilled from analyzing the Odysseus self-hosted AI workspace
+A batch distilled from analyzing the surveyed self-hosted AI workspace
 (`pewdiepie-archdaemon/odysseus`) and adopting its best agent ideas the
 Olympus-native way — verified, gated, headless-first. See the release-tracking
 analysis for the full feature comparison.
@@ -2945,7 +2945,7 @@ analysis for the full feature comparison.
   `tools._PinnedHTTP(S)Connection` connect to that pinned IP (HTTPS keeps
   SNI/cert checks on the hostname), closing the validate-then-reconnect window
   the SSRF guard's own docstring had acknowledged. `_http_get` and webhook
-  delivery use the pinned opener. (Adapted from Odysseus fix #704; the
+  delivery use the pinned opener. (Adapted from the surveyed framework fix #704; the
   case-insensitive sensitive-file deny-list mirrors their #5097.)
 
 ## [0.24.0] — 2026-07-03
@@ -3733,7 +3733,7 @@ CI-verified capability manifest.
 - **agentskills.io interop** (`olympus/skillpack.py`, `olympus skill-import` /
   `skill-export`): import/export skills in the open SKILL.md standard.
 - **Migration importer** (`olympus/migrate.py`, `olympus import-agent`): fold an
-  OpenClaw/Hermes-style agent's memories, profile, and skills into Olympus;
+  The surveyed gateway/Hermes-style agent's memories, profile, and skills into Olympus;
   API keys are detected and reported, never silently stored (opt-in `--keys`).
 - **Media tools** (`olympus/media.py`): `generate_image`, `text_to_speech`, and
   a link-extracting `browse_page`; generative tools degrade gracefully without a

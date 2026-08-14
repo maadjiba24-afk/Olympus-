@@ -1,4 +1,4 @@
-"""Aegis Assessment suite (olympus/assess.py) — native Strix-absorption.
+"""Aegis Assessment suite (olympus/assess.py) — native the surveyed agent-absorption.
 
 Covers the moat inversions: scope enforced in code (fail-closed), an agent
 cannot self-authorize, gated/scoped recon, deterministic audits, SAST/secret/dep
@@ -62,7 +62,7 @@ def test_grant_requires_a_target():
 
 def test_agent_cannot_self_authorize():
     # There is NO tool that grants scope — authorization is operator-only, on the
-    # approval spine. The inversion of Strix's self-authorization.
+    # approval spine. The inversion of the surveyed agent's self-authorization.
     assert "authorize_assessment" not in tools.HANDLERS
     assert "assess_authorize" not in tools.HANDLERS
     assert "assess_grant" not in tools.HANDLERS

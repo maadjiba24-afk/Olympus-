@@ -14,7 +14,7 @@ A platform adapter supplies three small callables and gets a hardened server:
         expected JSON response shape.
 
 The server itself owns the security invariants every webhook channel needs and
-that OpenClaw repeatedly got wrong: a bounded request body, a per-source rate
+that the surveyed gateway repeatedly got wrong: a bounded request body, a per-source rate
 limit, fail-closed auth, no stack traces in responses, and routing through the
 untrusted-by-default access spine (chanbase.collect_reply). The adapter never
 re-implements any of that.

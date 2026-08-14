@@ -1,6 +1,6 @@
 """Deep Research — plan → iterative search/read/extract → cited synthesis.
 
-Adopted from Odysseus's IterResearch-style engine (itself after Alibaba's
+Adopted from the surveyed framework's IterResearch-style engine (itself after Alibaba's
 IterResearch): the model drives every decision — what to search, which pages
 deserve a full read, what a page actually established, whether the question
 is answered — and the loop simply executes those decisions until the model
@@ -132,7 +132,7 @@ def _rounds() -> int:
 
 
 def _today() -> str:
-    # Date-grounding (an Odysseus lesson): without this, models write queries
+    # Date-grounding (a lesson from the surveyed framework): without this, models write queries
     # anchored to their training-cutoff year and miss everything current.
     return _dt.date.today().isoformat()
 

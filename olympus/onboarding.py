@@ -1,6 +1,6 @@
 """Conversational onboarding — a warm first-contact for chat channels.
 
-OpenClaw greets a brand-new user with a guided setup conversation. Olympus is
+The surveyed gateway greets a brand-new user with a guided setup conversation. Olympus is
 already provisioned server-side (the operator brings the keys), so the goal
 here is different: the *first* time a given chat identity talks to Olympus,
 introduce what it is and how to get the most out of it — once, and never again

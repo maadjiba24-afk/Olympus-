@@ -225,7 +225,7 @@ SPECIALISTS: dict[str, Specialist] = {
                         "Assessment scope is enforced in code — Aegis can only "
                         "assess targets the operator has explicitly authorized.",
             web=True,
-            # The assessment suite (native Strix-absorption; olympus/assess.py):
+            # The assessment suite (native the surveyed agent-absorption; olympus/assess.py):
             # recon/http_audit fetch the target (INGESTION — capability
             # separation strips any actuator from the run), while the source
             # scanners and findings-store verbs read local source or Olympus's

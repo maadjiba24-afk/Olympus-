@@ -1,7 +1,7 @@
 """Media tools — image generation, text-to-speech, and richer browsing.
 
 Olympus could read the web but couldn't *produce* media or browse a page
-structurally. These tools close that gap (the kind of toolset Hermes ships:
+structurally. These tools close that gap (the toolset comparable assistants ship:
 image gen, TTS, browser):
 
   * ``generate_image`` — create an image from a prompt (OpenAI-compatible
@@ -267,7 +267,7 @@ def analyze_image(image: str, question: str = "") -> str:
     """Describe or answer a question about an image using a vision-capable model.
 
     `image` is either an http(s) URL or a filename in the confined workspace.
-    Fills the one real capability gap vs Hermes: Olympus could *generate* images
+    Fills the one real capability gap vs comparable assistants: Olympus could *generate* images
     but never *read* them. The model's answer is external content, so callers
     wrap it as untrusted (analyze_image is an INGESTION tool).
     """

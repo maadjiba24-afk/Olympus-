@@ -1,12 +1,12 @@
-# ADR 0010: Native web-context capabilities (Firecrawl absorption)
+# ADR 0010: Native web-context capabilities (the surveyed scraper absorption)
 
 Status: accepted
 Date: 2026-07-22
 
 ## Context
 
-A full inventory and security review of [Firecrawl](https://github.com/firecrawl/firecrawl)
-(a large TS/Go/Rust web-scraping SaaS — see `docs/FIRECRAWL_TRACKING.md`) found a
+A full inventory and security review of [the surveyed scraper](https://github.com/firecrawl/firecrawl)
+(a large TS/Go/Rust web-scraping SaaS) found a
 capable feature surface — scrape, map, crawl, batch, schema-guided extraction,
 llms.txt, change-diffing, document parsing, change-monitoring — sitting on a
 security model Olympus already beats: SSRF resting on a single fail-open socket
@@ -29,7 +29,7 @@ or the new `tools._http_get_bytes` (binary). Both share the exact SSRF/egress
 preamble: `security.secret_exfil_reason` → `security.url_block_reason` →
 `_pinned_opener()` (which pins the validated IP into the socket, defeating DNS
 rebinding) or `_proxy_opener()` (the egress choke). There is **no second socket
-path** in the module. This is strictly stronger than Firecrawl's fail-open
+path** in the module. This is strictly stronger than the surveyed scraper's fail-open
 undici hook and closes the rebinding window its browser path leaves open.
 
 ## Decision (b): untrusted content is isolated structurally
@@ -41,7 +41,7 @@ extraction prompt, the verification prompt, and the summary prompt alike, per
 ingesters plus the already-classified `browse_page`/`crawl_site`) are registered
 in `security.INGESTION_TOOLS`, so any agent run that can invoke them loses its
 action tools (`security.filter_tools`): a prompt-injected page can never reach
-an actuator. This replaces Firecrawl's soft "ignore embedded directives" string
+an actuator. This replaces the surveyed scraper's soft "ignore embedded directives" string
 (present on one path, absent on others) with an envelope the model is told to
 treat as adversarial data, on every path.
 
@@ -50,7 +50,7 @@ treat as adversarial data, on every path.
 `webctx.extract` runs schema-guided extraction on the pool's cheap `general`
 member, then a second `verify` member re-reads the extracted values against the
 (wrapped) source and flags anything unsupported. The tool surfaces
-`verified: true/false/None` and per-field flags. Firecrawl ships no fact-check;
+`verified: true/false/None` and per-field flags. The surveyed scraper ships no fact-check;
 this is the single clearest capability advantage, and it reuses the exact
 composition-by-role the council already runs.
 
@@ -76,16 +76,16 @@ New tools (8) and CLI commands (6) are registered through the normal seams
 `capabilities.py`, threat-modeled in `docs/THREAT_MODEL.md`, and bound to the
 README markers — the truthful-accounting gate keeps holding.
 
-Firecrawl's full surface is covered either by a new native capability or by an
+The surveyed scraper's full surface is covered either by a new native capability or by an
 existing Olympus one; nothing is left as a silent gap:
 
-| Firecrawl capability | Olympus |
+| the surveyed scraper capability | Olympus |
 |---|---|
 | scrape → clean markdown + links | existing `browse_page`, **upgraded** to `webctx.to_markdown` (readability-grade, zero-dep) |
 | map (URL discovery) | `web_map` (new) |
 | crawl | existing `crawl_site`, **upgraded** to `webctx.crawl` clean markdown + new `include`/`exclude` glob filters |
 | batch scrape | `web_batch_scrape` (new) |
-| extract (schema) | `web_extract` (new) — **verified**, which Firecrawl is not |
+| extract (schema) | `web_extract` (new) — **verified**, which the surveyed scraper is not |
 | llms.txt | `generate_llmstxt` (new) |
 | change-tracking (git-diff mode) | `web_diff` (new) + `web_monitor_*` (new) |
 | change-tracking (json mode) | composition: `web_extract` on a schedule + `web_diff` on the structured result (no new engine) |
@@ -93,7 +93,7 @@ existing Olympus one; nothing is left as a silent gap:
 | search (+scrape) | existing `web_search`/`websearch.py` + `browse_page` |
 | deep-research | existing `research.py` / `trigger_research` |
 | screenshot | existing governed browser harness `browser_screenshot` |
-| browser sessions + actions (incl. executeJavascript) | existing governed `browser.py` — `browser_act` is an ACTION_TOOL stripped from untrusted-ingesting runs, every CDP call ledgered/replayable. Olympus's answer to Firecrawl's ungoverned `executeJavascript` |
+| browser sessions + actions (incl. executeJavascript) | existing governed `browser.py` — `browser_act` is an ACTION_TOOL stripped from untrusted-ingesting runs, every CDP call ledgered/replayable. Olympus's answer to the surveyed scraper's ungoverned `executeJavascript` |
 | agent ("describe what you need") | existing browser harness + `spawn_subagent` |
 | monitor (scheduled) | `webmonitor` (new) |
 
@@ -110,13 +110,13 @@ matches the existing `web_search`/`web_fetch` family (with `generate_llmstxt`,
 Two small, dependency-free modules land (`webctx.py`, `webmonitor.py`) plus one
 canonical byte-fetch seam, composed through named seams rather than replacing
 anything. Each ships its own test module. Honest framing of the moat: Olympus
-does **not** claim to out-quality Firecrawl's Go+Rust markdown converter — it
+does **not** claim to out-quality the surveyed scraper's Go+Rust markdown converter — it
 claims (and tests) that its readability-grade markdown is *zero-dependency*, its
 every fetch is *IP-pinned-gated*, its every model hop is *untrusted-wrapped*, and
-its extraction is *verified* — advantages Firecrawl's architecture cannot cheaply
+its extraction is *verified* — advantages the surveyed scraper's architecture cannot cheaply
 match.
 
-What was deliberately **NOT absorbed**: Firecrawl's network-only SSRF model (we
+What was deliberately **NOT absorbed**: the surveyed scraper's network-only SSRF model (we
 reject at the pinned socket, not a fail-open hook), its ungated in-browser JS
 execution (actuation stays behind the governed harness's capability separation),
 its open-by-default posture (new tools are inert until invoked; the monitor is
