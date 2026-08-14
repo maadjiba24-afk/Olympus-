@@ -61,8 +61,13 @@ def test_extract_ignores_non_text():
 
 # --- signature verification ----------------------------------------------
 
-def test_signature_skipped_without_secret():
-    assert whatsapp.valid_signature(b"body", None) is True
+def test_signature_refused_without_secret():
+    """Fail closed: without WHATSAPP_APP_SECRET no payload can be shown to
+    be genuine, so none is accepted. Previously this returned True, so a
+    default install trusted any POST that reached the webhook URL and let
+    a forged payload spoof any sender number."""
+    assert whatsapp.valid_signature(b"body", None) is False
+    assert whatsapp.valid_signature(b"body", "sha256=deadbeef") is False
 
 
 def test_signature_enforced_with_secret(monkeypatch):
@@ -83,6 +88,7 @@ def test_allowlist(monkeypatch):
 
 
 def test_process_runs_pipeline_and_replies(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_ALLOWED_NUMBERS", "1555")  # closed by default
     sent = []
     monkeypatch.setattr(whatsapp, "_send", lambda to, text: sent.append((to, text)))
     monkeypatch.setattr(whatsapp.orchestrator.Olympus, "ask",
@@ -147,6 +153,8 @@ def test_webhook_get_rejects_bad_token(server):
 
 def test_webhook_post_dispatches_once(server, monkeypatch):
     base, httpd = server
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "")   # signature path covered
+    monkeypatch.setattr(whatsapp, "valid_signature", lambda *a: True)
     processed = []
     monkeypatch.setattr(whatsapp, "_process",
                         lambda bots, sender, text: processed.append((sender, text)))

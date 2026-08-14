@@ -531,3 +531,86 @@ def test_a_raising_release_fn_cannot_break_the_cancellation(monkeypatch):
     assert lease.refused is True and lease.cancelled is True
     assert lease.released is True            # attempted exactly once
     assert watchdog.read_forensics(lease.lease_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Wave-0 hardening: an absolute per-job ceiling, independent of the watchdog
+#
+# The watchdog is off by default (its thresholds are self-declared
+# PROVISIONAL), which left the SHIPPED configuration with no protection at all:
+# tick() runs every cadence serially and inline, so one provider that accepts a
+# request and never streams stalls the scheduler, goals, beats and backups
+# forever. `OLYMPUS_JOB_STALL_SECS` — documented in .env.example and read by
+# nothing until now — is the crude floor under that.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_job_timeout_default_and_overrides(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_JOB_STALL_SECS", raising=False)
+    assert heartbeat.job_timeout_secs() == heartbeat._DEFAULT_JOB_TIMEOUT
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "45")
+    assert heartbeat.job_timeout_secs() == 45.0
+    for disabled in ("0", "off", "none", "never"):
+        monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", disabled)
+        assert heartbeat.job_timeout_secs() == 0.0
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "not-a-number")
+    assert heartbeat.job_timeout_secs() == heartbeat._DEFAULT_JOB_TIMEOUT
+
+
+def test_a_wedged_job_is_abandoned_instead_of_stalling_forever(monkeypatch):
+    """The defect itself: with the watchdog off, a job that never returns used
+    to hold the tick indefinitely."""
+    monkeypatch.delenv("OLYMPUS_WATCHDOG", raising=False)
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "0.3")
+    release = threading.Event()
+
+    def _wedged():
+        release.wait(30)          # never released within the deadline
+        return "too late"
+
+    with pytest.raises(heartbeat.JobTimedOut) as err:
+        heartbeat._watch_job("wedged", _wedged)
+    assert "OLYMPUS_JOB_STALL_SECS" in str(err.value)
+    release.set()                 # let the abandoned worker exit
+
+
+def test_the_tick_continues_past_a_wedged_cadence(monkeypatch):
+    """End-to-end with the watchdog OFF (the shipped default): a wedged job is
+    abandoned on the deadline and the cadences after it still run. Before this,
+    the tick waited on the wedged job forever and backups never happened."""
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "0.3")
+    clock = _FakeClock()
+    gate, ran = _wedged_tick(monkeypatch, clock)
+    try:
+        log = heartbeat.tick(_state("opportunity_scan", "evolution_audit"),
+                             now=1e9)
+    finally:
+        gate.set()
+
+    assert "audit" in ran, "the tick stalled on the wedged job"
+    assert "scan" not in ran, "the wedged job was not abandoned"
+    assert any("Prometheus: audit saved" in line for line in log), log
+    # …and no watchdog machinery was involved in doing it.
+    assert not (config.MEMORY_DIR / "watchdog").exists()
+
+
+def test_disabling_the_ceiling_restores_the_inline_tick(monkeypatch):
+    """`0` must mean genuinely inline — same thread, no worker hop."""
+    monkeypatch.delenv("OLYMPUS_WATCHDOG", raising=False)
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "off")
+    where: list[int] = []
+    result = heartbeat._watch_job(
+        "inline", lambda: (where.append(threading.get_ident()), "value")[1])
+    assert result == "value"
+    assert where == [threading.get_ident()]
+
+
+def test_a_normal_job_still_returns_its_value_and_raises_its_errors(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_WATCHDOG", raising=False)
+    monkeypatch.setenv("OLYMPUS_JOB_STALL_SECS", "30")
+    assert heartbeat._watch_job("ok", lambda: "answer") == "answer"
+
+    def _boom():
+        raise RuntimeError("job failed for its own reasons")
+
+    with pytest.raises(RuntimeError, match="its own reasons"):
+        heartbeat._watch_job("bad", _boom)

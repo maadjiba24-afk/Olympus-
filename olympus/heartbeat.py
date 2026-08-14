@@ -9,6 +9,7 @@ Run with `python -m olympus heartbeat`. On its own cadence it:
 from __future__ import annotations
 
 import contextvars
+import os
 import threading
 import time
 import traceback
@@ -65,6 +66,83 @@ def _wd_do(lease, method: str, name: str, *args) -> None:
         _wd_capture(f"heartbeat.watchdog.{method}:{name}", err, context=name)
 
 
+#: Absolute wall-clock ceiling for ONE heartbeat job, independent of the
+#: watchdog. 30 minutes: this is a WEDGE BACKSTOP, not an SLA — a legitimate
+#: `train_specialists` or `daily_learning` pass makes many model calls and can
+#: run for many minutes, and abandoning honest work is worse than the stall it
+#: would prevent. (absorption doc 11 cites 300s, but that is the watchdog's
+#: *progress-based* stall threshold: a job still emitting beats keeps its lease.
+#: An absolute deadline cannot tell progress from silence, so it must be far
+#: more generous than an activity timeout.)
+_DEFAULT_JOB_TIMEOUT = 1800.0
+
+
+class JobTimedOut(RuntimeError):
+    """One heartbeat job exceeded its absolute wall-clock ceiling."""
+
+
+def job_timeout_secs() -> float:
+    """The per-job ceiling; 0 disables it (fully inline, pre-hardening tick).
+
+    Reads `OLYMPUS_JOB_STALL_SECS`, which .env.example has documented as the
+    "background-job stall threshold" while nothing read it — the knob existed
+    only in prose."""
+    raw = os.environ.get("OLYMPUS_JOB_STALL_SECS", "").strip().lower()
+    if raw in ("0", "off", "none", "never"):
+        return 0.0
+    if not raw:
+        return _DEFAULT_JOB_TIMEOUT
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return _DEFAULT_JOB_TIMEOUT
+
+
+def _run_with_deadline(name: str, fn):
+    """Run `fn` with an absolute ceiling, without involving the watchdog.
+
+    The watchdog is the *sophisticated* answer to a wedged job, and it is off by
+    default — deliberately, because its thresholds are self-declared PROVISIONAL
+    and arming an uncalibrated classifier by default would abandon honest work.
+    But "off" left the shipped configuration with NO protection at all: `tick()`
+    runs every cadence serially and inline, so one provider that accepts a
+    request and never streams a token stalls the scheduler, goals, agent beats
+    and BACKUPS indefinitely and silently.
+
+    This is the crude floor under that: no classification, no forensics, no
+    verdict — just a deadline. It needs no calibration to be safe because it
+    only fires where the alternative is waiting forever. `JobTimedOut` is a
+    plain exception, so each cadence's existing `except Exception` logs it and
+    the tick moves on."""
+    limit = job_timeout_secs()
+    if limit <= 0:
+        return fn()
+
+    box: dict = {}
+    ctx = contextvars.copy_context()
+
+    def _runner() -> None:
+        try:
+            box["value"] = ctx.run(fn)
+        except BaseException as err:          # re-raised on the tick's thread
+            box["error"] = err
+
+    worker = threading.Thread(target=_runner, name=f"olympus-job-{name}",
+                              daemon=True)
+    worker.start()
+    worker.join(limit)
+    if worker.is_alive():
+        # The thread is a daemon and cannot be killed; it is abandoned exactly
+        # as the watchdog's enforce path abandons one, and for the same reason.
+        raise JobTimedOut(
+            f"{name}: abandoned after {limit:.0f}s (OLYMPUS_JOB_STALL_SECS). "
+            f"The job is still running on a background thread; the tick "
+            f"continued so the remaining cadences are not stalled with it.")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def _watch_job(name: str, fn):
     """Run ONE heartbeat job under a Wave-2 progress lease (W2-C6).
 
@@ -98,12 +176,12 @@ def _watch_job(name: str, fn):
     try:
         from . import watchdog
         if not watchdog.enabled():
-            return fn()
+            return _run_with_deadline(name, fn)
         lease = watchdog.ProgressLease(f"heartbeat:{name}", kind="job",
                                        clock=_clock)
     except Exception as err:                 # noqa: BLE001 - never raise
         _wd_capture(f"heartbeat.watchdog.open:{name}", err, context=name)
-        return fn()
+        return _run_with_deadline(name, fn)
 
     box: dict = {}
     # A worker thread starts with a fresh context, so carry the tick's
@@ -119,10 +197,20 @@ def _watch_job(name: str, fn):
     worker = threading.Thread(target=_runner, name=f"olympus-job-{name}",
                               daemon=True)
     worker.start()
+    # The same absolute ceiling applies here. `observe` deliberately changes
+    # nothing about scheduling, so without this an observed wedge still stalls
+    # the tick forever — it would merely be a *documented* stall.
+    limit = job_timeout_secs()
+    deadline = (_clock() + limit) if limit > 0 else None
     while True:
         worker.join(_JOB_POLL_SECS)
         if not worker.is_alive():
             break
+        if deadline is not None and _clock() >= deadline:
+            _wd_do(lease, "close", name, "abandoned")
+            raise JobTimedOut(
+                f"{name}: abandoned after {limit:.0f}s "
+                f"(OLYMPUS_JOB_STALL_SECS) — the tick continued without it.")
         if not _wd_supervise(lease, name):
             _wd_do(lease, "close", name, "abandoned")
             raise JobAbandoned(

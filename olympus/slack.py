@@ -217,7 +217,7 @@ class _Handler(BaseHTTPRequestHandler):
             _DISPATCH.submit(user_key, lambda p=payload: process_event(p))
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8487) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8487) -> None:
     if not os.environ.get("SLACK_SIGNING_SECRET"):
         raise SystemExit("Set SLACK_SIGNING_SECRET (from your Slack app config).")
     print(f"⚡ Olympus Slack events endpoint on {host}:{port}")
