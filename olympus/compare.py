@@ -1,7 +1,7 @@
 """Blind multi-model compare — the same prompt, every configured model, judged
 without brand labels.
 
-Odysseus lets you pit models against each other; the value is *blindness* —
+The surveyed framework lets you pit models against each other; the value is *blindness* —
 you pick the better answer before you know which model wrote it, so the choice
 reflects the output, not the brand. This runs a prompt once against each usable
 pool member with labels shuffled (so label order never tracks pool order),

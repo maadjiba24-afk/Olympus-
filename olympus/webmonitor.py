@@ -1,9 +1,9 @@
 """Web change-monitoring — scheduled diffing of watched pages.
 
-Firecrawl ships a hosted "monitor" that re-crawls URLs on a schedule and alerts
+The surveyed scraper ships a hosted "monitor" that re-crawls URLs on a schedule and alerts
 on change — but it removed its own audit trail (enforcement-only, no security
 events) and runs in an open-by-default service. Olympus absorbs the *capability*
-natively and keeps what Firecrawl dropped:
+natively and keeps what the surveyed scraper dropped:
 
   * **Opt-in, never open-by-default.** The heartbeat scheduler does nothing
     unless `OLYMPUS_WEB_MONITOR` is set; a default install is byte-identical.

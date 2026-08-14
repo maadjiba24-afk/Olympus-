@@ -540,7 +540,7 @@ class Dispatcher:
         worker.q.put(fn)
 
 
-# --- unified gateway daemon (OpenClaw-style: one process, all channels) ----
+# --- unified gateway daemon (the surveyed gateway-style: one process, all channels) ----
 #
 # Historically each channel was its own `olympus <channel>` process. This runs
 # every CONFIGURED channel together in one long-lived daemon, each in its own

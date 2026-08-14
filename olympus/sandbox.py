@@ -627,7 +627,7 @@ def undo_write(result: dict) -> str:
 # keys over time, and an agent has no business feeding those to a model.
 # Matched CASE-INSENSITIVELY against every path component (".ENV" and
 # "ID_RSA.BAK" are the same secret — the case-sensitive version of this list
-# was an actual Odysseus vulnerability, fixed upstream as #5097).
+# was an actual the surveyed framework vulnerability, fixed upstream as #5097).
 _SENSITIVE_PATTERNS = (
     ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
     "*.keystore", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",

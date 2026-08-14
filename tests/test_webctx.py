@@ -1,4 +1,4 @@
-"""Web Context suite — native Firecrawl absorption (olympus/webctx.py).
+"""Web Context suite — native the surveyed scraper absorption (olympus/webctx.py).
 
 Covers the content pipeline (readability markdown), the security invariants the
 absorption is *for* (every fetch gated, every model hop wrapped, local files
@@ -565,7 +565,7 @@ def test_jsonld_array_and_malformed_are_safe(monkeypatch):
 
 
 # --- web_llms_txt: governed CONSUMPTION of a site's own /llms.txt -----------
-# (native Page Agent absorption, ADR 0014 (e))
+# (native the surveyed DOM agent absorption, ADR 0014 (e))
 
 def test_fetch_llmstxt_returns_body_and_caches(monkeypatch):
     webctx._llmstxt_cache.clear()

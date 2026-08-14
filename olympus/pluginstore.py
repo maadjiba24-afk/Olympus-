@@ -1,6 +1,6 @@
-"""Hardened plugin installer — OpenClaw's plugin ecosystem, built the safe way.
+"""Hardened plugin installer — the surveyed gateway's plugin ecosystem, built the safe way.
 
-OpenClaw shipped a plugin marketplace and then a string of supply-chain CVEs:
+The surveyed gateway shipped a plugin marketplace and then a string of supply-chain CVEs:
 "install wrappers could skip install policy", "non-owner persistence", plugins
 that ran before any provenance check. This module gives Olympus the same
 capability — installing third-party tool plugins — with the trust model

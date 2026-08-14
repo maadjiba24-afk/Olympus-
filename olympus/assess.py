@@ -1,6 +1,6 @@
 """Aegis Assessment — Olympus's native authorized security-assessment suite.
 
-A full inventory and security review of Strix (an open-source autonomous
+A full inventory and security review of the surveyed agent (an open-source autonomous
 offensive-security agent) found a capable feature
 surface (recon, source-aware SAST, dependency-CVE scanning, HTTP capture,
 PoC-backed CVSS/SARIF findings, multi-agent orchestration, a USD budget stop)
@@ -16,24 +16,24 @@ safety spine, and turns each of those weaknesses into a structural strength
   * **Scope is enforced in CODE, not a prompt.** Every target-touching call
     goes through `require_scope()`, which fails closed against a signed,
     human-approved `authorize_assessment` grant (`authorizations.json`). No
-    grant → nothing runs. Strix's "SYSTEM-VERIFIED SCOPE" is a text block a
+    grant → nothing runs. The surveyed agent's "SYSTEM-VERIFIED SCOPE" is a text block a
     single bad render or injection collapses; here an out-of-scope host cannot
     be reached because the function refuses before any I/O.
-  * **Authorization is a signed fact, not a suppressed refusal.** Strix's prompt
+  * **Authorization is a signed fact, not a suppressed refusal.** the surveyed agent's prompt
     orders the model to "never ask permission." Olympus does the inverse: an
     assessment can only run against a target the operator authorized through the
     approval spine (`builtin_actions.authorize_assessment`), recorded in the
-    tamper-evident decision ledger — the audit trail Strix removed.
+    tamper-evident decision ledger — the audit trail the surveyed agent removed.
   * **Injection isolated structurally.** Every probe fetch goes through the
     egress-gated, DNS-rebinding-PINNED `tools._http_get` / `tools._http_probe`;
     attacker-controlled response bytes reach a model only through the INGESTION
     classification (`security.should_wrap` → `wrap_untrusted`, fail-closed) with
-    action tools stripped from the run. Strix feeds target output straight into
+    action tools stripped from the run. The surveyed agent feeds target output straight into
     an actuation-live context.
   * **Findings are computed and evidenced, not asserted.** Severity is a
     CVSS 3.1 base score computed from a vector (`olympus/sarif.py`), findings
     carry evidence + remediation + a CWE, are deduped by fingerprint, and export
-    as schema-valid SARIF 2.1.0 for CI — matching Strix's output discipline
+    as schema-valid SARIF 2.1.0 for CI — matching the surveyed agent's output discipline
     while adding the ledgered provenance it lacks.
   * **Defensive posture preserved.** This is authorized assessment of the
     operator's OWN assets to help them defend: recon, security-header/config
@@ -150,7 +150,7 @@ def grant(targets: list[str] | str, *, expires_in: float = _DEFAULT_EXPIRY,
     """Record a signed assessment authorization. Called ONLY by the approval
     spine (`authorize_assessment` action) or the operator CLI — never by a tool
     an agent can call, so an agent can never authorize itself (the inversion of
-    Strix's self-authorization). Returns the stored grant."""
+    The surveyed agent's self-authorization). Returns the stored grant."""
     user = _user(user)
     norm = _normalize_targets(targets)
     if not norm:
@@ -217,7 +217,7 @@ def _host_matches(host: str, pattern: str) -> bool:
 def in_scope(target: str, user: str | None = None) -> bool:
     """Whether `target` (a URL, host, IP, or the marker 'local'/a workspace path)
     is covered by an active authorization. FAIL-CLOSED: no grant → False. This is
-    the code check that replaces Strix's prompt-level scope."""
+    the code check that replaces the surveyed agent's prompt-level scope."""
     auths = active_authorizations(user)
     if not auths:
         return False
@@ -335,7 +335,7 @@ def record_finding(finding: Finding | dict, user: str | None = None) -> dict:
         records.append(rec)
         dup = False
     _atomic_write(_findings_path(user), json.dumps(records, indent=2))
-    # Best-effort ledger note (the audit trail Strix removed): the authoritative
+    # Best-effort ledger note (the audit trail the surveyed agent removed): the authoritative
     # record is the signed authorize_assessment action on the decision log; this
     # just annotates the active trace when one is present.
     try:
@@ -1065,7 +1065,7 @@ _SECRET_PATTERNS = (
 
 def _redact_secret(line: str) -> str:
     """Show the shape without emitting the secret itself (evidence must never
-    become an exfil channel — the lesson from Strix's info-disclosure skill,
+    become an exfil channel — the lesson from the surveyed agent's info-disclosure skill,
     applied to Olympus's own output)."""
     s = line.strip()[:_MAX_EVIDENCE]
     # Reuse the spine's redactors so a matched secret is defanged in the report.
@@ -1322,7 +1322,7 @@ def dep_audit(path: str = ".", record: bool = True,
     """Audit declared dependencies (requirements.txt / package.json) against the
     bundled advisory index — and, when OLYMPUS_ASSESS_OSV is set, the live
     OSV.dev feed too (cached, gated, offline-first). Scope-gated, workspace-
-    confined. Absorbs Strix's dependency-CVE scan."""
+    confined. Absorbs the surveyed agent's dependency-CVE scan."""
     require_scope("local", user)
     from . import sandbox
     try:
@@ -1408,7 +1408,7 @@ def run_assessment(target: str, *, source_path: str | None = None,
     """Run a bounded assessment against an AUTHORIZED target: recon + HTTP audit
     (network), plus SAST + secret + dependency scans when `source_path` is given
     (whitebox). Scope is enforced in code before any phase. A USD budget, if
-    given, halts further phases once session spend exceeds it (Strix's budget
+    given, halts further phases once session spend exceeds it (the surveyed agent's budget
     stop, made structural). Findings are recorded and deduped."""
     require_scope(target, user)
     start_spent = _spent_usd()
@@ -1449,13 +1449,13 @@ def run_assessment(target: str, *, source_path: str | None = None,
 # ===========================================================================
 # Active validation — confirm a finding with a BENIGN, scope-locked probe
 # ===========================================================================
-# The moat over Strix: Strix "confirms" by throwing arbitrary/weaponized payloads
+# The moat over the surveyed agent: the surveyed agent "confirms" by throwing arbitrary/weaponized payloads
 # from an open-egress box at arbitrary targets — powerful but undeployable and
 # unsafe. Olympus confirms with a benign marker sent ONLY to a parameter the
 # operator named, ONLY against a code-authorized target, through the SSRF-pinned
 # gated fetch, hard-capped so it can never spray. It upgrades a finding from
 # "potential (static)" to "confirmed (observed)" — a real proof — while being
-# safe to run unattended. That is *stronger than Strix* on the axis that
+# safe to run unattended. That is *stronger than the surveyed agent* on the axis that
 # matters (deployable confirmation), not weaker.
 #
 # Deliberate boundaries (do not cross in any future check):
@@ -1875,7 +1875,7 @@ def validate(url: str, user: str | None = None) -> dict[str, Any]:
     """Actively CONFIRM weaknesses on an AUTHORIZED target using benign, non-
     destructive probes against the query parameters PRESENT in `url`. Scope is
     enforced in code; every probe is SSRF-pinned/gated and the total is capped
-    at `_MAX_ACTIVE_PROBES`. This is the deployable, safe superset of Strix's
+    at `_MAX_ACTIVE_PROBES`. This is the deployable, safe superset of the surveyed agent's
     exploitation phase — it proves findings without arbitrary payloads, spraying,
     or open egress. Records confirmed findings; returns a per-parameter log."""
     require_scope(url, user)
@@ -2237,9 +2237,9 @@ def insights_summary(user: str | None = None) -> str:
 
 
 # ===========================================================================
-# Blast-radius containment — turn Strix's damage vectors into owned controls
+# Blast-radius containment — turn the surveyed agent's damage vectors into owned controls
 # ===========================================================================
-# Strix's "blast radius" is what an autonomous security agent can reach/break if
+# The surveyed agent's "blast radius" is what an autonomous security agent can reach/break if
 # it is wrong, injected, or misused. Olympus owns a named control for each
 # vector; this section makes two of them FIRST-CLASS:
 #
@@ -2249,7 +2249,7 @@ def insights_summary(user: str | None = None) -> str:
 #       authorization's hosts, enforced at the gated-fetch layer (fail-closed).
 #       So even a hijacked assessment physically cannot reach an out-of-scope
 #       host, the operator's LAN, or a metadata endpoint — the inversion of
-#       Strix's open-egress sandbox. A strict NO-OP when no assessment is active,
+#       The surveyed agent's open-egress sandbox. A strict NO-OP when no assessment is active,
 #       so ordinary Olympus fetches are byte-for-byte unchanged.
 #   (b) A containment self-check that PROVES each vector is contained (like the
 #       self-benchmark proves detection quality), so the guardrails are
@@ -2318,13 +2318,13 @@ def _check(name: str, vector: str, control: str, ok: bool, detail: str) -> dict:
 
 
 def containment(user: str | None = None) -> list[dict]:
-    """Prove each of Strix's blast-radius vectors is contained by a named
+    """Prove each of the surveyed agent's blast-radius vectors is contained by a named
     Olympus control. Runs live checks where it can (scope fail-closed, egress
     confinement refuses out-of-scope); asserts the structural ones. Pure — no
     network, no scope grant needed."""
     checks: list[dict] = []
 
-    # 1. Scope: prompt-only (Strix) vs code-enforced fail-closed (Olympus).
+    # 1. Scope: prompt-only (the surveyed agent) vs code-enforced fail-closed (Olympus).
     fresh = f"containment-probe-{os.urandom(2).hex()}.example"
     try:
         require_scope(fresh, user="__containment_no_such_user__")
@@ -2336,7 +2336,7 @@ def containment(user: str | None = None) -> list[dict]:
         "require_scope() — code-enforced, fail-closed",
         scope_ok, "an unauthorized target raises AssessScopeError before any I/O"))
 
-    # 2. Egress: open sandbox (Strix) vs egress confined to signed scope.
+    # 2. Egress: open sandbox (the surveyed agent) vs egress confined to signed scope.
     with confined_egress(targets=["authorized.example"]):
         blocked = egress_confined_reason("evil.example") is not None
         allowed = egress_confined_reason("authorized.example") is None
@@ -2347,7 +2347,7 @@ def containment(user: str | None = None) -> list[dict]:
         blocked and allowed and noop,
         "out-of-scope egress refused while active; no-op when inactive"))
 
-    # 3. Refusal-suppression (Strix) vs model judgment retained.
+    # 3. Refusal-suppression (the surveyed agent) vs model judgment retained.
     supp = False
     try:
         from . import agent
@@ -2362,7 +2362,7 @@ def containment(user: str | None = None) -> list[dict]:
         "Aegis keeps its judgment + a signed authorize_assessment gate",
         not supp, "Aegis prompt carries no refusal-suppression directives"))
 
-    # 4. Arbitrary payloads / spraying (Strix) vs benign-only, capped validation.
+    # 4. Arbitrary payloads / spraying (the surveyed agent) vs benign-only, capped validation.
     # Every registered check must be on the benign allowlist: each sends an inert
     # marker (canary / arithmetic / reserved .invalid host) or a single benign
     # boundary character to an operator-named parameter — never a working exploit,
@@ -2378,7 +2378,7 @@ def containment(user: str | None = None) -> list[dict]:
         "active validation is benign-marker, parameter-directed, capped",
         benign, f"probes capped at {_MAX_ACTIVE_PROBES}; inert markers only, no exploits"))
 
-    # 5. Removed audit trail (Strix) vs signed authorization + ledgered findings.
+    # 5. Removed audit trail (the surveyed agent) vs signed authorization + ledgered findings.
     from . import actions, builtin_actions  # noqa: F401 (registers built-ins)
     ledger_ok = "authorize_assessment" in actions.registered()
     checks.append(_check(
@@ -2393,7 +2393,7 @@ def containment_scorecard(user: str | None = None) -> str:
     rows = containment(user)
     n_ok = sum(1 for r in rows if r["contained"])
     lines = [
-        "# Blast-radius containment (Strix's damage vectors → Olympus controls)",
+        "# Blast-radius containment (the surveyed agent's damage vectors → Olympus controls)",
         f"{n_ok}/{len(rows)} vectors contained by a named, live control.", ""]
     for r in rows:
         mark = "✓" if r["contained"] else "✗ UNCONTAINED"

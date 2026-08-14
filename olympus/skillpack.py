@@ -1,8 +1,8 @@
 """agentskills.io interop — import and export skills in the open standard.
 
 Olympus builds its own skill library (see skills.py), but those files use an
-Olympus-specific layout. The agentskills.io standard (also used by Hermes and
-others) packages a skill as a directory containing a ``SKILL.md`` with YAML
+Olympus-specific layout. The agentskills.io standard (also used by other
+agents) packages a skill as a directory containing a ``SKILL.md`` with YAML
 frontmatter (``name``, ``description``, …) followed by the instructions. This
 module bridges the two so skills are portable in both directions — Olympus can
 consume community skill packs and publish its own.
@@ -204,7 +204,7 @@ def import_dir(root: str, *, provisional: bool = False) -> list[str]:
 
 
 # --- import from public GitHub URLs ---------------------------------------
-# Adopted from Odysseus (import SKILL.md bundles straight from a repo URL).
+# Adopted from the surveyed framework (import SKILL.md bundles straight from a repo URL).
 # Remote skills are ALWAYS imported provisional: they're third-party
 # instructions, so beyond the injection/credential scan they must also prove
 # themselves through the same benchmark gate as self-written skills.

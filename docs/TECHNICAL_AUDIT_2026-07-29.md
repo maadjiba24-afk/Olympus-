@@ -336,7 +336,7 @@ image/repo** unless an operator overrides it.
   artifact. The Postgres path is IMPLEMENTED_UNTESTED, so "database-ready is a config switch" is
   unproven.
 - **`migrate.py` is a red herring** — not a DB/schema migrator but a *competitor-agent data importer*
-  (OpenClaw/Hermes to Olympus). There is **no schema-migration mechanism** for the KV table (only
+  (the surveyed gateway/Hermes to Olympus). There is **no schema-migration mechanism** for the KV table (only
   `CREATE TABLE IF NOT EXISTS`).
 - **`trace.py` is not crash-durable mid-run by design** — it flushes the whole decision log once at
   the end (`trace.py:146`); a run killed before flush loses its decision log (exactly the gap

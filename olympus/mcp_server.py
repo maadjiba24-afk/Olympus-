@@ -252,7 +252,7 @@ TOOLS: list[dict[str, Any]] = [
         "name": "olympus_assess_scorecard",
         "description": ("The Aegis self-benchmark (precision/recall/F1 over a "
                         "labeled corpus) plus the blast-radius containment proof "
-                        "(each of Strix's damage vectors mapped to an owned "
+                        "(each of the surveyed agent's damage vectors mapped to an owned "
                         "control). Pure — no scope, network, or scan."),
         "inputSchema": {"type": "object", "properties": {}},
     },

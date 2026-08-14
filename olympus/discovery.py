@@ -16,7 +16,7 @@ CANNOT yet do, and closes those gaps over time:
     upgrade spine (`memory.save("upgrades", …)` — surfaced in the digest and
     `olympus discover`), for the operator to review. This is the native form of
     the manual "analyze the landscape → propose what to absorb" pattern that
-    produced the Firecrawl/Strix absorptions.
+    produced the scraper and security-agent absorptions.
 
 Doctrine (inherited from `evolve.py` / `outcomes.py`):
 

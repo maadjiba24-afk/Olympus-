@@ -117,7 +117,7 @@ def test_route_pair_command_bypasses_access(monkeypatch):
 def test_access_never_implies_authority():
     # Being allowlisted grants ACCESS only; authority lives in the capability
     # profile / autonomy spine, which the channel base never touches. This is
-    # the separation OpenClaw's allowlist-grants-owner CVE lacked. Verify by
+    # the separation the surveyed gateway's allowlist-grants-owner CVE lacked. Verify by
     # AST: the module calls no authority-granting function.
     import ast
     import inspect

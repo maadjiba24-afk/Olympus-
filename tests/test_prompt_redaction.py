@@ -1,6 +1,6 @@
 """Default-on pre-prompt secret redaction (ADR 0014 (d); PAGE_AGENT §2.1).
 
-Inverts page-agent's biggest risk: it streams cleaned page HTML to the LLM and
+Inverts the surveyed DOM agent's biggest risk: it streams cleaned page HTML to the LLM and
 its own docs admit the cleaning "does not guarantee removal of sensitive
 information", leaving redaction to an opt-in hook. Olympus redacts secrets from
 untrusted content by DEFAULT, in code, at the ingestion chokepoint.

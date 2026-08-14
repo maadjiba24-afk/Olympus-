@@ -1,6 +1,6 @@
 """Mid-run user interaction — the seam behind the `ask_user` tool.
 
-Adopted from Odysseus's `ask_user` (a specialist pauses mid-task to ask the
+Adopted from the surveyed framework's `ask_user` (a specialist pauses mid-task to ask the
 user a multiple-choice question). Olympus is headless-first and often runs
 unattended, so the question is answered by a **thread-local provider** the
 running surface installs — never by blocking on stdin from deep inside the

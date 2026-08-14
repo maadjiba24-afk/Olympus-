@@ -1,7 +1,7 @@
 """Teacher escalation — a failed rework runs on the strongest pool member, and
 the fix becomes a provisional skill the regular model learns from.
 
-Adopted from Odysseus's teacher-escalation loop (a SOTA "teacher" endpoint
+Adopted from the surveyed framework's teacher-escalation loop (a SOTA "teacher" endpoint
 fixes what the local "student" model failed at, then writes the lesson down as
 a skill so the student does it itself next time), fitted to Olympus's pieces:
 

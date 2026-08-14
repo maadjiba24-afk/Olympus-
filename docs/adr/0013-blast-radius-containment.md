@@ -1,4 +1,4 @@
-# ADR 0013: Blast-radius containment — owning each of Strix's damage vectors
+# ADR 0013: Blast-radius containment — owning each of the surveyed agent's damage vectors
 
 Status: accepted
 Date: 2026-07-23
@@ -6,7 +6,7 @@ Date: 2026-07-23
 ## Context
 
 An autonomous security agent's "blast radius" is how much damage it can do if it
-is wrong, misconfigured, hijacked, or misused. [Strix](https://github.com/usestrix/strix)'s
+is wrong, misconfigured, hijacked, or misused. The surveyed agent's
 is large by construction: prompt-only scope, an
 open-egress sandbox (NET_ADMIN/NET_RAW + host-gateway) that can reach the
 operator's own machine / LAN / cloud-metadata, a refusal-suppression prompt that
@@ -30,17 +30,17 @@ call `assess.egress_confined_reason` after their SSRF/egress preamble). A host
 outside the signed scope is refused at the socket layer, fail-closed — so even a
 *hijacked* assessment (e.g. one steered by an injected target page) physically
 cannot reach an out-of-scope host, the operator's LAN, or a metadata endpoint.
-This is the inversion of Strix's open-egress sandbox. It is a strict **no-op**
+This is the inversion of the surveyed agent's open-egress sandbox. It is a strict **no-op**
 when no assessment is confining egress (the context var is unset by default), so
 every ordinary Olympus fetch is byte-for-byte unchanged. `run_assessment` runs
 its phases inside `confined_egress`.
 
 ## Decision (b): a containment self-check
 
-`assess.containment()` maps each of Strix's five blast-radius vectors to its
+`assess.containment()` maps each of the surveyed agent's five blast-radius vectors to its
 owning Olympus control and proves it — running LIVE checks where it can:
 
-| Strix vector | Owned control (proven) |
+| the surveyed agent vector | Owned control (proven) |
 |---|---|
 | Prompt-only scope → act on unintended hosts | `require_scope()` raises before any I/O (live) |
 | Open egress → host / LAN / metadata | `confined_egress()` refuses out-of-scope, no-op when inactive (live) |

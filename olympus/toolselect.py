@@ -1,6 +1,6 @@
 """Per-turn dynamic tool selection — a slimmer loadout for the actual request.
 
-Adopted from Odysseus's per-request tool index (their answer to "tool schemas
+Adopted from the surveyed framework's per-request tool index (their answer to "tool schemas
 eat the context before the user request starts"): instead of always sending a
 specialist's whole catalog, rank the loadout against the current task and keep
 only the most relevant tail of big loadouts. Every schema not sent is prompt

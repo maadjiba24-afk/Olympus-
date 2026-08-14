@@ -50,7 +50,7 @@ store (`memory.save("upgrades", …)`, surfaced in the digest and `olympus
 discover`). Proposals are for the operator to review — **nothing is auto-built
 or auto-changed**. This is the native, recurring form of the manual
 "analyze the landscape → propose what to absorb" pattern that produced the
-Firecrawl (ADR 0010) and Strix (ADR 0011) absorptions.
+The surveyed scraper (ADR 0010) and the surveyed agent (ADR 0011) absorptions.
 
 ## Safety invariants
 

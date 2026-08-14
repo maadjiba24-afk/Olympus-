@@ -355,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--out", default=None,
                        help="also write the report to this markdown file")
 
-    # --- Web Context suite (native Firecrawl-absorption; olympus/webctx.py) ---
+    # --- Web Context suite (native the surveyed scraper-absorption; olympus/webctx.py) ---
     p_scrape = sub.add_parser(
         "scrape", help="scrape a URL to clean markdown (+links)")
     p_scrape.add_argument("url")
@@ -407,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon_rm.add_argument("id")
     mon_sub.add_parser("run", help="run all due checks now (one pass)")
 
-    # --- Aegis Assessment suite (native Strix-absorption; olympus/assess.py) ---
+    # --- Aegis Assessment suite (native the surveyed agent-absorption; olympus/assess.py) ---
     p_as = sub.add_parser(
         "assess", help="authorized security assessment (Aegis): scope-in-code, "
                        "recon/audit/SAST/secrets/deps, CVSS+SARIF findings")
@@ -685,7 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_skex.add_argument("name", help="skill name to export")
     p_skex.add_argument("--out", default=".", help="destination directory")
     p_mig = sub.add_parser("import-agent", help="migrate memories/skills/profile "
-                                                "from another agent (OpenClaw/Hermes-style)")
+                                                "from another agent framework")
     p_mig.add_argument("path", help="the other agent's data directory")
     p_mig.add_argument("--keys", action="store_true",
                        help="also import recognised provider API keys")

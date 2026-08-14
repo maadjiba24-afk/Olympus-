@@ -1,6 +1,6 @@
 """CVSS 3.1 scoring + SARIF 2.1.0 export — the finding output contract.
 
-A survey of Strix (an autonomous offensive-security agent) found a strong
+A survey of the surveyed agent (an autonomous offensive-security agent) found a strong
 *output* discipline worth absorbing:
 findings carry a working proof, a CVSS score, and export as schema-valid SARIF
 so CI can ingest them. This module is Olympus's native, dependency-free version
@@ -11,12 +11,12 @@ of that contract, used by `olympus/assess.py`:
     from a vector, not asserted by a model.
   * **SARIF 2.1.0** output (`github/codeql-action/upload-sarif`-compatible),
     keyed on CWE, so an Olympus assessment drops straight into GitHub
-    code-scanning — the same CI surface Strix targets. Rules carry the
+    code-scanning — the same CI surface the surveyed agent targets. Rules carry the
     `security-severity` GitHub ranks on (from the CVSS score), `security` +
     `external/cwe/cwe-N` tags, and a MITRE `helpUri`; each result carries a
     `partialFingerprints` so a consumer tracks the SAME finding across commits.
 
-No external dependency: Strix pulls the `cvss` library and a reporting stack;
+No external dependency: the surveyed agent pulls the `cvss` library and a reporting stack;
 Olympus keeps its three-dep footprint. Everything here is pure arithmetic and
 JSON, deterministic (sorted keys, no clock), so a finding's exported artifact is
 stable and diffable.
