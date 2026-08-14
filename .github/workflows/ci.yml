@@ -7,6 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       # One version failing must not cancel the others — we want the full
       # compatibility picture across the supported range on every run.
@@ -46,6 +47,16 @@ jobs:
       # Refuse pre-release (alpha/beta/rc/dev) dependencies.
       - run: python scripts/check_no_prerelease.py requirements.lock
       - run: python -m compileall -q olympus
+      # See the note on the linux leg: parses != imports.
+      - run: python scripts/import_smoke.py --quiet
+      # compileall proves every file PARSES; it does not prove any file
+      # IMPORTS. `scripts/release_pipeline.py` imported `tomllib` (stdlib only
+      # on 3.11+) at module scope, which parsed fine everywhere and killed
+      # collection on the 3.10 leg — pytest exited 2 having run nothing, in
+      # ~45s, looking like a fast test failure. This imports every module in
+      # olympus/ AND scripts/ in ~2s, so that class of breakage is named
+      # before the 6-minute suite starts.
+      - run: python scripts/import_smoke.py --quiet
       # Fail the build if any published capability count drifts from the code.
       - run: python -m olympus capabilities --check
       # Fail if any exposed tool is missing from the threat model.
@@ -55,6 +66,7 @@ jobs:
   windows-test:
     name: test (windows-py3.12)
     runs-on: windows-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -78,6 +90,7 @@ jobs:
     # poster, metrics recording, a hostile observe-only plugin) — failing the
     # build if any decision or reply hash differs. Proves I-N1/I-N2 per PR.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -100,6 +113,7 @@ jobs:
     name: test
     needs: [test, windows-test, noninterference]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always()
     steps:
       - name: Require every test matrix leg to pass
@@ -132,6 +146,7 @@ jobs:
     # publish workflow does, so a packaging regression (bad license metadata,
     # missing data files, …) is caught on every PR — not at release time.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -143,6 +158,7 @@ jobs:
 
   sbom:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -166,6 +182,7 @@ jobs:
     # binary is installed in this step, so a launch/transport regression fails
     # the build rather than silently skipping.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       # _find_chrome() globs chromium-*/chrome-linux/chrome under this path.
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/pw-browsers
@@ -191,6 +208,7 @@ jobs:
     # navigation, interaction, keyboard input, screenshots, uploads, downloads,
     # dialogs, console events, network-idle tracking, and tab switching.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -294,6 +312,7 @@ jobs:
     # no-new-privileges, --network none) on every push/PR. A regression that
     # weakens the sandbox fails the build here instead of skipping silently.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
