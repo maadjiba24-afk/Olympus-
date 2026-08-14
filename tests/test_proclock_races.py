@@ -586,15 +586,25 @@ def test_trace_flush_overflow_when_lock_wedged(monkeypatch):
 # the test passes against the bug it is supposed to catch.
 
 _RACE_PROLOGUE = """
-import sys, time
+import os, sys, time
 sys.path.insert(0, {repo!r})
 from pathlib import Path
 from olympus import config
 config.MEMORY_DIR = Path({mem!r})
+# Start barrier: every writer publishes its OWN file and waits for the others.
+# The first version incremented a single shared counter file — an unsynchronized
+# read-modify-write, i.e. precisely the lost update this test exists to detect.
+# When both writers read the empty counter and both wrote "x", the count never
+# reached 2 and both spun until the harness timeout, which is how it wedged CI
+# for ~180s per test while passing locally. A per-process file cannot lose an
+# update: each writer touches only its own path.
 _b = Path({mem!r}) / "barrier"
-_b.parent.mkdir(parents=True, exist_ok=True)
-_b.write_text((_b.read_text() if _b.exists() else "") + "x")
-while len(_b.read_text()) < {writers}:      # start together, or there is no race
+_b.mkdir(parents=True, exist_ok=True)
+(_b / str(os.getpid())).write_text("x")
+_deadline = time.monotonic() + 60
+while len(list(_b.iterdir())) < {writers}:
+    if time.monotonic() > _deadline:
+        raise SystemExit("barrier timeout: peer writers never arrived")
     time.sleep(0.01)
 """
 
@@ -623,7 +633,7 @@ def _race(tmp_path, script, *, writers=2, n=40):
         for w in range(writers)
     ]
     for p in procs:
-        assert p.wait(timeout=180) == 0, "race writer process failed"
+        assert p.wait(timeout=120) == 0, "race writer process failed"
 
 
 @pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
