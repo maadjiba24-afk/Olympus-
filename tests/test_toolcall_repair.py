@@ -1,4 +1,4 @@
-"""Tests for refusal-safe tool-call repair (docs/PAGE_AGENT_TRACKING.md §3.1).
+"""Tests for refusal-safe tool-call repair.
 
 Absorbs alibaba/page-agent's `autoFixer` malformed-tool-call salvage — and
 proves the structural inversion: recovery NEVER fabricates an action from a

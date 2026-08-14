@@ -392,8 +392,7 @@ def sanitize_for_prompt(text: str, *, redact_pii: bool | None = None) -> str:
     """Redact secrets (always) and, when enabled, PII from untrusted page/tool
     content BEFORE it reaches a model prompt.
 
-    Inverts page-agent's biggest risk (docs/PAGE_AGENT_TRACKING.md §2.1 / ADR
-    0014 (d)): page-agent streams cleaned page HTML to the LLM and its own docs
+    Inverts page-agent's biggest risk (ADR 0014 (d)): page-agent streams cleaned page HTML to the LLM and its own docs
     admit the cleaning "does not guarantee removal of sensitive information",
     leaving redaction to an opt-in regex hook most integrators never set. Olympus
     redacts the genuinely dangerous class — secrets: private keys, JWTs,

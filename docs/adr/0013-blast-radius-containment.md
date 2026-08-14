@@ -7,7 +7,7 @@ Date: 2026-07-23
 
 An autonomous security agent's "blast radius" is how much damage it can do if it
 is wrong, misconfigured, hijacked, or misused. [Strix](https://github.com/usestrix/strix)'s
-is large by construction (see `docs/STRIX_TRACKING.md`): prompt-only scope, an
+is large by construction: prompt-only scope, an
 open-egress sandbox (NET_ADMIN/NET_RAW + host-gateway) that can reach the
 operator's own machine / LAN / cloud-metadata, a refusal-suppression prompt that
 removes the model's own judgment, arbitrary/weaponized payloads that break or

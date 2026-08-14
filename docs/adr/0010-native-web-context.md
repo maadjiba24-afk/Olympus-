@@ -6,7 +6,7 @@ Date: 2026-07-22
 ## Context
 
 A full inventory and security review of [Firecrawl](https://github.com/firecrawl/firecrawl)
-(a large TS/Go/Rust web-scraping SaaS — see `docs/FIRECRAWL_TRACKING.md`) found a
+(a large TS/Go/Rust web-scraping SaaS) found a
 capable feature surface — scrape, map, crawl, batch, schema-guided extraction,
 llms.txt, change-diffing, document parsing, change-monitoring — sitting on a
 security model Olympus already beats: SSRF resting on a single fail-open socket

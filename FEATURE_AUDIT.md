@@ -3,8 +3,7 @@
 - **Scope**: the Olympus codebase at `28dec49` (+`67eb8d4` secret-CLI fix), with
   emphasis on the 12 OpenClaw-derived features and every user-claimed surface
   (README counts, CLI commands, docs). *The OpenClaw upstream repo itself is
-  out of this session's repo scope and cannot be cloned or executed here; its
-  claims are tracked analytically in `docs/OPENCLAW_TRACKING.md`.*
+  out of this session's repo scope and cannot be cloned or executed here.*
 - **Date**: 2026-07-17 · **Read-only pass**: nothing was modified; this file is
   the only output.
 - **Full test suite (verbatim)**: `1473 passed, 4 skipped in 126.08s (0:02:06)`
@@ -134,7 +133,7 @@ No other BROKEN/PARTIAL surfaces were found on the tested paths.
 | # | Discrepancy | Severity |
 |---|---|---|
 | 1 | `OLYMPUS_DREAM_EVERY`, `OLYMPUS_JOB_RESUME_AFTER`, `OLYMPUS_PAIR_TTL` are read by code but documented nowhere in README/docs (only module docstrings) | Low — add to README env-var section |
-| 2 | `OLYMPUS_ROLE_FALLBACKS` and `OLYMPUS_CHANNEL_PROFILE` are documented only in `docs/OPENCLAW_TRACKING.md` (an analysis doc), not in user-facing README/docs | Low |
+| 2 | `OLYMPUS_ROLE_FALLBACKS` and `OLYMPUS_CHANNEL_PROFILE` are documented only in an analysis doc, not in user-facing README/docs | Low |
 | 3 | ~~`olympus scores` help says "show per-specialist benchmark scores" but it may *run* the benchmark~~ **RESOLVED** — `scores` is display-only and its help now says so (§2.1) | — |
 | 4 | README capability counts: **consistent** (gate green) — no discrepancy | — |
 | 5 | `docs/THREAT_MODEL.md` ↔ live tool surface: **consistent** (binding check passes) | — |

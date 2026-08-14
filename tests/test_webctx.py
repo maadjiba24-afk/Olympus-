@@ -565,7 +565,7 @@ def test_jsonld_array_and_malformed_are_safe(monkeypatch):
 
 
 # --- web_llms_txt: governed CONSUMPTION of a site's own /llms.txt -----------
-# (native Page Agent absorption, ADR 0014 (e); PAGE_AGENT_TRACKING §3.6)
+# (native Page Agent absorption, ADR 0014 (e))
 
 def test_fetch_llmstxt_returns_body_and_caches(monkeypatch):
     webctx._llmstxt_cache.clear()

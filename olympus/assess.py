@@ -1,7 +1,7 @@
 """Aegis Assessment — Olympus's native authorized security-assessment suite.
 
 A full inventory and security review of Strix (an open-source autonomous
-offensive-security agent — see `docs/STRIX_TRACKING.md`) found a capable feature
+offensive-security agent) found a capable feature
 surface (recon, source-aware SAST, dependency-CVE scanning, HTTP capture,
 PoC-backed CVSS/SARIF findings, multi-agent orchestration, a USD budget stop)
 sitting on a security model Olympus is built to beat: scope enforced only by a

@@ -1540,7 +1540,7 @@ class BrowserSession:
         # that an input/click revealed a suggestion list, dialog, or step — but
         # only when the URL is unchanged (a navigation replaces the whole set, so
         # "new" would be meaningless noise). Absorbed from page-agent's `*[`
-        # marking; see docs/PAGE_AGENT_TRACKING.md §3.2 / ADR 0014 (b).
+        # marking; see ADR 0014 (b).
         self._prev_observe_sels: set[str] = set()
         self._prev_observe_url: str = ""
         # Last URL resolved by _blocked_landing() — reused by observe() for the

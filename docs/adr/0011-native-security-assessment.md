@@ -6,8 +6,7 @@ Date: 2026-07-23
 ## Context
 
 A full inventory and security review of [Strix](https://github.com/usestrix/strix)
-(an open-source autonomous offensive-security agent — see
-`docs/STRIX_TRACKING.md`) found a capable feature surface — multi-agent
+(an open-source autonomous offensive-security agent) found a capable feature surface — multi-agent
 recon → scan → validate → report, source-aware SAST, dependency-CVE scanning,
 HTTP capture/replay, PoC-mandatory findings with CVSS and SARIF, and a USD
 budget stop — sitting on a security model Olympus is built to beat:
@@ -183,7 +182,7 @@ data), deduped, replay-inert, and bounded.
   benign, scope-locked, parameter-directed active validation, which is the
   deployable — and therefore stronger — form. Crossing any of the three
   boundaries in Decision (f) is the thing this ADR forbids. See
-  `docs/STRIX_TRACKING.md` and `DEFERRED.md` #16/#18.
+  `DEFERRED.md` #16/#18.
 - **Telemetry-on-by-default and the OSS email wall** — Olympus stays opt-in.
 - Heavy infra deferred (a live CVE feed, a full Caido-grade capture proxy, the
   25-file offensive skills library) is tracked in `DEFERRED.md`.

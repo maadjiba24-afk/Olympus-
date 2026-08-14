@@ -119,7 +119,7 @@ def _optional_checks() -> list[Check]:
                      ", ".join(live) if live else "none connected (optional)"))
     # Web-search providers: DuckDuckGo always works keyless; report any keyed
     # or self-hosted providers the operator has configured so they're
-    # discoverable (see docs/ODYSSEUS_TRACKING.md §7).
+    # discoverable.
     from . import websearch
     providers = websearch.configured()
     extra = [p for p in providers if p != "ddg"]
