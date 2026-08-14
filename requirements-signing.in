@@ -1,0 +1,26 @@
+# MINIMUM signing dependencies for the release-signing job (Step 1L).
+#
+# The signing runner is the only place the release seed exists, so it
+# installs the smallest possible dependency set: the narrow
+# `release_pipeline.py sign-manifest` command needs the Ed25519 primitives
+# from `cryptography` and nothing else. The build
+# toolchain (build/twine/setuptools) is deliberately NOT here — building
+# happens on a separate runner that never sees the seed.
+#
+# Locked for Ubuntu 24.04 / CPython 3.12.3, the exact runner and interpreter
+# selectors used by the workflow.
+# Regenerate ONLY inside a clean Linux environment:
+#
+#   python3.12 -m venv /tmp/olymp-signing-lock
+#   /tmp/olymp-signing-lock/bin/python --version  # Python 3.12.3
+#   /tmp/olymp-signing-lock/bin/pip install 'pip==24.0' 'pip-tools==7.6.1'
+#   /tmp/olymp-signing-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+#       --strip-extras --output-file=requirements-signing.lock \
+#       requirements-signing.in
+#
+# The toolchain is pinned so the lock is reproducible: an unpinned
+# pip/pip-tools would change resolution or output formatting between runs and
+# the byte-identity check would fail for a reason unrelated to the inputs.
+#
+pip==24.0
+cryptography

@@ -8,8 +8,10 @@ What these prove:
 3. `requirements.lock` exists, is hash-pinned, and covers the runtime deps.
 """
 
+import fnmatch
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -157,6 +159,17 @@ def test_shipped_witness_pubkey_is_valid_hex():
     assert len(keys) == 1, "exactly one pinned key expected"
     key = keys[0].lower()
     assert len(key) == 64 and all(c in "0123456789abcdef" for c in key)
-    # packaged into the wheel
+    # Packaged into the wheel. V4 intentionally uses catch-all globs so future
+    # extensionless/native/data files are shipped and therefore signable; test
+    # semantic coverage rather than freezing this one literal filename.
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "witness_pubkey.txt" in pyproject
+    section = re.search(
+        r"^\[tool\.setuptools\.package-data\](.*?)(?=^\[|\Z)",
+        pyproject, re.S | re.M)
+    assert section
+    entry = re.search(r"^\s*olympus\s*=\s*\[(.*?)\]",
+                      section.group(1), re.S | re.M)
+    assert entry
+    patterns = re.findall(r'"([^"]+)"', entry.group(1))
+    assert any(fnmatch.fnmatch("witness_pubkey.txt", pattern)
+               for pattern in patterns)
