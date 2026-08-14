@@ -626,6 +626,8 @@ def _race(tmp_path, script, *, writers=2, n=40):
         assert p.wait(timeout=180) == 0, "race writer process failed"
 
 
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
 def test_concurrent_processes_do_not_lose_user_memories(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
     from olympus import usermem
@@ -641,6 +643,8 @@ def test_concurrent_processes_do_not_lose_user_memories(tmp_path, monkeypatch):
         f"(e.g. {missing[:3]})")
 
 
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
 def test_concurrent_processes_do_not_lose_revocations(tmp_path, monkeypatch):
     """A lost update here silently UN-revokes a capability: `is_revoked`
     answers False for a token the operator believes they killed."""
