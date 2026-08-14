@@ -62,11 +62,21 @@ import re
 import subprocess
 import sys
 import tarfile
-import tomllib
 import unicodedata
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
+
+# `tomllib` is stdlib only on Python 3.11+. This project supports 3.10 (see the
+# `requires-python` floor and the py3.10 CI leg), where an unguarded import
+# raises ModuleNotFoundError at module scope — which took down collection of
+# `tests/test_release_pipeline_helper.py` and, with it, the ENTIRE py3.10 suite
+# (pytest exits 2 on a collection error). `olympus/sandbox.py` already carries
+# this exact fallback; the release pipeline needs it for the same reason.
+try:
+    import tomllib
+except ModuleNotFoundError:                  # Python 3.10
+    import tomli as tomllib                  # provided by the `test` extra
 
 # A release tag is STABLE ONLY: vX.Y.Z. `\A`/`\Z`, never `$`, because `$`
 # also matches immediately before a trailing newline.

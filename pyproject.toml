@@ -82,8 +82,25 @@ native = ["torch>=2.0.0", "numpy>=1.24"]
 # drives the OpenAI-compatible server test, `websockets` the real-Chromium CDP
 # transport, `mcp` the native MCP client integration, `pyyaml` the ABC drift
 # guard. CI installs `.[test]` so this list is the single source of truth.
+# `build` is here for the same reason as the rest: `test_release_pipeline_helper`
+# shells out to `python -m build --no-isolation` to prove the release metadata
+# model matches the backend production actually uses. Without it that test fails
+# on every leg of the `test` matrix — `build` is installed only in the separate
+# `package` job, which does not run the suite.
 test = ["pytest", "pytest-timeout>=2.4,<3", "openai", "websockets>=12.0",
-        "mcp>=1.5.0,<2", "pyyaml>=6.0"]
+        "mcp>=1.5.0,<2", "pyyaml>=6.0", "build>=1.0",
+        # `setuptools` is pinned to the SAME version as requirements-publish.lock
+        # and `release_pipeline._SETUPTOOLS_METADATA_POLICY_VERSION`. The release
+        # test builds with `--no-isolation` on purpose — that is what publish.yml
+        # does — so the wheel's `Generator:` header records whatever setuptools is
+        # installed here. The metadata policy accepts exactly one version, so a
+        # test env on any other setuptools fails the check. Keep these three in
+        # sync; `_pinned_setuptools_version` already cross-checks the other two.
+        "setuptools==84.0.0",
+        # `scripts/release_pipeline.py` parses TOML; `tomllib` is stdlib
+        # only on 3.11+, so the 3.10 leg needs the backport or the whole
+        # suite fails at collection.
+        'tomli>=2.0; python_version<"3.11"']
 all = ["psycopg>=3.1", "websockets>=12.0", "playwright>=1.61,<2", "pyyaml>=6.0", "mcp>=1.5.0,<2",
        "neo4j>=5.0", "falkordb>=1.0", "pypdf>=4.0", "python-docx>=1.0",
        "boto3>=1.34"]
