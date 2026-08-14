@@ -14,6 +14,7 @@ usual approval gate.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
@@ -57,6 +58,20 @@ def _save(ns: str, user: str, data: list) -> None:
     store.backend().put(ns, memory.safe_id(user), json.dumps(data).encode())
 
 
+
+@contextlib.contextmanager
+def _guard(user: str):
+    """Serialize one user's graph RMW across threads AND processes.
+
+    Same defect and same fix as `usermem._guard`: nodes and edges are whole-JSON
+    documents in the kv store, a blind put replaces the whole value, and the
+    heartbeat writes this graph (via the recall extractor) at the same time the
+    web process does. A thread lock cannot order writers in two interpreters."""
+    from . import proclock
+    with _LOCK, proclock.lock(f"relgraph-{memory.safe_id(user)}"):
+        yield
+
+
 # --- nodes & edges -------------------------------------------------------
 
 def add_node(user: str, label: str, kind: str = OTHER) -> dict | None:
@@ -66,7 +81,7 @@ def add_node(user: str, label: str, kind: str = OTHER) -> dict | None:
     label = _clean_label(label)
     if not label:
         raise ValueError("a node needs a label")
-    with _LOCK:
+    with _guard(user):
         nodes = _load(_NODES, user)
         for n in nodes:
             if n["label"].lower() == label.lower():
@@ -108,7 +123,7 @@ def add_edge(user: str, src_label: str, rel: str, dst_label: str,
         return None
     vf = None if valid_from is None else float(valid_from)
     vt = None if valid_to is None else float(valid_to)
-    with _LOCK:
+    with _guard(user):
         edges = _load(_EDGES, user)
         for e in edges:
             if (e["src"] == src["id"] and e["dst"] == dst["id"]
@@ -142,7 +157,7 @@ def close_relation(user: str, src_label: str, rel: str, dst_label: str,
     'left Acme at T'. Returns True if an open edge was closed. Supersession
     without deletion: the historical fact remains queryable 'as of' earlier T."""
     rel = (rel or "").strip().lower().replace(" ", "_")
-    with _LOCK:
+    with _guard(user):
         ns_ = _load(_NODES, user)
         s = next((n for n in ns_ if n["label"].lower()
                   == _clean_label(src_label).lower()), None)
@@ -176,7 +191,7 @@ def _node_by_id(nodes_: list, nid: str) -> dict | None:
 
 def forget(user: str, label: str) -> bool:
     """Remove an entity and every edge touching it."""
-    with _LOCK:
+    with _guard(user):
         ns_ = _load(_NODES, user)
         node = next((n for n in ns_ if n["label"].lower() == label.strip().lower()),
                     None)

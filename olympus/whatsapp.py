@@ -57,9 +57,18 @@ def _phone_number_id() -> str:
 
 
 def _allowed(sender: str) -> bool:
+    """Whether this sender may use the council. CLOSED by default.
+
+    Every other channel treats an unknown sender as untrusted (chanbase's
+    default policy is `pairing`); WhatsApp answered everyone unless an
+    allowlist was set, which is the opposite default and contradicts
+    docs/GATEWAY.md. Set WHATSAPP_ALLOWED_NUMBERS to your own number(s), or
+    WHATSAPP_DM_POLICY=open to deliberately restore the old behavior."""
+    if os.environ.get("WHATSAPP_DM_POLICY", "").strip().lower() == "open":
+        return True
     raw = os.environ.get("WHATSAPP_ALLOWED_NUMBERS", "").strip()
     if not raw:
-        return True  # open to everyone unless restricted
+        return False
     return sender in {x.strip() for x in raw.split(",")}
 
 
@@ -95,11 +104,17 @@ def verify_challenge(mode: str, token: str, challenge: str) -> str | None:
 
 
 def valid_signature(raw_body: bytes, header: str | None) -> bool:
-    """Verify Meta's X-Hub-Signature-256 if an app secret is configured.
-    When no secret is set, signatures aren't enforced (returns True)."""
+    """Verify Meta's X-Hub-Signature-256. FAIL CLOSED without an app secret.
+
+    This used to return True when `WHATSAPP_APP_SECRET` was unset, so a default
+    install accepted *any* POST to the webhook URL as genuine. The verify token
+    guards only Meta's GET handshake, not message delivery — so anyone who
+    learned the URL could forge a payload, spoof any sender number, and drive
+    the council on the operator's key. An unverified payload is not a WhatsApp
+    payload; refuse it rather than trust it."""
     secret = os.environ.get("WHATSAPP_APP_SECRET", "")
     if not secret:
-        return True
+        return False
     if not header or not header.startswith("sha256="):
         return False
     digest = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
@@ -323,7 +338,7 @@ class Handler(BaseHTTPRequestHandler):
             worker.q.put(text)
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8485) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8485) -> None:
     _access_token(); _phone_number_id()    # fail fast if misconfigured
     if not os.environ.get("WHATSAPP_VERIFY_TOKEN"):
         raise SystemExit("Set WHATSAPP_VERIFY_TOKEN (any secret; used for "

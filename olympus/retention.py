@@ -57,6 +57,32 @@ _DERIVED_GLOBS = (
     "docrag/{uid}",
 )
 
+#: KV-store namespaces keyed by `memory.safe_id(principal)`.
+#:
+#: These are NOT files. They live behind `store.backend()`, which is either
+#: `MEMORY_DIR/store/<ns>/<key>` or a row in Postgres — so a path-only sweep
+#: misses them entirely on the file backend and could never see them at all on
+#: the database backend. That was the bug: `delete_principal` walked
+#: `_DERIVED_ROOTS`/`_DERIVED_GLOBS` only, so a user's typed memories (including
+#: the ones they approved as sensitive), their raw event log with verbatim
+#: message snippets, their relationship graph, and their document embeddings all
+#: survived a deletion that then reported `verified=True`. A deletion that
+#: leaves the content recoverable is not a deletion, and reporting it as
+#: verified is worse than not deleting at all.
+_DERIVED_KV_NAMESPACES = (
+    "usermem.events",          # raw event log — carries message snippets
+    "usermem.memories",        # typed facts, incl. approved-sensitive ones
+    "usermem.candidates",      # extracted-but-ungated candidates
+    "relgraph.nodes",
+    "relgraph.edges",
+    "docrag.ann",              # persisted per-user vector index
+    "docrag.ann.sig",
+    "sleeptime.proposals",
+    "sleeptime.quarantine",
+    "sleeptime.snapshots",     # pre-rewrite copies of memory text
+    "routing_outcomes",
+)
+
 
 # ---------------------------------------------------------------------------
 # policy surface
@@ -137,6 +163,54 @@ def _paths_for(uid: str) -> list[Path]:
     return out
 
 
+def _kv_label(ns: str, uid: str) -> str:
+    """The one spelling of a KV target, shared by prediction and outcome so the
+    dry run can never drift from what deletion actually reports."""
+    return f"store/{ns}/{uid}"
+
+
+def _index_label(turns: int) -> str:
+    return f"search_index:{turns} turn(s)"
+
+
+def _kv_present(uid: str) -> list[str]:
+    """KV namespaces that still hold a value for `uid`.
+
+    Fails CLOSED: if the store cannot be read (Postgres down, permissions), the
+    namespace is reported as still present rather than assumed empty, so
+    `verify_deleted` can never return True on the strength of an error."""
+    out: list[str] = []
+    try:
+        from . import store
+        be = store.backend()
+    except Exception:                                           # noqa: BLE001
+        return list(_DERIVED_KV_NAMESPACES)
+    for ns in _DERIVED_KV_NAMESPACES:
+        try:
+            if be.get(ns, uid) is not None:
+                out.append(ns)
+        except Exception:                                       # noqa: BLE001
+            out.append(ns)
+    return out
+
+
+def _indexed_turns(uid: str) -> int:
+    """Turns still in the full-text index for this principal's conversation.
+
+    Fails closed to 1 ("something remains") when the index exists but cannot be
+    read — an unreadable index must never be mistaken for an empty one. The
+    existence check comes first so that `inspect_principal`, documented as
+    read-only, does not create an empty index database as a side effect of
+    being asked a question."""
+    try:
+        from . import search
+        if not Path(search._db_path()).exists():   # _db_path returns a str
+            return 0
+        return search.indexed_turns(uid)
+    except Exception:                                           # noqa: BLE001
+        return 1
+
+
 def _size_of(path: Path) -> int:
     if path.is_file():
         try:
@@ -151,10 +225,24 @@ def inspect_principal(principal: str) -> dict:
     """Everything on disk attributable to `principal`. PURE — reads only."""
     uid = memory.safe_id(principal)
     paths = _paths_for(uid)
+    kv = _kv_present(uid)
+    turns = _indexed_turns(uid)
+    # `paths` is the deletion PREDICTION, and the dry run is a verification
+    # artifact (Step 11) — `test_the_dry_run_predicts_exactly_what_deletion_
+    # removes` pins prediction == outcome. So every target `delete_principal`
+    # will remove is listed here in exactly the label it will report, including
+    # the non-filesystem ones. Byte/file counts stay filesystem-only: a KV row's
+    # size is backend-dependent and a turn count is not bytes.
+    targets = [str(p.relative_to(config.MEMORY_DIR)) for p in paths]
+    targets += [_kv_label(ns, uid) for ns in kv]
+    if turns:
+        targets.append(_index_label(turns))
     return {
         "principal": uid,
-        "exists": bool(paths),
-        "paths": [str(p.relative_to(config.MEMORY_DIR)) for p in paths],
+        "exists": bool(targets),
+        "paths": targets,
+        "kv_namespaces": kv,
+        "indexed_turns": turns,
         "bytes": sum(_size_of(p) for p in paths),
         "files": sum(1 for p in paths
                      for _ in ([p] if p.is_file() else p.rglob("*"))),
@@ -253,6 +341,28 @@ def delete_principal(principal: str, *, dry_run: bool = True,
         except OSError as err:
             plan["errors"].append(f"{rel}: {err}")
 
+    # KV-backed stores. Deleted through `store.backend()` rather than by path so
+    # the same code removes a file on the file backend and a row on Postgres.
+    from . import store
+    for ns in _DERIVED_KV_NAMESPACES:
+        try:
+            if store.backend().get(ns, uid) is not None:
+                store.backend().delete(ns, uid)
+                plan["deleted"].append(_kv_label(ns, uid))
+        except Exception as err:                                # noqa: BLE001
+            plan["errors"].append(f"store/{ns}: {type(err).__name__}: {err}")
+
+    # The searchable copy of the principal's messages. Purged synchronously —
+    # `search.maintain()` would reap it eventually, but "eventually" is not a
+    # deletion guarantee.
+    try:
+        from . import search
+        removed = search.purge_conversation(uid)
+        if removed:
+            plan["deleted"].append(_index_label(removed))
+    except Exception as err:                                    # noqa: BLE001
+        plan["errors"].append(f"search_index: {type(err).__name__}: {err}")
+
     plan["verified"] = verify_deleted(uid)
     _audit("delete", principal=uid, deleted=len(plan["deleted"]),
            errors=len(plan["errors"]), verified=plan["verified"],
@@ -265,8 +375,16 @@ def verify_deleted(principal: str) -> bool:
 
     Step 13's rule applied to deletion: an unverified deletion is not a
     verified deletion. Called automatically after a real delete, and available
-    standalone for an auditor who wants to check independently."""
-    return not _paths_for(memory.safe_id(principal))
+    standalone for an auditor who wants to check independently.
+
+    Checks all three substrates a principal's data lives in — files, the KV
+    store, and the full-text index — because a path-only check reported
+    `verified=True` while every typed memory the user had ever stated was still
+    sitting in `store/usermem.memories/<uid>`."""
+    uid = memory.safe_id(principal)
+    return (not _paths_for(uid)
+            and not _kv_present(uid)
+            and _indexed_turns(uid) == 0)
 
 
 def sweep_conversations(retain_days: int | None = None, *,

@@ -23,7 +23,10 @@ import os
 import time
 import urllib.request
 
-from . import gateway
+from . import chanbase, gateway
+
+
+_limiter = chanbase.RateLimiter(per_minute=12)
 
 
 def _base() -> str:
@@ -125,8 +128,16 @@ def run_bot() -> None:
             continue
         for source, text in parse_messages(raw):
             try:
-                for part in gateway.reply_for(bots, source, text, prefix="sg"):
-                    send(source, part, number=number)
+                # Routed through chanbase (pairing → allowlist → rate limit →
+                # council), like matrix/sms/mattermost. Signal previously fed
+                # every sender straight into `gateway.reply_for`: no pairing,
+                # no allowlist, no limiter — so anyone who knew the number ran
+                # the full council on the operator's key, and the codes minted
+                # by `olympus pair signal` were never consulted by anything.
+                chanbase.route(
+                    "signal", "sg", source, text, bots,
+                    lambda part, _s=source: send(_s, part, number=number),
+                    limiter=_limiter)
             except Exception:
                 pass
         time.sleep(1)

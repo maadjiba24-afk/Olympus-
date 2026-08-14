@@ -264,3 +264,125 @@ def test_run_python_rejects_oversized_code(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
     res = sandbox.run_python("x=1\n" * 100_000)
     assert not res.ok and res.code == 2 and "too large" in res.output
+
+
+# --- Wave-0 hardening: secret confinement + fail-closed isolation -----------
+# These tests exist because `run()` used to pass `{**os.environ}` to the child,
+# handing every provider key, the vault key and the signing seed to any command
+# a user approved. They assert the exfiltration path is CLOSED, not merely that
+# the scrubbing code runs.
+
+def test_child_env_strips_the_vault_key_and_signing_seed(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "vault-key-must-not-leak")
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "seed-must-not-leak")
+    env = sandbox._child_env()
+    assert "OLYMPUS_SECRET_KEY" not in env
+    assert "OLYMPUS_SIGNING_SEED" not in env
+    assert env["OLYMPUS_IN_SANDBOX"] == "1"
+
+
+def test_child_env_strips_provider_credentials_by_shape(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-must-not-leak")
+    monkeypatch.setenv("SOME_SERVICE_TOKEN", "tok-must-not-leak")
+    monkeypatch.setenv("DB_PASSWORD", "pw-must-not-leak")
+    monkeypatch.setenv("HARMLESS_SETTING", "keep-me")
+    env = sandbox._child_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "SOME_SERVICE_TOKEN" not in env
+    assert "DB_PASSWORD" not in env
+    assert env["HARMLESS_SETTING"] == "keep-me"
+
+
+def test_env_passthrough_allowlist_readmits_named_variables(monkeypatch):
+    monkeypatch.setenv("BUILD_TOKEN", "needed-by-the-build")
+    monkeypatch.setenv("OTHER_TOKEN", "not-needed")
+    monkeypatch.setenv("OLYMPUS_EXEC_ENV_PASSTHROUGH", "BUILD_TOKEN")
+    env = sandbox._child_env()
+    assert env["BUILD_TOKEN"] == "needed-by-the-build"
+    assert "OTHER_TOKEN" not in env
+
+
+def test_approved_command_cannot_read_a_secret_from_the_environment(
+        monkeypatch, tmp_path):
+    """End-to-end: the exfiltration primitive from the audit, executed for real."""
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "canary-vault-key-9f3a")
+    res = sandbox.run(_python_cmd(
+        "import os; print('LEAK:' + os.environ.get('OLYMPUS_SECRET_KEY', 'ABSENT'))"))
+    assert res.ok, res.output
+    assert "canary-vault-key-9f3a" not in res.output
+    assert "LEAK:ABSENT" in res.output
+
+
+def test_run_python_also_runs_without_the_secret(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "canary-vault-key-7b21")
+    res = sandbox.run_python(
+        "import os\nprint(os.environ.get('OLYMPUS_SECRET_KEY', 'ABSENT'))")
+    assert res.ok, res.output
+    assert "canary-vault-key-7b21" not in res.output
+    assert "ABSENT" in res.output
+
+
+def test_sovereign_mode_refuses_the_unisolated_backend(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_SOVEREIGN", "1")
+    res = sandbox.run("echo should-not-run")
+    assert not res.ok and res.code == 126
+    assert "sovereign" in res.output.lower()
+    assert "should-not-run" not in res.output
+
+
+def test_production_mode_refuses_the_unisolated_backend(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_ENV", "production")
+    res = sandbox.run("echo should-not-run")
+    assert not res.ok and res.code == 126
+    assert "production" in res.output.lower()
+
+
+def test_unisolated_escape_hatch_is_explicit_and_works(monkeypatch, tmp_path):
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.setenv("OLYMPUS_ENV", "production")
+    monkeypatch.setenv("OLYMPUS_EXEC_ALLOW_UNISOLATED", "1")
+    res = sandbox.run("echo hatch-open")
+    assert res.ok and "hatch-open" in res.output
+
+
+def test_isolated_backends_are_never_refused(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SOVEREIGN", "1")
+    monkeypatch.setenv("OLYMPUS_ENV", "production")
+    assert sandbox._isolation_refusal("docker") is None
+    assert sandbox._isolation_refusal("daytona") is None
+    assert sandbox._isolation_refusal("local") is not None
+
+
+def test_dev_mode_still_allows_local_without_ceremony(monkeypatch, tmp_path):
+    """The hardening must not break an ordinary developer laptop."""
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "local")
+    monkeypatch.delenv("OLYMPUS_SOVEREIGN", raising=False)
+    monkeypatch.delenv("OLYMPUS_ENV", raising=False)
+    res = sandbox.run("echo dev-ok")
+    assert res.ok and "dev-ok" in res.output
+
+
+def test_auto_backend_resolves_to_docker_when_the_daemon_is_up(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "auto")
+    monkeypatch.setattr(sandbox, "_AUTO_BACKEND", [None])
+    monkeypatch.setattr(sandbox, "_docker_available", lambda: True)
+    assert sandbox.backend() == "docker"
+
+
+def test_auto_backend_degrades_to_local_without_a_daemon(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_EXEC_BACKEND", "auto")
+    monkeypatch.setattr(sandbox, "_AUTO_BACKEND", [None])
+    monkeypatch.setattr(sandbox, "_docker_available", lambda: False)
+    assert sandbox.backend() == "local"

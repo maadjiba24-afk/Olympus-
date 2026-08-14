@@ -94,7 +94,7 @@ def notify(text: str) -> bool:
         return False
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8489) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8489) -> None:
     if not _outgoing_token():
         raise SystemExit("Set MATTERMOST_OUTGOING_TOKEN (from your Mattermost "
                          "outgoing webhook) — inbound calls are rejected "

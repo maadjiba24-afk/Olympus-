@@ -93,5 +93,9 @@ def test_webhook_secret_check(monkeypatch):
     monkeypatch.setenv("OLYMPUS_WEBHOOK_SECRET", "s3cret")
     assert webhook_gateway._secret_ok("s3cret") is True
     assert webhook_gateway._secret_ok("wrong") is False
+    # Unset → CLOSED. This endpoint runs the full council on the operator's
+    # key; an optional credential that defaults to "none required" is not a
+    # credential. (Was: unset → open, which is the vulnerability.)
     monkeypatch.delenv("OLYMPUS_WEBHOOK_SECRET", raising=False)
-    assert webhook_gateway._secret_ok("") is True      # unset → open
+    assert webhook_gateway._secret_ok("") is False
+    assert webhook_gateway._secret_ok("anything") is False

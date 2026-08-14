@@ -8,11 +8,14 @@ decays unless reinforced — so the agent's recollection stays honest and curren
 Storage rides the existing `store` backend (local files by default, Postgres
 when OLYMPUS_DATABASE_URL is set). To stay backend-agnostic over a plain kv
 interface, each user's events / memories / candidates are single JSON documents,
-guarded by an in-process lock. (Multi-process deployments should use the DB.)
+and every load-modify-save runs under `_guard()` — a thread lock AND a
+`proclock` flock, so the web server and the heartbeat mutating the same user
+concurrently cannot lose each other's writes on the default file backend.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -56,10 +59,32 @@ def _save(ns: str, user: str, data: list) -> None:
                         json.dumps(data).encode("utf-8"))
 
 
+@contextlib.contextmanager
+def _guard(user: str):
+    """Serialize one user's load-modify-save across threads AND processes.
+
+    Every mutation here is a whole-document RMW over a `store` key, and a blind
+    `put` is defined as replace-whole-value (ADR 0005) — so two concurrent
+    writers do not merge, the loser's entire memory list is discarded. A
+    `threading.Lock` alone only ordered writers *inside one interpreter*, while
+    the shipped topology runs the web server and the heartbeat as separate
+    processes against the same MEMORY_DIR: the heartbeat's goal cycle extracts
+    memories for the same user the web process is talking to. That is a silent
+    lost update of durable user data, which is why the module docstring's
+    "multi-process deployments should use the DB" was never an adequate answer —
+    the file backend is the default.
+
+    `prefs.set` already established the fix: hold `proclock` (an flock, so it is
+    honored across processes) around the read+write, not just a thread lock."""
+    from . import proclock
+    with _LOCK, proclock.lock(f"usermem-{memory.safe_id(user)}"):
+        yield
+
+
 # --- event log -----------------------------------------------------------
 
 def record_event(user: str, kind: str, payload: dict, source: str) -> str:
-    with _LOCK:
+    with _guard(user):
         events = _load(_EVENTS, user)
         eid = uuid.uuid4().hex[:12]
         events.append({"id": eid, "ts": time.time(), "kind": kind,
@@ -88,7 +113,7 @@ def add_memory(user: str, *, type: str, content: str, confidence: float,
         "superseded_by": None, "provenance": provenance or [],
         "created_at": now, "last_used_at": now, "use_count": 0,
     }
-    with _LOCK:
+    with _guard(user):
         mems = _load(_MEMS, user)
         mems.append(mem)
         _prune(mems)
@@ -128,7 +153,7 @@ def get_memory(user: str, mem_id: str) -> dict | None:
 
 
 def _mutate(user: str, mem_id: str, fn) -> dict | None:
-    with _LOCK:
+    with _guard(user):
         mems = _load(_MEMS, user)
         for m in mems:
             if m["id"] == mem_id:
@@ -188,7 +213,7 @@ def add_candidate(user: str, cand: dict) -> dict:
     cand = dict(cand)
     cand["id"] = uuid.uuid4().hex[:12]
     cand["created_at"] = time.time()
-    with _LOCK:
+    with _guard(user):
         cands = _load(_CANDS, user)
         cands.append(cand)
         _save(_CANDS, user, cands[-_MAX_CANDIDATES:])   # bound the queue
@@ -200,7 +225,7 @@ def candidates(user: str) -> list:
 
 
 def pop_candidate(user: str, cand_id: str) -> dict | None:
-    with _LOCK:
+    with _guard(user):
         cands = _load(_CANDS, user)
         for i, c in enumerate(cands):
             if c["id"] == cand_id:

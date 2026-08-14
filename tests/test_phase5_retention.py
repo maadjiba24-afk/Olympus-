@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 
 import pytest
@@ -358,3 +359,102 @@ def test_the_report_is_read_only_by_default(store):
     assert rep["conversation_sweep"]["dry_run"] is True
     assert retention.inspect_principal("alice")["exists"]
     assert json.dumps(rep, default=str)          # serialisable for the report
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Wave-0 hardening: deletion completeness across ALL substrates
+#
+# The original fixture seeded only notes + snapshot + journal, so the suite
+# could not see that `delete_principal` walked filesystem paths only and left
+# every KV-backed store behind while still reporting verified=True. These tests
+# seed the substrates that were actually being missed.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _seed_kv_footprint(uid: str) -> None:
+    """Typed memories, relationship graph, embeddings and routing rows —
+    everything that lives behind `kvstore.backend()` rather than in a file."""
+    from olympus import store as kvstore
+    safe = memory.safe_id(uid)
+    for ns in retention._DERIVED_KV_NAMESPACES:
+        kvstore.backend().put(ns, safe, b'[{"text": "sensitive-canary"}]')
+
+
+def test_inspect_reports_kv_and_index_footprint(store, monkeypatch):
+    from olympus import search
+    _make_principal("kvuser")
+    _seed_kv_footprint("kvuser")
+    search.index_conversation(memory.safe_id("kvuser"),
+                              [{"role": "user", "content": "findable canary"}])
+    info = retention.inspect_principal("kvuser")
+    assert info["exists"]
+    assert set(info["kv_namespaces"]) == set(retention._DERIVED_KV_NAMESPACES)
+    assert info["indexed_turns"] > 0
+
+
+def test_delete_principal_removes_kv_backed_stores(store):
+    from olympus import store as kvstore
+    _make_principal("kvuser")
+    _seed_kv_footprint("kvuser")
+    safe = memory.safe_id("kvuser")
+
+    plan = retention.delete_principal("kvuser", dry_run=False, reason="rtbf")
+
+    assert plan["verified"] is True, plan
+    for ns in retention._DERIVED_KV_NAMESPACES:
+        assert kvstore.backend().get(ns, safe) is None, f"{ns} survived deletion"
+
+
+def test_delete_principal_purges_the_search_index(store):
+    from olympus import search
+    _make_principal("kvuser")
+    safe = memory.safe_id("kvuser")
+    search.index_conversation(safe, [{"role": "user", "content": "canary-text"}])
+    assert search.indexed_turns(safe) > 0
+
+    retention.delete_principal("kvuser", dry_run=False, reason="rtbf")
+
+    assert search.indexed_turns(safe) == 0
+
+
+def test_verify_deleted_is_false_while_typed_memories_remain(store):
+    """The exact false-assurance from the audit, asserted directly."""
+    from olympus import store as kvstore
+    _make_principal("kvuser")
+    safe = memory.safe_id("kvuser")
+    kvstore.backend().put("usermem.memories", safe, b'[{"text": "still here"}]')
+
+    # Remove only the filesystem footprint, as the old implementation did.
+    for path in retention._paths_for(safe):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    assert retention.verify_deleted("kvuser") is False
+
+
+def test_dry_run_still_touches_nothing_in_the_kv_store(store):
+    from olympus import store as kvstore
+    _make_principal("kvuser")
+    _seed_kv_footprint("kvuser")
+    safe = memory.safe_id("kvuser")
+
+    plan = retention.delete_principal("kvuser", dry_run=True)
+
+    assert plan["dry_run"] is True
+    for ns in retention._DERIVED_KV_NAMESPACES:
+        assert kvstore.backend().get(ns, safe) is not None
+
+
+def test_deletion_leaves_other_principals_kv_data_intact(store):
+    from olympus import store as kvstore
+    _make_principal("victim")
+    _make_principal("bystander")
+    _seed_kv_footprint("victim")
+    _seed_kv_footprint("bystander")
+
+    retention.delete_principal("victim", dry_run=False, reason="rtbf")
+
+    other = memory.safe_id("bystander")
+    for ns in retention._DERIVED_KV_NAMESPACES:
+        assert kvstore.backend().get(ns, other) is not None, f"{ns} lost for bystander"
