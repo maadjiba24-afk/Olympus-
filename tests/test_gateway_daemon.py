@@ -1,4 +1,4 @@
-"""Phase 2 (OpenClaw reach) — the unified gateway daemon: runs every configured
+"""Phase 2 (the surveyed gateway reach) — the unified gateway daemon: runs every configured
 channel in one process, SUPERVISED so a channel that exits or crashes is
 auto-restarted with backoff. Channel `start` callables are injected so tests
 exercise selection/launch/restart/health without real credentials or blocking

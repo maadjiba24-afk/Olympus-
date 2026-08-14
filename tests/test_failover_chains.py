@@ -1,5 +1,5 @@
 """Per-role ordered fallback chains and Anthropic key rotation
-(OpenClaw adoption plan #3 — model failover)."""
+(the surveyed gateway adoption plan #3 — model failover)."""
 
 import json
 

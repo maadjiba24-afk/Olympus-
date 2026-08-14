@@ -355,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_res.add_argument("--out", default=None,
                        help="also write the report to this markdown file")
 
-    # --- Web Context suite (native Firecrawl-absorption; olympus/webctx.py) ---
+    # --- Web Context suite (native the surveyed scraper-absorption; olympus/webctx.py) ---
     p_scrape = sub.add_parser(
         "scrape", help="scrape a URL to clean markdown (+links)")
     p_scrape.add_argument("url")
@@ -407,7 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon_rm.add_argument("id")
     mon_sub.add_parser("run", help="run all due checks now (one pass)")
 
-    # --- Aegis Assessment suite (native Strix-absorption; olympus/assess.py) ---
+    # --- Aegis Assessment suite (native the surveyed agent-absorption; olympus/assess.py) ---
     p_as = sub.add_parser(
         "assess", help="authorized security assessment (Aegis): scope-in-code, "
                        "recon/audit/SAST/secrets/deps, CVSS+SARIF findings")
@@ -685,7 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_skex.add_argument("name", help="skill name to export")
     p_skex.add_argument("--out", default=".", help="destination directory")
     p_mig = sub.add_parser("import-agent", help="migrate memories/skills/profile "
-                                                "from another agent (OpenClaw/Hermes-style)")
+                                                "from another agent framework")
     p_mig.add_argument("path", help="the other agent's data directory")
     p_mig.add_argument("--keys", action="store_true",
                        help="also import recognised provider API keys")
@@ -906,30 +906,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_wa = sub.add_parser("whatsapp", help="run the WhatsApp Cloud API gateway "
                                            "(needs WHATSAPP_* env vars)")
-    p_wa.add_argument("--host", default="0.0.0.0")
+    p_wa.add_argument("--host", default="127.0.0.1")
     p_wa.add_argument("--port", type=int, default=8485)
 
     p_dc = sub.add_parser("discord", help="serve the Discord interactions "
                                           "endpoint (needs DISCORD_* env vars)")
-    p_dc.add_argument("--host", default="0.0.0.0")
+    p_dc.add_argument("--host", default="127.0.0.1")
     p_dc.add_argument("--port", type=int, default=8486)
 
     p_sl = sub.add_parser("slack", help="serve the Slack Events endpoint "
                                         "(needs SLACK_* env vars)")
-    p_sl.add_argument("--host", default="0.0.0.0")
+    p_sl.add_argument("--host", default="127.0.0.1")
     p_sl.add_argument("--port", type=int, default=8487)
 
     p_mm = sub.add_parser("mattermost", help="serve the Mattermost outgoing-"
                           "webhook endpoint (needs MATTERMOST_OUTGOING_TOKEN)")
-    p_mm.add_argument("--host", default="0.0.0.0")
+    p_mm.add_argument("--host", default="127.0.0.1")
     p_mm.add_argument("--port", type=int, default=8489)
     p_gc = sub.add_parser("googlechat", help="serve the Google Chat app "
                           "endpoint (needs GOOGLECHAT_VERIFY_TOKEN)")
-    p_gc.add_argument("--host", default="0.0.0.0")
+    p_gc.add_argument("--host", default="127.0.0.1")
     p_gc.add_argument("--port", type=int, default=8490)
     p_sms = sub.add_parser("sms", help="serve the SMS channel over Twilio's "
                            "webhook (needs TWILIO_AUTH_TOKEN)")
-    p_sms.add_argument("--host", default="0.0.0.0")
+    p_sms.add_argument("--host", default="127.0.0.1")
     p_sms.add_argument("--port", type=int, default=8491)
 
     sub.add_parser("signal", help="run the Signal gateway over signal-cli REST "
@@ -940,7 +940,7 @@ def build_parser() -> argparse.ArgumentParser:
                          help="seconds between inbox polls (default 60)")
     p_hook = sub.add_parser("webhook", help="serve the inbound webhook gateway "
                                             "(POST {user,text} → {reply})")
-    p_hook.add_argument("--host", default="0.0.0.0")
+    p_hook.add_argument("--host", default="127.0.0.1")
     p_hook.add_argument("--port", type=int, default=8487)
 
     p_hc = sub.add_parser(

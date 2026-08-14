@@ -20,6 +20,7 @@ the grant's bound).
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -213,17 +214,28 @@ def _revoked() -> set:
 
 
 def revoke(jti: str) -> None:
-    """Revoke a capability token by its id — a tighten-only, append-only set."""
+    """Revoke a capability token by its id — a tighten-only, append-only set.
+
+    Held under `proclock` for the whole read-modify-write. This set is a
+    SECURITY control: losing an update here does not merely drop data, it
+    silently UN-revokes a capability, because `is_revoked` then answers False
+    for a token an operator believes they killed. Two revocations racing (an
+    operator in the CLI while the web process revokes on logout, say) is exactly
+    when revocation matters most — measured at 11 of 80 revocations lost without
+    this lock. The temp file is pid-unique for the same reason: a fixed
+    `.json.tmp` is itself a cross-process collision."""
     jti = (jti or "").strip()
     if not jti:
         return
-    r = _revoked()
-    r.add(jti)
-    path = _revocation_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(sorted(r)), encoding="utf-8")
-    tmp.replace(path)
+    from . import proclock
+    with proclock.lock("capability-revocations"):
+        r = _revoked()
+        r.add(jti)
+        path = _revocation_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(sorted(r)), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def is_revoked(jti: str) -> bool:

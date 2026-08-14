@@ -1,5 +1,5 @@
 {
-  "name": "shape_c_page_agent_fenced",
+  "name": "shape_c_dom_agent_fenced",
   "payload": "```json\n{\"web_search\": {\"query\": \"hermes\"}}\n```",
   "tools": [
     {

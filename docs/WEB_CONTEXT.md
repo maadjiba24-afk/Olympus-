@@ -1,6 +1,6 @@
 # Web Context — the self-evolving web-data moat
 
-Olympus's native answer to a hosted "web data API" (Firecrawl-class), built as a
+Olympus's native answer to a hosted "web data API" (the surveyed scraper-class), built as a
 zero-dependency, security-gated, and — crucially — **self-evolving** subsystem.
 The design contract is ADR 0010 (absorption) and ADR 0009 (self-evolving moat).
 This page is the operator's map of what it does and how it gets stronger over

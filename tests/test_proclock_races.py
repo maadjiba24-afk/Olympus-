@@ -570,3 +570,125 @@ def test_trace_flush_overflow_when_lock_wedged(monkeypatch):
     rec = json.loads(overflow[0].read_text().splitlines()[0])
     assert rec["kind"] == "overflow-test"
     assert trace_mod.load_run(rec["id"]) is not None  # still discoverable
+
+
+# --- Wave-0 hardening: cross-process user-memory RMW ------------------------
+# `usermem`/`relgraph` guarded whole-document read-modify-write with a
+# `threading.Lock`, which orders writers inside ONE interpreter only. The
+# shipped topology runs the web server and the heartbeat as separate processes
+# against one MEMORY_DIR, so concurrent writes silently discarded whole memory
+# lists.
+#
+# These spawn REAL OS processes and were calibrated against the unfixed code:
+# with a thread-only lock they lose 25 of 80 memories and 20+ revocations; with
+# the proclock guard they lose zero. The start barrier and the padded content
+# matter — without both, the two writers finish before they ever overlap and
+# the test passes against the bug it is supposed to catch.
+
+_RACE_PROLOGUE = """
+import os, sys, time
+sys.path.insert(0, {repo!r})
+from pathlib import Path
+from olympus import config
+config.MEMORY_DIR = Path({mem!r})
+# Start barrier: every writer publishes its OWN file and waits for the others.
+# The first version incremented a single shared counter file — an unsynchronized
+# read-modify-write, i.e. precisely the lost update this test exists to detect.
+# When both writers read the empty counter and both wrote "x", the count never
+# reached 2 and both spun until the harness timeout, which is how it wedged CI
+# for ~180s per test while passing locally. A per-process file cannot lose an
+# update: each writer touches only its own path.
+_b = Path({mem!r}) / "barrier"
+_b.mkdir(parents=True, exist_ok=True)
+(_b / str(os.getpid())).write_text("x")
+_deadline = time.monotonic() + 60
+while len(list(_b.iterdir())) < {writers}:
+    if time.monotonic() > _deadline:
+        raise SystemExit("barrier timeout: peer writers never arrived")
+    time.sleep(0.01)
+"""
+
+_WRITE_MEMORIES = _RACE_PROLOGUE + """
+from olympus import usermem
+for i in range({n}):
+    usermem.add_memory("racer", type="project",
+                       content="{tag}-" + str(i) + "-" + ("p" * 200),
+                       confidence=0.9)
+"""
+
+_WRITE_REVOCATIONS = _RACE_PROLOGUE + """
+from olympus import identity
+for i in range({n}):
+    identity.revoke("{tag}-" + str(i))
+"""
+
+
+def _race(tmp_path, script, *, writers=2, n=40):
+    """Run `script` in `writers` real processes and wait for all of them."""
+    repo = str(Path(__file__).resolve().parents[1])
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script.format(
+            repo=repo, mem=str(tmp_path / "mem"), n=n, tag=f"w{w}",
+            writers=writers)])
+        for w in range(writers)
+    ]
+    for p in procs:
+        assert p.wait(timeout=120) == 0, "race writer process failed"
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_concurrent_processes_do_not_lose_user_memories(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    from olympus import usermem
+
+    _race(tmp_path, _WRITE_MEMORIES, writers=2, n=40)
+
+    present = {m["content"].split("-p")[0]
+               for m in usermem.all_memories("racer")}
+    missing = sorted({f"w{w}-{i}" for w in range(2) for i in range(40)}
+                     - present)
+    assert not missing, (
+        f"{len(missing)} of 80 memories lost to a cross-process race "
+        f"(e.g. {missing[:3]})")
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_concurrent_processes_do_not_lose_revocations(tmp_path, monkeypatch):
+    """A lost update here silently UN-revokes a capability: `is_revoked`
+    answers False for a token the operator believes they killed."""
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    from olympus import identity
+
+    _race(tmp_path, _WRITE_REVOCATIONS, writers=2, n=40)
+
+    still_valid = [f"w{w}-{i}" for w in range(2) for i in range(40)
+                   if not identity.is_revoked(f"w{w}-{i}")]
+    assert not still_valid, (
+        f"{len(still_valid)} revocations lost — those tokens still verify")
+
+
+def test_usermem_guard_takes_a_cross_process_lock(monkeypatch):
+    """Structural companion: the guard must hold a proclock, not just _LOCK."""
+    from olympus import proclock, usermem
+    taken = []
+    real = proclock.lock
+    monkeypatch.setattr(proclock, "lock",
+                        lambda name, *a, **kw: (taken.append(name),
+                                                real(name, *a, **kw))[1])
+    with usermem._guard("someone"):
+        pass
+    assert any(n.startswith("usermem-") for n in taken), taken
+
+
+def test_relgraph_guard_takes_a_cross_process_lock(monkeypatch):
+    from olympus import proclock, relgraph
+    taken = []
+    real = proclock.lock
+    monkeypatch.setattr(proclock, "lock",
+                        lambda name, *a, **kw: (taken.append(name),
+                                                real(name, *a, **kw))[1])
+    with relgraph._guard("someone"):
+        pass
+    assert any(n.startswith("relgraph-") for n in taken), taken

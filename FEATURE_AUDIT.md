@@ -1,10 +1,9 @@
 # FEATURE_AUDIT.md — Olympus implementation-completeness audit
 
 - **Scope**: the Olympus codebase at `28dec49` (+`67eb8d4` secret-CLI fix), with
-  emphasis on the 12 OpenClaw-derived features and every user-claimed surface
-  (README counts, CLI commands, docs). *The OpenClaw upstream repo itself is
-  out of this session's repo scope and cannot be cloned or executed here; its
-  claims are tracked analytically in `docs/OPENCLAW_TRACKING.md`.*
+  emphasis on the 12 the surveyed gateway-derived features and every user-claimed surface
+  (README counts, CLI commands, docs). *The the surveyed gateway upstream repo itself is
+  out of this session's repo scope and cannot be cloned or executed here.*
 - **Date**: 2026-07-17 · **Read-only pass**: nothing was modified; this file is
   the only output.
 - **Full test suite (verbatim)**: `1473 passed, 4 skipped in 126.08s (0:02:06)`
@@ -20,7 +19,7 @@
 
 Statuses: IMPLEMENTED / PARTIAL / STUB / BROKEN / UNWIRED / MISSING.
 
-### 1a. The 12 OpenClaw-adoption features
+### 1a. The 12 the surveyed gateway-adoption features
 
 | Feature | Status | Evidence | Repro command |
 |---|---|---|---|
@@ -134,14 +133,14 @@ No other BROKEN/PARTIAL surfaces were found on the tested paths.
 | # | Discrepancy | Severity |
 |---|---|---|
 | 1 | `OLYMPUS_DREAM_EVERY`, `OLYMPUS_JOB_RESUME_AFTER`, `OLYMPUS_PAIR_TTL` are read by code but documented nowhere in README/docs (only module docstrings) | Low — add to README env-var section |
-| 2 | `OLYMPUS_ROLE_FALLBACKS` and `OLYMPUS_CHANNEL_PROFILE` are documented only in `docs/OPENCLAW_TRACKING.md` (an analysis doc), not in user-facing README/docs | Low |
+| 2 | `OLYMPUS_ROLE_FALLBACKS` and `OLYMPUS_CHANNEL_PROFILE` are documented only in an analysis doc, not in user-facing README/docs | Low |
 | 3 | ~~`olympus scores` help says "show per-specialist benchmark scores" but it may *run* the benchmark~~ **RESOLVED** — `scores` is display-only and its help now says so (§2.1) | — |
 | 4 | README capability counts: **consistent** (gate green) — no discrepancy | — |
 | 5 | `docs/THREAT_MODEL.md` ↔ live tool surface: **consistent** (binding check passes) | — |
 
 ## 5. Verdict
 
-- **12/12 OpenClaw-adoption features: IMPLEMENTED** with runtime evidence and
+- **12/12 the surveyed gateway-adoption features: IMPLEMENTED** with runtime evidence and
   167 dedicated tests; no stubs, no unwired modules, no missing claims.
 - Whole-repo health: full suite green (1473/0), drift gates green, graceful
   no-credential degradation everywhere tested **except** one BROKEN command

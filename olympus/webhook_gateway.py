@@ -56,9 +56,18 @@ def _rate_limited(key: str, limit: int | None = None) -> bool:
 
 
 def _secret_ok(supplied: str) -> bool:
+    """Whether a request may drive the council. FAIL CLOSED when unconfigured.
+
+    This used to return True when `OLYMPUS_WEBHOOK_SECRET` was unset, which —
+    combined with a default bind of 0.0.0.0 — meant `olympus webhook` with no
+    further configuration handed any peer on the network an unauthenticated,
+    unmetered channel into the full council on the operator's API key. An
+    optional credential that defaults to "no credential required" is not an
+    optional credential; a2a_server, mcp_server and federation all refuse to
+    serve without their token, and this surface is no less sensitive."""
     want = os.environ.get("OLYMPUS_WEBHOOK_SECRET", "")
     if not want:
-        return True
+        return False
     import hmac
     return hmac.compare_digest(want, supplied or "")
 
@@ -87,8 +96,10 @@ def _make_handler(bots: dict):
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802 (stdlib naming)
-            supplied = (self.headers.get("X-Olympus-Secret", "")
-                        or self.path.partition("secret=")[2])
+            # Header only. The old `?secret=` fallback put the credential in
+            # the request line, where it lands in access logs, proxy logs and
+            # anything else that records a URL.
+            supplied = self.headers.get("X-Olympus-Secret", "")
             if not _secret_ok(supplied):
                 return self._send(401, {"error": "unauthorized"})
             client = self.client_address[0] if self.client_address else "?"
@@ -111,9 +122,22 @@ def _make_handler(bots: dict):
     return _Handler
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8487) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8487) -> None:
+    """Serve the generic webhook endpoint.
+
+    Binds loopback by DEFAULT (was 0.0.0.0) and refuses to start at all without
+    a secret: an endpoint that runs the council on the operator's key is not
+    something to expose by omission. Exposing it is now two deliberate acts —
+    setting the secret and passing an explicit --host."""
     bots: dict = {}
-    auth = "on" if os.environ.get("OLYMPUS_WEBHOOK_SECRET") else "OFF (open)"
-    print(f"⚡ Olympus webhook gateway on {host}:{port}  (auth: {auth})")
+    if not os.environ.get("OLYMPUS_WEBHOOK_SECRET"):
+        raise SystemExit(
+            "refusing to start: OLYMPUS_WEBHOOK_SECRET is not set.\n"
+            "This endpoint runs the full council on your API key, so it has no "
+            "safe unauthenticated mode. Generate one with:\n"
+            "    export OLYMPUS_WEBHOOK_SECRET=$(python3 -c "
+            "'import secrets; print(secrets.token_urlsafe(32))')\n"
+            "and send it in the X-Olympus-Secret header.")
+    print(f"⚡ Olympus webhook gateway on {host}:{port}  (auth: on)")
     print('   POST {"user":"...","text":"..."}  →  {"reply":"..."}')
     HTTPServer((host, port), _make_handler(bots)).serve_forever()

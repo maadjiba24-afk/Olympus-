@@ -1,6 +1,6 @@
-"""Migrate from another agent (OpenClaw / Hermes-style) into Olympus.
+"""Migrate from another agent framework into Olympus.
 
-Hermes advertises an automated OpenClaw importer ("import your settings,
+Peer assistants advertise automated importers ("import your settings,
 memories, skills, and API keys"). This is the Olympus equivalent: point it at
 another agent's data directory and it folds what it understands into Olympus —
 

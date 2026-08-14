@@ -110,6 +110,36 @@ def reindex() -> int:
     return total
 
 
+def purge_conversation(conversation_id: str) -> int:
+    """Drop every indexed turn for one conversation. Returns rows removed.
+
+    Deletion-path primitive, not hygiene: `maintain()` reaps orphans lazily on
+    the heartbeat's schedule, which is far too slow a guarantee for a
+    right-to-be-forgotten request — the searchable copy of a user's messages
+    would outlive the deletion that reported success. `retention` calls this
+    synchronously so the index is purged in the same operation that removes the
+    conversation file."""
+    conn, _ = _connect()
+    try:
+        cur = conn.execute("DELETE FROM turns WHERE conversation = ?",
+                           (conversation_id,))
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def indexed_turns(conversation_id: str) -> int:
+    """How many turns remain indexed for one conversation (verification)."""
+    conn, _ = _connect()
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM turns WHERE conversation = ?",
+                           (conversation_id,)).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
 def maintain(retain_days: int | None = None) -> dict:
     """Index hygiene, run by the heartbeat's maintenance sweep (a long-lived
     server rarely restarts, so startup-time pruning would never fire):

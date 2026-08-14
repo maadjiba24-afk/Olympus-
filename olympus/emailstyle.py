@@ -1,6 +1,6 @@
 """Writing-style profile for style-matched email drafts.
 
-Adopted from Odysseus's style-matched reply drafting (it learns the user's
+Adopted from the surveyed framework's style-matched reply drafting (it learns the user's
 voice from sent mail and drafts in it). Angelos already reads the inbox and
 prepares send/draft actions; this gives its drafts the user's voice.
 

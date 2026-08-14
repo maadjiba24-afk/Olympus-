@@ -189,7 +189,7 @@ from that registry):
 
 ### Reasoning over serial problems (dependency-graph planning)
 
-Most orchestrator-worker systems (Hermes included) fan tasks out in parallel
+Most orchestrator-worker systems fan tasks out in parallel
 and stitch the pieces together — which breaks on problems where one step needs
 another's result first. Olympus's Athena instead plans a **dependency graph**:
 
@@ -223,7 +223,7 @@ It is **opt-in and privacy-first** (off by default):
 - The **benchmark gate** then keeps only the skills that measurably help and
   reverts the rest, so a weak model's output can't pollute the shared library.
 
-The result is something neither Hermes nor OpenClaw has: a system that gets
+The result is something no comparable assistant has: a system that gets
 collectively smarter by distilling the best of every frontier model its users
 bring — with consent, anonymization, and quality-gating built in.
 
@@ -318,9 +318,9 @@ user-facing specialist and trains the weakest on a cadence:
   the hallucination controller before you see them; uncertain claims are
   flagged, never laundered.
 
-## Why Olympus vs Hermes / OpenClaw
+## Why Olympus
 
-| | Hermes | OpenClaw | **Olympus** |
+| | Typical agent framework | Typical assistant gateway | **Olympus** |
 |---|---|---|---|
 | Hallucination control | none | none | **built-in verification gate** — factual answers are web-checked (the supervisor flags what needs checking) before you see them |
 | Specialists | generic per-task workers | one assistant + plug-in skills | **<!--cap:agents-->13<!--/cap--> permanent domain experts** with crafted identities |
@@ -654,7 +654,7 @@ Put the file in a `plugins/` directory (or point `OLYMPUS_PLUGINS_DIR` at one;
 see `examples/plugins/`). See `examples/plugins/example_rest_connector.py` for
 a working template.
 
-**The security edge nobody else has.** Hermes and OpenClaw let you plug in MCP
+**The security edge nobody else has.** Comparable assistants let you plug in MCP
 servers with no quality gate and no injection defense — a malicious or buggy
 connector runs unchecked. Olympus gates connectors in two tiers:
 
@@ -689,8 +689,8 @@ This objective signal feeds the self-improvement loop: Prometheus runs
 `run_code_benchmark` before and after changing Hephaestus's prompt or coding
 skills and keeps only changes that raise the **pass rate** — so his coding
 ability improves against ground truth, not a judge's guess. It's the closest
-thing to genuinely training a coding agent, and it's a coding edge neither
-Hermes nor OpenClaw has.
+thing to genuinely training a coding agent, and it's a coding edge
+no comparable assistant has.
 
 ### Controlled-autonomy actions — prepare, approve, execute, undo
 

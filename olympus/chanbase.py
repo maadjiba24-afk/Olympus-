@@ -2,7 +2,7 @@
 
 Every messaging platform Olympus speaks to (Telegram, Matrix, Mattermost, …)
 faces the same access-control problem, and it is exactly the problem that
-produced OpenClaw's worst CVEs: an allowlist or pairing check that silently
+produced the surveyed gateway's worst CVEs: an allowlist or pairing check that silently
 grants *authority* instead of merely *access*. This module keeps those two
 concerns strictly apart:
 
@@ -12,7 +12,7 @@ concerns strictly apart:
   * AUTHORITY (elsewhere) — what may an allowed conversation actually do? That
     stays with the capability-profile + action/autonomy spine, which a channel
     can never widen. So being on a channel allowlist can NEVER escalate to
-    owner powers — the failure mode that broke OpenClaw.
+    owner powers — the failure mode that broke the surveyed gateway.
 
 A channel module only handles transport (auth to the platform, parse an
 incoming message, send an outgoing one) and calls into here for the access

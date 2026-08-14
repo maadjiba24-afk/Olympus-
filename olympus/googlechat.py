@@ -80,7 +80,7 @@ def notify(text: str) -> bool:
         return False
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8490) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8490) -> None:
     if not _verify_token():
         raise SystemExit("Set GOOGLECHAT_VERIFY_TOKEN — inbound calls are "
                          "rejected without it.")

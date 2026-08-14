@@ -1,6 +1,6 @@
 """Olympus SMS channel — inbound texts in, replies out, over Twilio's webhook.
 
-This is the *buildable* slice of OpenClaw's telephony surface. A live voice call
+This is the *buildable* slice of the surveyed gateway's telephony surface. A live voice call
 needs an audio/media stack (streaming speech in and out) that Olympus
 deliberately doesn't carry; an SMS, by contrast, is plain text — so it drops
 straight onto the same untrusted-by-default access spine every other channel
@@ -190,7 +190,7 @@ def notify(text: str, to: str | None = None) -> bool:
         return False
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8491) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8491) -> None:
     if not _auth_token():
         raise SystemExit(
             "Set TWILIO_AUTH_TOKEN — inbound SMS is rejected without a "

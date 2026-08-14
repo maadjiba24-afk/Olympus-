@@ -252,7 +252,7 @@ class _Handler(BaseHTTPRequestHandler):
                              lambda p=payload: process_command(p))
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8486) -> None:
+def run_server(host: str = "127.0.0.1", port: int = 8486) -> None:
     if not os.environ.get("DISCORD_PUBLIC_KEY"):
         raise SystemExit("Set DISCORD_PUBLIC_KEY (your Discord app's public key).")
     print(f"⚡ Olympus Discord interactions endpoint on {host}:{port}")
