@@ -228,7 +228,7 @@ Questions (clarify)** · **Task Delegation (delegate_task)** · Cron Jobs
 - Tools that need keys are **enabled here but configured lazily** ("configured
   when enabled") — it collected 5 that needed setup and let you skip any.
 - **Browser provider sub-picker**: Local (free headless Chromium) default, or
-  cloud (Browserbase/BrowserUse/Firecrawl w/ stealth+proxies), or Camofox
+  cloud (Browserbase/BrowserUse/the surveyed scraper w/ stealth+proxies), or Camofox
   (anti-detection), or Skip.
 
 ### Where Olympus already matches / exceeds
@@ -283,8 +283,8 @@ Questions (clarify)** · **Task Delegation (delegate_task)** · Cron Jobs
   active/default, then OpenAI TTS (Premium), ElevenLabs (Premium — most
   natural), Mistral Voxtral (multilingual, native, needs `MISTRAL_API_KEY`),
   and **Skip**.
-- **Web Search provider sub-picker**: Firecrawl Cloud, Exa, Parallel, Tavily,
-  **Firecrawl Self-Hosted (Free — run your own)**, and **Skip**.
+- **Web Search provider sub-picker**: the surveyed scraper Cloud, Exa, Parallel, Tavily,
+  **the surveyed scraper Self-Hosted (Free — run your own)**, and **Skip**.
 
 ### Read
 This is the same three patterns we already captured, now confirmed as Hermes's
@@ -301,7 +301,7 @@ at the moment of key creation.
 | **"Get yours at <url>"** before key prompt | **ADOPT (backlog #7)** | Already planned; reconfirmed as universal in Hermes. |
 | **"Key shown once — save it now"** safety note | **ADOPT — new nuance** | When we prompt for/echo any key path, add a one-line "your provider shows this once; store it in `~/.olympus/config.env` (owner-only) now" note. Small trust win, costs nothing. |
 | Bundled premium media providers (FAL/ElevenLabs/Mistral Voxtral) | **DIFFERENTIATE** | Don't bundle a provider zoo. Keep our generate_image/text_to_speech behind the ModelPool + openai_compat, so any OpenAI-compatible media endpoint drops in via config — no per-vendor code. Free/no-key default (like Edge TTS) is the right stance; we already lean headless/free. |
-| Firecrawl **self-hosted** free web-search option | **NOTE** | Nice that they surface a self-host escape hatch. Our web_search already defaults to server-side (Anthropic) with a DDG fallback — free, no key. Parity without the picker. |
+| the surveyed scraper **self-hosted** free web-search option | **NOTE** | Nice that they surface a self-host escape hatch. Our web_search already defaults to server-side (Anthropic) with a DDG fallback — free, no key. Parity without the picker. |
 
 ### Build backlog additions (batched)
 24. **"Key shown once — save it" safety note** on any key/credential prompt

@@ -1,8 +1,8 @@
 # FEATURE_AUDIT.md — Olympus implementation-completeness audit
 
 - **Scope**: the Olympus codebase at `28dec49` (+`67eb8d4` secret-CLI fix), with
-  emphasis on the 12 OpenClaw-derived features and every user-claimed surface
-  (README counts, CLI commands, docs). *The OpenClaw upstream repo itself is
+  emphasis on the 12 the surveyed gateway-derived features and every user-claimed surface
+  (README counts, CLI commands, docs). *The the surveyed gateway upstream repo itself is
   out of this session's repo scope and cannot be cloned or executed here.*
 - **Date**: 2026-07-17 · **Read-only pass**: nothing was modified; this file is
   the only output.
@@ -19,7 +19,7 @@
 
 Statuses: IMPLEMENTED / PARTIAL / STUB / BROKEN / UNWIRED / MISSING.
 
-### 1a. The 12 OpenClaw-adoption features
+### 1a. The 12 the surveyed gateway-adoption features
 
 | Feature | Status | Evidence | Repro command |
 |---|---|---|---|
@@ -140,7 +140,7 @@ No other BROKEN/PARTIAL surfaces were found on the tested paths.
 
 ## 5. Verdict
 
-- **12/12 OpenClaw-adoption features: IMPLEMENTED** with runtime evidence and
+- **12/12 the surveyed gateway-adoption features: IMPLEMENTED** with runtime evidence and
   167 dedicated tests; no stubs, no unwired modules, no missing claims.
 - Whole-repo health: full suite green (1473/0), drift gates green, graceful
   no-credential degradation everywhere tested **except** one BROKEN command

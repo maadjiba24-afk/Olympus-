@@ -1,6 +1,6 @@
 """Pluggable web-search providers — one seam, many backends.
 
-Adopted from Odysseus's search-provider layer: client-side web search should
+Adopted from the surveyed framework's search-provider layer: client-side web search should
 not live or die with one engine. Providers are tried in order until one
 returns results; a provider that rate-limits (429) is put on cooldown and the
 next takes over; identical queries within the TTL are served from a small

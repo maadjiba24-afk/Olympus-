@@ -1294,7 +1294,7 @@ def test_obscured_click_refuses_blind_coordinate_click_and_flags_it(monkeypatch)
         assert out.startswith("Clicked #buy.")
         assert "obscured" in out and "overlay" in out
         # crucially: NO blind coordinate click was fired at the obscured point —
-        # we dispatched to the intended element instead (page-agent would have
+        # we dispatched to the intended element instead (the surveyed DOM agent would have
         # clicked whatever was on top).
         assert _mouse_events(sess, "mousePressed") == []
     finally:

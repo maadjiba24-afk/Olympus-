@@ -4,7 +4,7 @@ The read-side tools are free (side-effect-free, path-confined, deny-listed);
 the write side (edit_file) rides the approval spine with a unified diff as its
 preview. The sensitive-file deny-list is matched case-insensitively — the
 case-sensitive version of this list was a real vulnerability upstream
-(Odysseus #5097).
+(the surveyed framework #5097).
 """
 
 import pytest

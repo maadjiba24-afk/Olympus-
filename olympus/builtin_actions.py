@@ -287,8 +287,8 @@ def _authorize_payment_execute(p: dict) -> dict:
             "note": "Authorization recorded; NO payment rail — no money moved."}
 
 
-# --- authorize_assessment: the signed scope grant (Strix absorption, ADR 0011) -
-# Strix's system prompt orders the model to "never ask permission." Olympus does
+# --- authorize_assessment: the signed scope grant (the surveyed agent absorption, ADR 0011) -
+# The surveyed agent's system prompt orders the model to "never ask permission." Olympus does
 # the inverse: an assessment can only run against a target the operator
 # authorized HERE, on the approval spine — a human-signed, ledger-recorded fact.
 # The grant is what makes assess.require_scope() pass; without it every
@@ -418,11 +418,11 @@ def register_builtins() -> None:
         undo=_write_document_undo,
         description="Create or overwrite a document in the user's workspace "
                     "(reversible)."))
-    # Authorized-assessment scope grant (Strix absorption, ADR 0011).
+    # Authorized-assessment scope grant (the surveyed agent absorption, ADR 0011).
     # IRREVERSIBLE so it always needs explicit human approval and never
     # auto-runs; undo revokes the grant. This signed, ledger-recorded action is
     # the ONLY way an assessment becomes in-scope — the code-enforced inversion
-    # of Strix's prompt-level "you are already authorized".
+    # of the surveyed agent's prompt-level "you are already authorized".
     actions.register(actions.ActionType(
         name="authorize_assessment", risk_class=actions.IRREVERSIBLE,
         scope="assess.authorize", preview=_authorize_assessment_preview,

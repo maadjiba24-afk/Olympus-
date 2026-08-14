@@ -1,11 +1,11 @@
-# ADR 0014: Absorb Page Agent's capabilities natively (in-page GUI-agent surface)
+# ADR 0014: Absorb the surveyed DOM agent's capabilities natively (in-page GUI-agent surface)
 
 Status: accepted (complete — all five decisions shipped)
 Date: 2026-07-23
 
 ## Context
 
-A full inventory and security review of [alibaba/page-agent](https://github.com/alibaba/page-agent)
+A full inventory and security review of [alibaba/the surveyed DOM agent](https://github.com/alibaba/the surveyed DOM agent)
 (a zero-install, in-page GUI agent — one `<script>` gives any web page its own
 DOM-driving LLM agent) found a clean
 capability surface — a numbered interactive-element map, index-addressed
@@ -29,7 +29,7 @@ idioms and safety spine — and turns each of those weaknesses into a structural
 strength, rather than porting a foreign subsystem or its anti-patterns. It
 follows the shared contract of ADR 0008/0010/0011: opt-in where it touches the
 network or actuation, replay-safe, security-spine reuse, own tests, and an
-explicit "NOT absorbed" list. Page Agent's own DOM-processing lineage is
+explicit "NOT absorbed" list. The surveyed DOM agent's own DOM-processing lineage is
 browser-use, whose perception ideas Olympus's CDP harness (`olympus/browser.py`,
 ADR — `docs/BROWSER_HARNESS.md`) already implements more completely (open shadow
 roots + **cross-origin** OOPIF traversal, self-healing selectors, provenance-
@@ -38,18 +38,18 @@ genuinely additive ergonomics/robustness patterns, and invert every weakness.
 
 ## The core inversion
 
-Page Agent's reach comes from **removing every trust boundary** (it runs *as the
+The surveyed DOM agent's reach comes from **removing every trust boundary** (it runs *as the
 page*). Olympus keeps the same in-page DOM-automation surface but drives it from
 a **governed process outside the victim origin** (CDP), so every actuation
 already passes through `security.filter_tools` (capability separation), the
 SSRF/egress guards, and the `actions.py` approval spine. The absorption program
-adds page-agent's *good* parts to that spine — it never relaxes the spine to
-match page-agent's frictionlessness. The four documented non-goals below are the
+adds the surveyed DOM agent's *good* parts to that spine — it never relaxes the spine to
+match the surveyed DOM agent's frictionlessness. The four documented non-goals below are the
 line no decision in this ADR crosses.
 
 ## Decision (a): resilient, refusal-safe tool-call repair — SHIPPED
 
-Page Agent's `autoFixer.normalizeResponse` salvages malformed tool calls from
+The surveyed DOM agent's `autoFixer.normalizeResponse` salvages malformed tool calls from
 weak models (double-encoded arguments, ```json-fenced or prose-wrapped objects,
 and — the important one — a tool call emitted as JSON in `content` with an empty
 `tool_calls` array). Olympus's own `openai_compat` (Ollama/vLLM/LM Studio/
@@ -71,7 +71,7 @@ New pure module `olympus/toolcall_repair.py`:
 - `recover_tool_call(content, known_names)` — reconstructs an OpenAI-shaped tool
   call from `content` when `tool_calls` is empty.
 
-**The inversion (refusal-safety).** Page Agent's fixer will reconstruct a tool
+**The inversion (refusal-safety).** the surveyed DOM agent's fixer will reconstruct a tool
 call from *any* content JSON, which can mask a model's refusal ("I can't do
 that") or turn a legitimate final answer into a phantom action. Olympus's
 `recover_tool_call` fires **only when the content names a tool the model was
@@ -87,7 +87,7 @@ integration tests: a content-emitted call executes; a refusal never does).
 
 ## Decision (b): perception deltas + scroll geometry in `observe()` — SHIPPED
 
-Page Agent enriches its element map with two model-useful signals Olympus's
+The surveyed DOM agent enriches its element map with two model-useful signals Olympus's
 `observe()` lacked: a `*[` marker on elements that are *new since the last step*
 (the strongest signal that an input revealed a suggestion list / dialog / next
 step), and scroll affordances (pages above/below + `data-scrollable` containers
@@ -96,7 +96,7 @@ native, deterministic annotations on `browser.observe()`:
 
 - **Perception delta.** `BrowserSession` remembers the durable selectors from the
   previous `observe()` and the URL they were seen on. The next `observe()` on the
-  *same* URL prefixes any newly-appeared element with `*` (page-agent's idiom). A
+  *same* URL prefixes any newly-appeared element with `*` (the surveyed DOM agent's idiom). A
   navigation (URL change) or the first look marks nothing — a new page replaces
   the whole set, so "new" would be noise. Keyed on the durable `__olySel`
   selector, not the ephemeral index, so it survives re-indexing.
@@ -118,11 +118,11 @@ cross-origin path) stays a plain map by design. Covered by six new cases in
 
 ## Decision (c): human-fidelity click + landing hit-test as a GUARD — SHIPPED
 
-Page Agent scrolls the target to view, computes its center, and dispatches a
+The surveyed DOM agent scrolls the target to view, computes its center, and dispatches a
 full spec-ordered pointer/mouse sequence — then uses `elementFromPoint` to
 retarget to whatever element is actually on top (matching real browser event
 targeting). The hit-test is the valuable idea; the *silent retarget* is a risk:
-an overlay, cookie banner, or interstitial covering the button means page-agent
+an overlay, cookie banner, or interstitial covering the button means the surveyed DOM agent
 clicks the overlay.
 
 `browser.act('click', selector=…)` previously fired a bare `e.click()` (untrusted,
@@ -135,17 +135,17 @@ single event, no scroll, no hit-test). It now:
    hittable at all.
 2. **Clear point → a TRUSTED, coordinate-accurate CDP click** (`Input.dispatch
    MouseEvent` mouseMoved→Pressed→Released at the probed point). This is
-   *stronger* than page-agent's untrusted in-page `dispatchEvent` (`isTrusted`
+   *stronger* than the surveyed DOM agent's untrusted in-page `dispatchEvent` (`isTrusted`
    true → drives handlers that ignore synthetic events), and it lands exactly
    where the hit-test verified.
 3. **Obscured / off-view → the inversion.** Olympus does **not** fire a blind
    coordinate click (which would hit the overlay). It dispatches a faithful
    pointer→mouse→click sequence straight to the *intended* element
    (`_dispatch_click_js`) and returns a note that the point was obscured so the
-   operator/model can dismiss the modal first. Where page-agent clicks whatever
+   operator/model can dismiss the modal first. Where the surveyed DOM agent clicks whatever
    is on top, Olympus actuates the observed control and surfaces the obstruction.
 
-So Olympus takes page-agent's hit-test and makes it a **safety guard** rather than
+So Olympus takes the surveyed DOM agent's hit-test and makes it a **safety guard** rather than
 a hijack surface, while upgrading the happy path from untrusted to trusted input.
 FakeTransport gains a scriptable landing probe (`__OLY_CLICK__`) and a
 `click_obstructed` switch; four new tests in `tests/test_browser.py` cover the
@@ -154,10 +154,10 @@ and the missing-element error.
 
 ## Decision (d): default-on pre-prompt secret redaction — SHIPPED
 
-Page Agent's biggest risk: it streams cleaned page HTML to the LLM every step and
+The surveyed DOM agent's biggest risk: it streams cleaned page HTML to the LLM every step and
 its own privacy doc admits the cleaning "does not guarantee removal of sensitive
 information" — redaction is left to an opt-in `transformPageContent` regex hook
-that most integrators never set. The inversion is the moat: what page-agent
+that most integrators never set. The inversion is the moat: what the surveyed DOM agent
 leaves to the user, Olympus enforces in code, on by default.
 
 New `security.sanitize_for_prompt(text, *, redact_pii=None)`:
@@ -186,7 +186,7 @@ passes unchanged.
 
 ## Decision (e): governed `/llms.txt` consumption — SHIPPED
 
-Page Agent's `experimentalLlmsTxt` fetches `{origin}/llms.txt` — a site's
+The surveyed DOM agent's `experimentalLlmsTxt` fetches `{origin}/llms.txt` — a site's
 author-curated guidance for agents — with a raw `fetch()` (no SSRF check, no
 egress confinement, no secret scan) and folds it into the prompt unwrapped.
 Olympus already *produces* `llms.txt` (`generate_llmstxt`); this adds the
@@ -204,7 +204,7 @@ Olympus already *produces* `llms.txt` (`generate_llmstxt`); this adds the
   can't inject or smuggle a secret, and actuators are stripped from any run that
   reads it.
 
-Every layer that page-agent skips — SSRF/egress gate, rebinding pin, port
+Every layer that the surveyed DOM agent skips — SSRF/egress gate, rebinding pin, port
 allowlist, untrusted envelope, secret redaction, threat-model binding — is
 present here. Seven new tests (`tests/test_webctx.py`).
 
@@ -243,14 +243,14 @@ now closed:
 ## Status: program complete + hardened
 
 All five borrowable watchlist items (§3.1, §3.2/§3.3, §3.4, §3.5, §3.6) are now
-native Olympus capabilities, each on the security spine with page-agent's
+native Olympus capabilities, each on the security spine with the surveyed DOM agent's
 corresponding weakness inverted, and each hardened per decision (f). The four
-non-goals below remain the fixed boundary. Nothing further from page-agent is
+non-goals below remain the fixed boundary. Nothing further from the surveyed DOM agent is
 planned for absorption.
 
 ## NOT absorbed (deliberate non-goals)
 
-These are structural to page-agent's frictionlessness and incompatible with the
+These are structural to the surveyed DOM agent's frictionlessness and incompatible with the
 Olympus spine; they stay declined (mirrors `DEFERRED.md`):
 
 1. **Running the agent *as the page* (zero-permission origin sharing).** Olympus
@@ -272,7 +272,7 @@ Olympus spine; they stay declined (mirrors `DEFERRED.md`):
 
 Weak-model tool-calling on the OpenAI-compat and Bedrock-Converse backends is now
 materially more robust, and the robustness is refusal-safe by construction —
-Olympus gains page-agent's most useful contribution without its ability to
+Olympus gains the surveyed DOM agent's most useful contribution without its ability to
 launder a refusal into an action. Remaining decisions (b)–(e) land per iteration,
 each opt-in/replay-safe/spine-reusing with its own tests; the four non-goals are
 the fixed boundary.

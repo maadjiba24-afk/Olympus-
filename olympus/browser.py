@@ -219,7 +219,7 @@ _PERCEPTION_JS = (
 def _click_probe_js(selector: str) -> str:
     """Resolve the element, scroll it to center, and report its click point plus
     whether that point is OBSCURED by an unrelated element (an overlay / cookie
-    banner / modal intercepting the hit). Absorbs page-agent's elementFromPoint
+    banner / modal intercepting the hit). Absorbs the surveyed DOM agent's elementFromPoint
     landing hit-test — but as a *guard*, not a silent retarget (ADR 0014 (c)).
     __OLY_CLICK__ routes it offline. Returns JSON {found,cx,cy,obstructed,tag}."""
     sel = json.dumps(selector)
@@ -1539,7 +1539,7 @@ class BrowserSession:
         # that are NEW since the last look (a *[i] marker) — the strongest signal
         # that an input/click revealed a suggestion list, dialog, or step — but
         # only when the URL is unchanged (a navigation replaces the whole set, so
-        # "new" would be meaningless noise). Absorbed from page-agent's `*[`
+        # "new" would be meaningless noise). Absorbed from the surveyed DOM agent's `*[`
         # marking; see ADR 0014 (b).
         self._prev_observe_sels: set[str] = set()
         self._prev_observe_url: str = ""
@@ -2038,7 +2038,7 @@ class BrowserSession:
         # Perception delta: which durable selectors are NEW since the last
         # observe() on this same URL. On a fresh page (URL changed or first look)
         # nothing is marked — a navigation replaces the whole set, so "new" would
-        # be noise. Marked elements get a `*` prefix (page-agent's `*[` idiom).
+        # be noise. Marked elements get a `*` prefix (the surveyed DOM agent's `*[` idiom).
         # Reuse the URL _observe_raw() already resolved via _blocked_landing()
         # (no extra eval, and no TOCTOU between the landing check and the delta).
         cur_url = self._landed_url
@@ -2330,9 +2330,9 @@ class BrowserSession:
         if action == "click":
             if selector:
                 # Probe first: resolve + scroll to center + hit-test the landing
-                # point. Absorbs page-agent's elementFromPoint check, but as a
+                # point. Absorbs the surveyed DOM agent's elementFromPoint check, but as a
                 # GUARD (ADR 0014 (c)): when the point is clear we fire a TRUSTED,
-                # coordinate-accurate CDP click (stronger than page-agent's
+                # coordinate-accurate CDP click (stronger than the surveyed DOM agent's
                 # untrusted in-page dispatch); when an overlay obscures the point
                 # we refuse the blind coordinate click (it would hit the overlay)
                 # and instead dispatch straight to the intended element, flagging

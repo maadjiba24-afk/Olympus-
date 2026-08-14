@@ -225,7 +225,7 @@ def wrap_untrusted(text: str, source: str = "web") -> str:
     Also the default-on redaction chokepoint (ADR 0014 (d)): every piece of
     untrusted content that reaches a model prompt passes through
     `sanitize_for_prompt` here first, so secrets in page/tool content are redacted
-    by default, in code — inverting page-agent's opt-in-only redaction. Because
+    by default, in code — inverting the surveyed DOM agent's opt-in-only redaction. Because
     `should_wrap` is fail-closed (an unclassified tool still wraps), redaction is
     fail-closed too: a new ingesting tool nobody registered is still both wrapped
     AND secret-redacted.
@@ -392,7 +392,7 @@ def sanitize_for_prompt(text: str, *, redact_pii: bool | None = None) -> str:
     """Redact secrets (always) and, when enabled, PII from untrusted page/tool
     content BEFORE it reaches a model prompt.
 
-    Inverts page-agent's biggest risk (ADR 0014 (d)): page-agent streams cleaned page HTML to the LLM and its own docs
+    Inverts the surveyed DOM agent's biggest risk (ADR 0014 (d)): the surveyed DOM agent streams cleaned page HTML to the LLM and its own docs
     admit the cleaning "does not guarantee removal of sensitive information",
     leaving redaction to an opt-in regex hook most integrators never set. Olympus
     redacts the genuinely dangerous class — secrets: private keys, JWTs,

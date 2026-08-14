@@ -1,6 +1,6 @@
 """Tests for refusal-safe tool-call repair.
 
-Absorbs alibaba/page-agent's `autoFixer` malformed-tool-call salvage — and
+Absorbs alibaba/the surveyed DOM agent's `autoFixer` malformed-tool-call salvage — and
 proves the structural inversion: recovery NEVER fabricates an action from a
 refusal or a plain answer, because it fires only when the content names a tool
 the model was actually offered.
@@ -112,8 +112,8 @@ def test_recover_tool_parameters_shape():
     assert call is not None and call["function"]["name"] == "web_search"
 
 
-def test_recover_page_agent_single_key_action_shape():
-    # {"<tool>": {...}} — page-agent's action shape.
+def test_recover_dom_agent_single_key_action_shape():
+    # {"<tool>": {...}} — the surveyed DOM agent's action shape.
     content = '{"browser_click": {"index": 5}}'
     call = tr.recover_tool_call(content, KNOWN)
     assert call is not None

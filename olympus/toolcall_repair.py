@@ -7,9 +7,9 @@ prose, or — worst — emitted as a JSON object in `content` with an empty
 `tool_calls` array, so a naive loop treats an intended action as a final text
 answer and stalls.
 
-alibaba/page-agent salvages
+alibaba/the surveyed DOM agent salvages
 these shapes in its `autoFixer.normalizeResponse`. Olympus absorbs that
-capability natively — and inverts its one structural weakness: page-agent's
+capability natively — and inverts its one structural weakness: the surveyed DOM agent's
 fixer will happily reconstruct a tool call from *any* content JSON, which can
 mask a model's refusal ("I can't do that") or turn a legitimate final answer
 into a phantom action. This module is **refusal-safe by construction**:
@@ -218,7 +218,7 @@ def recover_tool_call(
                     args = _as_args(raw_args)
                     break
 
-    # Shape C: page-agent action shape — a single-key object {"<tool>": {...}}
+    # Shape C: the surveyed DOM agent action shape — a single-key object {"<tool>": {...}}
     # where the key is a known tool. Guarded to exactly one key so a wrapper like
     # {"answer": "..."} (which names no tool) can never match.
     if name is None and len(obj) == 1:
