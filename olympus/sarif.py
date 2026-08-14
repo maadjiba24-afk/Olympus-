@@ -1,7 +1,7 @@
 """CVSS 3.1 scoring + SARIF 2.1.0 export — the finding output contract.
 
-A survey of Strix (an autonomous offensive-security agent — see
-`docs/STRIX_TRACKING.md`) found a strong *output* discipline worth absorbing:
+A survey of Strix (an autonomous offensive-security agent) found a strong
+*output* discipline worth absorbing:
 findings carry a working proof, a CVSS score, and export as schema-valid SARIF
 so CI can ingest them. This module is Olympus's native, dependency-free version
 of that contract, used by `olympus/assess.py`:

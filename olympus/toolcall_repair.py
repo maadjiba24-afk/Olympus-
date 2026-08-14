@@ -7,7 +7,7 @@ prose, or — worst — emitted as a JSON object in `content` with an empty
 `tool_calls` array, so a naive loop treats an intended action as a final text
 answer and stalls.
 
-alibaba/page-agent (see `docs/PAGE_AGENT_TRACKING.md`, watchlist §3.1) salvages
+alibaba/page-agent salvages
 these shapes in its `autoFixer.normalizeResponse`. Olympus absorbs that
 capability natively — and inverts its one structural weakness: page-agent's
 fixer will happily reconstruct a tool call from *any* content JSON, which can

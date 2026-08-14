@@ -7,7 +7,7 @@ Date: 2026-07-23
 
 A full inventory and security review of [alibaba/page-agent](https://github.com/alibaba/page-agent)
 (a zero-install, in-page GUI agent — one `<script>` gives any web page its own
-DOM-driving LLM agent; see `docs/PAGE_AGENT_TRACKING.md`) found a clean
+DOM-driving LLM agent) found a clean
 capability surface — a numbered interactive-element map, index-addressed
 click/type/select/scroll, a ReAct loop with a forced-reflection "MacroTool," a
 strong malformed-response repair layer, human-fidelity synthetic input, and a

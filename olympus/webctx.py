@@ -1281,8 +1281,7 @@ def fetch_llmstxt(url: str, max_chars: int = _LLMSTXT_CONSUME_CAP) -> dict:
     """CONSUME a site's own ``/llms.txt`` as governed page context — the site's
     author-curated map/guidance for agents.
 
-    Absorbs page-agent's `experimentalLlmsTxt` (docs/PAGE_AGENT_TRACKING.md §3.6 /
-    ADR 0014 (e)) and inverts its ungoverned fetch: page-agent does a raw
+    Absorbs page-agent's `experimentalLlmsTxt` (ADR 0014 (e)) and inverts its ungoverned fetch: page-agent does a raw
     `fetch(origin + '/llms.txt')` with no SSRF check, no egress confinement, no
     secret-exfil scan, and folds the result into the prompt unwrapped. Olympus
     fetches through the SSRF/egress-gated, DNS-rebinding-pinned `tools._http_get`
