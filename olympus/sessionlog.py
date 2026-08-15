@@ -498,6 +498,107 @@ def compact(conversation_id: str, through_seq: int) -> None:
                 pass
 
 
+#: Compact a journal once it passes this fraction of the hard ceiling
+#: (`OLYMPUS_SESSION_JOURNAL_MAX_MB`, default 64 MB → 16 MB here). Deliberately
+#: not AT the ceiling: at the ceiling appends and `recover_history` have already
+#: stopped for that conversation (I-J10), so a threshold there would only ever
+#: run after the damage. A quarter leaves 3x headroom for a day's growth between
+#: maintenance ticks.
+COMPACT_AT_FRACTION = 0.25
+
+
+def safe_compact_bound(records) -> int:
+    """The largest `through_seq` whose removal provably does not change the
+    replayed history. 0 when nothing can be dropped.
+
+    THE INVARIANT. `compact()` physically deletes records at or below
+    `through_seq`, and `recover_history` rebuilds history from the JOURNAL
+    ALONE — it never reads the snapshot. So a bound chosen from "what the
+    snapshot covers" would silently destroy the crash-recovery data this
+    subsystem exists to provide, and destroy it invisibly, because nothing
+    reads it until the next crash.
+
+    The bound is therefore derived from `_replay` itself, which is the only
+    thing that defines what a record contributes:
+
+      * `reset` CLEARS the accumulated history;
+      * `turn` EXTENDS it;
+      * tombstoned turns are skipped, marks are boundaries.
+
+    Everything strictly before the most recent `reset` is therefore dead by
+    construction — `_replay` discards it regardless. That prefix, and only that
+    prefix, is safe to delete. `sync()` writes exactly such a `reset` + full
+    -history pair whenever the history is rewritten rather than extended
+    (`/clear`, ABC/in-run compaction), which is precisely what happens on the
+    long conversations whose journals actually approach the ceiling.
+
+    The bound is then VERIFIED by replay before it is returned, so safety rests
+    on a comparison rather than on the reasoning above being right."""
+    if not records:
+        return 0
+    resets = [r["seq"] for r in records if r.get("kind") == "reset"]
+    if not resets:
+        return 0                      # append-only journal: nothing is dead
+    bound = max(resets) - 1
+    if bound < 1:
+        return 0
+    kept = [r for r in records if r["seq"] > bound]
+    if _replay(kept) != _replay(records):
+        return 0                      # verification failed — never compact
+    return bound
+
+
+def compact_due(*, threshold_bytes: int | None = None) -> dict:
+    """Compact every journal past the size threshold, dropping only records
+    that `safe_compact_bound` proves are dead.
+
+    The scheduled counterpart to `compact()`, which takes an explicit
+    `through_seq` and so cannot be called by a scheduler on its own. Never
+    raises: this runs inside the heartbeat's maintenance job, where one bad
+    journal must not stop the sweep for the rest.
+
+    A conversation that is over the threshold but has nothing safe to drop is
+    reported in `skipped`, not silently ignored — a journal that keeps growing
+    with no compactable prefix is an operator-visible condition."""
+    out = {"scanned": 0, "compacted": [], "skipped": [], "bytes_before": 0,
+           "bytes_after": 0}
+    limit = _max_bytes() if threshold_bytes is None else int(threshold_bytes)
+    if threshold_bytes is None:
+        limit = int(limit * COMPACT_AT_FRACTION)
+    d = config.MEMORY_DIR / "sessions"
+    if not d.exists():
+        return out
+    for path in sorted(d.glob("*.journal.jsonl")):
+        sid = path.name[: -len(".journal.jsonl")]
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        out["scanned"] += 1
+        if size < limit:
+            continue
+        try:
+            with _locked(sid):
+                records, status = _scan(sid)
+            if status == "absent" or not records:
+                continue
+            bound = safe_compact_bound(records)
+            if bound <= 0:
+                out["skipped"].append({"sid": sid, "bytes": size,
+                                       "reason": "no dead prefix to drop"})
+                continue
+            compact(sid, bound)
+            out["bytes_before"] += size
+            out["bytes_after"] += path.stat().st_size
+            out["compacted"].append({"sid": sid, "through_seq": bound})
+        except Exception as err:            # noqa: BLE001 — never stop the sweep
+            from . import errors
+            errors.capture("sessionlog.compact_due", err, context=sid)
+            out["skipped"].append({"sid": sid, "bytes": size,
+                                   "reason": f"error: {type(err).__name__}"})
+    return out
+
+
 def delete_session(conversation_id: str) -> None:
     """Hard-delete a session's journal, quarantine copies, and snapshot."""
     sid = _sid(conversation_id)
