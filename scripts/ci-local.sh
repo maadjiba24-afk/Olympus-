@@ -38,7 +38,11 @@ set -uo pipefail
 
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 
-PYVER="3.10"
+# The minimum supported version, and this script's default. Kept in a variable
+# so the "not found" help can tell whether the caller asked for the minimum leg
+# or deliberately chose another one.
+DEFAULT_PYVER="3.10"
+PYVER="$DEFAULT_PYVER"
 REUSE=0
 FAST=0
 for arg in "$@"; do
@@ -52,12 +56,36 @@ for arg in "$@"; do
 done
 
 VENV=".venv/ci-py${PYVER}"
+
+# Interpreter discovery. A versioned binary on PATH is also where
+# `uv python install` drops its shim (~/.local/bin/python3.10); fall back to
+# asking uv directly, which covers a uv-managed interpreter whose shim dir is
+# not on PATH. Kept in step with the same two tiers in ci-local.ps1.
 PYBIN="python${PYVER}"
-command -v "$PYBIN" >/dev/null 2>&1 || {
-  echo "python${PYVER} not found on PATH." >&2
-  echo "Install it, or pass a version you have (e.g. ./scripts/ci-local.sh 3.12)." >&2
+if ! command -v "$PYBIN" >/dev/null 2>&1; then
+  PYBIN=""
+  if command -v uv >/dev/null 2>&1; then
+    FOUND="$(uv python find "$PYVER" 2>/dev/null || true)"
+    [ -n "$FOUND" ] && [ -x "$FOUND" ] && PYBIN="$FOUND"
+  fi
+fi
+if [ -z "$PYBIN" ]; then
+  echo "Python ${PYVER} not found. Tried 'python${PYVER}' on PATH and 'uv python find ${PYVER}'." >&2
+  echo >&2
+  echo "Install it with any of:" >&2
+  echo "    uv python install ${PYVER}     # recommended; puts python${PYVER} on PATH" >&2
+  echo "    pyenv install ${PYVER}" >&2
+  echo "    sudo apt install python${PYVER} python${PYVER}-venv    # Debian/Ubuntu + deadsnakes" >&2
+  echo >&2
+  if [ "$PYVER" = "$DEFAULT_PYVER" ]; then
+    echo "${PYVER} is the MINIMUM supported version and the leg where version-dependent" >&2
+    echo "breakage surfaces first, so prefer installing it over switching. If you must:" >&2
+    echo "    ./scripts/ci-local.sh 3.12" >&2
+  else
+    echo "Or run the default minimum-version leg:  ./scripts/ci-local.sh" >&2
+  fi
   exit 2
-}
+fi
 
 FAILED=()
 step() {
