@@ -81,10 +81,10 @@ def test_filestore_put_syncs_before_replace(monkeypatch):
 
 def test_usage_record_syncs_when_opted_in(monkeypatch):
     """The spend ledger is the ONE W1-1 site that does not fsync by default
-    (W1-1a — it cost 19.5 ms/call inside a cross-process lock on CI storage).
-    This proves the OPT-IN path is still correct, which is what keeps W1-1c
-    honest: when the ledger becomes cheap to sync, this is the contract it has
-    to meet."""
+    (W1-1a — the sync costs roughly 15 ms inside a cross-process lock on CI
+    storage). This proves the OPT-IN path is still correct, which is what keeps
+    W1-1c honest: when the ledger becomes cheap to sync, this is the contract it
+    has to meet."""
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 100, 50)
@@ -175,8 +175,8 @@ def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
 
 
 def test_usage_record_does_not_fsync_by_default(monkeypatch):
-    """REGRESSION GUARD (W1-1a). The ledger sync costs ~19.5 ms per call inside
-    a cross-process lock on CI storage — ~400 ms serialized across a
+    """REGRESSION GUARD (W1-1a). The ledger sync costs roughly 15 ms per call
+    inside a cross-process lock on CI storage — ~300 ms serialized across a
     20-specialist council turn — which is what
     `test_val_performance.py::test_observability_overhead_absolute_cost_bounded`
     caught on the windows-py3.12 leg.
@@ -196,7 +196,7 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
 
 def test_usage_fsync_knob_defaults_to_auto(monkeypatch):
     """Opt-IN, and fail-safe: anything unrecognised reads as off, so a typo
-    cannot silently re-arm a 400 ms serialized cost."""
+    cannot silently re-arm a ~300 ms serialized cost."""
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
     assert usage._fsync_ledger() is False
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")

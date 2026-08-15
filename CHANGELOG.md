@@ -109,25 +109,39 @@ anywhere.
   argument outweighs that, and revocations are rare.
 - **The spend ledger does NOT fsync by default** (`OLYMPUS_USAGE_FSYNC=always`
   opts in). It is the one exempted site, and the exemption is the interesting
-  part of this entry. A local benchmark put the sync at **+1.539 ms/call**
-  (1000 calls × 5 repeats, best-of, NTFS on a local SSD, py3.10: 730 → 2269
-  µs). The Windows CI leg then measured the same sync at **19.5 ms/call —
-  12.7× the local figure** — via
+  part of this entry. The Windows CI leg failed
   `test_val_performance.py::test_observability_overhead_absolute_cost_bounded`,
-  which attributes overhead per component and found `usage` responsible for 77%
-  of the total with the lowest noise of any component (19.519 ± 1.095 ms, the
-  only one cleanly resolved). Cloud block storage is slower than a hosted
-  runner, not faster, so 19.5 ms is the realistic number and 1.5 ms was the
-  outlier.
+  which attributes overhead per component and found `usage` at **19.519 ± 1.095
+  ms** — 77% of the total and the lowest-noise component in the run, the only
+  one cleanly resolved.
 
-  The latency alone would be affordable — 19.5 ms against a ~2 s provider call
-  is 1%. What is not is **where it sits**: `record()` rewrites the whole ledger
-  inside a *cross-process lock*, and specialists run in parallel, so twenty
-  concurrent calls serialize on that lock rather than paying in parallel —
-  roughly **400 ms welded onto the critical path of every council turn**. The
+  **Measure like against like.** 19.519 ms is the *whole* usage component
+  (read-modify-write **plus** fsync, per pipeline run). The micro-benchmark that
+  justified the original default — 730 → 2269 µs, **+1.539 ms** — was the fsync
+  *alone*, per call. Dividing one by the other is the same category of error
+  that produced the wrong default: a number compared against something it was
+  not measured against. On the component's own basis, the local before/after in
+  this PR is **4.824 ms with fsync → 2.264 ms without**, so the fsync costs
+  **2.560 ms** locally. The runner's read-modify-write cannot cost zero, so its
+  fsync is strictly *under* 19.519 ms and the runner-to-local ratio is strictly
+  **under 7.6×** (19.519 / 2.560) — realistically ~6×, i.e. roughly 15 ms. Both
+  raw numbers are given so the arithmetic can be redone; no point estimate is
+  claimed, because the data does not support one.
+
+  The latency alone would be affordable — ~15 ms against a ~2 s provider call is
+  under 1%. What is not is **where it sits**: `record()` rewrites the whole
+  ledger inside a *cross-process lock*, and specialists run in parallel, so
+  twenty concurrent calls serialize on that lock rather than overlapping —
+  roughly **300 ms welded onto the critical path of every council turn**. The
   first draft of this entry justified the sync with "~30 ms on a 20-specialist
-  council turn"; that was wrong by an order of magnitude, because it multiplied
-  the local per-call cost and ignored the lock.
+  council turn"; that was an order of magnitude out, because it multiplied the
+  local per-call cost and ignored the lock.
+
+  *(Correction: commit `dd58dd5` and an earlier revision of this entry cited a
+  "12.7×" runner-to-local ratio. That figure divided the runner's whole usage
+  component by an isolated per-call fsync micro-benchmark — different quantities
+  on different bases — and is not supportable. The bounded claim above replaces
+  it. The decision is unchanged; only the multiplier was wrong.)*
 
   **Residual risk, plainly:** a power cut can return an empty ledger, which
   resets the day's recorded spend to 0 and disables the budget cap until the
