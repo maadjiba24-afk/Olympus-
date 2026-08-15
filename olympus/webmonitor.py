@@ -95,9 +95,9 @@ def _save(monitors: list[Monitor]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps([asdict(m) for m in monitors], indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p,
+                     json.dumps([asdict(m) for m in monitors], indent=2))
 
 
 def _mutex():

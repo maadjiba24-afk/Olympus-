@@ -19,7 +19,7 @@ import os
 import re
 from pathlib import Path
 
-from . import config
+from . import atomicio, config
 
 
 def _safe(s: str) -> str:
@@ -45,14 +45,12 @@ class FileStore:
         # Atomic publish: a reader in the other process must see the old or
         # the new value, never a truncated blob — consumers map a torn read
         # to "empty" and would silently rebuild from defaults (ADR 0005).
+        # Durable too (W1-1): usermem, relgraph, docrag and routing_outcomes
+        # all ride this, and os.replace alone survives a peer process but not
+        # a power cut — see olympus/atomicio.py.
         path = self._dir(ns) / _safe(key)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(value)
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp, path)
+        atomicio.publish(tmp, path, value, chmod=0o600)
 
     def get(self, ns: str, key: str) -> bytes | None:
         path = self._dir(ns) / _safe(key)

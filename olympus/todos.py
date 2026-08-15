@@ -64,8 +64,8 @@ def _save(user: str, items: list[dict]) -> None:
     # Atomic publish: _load maps a torn file to [] (ADR 0005).
     p = _path(user)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(items, indent=2))
 
 
 def _mutex(user: str):

@@ -138,8 +138,8 @@ def _save_emb_cache(cache: dict) -> None:
     p = _emb_cache_path()
     tmp = p.with_suffix(".json.tmp")
     try:
-        tmp.write_text(json.dumps(cache), encoding="utf-8")
-        os.replace(tmp, p)
+        from . import atomicio
+        atomicio.publish(tmp, p, json.dumps(cache))
     except OSError:
         pass
 

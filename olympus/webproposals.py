@@ -147,9 +147,9 @@ def _save(records: dict) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({k: asdict(v) for k, v in records.items()},
-                              indent=0), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(
+        {k: asdict(v) for k, v in records.items()}, indent=0))
 
 
 def _pid(key: str) -> str:

@@ -921,19 +921,25 @@ def test_two_threads_saving_one_conversation_use_distinct_temp_files(
     seen_tmp: list[str] = []
     counter = {"n": 0}
     guard = threading.Lock()
-    real_write_text = Path.write_text
+    real_replace = os.replace
 
-    def gated_write_text(self, data, *a, **kw):
-        out = real_write_text(self, data, *a, **kw)
-        if self.name.endswith(".tmp") and "conversations" in str(self):
+    # Gates on `os.replace` rather than `Path.write_text`. W1-1 moved the
+    # snapshot write into `atomicio.publish`, which writes through `open()` so
+    # it can fsync the descriptor before publishing — `Path.write_text` is no
+    # longer on this path and a hook there silently observed NOTHING, leaving
+    # this race unexercised. `os.replace` is the same instant the docstring
+    # names: the temp file is fully written (and now synced), nothing is
+    # published yet.
+    def gated_replace(src, dst, *a, **kw):
+        if str(src).endswith(".tmp") and "conversations" in str(src):
             with guard:
                 counter["n"] += 1
                 nth = counter["n"]
-            seen_tmp.append(str(self))
+            seen_tmp.append(str(src))
             if nth == 1:
                 first_wrote.set()
                 second_published.wait(5)
-        return out
+        return real_replace(src, dst, *a, **kw)
 
     box: dict = {}
 
@@ -952,7 +958,7 @@ def test_two_threads_saving_one_conversation_use_distinct_temp_files(
         second_published.set()
 
     with monkeypatch.context() as m:
-        m.setattr(Path, "write_text", gated_write_text)
+        m.setattr(os, "replace", gated_replace)
         ta = threading.Thread(target=writer_a, daemon=True)
         tb = threading.Thread(target=writer_b, daemon=True)
         ta.start()

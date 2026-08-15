@@ -59,8 +59,8 @@ def _load_manifest() -> dict:
 def _save_manifest(data: dict) -> None:
     p = _manifest_path()
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(data, indent=2))
     try:
         os.chmod(p, 0o600)
     except OSError:

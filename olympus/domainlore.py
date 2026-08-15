@@ -177,9 +177,9 @@ def _save(records: dict) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({k: asdict(v) for k, v in records.items()},
-                              indent=0), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(
+        {k: asdict(v) for k, v in records.items()}, indent=0))
 
 
 def observe(url: str, *, ok: bool = True, blocked: bool = False,
@@ -429,8 +429,8 @@ def _save_staged(rows: list) -> None:
     p = _staged_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(rows[-_MAX_STAGED:], indent=0), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(rows[-_MAX_STAGED:], indent=0))
 
 
 def _clean_share_row(d: dict) -> dict | None:

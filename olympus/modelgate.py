@@ -384,9 +384,9 @@ def _write_baseline(key: str, scores: dict) -> None:
             data = {}
         data[key] = {k: round(float(v), 2) for k, v in scores.items()}
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path,
+                         json.dumps(data, indent=2, sort_keys=True))
 
 
 def frozen_members() -> dict:
@@ -410,9 +410,9 @@ def _write_freeze(member: str, severity: str, reason: str, ref: str) -> None:
         data[member] = {"severity": severity, "reason": reason,
                         "ts": time.time(), "result_ref": ref}
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path,
+                         json.dumps(data, indent=2, sort_keys=True))
 
 
 def unfreeze(member: str) -> bool:
@@ -424,9 +424,9 @@ def unfreeze(member: str) -> bool:
             return False
         del data[member]
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path,
+                         json.dumps(data, indent=2, sort_keys=True))
         return True
 
 

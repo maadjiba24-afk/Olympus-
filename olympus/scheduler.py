@@ -194,9 +194,8 @@ def _save(jobs: list[Job]) -> None:
     # would let a cross-process reader see "no jobs" mid-write (ADR 0005).
     p = _path()
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps([asdict(j) for j in jobs], indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps([asdict(j) for j in jobs], indent=2))
 
 
 def _mutex():
