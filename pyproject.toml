@@ -131,3 +131,20 @@ olympus = ["*", "**/*", ".*", "**/.*"]
 # a reviewed native extension is real executable package content and is signed.
 olympus = ["*.pyc", "**/*.pyc", "*.pyo", "**/*.pyo",
            "__pycache__/*", "**/__pycache__/*"]
+
+[tool.pytest.ini_options]
+# A hanging test must fail FAST and LABELLED, not silently consume the job.
+#
+# Concretely: a deadlocking start barrier in a cross-process race test burned
+# its full harness timeout twice per run. The CI signature was py3.11/py3.12
+# "failing" at ~9m where the same job passes in ~5m30s — a duration anomaly,
+# not an error message, and only visible by comparing a passing run to a
+# failing one. With a per-test ceiling, pytest names the offending test
+# immediately instead.
+#
+# 300s is deliberately generous: no honest test in this suite approaches it
+# (the slowest spawn real subprocesses and finish well under 120s), so this
+# can only fire on a genuine hang. `pytest-timeout` ships in the `test` extra;
+# without it pytest warns about an unknown option and continues, which is the
+# right degradation for a plain `pip install -e .` checkout.
+timeout = 300
