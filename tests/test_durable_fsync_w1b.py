@@ -244,10 +244,39 @@ def test_group_a_sites_remain_plain_os_replace():
 
     Pinned as a test so the exemption is a recorded decision rather than an
     oversight the next sweep silently "fixes".
+
+    Two assertions, because either alone has a hole:
+
+    * **Exactly one** `os.replace(` per file, not merely one present. A
+      presence check passes on any number >= 1, so a new UNCONVERTED publish
+      landing in one of these files would sail through.
+    * **The survivor is the MOVE form**, i.e. its first argument is not a temp
+      file. Count alone does not close the case this test exists for: convert
+      the Group A quarantine AND add an unconverted publish to the same file
+      and the count is still 1. The form check is what catches that, because
+      every publish site in W1-1/W1-1b passed `tmp` (or `tmp_final`) first
+      while every Group A move passes an already-existing path.
     """
+    import re
     from pathlib import Path
     repo = Path(__file__).resolve().parent.parent
-    for rel, _why in GROUP_A:
+    call = re.compile(r"os\.replace\(\s*([A-Za-z_][A-Za-z0-9_]*)")
+    for rel, why in GROUP_A:
         text = (repo / rel).read_text(encoding="utf-8")
-        assert "os.replace(" in text, (
-            f"{rel}: expected a surviving bare os.replace (Group A move)")
+        hits = [(i, ln.strip())
+                for i, ln in enumerate(text.splitlines(), 1)
+                if "os.replace(" in ln]
+        assert len(hits) == 1, (
+            f"{rel}: expected exactly 1 os.replace( — the Group A move "
+            f"({why}) — but found {len(hits)}. "
+            f"Lines: {[f'{i}: {s}' for i, s in hits]}. "
+            f"A NEW publish site here must use atomicio.publish; a Group A "
+            f"move must stay a bare os.replace.")
+        line_no, src = hits[0]
+        first_arg = call.search(src)
+        assert first_arg is not None, (
+            f"{rel}:{line_no}: could not parse the os.replace call: {src!r}")
+        assert not first_arg.group(1).startswith("tmp"), (
+            f"{rel}:{line_no}: the surviving os.replace publishes a TEMP file "
+            f"({src!r}) — that is an unconverted publish, not the Group A "
+            f"move ({why}). Convert it with atomicio.publish.")
