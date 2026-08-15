@@ -15,6 +15,65 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security/Changed — Channel and exec surfaces fail closed (BREAKING, PR #244)
+
+Four unsafe defaults on the paths that let a *remote* party reach the council,
+or let approved code reach the host. Each was safe only for an operator who had
+already configured something; each is now safe for an operator who configures
+nothing. **All four change behavior on upgrade** — the restore switch is named
+in every bullet.
+
+- **`olympus webhook` refuses to start without a secret, and reads it from the
+  header only.** `_secret_ok` returned `True` when `OLYMPUS_WEBHOOK_SECRET` was
+  unset — and the gateway bound `0.0.0.0` — so `olympus webhook` with no further
+  configuration handed any peer on the network an unauthenticated, unmetered
+  channel into the full council on the operator's API key. An optional
+  credential that defaults to "no credential required" is not an optional
+  credential; `a2a_server`, `mcp_server` and `federation` all already refused to
+  serve without their token. The `?secret=` query fallback is gone too: it put
+  the credential in the request line, where it lands in access logs, proxy logs,
+  and anything else that records a URL. **Restore:** there is deliberately no
+  switch back to the open mode — set `OLYMPUS_WEBHOOK_SECRET` and send it in the
+  `X-Olympus-Secret` header. Callers using `?secret=` must move to the header.
+- **WhatsApp requires a signing secret and an allowlist.** Two independent
+  opposite-of-everything-else defaults. `valid_signature` returned `True` when
+  `WHATSAPP_APP_SECRET` was unset, so a default install accepted *any* POST to
+  the webhook URL as genuine — the verify token guards only Meta's GET
+  handshake, not message delivery, so anyone who learned the URL could forge a
+  payload, spoof any sender number, and drive the council on the operator's key.
+  Separately, `_allowed` returned `True` for every sender when
+  `WHATSAPP_ALLOWED_NUMBERS` was unset, while every other channel treats an
+  unknown sender as untrusted (chanbase's default policy is `pairing`) — the
+  opposite of what `docs/GATEWAY.md` documented. Unsigned payloads are now
+  rejected and unknown senders are refused. **Restore:** `WHATSAPP_DM_POLICY=open`
+  reopens DM access to every sender; the signature requirement has no opt-out —
+  set `WHATSAPP_APP_SECRET`.
+- **All 11 channel/webhook servers bind `127.0.0.1`, not `0.0.0.0`.** Seven of
+  them (`whatsapp`, `discord`, `slack`, `mattermost`, `googlechat`, `sms`,
+  `webhook`) defaulted to every interface, so starting a channel to test it
+  locally published a council entry point to the whole LAN — and for the two
+  above, an unauthenticated one. `web`, `serve`, `a2a` and `federation` already
+  bound loopback; the set is now uniform. Exposing one is a deliberate act.
+  **Restore:** pass an explicit `--host 0.0.0.0` (the `run_server(host=...)`
+  keyword is unchanged for programmatic callers).
+- **Sovereign and production modes refuse the unisolated `local` exec backend.**
+  `local` runs a bare subprocess with unrestricted network. That is an
+  acceptable trade on a developer laptop, but not for the two postures that make
+  an explicit promise: `sovereign_mode` guarantees data leaves only to
+  allowlisted hosts and that forbidden egress fails closed — impossible to
+  honor while commands run unconfined — and `is_production` already refuses to
+  boot on a forgeable signing seed, so the same fail-closed reasoning applies to
+  running untrusted-derived commands with no confinement. Both now refuse with
+  an actionable message instead of silently voiding the invariant.
+  **Restore:** `OLYMPUS_EXEC_BACKEND=docker` (or `auto`, which uses Docker when
+  a daemon is up and degrades to `local` otherwise), or
+  `OLYMPUS_EXEC_ALLOW_UNISOLATED=1` to accept the risk when confinement exists
+  at another layer (a dedicated VM, gVisor, a locked-down container).
+
+19 new tests (`tests/test_chanbase.py`, `tests/test_sandbox.py`) plus updated
+WhatsApp and email-webhook coverage; the new settings are documented in
+`.env.example`.
+
 ## [0.27.3] — 2026-08-12
 
 ### Added
