@@ -1,8 +1,25 @@
 name: CI
 
 on:
+  # `push:` with NO branch filter used to fire alongside `pull_request:`, so
+  # every push to a PR branch ran the WHOLE workflow twice against the same
+  # commit — two full matrices and two ~17-minute Windows legs. That doubled PR
+  # turnaround, and on #248 it produced two `test` contexts where one was green
+  # while its twin was still pending: the merge was blocked, the block was
+  # misdiagnosed as a review requirement, and it was bypassed with --admin.
+  # Restricting push to `main` leaves PR validation entirely to
+  # `pull_request:` and keeps the post-merge verification run on main.
   push:
+    branches: [main]
   pull_request:
+
+# Supersede a PR's own in-flight run when it is pushed again — but NEVER on
+# main. A push to main is the post-merge verification run for a commit that is
+# already the released tip; cancelling it because a later merge landed would
+# leave the earlier commit unverified with nothing to say so.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:

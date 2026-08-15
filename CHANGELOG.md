@@ -15,6 +15,59 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Retention and journal compaction are actually scheduled (W1-2)
+
+Two maintenance routines existed, were tested, and had **no production caller**.
+
+- `retention.sweep_conversations` was CLI-only — `heartbeat.py` contained no
+  retention call at all, so `OLYMPUS_CONVERSATION_RETAIN_DAYS` enforced nothing
+  and the policy was decorative.
+- `sessionlog.compact` had zero production callers (every caller was a test), so
+  journals grew to `OLYMPUS_SESSION_JOURNAL_MAX_MB` (64 MB default), after which
+  appends **and crash recovery** stop for that conversation — the recovery layer
+  disappearing silently, on the heaviest sessions first.
+
+Both now run inside the existing daily `maintenance` job, so both inherit its
+`_watch_job` per-job timeout (`OLYMPUS_JOB_STALL_SECS`) rather than getting an
+unsupervised path of their own.
+
+- **The retention call passes no `retain_days`, deliberately.**
+  `config.RETAIN_DAYS` (30, always set) is in scope directly above it and is the
+  obvious-looking argument, but it governs trace/usage/evidence files.
+  Conversation retention has its own knob, defaulting to `None` = UNSET, because
+  `retention.py` refuses to guess a deletion policy for user content —
+  `deployment_blocked_reason()` exists to report that refusal. Passing
+  `RETAIN_DAYS` would have invented a 30-day conversation-deletion policy on
+  every existing deployment. It passes `dry_run=False` explicitly, since that
+  parameter defaults to `True`. Legal hold still outranks the sweep on the
+  scheduled path exactly as on the CLI one.
+- **Compaction derives its bound from `_replay`, not from the snapshot.**
+  `compact()` physically deletes records at or below `through_seq`, and
+  `recover_history` rebuilds from the journal **alone** — it never reads the
+  snapshot. A bound taken from "what the snapshot covers" would destroy exactly
+  the crash-recovery data the journal exists for, silently, because nothing
+  reads it until the next crash. New `sessionlog.safe_compact_bound` instead
+  drops only what `_replay` already discards: a `reset` clears the accumulated
+  history, so everything strictly before the most recent `reset` is dead by
+  construction. `sync()` writes such a `reset` + full-history pair whenever the
+  history is rewritten rather than extended (`/clear`, ABC/in-run compaction) —
+  which is what happens on exactly the long conversations whose journals
+  approach the ceiling. The bound is then **verified by replay** before use, so
+  safety rests on a comparison rather than on that reasoning being correct; an
+  append-only journal has no dead prefix, yields a bound of 0, and is left alone
+  and reported rather than truncated.
+- **The threshold is a quarter of the ceiling** (16 MB at the default), not the
+  ceiling itself: at the ceiling, appends and recovery have already stopped, so
+  a threshold there would only ever fire after the damage.
+
+13 new tests (`tests/test_w1_2_scheduled_maintenance.py`), driving the real
+`heartbeat.tick` rather than the routines directly — a test that mocks the sweep
+and asserts it was called proves nothing about either default. The two that
+matter were mutation-proved: passing `config.RETAIN_DAYS` deletes 3 of 3
+conversations under an unset policy, and omitting `dry_run=False` leaves the
+over-age conversation on disk.
+
+
 ### Security/Changed — Channel and exec surfaces fail closed (BREAKING, PR #244)
 
 Four unsafe defaults on the paths that let a *remote* party reach the council,

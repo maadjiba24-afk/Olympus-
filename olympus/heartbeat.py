@@ -411,6 +411,44 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             stale = domainlore.prune(config.RETAIN_DAYS, now)
             if stale:
                 log.append(f"Web knowledge: pruned {stale} stale domain(s).")
+            # Conversation retention (W1-2). Until now `sweep_conversations`
+            # had no production caller at all, so OLYMPUS_CONVERSATION_RETAIN_
+            # DAYS enforced nothing and the policy was decorative.
+            #
+            # NOTE the two arguments NOT passed here, both deliberate:
+            #
+            #   * NO `retain_days`. `config.RETAIN_DAYS` is in scope directly
+            #     above (30, always set) and is the obvious-looking argument,
+            #     but it belongs to trace/usage/evidence files. Conversation
+            #     retention has its OWN knob which defaults to None = UNSET,
+            #     because `retention.py` refuses to guess a deletion policy for
+            #     user content — `deployment_blocked_reason()` exists to report
+            #     that refusal. Passing RETAIN_DAYS would silently invent a
+            #     30-day conversation-deletion policy on every deployment that
+            #     never asked for one. Unset must stay a no-op.
+            #   * `dry_run=False` IS passed. It defaults to True, so omitting
+            #     it would ship a scheduler that runs forever, logs plausible
+            #     output and deletes nothing.
+            from . import retention
+            swept = retention.sweep_conversations(dry_run=False)
+            if swept["removed"] or swept["held"]:
+                log.append(
+                    f"Retention ({swept['policy']}): removed "
+                    f"{swept['removed']} conversation(s); "
+                    f"{len(swept['held'])} under legal hold.")
+            # Journal compaction (W1-2). Also had no production caller, so
+            # journals grew to OLYMPUS_SESSION_JOURNAL_MAX_MB and then stopped
+            # accepting appends AND stopped serving crash recovery — silently,
+            # and on the heaviest sessions first.
+            from . import sessionlog
+            comp = sessionlog.compact_due()
+            if comp["compacted"]:
+                saved = comp["bytes_before"] - comp["bytes_after"]
+                log.append(f"Journals: compacted {len(comp['compacted'])} "
+                           f"session(s), reclaiming {saved // 1024} KiB.")
+            if comp["skipped"]:
+                log.append(f"Journals: {len(comp['skipped'])} oversized "
+                           f"session(s) had nothing safe to compact.")
 
         try:
             _watch_job("maintenance", _job_maintenance)
