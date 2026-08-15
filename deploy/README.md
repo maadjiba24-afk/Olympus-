@@ -76,6 +76,35 @@ status` prints a health summary.
 cd Olympus-/deploy && git pull && docker compose up -d --build
 ```
 
+### Upgrading ACROSS the non-root change (one time, only if you deployed before it)
+
+The image now runs as `olympus` (**UID/GID 10001**) instead of root. Docker seeds
+a **new** named volume with the ownership of the image's mount point, so a fresh
+deployment gets `olympus-memory` owned by `10001:10001` and needs nothing here.
+
+An **existing** volume keeps the ownership it was created with. If this instance
+ever ran the root image, `olympus-memory` is root-owned and the new non-root
+process cannot write to it — the container starts, reports healthy for a moment,
+and then silently persists nothing. Fix it once, before `up`:
+
+```bash
+docker compose down
+docker run --rm -v olympus-memory:/m alpine chown -R 10001:10001 /m
+docker compose up -d --build
+```
+
+Verify:
+
+```bash
+docker compose exec olympus sh -c 'id; touch /app/memory/.wtest && echo WRITABLE && rm /app/memory/.wtest'
+```
+
+**Untested against a real pre-existing volume**, because Olympus has never been
+deployed and no such volume exists to test against. The command is written from
+the documented behaviour of volume ownership, not from a reproduction — treat it
+as the starting point for the first real upgrade, and check `id` and the write
+probe above rather than assuming it worked.
+
 ## Optional
 - **Self-learning loop:** runs **by default** (the `heartbeat` service above).
   Comment it out in `docker-compose.yml` if you want a chat-only instance that

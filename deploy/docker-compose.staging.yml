@@ -56,10 +56,26 @@ services:
       - "8484"
     volumes:
       # All durable state: journals, ledgers, evidence stores, accounts, vault.
-      # Owned by the container user (root in the shipped image). If you run the
-      # image as a non-root UID, chown this volume to match or the boot probe
-      # in `staging_problems()` will refuse to start — which is the intended
-      # behaviour, not a bug to work around.
+      #
+      # Owned by the container user, which is `olympus` (UID/GID 10001) — this
+      # profile builds the repo-root Dockerfile (`build: ..` above), so it picked
+      # up the non-root USER in W1-3. It is NOT root, and non-root is no longer
+      # hypothetical here.
+      #
+      # A FRESH volume needs nothing: Docker seeds a new named volume with the
+      # ownership of the image's mount point, and the Dockerfile chowns
+      # /app/memory to 10001:10001 before declaring VOLUME — the same mechanism
+      # verified end-to-end for the production stack.
+      #
+      # A PRE-EXISTING volume created while the image still ran as root keeps
+      # that root ownership, and the non-root process then cannot write to it.
+      # `staging_problems()` catches this at boot and REFUSES to start — which is
+      # the intended behaviour, not a bug to work around; its `_writable_dir`
+      # probe actually writes and removes a file rather than trusting
+      # `os.access(W_OK)`, which lies under exactly these volume setups. Fix it
+      # with the one-time chown in deploy/README.md ("Upgrading ACROSS the
+      # non-root change") pointed at olympus-staging-memory, not the production
+      # volume.
       - olympus-staging-memory:/app/memory
     expose:
       - "8484"                     # compose network only — never the host

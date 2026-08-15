@@ -2,6 +2,13 @@
 # the app over the private compose network. Run from this directory:
 #   cp .env.example .env   # then fill it in
 #   docker compose up -d --build
+#
+# RESOURCE LIMITS ARE TOP-LEVEL SERVICE KEYS (mem_limit / cpus / pids_limit),
+# deliberately NOT `deploy.resources.limits`. In a non-swarm compose file
+# `deploy:` is accepted and validated and then SILENTLY IGNORED by
+# `docker compose up` — you get a file that documents limits it does not
+# enforce, which reads as done and is the worst of both. Verify with
+# `docker inspect`, never by reading this file back.
 services:
   olympus:
     build: ..                       # uses the Dockerfile at the repo root
@@ -12,6 +19,20 @@ services:
       - olympus-memory:/app/memory  # persists memory/accounts/vault across restarts
     expose:
       - "8484"                       # internal only — never exposed to the internet
+    # Uses the interpreter already in the image: python:3.12-slim ships neither
+    # curl nor wget, and a not-found healthcheck command does not fail loudly —
+    # it exits non-zero forever, which with the service_healthy gates below
+    # would deadlock the whole stack.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8484/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 512
 
   # WhatsApp gateway. Dormant by default (profile); start it once the WHATSAPP_*
   # vars are in .env, with:  docker compose --profile whatsapp up -d --build
@@ -26,9 +47,23 @@ services:
       - olympus-memory:/app/memory
     expose:
       - "8485"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8485/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
 
   caddy:
-    image: caddy:2
+    # Pinned by digest for the same reason as the app's base image; `caddy:2` is
+    # a mutable tag. Resolved 2026-08-16 from caddy:2.
+    # Bump: docker pull caddy:2 && \
+    #       docker inspect --format='{{index .RepoDigests 0}}' caddy:2
+    image: caddy@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
     restart: unless-stopped
     ports:
       - "80:80"                      # ACME challenge + HTTP→HTTPS redirect
@@ -37,8 +72,14 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data             # stores the issued TLS certificates
       - caddy-config:/config
+    # `depends_on: [olympus]` waited only for the container to START, so Caddy
+    # could begin proxying to a process that was not yet serving. Wait for READY.
     depends_on:
-      - olympus
+      olympus:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
 
   # The self-learning loop — ON by default so Olympus keeps learning around the
   # clock (world scans, YouTube learning, daily skill distillation, weekly
@@ -62,7 +103,26 @@ services:
     volumes:
       - olympus-memory:/app/memory
     depends_on:
-      - olympus
+      olympus:
+        condition: service_healthy
+    # The image HEALTHCHECK probes http://127.0.0.1:8484/healthz, but this
+    # service runs the autonomous loop and serves NO HTTP — so it inherits a
+    # check it can never pass and reports `unhealthy` about 20s after every
+    # start (verified: exit=1, urlopen ConnectionRefused). Nothing gates on it,
+    # so it deadlocks nothing, but a container that is permanently unhealthy by
+    # construction is a false alarm that teaches operators to ignore health
+    # status and trips any monitoring pointed at it. A loop with no endpoint has
+    # no readiness to report; say so explicitly rather than ship a red light.
+    healthcheck:
+      disable: true
+    # Deliberately the TIGHTEST limits in the stack. This is the service most
+    # likely to run away: it wakes on its own cadence with no human in the loop,
+    # makes model calls that spend real money, and writes to the shared memory
+    # volume — so an unbounded fork/alloc here damages the app's state too. It
+    # has no inbound traffic to serve, so it needs no headroom for bursts.
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 128
 
   # Off-droplet backups WITHOUT the token-spending heartbeat: this loop only
   # runs `olympus backup` (no model calls), so it's safe to leave on. Set
@@ -74,6 +134,9 @@ services:
   #   command: ["sh", "-c", "while true; do python -m olympus backup || true; sleep ${OLYMPUS_BACKUP_EVERY:-86400}; done"]
   #   volumes:
   #     - olympus-memory:/app/memory
+  #   mem_limit: 512m
+  #   cpus: 0.5
+  #   pids_limit: 128
 
 volumes:
   olympus-memory:
