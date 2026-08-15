@@ -1,0 +1,37 @@
+# THE UNIFIED RELEASE ENVIRONMENT for the verify and build jobs (Step 1L).
+#
+# ONE resolution, not several. v2 installed requirements.lock and then a
+# separate publish lock in sequence; the two disagreed on 9 pins, and the
+# second install silently replaced the first — so the environment the suite
+# ran in was not the environment either lock described. pip-compile resolves
+# runtime, test, and build requirements together here, so a conflict is a
+# hard resolution failure at lock time instead of a silent overwrite on a
+# release runner.
+#
+# The runtime and test requirements are NOT duplicated here: they are read
+# from pyproject.toml (with the `test` extra) by the regeneration command
+# below, so this file can never drift from the package's own metadata.
+#
+# Locked for the runner the workflow uses: Ubuntu 24.04 / CPython 3.12.3.
+# Regenerate ONLY inside a clean Linux environment — a Windows resolution
+# evaluates platform markers differently and produces a different tree.
+# The toolchain itself is pinned so the lock is reproducible:
+#
+#   python3.12 -m venv /tmp/olymp-lock
+#   /tmp/olymp-lock/bin/python --version  # Python 3.12.3
+#   /tmp/olymp-lock/bin/pip install 'pip==24.0' 'pip-tools==7.6.1'
+#   /tmp/olymp-lock/bin/pip-compile --generate-hashes --allow-unsafe \
+#       --strip-extras --extra test \
+#       --output-file=requirements-publish.lock \
+#       pyproject.toml requirements-publish.in
+#
+# `--allow-unsafe` pins setuptools: the workflow builds with
+# `python -m build --no-isolation`, so the build backend
+# (setuptools.build_meta, per pyproject's `requires`) must come from this
+# hash-locked set rather than an unpinned network resolution at build time.
+
+# Build and validation toolchain.
+pip==24.0
+build
+twine
+setuptools>=77

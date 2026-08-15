@@ -1,42 +1,283 @@
 name: Publish to PyPI
 
-# Publishes the package when you push a version tag (e.g. v0.16.0).
-# One-time setup on PyPI: create the project, then add a "Trusted Publisher"
-# for this repo + workflow (no API token needed). See
-# https://docs.pypi.org/trusted-publishers/ . Alternatively, set a
-# PYPI_API_TOKEN secret and switch the publish step to use it.
+# Fail-closed release pipeline (Step 1L v4). FIVE jobs, one direction of
+# trust, each source-processing job on a fresh runner that checks out the
+# release commit itself:
+#
+#   verify  — gates only. No environment, secret, or OIDC. Proves dispatch,
+#             tag, commit, version, toolchain, and the complete test suite.
+#   sign    — environment: release-signing, no OIDC. Installs only the
+#             minimal signing lock and uploads only the signed manifest.
+#   build   — no environment, secret, or OIDC. Re-verifies the immutable
+#             manifest artifact, builds, and uploads untrusted distributions.
+#   inspect — no environment, secret, or OIDC. On a fresh checkout, downloads
+#             BOTH artifacts by ID, cryptographically re-verifies the manifest
+#             and expected commit, then validates the exact dist artifact.
+#   publish — environment: pypi. Downloads the artifact ID forwarded by
+#             inspect and publishes it. Two SHA-pinned actions, no shell.
+#
+# NO SOURCE CODE, VALIDATOR, OR LOCKFILE IS TRANSFERRED BETWEEN JOBS. Every
+# source-processing job derives those inputs from `${{ github.sha }}`. The two
+# permitted artifacts are the signed manifest and the distributions; every
+# consumer selects the exact upload by immutable artifact ID.
+#
+# TRIGGER: workflow_dispatch ONLY, with a required stable tag input. Dispatch
+# must originate from the protected main branch. A tag-push trigger would let
+# an old tag execute an obsolete workflow; the gates prove that main is the
+# protected tip and that the supplied immutable tag peels exactly to it.
+#
+# The signing seed and the PyPI OIDC credential NEVER share an environment:
+# `release-signing` holds the seed, `pypi` holds the publishing trust, and no
+# job holds both. Inspect holds neither.
+#
+# SUPPLY-CHAIN STATUS: every action is pinned to a full commit SHA with the
+# audited release named alongside. This pipeline is NOT fully
+# content-addressed: pypa/gh-action-pypi-publish, even at a pinned commit,
+# builds and runs a Docker action from its own `Dockerfile`
+# (`FROM python:3.13-slim`, a mutable tag). Tracked as
+# MUTABLE_PUBLISH_CONTAINER=BLOCKED in RELEASING.md.
+#
+# ACTIVATION IS BLOCKED: this workflow is disabled (disabled_manually) and
+# must stay so until every precondition in RELEASING.md is met and a separate
+# reviewed activation authorization exists.
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing stable release tag to publish (vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
-    environment: pypi
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
-      id-token: write          # required for trusted publishing (OIDC)
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          python-version: "3.12"
-      - name: Sign the release (witness manifest)
-        # Generate the signed verification.json so it ships inside the wheel.
-        # Set OLYMPUS_SIGNING_SEED as a repo secret for an authentic key.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12.3"
+      - name: Prove the exact release toolchain
+        run: |
+          set -euo pipefail
+          python scripts/release_pipeline.py check-toolchain \
+            --python-version "3.12.3" --pip-version "24.0"
+      - name: Require dispatch from the protected main branch
+        run: python scripts/release_pipeline.py check-dispatch-ref "${GITHUB_REF}" "${GITHUB_REF_TYPE}"
+      - name: Install the unified hash-locked release environment
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements-publish.lock
+          python -m pip install -e . --no-deps --no-build-isolation
+      - name: Require this run to be the protected main tip
+        run: python scripts/release_pipeline.py check-commit "${GITHUB_SHA}"
+      - name: Require the supplied tag to peel to this commit
+        run: |
+          set -euo pipefail
+          python scripts/release_pipeline.py check-tag-points-at \
+            "${RELEASE_TAG}" "${GITHUB_SHA}"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+      - name: Require tag, source, and runtime versions to be identical
+        run: python scripts/release_pipeline.py check-tag "${RELEASE_TAG}"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+      - name: Run the established release gates
+        run: |
+          set -euo pipefail
+          python scripts/check_no_prerelease.py requirements.lock
+          python scripts/check_no_prerelease.py requirements-publish.lock
+          python scripts/check_no_prerelease.py requirements-signing.lock
+          python -m compileall -q olympus
+          python -m olympus capabilities --check
+          python scripts/check_threat_model.py
+          python scripts/noninterference_gate.py
+      - name: Run the full test suite
+        run: python -m pytest -q
+
+  sign:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-signing
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12.3"
+      - name: Prove the exact signing toolchain
+        run: |
+          set -euo pipefail
+          python scripts/release_pipeline.py check-toolchain \
+            --python-version "3.12.3" --pip-version "24.0"
+      - name: Install only the minimal hash-locked signing dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements-signing.lock
+      - name: Sign the release manifest
+        # The narrow signer imports only the standard library + cryptography.
+        # It writes the sole signing output outside the source checkout.
         env:
           OLYMPUS_SIGNING_SEED: ${{ secrets.OLYMPUS_SIGNING_SEED }}
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
-          python -m pip install -e .
-          python -m olympus sign
-      - name: Build sdist and wheel
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/signed"
+          python -B scripts/release_pipeline.py sign-manifest \
+            --manifest "$RUNNER_TEMP/signed/verification.json" \
+            --expected-commit "${GITHUB_SHA}"
+      - name: Upload only the signed manifest
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: signed-manifest
+          path: ${{ runner.temp }}/signed/verification.json
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12.3"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: ${{ runner.temp }}/signed
+      - name: Prove the exact build toolchain
         run: |
-          python -m pip install --upgrade build
-          python -m build
-      - name: Check the built distributions
+          set -euo pipefail
+          python scripts/release_pipeline.py check-toolchain \
+            --python-version "3.12.3" --pip-version "24.0"
+      - name: Install the unified hash-locked release environment
         run: |
-          python -m pip install --upgrade twine
-          twine check dist/*
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements-publish.lock
+      - name: Verify the signed manifest against this checkout
+        run: |
+          set -euo pipefail
+          python -B scripts/release_pipeline.py verify-manifest \
+            --manifest "$RUNNER_TEMP/signed/verification.json" \
+            --expected-commit "${GITHUB_SHA}"
+      - name: Place the verified manifest in the package tree
+        run: |
+          set -euo pipefail
+          cp -- "$RUNNER_TEMP/signed/verification.json" olympus/verification.json
+      - name: Build wheel and sdist without build isolation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist"
+          python -B -m build --no-isolation --outdir "$RUNNER_TEMP/dist"
+      - name: Upload distributions for independent inspection
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  inspect:
+    needs: [sign, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ needs.build.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12.3"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: ${{ runner.temp }}/signed
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/dist
+      - name: Prove the exact inspection toolchain
+        run: |
+          set -euo pipefail
+          python scripts/release_pipeline.py check-toolchain \
+            --python-version "3.12.3" --pip-version "24.0"
+      - name: Install the unified hash-locked inspection environment
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements-publish.lock
+      - name: Cryptographically re-verify the immutable manifest
+        run: |
+          set -euo pipefail
+          python -B scripts/release_pipeline.py verify-manifest \
+            --manifest "$RUNNER_TEMP/signed/verification.json" \
+            --expected-commit "${GITHUB_SHA}"
+      - name: Inspect the exact immutable distributions
+        run: |
+          set -euo pipefail
+          python -B scripts/release_pipeline.py check-dists \
+            --manifest "$RUNNER_TEMP/signed/verification.json" \
+            --expected-commit "${GITHUB_SHA}" \
+            --dist "$RUNNER_TEMP/dist" \
+            --version "${RELEASE_TAG#v}"
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+      - name: Run twine validation on the inspected distributions
+        run: python -m twine check --strict "$RUNNER_TEMP"/dist/*
+
+  publish:
+    needs: inspect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # Inspect forwards the exact dist artifact ID it approved; the
+      # credentialed job cannot choose another artifact and runs no shell.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          artifact-ids: ${{ needs.inspect.outputs.artifact-id }}
+          path: ${{ runner.temp }}/dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: ${{ runner.temp }}/dist
