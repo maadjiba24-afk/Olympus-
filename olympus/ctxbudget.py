@@ -137,12 +137,26 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
+    """Publish the calibration atomically. DELIBERATELY NOT FSYNCED (W1-1b).
+
+    `observe()` reaches here on EVERY model call (`llm._observe_ctx` at
+    llm.py:389/483, `openai_compat.py:187`) as a locked read-modify-write —
+    structurally identical to `usage.record`, which is where W1-1 shipped a
+    per-call fsync and broke the observability wall-clock contract. This is the
+    `ctx` component of that same benchmark (5.070 ms on the runner), so a
+    default fsync here would repeat W1-1 exactly.
+
+    No knob, unlike the spend ledger: this holds no safety control. Losing the
+    calibration degrades an estimator that recalibrates itself from the next
+    few samples, so the durability is not worth a millisecond on the per-call
+    path. Atomicity is still guaranteed — a reader never sees a torn file."""
     path = _cal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    from . import atomicio
+    atomicio.publish(tmp, path,
+                     json.dumps(data, ensure_ascii=False, sort_keys=True),
+                     fsync=False)
 
 
 def _key(provider: str, model: str) -> str:

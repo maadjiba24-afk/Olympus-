@@ -380,11 +380,25 @@ def _lock_name(user: str | None) -> str:
 
 def _atomic_write_json(path: Path, obj) -> None:
     """tmp + `os.replace` publish (ADR 0005) — a reader never sees a torn
-    ledger, and a crash leaves the previous good file intact."""
+    ledger, and a crash leaves the previous good file intact.
+
+    DELIBERATELY NOT FSYNCED (W1-1b). Reached from `record()` -> `_apply()`,
+    a locked read-modify-write, and `recall._heat_record` calls that once per
+    RETRIEVED MEMORY on a path `orchestrator` runs every turn
+    (`recall.context_block`, orchestrator.py:531/1195/2307) — so this writes
+    more often per turn than `usage.record` does, where W1-1's per-call fsync
+    broke the observability contract. `OLYMPUS_CTXHEAT` defaults to `off`,
+    which means a default install would not have caught the regression and an
+    operator enabling heat would have absorbed it silently.
+
+    No knob: heat is telemetry by construction ("never a retrieval
+    dependency"), so a power cut costs pin-proposal quality, not correctness or
+    a safety control. Atomicity is unchanged."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(obj, indent=1, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    from . import atomicio
+    atomicio.publish(tmp, path, json.dumps(obj, indent=1, sort_keys=True),
+                     fsync=False)
 
 
 # --- entry validation (W2-I2.1 content minimisation) ----------------------

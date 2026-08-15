@@ -71,9 +71,9 @@ def _save_state(state: dict) -> None:
     p = _state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"seen": state["seen"][-2000:],
-                               "last_run": state["last_run"]}), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps({"seen": state["seen"][-2000:],
+                                         "last_run": state["last_run"]}))
 
 
 def discoveries() -> list[dict]:

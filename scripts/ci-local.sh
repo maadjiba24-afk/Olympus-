@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Reproduce one leg of the CI `test` job EXACTLY, locally, before pushing.
+# Reproduce one leg of the CI `test` job locally, before pushing.
 #
 # `scripts/dev-setup.sh` gives you a working environment. This gives you CI's
-# environment, and the difference is where the bugs live. Four failures in the
-# Wave-0/#245 work were invisible locally and red on CI, every one of them
-# because the local venv differed from the runner's:
+# environment, and the difference is where the bugs live. Five failures were
+# invisible locally and red on CI:
 #
 #   * `build` was absent from the `test` extra — the local venv happened to
 #     have it from an earlier install.
@@ -13,6 +12,20 @@
 #   * `tomllib` was imported unguarded — invisible on 3.11+, fatal on the 3.10
 #     leg, and the dev machine was 3.11.
 #   * a test's POSIX assumption passed on Linux and failed on Windows.
+#   * W1-1 turned on an fsync per model call.
+#     `test_observability_overhead_absolute_cost_bounded` measured the overhead
+#     at 25.4 ms on windows-py3.12, over its 25.0 ms limit, and 6.6 ms on the
+#     dev machine — same code, same test, storage an order of magnitude faster.
+#     Both arms passed locally.
+#
+# The first four were the local venv differing from the runner's, and this
+# script fixes those. THE FIFTH IS NOT REPRODUCIBLE HERE AT ALL: it reproduces
+# CI's ENVIRONMENT — interpreter version, hash-pinned lock, install order,
+# guard sequence — and it cannot reproduce CI's HARDWARE. Performance contracts
+# are green locally almost regardless of what you did to them, so a green run
+# here is not evidence about a timing-sensitive change. For those, the CI leg
+# is the only authority; treating a local pass as confirmation is a check that
+# cannot fail.
 #
 # What CI does, and therefore what this does, in order:
 #     pip install --require-hashes -r requirements.lock
@@ -50,7 +63,11 @@ for arg in "$@"; do
     --reuse) REUSE=1 ;;
     --fast)  FAST=1 ;;
     3.*)     PYVER="$arg" ;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    # Print the whole header block and stop at the first non-comment line.
+    # Was a hardcoded '2,36p', which silently truncated the help the moment
+    # the header grew a fifth bullet.
+    -h|--help) awk 'NR>1 {if (/^#/) {sub(/^# ?/,""); print} else exit}' "$0"
+               exit 0 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done

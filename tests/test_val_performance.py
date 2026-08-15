@@ -2818,7 +2818,46 @@ def observability_gate_violations(r, *, pairs=_OBS_PAIRS,
     return out
 
 
-def test_observability_overhead_absolute_cost_bounded():
+def _format_obs_evidence(r: dict, limit_ms: float) -> str:
+    """The measurement, as a block for the CI log.
+
+    Printed on PASS as well as failure (W1-1b). This contract was green on
+    `main` for seven consecutive runs while its margin eroded invisibly, and
+    W1-1's fix reported "passed" without saying by how much. A perf contract
+    that shows its numbers only once it is already breached cannot show drift
+    approaching the limit — and it cannot corroborate a claim that some
+    component was deliberately left un-fsynced.
+    """
+    head = max(0.0, r["abs_overhead_ms"] - r["noise_ms"])
+    tail = max(0.0, r["abs_overhead_ms"] + r["noise_ms"])
+    lines = [
+        "",
+        "observability overhead (limit %.1f ms)" % limit_ms,
+        "  off_p50_ms       %9.3f" % r["off_p50_ms"],
+        "  on_p50_ms        %9.3f" % r["on_p50_ms"],
+        "  abs_overhead_ms  %9.3f" % r["abs_overhead_ms"],
+        "  noise_ms         %9.3f" % r["noise_ms"],
+        "  band             [%.3f, %.3f]  headroom %.3f ms" % (
+            head, tail, limit_ms - tail),
+    ]
+    comps = r.get("components_ms") or {}
+    if comps:
+        lines.append("  components_ms")
+        for name, c in sorted(comps.items(),
+                              key=lambda kv: -(kv[1].get("ms", 0.0)
+                                               if isinstance(kv[1], dict)
+                                               else kv[1])):
+            if isinstance(c, dict):
+                lines.append(
+                    "    %-9s %8.3f  +/- %6.3f  %s" % (
+                        name, c.get("ms", 0.0), c.get("noise_ms", 0.0),
+                        "resolved" if c.get("resolved") else "NOT resolved"))
+            else:
+                lines.append("    %-9s %8.3f" % (name, c))
+    return "\n".join(lines)
+
+
+def test_observability_overhead_absolute_cost_bounded(capsys):
     """Reference: +2.10 ms/run absolute on a fake pipeline (+100.9% of a
     denominator containing ~0 ms of provider time). The assertion is on the
     ABSOLUTE cost, which is the portable number.
@@ -2829,9 +2868,16 @@ def test_observability_overhead_absolute_cost_bounded():
     limit; a band that reaches or crosses it is inconclusive and fails, and
     a lower edge at or above it is a breach. The failure message keeps the
     raw overhead, noise, and both band edges visible.
+
+    The same numbers are printed on PASS — see `_format_obs_evidence`.
     """
     r = pv.bench_observability_overhead(iters=_OBS_PAIRS,
                                         batches=_OBS_BATCHES)
+    evidence = _format_obs_evidence(r, _OBS_LIMIT_MS)
+    # `capsys.disabled()` so it reaches the CI log under a plain `pytest -q`,
+    # which otherwise shows captured stdout only for FAILING tests.
+    with capsys.disabled():
+        print(evidence)
     violations = observability_gate_violations(r)
     assert violations == [], (
         f"observability wall-clock contract violated: {violations}\n"
@@ -2839,6 +2885,7 @@ def test_observability_overhead_absolute_cost_bounded():
         f"noise_ms={r['noise_ms']} "
         f"overhead_lower_bound_ms={r['overhead_lower_bound_ms']} "
         f"overhead_upper_bound_ms={r['overhead_upper_bound_ms']}\n"
+        f"{evidence}\n"
         f"full result: {r}")
 
 

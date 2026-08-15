@@ -234,8 +234,12 @@ def revoke(jti: str) -> None:
         path = _revocation_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(sorted(r)), encoding="utf-8")
-        os.replace(tmp, path)
+        # Always fsync, no policy knob (W1-1). Losing this write does not drop
+        # data, it silently UN-revokes a capability: `is_revoked` answers False
+        # for a token the operator believes they killed. There is no throughput
+        # argument that outweighs that, and revocations are rare.
+        from . import atomicio
+        atomicio.publish(tmp, path, json.dumps(sorted(r)))
 
 
 def is_revoked(jti: str) -> bool:

@@ -328,8 +328,8 @@ def _atomic_write(path: Path, text: str) -> None:
     never see a half-written connectors.json (the corruption that used to make
     the next add_mcp_server drop the whole registry)."""
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    from . import atomicio
+    atomicio.publish(tmp, path, text)
 
 
 def _raw_mcp_definitions() -> list[dict]:

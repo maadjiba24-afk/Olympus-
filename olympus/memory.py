@@ -324,8 +324,8 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     # -wins instead of corrupt-or-crash; the sealed journal remains the ordered
     # record of every turn.
     tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(history, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps(history, indent=1))
     # Seal this turn's delta into the session journal (C1) — purely additive:
     # the snapshot above stays the source of truth, and a journal failure must
     # never block the reply (sync captures its own errors; belt and braces).
@@ -422,9 +422,9 @@ def _watchlist_pop_locked(proclock) -> str | None:
         # Atomic rewrite: a crash mid-write_text would drop every remaining
         # queued URL; with os.replace the queue is always old-or-new.
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text("\n".join(rest) + ("\n" if rest else ""),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path,
+                         "\n".join(rest) + ("\n" if rest else ""))
         return url
 
 
@@ -575,9 +575,9 @@ def sweep_evidence(retain_days: int) -> int:
             continue
         tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            tmp.write_text("\n".join(keep) + ("\n" if keep else ""),
-                           encoding="utf-8")
-            os.replace(tmp, path)
+            from . import atomicio
+            atomicio.publish(tmp, path,
+                             "\n".join(keep) + ("\n" if keep else ""))
             removed += dropped
         except OSError:
             try:
@@ -865,8 +865,8 @@ def save_state(state: dict) -> None:
         # mid-write would reset every cadence timestamp (ADR 0005). Only the
         # heartbeat writes, so the thread lock suffices for exclusion.
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path, json.dumps(state, indent=2))
 
 
 def bump_conversation_count() -> int:

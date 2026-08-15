@@ -23,7 +23,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from . import config, memory, proclock
+from . import atomicio, config, memory, proclock
 
 
 class BudgetExceeded(RuntimeError):
@@ -675,13 +675,75 @@ def estimate_cost(model: str, in_tokens: int, out_tokens: int, *,
     return total / 1_000_000
 
 
+def _fsync_ledger() -> bool:
+    """OLYMPUS_USAGE_FSYNC — `auto` (the default) or `always`.
+
+    THE ONE W1-1 SITE THAT DOES NOT FSYNC BY DEFAULT. Every other durable store
+    syncs unconditionally; this one is opt-in, and the reason is measurement.
+
+    W1-1 shipped `always` on the strength of an isolated micro-benchmark (1000
+    calls x 5 repeats, best-of, NTFS on a local SSD, py3.10): 730 -> 2269
+    us/call, i.e. +1.539 ms for the fsync alone.
+
+    The Windows CI leg then failed
+    `test_observability_overhead_absolute_cost_bounded`, which attributes
+    overhead per component and found `usage` at 19.519 +/- 1.095 ms — 77% of
+    the total and the lowest-noise component in the run, the only one cleanly
+    resolved.
+
+    MEASURE LIKE AGAINST LIKE. 19.519 ms is the WHOLE usage component
+    (read-modify-write plus fsync, per pipeline run); 1.539 ms was the fsync
+    ALONE, per call. Dividing them is the same category of error that produced
+    the wrong default in the first place — a number compared against something
+    it was not measured against. On the component's own basis, the local
+    before/after in this PR is:
+
+        with fsync     4.824 ms      without fsync   2.264 ms
+        fsync cost     2.560 ms      (component basis, same benchmark)
+
+    The runner's read-modify-write cannot cost zero, so its fsync is strictly
+    LESS than 19.519 ms and the runner-to-local ratio is strictly under 7.6x
+    (19.519 / 2.560) — realistically around 6x, i.e. roughly 15 ms. Both raw
+    numbers are above so the next reader can redo the arithmetic; no point
+    estimate is claimed, because the data does not support one.
+
+    The latency alone would be affordable — ~15 ms against a ~2 s provider call
+    is under 1%. What is not affordable is WHERE it sits: `record()` does a
+    read-modify-write of the whole ledger INSIDE a cross-process lock, and
+    Olympus runs specialists in parallel. Twenty concurrent calls do not each
+    pay it simultaneously; they serialize on that lock and pay in sequence —
+    roughly **300 ms welded onto the critical path of every council turn**, plus
+    contention. The W1-1 record justified `always` with "~30 ms on a
+    20-specialist council turn": an order of magnitude out, because it
+    multiplied the local per-call cost and ignored the lock.
+
+    `OLYMPUS_USAGE_FSYNC=always` restores the sync for an operator who has
+    measured their own storage and wants it. Any unrecognised value reads as
+    off, so a typo cannot silently re-arm a ~300 ms serialized cost.
+
+    RESIDUAL RISK, stated plainly: with the default, a power cut can return an
+    empty ledger. That resets the day's recorded spend to 0 and disables the
+    budget cap until the next write. This is the cost of the decision. It is
+    also exactly where `main` stood before W1-1 — the change declines to make
+    one thing better at a price that was mis-measured, rather than regressing
+    anything. W1-1c is the real fix: append + fsync one record like `sessionlog`
+    does, which is both cheaper and more crash-safe than rewriting the whole
+    file under a lock."""
+    return os.environ.get("OLYMPUS_USAGE_FSYNC", "auto").strip().lower() \
+        == "always"
+
+
 def _atomic_write_json(path: Path, obj) -> None:
-    """Write JSON via a temp file + os.replace so a reader (or a crash) never
-    sees a torn ledger — a truncated ledger would silently reset the day's spend
-    to 0 and disable the budget guard."""
+    """Write JSON via a temp file + os.replace so a reader never sees a torn
+    ledger — a truncated ledger would silently reset the day's spend to 0 and
+    disable the budget guard.
+
+    The fsync that would also make this survive a power cut is OFF by default
+    here, alone among the W1-1 sites, because it costs roughly 15 ms inside a
+    cross-process lock on CI storage. See `_fsync_ledger`."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    atomicio.publish(tmp, path, json.dumps(obj, indent=1),
+                     fsync=_fsync_ledger())
 
 
 # In-process per-user session totals (since process start). The per-day

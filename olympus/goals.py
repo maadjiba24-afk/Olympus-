@@ -90,9 +90,8 @@ def _save(goals: list[Goal]) -> None:
     p = _path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps([asdict(g) for g in goals], indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps([asdict(g) for g in goals], indent=2))
 
 
 def goals_every() -> int:

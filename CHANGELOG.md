@@ -74,6 +74,159 @@ in every bullet.
 WhatsApp and email-webhook coverage; the new settings are documented in
 `.env.example`.
 
+### Fixed — The durable stores now survive power loss, not just a peer process (W1-1)
+
+Twelve write sites published with a temp file and `os.replace` and no `fsync`.
+That idiom buys **atomicity** — a reader in another process sees the old bytes
+or the new ones, never a torn blob — and it does **not** buy durability.
+`os.replace` is atomic against another process, not against power loss: the
+rename can reach disk before the data blocks it points at, so a crash at the
+wrong moment leaves a file that exists and is empty.
+
+The failure was silent by construction. Every consumer maps an unreadable or
+empty file to `{}` / `[]` and rebuilds from defaults — correct for a torn read,
+and exactly wrong for a lost write. A crash could reset the day's spend ledger,
+empty a user's memory document, or un-revoke a capability, with nothing raised
+anywhere.
+
+- **One helper, not twelve copies.** New `olympus/atomicio.py` implements the
+  pattern `sessionlog` already used (`_append_records`, `compact`): flush and
+  `os.fsync` the temp file's descriptor **before** the replace, then fsync the
+  parent directory to make the rename itself durable. Text is written through
+  text mode with `Path.write_text`'s defaults, so the on-disk bytes are
+  unchanged — a binary write would have altered Windows newline translation and
+  moved every file hash with it, including the conversation-snapshot sha that
+  `sessionlog.compact` records.
+- **Ten sites now fsync.** `store.FileStore.put` (the highest-value one —
+  `usermem`, `relgraph`, `docrag` and `routing_outcomes` all ride it),
+  `identity`'s revocation set, `prefs`, `goals`, `todos`, `domainlore` (records
+  + staged), and `memory`'s conversation snapshot, watchlist pop, retention
+  sweep and heartbeat state. The eleventh — the spend ledger — is opt-in; see
+  below.
+- **The revocation set always fsyncs, with no knob.** Losing that write does
+  not merely drop data, it silently **un-revokes** a capability: `is_revoked`
+  answers `False` for a token the operator believes they killed. No throughput
+  argument outweighs that, and revocations are rare.
+- **The spend ledger does NOT fsync by default** (`OLYMPUS_USAGE_FSYNC=always`
+  opts in). It is the one exempted site, and the exemption is the interesting
+  part of this entry. The Windows CI leg failed
+  `test_val_performance.py::test_observability_overhead_absolute_cost_bounded`,
+  which attributes overhead per component and found `usage` at **19.519 ± 1.095
+  ms** — 77% of the total and the lowest-noise component in the run, the only
+  one cleanly resolved.
+
+  **Measure like against like.** 19.519 ms is the *whole* usage component
+  (read-modify-write **plus** fsync, per pipeline run). The micro-benchmark that
+  justified the original default — 730 → 2269 µs, **+1.539 ms** — was the fsync
+  *alone*, per call. Dividing one by the other is the same category of error
+  that produced the wrong default: a number compared against something it was
+  not measured against. On the component's own basis, the local before/after in
+  this PR is **4.824 ms with fsync → 2.264 ms without**, so the fsync costs
+  **2.560 ms** locally. The runner's read-modify-write cannot cost zero, so its
+  fsync is strictly *under* 19.519 ms and the runner-to-local ratio is strictly
+  **under 7.6×** (19.519 / 2.560) — realistically ~6×, i.e. roughly 15 ms. Both
+  raw numbers are given so the arithmetic can be redone; no point estimate is
+  claimed, because the data does not support one.
+
+  The latency alone would be affordable — ~15 ms against a ~2 s provider call is
+  under 1%. What is not is **where it sits**: `record()` rewrites the whole
+  ledger inside a *cross-process lock*, and specialists run in parallel, so
+  twenty concurrent calls serialize on that lock rather than overlapping —
+  roughly **300 ms welded onto the critical path of every council turn**. The
+  first draft of this entry justified the sync with "~30 ms on a 20-specialist
+  council turn"; that was an order of magnitude out, because it multiplied the
+  local per-call cost and ignored the lock.
+
+  *(Correction: commit `dd58dd5` and an earlier revision of this entry cited a
+  "12.7×" runner-to-local ratio. That figure divided the runner's whole usage
+  component by an isolated per-call fsync micro-benchmark — different quantities
+  on different bases — and is not supportable. The bounded claim above replaces
+  it. The decision is unchanged; only the multiplier was wrong.)*
+
+  **Residual risk, plainly:** a power cut can return an empty ledger, which
+  resets the day's recorded spend to 0 and disables the budget cap until the
+  next write. That is the cost of this decision. It is also exactly where the
+  ledger stood before W1-1 — nothing is made worse, one thing is declined at a
+  price that was mis-measured by 13×. W1-1c is the real fix: append and fsync a
+  single record the way `sessionlog` does, which is both cheaper and *more*
+  crash-safe than rewriting the whole file under a lock.
+- **Windows degrades cleanly.** The parent-directory fsync is POSIX-only — a
+  directory cannot be opened as a descriptor on Windows, so `os.O_DIRECTORY`
+  does not exist there. `atomicio.CAN_FSYNC_DIR` probes the capability rather
+  than the platform name and skips that half without error; the file fsync, the
+  larger half, applies on both.
+
+22 new tests (`tests/test_durable_fsync.py`). Power loss cannot be simulated in
+a unit test, so they assert the calls: `os.fsync` and `os.replace` are traced at
+the `os` module and each store must sync a non-empty file descriptor **strictly
+before** it publishes. 11 of them were confirmed to fail with the fsync removed.
+One pins the ledger's exemption directly — if a future change re-arms that
+default it fails in milliseconds rather than nine minutes into the Windows leg —
+and one proves `OLYMPUS_USAGE_FSYNC=always` still syncs correctly, which is the
+contract W1-1c will have to meet.
+
+### Fixed — The remaining durable publish sites, classified before converting (W1-1b)
+
+W1-1 left 24 `os.replace` calls outside its scope. This converts the 19 that are
+publishes, and the interesting half of the work was deciding which of them may
+fsync — because W1-1 applied a correct fix uniformly and broke a wall-clock
+contract, having never asked how often one of its eleven sites was called.
+
+Every site here has a **recorded call frequency** before it got a default.
+
+- **Group A — 5 sites deliberately untouched.** `ctxbudget.py:110`,
+  `ctxheat.py:470`, `modelgrade.py:340`, `toolcall_repair.py:522` and
+  `backup.py:410` are `os.replace(existing, dest)` — quarantine and restore
+  *moves* of a file that already exists, with no data to publish.
+  `atomicio.publish(tmp, path, data)` has no meaning for them and would corrupt
+  them. A test pins the exemption so the next sweep cannot silently "fix" it.
+- **Group B — 3 sites publish atomically and deliberately do NOT fsync.** Each
+  is a locked read-modify-write on a per-call path, the exact shape whose fsync
+  broke the observability contract in W1-1:
+  - `ctxbudget._save` — every model call (`llm._observe_ctx`,
+    `openai_compat.py:187`); it is the `ctx` component of that same benchmark.
+  - `toolcall_repair.record_repair` — every repaired tool call, under
+    `proclock.lock("repair-stats")`; `usage.py` already groups it with
+    `ctxbudget.observe` as one contract.
+  - `ctxheat._atomic_write_json` — **reclassified during this work.** It reads
+    as ordinary state, but `recall._heat_record` calls `record()` once per
+    *retrieved memory* on the per-turn `recall.context_block` path
+    (orchestrator.py:531/1195/2307), so it writes more often per turn than
+    `usage.record` does. `OLYMPUS_CTXHEAT` defaults to `off`, so a default
+    install would not have caught the regression and an operator enabling heat
+    would have absorbed it silently.
+
+  No knob at any of the three, unlike the spend ledger: none holds a safety
+  control. Losing calibration degrades an estimator that recalibrates; losing
+  heat or repair counters loses telemetry. Atomicity is unchanged throughout.
+- **Group C — 16 sites fsync before replace**, with the traced frequency:
+  `agentbeat._save` (per beat mutation), `backup.create` (per backup),
+  `connectors._atomic_write` (per operator action), `facts._trim` (amortised —
+  only past 2×`MAX_FACTS`, ~1 per 5000 appends; the normal path is an append),
+  `modelgate._write_baseline` / `_write_freeze` / `unfreeze` (per gate run and
+  per operator action — **a lost freeze silently un-freezes a member**, the
+  same safety-control argument as `identity.revoke`), `modelgrade.rebuild`
+  (only on a missing/stale/corrupt `cards.json`), `pairing._save`,
+  `pluginstore._save_manifest`, `scheduler._save`, `skills._save_emb_cache`
+  (embedding cache MISS only), `watchdog.write_forensics` (per anomaly),
+  `webmonitor._save`, `webproposals._save`, `webreflect._save_state`.
+
+**The perf contract now publishes its evidence on PASS**, not only on failure.
+`test_observability_overhead_absolute_cost_bounded` prints `off_p50`, `on_p50`,
+`abs_overhead_ms`, noise, the band, remaining headroom, and the per-component
+breakdown into the CI log via `capsys.disabled()`. `main` was green for seven
+consecutive runs while this margin eroded invisibly, and W1-1's fix reported
+"passed" without saying by how much. A contract that shows its measurement only
+once it is already breached cannot show drift approaching the limit — and
+cannot corroborate a claim that some component was deliberately left unsynced.
+
+21 new tests (`tests/test_durable_fsync_w1b.py`), reusing W1-1's tracing
+helpers. Group C asserts fsync-before-replace; Group B asserts the inverse, so
+the exemptions fail loudly if a later sweep "fixes" them. Two were
+mutation-proved in both directions — a Group C site reverted to a bare
+`write_text` + `os.replace`, and a Group B site given its fsync back — each
+shown failing before the fix was restored.
+
 ## [0.27.3] — 2026-08-12
 
 ### Added
