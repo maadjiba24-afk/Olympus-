@@ -79,11 +79,16 @@ def test_filestore_put_syncs_before_replace(monkeypatch):
     assert_data_synced_before_replace(events, label="store.put")
 
 
-def test_usage_record_syncs_before_replace(monkeypatch):
-    """The spend ledger. Default is fsync=always; see the knob test below."""
+def test_usage_record_syncs_when_opted_in(monkeypatch):
+    """The spend ledger is the ONE W1-1 site that does not fsync by default
+    (W1-1a — it cost 19.5 ms/call inside a cross-process lock on CI storage).
+    This proves the OPT-IN path is still correct, which is what keeps W1-1c
+    honest: when the ledger becomes cheap to sync, this is the contract it has
+    to meet."""
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 100, 50)
-    assert_data_synced_before_replace(events, label="usage.record")
+    assert_data_synced_before_replace(events, label="usage.record (always)")
 
 
 def test_identity_revoke_syncs_before_replace(monkeypatch):
@@ -151,11 +156,10 @@ def test_watchlist_pop_syncs_before_replace(monkeypatch):
 # --- the usage hot-path knob ----------------------------------------------
 
 def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
-    """`OLYMPUS_USAGE_FSYNC=auto` restores the pre-W1-1 atomic-only write.
+    """`OLYMPUS_USAGE_FSYNC=auto` keeps the atomic-only write.
 
-    The knob exists because the sync is a measured 3.1x on this call (730 ->
-    2269 us/call); `always` is the default because a lost ledger disables the
-    budget cap. Publishing must still be atomic either way.
+    Publishing must still be atomic either way — `auto` gives up durability
+    against power loss, never atomicity against a peer process.
     """
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "auto")
     events = trace(monkeypatch)
@@ -165,14 +169,45 @@ def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
     first_replace = kinds.index("replace")
     assert not [e for e in events[:first_replace] if e[0] == "fsync"], \
         "auto must not fsync"
-
-
-def test_usage_fsync_knob_defaults_to_always(monkeypatch):
+    # Unset resolves to auto — the same thing, by default.
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
-    assert usage._fsync_ledger() is True
+    assert usage._fsync_ledger() is False, "unset must resolve to auto"
+
+
+def test_usage_record_does_not_fsync_by_default(monkeypatch):
+    """REGRESSION GUARD (W1-1a). The ledger sync costs ~19.5 ms per call inside
+    a cross-process lock on CI storage — ~400 ms serialized across a
+    20-specialist council turn — which is what
+    `test_val_performance.py::test_observability_overhead_absolute_cost_bounded`
+    caught on the windows-py3.12 leg.
+
+    If a future change re-arms the default, this fails here in milliseconds
+    instead of nine minutes into the Windows leg."""
+    monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
+    events = trace(monkeypatch)
+    usage.record("claude-opus-5", 100, 50)
+    kinds = [e[0] for e in events]
+    assert "replace" in kinds, "the ledger must still publish atomically"
+    first_replace = kinds.index("replace")
+    assert not [e for e in events[:first_replace] if e[0] == "fsync"], \
+        ("the usage ledger must NOT fsync by default — it is the one W1-1 site "
+         f"exempted, see usage._fsync_ledger. events={events}")
+
+
+def test_usage_fsync_knob_defaults_to_auto(monkeypatch):
+    """Opt-IN, and fail-safe: anything unrecognised reads as off, so a typo
+    cannot silently re-arm a 400 ms serialized cost."""
+    monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
+    assert usage._fsync_ledger() is False
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")
     assert usage._fsync_ledger() is True
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "AUTO")     # case-insensitive
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "ALWAYS")   # case-insensitive
+    assert usage._fsync_ledger() is True
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "AUTO")
+    assert usage._fsync_ledger() is False
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "yes")      # unrecognised
+    assert usage._fsync_ledger() is False
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "")         # empty
     assert usage._fsync_ledger() is False
 
 

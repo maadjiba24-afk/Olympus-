@@ -97,40 +97,59 @@ anywhere.
   unchanged — a binary write would have altered Windows newline translation and
   moved every file hash with it, including the conversation-snapshot sha that
   `sessionlog.compact` records.
-- **Sites covered.** `store.FileStore.put` (the highest-value one — `usermem`,
-  `relgraph`, `docrag` and `routing_outcomes` all ride it), `usage`'s ledger
-  write, `identity`'s revocation set, `prefs`, `goals`, `todos`, `domainlore`
-  (records + staged), and `memory`'s conversation snapshot, watchlist pop,
-  retention sweep and heartbeat state.
+- **Ten sites now fsync.** `store.FileStore.put` (the highest-value one —
+  `usermem`, `relgraph`, `docrag` and `routing_outcomes` all ride it),
+  `identity`'s revocation set, `prefs`, `goals`, `todos`, `domainlore` (records
+  + staged), and `memory`'s conversation snapshot, watchlist pop, retention
+  sweep and heartbeat state. The eleventh — the spend ledger — is opt-in; see
+  below.
 - **The revocation set always fsyncs, with no knob.** Losing that write does
   not merely drop data, it silently **un-revokes** a capability: `is_revoked`
   answers `False` for a token the operator believes they killed. No throughput
   argument outweighs that, and revocations are rare.
-- **The spend ledger's cost was measured, not assumed.** `usage.record` runs
-  once per model call with no batch to amortise a sync over, so it was timed at
-  1000 calls × 5 repeats (best-of, NTFS on a local SSD, py3.10):
+- **The spend ledger does NOT fsync by default** (`OLYMPUS_USAGE_FSYNC=always`
+  opts in). It is the one exempted site, and the exemption is the interesting
+  part of this entry. A local benchmark put the sync at **+1.539 ms/call**
+  (1000 calls × 5 repeats, best-of, NTFS on a local SSD, py3.10: 730 → 2269
+  µs). The Windows CI leg then measured the same sync at **19.5 ms/call —
+  12.7× the local figure** — via
+  `test_val_performance.py::test_observability_overhead_absolute_cost_bounded`,
+  which attributes overhead per component and found `usage` responsible for 77%
+  of the total with the lowest noise of any component (19.519 ± 1.095 ms, the
+  only one cleanly resolved). Cloud block storage is slower than a hosted
+  runner, not faster, so 19.5 ms is the realistic number and 1.5 ms was the
+  outlier.
 
-      no fsync (before)   730 µs/call
-      fsync=always       2269 µs/call     3.1×, +1539 µs
-      fsync=auto          733 µs/call     confirms the refactor itself is free
+  The latency alone would be affordable — 19.5 ms against a ~2 s provider call
+  is 1%. What is not is **where it sits**: `record()` rewrites the whole ledger
+  inside a *cross-process lock*, and specialists run in parallel, so twenty
+  concurrent calls serialize on that lock rather than paying in parallel —
+  roughly **400 ms welded onto the critical path of every council turn**. The
+  first draft of this entry justified the sync with "~30 ms on a 20-specialist
+  council turn"; that was wrong by an order of magnitude, because it multiplied
+  the local per-call cost and ignored the lock.
 
-  3.1× is material against the function's own runtime and immaterial against
-  what it accompanies: `record()` books a network round-trip measured in
-  seconds, so +1.5 ms is ~0.08% of a ~2 s call and ~30 ms on a 20-specialist
-  council turn. The ledger is the budget guard's only durable state, so the
-  default is **`always`**; `OLYMPUS_USAGE_FSYNC=auto` restores the previous
-  atomic-only write for an operator whose storage measures differently (a
-  network filesystem makes `fsync` far more expensive than this).
+  **Residual risk, plainly:** a power cut can return an empty ledger, which
+  resets the day's recorded spend to 0 and disables the budget cap until the
+  next write. That is the cost of this decision. It is also exactly where the
+  ledger stood before W1-1 — nothing is made worse, one thing is declined at a
+  price that was mis-measured by 13×. W1-1c is the real fix: append and fsync a
+  single record the way `sessionlog` does, which is both cheaper and *more*
+  crash-safe than rewriting the whole file under a lock.
 - **Windows degrades cleanly.** The parent-directory fsync is POSIX-only — a
   directory cannot be opened as a descriptor on Windows, so `os.O_DIRECTORY`
   does not exist there. `atomicio.CAN_FSYNC_DIR` probes the capability rather
   than the platform name and skips that half without error; the file fsync, the
   larger half, applies on both.
 
-21 new tests (`tests/test_durable_fsync.py`). Power loss cannot be simulated in
+22 new tests (`tests/test_durable_fsync.py`). Power loss cannot be simulated in
 a unit test, so they assert the calls: `os.fsync` and `os.replace` are traced at
 the `os` module and each store must sync a non-empty file descriptor **strictly
 before** it publishes. 11 of them were confirmed to fail with the fsync removed.
+One pins the ledger's exemption directly — if a future change re-arms that
+default it fails in milliseconds rather than nine minutes into the Windows leg —
+and one proves `OLYMPUS_USAGE_FSYNC=always` still syncs correctly, which is the
+contract W1-1c will have to meet.
 
 ## [0.27.3] — 2026-08-12
 
