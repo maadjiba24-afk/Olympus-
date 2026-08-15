@@ -540,8 +540,15 @@ def record_repair(provider: str, model: str, tool: str, rung: int,
             bucket = data["days"].setdefault(day, {}).setdefault(key, {})
             bucket[cell] = int(bucket.get(cell, 0)) + 1
             tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps(data), encoding="utf-8")
-            os.replace(tmp, path)
+            # Atomic, DELIBERATELY NOT FSYNCED (W1-1b). This runs on every
+            # repaired tool call inside `proclock.lock("repair-stats")` — the
+            # same per-call locked read-modify-write shape that made W1-1's
+            # fsync on `usage.record` a measured latency regression, and
+            # `usage.py` already groups `record_repair` with
+            # `ctxbudget.observe` as sharing that contract. No knob: these are
+            # repair COUNTERS, so a power cut loses telemetry, not a control.
+            from . import atomicio
+            atomicio.publish(tmp, path, json.dumps(data), fsync=False)
     except Exception as err:                       # noqa: BLE001 — I-T3
         try:
             from . import errors

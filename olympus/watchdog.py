@@ -694,8 +694,8 @@ def write_forensics(state: LeaseState, verdict: Verdict, *,
         with proclock.lock(_LOCK, timeout=10.0):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_text(blob, encoding="utf-8")
-            os.replace(tmp, path)
+            from . import atomicio
+            atomicio.publish(tmp, path, blob)
         return path
     except Exception as err:                       # noqa: BLE001 - never raise
         # A wedged/broken lock must not cost us the evidence AND the process:

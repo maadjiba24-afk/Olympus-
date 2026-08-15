@@ -165,6 +165,68 @@ default it fails in milliseconds rather than nine minutes into the Windows leg �
 and one proves `OLYMPUS_USAGE_FSYNC=always` still syncs correctly, which is the
 contract W1-1c will have to meet.
 
+### Fixed — The remaining durable publish sites, classified before converting (W1-1b)
+
+W1-1 left 24 `os.replace` calls outside its scope. This converts the 19 that are
+publishes, and the interesting half of the work was deciding which of them may
+fsync — because W1-1 applied a correct fix uniformly and broke a wall-clock
+contract, having never asked how often one of its eleven sites was called.
+
+Every site here has a **recorded call frequency** before it got a default.
+
+- **Group A — 5 sites deliberately untouched.** `ctxbudget.py:110`,
+  `ctxheat.py:470`, `modelgrade.py:340`, `toolcall_repair.py:522` and
+  `backup.py:410` are `os.replace(existing, dest)` — quarantine and restore
+  *moves* of a file that already exists, with no data to publish.
+  `atomicio.publish(tmp, path, data)` has no meaning for them and would corrupt
+  them. A test pins the exemption so the next sweep cannot silently "fix" it.
+- **Group B — 3 sites publish atomically and deliberately do NOT fsync.** Each
+  is a locked read-modify-write on a per-call path, the exact shape whose fsync
+  broke the observability contract in W1-1:
+  - `ctxbudget._save` — every model call (`llm._observe_ctx`,
+    `openai_compat.py:187`); it is the `ctx` component of that same benchmark.
+  - `toolcall_repair.record_repair` — every repaired tool call, under
+    `proclock.lock("repair-stats")`; `usage.py` already groups it with
+    `ctxbudget.observe` as one contract.
+  - `ctxheat._atomic_write_json` — **reclassified during this work.** It reads
+    as ordinary state, but `recall._heat_record` calls `record()` once per
+    *retrieved memory* on the per-turn `recall.context_block` path
+    (orchestrator.py:531/1195/2307), so it writes more often per turn than
+    `usage.record` does. `OLYMPUS_CTXHEAT` defaults to `off`, so a default
+    install would not have caught the regression and an operator enabling heat
+    would have absorbed it silently.
+
+  No knob at any of the three, unlike the spend ledger: none holds a safety
+  control. Losing calibration degrades an estimator that recalibrates; losing
+  heat or repair counters loses telemetry. Atomicity is unchanged throughout.
+- **Group C — 16 sites fsync before replace**, with the traced frequency:
+  `agentbeat._save` (per beat mutation), `backup.create` (per backup),
+  `connectors._atomic_write` (per operator action), `facts._trim` (amortised —
+  only past 2×`MAX_FACTS`, ~1 per 5000 appends; the normal path is an append),
+  `modelgate._write_baseline` / `_write_freeze` / `unfreeze` (per gate run and
+  per operator action — **a lost freeze silently un-freezes a member**, the
+  same safety-control argument as `identity.revoke`), `modelgrade.rebuild`
+  (only on a missing/stale/corrupt `cards.json`), `pairing._save`,
+  `pluginstore._save_manifest`, `scheduler._save`, `skills._save_emb_cache`
+  (embedding cache MISS only), `watchdog.write_forensics` (per anomaly),
+  `webmonitor._save`, `webproposals._save`, `webreflect._save_state`.
+
+**The perf contract now publishes its evidence on PASS**, not only on failure.
+`test_observability_overhead_absolute_cost_bounded` prints `off_p50`, `on_p50`,
+`abs_overhead_ms`, noise, the band, remaining headroom, and the per-component
+breakdown into the CI log via `capsys.disabled()`. `main` was green for seven
+consecutive runs while this margin eroded invisibly, and W1-1's fix reported
+"passed" without saying by how much. A contract that shows its measurement only
+once it is already breached cannot show drift approaching the limit — and
+cannot corroborate a claim that some component was deliberately left unsynced.
+
+21 new tests (`tests/test_durable_fsync_w1b.py`), reusing W1-1's tracing
+helpers. Group C asserts fsync-before-replace; Group B asserts the inverse, so
+the exemptions fail loudly if a later sweep "fixes" them. Two were
+mutation-proved in both directions — a Group C site reverted to a bare
+`write_text` + `os.replace`, and a Group B site given its fsync back — each
+shown failing before the fix was restored.
+
 ## [0.27.3] — 2026-08-12
 
 ### Added

@@ -71,9 +71,8 @@ def _save(beats: list[Beat]) -> None:
     # mid-write would see "no beats" (ADR 0005).
     p = _path()
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps([asdict(b) for b in beats], indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    from . import atomicio
+    atomicio.publish(tmp, p, json.dumps([asdict(b) for b in beats], indent=2))
 
 
 def _mutex():

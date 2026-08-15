@@ -46,8 +46,8 @@ def _load() -> dict:
 def _save(data: dict) -> None:
     path = _path()
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    from . import atomicio
+    atomicio.publish(tmp, path, json.dumps(data, indent=1))
     try:
         os.chmod(path, 0o600)
     except OSError:

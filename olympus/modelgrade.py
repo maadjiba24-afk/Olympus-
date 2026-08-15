@@ -911,9 +911,9 @@ def rebuild(*, now: float | None = None) -> dict:
         path = cards_path()
         with proclock.lock(_LOCK):
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
-                           encoding="utf-8")
-            os.replace(tmp, path)
+            from . import atomicio
+            atomicio.publish(tmp, path,
+                             json.dumps(data, indent=2, sort_keys=True))
     except (OSError, TimeoutError, ValueError) as err:
         _capture("modelgrade.rebuild", err, context=str(cards_path()))
     return data

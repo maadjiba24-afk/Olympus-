@@ -182,8 +182,8 @@ def create(*, full: bool = False, label: str = "") -> dict:
 
         final = out_dir / (name + suffix)
         tmp_final = out_dir / ("." + name + suffix + ".tmp")
-        tmp_final.write_bytes(payload)
-        os.replace(tmp_final, final)    # atomic publish
+        from . import atomicio
+        atomicio.publish(tmp_final, final, payload)   # atomic + durable
 
         # 3) Sign the on-disk archive bytes (tamper-evidence sidecar).
         digest = _sha256_bytes(payload)

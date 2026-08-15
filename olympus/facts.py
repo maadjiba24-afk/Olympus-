@@ -59,8 +59,8 @@ def _trim(path: Path) -> None:
     except OSError:
         return
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text("\n".join(lines[-MAX_FACTS:]) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    from . import atomicio
+    atomicio.publish(tmp, path, "\n".join(lines[-MAX_FACTS:]) + "\n")
 
 
 def record(claim: str, verdict: str, source: str = "") -> str:
