@@ -23,7 +23,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from . import config, memory, proclock
+from . import atomicio, config, memory, proclock
 
 
 class BudgetExceeded(RuntimeError):
@@ -675,13 +675,41 @@ def estimate_cost(model: str, in_tokens: int, out_tokens: int, *,
     return total / 1_000_000
 
 
+def _fsync_ledger() -> bool:
+    """OLYMPUS_USAGE_FSYNC — `always` (the default) or `auto`.
+
+    Same shape as `sessionlog._fsync_always`. `record()` runs once per model
+    call and there is no batch to amortise the sync over, so this was measured
+    rather than assumed (1000 calls x 5 repeats, best-of, NTFS on a local SSD,
+    py3.10):
+
+        no fsync (pre-W1-1)   730 us/call
+        fsync=always         2269 us/call     3.1x, +1539 us
+        fsync=auto            733 us/call     confirms the refactor is free
+
+    3.1x is material against this function's own runtime and immaterial against
+    what it accompanies: `record()` is called once per model call, and the
+    network round-trip it books costs seconds. +1.5 ms on a ~2 s call is ~0.08%,
+    and ~30 ms on a 20-specialist council turn. The ledger is the budget guard's
+    only durable state — losing it to a power cut resets the day's spend to 0
+    and disables the cap — so the default buys real protection for a cost the
+    surrounding operation cannot notice.
+
+    `auto` restores the pre-W1-1 behaviour (atomic against a peer process, not
+    against power loss) for an operator who measures differently on their own
+    storage — a network filesystem makes fsync far more expensive than this."""
+    return os.environ.get("OLYMPUS_USAGE_FSYNC", "always").strip().lower() \
+        != "auto"
+
+
 def _atomic_write_json(path: Path, obj) -> None:
-    """Write JSON via a temp file + os.replace so a reader (or a crash) never
-    sees a torn ledger — a truncated ledger would silently reset the day's spend
-    to 0 and disable the budget guard."""
+    """Write JSON via a temp file + fsync + os.replace so a reader (or a crash)
+    never sees a torn ledger — a truncated ledger would silently reset the day's
+    spend to 0 and disable the budget guard, and an unsynced one can come back
+    from a power cut EMPTY, which reads the same way (W1-1)."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(obj, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    atomicio.publish(tmp, path, json.dumps(obj, indent=1),
+                     fsync=_fsync_ledger())
 
 
 # In-process per-user session totals (since process start). The per-day

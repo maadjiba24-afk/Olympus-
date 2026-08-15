@@ -50,5 +50,5 @@ def set(user: str, key: str, value) -> None:
             data[key] = value
         path = _path(user)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        from . import atomicio
+        atomicio.publish(tmp, path, json.dumps(data, indent=2))

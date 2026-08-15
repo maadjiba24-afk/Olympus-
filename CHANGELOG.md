@@ -74,6 +74,64 @@ in every bullet.
 WhatsApp and email-webhook coverage; the new settings are documented in
 `.env.example`.
 
+### Fixed — The durable stores now survive power loss, not just a peer process (W1-1)
+
+Twelve write sites published with a temp file and `os.replace` and no `fsync`.
+That idiom buys **atomicity** — a reader in another process sees the old bytes
+or the new ones, never a torn blob — and it does **not** buy durability.
+`os.replace` is atomic against another process, not against power loss: the
+rename can reach disk before the data blocks it points at, so a crash at the
+wrong moment leaves a file that exists and is empty.
+
+The failure was silent by construction. Every consumer maps an unreadable or
+empty file to `{}` / `[]` and rebuilds from defaults — correct for a torn read,
+and exactly wrong for a lost write. A crash could reset the day's spend ledger,
+empty a user's memory document, or un-revoke a capability, with nothing raised
+anywhere.
+
+- **One helper, not twelve copies.** New `olympus/atomicio.py` implements the
+  pattern `sessionlog` already used (`_append_records`, `compact`): flush and
+  `os.fsync` the temp file's descriptor **before** the replace, then fsync the
+  parent directory to make the rename itself durable. Text is written through
+  text mode with `Path.write_text`'s defaults, so the on-disk bytes are
+  unchanged — a binary write would have altered Windows newline translation and
+  moved every file hash with it, including the conversation-snapshot sha that
+  `sessionlog.compact` records.
+- **Sites covered.** `store.FileStore.put` (the highest-value one — `usermem`,
+  `relgraph`, `docrag` and `routing_outcomes` all ride it), `usage`'s ledger
+  write, `identity`'s revocation set, `prefs`, `goals`, `todos`, `domainlore`
+  (records + staged), and `memory`'s conversation snapshot, watchlist pop,
+  retention sweep and heartbeat state.
+- **The revocation set always fsyncs, with no knob.** Losing that write does
+  not merely drop data, it silently **un-revokes** a capability: `is_revoked`
+  answers `False` for a token the operator believes they killed. No throughput
+  argument outweighs that, and revocations are rare.
+- **The spend ledger's cost was measured, not assumed.** `usage.record` runs
+  once per model call with no batch to amortise a sync over, so it was timed at
+  1000 calls × 5 repeats (best-of, NTFS on a local SSD, py3.10):
+
+      no fsync (before)   730 µs/call
+      fsync=always       2269 µs/call     3.1×, +1539 µs
+      fsync=auto          733 µs/call     confirms the refactor itself is free
+
+  3.1× is material against the function's own runtime and immaterial against
+  what it accompanies: `record()` books a network round-trip measured in
+  seconds, so +1.5 ms is ~0.08% of a ~2 s call and ~30 ms on a 20-specialist
+  council turn. The ledger is the budget guard's only durable state, so the
+  default is **`always`**; `OLYMPUS_USAGE_FSYNC=auto` restores the previous
+  atomic-only write for an operator whose storage measures differently (a
+  network filesystem makes `fsync` far more expensive than this).
+- **Windows degrades cleanly.** The parent-directory fsync is POSIX-only — a
+  directory cannot be opened as a descriptor on Windows, so `os.O_DIRECTORY`
+  does not exist there. `atomicio.CAN_FSYNC_DIR` probes the capability rather
+  than the platform name and skips that half without error; the file fsync, the
+  larger half, applies on both.
+
+21 new tests (`tests/test_durable_fsync.py`). Power loss cannot be simulated in
+a unit test, so they assert the calls: `os.fsync` and `os.replace` are traced at
+the `os` module and each store must sync a non-empty file descriptor **strictly
+before** it publishes. 11 of them were confirmed to fail with the fsync removed.
+
 ## [0.27.3] — 2026-08-12
 
 ### Added
