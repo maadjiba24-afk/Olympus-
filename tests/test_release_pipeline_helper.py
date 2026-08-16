@@ -94,8 +94,13 @@ def _git_repo(tmp_path: Path, *, key: str | None = None) -> Path:
         f"# pinned\n{key or _pubkey_for(_SEED)}\n", encoding="utf-8")
     (root / "README.md").write_text("# Test Olympus\n", encoding="utf-8")
     (root / "LICENSE").write_text("test license\n", encoding="utf-8")
+    # Derived from the module constant, not hardcoded: `_pinned_setuptools_version`
+    # compares this fixture against the REAL policy constant, so a hardcoded
+    # version here would break every one of these tests the next time the pin is
+    # bumped — for a reason that has nothing to do with what they test.
     (root / "requirements-publish.lock").write_text(
-        "setuptools==84.0.0\n", encoding="utf-8")
+        f"setuptools=={rp._SETUPTOOLS_METADATA_POLICY_VERSION}\n",
+        encoding="utf-8")
     (root / "pyproject.toml").write_text(
         '[build-system]\n'
         'requires = ["setuptools>=77"]\n'
@@ -114,6 +119,11 @@ def _git_repo(tmp_path: Path, *, key: str | None = None) -> Path:
         '    "Development Status :: 4 - Beta",\n'
         '    "Programming Language :: Python :: 3",\n'
         ']\n\n'
+        # The THIRD setuptools pin (W1-5). `_pinned_setuptools_version` now
+        # cross-checks all three locations, so a faithful miniature repo has to
+        # carry this one too.
+        '[project.optional-dependencies]\n'
+        f'test = ["setuptools=={rp._SETUPTOOLS_METADATA_POLICY_VERSION}"]\n\n'
         '[project.urls]\n'
         'Homepage = "https://example.invalid/olympus"\n'
         'Issues = "https://example.invalid/olympus/issues"\n\n'
@@ -787,6 +797,14 @@ def _fixture_core_metadata(root: Path, version: str, *,
         "Classifier: Programming Language :: Python :: 3\n"
         "Requires-Python: >=3.10\n"
         "Description-Content-Type: text/markdown\n"
+        # The fixture pyproject declares a `test` extra carrying the third
+        # setuptools pin (W1-5), so the METADATA this miniature hand-builds has
+        # to declare it too — `_check_project_metadata` compares the wheel's
+        # requirements against what the signed pyproject says, and a fixture
+        # that disagrees with its own pyproject fails for the wrong reason.
+        "Provides-Extra: test\n"
+        f'Requires-Dist: setuptools=='
+        f'{rp._SETUPTOOLS_METADATA_POLICY_VERSION}; extra == "test"\n'
         "License-File: LICENSE\n"
         "Dynamic: license-file\n"
     ).encode("utf-8")
@@ -926,6 +944,16 @@ def _build_dists(dist: Path, root: Path, *, version: str = _VERSION,
         f"{egg}/dependency_links.txt": b"",
         f"{egg}/entry_points.txt":
             b"[console_scripts]\nolympus = olympus.cli:main\n",
+        # setuptools emits requires.txt as soon as the project declares any
+        # requirement, and `_check_sdist_metadata` REQUIRES it once
+        # `_expected_requirements` is non-empty. The fixture pyproject now
+        # declares the `test` extra (the third setuptools pin, W1-5), so the
+        # miniature has to generate this file too — extras are written as a
+        # `[name]` section, which `_normalise_requirement_lines` flattens back
+        # to `... ; extra == "test"`.
+        f"{egg}/requires.txt":
+            b"\n[test]\nsetuptools=="
+            + rp._SETUPTOOLS_METADATA_POLICY_VERSION.encode() + b"\n",
         f"{egg}/top_level.txt": b"olympus\n",
     }
     source_names = sorted(set(source_blobs) | set(generated))

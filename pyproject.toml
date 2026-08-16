@@ -95,7 +95,10 @@ test = ["pytest", "pytest-timeout>=2.4,<3", "openai", "websockets>=12.0",
         # does — so the wheel's `Generator:` header records whatever setuptools is
         # installed here. The metadata policy accepts exactly one version, so a
         # test env on any other setuptools fails the check. Keep these three in
-        # sync; `_pinned_setuptools_version` already cross-checks the other two.
+        # sync — `_pinned_setuptools_version` now cross-checks ALL THREE and
+        # names each location with its value when they disagree, so a drift here
+        # stops the release instead of surfacing later as a confusing
+        # wheel-metadata failure (which is how it presented in #245).
         "setuptools==84.0.0",
         # `scripts/release_pipeline.py` parses TOML; `tomllib` is stdlib
         # only on 3.11+, so the 3.10 leg needs the backport or the whole
