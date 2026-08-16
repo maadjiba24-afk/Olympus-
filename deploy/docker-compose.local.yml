@@ -1,0 +1,17 @@
+# LOCAL VERIFICATION OVERRIDE — never use this on a server.
+#
+# Swaps the production Caddyfile (caelarion.com + Let's Encrypt, unreachable
+# from a laptop) for the HTTP-only Caddyfile.local, so the proxy ROUTING path
+# can be exercised without ACME. See deploy/README.md, "Verified bring-up".
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Everything else — the app image, the healthcheck, the service_healthy gate,
+# the resource limits — is inherited unchanged from docker-compose.yml, so what
+# is verified through this override is the real stack minus TLS.
+services:
+  caddy:
+    volumes:
+      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
