@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pathlib
 import re
 import time
 import urllib.request
@@ -74,7 +75,13 @@ def generate_image(prompt: str, filename: str = "") -> str:
     except Exception as err:
         return f"Error generating image: {str(err)[:200]}"
     name = filename or f"image-{int(time.time())}.png"
-    res = sandbox.write_file(name, "")             # confine + create the path
+    # OWNERSHIP IS DECIDED HERE, at write time, from the principal the
+    # orchestrator threaded into this thread (W2-1b) — not inferred at read
+    # time from whoever is looking. `gallery.owner_root` is inside workdir(),
+    # so sandbox confinement is unchanged.
+    from . import gallery
+    dest = gallery.owner_root(create=True) / pathlib.Path(name).name
+    res = sandbox.write_file(str(dest.relative_to(sandbox.workdir())), "")
     with open(res["path"], "wb") as f:
         f.write(base64.b64decode(b64))
     return f"Image saved to workspace: {name}"
@@ -118,13 +125,17 @@ def edit_image(prompt: str, source: str, filename: str = "") -> str:
     if not _api_key():
         return ("Error: image editing needs an API key "
                 "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
-    try:
-        src = sandbox._confine(source)
-    except ValueError:
-        return f"Error: '{source}' is outside the workspace."
-    ext = src.suffix.lower()
-    if not src.is_file() or ext not in _IMAGE_EXTS:
+    # THE SOURCE MUST BE THIS PRINCIPAL'S IMAGE (W2-1b). `sandbox._confine`
+    # only proves the path is inside workdir(), which includes every OTHER
+    # principal's gallery directory — so edit_image was a third cross-tenant
+    # vector alongside list/read/delete: B could name A's image as the source
+    # and receive an edited copy of it. Resolve through the gallery's own
+    # per-principal resolver, which never unions.
+    from . import gallery
+    src = gallery._owned(None, source) or gallery._legacy(None, source)
+    if src is None:
         return f"Error: no workspace image named '{source}'."
+    ext = src.suffix.lower()
     try:
         blob = src.read_bytes()
         if len(blob) > _MAX_IMAGE_BYTES:
@@ -137,7 +148,9 @@ def edit_image(prompt: str, source: str, filename: str = "") -> str:
     except Exception as err:
         return f"Error editing image: {str(err)[:200]}"
     name = filename or f"{src.stem}-edited-{int(time.time())}.png"
-    res = sandbox.write_file(name, "")
+    # The edited copy belongs to whoever asked for it, in their own gallery.
+    dest = gallery.owner_root(create=True) / pathlib.Path(name).name
+    res = sandbox.write_file(str(dest.relative_to(sandbox.workdir())), "")
     with open(res["path"], "wb") as f:
         f.write(base64.b64decode(b64))
     return f"Edited image saved to workspace: {name}"

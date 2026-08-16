@@ -199,12 +199,32 @@ def _resolve_sid(handler: BaseHTTPRequestHandler,
                  provided: str | None) -> tuple[str, str | None]:
     """Determine the session id, preferring a server-issued HttpOnly cookie so
     browser users get an unguessable, isolated session automatically (no shared
-    'default' namespace, no manual session strings). Falls back to an explicit
-    `session` value for programmatic/CLI use. Returns (sid, cookie_to_set)."""
+    'default' namespace, no manual session strings). Returns (sid, cookie).
+
+    WITH ACCOUNTS ON, THE COOKIE IS THE ONLY ACCEPTED SOURCE (W2-1b). A
+    client-supplied `session=` was previously honoured on every call site, and
+    the id is the account's session token: it selects the memory namespace. The
+    ids are uuid4 so they are not guessable, but a value in a query string is a
+    BEARER TOKEN IN A URL — it leaks through server access logs, `Referer`
+    headers to third parties, browser history, and anything that records a URL.
+    Not-guessable is not the same as not-disclosed.
+
+    WHICH CASE IS WHICH:
+
+      * `accounts.require_login()` ON — per-account identity exists and a
+        session id IS a credential. Cookie only; a supplied value is ignored,
+        so pasting another user's id in a URL cannot select their namespace.
+      * `accounts.require_login()` OFF — there are no accounts, so a session id
+        is a conversation selector rather than a credential, and the escape
+        hatch stays for CLI/programmatic callers. It is not unguarded:
+        `_authorized` has already required OLYMPUS_ACCESS_TOKEN, or proved the
+        peer is on-box when no token is configured. So the hatch only exists
+        where a real credential (or loopback) was already required.
+    """
     m = _SID_RE.search(handler.headers.get("Cookie", "") or "")
     if m:
         return m.group(1), None
-    if provided:
+    if provided and not accounts.require_login():
         return provided[:64], None
     sid = uuid.uuid4().hex                       # fresh, random, server-issued
     return sid, sid
@@ -2323,10 +2343,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"documents": documents.listing(user)})
         elif url.path == "/api/gallery":
             from . import gallery
-            self._json({"images": gallery.list_images()})
+            self._json({"images": gallery.list_images(user)})
         elif url.path == "/api/gallery/image":
             from . import gallery
-            got = gallery.read_image(params.get("name", [""])[0])
+            got = gallery.read_image(params.get("name", [""])[0], user)
             if got is None:
                 self._json({"error": "not found"}, 404)
             else:
@@ -2579,14 +2599,18 @@ class Handler(BaseHTTPRequestHandler):
             from . import gallery
             op = str(payload.get("op", ""))
             if op == "delete":
-                ok = gallery.delete_image(str(payload.get("name", "")))
-                self._json({"ok": ok, "images": gallery.list_images()})
+                ok = gallery.delete_image(str(payload.get("name", "")), user)
+                self._json({"ok": ok, "images": gallery.list_images(user)})
             elif op == "edit":
                 from . import media
+                # edit_image resolves its source through the gallery, which
+                # reads memory.current_user(); set it for this request.
+                from . import memory
+                memory.set_user(user)
                 msg = media.edit_image(str(payload.get("prompt", "")),
                                        str(payload.get("name", "")))
                 self._json({"ok": msg.startswith("Edited"), "message": msg,
-                            "images": gallery.list_images()})
+                            "images": gallery.list_images(user)})
             else:
                 self._json({"error": "unknown op"}, 400)
             return

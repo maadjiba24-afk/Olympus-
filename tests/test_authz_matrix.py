@@ -228,20 +228,29 @@ def test_todos_are_not_cross_tenant(srv):
     assert "alice-private-todo" not in seen, "B can see A's todos"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN CROSS-TENANT DEFECT, deferred to W2-1b. gallery.list_images(), "
-    "read_image() and delete_image() take no principal and resolve against "
-    "shared sandbox roots, and media.edit_image() is a third unscoped vector. "
-    "strict=True on purpose: when W2-1b scopes the gallery this test starts "
-    "PASSING and the suite fails until the marker is removed, so the fix "
-    "cannot land while the matrix still claims the hole is open."))
-def test_gallery_is_not_cross_tenant(srv):
-    """Images A generated must not be listable, readable or deletable by B."""
+def test_gallery_surface_is_not_cross_tenant(srv):
+    """The GALLERY SURFACE -- all four vectors: list, read, delete, edit_image.
+
+    NAMED FOR EXACTLY WHAT IT PROVES. It was `test_gallery_is_not_cross_tenant`,
+    which reads as a claim about the DATA. It is not: the images themselves sit
+    in one shared workspace and the sandbox file tools still union across it, so
+    B can still read A's gallery directory through `read_file`. That residual
+    gap is demonstrated by `test_file_tools_still_reach_another_principals_
+    gallery` below, not merely described here -- citing this test as isolation
+    would be wrong.
+
+    The strict xfail this carried through W2-1a is removed in the same commit as
+    the fix, which is what strict=True was for.
+    """
     base, tokens, ws = srv
     a, b = tokens["alice"], tokens["bob"]
 
-    # An image produced by A's work in the sandbox workspace.
-    (ws / "alice-secret.png").write_bytes(_PNG)
+    # An image produced by A's work, where generate_image now writes it: into
+    # A's OWN gallery directory. Seeding it flat would exercise the legacy
+    # bucket instead, which is a different contract (see the legacy tests).
+    from olympus import gallery
+    ns_a = accounts.namespace_for_token(a)
+    (gallery.owner_root(ns_a, create=True) / "alice-secret.png").write_bytes(_PNG)
 
     _, mine = call(base, "GET", "/api/gallery", sid=a)
     assert "alice-secret.png" in mine, "A cannot see their own image"
@@ -257,6 +266,161 @@ def test_gallery_is_not_cross_tenant(srv):
          payload={"op": "delete", "name": "alice-secret.png"})
     _, still = call(base, "GET", "/api/gallery", sid=a)
     assert "alice-secret.png" in still, "B DELETED A's image"
+
+    # FOURTH vector: edit_image resolved its source with sandbox._confine,
+    # which admits any path under workdir() -- including A's gallery. A dummy
+    # key is required because the key check runs BEFORE source resolution, so
+    # without one every call returns the same "needs an API key" and the cell
+    # would pass while proving nothing. With a key, B's edit must stop at
+    # source resolution -- before any network call is attempted.
+    import os
+    os.environ["OLYMPUS_MEDIA_API_KEY"] = "dummy-not-used-resolution-fails-first"
+    try:
+        _, edited = call(base, "POST", "/api/gallery", sid=b,
+                         payload={"op": "edit", "prompt": "make it blue",
+                                  "name": "alice-secret.png"})
+    finally:
+        os.environ.pop("OLYMPUS_MEDIA_API_KEY", None)
+    assert "no workspace image named" in edited, (
+        f"B could EDIT A's image (fourth vector): {edited[:200]}")
+
+
+def test_file_tools_still_reach_another_principals_gallery(monkeypatch, tmp_path):
+    """THE RESIDUAL GAP, asserted as CURRENT behaviour so it stays tracked.
+
+    W2-1b scoped the gallery SURFACE (the /api/gallery routes and the CLI
+    listing). It did not re-root the sandbox file tools, which still share one
+    workspace and still union across it by deliberate design -- `read_file`'s
+    own docstring says so, and ADR 0005 records why per-worker re-rooting was
+    rejected. So one principal's gallery directory is a plain subdirectory of a
+    workspace every principal's file tools can read.
+
+    This asserts the leak EXISTS rather than describing it in a README, because
+    a hole with a test is tracked and a hole in prose is forgotten. It is the
+    reason W2-2 exists.
+
+    WHEN PER-PRINCIPAL WORKSPACE ROOTS LAND, THIS TEST FLIPS AND FAILS. That
+    failure is the signal that the gap closed: invert the assertion then, and
+    rename `test_gallery_surface_is_not_cross_tenant` to drop "surface" only
+    once this can no longer pass.
+    """
+    from olympus import config, gallery, memory, sandbox
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
+    monkeypatch.setenv("OLYMPUS_REQUIRE_LOGIN", "1")
+
+    # A's file, in the directory the scoped gallery owns. Distinctive content,
+    # so the assertion proves B READ IT rather than merely that no error came
+    # back -- an absence-of-error check would also pass on an empty read.
+    a_root = gallery.owner_root("u:alice", create=True)
+    (a_root / "alice-secret.png").write_bytes(_PNG)
+    (a_root / "notes.txt").write_text("ALICE-PRIVATE-CONTENT", encoding="utf-8")
+    rel = f"gallery/{memory.safe_id('u:alice')}/notes.txt"
+
+    # The gallery surface refuses B -- that half really is fixed.
+    assert gallery.read_image("alice-secret.png", "u:bob") is None
+    assert gallery.list_images("u:bob") == []
+
+    # ...but the file tools do not know about principals at all.
+    memory.set_user("u:bob")
+    out = sandbox.read_file(rel)
+    assert "ALICE-PRIVATE-CONTENT" in out, (
+        "GAP CLOSED -- the sandbox file tools no longer reach another "
+        "principal's gallery directory. That is the W2-2 outcome: invert this "
+        "assertion and drop 'surface' from the sibling test's name.")
+
+
+def test_gallery_owner_can_do_all_four(srv):
+    """Scoping must not cost the owner their own access."""
+    base, tokens, _ws = srv
+    from olympus import accounts, gallery
+    a = tokens["alice"]
+    ns_a = accounts.namespace_for_token(a)
+    root = gallery.owner_root(ns_a, create=True)
+    (root / "mine.png").write_bytes(_PNG)
+
+    _, listed = call(base, "GET", "/api/gallery", sid=a)
+    assert "mine.png" in listed, "owner cannot LIST their own image"
+    status, _ = call(base, "GET", "/api/gallery/image", sid=a,
+                     query="?name=mine.png")
+    assert status == 200, "owner cannot READ their own image"
+    _, after = call(base, "POST", "/api/gallery", sid=a,
+                    payload={"op": "delete", "name": "mine.png"})
+    assert "mine.png" not in after, "owner cannot DELETE their own image"
+
+
+def test_gallery_resolver_never_unions_read_roots():
+    """`sandbox._read_roots()` unions the worker root, the shared workspace AND
+    every sibling worker root. That union is the cross-tenant bug. Assert the
+    gallery does not call it, so a later refactor cannot quietly restore it.
+    """
+    import ast
+
+    from olympus import gallery
+    tree = ast.parse(Path(gallery.__file__).read_text(encoding="utf-8"))
+    # Checked on the AST, not by substring. The module's docstring and comments
+    # EXPLAIN why _read_roots must not be used, so a text search matches its own
+    # rationale -- the same trap as the W1-4 `time.sleep` assertion, and here
+    # even stripping `#` comments is not enough because the docstring is prose
+    # the parser keeps. The AST sees only what actually executes.
+    called = {node.attr for node in ast.walk(tree)
+              if isinstance(node, ast.Attribute)}
+    called |= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "_read_roots" not in called, (
+        "gallery reintroduced sandbox._read_roots(); that unions sibling worker "
+        "roots and is exactly the cross-tenant leak this scoping removed")
+
+
+def test_legacy_flat_images_survive_the_upgrade(monkeypatch, tmp_path):
+    """A single-user install must not open the gallery after upgrade and find
+    it empty. With accounts OFF there is one human, so the pre-upgrade flat
+    images are shown to them."""
+    from olympus import config, gallery
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    ws = tmp_path / "ws"; ws.mkdir()
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
+    monkeypatch.delenv("OLYMPUS_REQUIRE_LOGIN", raising=False)
+    (ws / "legacy.png").write_bytes(_PNG)          # written before scoping
+
+    names = [i["name"] for i in gallery.list_images("solo")]
+    assert "legacy.png" in names, "a single-user install LOST its gallery"
+    assert gallery.read_image("legacy.png", "solo") is not None
+
+
+def test_legacy_images_are_hidden_once_accounts_are_on(monkeypatch, tmp_path):
+    """With accounts ON they belong to nobody and must not leak to everyone."""
+    from olympus import config, gallery
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    ws = tmp_path / "ws"; ws.mkdir()
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
+    monkeypatch.setenv("OLYMPUS_REQUIRE_LOGIN", "1")
+    (ws / "legacy.png").write_bytes(_PNG)
+
+    assert gallery.list_images("u:1") == [], "legacy images leaked to an account"
+    assert gallery.read_image("legacy.png", "u:1") is None
+    # ...and the operator can claim them deliberately.
+    assert gallery.claim_legacy("u:1") == 1
+    assert [i["name"] for i in gallery.list_images("u:1")] == ["legacy.png"]
+
+
+def test_supplied_session_is_ignored_when_login_is_required(srv):
+    """A session id in a query string is a bearer token in a URL. With accounts
+    on it must not select another account's namespace."""
+    base, tokens, _ws = srv
+    a = tokens["alice"]
+    # NO COOKIE. `_resolve_sid` prefers the cookie and returns before it ever
+    # reads `provided`, so a request that HAS a cookie cannot exercise this at
+    # all -- an earlier version of this test sent one and was therefore
+    # vacuous: it passed against the unfixed code.
+    _, body = call(base, "GET", "/api/me", query=f"?session={a}")
+    assert '"logged_in": false' in body.replace(" ", "").replace(
+        '"logged_in":false', '"logged_in": false'), (
+        f"a query-string session logged the caller in as another account: "
+        f"{body[:200]}")
+    assert "alice" not in body, (
+        f"a bearer session id in the URL selected A's account: {body[:200]}")
 
 
 def test_memory_is_not_cross_tenant(srv):
