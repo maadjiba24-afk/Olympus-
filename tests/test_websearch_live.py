@@ -66,6 +66,23 @@ from olympus import websearch
 # surfaces as an HTTPError, so both shapes have to be caught.
 _CREDENTIAL_REJECTED = {401, 402, 403}
 
+# Provider responses that mean "this account's allowance is used up". A THIRD
+# category, deliberately kept out of `_CREDENTIAL_REJECTED` above.
+#
+# Tavily documents 432 as Plan Limit Exceeded ("exceeds your plan's set usage
+# limit") and 433 as PayGo Limit Exceeded. The key is valid, the integration is
+# fine, and the plan is spent — so the remedy is to upgrade the plan or wait for
+# the billing cycle to roll over. Folding these into `_CREDENTIAL_REJECTED`
+# would produce a skip telling the operator to ROTATE THE KEY, which is a
+# plausible-sounding instruction that cannot possibly work: a fresh key on an
+# exhausted plan is still an exhausted plan. A skip that reports the wrong
+# reason is worse than the failure it replaces, because it looks handled.
+#
+# Distinct from `RateLimited` (429) too: 429 means "you are going too fast, try
+# again shortly" and the provider is put on cooldown. This means "you have no
+# allowance left", and waiting minutes will not help.
+_QUOTA_EXHAUSTED = {432, 433}
+
 # The repository-pinned hard integration anchor: a SearXNG container this repo
 # pins by digest, starts, and configures from committed settings. That control
 # is why its emptiness is treated as a build failure while a third-party
@@ -81,8 +98,21 @@ _CREDENTIAL_REJECTED = {401, 402, 403}
 _ANCHOR = "searxng"
 _ANCHOR_ENV = "OLYMPUS_SEARXNG_URL"
 
-# The complete SEARCH_LIVE status vocabulary, matching websearch.diagnostics().
-_STATUSES = frozenset({"ok", "empty", "rate_limited", "down", "unconfigured"})
+# The complete SEARCH_LIVE status vocabulary. Mostly shared with
+# websearch.diagnostics(), which additionally has "unverified" (a state only the
+# non-live report can be in) and does not distinguish quota exhaustion.
+#
+# `quota_exhausted` is deliberately its OWN word rather than reuse of
+# `rate_limited` or `down`. The entire purpose of this line is that an operator
+# reading the CI log can tell WHY a provider is not being covered, and those
+# three states call for three different actions: `rate_limited` means back off
+# and it will recover on its own, `down` means investigate the provider or the
+# integration, `quota_exhausted` means someone has to pay or wait for the
+# billing cycle. Reusing a word here would make the log actively misleading at
+# exactly the moment it is the only thing standing between an uncovered
+# provider and a green build.
+_STATUSES = frozenset({"ok", "empty", "rate_limited", "quota_exhausted",
+                       "down", "unconfigured"})
 
 # The complete set of subjects that may ever appear in a SEARCH_LIVE line: the
 # real provider registry, plus the one synthetic subject for the end-to-end
@@ -194,6 +224,19 @@ def is_credential_rejection(err: urllib.error.HTTPError) -> bool:
     return getattr(err, "code", None) in _CREDENTIAL_REJECTED
 
 
+def is_quota_exhausted(err: urllib.error.HTTPError) -> bool:
+    """True only for the statuses that mean 'the allowance is spent'.
+
+    Narrow for the same reason `is_credential_rejection` is narrow, and kept
+    separate from it because the two call for different actions. This one must
+    never grow to cover a generic 4xx: 400 is a malformed request and 404 is a
+    missing endpoint, and both are integration problems that have to fail.
+    Pinned by a deterministic test in tests/test_websearch.py alongside the
+    credential set.
+    """
+    return getattr(err, "code", None) in _QUOTA_EXHAUSTED
+
+
 def assert_live_result_contract(provider: str, results, limit: int) -> None:
     """Strict structural validation of a live result collection, empty or not.
 
@@ -270,15 +313,39 @@ def test_live_search_provider(provider):
             f"{provider} requires: {', '.join(missing)}"
         )
 
-    # Only the two documented credential/quota shapes are converted to skips.
-    # Every other exception — HTTP 4xx/5xx, JSON decode, DNS, timeout, a
+    # Only the three documented credential/rate/quota shapes are converted to
+    # skips. Every other exception — HTTP 4xx/5xx, JSON decode, DNS, timeout, a
     # provider changing its response schema — propagates and fails the gate.
+    #
+    # EVERY branch emits its status line BEFORE it skips. Once a provider
+    # skips, the live gate silently stops covering it, and a check that is not
+    # running cannot fail — so the SEARCH_LIVE line is the only thing that makes
+    # the loss of coverage visible in the CI log. A skip that emitted nothing,
+    # or emitted after `pytest.skip` raised, would be indistinguishable from a
+    # pass. (The job runs pytest with `-s` so these lines survive; see
+    # `emit_status`.)
     try:
         results = fetch(_QUERY, _LIMIT)
     except websearch.RateLimited:
         emit_status(provider, "rate_limited")
         pytest.skip(f"{provider} rate-limited the live probe (HTTP 429)")
     except urllib.error.HTTPError as err:
+        # Quota BEFORE credential: both are 4xx and both skip, but they demand
+        # different actions, and exactly one status line may be emitted per
+        # probe. Checking quota first is what keeps the reported reason true.
+        if is_quota_exhausted(err):
+            emit_status(provider, "quota_exhausted")
+            # ASCII only: this reason is rendered into the CI log, whose
+            # encoding is not ours to choose. An em-dash here came back as
+            # mojibake the first time it was captured.
+            pytest.skip(
+                f"{provider} has exhausted its plan allowance "
+                f"(HTTP {err.code} {err.reason}). The credential is VALID and "
+                f"the integration is fine, so rotating "
+                f"{', '.join(required_env)} will NOT help. Upgrade the plan, "
+                f"or wait for the billing cycle to reset, to re-enable this "
+                f"probe."
+            )
         emit_status(provider, "down")
         if not is_credential_rejection(err):
             raise
