@@ -423,9 +423,26 @@ def test_missing_key_matches_the_chat_completions_status(server):
 
 def test_one_constant_time_comparison_serves_both_dialects():
     """W3-I5: the key check is not duplicated — `_v1_credential` only extracts,
-    and `_v1_authorized` holds the single `hmac.compare_digest` call."""
-    src = inspect.getsource(web.Handler)
-    assert src.count("compare_digest") == 1
+    and `_v1_authorized` holds the single `hmac.compare_digest` call.
+
+    Scoped to the two /v1 methods rather than counting across the whole
+    Handler. The original assertion was `getsource(Handler).count(...) == 1`,
+    which was a PROXY for that property and only equalled it while /v1 was the
+    sole credential on the class. W2-1a added a separate operator credential
+    (`_admin_authorized`, `X-Olympus-Operator`) whose comparisons are a
+    different secret on a different surface, so the class-wide count became
+    meaningless — it would now forbid any future credential check anywhere in
+    the Handler, which is not what this test is about. Asserting per method
+    tests the actual invariant instead of a coincidence.
+    """
+    v1_auth = inspect.getsource(web.Handler._v1_authorized)
+    v1_cred = inspect.getsource(web.Handler._v1_credential)
+    assert v1_auth.count("compare_digest") == 1, (
+        "the /v1 key check must be exactly one constant-time comparison "
+        "serving both dialects")
+    assert v1_cred.count("compare_digest") == 0, (
+        "_v1_credential must only EXTRACT the credential; comparing there "
+        "would duplicate the check it exists to feed")
     assert "self._v1_credential()" in inspect.getsource(
         web.Handler._v1_authorized)
     assert "x-api-key" in inspect.getsource(web.Handler._v1_credential)

@@ -403,6 +403,34 @@ already routes `https://caelarion.com/webhook` to it. To turn it on:
 
 ## Notes
 - Only Caddy is exposed to the internet (ports 80/443); the app listens on the
-  private compose network. The access token is the entry gate, accounts are
-  per-user identity, and the memory/accounts/vault all persist in the
+  private compose network. The memory/accounts/vault all persist in the
   `olympus-memory` Docker volume across restarts and updates.
+
+### There are TWO secrets, and they must be different
+
+| Secret | Header | Gates | Who holds it |
+|---|---|---|---|
+| `OLYMPUS_ACCESS_TOKEN` | `X-Olympus-Token` | whether `/api/*` is reachable at all — the **entry gate** | **every user** of the instance |
+| `OLYMPUS_OPERATOR_TOKEN` | `X-Olympus-Operator` | `/api/admin` and `/api/admin/act` — the **operator panel** | the operator only |
+
+Accounts (`OLYMPUS_REQUIRE_LOGIN`) are per-user identity on top of the entry
+gate; they are not a substitute for either token.
+
+**Why they must differ.** The access token is handed to everyone who uses the
+instance — that is what "entry gate" means. Until W2-1a the admin panel was
+gated on that same token, so **every account that could log in was a full
+operator**, and `/api/admin/act` is not read-only: it carries `config_set`,
+`set_autonomy` on other users, approve/reject of pending actions, `schedule_add`
+and `mcp_add`. That was privilege escalation by registration. Setting the two
+variables to the same value recreates it exactly, so the server now **refuses to
+serve the panel** in that configuration rather than appearing configured.
+
+**`OLYMPUS_OPERATOR_TOKEN` is not optional for remote administration.** With it
+unset the panel falls back to loopback-only — peer on loopback, server bound to
+loopback, no reverse-proxy forwarding header — which on this deployment (behind
+Caddy) means it is unreachable. It deliberately does **not** fall back to the
+access token; that fallback is the hole. Generate it alongside the others:
+
+```bash
+echo "OLYMPUS_OPERATOR_TOKEN=$(openssl rand -hex 32)"
+```

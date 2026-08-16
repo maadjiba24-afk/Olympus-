@@ -15,6 +15,60 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — The operator panel gets its own credential (BREAKING, W2-1a)
+
+**Privilege escalation by registration.** `_admin_authorized` returned `True`
+whenever `OLYMPUS_ACCESS_TOKEN` was set, on the reasoning that the access token
+IS the operator credential. That holds for a single-operator box. It fails in
+the multi-user posture `deploy/README.md` documented — "the access token is the
+entry gate, accounts are per-user identity" — because the entry gate is held by
+**every user**, and `_authorized` has already checked it before the admin gate
+runs. So every account that could log in was a full operator.
+
+`/api/admin/act` is not read-only. It carries `config_set`, `config_unset`,
+`set_autonomy` **on other users**, approve/reject of pending actions,
+`schedule_add` and `mcp_add`. `accounts.py` has no role field, so there was
+nothing else to check.
+
+- **New `OLYMPUS_OPERATOR_TOKEN`, sent as `X-Olympus-Operator`.** A different
+  secret in a different header from the entry gate, so holding one does not
+  confer the other. Compared with `hmac.compare_digest`.
+- **Unset fails closed to loopback-only — it does NOT fall back to the access
+  token.** With no operator token the panel requires the pre-existing checks:
+  peer on loopback, server bound to loopback, no reverse-proxy forwarding
+  header. A fallback would have preserved the hole for every operator who does
+  not read this file, which is exactly the population the fix exists for.
+  **This is a breaking change for remote administration**, and behind the
+  shipped Caddy deployment the panel is unreachable until the token is set.
+  Its cost is zero: nothing is deployed yet (see the W1-4 bring-up notes), so
+  no running instance can be broken by it.
+- **An operator token equal to the access token is REFUSED**, with a message
+  saying why. Setting them the same recreates the escalation exactly while
+  looking configured, and a config that is wrong in a way that reads as right
+  is the failure mode this program keeps meeting.
+- **The `X-Olympus-Admin: 1` requirement on `/api/admin/act` is unchanged.**
+  That is CSRF defence and it defends something different; the two gates are
+  deliberately not collapsed.
+
+Both admin routes go through the one function — verified by a test that counts
+the call sites rather than assuming, so a third admin route cannot quietly skip
+the gate.
+
+**Found by the new authorization matrix** (`tests/test_authz_matrix.py`), which
+exercises every `/api/*` route against four principals — anonymous, user A, user
+B, operator. Its route list is DERIVED FROM `web.py` at test time, so a route
+added without a matrix row fails the suite; a route that is genuinely
+principal-free must declare a written reason rather than be omitted. The matrix
+also proves zero cross-tenant reads or writes for documents, todos and memory.
+
+Three cells are mutation-proved: reverting the fix, making the unset case fall
+back to the access token, and making the equality check a pass-through are each
+caught. One known cross-tenant defect remains and is marked `xfail(strict=True)`
+rather than hidden — the gallery (`list_images`/`read_image`/`delete_image` and
+`media.edit_image` take no principal), deferred to W2-1b. Strict, so the marker
+cannot outlive the fix.
+
+
 ### Fixed — Retention and journal compaction are actually scheduled (W1-2)
 
 Two maintenance routines existed, were tested, and had **no production caller**.

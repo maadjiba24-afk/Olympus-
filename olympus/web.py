@@ -2806,25 +2806,68 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _admin_authorized(self) -> tuple[bool, int, str]:
-        """Gate /api/admin. With OLYMPUS_ACCESS_TOKEN configured, the
-        `_authorized` check (already applied on this path) IS the operator
-        credential. With no token, the panel is on-box only — same posture as
-        the /v1 endpoint: peer must be loopback, the server must be bound to
-        loopback, and no reverse-proxy forwarding header may be present."""
-        if os.environ.get("OLYMPUS_ACCESS_TOKEN"):
-            return True, 200, ""
+        """Gate /api/admin and /api/admin/act on a SEPARATE operator secret.
+
+        This used to return True whenever OLYMPUS_ACCESS_TOKEN was set, on the
+        reasoning that the access token IS the operator credential. That holds
+        for a single-operator box and is PRIVILEGE ESCALATION BY REGISTRATION
+        in the multi-user posture deploy/README.md documents: the access token
+        is the entry gate, so every user holds it, and `_authorized` has
+        already checked it before this function runs. Any account that could
+        log in was therefore a full operator — and /api/admin/act is not
+        read-only. It carries `config_set`, `set_autonomy` (on OTHER users),
+        approve/reject of pending actions, `schedule_add` and `mcp_add`.
+        `accounts.py` has no role field, so there was nothing else to check.
+
+        The operator credential is now OLYMPUS_OPERATOR_TOKEN, presented in its
+        own `X-Olympus-Operator` header. It is a different secret in a
+        different header from the entry gate, so holding one does not confer
+        the other.
+
+        UNSET FAILS CLOSED TO LOOPBACK-ONLY — deliberately NOT back to the
+        access token. A fallback would preserve the hole for every operator who
+        does not read the changelog, which is precisely the population the fix
+        exists for. Remote administration now REQUIRES the operator token.
+
+        The `X-Olympus-Admin: 1` requirement on /api/admin/act is unchanged and
+        separate: that is CSRF defence (browsers only attach custom headers
+        after a preflight we never approve) and it defends a different thing.
+        """
+        operator = os.environ.get("OLYMPUS_OPERATOR_TOKEN", "")
+        access = os.environ.get("OLYMPUS_ACCESS_TOKEN", "")
+        if operator:
+            # Setting the two to the same value recreates the escalation while
+            # LOOKING configured: every user holds the access token, so an
+            # identical operator token hands every account the panel again. A
+            # config that is wrong in a way that reads as right is worse than
+            # one that is obviously unset, so this refuses rather than serves.
+            if access and hmac.compare_digest(operator, access):
+                return (False, 500,
+                        "OLYMPUS_OPERATOR_TOKEN is set to the same value as "
+                        "OLYMPUS_ACCESS_TOKEN. Every user holds the access "
+                        "token — it is the entry gate — so an identical "
+                        "operator token grants every account full operator "
+                        "rights while appearing configured. Set it to a "
+                        "different secret.")
+            provided = self.headers.get("X-Olympus-Operator", "")
+            if hmac.compare_digest(provided, operator):
+                return True, 200, ""
+            return (False, 403,
+                    "the admin panel requires the operator credential in the "
+                    "X-Olympus-Operator header. Holding OLYMPUS_ACCESS_TOKEN "
+                    "is not sufficient: it is the entry gate every user has.")
         if not self._peer_is_loopback():
             return (False, 403,
                     "the admin panel is loopback-only until "
-                    "OLYMPUS_ACCESS_TOKEN is set.")
+                    "OLYMPUS_OPERATOR_TOKEN is set.")
         if not self._bound_to_loopback():
             return (False, 401,
-                    "set OLYMPUS_ACCESS_TOKEN: the server is bound to a "
+                    "set OLYMPUS_OPERATOR_TOKEN: the server is bound to a "
                     "non-loopback address, so the admin panel needs the "
                     "operator token.")
         if _forwarding_headers_present(self.headers):
             return (False, 401,
-                    "set OLYMPUS_ACCESS_TOKEN: a reverse-proxy forwarding "
+                    "set OLYMPUS_OPERATOR_TOKEN: a reverse-proxy forwarding "
                     "header is present, so this request is relayed from "
                     "off-box and needs the operator token.")
         return True, 200, ""
