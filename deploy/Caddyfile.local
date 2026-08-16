@@ -1,0 +1,42 @@
+# LOCAL VERIFICATION ONLY — this is NOT the production proxy config.
+#
+# The real ./Caddyfile is hardcoded to caelarion.com with automatic Let's
+# Encrypt. On a laptop that is unreachable: ACME has to prove control of the
+# domain over the public internet, which cannot happen for caelarion.com from
+# a machine that is not the droplet holding its DNS. Caddy retries, fails, and
+# never serves the site — so with the production Caddyfile the proxy path
+# cannot be exercised locally AT ALL.
+#
+# This file removes TLS from the picture so the ROUTING half can be verified:
+# same reverse_proxy targets, same handle order, same flush_interval, over
+# plain HTTP on :80.
+#
+# WHAT THIS DOES NOT PROVE, and must never be cited as proving:
+#   * that Let's Encrypt issuance works for caelarion.com;
+#   * that the HTTPS listener, ALPN, or cert renewal work;
+#   * that the www → apex redirect works (it is TLS-only and is omitted here);
+#   * anything at all about the production Caddyfile, which is untouched.
+#
+# Use:  docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+{
+	# Refuse to even attempt ACME. Without this Caddy would try to provision a
+	# certificate for the site address and spend the run retrying.
+	auto_https off
+	admin off
+}
+
+:80 {
+	encode gzip
+	# Same routing as the production Caddyfile: the WhatsApp webhook goes to the
+	# gateway (only up under the `whatsapp` profile), everything else to the app.
+	handle /webhook* {
+		reverse_proxy whatsapp:8485
+	}
+	handle {
+		# flush_interval -1 disables response buffering so streamed tokens arrive
+		# live (the equivalent of nginx's `proxy_buffering off`).
+		reverse_proxy olympus:8484 {
+			flush_interval -1
+		}
+	}
+}

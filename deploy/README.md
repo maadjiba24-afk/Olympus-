@@ -105,6 +105,273 @@ the documented behaviour of volume ownership, not from a reproduction — treat 
 as the starting point for the first real upgrade, and check `id` and the write
 probe above rather than assuming it worked.
 
+## Verified bring-up (W1-4)
+
+Until this, `docker-compose.staging.yml` said in its own header that it had "NOT
+[been] VERIFIED BY EXECUTION … never been brought up". This section is the record
+of actually bringing the stack up.
+
+**Read the scope line first.** Everything below was run on **Docker Desktop
+29.2.1 / WSL2 / Windows, cgroup v2**. That is not a droplet, and this repo has
+never been deployed to one. A green local stack is evidence about the compose
+files and the app; it is **not** evidence about production.
+
+### Verified locally
+
+| # | What | Result |
+|---|---|---|
+| 1 | Proxy routing through Caddy — `/healthz`, `/readyz`, web UI | 200 / 200 / 200 (52,653 bytes) |
+| 2 | Production boot guard refuses `OLYMPUS_DAILY_BUDGET=0` | refuses, exit 1 |
+| 3 | Production boot guard refuses an unwritable memory dir | refuses, exit 1 |
+| 4 | Production boot with budget UNSET is bounded, not unlimited | boots, ceiling $10/day |
+| 5 | Graceful shutdown of the web service | 0.92 s, exit 0, drain logged |
+| 6 | Memory survives `docker compose down` + `up` | persisted |
+
+### NOT verified — do not cite this section as covering these
+
+- **Let's Encrypt / TLS for caelarion.com.** Not exercised at all; see below.
+- **Anything on a real server.** No droplet, no public DNS, no firewall, no
+  systemd, no reboot, no disk pressure, no concurrent users.
+- **The `whatsapp` profile.** Never started (needs real `WHATSAPP_*` credentials).
+- **The pre-existing-root-volume upgrade** documented above. Still untested
+  against a volume created by the old root image, because none exists.
+- **Sustained operation.** The longest run here was minutes.
+
+---
+
+### 1. The proxy path, and why TLS had to be worked around
+
+Everything before W1-4 talked to port 8484 directly. Nothing had ever reached the
+app *through Caddy*. With the production `Caddyfile` unchanged, it still cannot:
+
+```
+$ curl -o /dev/null -D - http://localhost/healthz
+HTTP/1.1 308 Permanent Redirect
+Location: https://localhost/healthz
+
+$ curl -k https://localhost/healthz
+curl: (35) schannel: ... SEC_E_INTERNAL_ERROR      # no certificate exists
+```
+
+Caddy's logs say why:
+
+```
+challenge failed ... "identifier":"caelarion.com","challenge_type":"http-01",
+  "detail":"46.101.143.92: Fetching http://caelarion.com/.well-known/acme-challenge/…:
+            Timeout during connect (likely firewall problem)"
+could not get certificate from issuer ... acme-v02.api.letsencrypt.org
+could not get certificate from issuer ... acme.zerossl.com  (EAB request: DNS lookup failed)
+```
+
+Note what that does and does not prove. `caelarion.com` **does** resolve — to
+`46.101.143.92` — so Let's Encrypt dutifully tried to reach *that host*, not this
+laptop, and timed out because nothing is listening there. ACME cannot be satisfied
+from a machine that does not hold the domain. Caddy then fell back to ZeroSSL,
+which failed on its own DNS lookup from inside the container.
+
+So with the production proxy the app is unreachable locally: `:80` redirects to an
+HTTPS listener that has no certificate.
+
+**The override.** `Caddyfile.local` + `docker-compose.local.yml` serve the same
+routes over plain HTTP with `auto_https off`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+```
+GET http://localhost/healthz   -> HTTP 200  (40 bytes, 0.008s)
+GET http://localhost/readyz    -> HTTP 200  (150 bytes, 0.009s)
+GET http://localhost/          -> HTTP 200  (52653 bytes, 0.008s)
+
+{"status": "ok", "uptime_seconds": 18.6}
+{"status": "ready", "env": "dev", "version": "0.27.3", "memory_dir_writable": true, …}
+```
+
+**The override exists so the ROUTING half can be tested with TLS removed. It is
+not evidence that the production TLS path works, and it never will be.** The
+production `Caddyfile` is untouched; the only way to verify Let's Encrypt is to
+run it on the host `caelarion.com` actually points at. One useful side result:
+`memory_dir_writable: true` in `/readyz` shows the non-root container really can
+write the named volume, end to end through the proxy.
+
+### 2. The fail-closed boot guard — a security control nobody had watched fire
+
+Three deliberately-broken production configs, each with `OLYMPUS_ENV=production`
+and a signing seed (production refuses a forgeable seed first, which would have
+masked the checks under test).
+
+**`OLYMPUS_DAILY_BUDGET=0` — refuses.** `0` means UNLIMITED, not off:
+
+```
+[production] production configuration is incomplete — refusing to start:
+  - OLYMPUS_DAILY_BUDGET='0' means UNLIMITED, not off. Production requires a positive cap.
+exit code: 1
+```
+
+**Unwritable memory dir — refuses:**
+
+```
+[production] production configuration is incomplete — refusing to start:
+  - OLYMPUS_MEMORY_DIR (/app/memory) is not writable by this process: journals,
+    ledgers and accounts would all fail to persist. Check volume ownership and permissions.
+exit code: 1
+```
+
+**Budget UNSET — boots, and that is correct.** A refusal was expected here; it
+does not refuse, deliberately, and `config.production_problems()` says so:
+
+> `OLYMPUS_DAILY_BUDGET` need not be set — unset now resolves to the bounded
+> `DEFAULT_DAILY_BUDGET`. An explicitly UNLIMITED value is still refused, which is
+> the actual hazard.
+
+Verified the fallback is genuinely bounded rather than a silent unlimited:
+
+```
+config.DEFAULT_DAILY_BUDGET = 10.0
+usage.daily_budget()        = 10.0
+production_problems()       = []
+```
+
+The guard fires on 2 of the 3 cases, and the third is a documented relaxation of
+the staging rules rather than a hole. **No case booted that should have refused.**
+
+### 3. Graceful shutdown — a defect, found and fixed
+
+The web service was fine. The heartbeat was being **killed on every stop**:
+
+```
+  olympus      0.92s  exit=0    CLEAN — "… received SIGTERM, finishing in-flight requests"
+  heartbeat    1.98s  exit=137  SIGKILLED after grace
+  caddy        1.22s  exit=0    CLEAN
+```
+
+Root cause, confirmed by isolating it: `heartbeat.run_forever()` catches only
+`KeyboardInterrupt`, i.e. SIGINT — and the process is **PID 1** in the container,
+where Linux ignores any signal that has no explicitly-installed handler. SIGTERM
+was dropped on the floor and Docker SIGKILLed the loop after the grace period. The
+web service escapes this only because `web.py::_install_shutdown` installs a
+SIGTERM handler explicitly.
+
+```
+  SIGTERM: 1.66s exit=137          # ignored, then killed
+  SIGINT:  0.77s exit=0            # only because cli.py catches KeyboardInterrupt
+```
+
+**What a kill actually costs.** Not corruption: `SIGKILL` ends the process, but
+the bytes it already wrote are in the kernel page cache and get flushed anyway,
+and the tmp-file + `os.replace` publish is atomic against process death by
+construction (`olympus/atomicio.py` — `fsync` there addresses power loss and
+kernel panic, which is a different failure). The real costs are that an in-flight
+model call is abandoned *after it has already been paid for*, the cadence
+timestamp for the running job is never written so the same work re-runs on the
+next boot, and a multi-step maintenance sweep stops wherever it happened to be.
+
+**Fixed in the application, not just in compose.** `stop_signal: SIGINT` in the
+compose file also made the symptom go away, but only there — systemd, Kubernetes
+and plain `docker run` all send SIGTERM and would have reproduced the identical
+SIGKILL. `heartbeat._install_shutdown` now installs a SIGTERM/SIGINT handler the
+way `web.py::_install_shutdown` always has, with the same best-effort guard
+(handlers install only on the main thread; failing to install is not a reason to
+refuse to run). The loop waits on an `Event` rather than `time.sleep`, because
+since PEP 475 a handler that returns normally makes `time.sleep` *resume* for its
+remaining time — so a SIGTERM arriving mid-tick would set the flag and still be
+killed waiting out the sleep.
+
+Same measurement as the defect, so the two are directly comparable — and taken
+with the **default** stop signal, no override:
+
+```
+  BEFORE (no handler):     1.66s  exit=137  SIGKILLED
+  AFTER  (SIGTERM handler): 0.56s  exit=0    CLEAN
+        … received SIGTERM, finishing this tick and stopping
+        Heartbeat stopped.
+```
+
+`stop_signal: SIGINT` was then **removed**. Once SIGTERM is handled properly the
+override is a workaround for a bug that no longer exists, and leaving it would
+hide a regression: delete the handler and compose would still stop cleanly while
+every other runtime went back to being killed.
+
+A second finding while measuring: **the effective grace period here was 1 second,
+not the documented 10.** A container that ignores SIGTERM died after 1.77 s, and
+`.Config.StopTimeout` read `1`. The production compose declared no
+`stop_grace_period` at all, so the drain inherited whatever the host chose — and
+the clean web drain already took 0.92 s, uncomfortably close to that. Applied:
+`stop_grace_period: 60s` on `olympus` and `whatsapp` (matching staging), `30s` on
+`heartbeat`.
+
+**`caddy` was deliberately left with no `stop_grace_period`**, so it still
+inherits `StopTimeout=1`. It handles SIGTERM itself and exits cleanly in 1.22 s,
+so there is nothing to fix; and unlike the other two it holds no in-flight
+application state — a proxy that stops is a proxy that stops. Adding a number
+there would imply a drain it does not need. The asymmetry is intentional.
+
+After, with no `stop_signal` anywhere:
+
+```
+  /deploy-olympus-1    StopSignal= StopTimeout=60   exit=0
+  /deploy-heartbeat-1  StopSignal= StopTimeout=30   exit=0
+  /deploy-caddy-1      StopSignal= StopTimeout=1    exit=0
+  total `docker compose stop`: 1.44s
+```
+
+No slowdown — a grace period is a ceiling, not a wait.
+
+### 4. Full-stack teardown and restart
+
+`docker compose down` (**without** `-v`; `-v` destroys the named volumes) then
+`up` — a stronger test than the container restart W1-3 did:
+
+```
+containers remaining: 0
+olympus-memory volume present: 1
+… up …
+loaded: [{'role': 'user', 'content': 'survives docker compose down'}]
+PERSISTED through docker compose down + up
+GET http://localhost/readyz -> HTTP 200
+```
+
+### 5. Everything that went wrong on the way
+
+The errors are the point; a bring-up that reports none was not written down
+honestly.
+
+- **The production Caddyfile makes the app unreachable locally.** TLS failing was
+  expected; the failure mode was not — a `308` into a certificate-less HTTPS
+  listener rather than a plain error. Worked around, not fixed.
+- **The first unwritable-volume test was wrong, and it looked like a critical
+  finding.** A volume was created and `chown`-ed to root; the app booted anyway.
+  The guard was fine — the setup was not. Docker re-seeds an **empty** named
+  volume from the image, ownership included, so the chown was silently undone.
+  Making the volume non-empty first reproduced it correctly. This is the same
+  mechanism as the pre-existing-volume note above, seen from the other side, and
+  it is worth knowing before anyone stages that upgrade.
+- **The first budget test looked like a boot-guard failure.** With the budget
+  unset the container ran 6m40s instead of refusing. That is correct behaviour,
+  but it took reading `production_problems()` to know, and stdout buffering (no
+  `PYTHONUNBUFFERED`, output piped through `head`) hid the startup banner that
+  would have said so sooner. Later runs set `PYTHONUNBUFFERED=1`.
+- **`bc` is absent** in this Git-Bash environment, so the first shutdown timing
+  produced an empty elapsed figure. Re-timed with Python.
+- **`ps` is absent** in the slim image, so "is it PID 1" had to be established
+  indirectly — by observing that SIGTERM was ignored and SIGINT was not.
+- An `alpine` pull was needed to manipulate volume ownership from outside the app
+  image.
+
+### Reproducing this
+
+```bash
+cd deploy
+cp .env.example .env                     # then fill it in
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+curl -sS http://localhost/healthz && curl -sS http://localhost/readyz
+docker compose -f docker-compose.yml -f docker-compose.local.yml down
+```
+
+Drop `-f docker-compose.local.yml` for the real TLS path — which, on anything that
+is not the host `caelarion.com` resolves to, fails at ACME exactly as above.
+
 ## Optional
 - **Self-learning loop:** runs **by default** (the `heartbeat` service above).
   Comment it out in `docker-compose.yml` if you want a chat-only instance that
