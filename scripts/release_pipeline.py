@@ -1045,7 +1045,8 @@ def _required_sdist_source_groups(source_root: Path) \
     return groups
 
 
-def _pinned_setuptools_version(source_root: Path) -> str:
+def _lock_setuptools_version(source_root: Path) -> str:
+    """The setuptools pin in the signed publish lock."""
     try:
         lines = (source_root / "requirements-publish.lock").read_text(
             encoding="utf-8").splitlines()
@@ -1061,9 +1062,77 @@ def _pinned_setuptools_version(source_root: Path) -> str:
         if match is None:
             raise _fail("the signed publish lock has a malformed setuptools pin")
         versions.append(match.group(1))
-    if versions != [_SETUPTOOLS_METADATA_POLICY_VERSION]:
-        raise _fail("the signed publish lock and metadata policy disagree")
+    if len(versions) != 1:
+        raise _fail(f"the signed publish lock must pin setuptools exactly "
+                    f"once (found {len(versions)})")
     return versions[0]
+
+
+def _test_extra_setuptools_version(source_root: Path) -> str:
+    """The setuptools pin in pyproject's `[project.optional-dependencies].test`.
+
+    Read as TOML rather than by regex, deliberately. pyproject.toml names
+    setuptools SEVEN times — `[build-system] requires = ["setuptools>=77"]`,
+    which is a different pin on purpose, three `[tool.setuptools.*]` table
+    headers, and the comments above the pin itself. A regex would have to
+    discriminate the one that matters from all of those; indexing
+    `project.optional-dependencies.test` cannot pick up the wrong one.
+
+    This adds no import dependency. `tomllib`/`tomli` is imported at MODULE
+    scope above, so on an interpreter where neither resolves this file cannot be
+    imported at all and every function here is unreachable — not just this one.
+    The publish workflow runs Python 3.12.3, where `tomllib` is stdlib, which is
+    why `tomli` is correctly absent from requirements-publish.lock; the 3.10
+    fallback exists for the test leg, which installs the extra that provides it.
+    `_project_metadata` already parses this same file with this same parser,
+    immediately before this check runs."""
+    project = _project_metadata(source_root)
+    extras = project.get("optional-dependencies")
+    if not isinstance(extras, dict):
+        raise _fail("the signed pyproject declares no optional-dependencies")
+    test_extra = extras.get("test")
+    if not isinstance(test_extra, list):
+        raise _fail("the signed pyproject declares no `test` extra")
+    pins = [item for item in test_extra
+            if isinstance(item, str)
+            and item.replace(" ", "").startswith("setuptools==")]
+    if len(pins) != 1:
+        raise _fail(f"the `test` extra must pin setuptools exactly once "
+                    f"(found {len(pins)})")
+    match = re.fullmatch(r"setuptools==([0-9]+\.[0-9]+\.[0-9]+)",
+                         pins[0].replace(" ", ""))
+    if match is None:
+        raise _fail("the `test` extra has a malformed setuptools pin")
+    return match.group(1)
+
+
+def _pinned_setuptools_version(source_root: Path) -> str:
+    """The one setuptools version, proven identical in all THREE places.
+
+    setuptools is pinned in three files and they must agree, because the wheel's
+    `Generator:` header records whichever version actually built it and the
+    metadata policy accepts exactly one. Two of the three were already
+    cross-checked here; the third — pyproject's `test` extra — drifted silently
+    and surfaced only as a confusing wheel-metadata failure, which is how it
+    presented in #245 and cost most of a debugging cycle.
+
+    The failure names EVERY location with its value, so the reader can see which
+    one drifted rather than having to guess which one is authoritative."""
+    found = {
+        "requirements-publish.lock": _lock_setuptools_version(source_root),
+        "scripts/release_pipeline.py (_SETUPTOOLS_METADATA_POLICY_VERSION)":
+            _SETUPTOOLS_METADATA_POLICY_VERSION,
+        "pyproject.toml ([project.optional-dependencies].test)":
+            _test_extra_setuptools_version(source_root),
+    }
+    if len(set(found.values())) != 1:
+        detail = "\n".join(f"    {loc}: {ver}" for loc, ver in found.items())
+        # ASCII only. This lands in CI logs and terminals whose encoding is not
+        # ours to choose; an em-dash here decoded as mojibake the first time it
+        # was captured, which is a poor look for the message a release stops on.
+        raise _fail("the setuptools pin has DRIFTED. All three must agree:\n"
+                    + detail)
+    return next(iter(found.values()))
 
 
 def _expected_core_metadata(source_root: Path, version: str) \
