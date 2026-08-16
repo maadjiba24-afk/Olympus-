@@ -605,6 +605,49 @@ def test_live_gate_only_skips_on_credential_rejection(code, rejected):
     assert live._CREDENTIAL_REJECTED == {401, 402, 403}
 
 
+@pytest.mark.parametrize("code, exhausted", [
+    # Tavily: 432 Plan Limit Exceeded, 433 PayGo Limit Exceeded.
+    (432, True), (433, True),
+    # NOT quota: these are the credential set, and they mean rotate the key.
+    (401, False), (402, False), (403, False),
+    # NOT quota: 429 is "slow down" and never reaches here as an HTTPError —
+    # `_request` converts it to RateLimited — but pin it anyway so a future
+    # change to that conversion cannot silently reclassify it.
+    (429, False),
+    # NOT quota: integration and protocol problems, which must still FAIL.
+    (400, False), (404, False), (431, False), (434, False),
+    (500, False), (502, False), (503, False),
+])
+def test_live_gate_quota_boundary_is_narrow(code, exhausted):
+    """Quota exhaustion is a THIRD category, and it must stay a narrow one.
+
+    432/433 mean the account's allowance is spent: the key is valid and the
+    integration works, so the skip has to say "upgrade the plan or wait for the
+    billing cycle", not "rotate the key". Rotating a key against an exhausted
+    plan changes nothing, and a skip that gives an instruction which cannot work
+    is worse than the failure it replaced.
+
+    The neighbours 431 and 434 are pinned as failures on purpose: this is an
+    allowlist of two documented codes, not a 43x range.
+    """
+    live = _live_module()
+    err = urllib.error.HTTPError(
+        "https://provider.example/search", code, "reason", {}, None)
+    assert live.is_quota_exhausted(err) is exhausted
+    assert live._QUOTA_EXHAUSTED == {432, 433}
+
+
+def test_quota_and_credential_categories_are_disjoint():
+    """The two skip categories must never overlap.
+
+    If a code were in both, the branch order would silently decide which advice
+    the operator got — and the wrong one is unactionable.
+    """
+    live = _live_module()
+    assert not (live._QUOTA_EXHAUSTED & live._CREDENTIAL_REJECTED)
+    assert 429 not in live._QUOTA_EXHAUSTED, "429 is RateLimited, not quota"
+
+
 def test_live_status_lines_have_the_exact_required_shape():
     """The CI health line must never carry a secret, a URL or a query."""
     live = _live_module()
@@ -641,8 +684,8 @@ def test_live_status_emitter_cannot_become_a_generic_formatter():
         live.emit_status("tavily", "down", 0, "extra")
 
     # The status word is a closed vocabulary, so a message cannot ride in it.
-    assert live._STATUSES == {"ok", "empty", "rate_limited", "down",
-                              "unconfigured"}
+    assert live._STATUSES == {"ok", "empty", "rate_limited", "quota_exhausted",
+                              "down", "unconfigured"}
     for bad_status in ("weird", "", "down https://x.example?api_key=SEC"):
         with pytest.raises(ValueError):
             live.emit_status("tavily", bad_status)
