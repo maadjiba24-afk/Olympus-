@@ -661,8 +661,44 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     return log
 
 
+def _install_shutdown(stop: "threading.Event") -> None:
+    """Stop the loop on SIGTERM/SIGINT so a container stop is graceful.
+
+    `docker stop`, systemd, and every orchestrator send SIGTERM first and
+    SIGKILL after a grace period. This loop had NO handler, and it runs as PID 1
+    in the shipped container — where Linux ignores any signal whose handler was
+    never explicitly installed. So SIGTERM was dropped on the floor and the loop
+    was SIGKILLed on every single stop (measured: exit=137). `cli.py` catches
+    KeyboardInterrupt, but that only ever fires for SIGINT, so it never helped
+    the container path.
+
+    What a kill costs: an in-flight model call is abandoned after it has already
+    been paid for, the cadence timestamp for the running job is never written so
+    the same work re-runs next boot, and a multi-step maintenance sweep stops
+    wherever it happened to be.
+
+    Best-effort by design, exactly like `web.py::_install_shutdown`: signal
+    handlers can only be installed on the main thread, and `run_forever` is also
+    called from tests and embedded callers. Failing to install is not a reason
+    to refuse to run — it just leaves shutdown as abrupt as it was before."""
+    import signal
+
+    def _stop(signum, _frame):
+        print(f"\n… received {signal.Signals(signum).name}, "
+              f"finishing this tick and stopping")
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _stop)
+        except (ValueError, OSError, AttributeError):
+            pass                        # not the main thread, or not POSIX
+
+
 def run_forever() -> None:
     state = memory.load_state()
+    stop = threading.Event()
+    _install_shutdown(stop)
     print("Olympus heartbeat started. Ctrl-C to stop.")
     print(f"  opportunity scan : every {config.OPPORTUNITY_SCAN_EVERY // 3600} h")
     print(f"  youtube watchlist: every {config.WATCHLIST_EVERY // 60} min")
@@ -678,7 +714,13 @@ def run_forever() -> None:
         dest = "off-droplet" if config.backup_command() else "local only"
         print(f"  data backup      : every {config.BACKUP_EVERY // 3600} h "
               f"({dest})")
-    while True:
+    while not stop.is_set():
         for line in tick(state):
             print(f"[heartbeat] {line}")
-        time.sleep(config.HEARTBEAT_TICK)
+        # `stop.wait()`, not `time.sleep()`: since PEP 475 a signal handler that
+        # returns normally makes `time.sleep` RESUME for its remaining time, so
+        # a SIGTERM arriving mid-sleep would set the flag and still be killed
+        # waiting out the tick. `Event.set()` releases the waiter, so this
+        # returns as soon as the handler runs.
+        stop.wait(config.HEARTBEAT_TICK)
+    print("Heartbeat stopped.")
