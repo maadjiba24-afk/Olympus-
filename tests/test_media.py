@@ -28,7 +28,7 @@ def test_generate_image_saves_file(monkeypatch, tmp_path):
                         b'{"data":[{"b64_json":"%s"}]}' % png.encode())
     out = media.generate_image("a cat", filename="cat.png")
     assert "cat.png" in out
-    assert (tmp_path / "ws" / "cat.png").read_bytes().startswith(b"\x89PNG")
+    assert (tmp_path / "ws" / "gallery" / "shared" / "cat.png").read_bytes().startswith(b"\x89PNG")
 
 
 def test_edit_image_without_key_is_graceful(monkeypatch):
@@ -49,7 +49,11 @@ def test_edit_image_rejects_traversal(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
     out = media.edit_image("x", "../secret.png")
-    assert out.startswith("Error") and "outside the workspace" in out
+    # Refused by the gallery's per-principal resolver now rather than by
+    # sandbox._confine, so the message changed. STILL REFUSED, and by a
+    # stricter check: the gallery resolver also rejects anything that leaves
+    # the OWNER's directory, not merely anything leaving the workspace.
+    assert out.startswith("Error") and "no workspace image named" in out
 
 
 def test_edit_image_saves_new_file_leaving_source(monkeypatch, tmp_path):
@@ -87,7 +91,10 @@ def test_edit_image_saves_new_file_leaving_source(monkeypatch, tmp_path):
     assert captured["len"] > len(b"\x89PNG original")   # multipart wrapped the file
     # source untouched, new file written
     assert src.read_bytes() == b"\x89PNG original"
-    assert (ws / "blue.png").read_bytes() == b"\x89PNG edited"
+    # W2-1b: the edited copy belongs to whoever asked for it, so it lands in
+    # that principal's gallery directory rather than flat in the workspace.
+    from olympus import gallery
+    assert (gallery.owner_root() / "blue.png").read_bytes() == b"\x89PNG edited"
 
 
 def test_post_multipart_names_do_not_collide():

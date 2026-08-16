@@ -107,15 +107,29 @@ def test_no_worker_scope_uses_shared_root(monkeypatch, tmp_path):
 
 # --- (e) gallery unions worker-generated images -------------------------
 
-def test_gallery_unions_worker_images(monkeypatch, tmp_path):
+def test_gallery_no_longer_unions_worker_images(monkeypatch, tmp_path):
+    """INVERTED BY W2-1b, deliberately.
+
+    This used to assert that the gallery UNIONS sibling worker roots, so an
+    image a specialist wrote into its own root showed up in the gallery. That
+    union is correct for specialists collaborating on one user's task and is
+    exactly the cross-tenant leak once images belong to different people: it is
+    how user B could list, read and delete user A's images.
+
+    The gallery now resolves inside ONE principal's directory and never unions
+    (`gallery._owned`). A worker-root image is no longer surfaced by it. The
+    union itself is untouched for the sandbox file tools, which still share one
+    workspace by design -- only the gallery stopped relying on it.
+    """
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
+    monkeypatch.delenv("OLYMPUS_REQUIRE_LOGIN", raising=False)
     tok = sandbox.set_worker_root("iris")
     try:
         sandbox.write_file("pic.png", "png-bytes-placeholder")
     finally:
         sandbox.reset_worker_root(tok)
-    assert "pic.png" in [im["name"] for im in gallery.list_images()]
-    assert gallery.read_image("pic.png") is not None        # union-served
+    assert "pic.png" not in [im["name"] for im in gallery.list_images("someone")]
+    assert gallery.read_image("pic.png", "someone") is None
 
 
 # --- confinement still holds inside a per-worker root -------------------

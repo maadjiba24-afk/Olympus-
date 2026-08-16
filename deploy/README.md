@@ -105,6 +105,39 @@ the documented behaviour of volume ownership, not from a reproduction — treat 
 as the starting point for the first real upgrade, and check `id` and the write
 probe above rather than assuming it worked.
 
+### Upgrading ACROSS the gallery scoping change (W2-1b)
+
+The gallery is now **per principal**. Images generated after this change land in
+`<workspace>/gallery/<principal>/` and are listable, readable, deletable and
+editable only by their owner. Before it, every image sat flat in the shared
+workspace and `list/read/delete` unioned across sandbox roots, so any account
+could see and delete any other account's images.
+
+**Images generated before the upgrade have no owner**, and what happens to them
+depends deliberately on whether you run accounts:
+
+| `OLYMPUS_REQUIRE_LOGIN` | What you see |
+|---|---|
+| unset (single user) | the old flat images are still shown — **nothing is lost by upgrading** |
+| `1` (accounts on) | they are shown to **nobody**, because they belong to nobody |
+
+The single-user case is the one that would bite a real person, so it is the one
+that keeps working with no action. On a multi-user instance the images are not
+deleted, just not surfaced; claim them into one principal's gallery deliberately:
+
+```bash
+docker compose exec olympus python -c   "from olympus import gallery, memory; memory.set_user('u:1'); print(gallery.claim_legacy(), 'claimed')"
+```
+
+Use the namespace of the account that should own them (`u:<account_id>`).
+Verified by test in both directions: legacy images remain reachable with accounts
+off, and are invisible with accounts on until claimed.
+
+**What this does NOT scope.** The gallery *surface* is per principal; the sandbox
+file tools still share one workspace by design (`sandbox.workdir`, ADR 0005). A
+principal who can run file tools can still reach another's gallery directory
+through those tools. Closing that is a workspace-model change, not a gallery one.
+
 ## Verified bring-up (W1-4)
 
 Until this, `docker-compose.staging.yml` said in its own header that it had "NOT
