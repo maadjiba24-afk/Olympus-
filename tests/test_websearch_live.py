@@ -102,6 +102,14 @@ _ANCHOR_ENV = "OLYMPUS_SEARXNG_URL"
 # websearch.diagnostics(), which additionally has "unverified" (a state only the
 # non-live report can be in) and does not distinguish quota exhaustion.
 #
+# `upstream_blocked` is the environment condition that took this job off the
+# merge path (W2-CI): a metasearch proxy whose upstream engines refused the
+# runner -- CAPTCHA, rate-limit, 403. It is NOT `down` (nothing here is
+# broken) and NOT `rate_limited` (that is one provider throttling us, and it
+# recovers on its own). It means the probe could not observe anything from
+# this network, so the operator should read the result as 'no data', not as
+# 'Olympus is failing'. Emitted by the scheduled workflow itself.
+#
 # `quota_exhausted` is deliberately its OWN word rather than reuse of
 # `rate_limited` or `down`. The entire purpose of this line is that an operator
 # reading the CI log can tell WHY a provider is not being covered, and those
@@ -112,7 +120,7 @@ _ANCHOR_ENV = "OLYMPUS_SEARXNG_URL"
 # exactly the moment it is the only thing standing between an uncovered
 # provider and a green build.
 _STATUSES = frozenset({"ok", "empty", "rate_limited", "quota_exhausted",
-                       "down", "unconfigured"})
+                       "upstream_blocked", "down", "unconfigured"})
 
 # The complete set of subjects that may ever appear in a SEARCH_LIVE line: the
 # real provider registry, plus the one synthetic subject for the end-to-end

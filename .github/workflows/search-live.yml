@@ -1,0 +1,119 @@
+name: search-live
+
+# REAL external search providers. Scheduled, NOT a merge gate.
+#
+# This job used to run in ci.yml on every PR. It cannot: SearXNG is a metasearch
+# PROXY, and the engines it proxies deliberately block datacenter IP ranges. Run
+# 31975823235 failed with every upstream refusing at once —
+#
+#   duckduckgo   CAPTCHA on every retry
+#   brave        "Too many request (suspended_time=180)"
+#   google cse   "Our systems have detected unusual traffic from your network"
+#   startpage    redirected to CAPTCHA (suspended 3600s)
+#   wikidata     HTTP 403
+#
+# — so the proxy had nothing to serve and never became operational. The runs
+# that passed were the ones that drew an unblocked runner IP. That is not flake:
+# it is a gate whose result depends on which IP GitHub handed out, and it turned
+# an upstream anti-bot decision into a red main.
+#
+# It is NOT deleted, because the live probe has real value: it is how you learn
+# that a provider changed its response SHAPE. Deleting it would trade a bad
+# signal for no signal. It is a scheduled alert instead, and the deterministic
+# half — that our adapters parse each provider's response correctly — moved to
+# tests/test_websearch_adapters.py, which runs on every PR with no network.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"        # daily, off the hour to avoid the rush
+  workflow_dispatch:            # and on demand, e.g. after touching an adapter
+
+# One at a time: two concurrent runs would hit the same upstreams from the same
+# IP range and manufacture the rate-limiting this job exists to observe.
+concurrency:
+  group: search-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  search-live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - run: pip install pytest
+
+      - name: Start pinned local SearXNG
+        id: searxng
+        run: |
+          docker run --detach \
+            --name olympus-searxng \
+            --publish 127.0.0.1:8888:8080 \
+            --env FORCE_OWNERSHIP=false \
+            --volume "$PWD/.github/searxng/settings.yml:/etc/searxng/settings.yml:ro" \
+            searxng/searxng:2026.7.26-b060c780d
+
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --get \
+              --data-urlencode "q=Olympus agent framework GitHub" \
+              --data "format=json" \
+              --output /tmp/searxng-ready.json \
+              http://127.0.0.1:8888/search \
+              && python -c "import json; data=json.load(open('/tmp/searxng-ready.json', encoding='utf-8')); raise SystemExit(0 if data.get('results') else 1)"
+            then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" -eq 1 ]; then
+            echo "SEARCH_LIVE provider=searxng status=ok"
+            exit 0
+          fi
+
+          # DISTINGUISH THE TWO FAILURES. "our adapter broke" and "upstream
+          # blocked the runner" used to produce the identical red, which is what
+          # made this job uninformative as well as unmergeable. Ask the engine
+          # log which one happened and say so in the same
+          # `SEARCH_LIVE provider=… status=…` vocabulary the tests emit.
+          docker logs olympus-searxng > /tmp/searxng.log 2>&1 || true
+          if grep -Eqi 'captcha|suspended_time|unusual traffic|too many request|HTTP 429|HTTP 403' /tmp/searxng.log; then
+            echo "SEARCH_LIVE provider=searxng status=upstream_blocked"
+            echo "::warning::SearXNG never became operational because its UPSTREAM engines blocked this runner (CAPTCHA / rate-limit / 403). This is an environment condition, not a defect in Olympus — the adapters are covered deterministically by tests/test_websearch_adapters.py on every PR."
+            grep -Ei 'captcha|suspended_time|unusual traffic|too many request|HTTP 429|HTTP 403' /tmp/searxng.log | head -20
+            exit 1
+          fi
+
+          echo "SEARCH_LIVE provider=searxng status=down"
+          echo "::error::SearXNG JSON search API did not become operational, and the engine log shows NO upstream block signature — this looks like a real container, settings or adapter problem rather than an anti-bot response."
+          cat /tmp/searxng.log
+          exit 1
+
+      # `-s` disables pytest's stdout capture so the sanitized
+      # `SEARCH_LIVE provider=... status=...` health lines reach this job log.
+      # Without it pytest only replays captured output for FAILING tests, so a
+      # provider that completed successfully with zero results — a state the
+      # live gate tolerates, because production falls through to the next
+      # provider — would be entirely invisible.
+      - name: Run real search-provider end-to-end tests
+        env:
+          OLYMPUS_SEARCH_LIVE: "1"
+          OLYMPUS_SEARXNG_URL: http://127.0.0.1:8888
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
+        run: python -m pytest -q -s tests/test_websearch_live.py
+
+      - name: Stop local SearXNG
+        if: always()
+        run: docker rm --force olympus-searxng || true

@@ -17,3 +17,8 @@ build/
 dist/
 *.egg-info/
 venv312/
+
+# CI-log captures. `git add -A` has swept these into commits three times
+(win_failure.txt, searchlive_failure.txt, webkit_failure.txt); they are
+scratch evidence, never source.
+*_failure.txt

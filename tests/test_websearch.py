@@ -685,7 +685,7 @@ def test_live_status_emitter_cannot_become_a_generic_formatter():
 
     # The status word is a closed vocabulary, so a message cannot ride in it.
     assert live._STATUSES == {"ok", "empty", "rate_limited", "quota_exhausted",
-                              "down", "unconfigured"}
+                              "upstream_blocked", "down", "unconfigured"}
     for bad_status in ("weird", "", "down https://x.example?api_key=SEC"):
         with pytest.raises(ValueError):
             live.emit_status("tavily", bad_status)
