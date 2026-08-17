@@ -177,8 +177,20 @@ def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "auto")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 10, 5)
-    assert not [e for e in events if e[0] == "fsync"], (
-        f"`auto` must not fsync on the record path: {events}")
+    # FILE syncs only. `_append_usage` fsyncs the parent DIRECTORY on the day's
+    # FIRST append and only then (the Q5 create-path barrier: fsyncing a file
+    # does not make its directory entry durable, and the append path never goes
+    # through atomicio.publish, so nothing else covers it). That is a different
+    # guarantee from the per-record data barrier this knob controls, it is
+    # one-per-day rather than per-call, and `auto` was never a promise to skip
+    # it. Counting it here made this test red on POSIX and green on Windows,
+    # where `atomicio.CAN_FSYNC_DIR` is False and the call is a no-op — a
+    # verdict that depended on the platform rather than on the behaviour.
+    assert not [e for e in events if e[0] == "fsync" and e[1] == "file"], (
+        f"`auto` must not fsync the RECORD on the record path: {events}")
+    assert len([e for e in events if e[0] == "fsync" and e[1] == "dir"]) <= 1, (
+        f"the parent-directory sync is a CREATE-path barrier and must fire at "
+        f"most once, not per append: {events}")
     # PROPERTY PRESERVED, mechanism changed. The old assertion was
     # `"replace" in kinds` — atomicity against a peer process came from
     # tmp + os.replace. An APPEND of one newline-terminated line gives it by
@@ -220,6 +232,13 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
     default must not sync ON EVERY CALL, because that is what cost ~19.5 ms
     per call on the runner. That is what is asserted now: many records, at most
     one sync.
+
+    COUNTED PER KIND, for the same reason. The day's first append also syncs
+    the parent DIRECTORY once (the Q5 create-path barrier), which is a real
+    `os.fsync` on POSIX and a no-op on Windows. Lumping the two together made
+    this guard count 2 on Linux against a bound of 1 while passing on Windows —
+    a regression guard whose verdict came from the platform. Both are bounded
+    here, separately and on their own terms.
     """
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC_INTERVAL_MS", "60000")
@@ -227,11 +246,17 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
     events = trace(monkeypatch)
     for _ in range(25):
         usage.record("claude-opus-5", 100, 50)
-    syncs = [e for e in events if e[0] == "fsync"]
+    syncs = [e for e in events if e[0] == "fsync" and e[1] == "file"]
     assert len(syncs) <= 1, (
-        f"the default fsynced {len(syncs)} times across 25 records — a "
+        f"the default fsynced {len(syncs)} records across 25 calls — a "
         f"PER-CALL sync arriving as a default is the W1-1a regression "
-        f"(~19.5 ms per call on the runner). See usage._fsync_ledger.")
+        f"(~19.5 ms per call on the runner). See usage._fsync_ledger. "
+        f"events={events}")
+    dir_syncs = [e for e in events if e[0] == "fsync" and e[1] == "dir"]
+    assert len(dir_syncs) <= 1, (
+        f"the parent directory was synced {len(dir_syncs)} times across 25 "
+        f"appends — that barrier belongs to the day's FIRST append only, and "
+        f"per-append it is the same per-call device flush under another name")
 
 
 def test_usage_fsync_knob_resolves_each_mode(monkeypatch):

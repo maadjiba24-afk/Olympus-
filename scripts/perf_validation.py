@@ -1640,6 +1640,32 @@ def _persisted_ledger_calls(root: Path) -> tuple[int, list[str]]:
     phantom accounting loss. Read failures are RETURNED rather than swallowed —
     an unreadable ledger is itself an accounting defect, and the caller has to
     be able to say so instead of silently under-counting.
+
+    CALLER CONTRACT: NO WORKER THREAD MAY BE LIVE. This swaps `config.MEMORY_DIR`
+    — a process-global — for the duration of the read, so a concurrent
+    `usage.record()` would write to whichever tree happened to be installed at
+    that instant. A harness that moved the measured writes out from under the
+    measurement would corrupt exactly what it is measuring, and the corruption
+    would look like a real accounting loss.
+
+    PROVABLY SEQUENTIAL AT ITS ONE CALL SITE, checked rather than assumed:
+
+      * `bench_usage_contention` is the only caller. It joins every thread in
+        `pool`, then re-checks `t.is_alive()` into `stuck` and RAISES
+        RuntimeError if any survived the join — before this function is called.
+        It also requires `len(ends) == threads`, and a worker appends to `ends`
+        only after its last `usage.record()` has returned. So reaching the call
+        proves every writer is finished, not merely joined-with-a-timeout.
+      * The harness's other threads cannot overlap. `bench_admission` joins
+        without a timeout, and `bench_concurrency_limit`'s daemon holders are
+        created AFTER this runs (`full()` calls `bench_usage_contention` then
+        `bench_concurrency_limit`) and exercise `usage.slot()`, which is
+        admission control and never reads the ledger.
+      * `full()` is straight-line on the main thread; no bench runs concurrently
+        with another.
+
+    If a future caller violates that contract, the fix is to pass the root down
+    rather than to swap the global — not to widen this note.
     """
     total = 0
     problems: list[str] = []
@@ -1810,6 +1836,10 @@ def bench_usage_contention(levels=None,
                 f"{len(lat)}/{threads * per_thread} samples collected")
 
         wall = max(ends) - tripped[0]
+        # Safe to read here and only here: the join loop above, the `stuck`
+        # re-check and the `len(ends) != threads` guard have all passed, so no
+        # worker thread is live and `_persisted_ledger_calls`'s MEMORY_DIR swap
+        # cannot move the tree out from under a writer. See its docstring.
         ledger_calls, ledger_problems = _persisted_ledger_calls(root)
         row = summarize(lat)
         row.update({

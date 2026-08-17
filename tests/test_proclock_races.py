@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from olympus import config, memory, proclock, sandbox
+from olympus import config, memory, proclock, sandbox, usage
 
 
 # --- proclock unit behavior ----------------------------------------------
@@ -133,7 +133,20 @@ _GATE = """
                     reason="flock requires POSIX")
 def test_two_processes_never_lose_a_ledger_update(tmp_path):
     """THE lost-update race from the audit: two processes each record N model
-    calls; the per-day ledger must show exactly 2N calls."""
+    calls; the per-day ledger must show exactly 2N calls.
+
+    READ THROUGH `usage.ledger()`, not off the day file. W2-2 made the write an
+    APPEND to `<day>.jsonl` with the `<day>.json` snapshot compacted from it on
+    a cadence, so 60 records well under the 64 KiB threshold produce a journal
+    and NO snapshot at all — this test read the snapshot directly and died with
+    FileNotFoundError. It is the same defect W2-2 fixed in `adminpanel`,
+    `codegraph_gate` and `doctor` ("every reader goes through usage.ledger()"),
+    in the one reader that was skipped on Windows and so never ran locally.
+
+    The PROPERTY is untouched: exactly 2N calls, no increment lost. A lost
+    increment under-counts spend against the cap, which is the direction that
+    costs money.
+    """
     n = 30
     _run_workers(tmp_path, f"""
     {_GATE}
@@ -141,9 +154,7 @@ def test_two_processes_never_lose_a_ledger_update(tmp_path):
     for _ in range({n}):
         usage.record("race-model", 10, 5)
     """)
-    day = time.strftime("%Y-%m-%d")
-    ledger = json.loads(
-        (config.MEMORY_DIR / "usage" / f"{day}.json").read_text())
+    ledger = usage.ledger(time.strftime("%Y-%m-%d"))
     assert ledger["__all__"]["calls"] == 2 * n
     assert ledger["__all__"]["in"] == 2 * n * 10
 

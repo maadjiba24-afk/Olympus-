@@ -42,6 +42,19 @@ safe.
   and from an `atexit` hook so short-lived processes are covered too. An
   unclean stop — SIGKILL, power cut — still loses up to one interval; that is
   bounded, not prevented.
+
+  **CORRECTION — this line was FALSE on Windows as first committed (3d15637),
+  and is true now.** `flush()` opened the journal `O_RDONLY`. `os.fsync` is
+  `FlushFileBuffers` on Windows and `FlushFileBuffers` requires
+  `GENERIC_WRITE`, so every exit flush raised `EBADF`, was swallowed by the
+  `atexit`-safety `except Exception: return False`, and returned False. On
+  Windows a clean exit inside the interval lost the records it claimed to save
+  — for the whole of that commit. It now opens `O_WRONLY | O_APPEND` (the
+  minimum the syscall accepts, and the same flags the append path uses), and a
+  failure is reported once per process through `errors.capture` under the
+  `usage.flush` key instead of being swallowed silently. Two things had to be
+  wrong at once for this to ship: the code, and a test that recorded the
+  *attempt* rather than the *outcome* — see the note under `atexit` below.
 - **The journal is bounded by size, not only by the daily cadence.**
   `today_spend()` feeds the per-model-call budget guard and replays the
   un-compacted journal, so its cost scales with the day: 0.14 ms at 1 record,
@@ -62,6 +75,27 @@ safe.
   against live writers where it actually excludes. Single-process Windows — the
   supported configuration — is safe; multi-process Windows was already lossy
   before this change, and W2-2 moves the window from daily to ~1-in-450 calls.
+- **The `atexit` test now observes the OUTCOME, not the attempt.** It wrapped
+  `os.fsync` and wrote its sentinel line *before* delegating, so it recorded
+  that a sync had been tried. On Windows the sync then raised every time and the
+  test stayed green — which is how the `O_RDONLY` defect above shipped as
+  "proven". Delegating first makes the sentinel reachable only on success, so it
+  separates three states instead of two: synced, attempted-and-failed, never
+  fired. A companion test asserts the open flags directly, because POSIX permits
+  `fsync` on a read-only descriptor and the subprocess probe therefore cannot
+  see this defect on three of the four test legs.
+- **Four durability tests were platform-dependent in the other direction**, and
+  were red on the Linux legs while the Windows-only local run was green.
+  `_append_usage` fsyncs the parent *directory* on the day's first append (the
+  create-path barrier) — a real syscall on POSIX, a no-op on Windows. Both
+  W1-1a per-call-sync guards counted it and over-counted; the `atexit` probe's
+  built-in mutation counted it and misfired. Each now counts file and directory
+  syncs separately and bounds both on their own terms. Separately,
+  `test_proclock_races` read `<day>.json` directly and died with
+  `FileNotFoundError` once the write became a journal append; it goes through
+  `usage.ledger()` like every other reader — the same fix this release already
+  applied to `adminpanel`, `codegraph_gate` and `doctor`, missed here because
+  the test is POSIX-gated and never ran on the dev machine.
 
 Migration is automatic: a pre-W2-2 day file is already in snapshot shape, so an
 instance upgraded mid-day keeps its morning and adds its afternoon.

@@ -819,6 +819,45 @@ def _should_sync_now(*, now: float | None = None) -> bool:
     return False
 
 
+#: One report per process for a failing exit flush. `flush()` is called from an
+#: `atexit` handler AND from the heartbeat's SIGTERM handler, so an unguarded
+#: report is a flood at exactly the moment nobody is reading. Same shape as
+#: `_FSYNC_MODE_WARNED`.
+_FLUSH_FAILURE_WARNED = False
+
+
+def _report_flush_failure(exc: BaseException) -> None:
+    """Report a failed exit flush ONCE per process, and never raise doing it.
+
+    NEVER RAISE, NEVER SILENT. `flush()`'s bare `except Exception: return False`
+    was correct for atexit safety -- a traceback on every process exit is not an
+    acceptable failure mode -- and it is ALSO what hid the O_RDONLY defect for a
+    whole commit: on Windows every exit flush failed, returned False, and said
+    nothing. The bare except stays; the swallow is now instrumented.
+
+    ITS OWN try/except, because this runs at interpreter shutdown where the
+    IMPORT itself can fail: atexit handlers run after module globals may already
+    have been torn down, so `from . import errors` is not guaranteed to succeed.
+    A failure to report a failure must still not raise.
+    """
+    global _FLUSH_FAILURE_WARNED
+    if _FLUSH_FAILURE_WARNED:
+        return
+    # Set BEFORE reporting, like `_FSYNC_MODE_WARNED`: if `capture` itself is
+    # what fails, the flag must still have moved or a retry loop re-enters here.
+    _FLUSH_FAILURE_WARNED = True
+    try:
+        from . import errors
+        errors.capture(
+            "usage.flush", exc,
+            context="the ledger journal could not be synced at shutdown, so "
+                    "records written since the last interval sync are "
+                    "unflushed and an unclean stop loses them. Reported once "
+                    "per process.")
+    except Exception:                    # noqa: BLE001 - atexit must not throw
+        pass
+
+
 def flush() -> bool:
     """Force the ledger journal to stable storage NOW.
 
@@ -830,19 +869,31 @@ def flush() -> bool:
     were: SIGKILL, a power cut or a panic take whatever is still unflushed.
     That residue is bounded by the interval -- see `_fsync_ledger`.
 
-    NEVER RAISES (F2). This runs from an `atexit` handler, where a traceback
-    would print on every process exit, and where module globals may already be
-    torn down. The journal can also be GONE by now -- a peer compaction unlinks
-    it -- so a missing file is a normal outcome, not an error. It reopens the
-    journal because the append path opens and closes per append: there is no
-    long-lived descriptor to sync.
+    NEVER RAISES, NEVER SILENT (F2). This runs from an `atexit` handler, where a
+    traceback would print on every process exit, and where module globals may
+    already be torn down -- so it cannot raise. But a swallowed failure here is
+    a durability guarantee quietly not happening, so a failure is reported once
+    through `errors.capture`; see `_report_flush_failure`. The journal can also
+    be GONE by now -- a peer compaction unlinks it -- so a missing file is a
+    normal outcome and is NOT reported. It reopens the journal because the
+    append path opens and closes per append: there is no long-lived descriptor
+    to sync.
     """
     try:
         day = time.strftime("%Y-%m-%d")
         journal = _journal_path(config.MEMORY_DIR / "usage" / f"{day}.json")
         if not journal.exists():
             return False
-        fd = os.open(str(journal), os.O_RDONLY)
+        # O_WRONLY, NOT O_RDONLY. `os.fsync` is `FlushFileBuffers` on Windows,
+        # and FlushFileBuffers requires GENERIC_WRITE on the handle -- so a
+        # read-only descriptor fails with EBADF and this entire function was
+        # INERT on Windows for the whole of 3d15637, returning False on every
+        # exit while the commit message claimed the hook was proven. O_APPEND on
+        # top of it because the only legal write to a journal is at the end: a
+        # stray write through this descriptor cannot land mid-file and cannot
+        # truncate. Minimum privilege that still satisfies the syscall, and the
+        # same flags `_open_append`'s "ab" opens with.
+        fd = os.open(str(journal), os.O_WRONLY | os.O_APPEND)
         try:
             os.fsync(fd)
         finally:
@@ -850,7 +901,13 @@ def flush() -> bool:
         with _FSYNC_CLOCK_LOCK:
             _LAST_FSYNC[0] = time.time()
         return True
-    except Exception:                    # noqa: BLE001 - atexit must not throw
+    except FileNotFoundError:
+        # Unlinked by a peer compaction between `exists()` and `open()`. The
+        # same normal outcome as the `exists()` check above, so it is not a
+        # failure to report.
+        return False
+    except Exception as exc:             # noqa: BLE001 - atexit must not throw
+        _report_flush_failure(exc)
         return False
 
 
