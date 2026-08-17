@@ -13,6 +13,7 @@ spend reaches it — a seatbelt on their provider bill, not a charge from us.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import itertools
 import json
@@ -675,62 +676,387 @@ def estimate_cost(model: str, in_tokens: int, out_tokens: int, *,
     return total / 1_000_000
 
 
-def _fsync_ledger() -> bool:
-    """OLYMPUS_USAGE_FSYNC — `auto` (the default) or `always`.
+def _journal_path(path: Path) -> Path:
+    """The append journal beside a day's snapshot: usage/<day>.jsonl."""
+    return path.with_suffix(".jsonl")
 
-    THE ONE W1-1 SITE THAT DOES NOT FSYNC BY DEFAULT. Every other durable store
-    syncs unconditionally; this one is opt-in, and the reason is measurement.
 
-    W1-1 shipped `always` on the strength of an isolated micro-benchmark (1000
-    calls x 5 repeats, best-of, NTFS on a local SSD, py3.10): 730 -> 2269
-    us/call, i.e. +1.539 ms for the fsync alone.
+def _open_append(path):
+    return open(path, "ab")             # seam for fault injection in tests
 
-    The Windows CI leg then failed
-    `test_observability_overhead_absolute_cost_bounded`, which attributes
-    overhead per component and found `usage` at 19.519 +/- 1.095 ms — 77% of
-    the total and the lowest-noise component in the run, the only one cleanly
-    resolved.
 
-    MEASURE LIKE AGAINST LIKE. 19.519 ms is the WHOLE usage component
-    (read-modify-write plus fsync, per pipeline run); 1.539 ms was the fsync
-    ALONE, per call. Dividing them is the same category of error that produced
-    the wrong default in the first place — a number compared against something
-    it was not measured against. On the component's own basis, the local
-    before/after in this PR is:
+def _append_usage(path: Path, event: dict) -> None:
+    """Append ONE usage event and sync it. Copied from
+    `sessionlog._append_records`: one write() per record ending in "\\n",
+    flush(), then os.fsync(fd).
 
-        with fsync     4.824 ms      without fsync   2.264 ms
-        fsync cost     2.560 ms      (component basis, same benchmark)
+    This is the whole point of W2-2. `record()` used to read-modify-write the
+    ENTIRE day ledger under a cross-process lock, once per model call: O(ledger)
+    work per call, which is why W1-1a had to turn fsync off (the sync cost ~15 ms
+    inside that lock and serialized to ~300 ms across a council turn). An append
+    touches ONE block, so durability becomes affordable and fsync comes back on.
 
-    The runner's read-modify-write cannot cost zero, so its fsync is strictly
-    LESS than 19.519 ms and the runner-to-local ratio is strictly under 7.6x
-    (19.519 / 2.560) — realistically around 6x, i.e. roughly 15 ms. Both raw
-    numbers are above so the next reader can redo the arithmetic; no point
-    estimate is claimed, because the data does not support one.
+    The line-oriented append is also what makes a torn tail survivable: only the
+    LAST record can be partial, `_replay_journal` discards it, and every record
+    before it is intact. That is stronger than the old whole-file rewrite, where
+    an interrupted publish could leave the day's total at zero.
+    """
+    journal = _journal_path(path)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    # Q5: fsyncing a FILE does not make its DIRECTORY ENTRY durable, so the
+    # day's first append needs a parent-directory sync or a crash can lose the
+    # whole journal even though its bytes were flushed. Appends do NOT go
+    # through atomicio.publish() -- that is the replace path -- so nothing else
+    # covers this. On the CREATE path only: paying it per append would
+    # reintroduce a per-call barrier, which is what this design removed.
+    created = not journal.exists()
+    line = (json.dumps(event, separators=(",", ":"), sort_keys=True)
+            + "\n").encode("utf-8")
+    f = _open_append(journal)
+    try:
+        f.write(line)
+        if _should_sync_now():
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        f.close()
+    if created:
+        atomicio.fsync_dir(journal.parent)
 
-    The latency alone would be affordable — ~15 ms against a ~2 s provider call
-    is under 1%. What is not affordable is WHERE it sits: `record()` does a
-    read-modify-write of the whole ledger INSIDE a cross-process lock, and
-    Olympus runs specialists in parallel. Twenty concurrent calls do not each
-    pay it simultaneously; they serialize on that lock and pay in sequence —
-    roughly **300 ms welded onto the critical path of every council turn**, plus
-    contention. The W1-1 record justified `always` with "~30 ms on a
-    20-specialist council turn": an order of magnitude out, because it
-    multiplied the local per-call cost and ignored the lock.
 
-    `OLYMPUS_USAGE_FSYNC=always` restores the sync for an operator who has
-    measured their own storage and wants it. Any unrecognised value reads as
-    off, so a typo cannot silently re-arm a ~300 ms serialized cost.
+#: Wall-clock of the last ledger fsync, and the mutex guarding it. Module-level
+#: because the interval is PER PROCESS -- see `_should_sync_now`.
+_LAST_FSYNC = [0.0]
+_FSYNC_CLOCK_LOCK = threading.Lock()
 
-    RESIDUAL RISK, stated plainly: with the default, a power cut can return an
-    empty ledger. That resets the day's recorded spend to 0 and disables the
-    budget cap until the next write. This is the cost of the decision. It is
-    also exactly where `main` stood before W1-1 — the change declines to make
-    one thing better at a price that was mis-measured, rather than regressing
-    anything. W1-1c is the real fix: append + fsync one record like `sessionlog`
-    does, which is both cheaper and more crash-safe than rewriting the whole
-    file under a lock."""
-    return os.environ.get("OLYMPUS_USAGE_FSYNC", "auto").strip().lower() \
-        == "always"
+
+#: Compact the journal once it passes this many BYTES. Size, never a line
+#: count: counting lines is O(N) and would reintroduce exactly the unbounded
+#: per-call read this threshold exists to bound.
+#:
+#: DERIVED, not chosen. MEASURED ON A LOCAL NTFS SSD, 2026-08-17 -- these are
+#: properties of that disk, NOT of this code. W1-1a exists because a local-SSD
+#: figure was used to justify a default without saying it was local, and the CI
+#: runner turned out ~6x slower (bounded at <7.6x in W1-5).
+#:
+#: MEASURED (local NTFS SSD): 146 bytes/record, so 64 KiB is ~450 records --
+#:
+#:   today_spend() at 450 records   ~2.0 ms   (ceiling 2.5 ms -- ~0.1% of the
+#:                                             ~2 s provider call it guards,
+#:                                             and <1/10 of the 25 ms
+#:                                             observability limit, so it
+#:                                             cannot push that contract over
+#:                                             on its own)
+#:   compaction at 450 records      5.23 ms   -> 11.6 us/record amortized
+#:
+#: REASONED, not measured -- how these should travel to slower storage:
+#:
+#:   * COMPACTION contains an fsync, so it is the figure that moves most. At a
+#:     ~6x runner ratio that is ~30 ms, i.e. ~60-70 us/record amortized: still
+#:     small against the ~1.66 ms an append already costs, and still 1-in-450.
+#:   * TODAY_SPEND() is a page-cache READ with no barrier, so it should travel
+#:     far better than compaction does -- but this is reasoning about where the
+#:     cost comes from, not a measurement on that hardware.
+#:
+#: An operator who has measured their own storage sets
+#: OLYMPUS_USAGE_COMPACT_BYTES rather than inheriting these numbers.
+#:
+#: The two constraints do not BOTH hold cleanly on this storage: compaction has
+#: a ~2.5 ms fixed cost (flock + fsync), so amortized cost only falls under
+#: 10 us/record at ~900 records -- by which point today_spend() is 4.4 ms, well
+#: over its ceiling. Resolved in favour of the ceiling, because today_spend()
+#: is on the PER-MODEL-CALL budget-guard path while compaction is 1-in-450; and
+#: 11.6 us/record is 0.7% of the ~1.66 ms an append already costs, so the
+#: overshoot is invisible next to the work it accompanies.
+_COMPACT_AT_BYTES = 64 * 1024
+
+
+def compact_at_bytes() -> int:
+    """OLYMPUS_USAGE_COMPACT_BYTES, default 64 KiB."""
+    raw = os.environ.get("OLYMPUS_USAGE_COMPACT_BYTES", "").strip()
+    if not raw:
+        return _COMPACT_AT_BYTES
+    try:
+        return max(1024, int(raw))
+    except ValueError:
+        return _COMPACT_AT_BYTES
+
+
+def fsync_interval_ms() -> float:
+    """OLYMPUS_USAGE_FSYNC_INTERVAL_MS, default 1000 (one second)."""
+    raw = os.environ.get("OLYMPUS_USAGE_FSYNC_INTERVAL_MS", "").strip()
+    if not raw:
+        return 1000.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1000.0
+
+
+def _should_sync_now(*, now: float | None = None) -> bool:
+    """Whether THIS append should pay for a device flush.
+
+    GROUP COMMIT BY TIME. `sessionlog._append_records` amortises a sync over a
+    BATCH of records, which it can because it is handed many at once. `record()`
+    is called singly, once per model call, so there is no batch to close --
+    the equivalent is to amortise over TIME instead: at most one fsync per
+    `fsync_interval_ms`, however many calls arrive inside it.
+
+    `always` and `auto` remain as explicit overrides for either extreme."""
+    mode = _fsync_ledger()
+    if mode == "auto":
+        return False
+    if mode == "always":
+        return True
+    interval = fsync_interval_ms() / 1000.0
+    if interval <= 0:
+        return True                       # a zero interval IS per-call
+    stamp = time.time() if now is None else now
+    with _FSYNC_CLOCK_LOCK:
+        if stamp - _LAST_FSYNC[0] >= interval:
+            _LAST_FSYNC[0] = stamp
+            return True
+    return False
+
+
+def flush() -> bool:
+    """Force the ledger journal to stable storage NOW.
+
+    Called on clean shutdown so the final records of a run are not the ones the
+    interval loses. W1-4 gave the heartbeat a real SIGTERM handler, so there is
+    now somewhere to hang this; `heartbeat._install_shutdown` calls it.
+
+    AN UNCLEAN SHUTDOWN IS NOT COVERED, and this must not be read as if it
+    were: SIGKILL, a power cut or a panic take whatever is still unflushed.
+    That residue is bounded by the interval -- see `_fsync_ledger`.
+
+    NEVER RAISES (F2). This runs from an `atexit` handler, where a traceback
+    would print on every process exit, and where module globals may already be
+    torn down. The journal can also be GONE by now -- a peer compaction unlinks
+    it -- so a missing file is a normal outcome, not an error. It reopens the
+    journal because the append path opens and closes per append: there is no
+    long-lived descriptor to sync.
+    """
+    try:
+        day = time.strftime("%Y-%m-%d")
+        journal = _journal_path(config.MEMORY_DIR / "usage" / f"{day}.json")
+        if not journal.exists():
+            return False
+        fd = os.open(str(journal), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        with _FSYNC_CLOCK_LOCK:
+            _LAST_FSYNC[0] = time.time()
+        return True
+    except Exception:                    # noqa: BLE001 - atexit must not throw
+        return False
+
+
+# Q4: EVERY process, not just the heartbeat. `_LAST_FSYNC` is per-process, so a
+# SHORT-LIVED one is the gap the interval creates: a CLI invocation that records
+# a model call and exits inside the interval loses it with no crash at all -- a
+# clean exit that drops spend. Registering here, where the timer lives, covers
+# every entry point uniformly and is cheaper than auditing each one (the web
+# server's shutdown path and `cli.main` would each have needed their own hook).
+#
+# atexit does NOT run on SIGKILL, a power cut or os._exit. The bound there is
+# still one interval, which is the designed behaviour rather than a gap.
+atexit.register(flush)
+
+
+def _replay_journal(path: Path) -> list[dict]:
+    """Every intact event in a day's journal, in order.
+
+    A TORN TAIL IS DISCARDED AND EVERY PRIOR RECORD SURVIVES. Records are
+    appended whole and newline-terminated, so a crash mid-write can only damage
+    the final line; anything that does not parse, or that arrives without its
+    terminating newline, is dropped and the rest stands. Silently tolerating a
+    torn record ANYWHERE else would hide corruption, so only the last line is
+    forgiven.
+    """
+    journal = _journal_path(path)
+    try:
+        raw = journal.read_bytes()
+    except OSError:
+        return []
+    if not raw:
+        return []
+    lines = raw.split(b"\n")
+    # A complete file ends with "\n", so the final split element is empty. If it
+    # is NOT empty the last record was never finished being written.
+    if lines and lines[-1] == b"":
+        lines.pop()
+    else:
+        lines = lines[:-1]              # drop the torn tail
+    out: list[dict] = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            if index == len(lines) - 1:
+                continue                # torn final record: forgiven
+            raise                       # mid-file corruption is NOT forgiven
+        if isinstance(event, dict):
+            out.append(event)
+    return out
+
+
+def _fold(ledger: dict, event: dict) -> None:
+    """Fold one journal event into an aggregate ledger, in place.
+
+    THE SINGLE AGGREGATION. `record` writes events and this reconstructs the
+    same row shape the snapshot has always had, so the on-disk snapshot format
+    is unchanged and every historical reader still understands it.
+    """
+    user = str(event.get("user", ""))
+    model = str(event.get("model", ""))
+    in_tokens = int(event.get("in", 0) or 0)
+    out_tokens = int(event.get("out", 0) or 0)
+    cache_read = int(event.get("cache_read", 0) or 0)
+    cache_creation = int(event.get("cache_creation", 0) or 0)
+    cost = float(event.get("cost", 0.0) or 0.0)
+    for key in ("__all__", f"user:{user}", f"model:{model}"):
+        row = ledger.setdefault(
+            key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+        row["calls"] = row.get("calls", 0) + 1
+        row["in"] = row.get("in", 0) + in_tokens
+        row["out"] = row.get("out", 0) + out_tokens
+        row["cache_read"] = row.get("cache_read", 0) + cache_read
+        row["cache_creation"] = row.get("cache_creation", 0) + cache_creation
+        row["cost"] = round(row.get("cost", 0.0) + cost, 6)
+    fp = str(event.get("prefix_fp", "") or "")
+    if fp:
+        fp_row = ledger.setdefault("prefix", {}).setdefault(
+            fp, {"calls": 0, "hits": 0, "cache_read": 0})
+        fp_row["calls"] = fp_row.get("calls", 0) + 1
+        if cache_read > 0:
+            fp_row["hits"] = fp_row.get("hits", 0) + 1
+        fp_row["cache_read"] = fp_row.get("cache_read", 0) + cache_read
+
+
+def ledger(day: str | None = None) -> dict:
+    """THE day's totals: the compacted snapshot PLUS the un-compacted journal.
+
+    Every reader must come through here. The snapshot alone is stale between
+    compactions, and reading it directly would UNDER-REPORT spend -- the
+    direction that costs money, because `today_spend` feeds `daily_budget`,
+    which is what stops a runaway. `adminpanel`, `codegraph_gate` and `doctor`
+    each used to parse the day file themselves and now call this instead.
+
+    MIGRATION ACROSS THE SEAM. A day file written by the pre-W2-2 code is
+    already in snapshot shape, so it is the base and the journal is layered on
+    top. A running instance that upgrades mid-day therefore keeps its morning's
+    spend and adds the afternoon's, with no special case: old format + new
+    events = correct total.
+    """
+    day = day or time.strftime("%Y-%m-%d")
+    path = config.MEMORY_DIR / "usage" / f"{day}.json"
+    out: dict = {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            out = loaded
+    except (json.JSONDecodeError, OSError, ValueError):
+        out = {}
+    for event in _replay_journal(path):
+        _fold(out, event)
+    return out
+
+
+def compact(day: str | None = None) -> dict:
+    """Fold a day's journal into its snapshot and truncate the journal.
+
+    Runs from the heartbeat's daily maintenance job (W1-2 built that home). The
+    total is IDENTICAL before and after: compaction moves where the numbers
+    live, never what they are.
+    """
+    day = day or time.strftime("%Y-%m-%d")
+    path = config.MEMORY_DIR / "usage" / f"{day}.json"
+    journal = _journal_path(path)
+    if not journal.exists():
+        return {"day": day, "compacted": 0, "bytes_reclaimed": 0}
+    try:
+        with proclock.lock("usage-ledger", timeout=_LEDGER_LOCK_TIMEOUT):
+            events = _replay_journal(path)
+            if not events:
+                return {"day": day, "compacted": 0, "bytes_reclaimed": 0}
+            size = journal.stat().st_size
+            merged = ledger(day)          # snapshot + journal, the real total
+            _atomic_write_json(path, merged)
+            # Only AFTER the snapshot is durably published may the journal go:
+            # the reverse order would lose every un-compacted event on a crash
+            # in between.
+            journal.unlink()
+            # The unlink itself must be durable. Without this, a crash in the
+            # window after the removal but before the directory entry reaches
+            # disk can RESURRECT a journal whose records are already in the
+            # snapshot -- double-counting the day's spend. (POSIX-only; a
+            # no-op on Windows, see atomicio.fsync_dir.)
+            atomicio.fsync_dir(journal.parent)
+            return {"day": day, "compacted": len(events),
+                    "bytes_reclaimed": size}
+    except (TimeoutError, OSError) as err:
+        from . import errors
+        errors.capture("usage.compact", err, context=day)
+        return {"day": day, "compacted": 0, "bytes_reclaimed": 0,
+                "error": type(err).__name__}
+
+
+def _fsync_ledger() -> str:
+    """OLYMPUS_USAGE_FSYNC -- `interval` (the default), `always`, or `auto`.
+
+    WHAT THE APPEND ALREADY BANKED, regardless of this setting. Before W2-2,
+    `record()` republished the WHOLE day ledger with tmp + os.replace. Unsynced,
+    that could return an EMPTY file after a power cut -- the rename reaching
+    disk ahead of the data -- which reset the day's spend to zero and disabled
+    the cap. Appending cannot do that: prior records are never rewritten, so a
+    crash costs only the unflushed TAIL and everything before it survives. That
+    is a real durability improvement held at every setting, including `auto`,
+    and it is why the exemption is no longer pure loss.
+
+    WHY NOT PER-CALL FSYNC. Measured on this benchmark, same machine:
+
+        old rewrite design, fsync off    2.26 ms
+        old rewrite design, fsync on     4.82 ms
+        append design,      fsync off    1.15 ms
+        append design,      fsync on     4.13 ms
+
+    The append halved the non-durable cost by removing the O(ledger)
+    read-modify-write -- that half worked. But the sync itself did not get
+    cheaper (~3.0 ms vs ~2.56 ms before), because an fsync is a DEVICE FLUSH
+    BARRIER: its cost is a round trip, not a function of how many bytes
+    preceded it. Writing 600 bytes instead of 50 KB removes work, not latency.
+    Extrapolated at W1-5's bounded runner-to-local ratio (<7.6x), ~3 ms locally
+    is ~18 ms on CI -- about where the contract failed before, against a 25 ms
+    limit shared with `ctx` and `guard`.
+
+    SO THE DEFAULT IS GROUP COMMIT BY TIME: at most one fsync per
+    OLYMPUS_USAGE_FSYNC_INTERVAL_MS (default 1000), however many calls arrive
+    inside it. `sessionlog` amortises a sync over a batch; `record()` is called
+    singly, so it amortises over time instead.
+
+    WORST-CASE LOSS IS BOUNDED BY THE INTERVAL: an unclean shutdown -- SIGKILL,
+    power cut, kernel panic -- loses at most the last `interval` of records,
+    one second by default. A CLEAN shutdown loses nothing: `flush()` is called
+    from the heartbeat's SIGTERM handler (W1-4). Nothing here covers the
+    unclean case; it is bounded, not prevented.
+
+    THE INTERVAL IS PER PROCESS, NOT GLOBAL. Two processes writing the same
+    ledger each keep their own timer and each sync once per interval, so the
+    instance pays up to N x one sync per interval for N processes. That is
+    bounded and small (the web app and the heartbeat make two), and the
+    alternative -- a shared cross-process timer -- would need a lock on the hot
+    path to save one flush per second, which is the trade this change exists to
+    avoid.
+    """
+    raw = os.environ.get("OLYMPUS_USAGE_FSYNC", "").strip().lower()
+    if raw in ("always", "auto"):
+        return raw
+    return "interval"
 
 
 def _atomic_write_json(path: Path, obj) -> None:
@@ -738,12 +1064,18 @@ def _atomic_write_json(path: Path, obj) -> None:
     ledger — a truncated ledger would silently reset the day's spend to 0 and
     disable the budget guard.
 
-    The fsync that would also make this survive a power cut is OFF by default
-    here, alone among the W1-1 sites, because it costs roughly 15 ms inside a
-    cross-process lock on CI storage. See `_fsync_ledger`."""
+    ALWAYS FSYNCS, unconditionally. This is the once-a-day compaction publish,
+    not the per-call path, so the argument that took fsync off `record()` does
+    not apply: one sync per compaction is free, and this snapshot is about to
+    become the ONLY copy of everything the journal held.
+
+    It also used to pass `fsync=_fsync_ledger()`, which silently became a BUG
+    when that function started returning a mode STRING instead of a bool --
+    "interval", "always" and "auto" are all truthy, so it happened to sync in
+    every case including the one that asked not to. Correct by accident is not
+    correct; it is stated explicitly now."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    atomicio.publish(tmp, path, json.dumps(obj, indent=1),
-                     fsync=_fsync_ledger())
+    atomicio.publish(tmp, path, json.dumps(obj, indent=1), fsync=True)
 
 
 # In-process per-user session totals (since process start). The per-day
@@ -812,6 +1144,12 @@ def record(model: str, in_tokens: int, out_tokens: int, *,
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     from . import proclock
+    # Bound BEFORE the try, so `if oversized:` below cannot raise
+    # UnboundLocalError on any path -- including one where the lock or the
+    # append raises something outside the caught tuple. It was previously
+    # bound only inside the `with`, which made the handler's `return`
+    # load-bearing for correctness rather than merely for control flow.
+    oversized = False
     with _TOTALS_LOCK:
         _bump_session(user, in_tokens, out_tokens, cost,
                       cache_read=cache_read, cache_creation=cache_creation)
@@ -826,32 +1164,22 @@ def record(model: str, in_tokens: int, out_tokens: int, *,
     # beats a broken reply — captured, never silent.
     try:
         with proclock.lock("usage-ledger", timeout=_LEDGER_LOCK_TIMEOUT):
-            ledger = {}
-            if path.exists():
-                try:
-                    ledger = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    ledger = {}
-            for key in ("__all__", f"user:{user}", f"model:{model}"):
-                row = ledger.setdefault(
-                    key, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
-                row["calls"] += 1
-                row["in"] += in_tokens
-                row["out"] += out_tokens
-                # Optional additive keys (migration-free: absent reads as 0
-                # on old files, and old readers ignore the new keys).
-                row["cache_read"] = row.get("cache_read", 0) + cache_read
-                row["cache_creation"] = (row.get("cache_creation", 0)
-                                         + cache_creation)
-                row["cost"] = round(row["cost"] + cost, 6)
-            if prefix_fp:
-                fp_row = ledger.setdefault("prefix", {}).setdefault(
-                    prefix_fp, {"calls": 0, "hits": 0, "cache_read": 0})
-                fp_row["calls"] = fp_row.get("calls", 0) + 1
-                if cache_read > 0:
-                    fp_row["hits"] = fp_row.get("hits", 0) + 1
-                fp_row["cache_read"] = fp_row.get("cache_read", 0) + cache_read
-            _atomic_write_json(path, ledger)
+            _append_usage(path, {
+                "ts": round(time.time(), 3),
+                "user": user, "model": model,
+                "in": in_tokens, "out": out_tokens,
+                "cache_read": cache_read,
+                "cache_creation": cache_creation,
+                "cost": round(cost, 6),
+                **({"prefix_fp": prefix_fp} if prefix_fp else {}),
+            })
+            # One stat(), never a line count -- counting lines is O(N) and is
+            # the very thing this bound exists to prevent.
+            try:
+                oversized = (_journal_path(path).stat().st_size
+                             >= compact_at_bytes())
+            except OSError:
+                oversized = False
     except (TimeoutError, OSError) as err:
         # Accounting must NEVER escape into the caller. `_atomic_write_json`
         # raises OSError on a full/read-only disk; letting that propagate made a
@@ -868,28 +1196,50 @@ def record(model: str, in_tokens: int, out_tokens: int, *,
         errors.capture("usage.record", err,
                        context=("ledger lock wedged" if isinstance(err, TimeoutError)
                                 else "ledger write failed (spend not recorded)"))
+        # No `return` here. `oversized` is False on this path, so the trigger
+        # below is skipped anyway, and an early return would silently become a
+        # skip-the-rest if anything is ever appended to this function.
+    # OUTSIDE the `with` block, deliberately. `record()` holds
+    # proclock.lock("usage-ledger") for its append and `compact()` acquires the
+    # SAME lock; calling it from inside would risk a self-deadlock on the
+    # per-model-call path, and flock reentrancy is not something to assume --
+    # the failure mode is Olympus HANGING, not erroring. Two acquisitions on
+    # the 1-in-N crossing is nothing, and a peer that compacts first is
+    # harmless: compact() returns 0 when the journal is already gone.
+    if oversized:
+        try:
+            compact()
+        except Exception as err:         # noqa: BLE001 - never raises, but
+            # NEVER SILENT either. A compaction that fails every time -- disk
+            # full, permissions, a wedged lock -- would let the journal grow
+            # unbounded with nothing reporting it, which is the bound quietly
+            # not existing. Same contract as the sibling handler above.
+            from . import errors
+            errors.capture("usage.record.autocompact", err,
+                           context="journal over threshold but compaction "
+                                   "failed; today_spend() cost is unbounded "
+                                   "until this succeeds")
 
 
 # --- the budget guard (protects the user's own API bill) -----------------
 
 def today_spend() -> float:
     """Total estimated USD spent across the whole instance today."""
-    day = time.strftime("%Y-%m-%d")
-    path = config.MEMORY_DIR / "usage" / f"{day}.json"
-    if not path.exists():
-        return 0.0
+    # NO `path.exists()` SHORT-CIRCUIT. There used to be one, and with the W2-2
+    # journal it silently returned 0.0 for a whole day: the SNAPSHOT does not
+    # exist until the first compaction, while every model call is already
+    # appending to the journal beside it. That is the exact failure this design
+    # has to avoid -- a budget guard reporting no spend while spend is
+    # happening, which disables the cap without telling anyone. `ledger()`
+    # handles a missing snapshot itself.
+    #
     # Deliberately lock-free with respect to record()'s cross-process flock:
-    # correctness rests entirely on the atomic tmp+os.replace publish (a
-    # reader sees the old or the new ledger, never a torn one). Taking the
-    # flock here would couple every budget check to the other process's
-    # liveness for no consistency gain. _TOTALS_LOCK only serializes against
+    # taking it here would couple every budget check to the other process's
+    # liveness for no consistency gain. `_TOTALS_LOCK` only serializes against
     # in-process session-total updates.
     with _TOTALS_LOCK:
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return 0.0
-    return float(ledger.get("__all__", {}).get("cost", 0.0))
+        today = ledger()
+    return float(today.get("__all__", {}).get("cost", 0.0))
 
 
 def daily_budget() -> float:
@@ -986,18 +1336,21 @@ def report(days: int = 7) -> str:
     base = config.MEMORY_DIR / "usage"
     if not base.exists():
         return "No usage recorded yet."
-    files = sorted(base.glob("*.json"), reverse=True)[:days]
+    # Snapshots AND journals (W2-2): an uncompacted day has only a .jsonl, and
+    # globbing *.json alone would omit it from the report entirely.
+    known = {q.stem for q in base.glob("*.json")} | {
+        q.stem for q in base.glob("*.jsonl")}
+    files = sorted(known, reverse=True)[:days]
     lines = ["Usage (estimated, USD):", ""]
     grand = 0.0
-    for path in sorted(files):
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+    for day_name in sorted(files):
+        led = ledger(day_name)
+        if not led:
             continue
-        allrow = ledger.get("__all__", {})
+        allrow = led.get("__all__", {})
         cost = allrow.get("cost", 0.0)
         grand += cost
-        lines.append(f"  {path.stem}: ${cost:.4f}  "
+        lines.append(f"  {day_name}: ${cost:.4f}  "
                      f"({allrow.get('calls', 0)} calls, "
                      f"{allrow.get('in', 0)+allrow.get('out', 0)} tokens)")
     lines.append("")
@@ -1036,16 +1389,15 @@ def cache_stats(days: int = 7) -> dict:
         return out
     read_mult = cache_read_mult()
     savings = 0.0
-    files = sorted(base.glob("*.json"), reverse=True)[:days]
-    for path in sorted(files):               # ascending: last_day wins below
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if not isinstance(ledger, dict):
+    known = {q.stem for q in base.glob("*.json")} | {
+        q.stem for q in base.glob("*.jsonl")}
+    files = sorted(known, reverse=True)[:days]
+    for day_name in sorted(files):           # ascending: last_day wins below
+        led = ledger(day_name)
+        if not isinstance(led, dict) or not led:
             continue
         out["days"] += 1
-        for key, row in ledger.items():
+        for key, row in led.items():
             if not (key.startswith("model:") and isinstance(row, dict)):
                 continue
             try:
@@ -1057,7 +1409,7 @@ def cache_stats(days: int = 7) -> dict:
             out["cache_creation"] += cc
             price_in, _ = PRICES.get(key[len("model:"):], DEFAULT_PRICE)
             savings += cr * price_in * (1.0 - read_mult) / 1_000_000
-        prefixes = ledger.get("prefix")
+        prefixes = led.get("prefix")
         if not isinstance(prefixes, dict):
             continue
         for fp, row in prefixes.items():
@@ -1065,11 +1417,11 @@ def cache_stats(days: int = 7) -> dict:
                 continue
             agg = out["by_fp"].setdefault(
                 fp, {"calls": 0, "hits": 0, "cache_read": 0,
-                     "first_day": path.stem, "last_day": path.stem})
+                     "first_day": day_name, "last_day": day_name})
             agg["calls"] += int(row.get("calls", 0) or 0)
             agg["hits"] += int(row.get("hits", 0) or 0)
             agg["cache_read"] += int(row.get("cache_read", 0) or 0)
-            agg["last_day"] = path.stem
+            agg["last_day"] = day_name
     for agg in out["by_fp"].values():
         agg["hit_rate"] = round(agg["hits"] / agg["calls"], 4) \
             if agg["calls"] else 0.0

@@ -129,13 +129,12 @@ def _budget() -> dict:
 
 def _usage_today_models() -> list[dict]:
     """Per-model rows from today's usage ledger (read-only file read)."""
-    day = time.strftime("%Y-%m-%d")
-    path = config.MEMORY_DIR / "usage" / f"{day}.json"
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    # Through usage.ledger() (W2-2): the day file is now a SNAPSHOT plus an
+    # append journal, so parsing the snapshot alone under-reports everything
+    # since the last compaction.
+    from . import usage
+    data = usage.ledger(time.strftime("%Y-%m-%d"))
+    if not data:
         return []
     out = []
     for key, row in sorted(data.items()):

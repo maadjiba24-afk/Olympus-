@@ -263,12 +263,14 @@ def _cache_write_overhead_usd(days: int = 7) -> float | None:
         return None
     premium = max(0.0, usage.cache_write_mult() - 1.0)
     total, seen = 0.0, False
-    for path in sorted(base.glob("*.json"), reverse=True)[:days]:
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(ledger, dict):
+    # Days are enumerated from BOTH the snapshots and the journals (W2-2): a
+    # day that has recorded spend but has not been compacted yet has only a
+    # .jsonl, and globbing *.json alone would skip it entirely.
+    days_seen = {q.stem for q in base.glob("*.json")}
+    days_seen |= {q.stem for q in base.glob("*.jsonl")}
+    for day in sorted(days_seen, reverse=True)[:days]:
+        ledger = usage.ledger(day)
+        if not isinstance(ledger, dict) or not ledger:
             continue
         for key, row in ledger.items():
             if not (key.startswith("model:") and isinstance(row, dict)):

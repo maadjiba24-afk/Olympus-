@@ -47,12 +47,12 @@ _GATE = {"read_source_file_drop": 0.50, "tokens_drop": 0.25}
 
 def _usage_totals() -> tuple[int, int]:
     """(model calls, total tokens) recorded across the instance today."""
-    day = time.strftime("%Y-%m-%d")
-    path = config.MEMORY_DIR / "usage" / f"{day}.json"
-    if not path.exists():
-        return (0, 0)
+    # Through usage.ledger() (W2-2). Reading the snapshot alone would return
+    # (0, 0) for everything since the last compaction -- and this feeds a GATE,
+    # so a silent zero is a gate that stops gating.
+    from . import usage
     try:
-        allrow = json.loads(path.read_text(encoding="utf-8")).get("__all__", {})
+        allrow = usage.ledger(time.strftime("%Y-%m-%d")).get("__all__", {})
     except (json.JSONDecodeError, OSError):
         return (0, 0)
     return (int(allrow.get("calls", 0)),
