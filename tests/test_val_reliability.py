@@ -357,12 +357,14 @@ def test_disk_full_at_the_usage_ledger_is_captured_not_raised(
     broken reply — captured, never silent." That intent covers only TimeoutError
     today.
 
-    Repro: monkeypatch `usage._atomic_write_json` to raise OSError(ENOSPC) and
+    Repro: monkeypatch `usage._append_usage` (the W2-2 write path;
+    this was `_atomic_write_json` before the ledger became
+    append-only) to raise OSError(ENOSPC) and
     call `usage.record("claude-opus-4-8", 100, 50)`."""
     def full(_path, _obj):
         raise ENOSPC
 
-    monkeypatch.setattr(usage, "_atomic_write_json", full)
+    monkeypatch.setattr(usage, "_append_usage", full)
     # FIXED (D-1): a ledger write failure is now exactly as non-fatal as a
     # journal write failure — captured, never propagated.
     usage.record("claude-opus-4-8", 100, 50)          # must not raise
@@ -385,7 +387,7 @@ def test_disk_full_at_the_ledger_does_not_reissue_the_paid_call(
     POST, the answer returned, the lost ledger increment captured.
 
     Repro: fake `urlopen` returning a valid completion, make
-    `usage._atomic_write_json` raise ENOSPC, call `openai_compat._post`."""
+    `usage._append_usage` raise ENOSPC, call `openai_compat._post`."""
     posts: list[int] = []
 
     class _Resp:
@@ -409,7 +411,7 @@ def test_disk_full_at_the_ledger_does_not_reissue_the_paid_call(
         raise ENOSPC
 
     monkeypatch.setattr(openai_compat.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(usage, "_atomic_write_json", full)
+    monkeypatch.setattr(usage, "_append_usage", full)
     settings = config.Settings(provider="openai", model="gpt-4o",
                                api_key="k1", base_url="https://example/v1")
     # FIXED (D-1): accounting no longer escapes, so a full disk can no longer
@@ -467,7 +469,7 @@ def test_disk_full_leaves_no_corrupt_store_behind(monkeypatch):
         raise ENOSPC
 
     with monkeypatch.context() as m:
-        m.setattr(usage, "_atomic_write_json", full)
+        m.setattr(usage, "_append_usage", full)
         usage.record("claude-opus-4-8", 999999, 999999)   # captured, not raised
 
     assert usage.today_spend() == before_spend         # old value, never torn
@@ -1617,7 +1619,13 @@ def test_pre_cache_usage_day_file_loads_and_accepts_new_records():
 
     assert usage.today_spend() == pytest.approx(0.25)
     usage.record("claude-opus-4-8", 100, 50, cache_read=40, cache_creation=10)
-    merged = json.loads(path.read_text(encoding="utf-8"))
+    # THE MIGRATION SEAM. W2-2 strengthens this rather than weakening it:
+    # the legacy file seeded above is now the SNAPSHOT base and the new
+    # record is a journal append, so this exercises the old-format +
+    # new-format boundary directly. Read through the one reader --
+    # parsing the snapshot alone would miss the append and UNDER-report,
+    # which is the direction that costs money on a budget guard.
+    merged = usage.ledger(day)
     assert merged["__all__"]["calls"] == 4
     assert merged["__all__"]["cache_read"] == 40       # absent read as 0
     assert merged["__all__"]["cost"] > 0.25

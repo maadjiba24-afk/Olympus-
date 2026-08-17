@@ -442,7 +442,7 @@ def test_iu2_split_equals_provider_total(in_toks, cr, cc):
                  provider="anthropic", prefix_fp="fp0000000001")
     day = config.MEMORY_DIR / "usage" / \
         f"{__import__('time').strftime('%Y-%m-%d')}.json"
-    row = json.loads(day.read_text())["model:claude-test"]
+    row = usage.ledger()["model:claude-test"]
     assert row["in"] == in_toks
     assert row["cache_read"] == cr
     assert row["cache_creation"] == cc
@@ -462,7 +462,7 @@ def test_iu1_positional_record_byte_identity():
         memory.set_user("shared")
     day = config.MEMORY_DIR / "usage" / \
         f"{__import__('time').strftime('%Y-%m-%d')}.json"
-    row = json.loads(day.read_text())["model:claude-x"]
+    row = usage.ledger()["model:claude-x"]
     exp_cost = round((1000 * 1.0 + 200 * 3.0) / 1e6, 6)   # DEFAULT_PRICE
     assert row["calls"] == 1 and row["in"] == 1000 and row["out"] == 200
     assert row["cost"] == exp_cost
@@ -470,7 +470,7 @@ def test_iu1_positional_record_byte_identity():
     # estimate_cost with zero cache fields == pre-C5 arithmetic.
     assert usage.estimate_cost("claude-x", 1000, 200) == exp_cost
     # No prefix key created when prefix_fp omitted.
-    assert "prefix" not in json.loads(day.read_text())
+    assert "prefix" not in usage.ledger()
 
 
 def test_verdict_active_inert_no_signal():
@@ -540,7 +540,7 @@ def test_openai_compat_records_cached_split(monkeypatch):
     assert out == "ok"
     day = config.MEMORY_DIR / "usage" / \
         f"{__import__('time').strftime('%Y-%m-%d')}.json"
-    row = json.loads(day.read_text())["model:gpt-x"]
+    row = usage.ledger()["model:gpt-x"]
     assert row["in"] == 100 and row["cache_read"] == 900
     assert row["cache_creation"] == 0
     assert seen == [("openai-compat", "gpt-x", len("sys") + len("q"), 1000)]
@@ -566,7 +566,7 @@ def test_openai_cached_tokens_clamped_to_prompt(monkeypatch):
                                                  "content": "q"}])
     day = config.MEMORY_DIR / "usage" / \
         f"{__import__('time').strftime('%Y-%m-%d')}.json"
-    row = json.loads(day.read_text())["model:gpt-clamp"]
+    row = usage.ledger()["model:gpt-clamp"]
     assert row["in"] == 0 and row["cache_read"] == 100     # clamped to prompt
 
 
@@ -648,7 +648,13 @@ def test_old_format_day_file_loads_reports_and_accepts_new_records():
         "__all__": {"calls": 1, "in": 10, "out": 1, "cost": 0.0}}))
     usage.record("m2", 5, 1, cache_read=7, cache_creation=2, provider="x",
                  prefix_fp="feed0000cafe")
-    ledger = json.loads((base / f"{today}.json").read_text())
+    # THE MIGRATION SEAM, and W2-2 makes it stronger rather than weaker:
+    # the seeded old-format file is now the SNAPSHOT base and the new
+    # record is a journal append, so this exercises exactly the
+    # old-format + new-format boundary. Read through the one reader --
+    # parsing the snapshot alone would miss the append and under-report,
+    # which is the direction that costs money.
+    ledger = usage.ledger(today)
     assert ledger["__all__"]["calls"] == 2          # old row incremented
     assert ledger["__all__"]["in"] == 15
     assert ledger["__all__"]["cache_read"] == 7     # new key added

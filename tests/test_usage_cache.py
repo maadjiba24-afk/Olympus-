@@ -89,9 +89,34 @@ _SETTINGS = config.Settings(provider="anthropic", model="claude-test")
 
 
 def _day_ledger() -> dict:
-    day = time.strftime("%Y-%m-%d")
-    path = config.MEMORY_DIR / "usage" / f"{day}.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    """Today's aggregate, through the ONE reader (W2-2).
+
+    This used to parse `usage/<day>.json` directly. After W2-2 that file is a
+    compacted SNAPSHOT with an append journal beside it, so reading it alone
+    reports only what has already been compacted — for a fresh test process
+    that is nothing at all, and every assertion below would see zeros or a
+    FileNotFoundError.
+
+    PROPERTIES PRESERVED, not merely the format. Six tests share this helper
+    and each keeps what it asserted:
+
+      * per-user and per-model aggregation (`user:` / `model:` rows) —
+        `ledger()` reconstructs exactly the same row shape the snapshot had, so
+        these assertions are unchanged;
+      * the cache-split fields (cache_read / cache_creation / prefix hit
+        counts) — same;
+      * `test_record_onto_old_format_today_file` is the MIGRATION SEAM: it
+        seeds a pre-C5 snapshot and records on top. That property is now
+        stronger, not weaker — the seeded file is the snapshot base and the new
+        records are journal appends, so it exercises exactly the old-format +
+        new-format boundary W2-2 introduced.
+
+    What no test here asserted, and so is NOT dropped by this change: the
+    tmp+replace atomicity of the old write path. That property moved to the
+    append (whole newline-terminated lines) and is asserted in
+    tests/test_durable_fsync.py, not here.
+    """
+    return usage.ledger(time.strftime("%Y-%m-%d"))
 
 
 def _write_day(name: str, ledger: dict) -> None:

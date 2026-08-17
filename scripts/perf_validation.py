@@ -1646,17 +1646,34 @@ def _persisted_ledger_calls(root: Path) -> tuple[int, list[str]]:
     base = root / "usage"
     if not base.exists():
         return 0, [f"no usage ledger directory at {base}"]
-    for path in sorted(base.glob("*.json")):
-        try:
-            blob = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as err:
-            problems.append(f"{path.name}: {type(err).__name__}: {err}")
-            continue
-        row = blob.get("__all__")
-        if not isinstance(row, dict):
-            problems.append(f"{path.name}: no __all__ row")
-            continue
-        total += int(row.get("calls", 0) or 0)
+    # Days come from BOTH the snapshots and the journals (W2-2). A day with
+    # recorded spend that has not been compacted yet has only a .jsonl, and
+    # globbing *.json alone would count it as ZERO -- reporting a phantom
+    # accounting loss, which is exactly the defect this function exists to
+    # detect. `usage.ledger()` is the one reader; read failures are still
+    # RETURNED rather than swallowed.
+    from olympus import config as _cfg
+    from olympus import usage as _usage
+    days = {q.stem for q in base.glob("*.json")}
+    days |= {q.stem for q in base.glob("*.jsonl")}
+    if not days:
+        return 0, problems
+    prev = _cfg.MEMORY_DIR
+    _cfg.MEMORY_DIR = root
+    try:
+        for day in sorted(days):
+            try:
+                blob = _usage.ledger(day)
+            except (OSError, ValueError) as err:
+                problems.append(f"{day}: {type(err).__name__}: {err}")
+                continue
+            row = blob.get("__all__")
+            if not isinstance(row, dict):
+                problems.append(f"{day}: no __all__ row")
+                continue
+            total += int(row.get("calls", 0) or 0)
+    finally:
+        _cfg.MEMORY_DIR = prev
     return total, problems
 
 

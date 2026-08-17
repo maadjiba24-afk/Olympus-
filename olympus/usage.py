@@ -970,9 +970,47 @@ def ledger(day: str | None = None) -> dict:
 def compact(day: str | None = None) -> dict:
     """Fold a day's journal into its snapshot and truncate the journal.
 
-    Runs from the heartbeat's daily maintenance job (W1-2 built that home). The
-    total is IDENTICAL before and after: compaction moves where the numbers
-    live, never what they are.
+    Runs from the heartbeat's daily maintenance job (W1-2 built that home) and
+    from `record()` when the journal passes its size threshold. The total is
+    IDENTICAL before and after: compaction moves where the numbers live, never
+    what they are.
+
+    SAFE AGAINST LIVE WRITERS ONLY WHERE proclock ACTUALLY EXCLUDES. The
+    read -> publish -> unlink sequence below runs under
+    `proclock.lock("usage-ledger")`, the same lock `record()` takes around its
+    append, so on POSIX the two serialize and a concurrent append cannot be
+    dropped.
+
+    ON WINDOWS THAT IS NOT TRUE. `proclock` is fcntl-based and degrades to an
+    in-process `threading.Lock` when fcntl is unavailable (proclock.py:96,
+    "Windows: thread-safe fallback"), so it excludes THREADS but not PROCESSES.
+    With two Olympus processes on Windows, a record appended between the
+    `_replay_journal` read and the `unlink` below lands in a journal that is
+    then deleted: SPEND LOST, silently, on a budget guard.
+
+    Why this is nonetheless shipped as-is:
+
+      * The supported Windows configuration is SINGLE-PROCESS -- ADR 0005
+        documents the heartbeat-vs-web split as unsupported there, and
+        `tests/test_proclock_races.py` skips its cross-process cases on
+        Windows for the same reason. In one process the threading fallback
+        DOES exclude `record()` from `compact()`, so the sequence is safe.
+      * Multi-process Windows was ALREADY lossy before W2-2: the old
+        read-modify-write had the same unprotected window, and two processes
+        publishing a rewritten ledger lost an increment to last-writer-wins.
+        This is a change of shape, not a new class of failure.
+      * The window here is the compaction itself (~5 ms measured locally) and
+        it opens roughly 1-in-450 records, so what is at risk is the handful
+        of records appended during those milliseconds -- not the batch.
+
+    What W2-2 DID change is frequency: compaction used to run once a day from
+    the heartbeat and now also fires from the per-model-call path. On a
+    multi-process Windows instance that moves the window from daily to
+    ~1-in-450 calls. If that configuration ever becomes supported, this needs a
+    real cross-process lock (DEFERRED #10) before it is safe -- gating the
+    auto-compaction trigger on POSIX is NOT the answer, because it would leave
+    Windows with an unbounded journal and an unbounded `today_spend()`, which
+    is the defect this threshold exists to prevent.
     """
     day = day or time.strftime("%Y-%m-%d")
     path = config.MEMORY_DIR / "usage" / f"{day}.json"
@@ -1004,6 +1042,12 @@ def compact(day: str | None = None) -> dict:
         errors.capture("usage.compact", err, context=day)
         return {"day": day, "compacted": 0, "bytes_reclaimed": 0,
                 "error": type(err).__name__}
+
+
+#: The complete, CLOSED set of fsync modes. Anything else is a typo, and
+#: `_fsync_ledger` reports it rather than quietly choosing for the operator.
+_FSYNC_MODES = ("always", "auto", "interval")
+_FSYNC_MODE_WARNED = False
 
 
 def _fsync_ledger() -> str:
@@ -1054,8 +1098,30 @@ def _fsync_ledger() -> str:
     avoid.
     """
     raw = os.environ.get("OLYMPUS_USAGE_FSYNC", "").strip().lower()
-    if raw in ("always", "auto"):
+    if not raw:
+        return "interval"
+    if raw in _FSYNC_MODES:
         return raw
+    # AN UNRECOGNISED VALUE IS REPORTED, NOT SILENTLY ACCEPTED. `interval` used
+    # to be the catch-all, so `OLYMPUS_USAGE_FSYNC=alwasy` (typo) resolved to
+    # `interval` while the operator believed they had `always` -- they asked
+    # for a zero-width tail and silently got a one-second one. That is a check
+    # that cannot fail, in the config layer, on a durability knob.
+    #
+    # Reported ONCE: this is read on the per-append path, so capturing every
+    # time would turn one typo into a flood. Same shape as proclock's _WARNED.
+    global _FSYNC_MODE_WARNED
+    if not _FSYNC_MODE_WARNED:
+        _FSYNC_MODE_WARNED = True
+        try:
+            from . import errors
+            errors.capture(
+                "usage.fsync_mode",
+                ValueError("unrecognised OLYMPUS_USAGE_FSYNC value"),
+                context=f"expected one of {sorted(_FSYNC_MODES)}; "
+                        f"falling back to 'interval'")
+        except Exception:                # noqa: BLE001 - never break a record
+            pass
     return "interval"
 
 

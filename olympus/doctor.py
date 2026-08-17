@@ -10,6 +10,7 @@ the wizard ends by showing the same readiness picture.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 from . import config
@@ -189,6 +190,51 @@ def _cache_checks() -> list[Check]:
                       f"({s.get('fp_calls', 0)} calls) — check prompt prefix "
                       "stability / provider support")]
     return [Check("prompt cache", OK, "no cache telemetry yet")]
+
+
+def _ledger_checks() -> list[Check]:
+    """Usage-ledger health (W2-2): is compaction keeping the journal bounded?
+
+    The ledger is append-only, and `today_spend()` -- which feeds the budget
+    guard on the per-model-call path -- replays the un-compacted journal every
+    call. Its cost therefore scales with journal size. Auto-compaction bounds
+    that, but a compaction failing repeatedly (disk full, permissions, a wedged
+    lock) leaves the journal growing with nothing visible: the bound quietly
+    not existing. `record()` captures that failure, and this SURFACES it.
+
+    Reports the active fsync mode too, because it decides how much spend an
+    unclean shutdown can lose and is otherwise invisible.
+    """
+    from . import usage
+    try:
+        mode = usage._fsync_ledger()
+        limit = usage.compact_at_bytes()
+        day = time.strftime("%Y-%m-%d")
+        journal = (config.MEMORY_DIR / "usage" / f"{day}.jsonl")
+        size = journal.stat().st_size if journal.exists() else 0
+    except (OSError, AttributeError):
+        # Narrow ON PURPOSE. A bare  here silently returned
+        # [] when this function had a NameError -- a health check that cannot
+        # fail, which is the defect class this whole program keeps meeting.
+        return []
+    tail = {"always": "no loss on an unclean stop",
+            "auto": "tail loss bounded by the OS, not by us"}.get(
+                mode, f"tail loss bounded by "
+                      f"{usage.fsync_interval_ms() / 1000:.0f}s")
+    if size > limit * 4:
+        return [Check("usage ledger", FAIL,
+                      f"journal is {size // 1024} KiB against a "
+                      f"{limit // 1024} KiB threshold — compaction is NOT "
+                      f"keeping up, so the budget guard's per-call cost is "
+                      f"growing; check errors for usage.record.autocompact")]
+    if size > limit:
+        return [Check("usage ledger", WARN,
+                      f"journal is {size // 1024} KiB, over the "
+                      f"{limit // 1024} KiB threshold — compaction is due "
+                      f"and has not run")]
+    return [Check("usage ledger", OK,
+                  f"journal {size // 1024} KiB / {limit // 1024} KiB, "
+                  f"fsync={mode} ({tail})")]
 
 
 def _drift_checks() -> list[Check]:
@@ -719,6 +765,7 @@ def run_checks() -> list[Check]:
     checks += _optional_checks()
     checks += _repair_checks()
     checks += _cache_checks()
+    checks += _ledger_checks()
     checks += _drift_checks()
     checks += _liveness_checks()
     checks += _config_skew_checks()

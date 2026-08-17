@@ -15,6 +15,58 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — The spend ledger is append-only (W2-2, closes #249)
+
+`usage.record()` rewrote the WHOLE per-day ledger under a cross-process lock on
+every model call. It is now one append per call, with a snapshot compacted from
+the journal on a cadence.
+
+**The append is the win — not the flush cadence.** Before, a crash mid-rewrite
+could leave a truncated or empty file: the entire day's spend gone, and the
+budget cap silently disabled until the next write. Now prior records are never
+rewritten, so a crash costs only the *unflushed tail*. That holds at **every**
+setting, including `auto`. The three modes only choose the tail's width —
+`always` = zero, `interval` = one second, `auto` = whatever the OS decides. The
+interval is a knob on an already-safe structure, not the thing that makes it
+safe.
+
+- **Group commit by time is the new default.** `OLYMPUS_USAGE_FSYNC=interval`
+  (default, `OLYMPUS_USAGE_FSYNC_INTERVAL_MS` = 1000) syncs at most once per
+  interval however many calls arrive inside it; `always` and `auto` remain as
+  explicit overrides. Per-call fsync was measured and rejected: on the same
+  benchmark the usage component was 3.89 ms with `always` against 1.40 ms with
+  `auto`, and 1.66 ms with group commit. An fsync is a device flush *barrier* —
+  its cost is a round trip, not a function of how many bytes preceded it — so
+  making the write smaller did not make the sync cheaper.
+- **`flush()` on clean shutdown**, from the heartbeat's SIGTERM handler (W1-4)
+  and from an `atexit` hook so short-lived processes are covered too. An
+  unclean stop — SIGKILL, power cut — still loses up to one interval; that is
+  bounded, not prevented.
+- **The journal is bounded by size, not only by the daily cadence.**
+  `today_spend()` feeds the per-model-call budget guard and replays the
+  un-compacted journal, so its cost scales with the day: 0.14 ms at 1 record,
+  6.8 ms at 1000, 43.5 ms at 10 000. `record()` now compacts past 64 KiB
+  (~450 records, local NTFS SSD), holding the guard near 2.0 ms. Without that
+  bound this change would have moved O(ledger) work off `record()` and onto
+  `today_spend()` under a different name — and the observability benchmark
+  cannot see it, because it stubs `record`, not `today_spend`.
+- **Every reader goes through `usage.ledger()`** — snapshot plus journal.
+  `adminpanel`, `codegraph_gate` and `doctor` each parsed the day file
+  themselves and would have under-reported everything since the last
+  compaction; `codegraph_gate` returning `(0, 0)` is a gate that stops gating.
+- **`doctor` reports ledger health**: journal size against the threshold, and
+  the active fsync mode. Compaction failing repeatedly while the journal grows
+  is the one new way this subsystem fails, and it was invisible.
+- **Windows caveat, written at the compaction site.** `proclock` is fcntl-based
+  and degrades to an in-process lock on Windows, so compaction is only safe
+  against live writers where it actually excludes. Single-process Windows — the
+  supported configuration — is safe; multi-process Windows was already lossy
+  before this change, and W2-2 moves the window from daily to ~1-in-450 calls.
+
+Migration is automatic: a pre-W2-2 day file is already in snapshot shape, so an
+instance upgraded mid-day keeps its morning and adds its afternoon.
+
+
 ### Security — The operator panel gets its own credential (BREAKING, W2-1a)
 
 **Privilege escalation by registration.** `_admin_authorized` returned `True`
