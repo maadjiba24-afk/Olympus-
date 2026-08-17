@@ -17,3 +17,15 @@ build/
 dist/
 *.egg-info/
 venv312/
+
+# CI-log captures: put them in .ci-logs/. They are scratch evidence, never
+# source, and `git add -A` has swept them into commits four times now
+# (win_failure.txt, searchlive_failure.txt, webkit_failure.txt, and
+# searchlive2.txt -- which the name pattern below did NOT match).
+#
+# THE DIRECTORY IS THE GUARD. The `*_failure.txt` pattern is a backstop that
+# still catches the three historical names if they recur, but matching on names
+# cannot cover a class whose names are invented ad hoc each time: the fourth
+# capture was called searchlive2.txt and sailed straight through.
+.ci-logs/
+*_failure.txt

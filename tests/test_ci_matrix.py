@@ -11,6 +11,9 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _CI = _ROOT / ".github" / "workflows" / "ci.yml"
+#: The real-provider probe lives in its OWN scheduled workflow (W2-CI), off the
+#: merge path — see test_search_live_probe_exists_but_is_not_a_merge_gate.
+_SEARCH_LIVE = _ROOT / ".github" / "workflows" / "search-live.yml"
 _PYPROJECT = _ROOT / "pyproject.toml"
 
 
@@ -71,18 +74,25 @@ def test_ci_still_hash_pins_dependencies():
 
 
 
-def test_ci_runs_real_search_provider_probe():
-    """CI must exercise at least the keyless provider against the real network."""
-    text = _CI.read_text(encoding="utf-8")
+def test_search_live_probe_exists_but_is_not_a_merge_gate():
+    """The real-provider probe must still EXIST -- and must not gate merges.
 
-    match = re.search(
-        r"(?ms)^  search-live:\s*\n"
-        r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
-        text,
-    )
-    assert match, "ci.yml has no dedicated `search-live` job"
-
-    body = match.group("body")
+    It moved out of ci.yml in W2-CI. SearXNG is a metasearch proxy and the
+    engines it proxies block datacenter IP ranges, so as a PR gate its result
+    depended on which runner IP GitHub handed out (run 31975823235: every
+    upstream refused at once -- CAPTCHA, suspended_time, unusual-traffic, 403).
+    Deleting it would have traded a bad signal for no signal, so it is
+    scheduled instead. Both halves are pinned: it exists, and it is off the
+    merge path.
+    """
+    assert "search-live" not in _CI.read_text(encoding="utf-8"), (
+        "search-live is back in ci.yml, which puts an upstream anti-bot "
+        "decision on the merge path again")
+    body = _SEARCH_LIVE.read_text(encoding="utf-8")
+    assert "schedule:" in body and "workflow_dispatch:" in body, (
+        "the probe must run on a schedule AND stay manually dispatchable")
+    assert "pull_request" not in body, (
+        "search-live must not trigger on pull_request")
     assert 'OLYMPUS_SEARCH_LIVE: "1"' in body, (
         "search-live must explicitly enable real provider requests")
     assert "tests/test_websearch_live.py" in body, (
@@ -92,18 +102,13 @@ def test_ci_runs_real_search_provider_probe():
 
 
 
-def test_ci_runs_self_hosted_searxng_probe():
-    """CI must verify Olympus against a real, locally hosted SearXNG server."""
-    text = _CI.read_text(encoding="utf-8")
-
-    match = re.search(
-        r"(?ms)^  search-live:\s*\n"
-        r"(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\s*\n|\Z)",
-        text,
-    )
-    assert match, "ci.yml has no dedicated `search-live` job"
-
-    body = match.group("body")
+def test_search_live_hosts_its_own_searxng():
+    """The scheduled probe still stands up the pinned SearXNG container, and
+    still tells the two failure modes apart in its log."""
+    body = _SEARCH_LIVE.read_text(encoding="utf-8")
+    assert "status=upstream_blocked" in body and "status=down" in body, (
+        "the probe must distinguish 'upstream blocked this runner' from 'our "
+        "adapter or container broke' -- they used to produce the identical red")
     assert "searxng/searxng:" in body, (
         "search-live must launch the official SearXNG container")
     assert "OLYMPUS_SEARXNG_URL: http://127.0.0.1:8888" in body, (
