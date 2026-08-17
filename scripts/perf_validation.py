@@ -1640,23 +1640,66 @@ def _persisted_ledger_calls(root: Path) -> tuple[int, list[str]]:
     phantom accounting loss. Read failures are RETURNED rather than swallowed —
     an unreadable ledger is itself an accounting defect, and the caller has to
     be able to say so instead of silently under-counting.
+
+    CALLER CONTRACT: NO WORKER THREAD MAY BE LIVE. This swaps `config.MEMORY_DIR`
+    — a process-global — for the duration of the read, so a concurrent
+    `usage.record()` would write to whichever tree happened to be installed at
+    that instant. A harness that moved the measured writes out from under the
+    measurement would corrupt exactly what it is measuring, and the corruption
+    would look like a real accounting loss.
+
+    PROVABLY SEQUENTIAL AT ITS ONE CALL SITE, checked rather than assumed:
+
+      * `bench_usage_contention` is the only caller. It joins every thread in
+        `pool`, then re-checks `t.is_alive()` into `stuck` and RAISES
+        RuntimeError if any survived the join — before this function is called.
+        It also requires `len(ends) == threads`, and a worker appends to `ends`
+        only after its last `usage.record()` has returned. So reaching the call
+        proves every writer is finished, not merely joined-with-a-timeout.
+      * The harness's other threads cannot overlap. `bench_admission` joins
+        without a timeout, and `bench_concurrency_limit`'s daemon holders are
+        created AFTER this runs (`full()` calls `bench_usage_contention` then
+        `bench_concurrency_limit`) and exercise `usage.slot()`, which is
+        admission control and never reads the ledger.
+      * `full()` is straight-line on the main thread; no bench runs concurrently
+        with another.
+
+    If a future caller violates that contract, the fix is to pass the root down
+    rather than to swap the global — not to widen this note.
     """
     total = 0
     problems: list[str] = []
     base = root / "usage"
     if not base.exists():
         return 0, [f"no usage ledger directory at {base}"]
-    for path in sorted(base.glob("*.json")):
-        try:
-            blob = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as err:
-            problems.append(f"{path.name}: {type(err).__name__}: {err}")
-            continue
-        row = blob.get("__all__")
-        if not isinstance(row, dict):
-            problems.append(f"{path.name}: no __all__ row")
-            continue
-        total += int(row.get("calls", 0) or 0)
+    # Days come from BOTH the snapshots and the journals (W2-2). A day with
+    # recorded spend that has not been compacted yet has only a .jsonl, and
+    # globbing *.json alone would count it as ZERO -- reporting a phantom
+    # accounting loss, which is exactly the defect this function exists to
+    # detect. `usage.ledger()` is the one reader; read failures are still
+    # RETURNED rather than swallowed.
+    from olympus import config as _cfg
+    from olympus import usage as _usage
+    days = {q.stem for q in base.glob("*.json")}
+    days |= {q.stem for q in base.glob("*.jsonl")}
+    if not days:
+        return 0, problems
+    prev = _cfg.MEMORY_DIR
+    _cfg.MEMORY_DIR = root
+    try:
+        for day in sorted(days):
+            try:
+                blob = _usage.ledger(day)
+            except (OSError, ValueError) as err:
+                problems.append(f"{day}: {type(err).__name__}: {err}")
+                continue
+            row = blob.get("__all__")
+            if not isinstance(row, dict):
+                problems.append(f"{day}: no __all__ row")
+                continue
+            total += int(row.get("calls", 0) or 0)
+    finally:
+        _cfg.MEMORY_DIR = prev
     return total, problems
 
 
@@ -1793,6 +1836,10 @@ def bench_usage_contention(levels=None,
                 f"{len(lat)}/{threads * per_thread} samples collected")
 
         wall = max(ends) - tripped[0]
+        # Safe to read here and only here: the join loop above, the `stuck`
+        # re-check and the `len(ends) != threads` guard have all passed, so no
+        # worker thread is live and `_persisted_ledger_calls`'s MEMORY_DIR swap
+        # cannot move the tree out from under a writer. See its docstring.
         ledger_calls, ledger_problems = _persisted_ledger_calls(root)
         row = summarize(lat)
         row.update({

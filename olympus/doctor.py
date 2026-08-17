@@ -10,6 +10,7 @@ the wizard ends by showing the same readiness picture.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 from . import config
@@ -191,6 +192,51 @@ def _cache_checks() -> list[Check]:
     return [Check("prompt cache", OK, "no cache telemetry yet")]
 
 
+def _ledger_checks() -> list[Check]:
+    """Usage-ledger health (W2-2): is compaction keeping the journal bounded?
+
+    The ledger is append-only, and `today_spend()` -- which feeds the budget
+    guard on the per-model-call path -- replays the un-compacted journal every
+    call. Its cost therefore scales with journal size. Auto-compaction bounds
+    that, but a compaction failing repeatedly (disk full, permissions, a wedged
+    lock) leaves the journal growing with nothing visible: the bound quietly
+    not existing. `record()` captures that failure, and this SURFACES it.
+
+    Reports the active fsync mode too, because it decides how much spend an
+    unclean shutdown can lose and is otherwise invisible.
+    """
+    from . import usage
+    try:
+        mode = usage._fsync_ledger()
+        limit = usage.compact_at_bytes()
+        day = time.strftime("%Y-%m-%d")
+        journal = (config.MEMORY_DIR / "usage" / f"{day}.jsonl")
+        size = journal.stat().st_size if journal.exists() else 0
+    except (OSError, AttributeError):
+        # Narrow ON PURPOSE. A bare  here silently returned
+        # [] when this function had a NameError -- a health check that cannot
+        # fail, which is the defect class this whole program keeps meeting.
+        return []
+    tail = {"always": "no loss on an unclean stop",
+            "auto": "tail loss bounded by the OS, not by us"}.get(
+                mode, f"tail loss bounded by "
+                      f"{usage.fsync_interval_ms() / 1000:.0f}s")
+    if size > limit * 4:
+        return [Check("usage ledger", FAIL,
+                      f"journal is {size // 1024} KiB against a "
+                      f"{limit // 1024} KiB threshold — compaction is NOT "
+                      f"keeping up, so the budget guard's per-call cost is "
+                      f"growing; check errors for usage.record.autocompact")]
+    if size > limit:
+        return [Check("usage ledger", WARN,
+                      f"journal is {size // 1024} KiB, over the "
+                      f"{limit // 1024} KiB threshold — compaction is due "
+                      f"and has not run")]
+    return [Check("usage ledger", OK,
+                  f"journal {size // 1024} KiB / {limit // 1024} KiB, "
+                  f"fsync={mode} ({tail})")]
+
+
 def _drift_checks() -> list[Check]:
     """Provider-drift freeze markers (C6): a member the drift gate froze because
     the pinned model regressed or started erroring. FAIL if any member is at
@@ -263,12 +309,14 @@ def _cache_write_overhead_usd(days: int = 7) -> float | None:
         return None
     premium = max(0.0, usage.cache_write_mult() - 1.0)
     total, seen = 0.0, False
-    for path in sorted(base.glob("*.json"), reverse=True)[:days]:
-        try:
-            ledger = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(ledger, dict):
+    # Days are enumerated from BOTH the snapshots and the journals (W2-2): a
+    # day that has recorded spend but has not been compacted yet has only a
+    # .jsonl, and globbing *.json alone would skip it entirely.
+    days_seen = {q.stem for q in base.glob("*.json")}
+    days_seen |= {q.stem for q in base.glob("*.jsonl")}
+    for day in sorted(days_seen, reverse=True)[:days]:
+        ledger = usage.ledger(day)
+        if not isinstance(ledger, dict) or not ledger:
             continue
         for key, row in ledger.items():
             if not (key.startswith("model:") and isinstance(row, dict)):
@@ -717,6 +765,7 @@ def run_checks() -> list[Check]:
     checks += _optional_checks()
     checks += _repair_checks()
     checks += _cache_checks()
+    checks += _ledger_checks()
     checks += _drift_checks()
     checks += _liveness_checks()
     checks += _config_skew_checks()

@@ -17,6 +17,16 @@
 #     at 25.4 ms on windows-py3.12, over its 25.0 ms limit, and 6.6 ms on the
 #     dev machine — same code, same test, storage an order of magnitude faster.
 #     Both arms passed locally.
+#   * W2-2 shipped four POSIX-ONLY failures behind a green Windows run of the
+#     sibling script. `atomicio.CAN_FSYNC_DIR` is False on Windows, so
+#     `_append_usage`'s parent-directory barrier is a real syscall on Linux and
+#     a NO-OP here — three guards counted it and their verdict came from the
+#     platform rather than the behaviour: `test_usage_fsync_knob_auto_skips_the_
+#     sync`, `test_usage_record_does_not_fsync_by_default` and
+#     `test_atexit_probe_can_fail`. The fourth,
+#     `test_proclock_races::test_two_processes_never_lose_a_ledger_update`, is
+#     POSIX-gated outright (flock) and had never run on the dev machine at all.
+#     `ci-local.ps1` could not have caught any of the four.
 #
 # The first four were the local venv differing from the runner's, and this
 # script fixes those. THE FIFTH IS NOT REPRODUCIBLE HERE AT ALL: it reproduces
@@ -26,6 +36,14 @@
 # here is not evidence about a timing-sensitive change. For those, the CI leg
 # is the only authority; treating a local pass as confirmation is a check that
 # cannot fail.
+#
+# THIS SCRIPT COVERS ONE LEG — the POSIX one. `scripts/ci-local.ps1` covers the
+# Windows one. They are NOT interchangeable and neither is a proxy for the
+# other: filesystem barriers (`atomicio.CAN_FSYNC_DIR`), locking (`proclock`
+# degrades to an in-process lock without fcntl) and signals all behave
+# differently, and each script's green is silent about the other's tests. A
+# change touching ANY of those three MUST be run on BOTH before it is pushed —
+# that is the sixth bullet above, and it cost four failures on PR #263.
 #
 # What CI does, and therefore what this does, in order:
 #     pip install --require-hashes -r requirements.lock
@@ -47,6 +65,28 @@
 # The venv lives at .venv/ci-py<version> (already gitignored). A fresh one is
 # built by default: a reused environment accumulates packages and is exactly
 # how the `build` and `setuptools` failures stayed hidden.
+#
+# RUNNING THIS FROM A WINDOWS BOX, under WSL. Recorded so the next session does
+# not rediscover it:
+#
+#     wsl -d Ubuntu-24.04
+#     cd ~ && python3 -m venv ~/olympus-venv       # once
+#     cp -r /mnt/c/<path>/Olympus- ~/olympus-src   # see NOTE below
+#     cd ~/olympus-src && ./scripts/ci-local.sh 3.12
+#
+#   * `*.sh text eol=lf` in .gitattributes is what makes this work at all. With
+#     the usual Windows `core.autocrlf=true` this file checked out CRLF and died
+#     on `set: pipefail: invalid option name` before doing anything.
+#   * Ubuntu 24.04 ships 3.12 only, so `3.12` is the argument. Plain
+#     `./scripts/ci-local.sh` asks for 3.10 (CI's minimum leg) and stops with
+#     install instructions; `uv python install 3.10` inside WSL gets that leg.
+#   * NOTE — copy, do not run against /mnt/c. Two reasons: $VENV is the SAME
+#     relative path this script and ci-local.ps1 both use, so running both
+#     against one checkout has each destroy the other's venv; and /mnt/c I/O is
+#     slow enough to distort the suite's timing-sensitive tests.
+#   * Some tests need a `python` on PATH, not just `python3` (code_eval probes
+#     `shutil.which("python")`). CI's runner provides one; a bare Ubuntu does
+#     not. `ln -s ~/olympus-venv/bin/python ~/bin/python` covers it.
 set -uo pipefail
 
 cd "$(cd "$(dirname "$0")/.." && pwd)"

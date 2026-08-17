@@ -84,11 +84,24 @@ def test_usage_record_syncs_when_opted_in(monkeypatch):
     (W1-1a — the sync costs roughly 15 ms inside a cross-process lock on CI
     storage). This proves the OPT-IN path is still correct, which is what keeps
     W1-1c honest: when the ledger becomes cheap to sync, this is the contract it
-    has to meet."""
+    has to meet.
+
+    PROPERTY PRESERVED: `always` really does put the record on stable storage.
+    FORMAT CHANGED: it no longer does so before an `os.replace`.
+
+    This used to call `assert_data_synced_before_replace`, because `record()`
+    republished the whole ledger with tmp + replace. W2-2 made it an APPEND, so
+    there is no replace to order against — the durable-publish ordering that
+    helper checks does not exist on this path any more. Asserting it would be
+    asserting the absence of a write path, which is a different claim.
+    """
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 100, 50)
-    assert_data_synced_before_replace(events, label="usage.record (always)")
+    file_syncs = [e for e in events if e[0] == "fsync" and e[1] == "file"]
+    assert file_syncs, f"`always` did not fsync the appended record: {events}"
+    assert any(size > 0 for _, _, size in file_syncs), (
+        "fsync happened on an empty descriptor — synced before the write")
 
 
 def test_identity_revoke_syncs_before_replace(monkeypatch):
@@ -164,14 +177,46 @@ def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "auto")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 10, 5)
-    kinds = [e[0] for e in events]
-    assert "replace" in kinds, "auto must still publish atomically"
-    first_replace = kinds.index("replace")
-    assert not [e for e in events[:first_replace] if e[0] == "fsync"], \
-        "auto must not fsync"
-    # Unset resolves to auto — the same thing, by default.
+    # FILE syncs only. `_append_usage` fsyncs the parent DIRECTORY on an append
+    # that CREATES the journal (the Q5 create-path barrier: fsyncing a file does
+    # not make its directory entry durable, and the append path never goes
+    # through atomicio.publish, so nothing else covers it). That is a different
+    # guarantee from the per-record data barrier this knob controls, it is
+    # per-CREATE rather than per-call, and `auto` was never a promise to skip
+    # it. Counting it here made this test red on POSIX and green on Windows,
+    # where `atomicio.CAN_FSYNC_DIR` is False and the call is a no-op — a
+    # verdict that depended on the platform rather than on the behaviour.
+    assert not [e for e in events if e[0] == "fsync" and e[1] == "file"], (
+        f"`auto` must not fsync the RECORD on the record path: {events}")
+    # The bound is ONE PER JOURNAL CREATION, not one per day and not one per
+    # run: `compact()` unlinks the journal, so the next append creates it again.
+    # This call records once into an empty tree, so exactly one creation is
+    # possible here — that is what makes `<= 1` the right number FOR THIS TEST.
+    assert len([e for e in events if e[0] == "fsync" and e[1] == "dir"]) <= 1, (
+        f"the parent-directory sync fired more than once for a single append "
+        f"that created the journal exactly once — the barrier is per-CREATE, "
+        f"and more than one here means it is running per append: {events}")
+    # PROPERTY PRESERVED, mechanism changed. The old assertion was
+    # `"replace" in kinds` — atomicity against a peer process came from
+    # tmp + os.replace. An APPEND of one newline-terminated line gives it by
+    # construction instead: a concurrent reader sees whole lines, and
+    # `_replay_journal` discards a torn final line rather than mis-parsing it.
+    # The guarantee survives; asserting `os.replace` would now be asserting a
+    # mechanism that no longer exists on this path.
+    import time as _t
+    journal = config.MEMORY_DIR / "usage" / f"{_t.strftime('%Y-%m-%d')}.jsonl"
+    assert journal.exists(), "the append produced no journal"
+    raw = journal.read_bytes()
+    assert raw.endswith(b"\n"), (
+        "a record was left without its terminating newline — a concurrent "
+        "reader could not tell a complete record from a torn one")
+    assert len(raw.splitlines()) == 1
+    # W2-2: unset resolves to `interval`, NOT `auto` -- the message here used
+    # to say "auto" and would have kept saying it, passing, forever. A stale
+    # assertion message on a green test is a lie that survives every run.
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
-    assert usage._fsync_ledger() is False, "unset must resolve to auto"
+    assert usage._fsync_ledger() == "interval", (
+        "unset must resolve to the group-commit default")
 
 
 def test_usage_record_does_not_fsync_by_default(monkeypatch):
@@ -182,33 +227,113 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
     caught on the windows-py3.12 leg.
 
     If a future change re-arms the default, this fails here in milliseconds
-    instead of nine minutes into the Windows leg."""
+    instead of nine minutes into the Windows leg.
+
+    PROPERTY PRESERVED, RESTATED FOR THE NEW DEFAULT. The old assertion was
+    "the default never fsyncs at all", which matched `auto`. W2-2's default is
+    `interval` — group commit — which DOES sync, at most once per interval. So
+    the guard cannot be "never syncs" any more without pinning `auto` forever
+    and retiring group commit. What W1-1a actually protected is that the
+    default must not sync ON EVERY CALL, because that is what cost ~19.5 ms
+    per call on the runner. That is what is asserted now: many records, at most
+    one sync.
+
+    COUNTED PER KIND, for the same reason. An append that CREATES the journal
+    also syncs the parent DIRECTORY (the Q5 create-path barrier), which is a
+    real `os.fsync` on POSIX and a no-op on Windows. Lumping the two together
+    made this guard count 2 on Linux against a bound of 1 while passing on
+    Windows — a regression guard whose verdict came from the platform. Both are
+    bounded here, separately and on their own terms.
+
+    THE DIRECTORY BOUND IS PER JOURNAL CREATION, not per day: `compact()`
+    unlinks the journal, so the next append creates it again and the barrier
+    fires again. Compaction is disabled outright below so this run has exactly
+    ONE creation, which is what makes `<= 1` a real bound here instead of an
+    accident of the default threshold. Without that the number would be
+    "however many times 25 records happened not to cross 64 KiB".
+    """
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC_INTERVAL_MS", "60000")
+    # Pin the regime: no compaction => exactly one journal creation.
+    monkeypatch.setenv("OLYMPUS_USAGE_COMPACT_BYTES", "10000000")
+    usage._LAST_FSYNC[0] = 0.0            # let exactly the first one through
     events = trace(monkeypatch)
-    usage.record("claude-opus-5", 100, 50)
-    kinds = [e[0] for e in events]
-    assert "replace" in kinds, "the ledger must still publish atomically"
-    first_replace = kinds.index("replace")
-    assert not [e for e in events[:first_replace] if e[0] == "fsync"], \
-        ("the usage ledger must NOT fsync by default — it is the one W1-1 site "
-         f"exempted, see usage._fsync_ledger. events={events}")
+    for _ in range(25):
+        usage.record("claude-opus-5", 100, 50)
+    syncs = [e for e in events if e[0] == "fsync" and e[1] == "file"]
+    assert len(syncs) <= 1, (
+        f"the default fsynced {len(syncs)} records across 25 calls — a "
+        f"PER-CALL sync arriving as a default is the W1-1a regression "
+        f"(~19.5 ms per call on the runner). See usage._fsync_ledger. "
+        f"events={events}")
+    dir_syncs = [e for e in events if e[0] == "fsync" and e[1] == "dir"]
+    assert len(dir_syncs) <= 1, (
+        f"the parent directory was synced {len(dir_syncs)} times across 25 "
+        f"appends. Compaction is disabled in this test, so the journal is "
+        f"created exactly ONCE and the create-path barrier may fire at most "
+        f"once; more than that means it is running per append, which is the "
+        f"same per-call device flush under another name")
 
 
-def test_usage_fsync_knob_defaults_to_auto(monkeypatch):
-    """Opt-IN, and fail-safe: anything unrecognised reads as off, so a typo
-    cannot silently re-arm a ~300 ms serialized cost."""
+def test_usage_fsync_knob_resolves_each_mode(monkeypatch):
+    """The SPECIFIC mode for each input.
+
+    `_fsync_ledger()` returned a bool until W2-2 and now returns one of
+    "always" / "auto" / "interval". Rewriting these as `== "interval"` alone
+    would pin today's default and retire the invariant W1-1a put here, so the
+    fail-safe DIRECTION is asserted separately below rather than as a side
+    effect of these equalities.
+    """
+    for value, expected in (("always", "always"), ("ALWAYS", "always"),
+                            ("auto", "auto"), ("AUTO", "auto"),
+                            ("interval", "interval"), ("  always  ", "always")):
+        monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", value)
+        assert usage._fsync_ledger() == expected, f"{value!r} misresolved"
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
-    assert usage._fsync_ledger() is False
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "always")
-    assert usage._fsync_ledger() is True
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "ALWAYS")   # case-insensitive
-    assert usage._fsync_ledger() is True
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "AUTO")
-    assert usage._fsync_ledger() is False
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "yes")      # unrecognised
-    assert usage._fsync_ledger() is False
-    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "")         # empty
-    assert usage._fsync_ledger() is False
+    assert usage._fsync_ledger() == "interval"
+
+
+def test_usage_fsync_never_resolves_to_always_by_accident(monkeypatch):
+    """THE W1-1a INVARIANT, asserted on its own.
+
+    W1-1a's regression was a per-call fsync arriving as a DEFAULT and costing
+    ~19.5 ms inside a lock on the CI runner. The guard that stopped it
+    returning was: neither an unset value nor an unrecognised one may ever
+    resolve to `always`. That is a statement about DIRECTION, and it must
+    survive any future change to what the default happens to be -- which is
+    why it is not folded into the mode-equality test above.
+    """
+    monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
+    assert usage._fsync_ledger() != "always", (
+        "unset resolved to `always` -- a per-call fsync arriving as a default "
+        "is the W1-1a regression")
+    for junk in ("yes", "", "1", "true", "on", "alwasy", "ALWAYS_", "  "):
+        monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", junk)
+        assert usage._fsync_ledger() != "always", (
+            f"unrecognised value {junk!r} resolved to `always` -- a typo must "
+            f"never arm a per-call fsync")
+
+
+def test_unrecognised_fsync_mode_is_reported_not_silent(monkeypatch):
+    """A typo must not be answered by silently choosing something else.
+
+    `OLYMPUS_USAGE_FSYNC=alwasy` resolves to `interval`: the operator asked
+    for a zero-width tail and got a one-second one. Falling back is right;
+    doing it silently is not.
+    """
+    from olympus import errors
+    seen = []
+    monkeypatch.setattr(errors, "capture",
+                        lambda where, err, context="": seen.append(where))
+    monkeypatch.setattr(usage, "_FSYNC_MODE_WARNED", False)
+    monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "alwasy")
+    assert usage._fsync_ledger() == "interval"
+    assert "usage.fsync_mode" in seen, (
+        "an unrecognised fsync mode was accepted silently")
+    # Reported ONCE: this is read on the per-append path.
+    seen.clear()
+    usage._fsync_ledger()
+    assert seen == [], "the unrecognised-mode report repeated on every call"
 
 
 # --- the platform guard ----------------------------------------------------

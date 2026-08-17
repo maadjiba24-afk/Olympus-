@@ -440,6 +440,15 @@ def tick(state: dict, now: float | None = None) -> list[str]:
             # journals grew to OLYMPUS_SESSION_JOURNAL_MAX_MB and then stopped
             # accepting appends AND stopped serving crash recovery — silently,
             # and on the heaviest sessions first.
+            # Fold the day's usage journal into its snapshot (W2-2). Same
+            # home as the other sweeps rather than a new cadence: W1-2 built
+            # this job for exactly this kind of periodic compaction.
+            from . import usage as _usage
+            folded = _usage.compact()
+            if folded.get("compacted"):
+                log.append(f"Usage ledger: compacted {folded['compacted']} "
+                           f"event(s), reclaiming "
+                           f"{folded['bytes_reclaimed'] // 1024} KiB.")
             from . import sessionlog
             comp = sessionlog.compact_due()
             if comp["compacted"]:
@@ -686,6 +695,16 @@ def _install_shutdown(stop: "threading.Event") -> None:
     def _stop(signum, _frame):
         print(f"\n… received {signal.Signals(signum).name}, "
               f"finishing this tick and stopping")
+        # The usage ledger syncs on a TIMER (W2-2 group commit), so the final
+        # records of a run are exactly the ones the interval would otherwise
+        # lose. A CLEAN stop therefore loses nothing. An UNCLEAN one -- SIGKILL,
+        # power cut, panic -- still loses up to one interval; that is bounded,
+        # not prevented, and nothing here should be read as covering it.
+        try:
+            from . import usage
+            usage.flush()
+        except Exception:                # noqa: BLE001 - never block shutdown
+            pass
         stop.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):

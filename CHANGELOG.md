@@ -15,6 +15,95 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Changed — The spend ledger is append-only (W2-2, closes #249)
+
+`usage.record()` rewrote the WHOLE per-day ledger under a cross-process lock on
+every model call. It is now one append per call, with a snapshot compacted from
+the journal on a cadence.
+
+**The append is the win — not the flush cadence.** Before, a crash mid-rewrite
+could leave a truncated or empty file: the entire day's spend gone, and the
+budget cap silently disabled until the next write. Now prior records are never
+rewritten, so a crash costs only the *unflushed tail*. That holds at **every**
+setting, including `auto`. The three modes only choose the tail's width —
+`always` = zero, `interval` = one second, `auto` = whatever the OS decides. The
+interval is a knob on an already-safe structure, not the thing that makes it
+safe.
+
+- **Group commit by time is the new default.** `OLYMPUS_USAGE_FSYNC=interval`
+  (default, `OLYMPUS_USAGE_FSYNC_INTERVAL_MS` = 1000) syncs at most once per
+  interval however many calls arrive inside it; `always` and `auto` remain as
+  explicit overrides. Per-call fsync was measured and rejected: on the same
+  benchmark the usage component was 3.89 ms with `always` against 1.40 ms with
+  `auto`, and 1.66 ms with group commit. An fsync is a device flush *barrier* —
+  its cost is a round trip, not a function of how many bytes preceded it — so
+  making the write smaller did not make the sync cheaper.
+- **`flush()` on clean shutdown**, from the heartbeat's SIGTERM handler (W1-4)
+  and from an `atexit` hook so short-lived processes are covered too. An
+  unclean stop — SIGKILL, power cut — still loses up to one interval; that is
+  bounded, not prevented.
+
+  **CORRECTION — this line was FALSE on Windows as first committed (3d15637),
+  and is true now.** `flush()` opened the journal `O_RDONLY`. `os.fsync` is
+  `FlushFileBuffers` on Windows and `FlushFileBuffers` requires
+  `GENERIC_WRITE`, so every exit flush raised `EBADF`, was swallowed by the
+  `atexit`-safety `except Exception: return False`, and returned False. On
+  Windows a clean exit inside the interval lost the records it claimed to save
+  — for the whole of that commit. It now opens `O_WRONLY | O_APPEND` (the
+  minimum the syscall accepts, and the same flags the append path uses), and a
+  failure is reported once per process through `errors.capture` under the
+  `usage.flush` key instead of being swallowed silently. Two things had to be
+  wrong at once for this to ship: the code, and a test that recorded the
+  *attempt* rather than the *outcome* — see the note under `atexit` below.
+- **The journal is bounded by size, not only by the daily cadence.**
+  `today_spend()` feeds the per-model-call budget guard and replays the
+  un-compacted journal, so its cost scales with the day: 0.14 ms at 1 record,
+  6.8 ms at 1000, 43.5 ms at 10 000. `record()` now compacts past 64 KiB
+  (~450 records, local NTFS SSD), holding the guard near 2.0 ms. Without that
+  bound this change would have moved O(ledger) work off `record()` and onto
+  `today_spend()` under a different name — and the observability benchmark
+  cannot see it, because it stubs `record`, not `today_spend`.
+- **Every reader goes through `usage.ledger()`** — snapshot plus journal.
+  `adminpanel`, `codegraph_gate` and `doctor` each parsed the day file
+  themselves and would have under-reported everything since the last
+  compaction; `codegraph_gate` returning `(0, 0)` is a gate that stops gating.
+- **`doctor` reports ledger health**: journal size against the threshold, and
+  the active fsync mode. Compaction failing repeatedly while the journal grows
+  is the one new way this subsystem fails, and it was invisible.
+- **Windows caveat, written at the compaction site.** `proclock` is fcntl-based
+  and degrades to an in-process lock on Windows, so compaction is only safe
+  against live writers where it actually excludes. Single-process Windows — the
+  supported configuration — is safe; multi-process Windows was already lossy
+  before this change, and W2-2 moves the window from daily to ~1-in-450 calls.
+- **The `atexit` test now observes the OUTCOME, not the attempt.** It wrapped
+  `os.fsync` and wrote its sentinel line *before* delegating, so it recorded
+  that a sync had been tried. On Windows the sync then raised every time and the
+  test stayed green — which is how the `O_RDONLY` defect above shipped as
+  "proven". Delegating first makes the sentinel reachable only on success, so it
+  separates three states instead of two: synced, attempted-and-failed, never
+  fired. A companion test asserts the open flags directly, because POSIX permits
+  `fsync` on a read-only descriptor and the subprocess probe therefore cannot
+  see this defect on three of the four test legs.
+- **Four durability tests were platform-dependent in the other direction**, and
+  were red on the Linux legs while the Windows-only local run was green.
+  `_append_usage` fsyncs the parent *directory* on an append that **creates**
+  the journal (the create-path barrier — which fires after every compaction,
+  not once a day, since `compact()` unlinks the journal; the in-code comment
+  claiming "the day's first append" was wrong and is corrected) — a real
+  syscall on POSIX, a no-op on Windows. Both
+  W1-1a per-call-sync guards counted it and over-counted; the `atexit` probe's
+  built-in mutation counted it and misfired. Each now counts file and directory
+  syncs separately and bounds both on their own terms. Separately,
+  `test_proclock_races` read `<day>.json` directly and died with
+  `FileNotFoundError` once the write became a journal append; it goes through
+  `usage.ledger()` like every other reader — the same fix this release already
+  applied to `adminpanel`, `codegraph_gate` and `doctor`, missed here because
+  the test is POSIX-gated and never ran on the dev machine.
+
+Migration is automatic: a pre-W2-2 day file is already in snapshot shape, so an
+instance upgraded mid-day keeps its morning and adds its afternoon.
+
+
 ### Security — The operator panel gets its own credential (BREAKING, W2-1a)
 
 **Privilege escalation by registration.** `_admin_authorized` returned `True`

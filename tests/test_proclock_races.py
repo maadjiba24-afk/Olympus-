@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from olympus import config, memory, proclock, sandbox
+from olympus import config, memory, proclock, sandbox, usage
 
 
 # --- proclock unit behavior ----------------------------------------------
@@ -133,7 +133,20 @@ _GATE = """
                     reason="flock requires POSIX")
 def test_two_processes_never_lose_a_ledger_update(tmp_path):
     """THE lost-update race from the audit: two processes each record N model
-    calls; the per-day ledger must show exactly 2N calls."""
+    calls; the per-day ledger must show exactly 2N calls.
+
+    READ THROUGH `usage.ledger()`, not off the day file. W2-2 made the write an
+    APPEND to `<day>.jsonl` with the `<day>.json` snapshot compacted from it on
+    a cadence, so 60 records well under the 64 KiB threshold produce a journal
+    and NO snapshot at all — this test read the snapshot directly and died with
+    FileNotFoundError. It is the same defect W2-2 fixed in `adminpanel`,
+    `codegraph_gate` and `doctor` ("every reader goes through usage.ledger()"),
+    in the one reader that was skipped on Windows and so never ran locally.
+
+    The PROPERTY is untouched: exactly 2N calls, no increment lost. A lost
+    increment under-counts spend against the cap, which is the direction that
+    costs money.
+    """
     n = 30
     _run_workers(tmp_path, f"""
     {_GATE}
@@ -141,11 +154,93 @@ def test_two_processes_never_lose_a_ledger_update(tmp_path):
     for _ in range({n}):
         usage.record("race-model", 10, 5)
     """)
-    day = time.strftime("%Y-%m-%d")
-    ledger = json.loads(
-        (config.MEMORY_DIR / "usage" / f"{day}.json").read_text())
+    ledger = usage.ledger(time.strftime("%Y-%m-%d"))
     assert ledger["__all__"]["calls"] == 2 * n
     assert ledger["__all__"]["in"] == 2 * n * 10
+
+
+@pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,
+                    reason="flock requires POSIX")
+def test_compaction_under_two_live_writers_loses_nothing(tmp_path):
+    """W2-2 ITEM 0'S CENTRAL CLAIM, MEASURED on the platform where it is made.
+
+    W2-2 argued that auto-compaction is safe against live writers on POSIX
+    because `record()`'s append and `compact()`'s replay→publish→unlink take the
+    SAME `proclock.lock("usage-ledger")` flock. That was an argument from
+    READING CODE, and it shipped unmeasured while W2-2 simultaneously moved the
+    compaction window off the once-a-day heartbeat and onto the per-model-call
+    path — from 1-in-a-day to ~1-in-450 records.
+
+    Here it runs: two REAL processes append concurrently with the threshold set
+    low enough that each crosses it repeatedly while the other is appending, and
+    the day's total must be exactly 2N. The failure this catches is SILENT SPEND
+    LOSS — a record appended into a journal that a peer's compaction then
+    unlinks. Under-counting disables the budget cap, the direction that costs
+    money, and nothing would raise.
+
+    THE CROSSING COUNT IS ASSERTED, because without it this test passes
+    vacuously: if the threshold is never reached it degenerates into the sibling
+    above, which already passes, and would keep passing if compaction were
+    deleted. `record()` calls `compact()` as a module global, so the worker can
+    count the real crossings and report them.
+
+    WINDOWS IS EXCLUDED BY DESIGN, not by oversight. `proclock` degrades to an
+    in-process `threading.Lock` there, so it excludes THREADS and not PROCESSES
+    and this would be asserting a guarantee the platform does not provide. That
+    is Item 0's point: multi-process Windows is unsupported (ADR 0005) and needs
+    a real cross-process lock (DEFERRED #10) first.
+
+    TWO ORDERINGS IT EXERCISES, both of which must survive:
+      * `compact()`'s `if not journal.exists()` guard is OUTSIDE the lock, so a
+        peer can unlink between that check and the acquisition. Inside the lock
+        `_replay_journal` then reads a file that is gone — it catches OSError
+        and returns `[]`, and `if not events` returns cleanly, so nothing raises
+        into the per-model-call path.
+      * `journal.stat().st_size` runs after `_replay_journal`, inside the lock.
+        Removal happens only under that same lock, so nothing can drop the file
+        between the two on POSIX.
+    """
+    n = 150
+    outs = _run_workers(tmp_path, f"""
+    {_GATE}
+    import os
+    os.environ["OLYMPUS_USAGE_COMPACT_BYTES"] = "1024"
+    from olympus import usage
+    _real_compact = usage.compact
+    _hits = [0]
+    def _counting(*a, **kw):
+        _hits[0] += 1
+        return _real_compact(*a, **kw)
+    usage.compact = _counting        # record() resolves it as a module global
+    for _ in range({n}):
+        usage.record("race-model", 10, 5)
+    print("COMPACTIONS", _hits[0])
+    """)
+
+    crossings = 0
+    for out in outs:
+        for line in out.splitlines():
+            if line.startswith("COMPACTIONS"):
+                crossings += int(line.split()[1])
+    assert crossings >= 10, (
+        f"only {crossings} compactions fired across {2 * n} records — the "
+        f"threshold was barely crossed, so this did not actually test "
+        f"compaction against live writers and would pass with compaction "
+        f"deleted")
+
+    ledger = usage.ledger(time.strftime("%Y-%m-%d"))
+    got = ledger["__all__"]["calls"]
+    assert got == 2 * n, (
+        f"{2 * n} records were written across {crossings} concurrent "
+        f"compactions and the ledger shows {got}. EXACTNESS IS THE PROPERTY "
+        f"and it fails in BOTH directions: fewer means a record was appended "
+        f"into a journal a peer then unlinked, so the budget cap under-counts "
+        f"and stops capping; more means one journal was folded into the "
+        f"snapshot twice, so the cap trips early and bills the user for spend "
+        f"that never happened. Both are silent — nothing raises either way. "
+        f"(Removing compaction's flock produces the second: measured 315.)")
+    assert ledger["__all__"]["in"] == 2 * n * 10, (
+        "token totals disagree with the call count — a partially folded record")
 
 
 @pytest.mark.skipif(not hasattr(proclock, "fcntl") or proclock.fcntl is None,

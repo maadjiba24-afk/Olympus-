@@ -4307,12 +4307,14 @@ _COLD_START_PROBE = textwrap.dedent(
     usage.record("claude-opus-4-8", 100, 50)
     first_call_ms = (time.perf_counter() - t0) * 1000.0
 
+    # Snapshots AND journals (W2-2): a day recorded but not yet compacted has
+    # only a .jsonl, and counting *.json alone would report zero calls.
     ledger_dir = config.MEMORY_DIR / "usage"
-    files = sorted(p.name for p in ledger_dir.glob("*.json"))
+    files = sorted({q.stem for q in ledger_dir.glob("*.json")}
+                   | {q.stem for q in ledger_dir.glob("*.jsonl")})
     calls = 0
     for name in files:
-        blob = json.loads((ledger_dir / name).read_text(encoding="utf-8"))
-        calls += int(blob.get("__all__", {}).get("calls", 0) or 0)
+        calls += int(usage.ledger(name).get("__all__", {}).get("calls", 0) or 0)
 
     print(json.dumps({
         "executable": sys.executable,

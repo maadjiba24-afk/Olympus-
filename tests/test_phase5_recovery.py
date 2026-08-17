@@ -280,10 +280,15 @@ def test_an_accounting_failure_never_becomes_a_provider_retry(store,
     """Phase-4 Stage-C D1, re-asserted as a Phase-5 gate: an ENOSPC on the
     ledger used to escape into openai_compat's retry handler, which treats
     OSError as a PROVIDER fault — 4 billed POSTs for one logical call."""
+    # Targets `_append_usage`, the W2-2 write path -- this was
+    # `_atomic_write_json` while record() republished the whole ledger. The
+    # PROPERTY is unchanged and is the reason this test exists: a disk fault at
+    # the ledger must be CAPTURED, never raised, or openai_compat's retry
+    # handler reads OSError as a provider fault and re-bills the user.
     def full(_path, _obj):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(usage, "_atomic_write_json", full)
+    monkeypatch.setattr(usage, "_append_usage", full)
     usage.record("claude-opus-4-8", 100, 50)          # must not raise
     log = config.MEMORY_DIR / "errors" / "errors.jsonl"
     assert log.exists(), "the failure was swallowed silently"
@@ -309,10 +314,14 @@ def test_the_spend_cap_survives_concurrent_recording(store):
         t.join(120)
     assert errors == [], errors
 
+    # PROPERTY UNCHANGED and still the point of this test: no increment may be
+    # LOST under concurrency, because a lost increment silently under-counts
+    # spend against the budget cap. Read through usage.ledger() -- W2-2 made
+    # the day file a compacted snapshot with an append journal beside it, and
+    # counting only the snapshot would report far fewer than were issued for a
+    # reason that has nothing to do with contention.
     day = time.strftime("%Y-%m-%d")
-    ledger = json.loads(
-        (config.MEMORY_DIR / "usage" / f"{day}.json").read_text(
-            encoding="utf-8"))
+    ledger = usage.ledger(day)
     assert ledger["__all__"]["calls"] == 90, (
         f"lost increments under concurrency: {ledger['__all__']['calls']}/90")
     memory.set_user("shared")
