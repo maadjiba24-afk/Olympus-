@@ -86,8 +86,11 @@ safe.
   see this defect on three of the four test legs.
 - **Four durability tests were platform-dependent in the other direction**, and
   were red on the Linux legs while the Windows-only local run was green.
-  `_append_usage` fsyncs the parent *directory* on the day's first append (the
-  create-path barrier) — a real syscall on POSIX, a no-op on Windows. Both
+  `_append_usage` fsyncs the parent *directory* on an append that **creates**
+  the journal (the create-path barrier — which fires after every compaction,
+  not once a day, since `compact()` unlinks the journal; the in-code comment
+  claiming "the day's first append" was wrong and is corrected) — a real
+  syscall on POSIX, a no-op on Windows. Both
   W1-1a per-call-sync guards counted it and over-counted; the `atexit` probe's
   built-in mutation counted it and misfired. Each now counts file and directory
   syncs separately and bounds both on their own terms. Separately,

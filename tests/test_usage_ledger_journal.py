@@ -59,10 +59,12 @@ def _raise_ebadf(fd):
 # The `atexit.unregister` sibling still covers the third.
 #
 # The KIND is recorded with each line because `_append_usage` fsyncs the parent
-# DIRECTORY on the day's first append (the Q5 create-path barrier), and that is
-# a real `os.fsync` on POSIX — indistinguishable from the exit flush unless the
-# descriptor is classified. `CAN_FSYNC_DIR` is False on Windows, so this is the
-# reverse of the defect above: a POSIX-only event the Windows leg cannot see.
+# DIRECTORY on an append that CREATES the journal (the Q5 create-path barrier —
+# which fires after every compaction, not once a day, since `compact()` unlinks
+# the journal), and that is a real `os.fsync` on POSIX, indistinguishable from
+# the exit flush unless the descriptor is classified. `CAN_FSYNC_DIR` is False
+# on Windows, so this is the reverse of the defect above: a POSIX-only event the
+# Windows leg cannot see.
 
 _PROBE = r'''
 import os, pathlib, stat, sys, time
@@ -170,8 +172,22 @@ def test_flush_opens_the_journal_with_write_access(monkeypatch, tmp_path):
     one that runs last. This asserts the flags directly, so the defect fails
     everywhere in milliseconds rather than only on windows-py3.12.
 
-    O_APPEND is part of the contract too, not decoration: it is what makes a
-    stray write through this descriptor unable to land anywhere but the end.
+    THE ACCESS MODE, NOT `O_WRONLY` SPECIFICALLY. This asserted
+    `flags & os.O_WRONLY`, which is wrong in the same family as everything else
+    this change corrected — a test pinning a MECHANISM where the GUARANTEE is
+    what matters. `os.O_RDWR` is 2 and `os.O_RDWR & os.O_WRONLY == 0`, so a
+    maintainer switching to `O_RDWR` — which grants write access and makes
+    `fsync` work perfectly well — would have got a red test for a correct fix.
+    The property is "not read-only".
+
+    The low two bits are the access mode on both POSIX (`O_ACCMODE` == 3) and
+    the Windows CRT (`_O_RDONLY`/`_O_WRONLY`/`_O_RDWR` == 0/1/2); `os.O_ACCMODE`
+    itself is POSIX-only, so the mask is written out.
+
+    O_APPEND is asserted SEPARATELY and strictly, because unlike the access mode
+    it is a deliberate choice rather than the syscall's minimum requirement: it
+    is what makes a stray write through this descriptor unable to land anywhere
+    but the end.
     """
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     memory.set_user("shared")
@@ -189,10 +205,11 @@ def test_flush_opens_the_journal_with_write_access(monkeypatch, tmp_path):
     assert usage.flush() is True, "flush() did not report success"
     assert seen, "flush() never opened the journal"
     flags = seen[-1]
-    assert flags & os.O_WRONLY, (
-        f"flush() opened the journal without write access (flags={flags:#o}) — "
-        f"os.fsync is FlushFileBuffers on Windows and needs GENERIC_WRITE, so "
-        f"the exit flush is inert there")
+    assert (flags & 3) in (os.O_WRONLY, os.O_RDWR), (
+        f"flush() opened the journal read-only (flags={flags:#o}, access mode "
+        f"{flags & 3}) — os.fsync is FlushFileBuffers on Windows and needs "
+        f"GENERIC_WRITE, so the exit flush is inert there. O_WRONLY and O_RDWR "
+        f"both satisfy this; only O_RDONLY does not.")
     assert flags & os.O_APPEND, (
         f"flush() opened the journal without O_APPEND (flags={flags:#o}) — a "
         f"stray write through this descriptor could land mid-journal")

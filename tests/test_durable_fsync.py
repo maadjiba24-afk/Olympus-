@@ -177,20 +177,25 @@ def test_usage_fsync_knob_auto_skips_the_sync(monkeypatch):
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC", "auto")
     events = trace(monkeypatch)
     usage.record("claude-opus-5", 10, 5)
-    # FILE syncs only. `_append_usage` fsyncs the parent DIRECTORY on the day's
-    # FIRST append and only then (the Q5 create-path barrier: fsyncing a file
-    # does not make its directory entry durable, and the append path never goes
+    # FILE syncs only. `_append_usage` fsyncs the parent DIRECTORY on an append
+    # that CREATES the journal (the Q5 create-path barrier: fsyncing a file does
+    # not make its directory entry durable, and the append path never goes
     # through atomicio.publish, so nothing else covers it). That is a different
     # guarantee from the per-record data barrier this knob controls, it is
-    # one-per-day rather than per-call, and `auto` was never a promise to skip
+    # per-CREATE rather than per-call, and `auto` was never a promise to skip
     # it. Counting it here made this test red on POSIX and green on Windows,
     # where `atomicio.CAN_FSYNC_DIR` is False and the call is a no-op — a
     # verdict that depended on the platform rather than on the behaviour.
     assert not [e for e in events if e[0] == "fsync" and e[1] == "file"], (
         f"`auto` must not fsync the RECORD on the record path: {events}")
+    # The bound is ONE PER JOURNAL CREATION, not one per day and not one per
+    # run: `compact()` unlinks the journal, so the next append creates it again.
+    # This call records once into an empty tree, so exactly one creation is
+    # possible here — that is what makes `<= 1` the right number FOR THIS TEST.
     assert len([e for e in events if e[0] == "fsync" and e[1] == "dir"]) <= 1, (
-        f"the parent-directory sync is a CREATE-path barrier and must fire at "
-        f"most once, not per append: {events}")
+        f"the parent-directory sync fired more than once for a single append "
+        f"that created the journal exactly once — the barrier is per-CREATE, "
+        f"and more than one here means it is running per append: {events}")
     # PROPERTY PRESERVED, mechanism changed. The old assertion was
     # `"replace" in kinds` — atomicity against a peer process came from
     # tmp + os.replace. An APPEND of one newline-terminated line gives it by
@@ -233,15 +238,24 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
     per call on the runner. That is what is asserted now: many records, at most
     one sync.
 
-    COUNTED PER KIND, for the same reason. The day's first append also syncs
-    the parent DIRECTORY once (the Q5 create-path barrier), which is a real
-    `os.fsync` on POSIX and a no-op on Windows. Lumping the two together made
-    this guard count 2 on Linux against a bound of 1 while passing on Windows —
-    a regression guard whose verdict came from the platform. Both are bounded
-    here, separately and on their own terms.
+    COUNTED PER KIND, for the same reason. An append that CREATES the journal
+    also syncs the parent DIRECTORY (the Q5 create-path barrier), which is a
+    real `os.fsync` on POSIX and a no-op on Windows. Lumping the two together
+    made this guard count 2 on Linux against a bound of 1 while passing on
+    Windows — a regression guard whose verdict came from the platform. Both are
+    bounded here, separately and on their own terms.
+
+    THE DIRECTORY BOUND IS PER JOURNAL CREATION, not per day: `compact()`
+    unlinks the journal, so the next append creates it again and the barrier
+    fires again. Compaction is disabled outright below so this run has exactly
+    ONE creation, which is what makes `<= 1` a real bound here instead of an
+    accident of the default threshold. Without that the number would be
+    "however many times 25 records happened not to cross 64 KiB".
     """
     monkeypatch.delenv("OLYMPUS_USAGE_FSYNC", raising=False)
     monkeypatch.setenv("OLYMPUS_USAGE_FSYNC_INTERVAL_MS", "60000")
+    # Pin the regime: no compaction => exactly one journal creation.
+    monkeypatch.setenv("OLYMPUS_USAGE_COMPACT_BYTES", "10000000")
     usage._LAST_FSYNC[0] = 0.0            # let exactly the first one through
     events = trace(monkeypatch)
     for _ in range(25):
@@ -255,8 +269,10 @@ def test_usage_record_does_not_fsync_by_default(monkeypatch):
     dir_syncs = [e for e in events if e[0] == "fsync" and e[1] == "dir"]
     assert len(dir_syncs) <= 1, (
         f"the parent directory was synced {len(dir_syncs)} times across 25 "
-        f"appends — that barrier belongs to the day's FIRST append only, and "
-        f"per-append it is the same per-call device flush under another name")
+        f"appends. Compaction is disabled in this test, so the journal is "
+        f"created exactly ONCE and the create-path barrier may fire at most "
+        f"once; more than that means it is running per append, which is the "
+        f"same per-call device flush under another name")
 
 
 def test_usage_fsync_knob_resolves_each_mode(monkeypatch):

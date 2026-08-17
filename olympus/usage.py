@@ -703,12 +703,22 @@ def _append_usage(path: Path, event: dict) -> None:
     """
     journal = _journal_path(path)
     journal.parent.mkdir(parents=True, exist_ok=True)
-    # Q5: fsyncing a FILE does not make its DIRECTORY ENTRY durable, so the
-    # day's first append needs a parent-directory sync or a crash can lose the
-    # whole journal even though its bytes were flushed. Appends do NOT go
-    # through atomicio.publish() -- that is the replace path -- so nothing else
-    # covers this. On the CREATE path only: paying it per append would
-    # reintroduce a per-call barrier, which is what this design removed.
+    # Q5: fsyncing a FILE does not make its DIRECTORY ENTRY durable, so an
+    # append that CREATES the journal needs a parent-directory sync or a crash
+    # can lose the whole journal even though its bytes were flushed. Appends do
+    # NOT go through atomicio.publish() -- that is the replace path -- so
+    # nothing else covers this.
+    #
+    # ON EVERY CREATE, NOT ONCE A DAY. This comment used to say "the day's first
+    # append", which is false: `created` is evaluated per append and `compact()`
+    # UNLINKS the journal (see its `journal.unlink()`), so the barrier fires on
+    # the first append after EVERY compaction -- roughly 1-in-450 records at the
+    # default threshold, not 1-in-a-day. The cost is unchanged and still
+    # negligible; the claim was simply wrong, in a comment explaining a
+    # durability barrier, which is where a wrong claim does the most damage.
+    #
+    # What matters is that it is NOT PER APPEND: paying it on every call would
+    # reintroduce exactly the per-call barrier this design removed.
     created = not journal.exists()
     line = (json.dumps(event, separators=(",", ":"), sort_keys=True)
             + "\n").encode("utf-8")

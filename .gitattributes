@@ -1,2 +1,17 @@
 # SHA-pinned replay fixtures are byte artifacts; never rewrite line endings.
 tests/fixtures/replay/** -text
+
+# Shell scripts MUST check out LF, on every platform. `core.autocrlf=true` is
+# the normal Windows setting and it gave `scripts/ci-local.sh` CRLF endings, so
+# running the Linux CI leg under WSL against a Windows checkout died on line 1
+# of real work:
+#
+#     scripts/ci-local.sh: line 50: set: pipefail: invalid option name
+#     scripts/ci-local.sh: line 51: $'\r': command not found
+#     scripts/ci-local.sh: line 61: syntax error near unexpected token `$'do\r''
+#
+# That is what made "just run ci-local before pushing" a Windows-only habit,
+# and four POSIX-only failures shipped to CI behind it (see the sixth bullet in
+# both ci-local scripts). `install.sh` has the same exposure for anyone who
+# clones on Windows and runs it under WSL.
+*.sh text eol=lf
