@@ -998,11 +998,44 @@ def test_releasing_doc_protects_environments_for_the_dispatch_branch():
         "workflow_dispatch runs on main, not on the tag supplied as input")
 
 
-def test_releasing_doc_keeps_the_separate_immutable_tag_ruleset():
-    text = _RELEASING.read_text(encoding="utf-8").lower()
-    assert "immutable `v*` tag ruleset" in text
-    tag_section = text[text.index("immutable `v*` tag ruleset"):]
-    assert "deny updates" in tag_section and "deletions" in tag_section
+def test_releasing_doc_documents_the_proven_two_ruleset_tag_design():
+    """AUDIT (high): the v6 instruction specified ONE `v*` ruleset carrying
+    creation + update + deletion with an empty bypass list. Because ruleset
+    bypass is explicit opt-in — repository admins are NOT exempt by default —
+    that configuration blocks ALL future `v*` tag creation, including by the
+    release operator, making a release impossible. The correct composition is
+    two rulesets, and the split was proven behaviourally before adoption."""
+    text = _RELEASING.read_text(encoding="utf-8")
+    lowered = text.lower()
+
+    assert "immutable-tags" in lowered, "the immutability ruleset must be named"
+    assert "controlled-tag-creation" in lowered, (
+        "the creation-control ruleset must be named")
+
+    immutable = lowered[lowered.index("immutable-tags"):]
+    assert "update" in immutable and "deletion" in immutable
+    assert "no bypass" in immutable or "empty bypass" in immutable, (
+        "immutable-tags must record that nobody — admins included — bypasses")
+
+    creation = lowered[lowered.index("controlled-tag-creation"):]
+    assert "creation" in creation
+    assert "admin" in creation, (
+        "controlled-tag-creation must record the RepositoryRole admin bypass")
+
+
+def test_releasing_doc_does_not_keep_the_self_defeating_single_ruleset():
+    """The defective instruction must be GONE, not merely supplemented."""
+    lowered = _RELEASING.read_text(encoding="utf-8").lower()
+    assert "restrict creation; deny updates and deletions" not in lowered, (
+        "the single-ruleset instruction would make releasing impossible")
+
+
+def test_releasing_doc_records_that_the_tag_design_was_behaviourally_proven():
+    lowered = _RELEASING.read_text(encoding="utf-8").lower()
+    assert "ztest" in lowered, (
+        "the doc must record the temporary pattern the split was proven on")
+    for needle in ("creation", "bypass"):
+        assert needle in lowered
 
 
 def test_releasing_doc_does_not_instruct_the_forbidden_seed_placement():
@@ -1014,19 +1047,173 @@ def test_releasing_doc_does_not_instruct_the_forbidden_seed_placement():
 
 
 def test_the_mutable_publisher_container_is_an_enforced_blocker():
-    """Inspected at the pinned SHA: for the OFFICIAL action repository,
-    `create-docker-action.py` returns its own local `Dockerfile`, whose base
-    is `FROM python:3.13-slim` — a mutable tag. Forks get
-    `docker://ghcr.io/<repo>:<ref>`, also tag-addressed."""
+    """The blocker stands; only its MECHANISM was recorded wrongly.
+
+    v6 claimed a consumer run builds the action's Dockerfile and resolves
+    `FROM python:3.13-slim` at run time. It does not: `create-docker-action.py`
+    takes the Dockerfile branch only when `github.repository_id` equals the
+    ACTION's own repo id, so every external consumer pulls a prebuilt GHCR
+    image instead. The pipeline is still not fully content-addressed, because
+    that image is addressed by a SHA-named — and therefore mutable — tag."""
     text = _RELEASING.read_text(encoding="utf-8")
     assert "MUTABLE_PUBLISH_CONTAINER=BLOCKED" in text
-    assert "python:3.13-slim" in text
     workflow = _raw()
     assert "MUTABLE_PUBLISH_CONTAINER=BLOCKED" in workflow
     lowered = workflow.lower()
     assert "not fully" in lowered or "not content-addressed" in lowered, (
         "the workflow must not claim full content addressing while the "
         "publisher container is unresolved")
+
+
+def test_no_document_still_claims_the_dockerfile_is_built_at_consumer_run_time():
+    """AUDIT (high): the obsolete claim must be gone from BOTH files, not
+    softened. Leaving it means a reviewer validates the wrong mechanism."""
+    for path in (_RELEASING, _WF_PATH):
+        flowed = _flowed(path)
+        assert "python:3.13-slim" not in flowed, (
+            f"{path.name} still names the base image as a run-time risk")
+        for obsolete in (
+            "resolved at run time",
+            "resolved at runtime",
+            "builds and runs a docker action from its own",
+            "its own checked-out `dockerfile`",
+        ):
+            assert obsolete not in flowed, (
+                f"{path.name} still carries the obsolete claim: {obsolete!r}")
+
+
+def test_both_documents_state_that_consumers_pull_a_prebuilt_ghcr_image():
+    for path in (_RELEASING, _WF_PATH):
+        flowed = _flowed(path)
+        assert "ghcr.io/pypa/gh-action-pypi-publish" in flowed, (
+            f"{path.name} must name the image a consumer actually pulls")
+        assert "prebuilt" in flowed, (
+            f"{path.name} must say the image is prebuilt, not built here")
+        assert "tag" in flowed and "digest" in flowed, (
+            f"{path.name} must distinguish the mutable tag from the digest")
+
+
+def _flowed(path: Path) -> str:
+    """Lowercased text with wrapping and comment markers collapsed, so a
+    claim split across two lines cannot evade a phrase assertion."""
+    text = path.read_text(encoding="utf-8").lower()
+    return re.sub(r"\s+", " ", text.replace("\n#", " "))
+
+
+def test_the_documents_do_not_overclaim_what_the_digest_gate_guarantees():
+    """AUDIT (v8): v7 said the gate ran "before publish becomes eligible"
+    and that `publish` "never becomes eligible" against an unaudited
+    manifest. Both overstate it. The check reads a MUTABLE name at one
+    instant; a repoint landing afterwards is still pulled. The gate blocks
+    only a mismatch observable while `inspect` runs."""
+    for path in (_RELEASING, _WF_PATH):
+        flowed = _flowed(path)
+        for overclaim in (
+            "never becomes eligible",
+            "before publish becomes eligible",
+            "before `publish` becomes eligible",
+            "always detected",
+            "detects every repoint",
+        ):
+            assert overclaim not in flowed, (
+                f"{path.name} overclaims the gate: {overclaim!r}")
+        assert "observable" in flowed, (
+            f"{path.name} must scope the guarantee to what inspect can see")
+
+
+def test_the_documents_record_digest_verification_without_overclaiming():
+    """Detection is not prevention: the residual TOCTOU window must be
+    stated, and full content addressing must NOT be claimed."""
+    for path in (_RELEASING, _WF_PATH):
+        flowed = _flowed(path)
+        assert "toctou" in flowed or "window" in flowed, (
+            f"{path.name} must disclose the inspect-to-publish window")
+        # The phrase may legitimately appear negated ("NOT fully
+        # content-addressed") or quoted in the prohibition against making
+        # the claim. What must never appear is an AFFIRMATIVE use.
+        claim = "fully content-addressed"
+        for match in re.finditer(re.escape(claim), flowed):
+            before = flowed[max(0, match.start() - 32):match.start()]
+            assert before.rstrip().endswith("not") or before.endswith('"'), (
+                f"{path.name} claims full content addressing at "
+                f"...{flowed[max(0, match.start() - 60):match.end()]!r}")
+
+
+def test_the_documents_record_that_direct_digest_invocation_is_not_adopted():
+    lowered = _RELEASING.read_text(encoding="utf-8").lower()
+    assert "unsupported" in lowered, (
+        "the doc must record that direct digest invocation is unsupported")
+
+
+# --- the GHCR digest gate lives in the uncredentialed inspect job -------------
+
+_DIGEST_COMMAND = "check-runtime-image"
+
+
+def test_inspect_verifies_the_publisher_image_digest():
+    """The gate must run in `inspect` — the job that holds neither the signing
+    seed nor the OIDC credential — so a repointed tag is caught by a runner
+    that could not itself publish."""
+    steps = _steps(_jobs(_wf())["inspect"])
+    runs = "\n".join(s.get("run", "") for s in steps if isinstance(s, dict))
+    assert _DIGEST_COMMAND in runs, (
+        "inspect must resolve and verify the pinned publisher image digest")
+
+
+def test_the_digest_gate_is_not_placed_in_a_credentialed_job():
+    jobs = _jobs(_wf())
+    for name in ("sign", "publish"):
+        runs = "\n".join(s.get("run", "") for s in _steps(jobs[name])
+                         if isinstance(s, dict))
+        assert _DIGEST_COMMAND not in runs, (
+            f"the digest gate must not run in the credentialed {name} job")
+
+
+def test_inspect_holds_neither_the_signing_seed_nor_oidc():
+    """Unchanged by v7: adding the digest gate must not have promoted
+    inspect into a credentialed job."""
+    inspect = _jobs(_wf())["inspect"]
+    assert "environment" not in inspect, (
+        "inspect must remain outside every protected environment")
+    perms = inspect.get("permissions") or {}
+    assert perms == {"contents": "read"}, (
+        f"inspect must stay contents:read only, got {perms}")
+    assert "id-token" not in perms
+    assert "secrets." not in yaml.safe_dump(inspect), (
+        "inspect must reference no secret whatsoever")
+
+
+def test_publish_still_depends_on_inspect_and_keeps_the_exact_action_pin():
+    jobs = _jobs(_wf())
+    raw_needs = jobs["publish"].get("needs")
+    needs = [raw_needs] if isinstance(raw_needs, str) else list(raw_needs or [])
+    assert needs == ["inspect"], (
+        "publish must remain gated behind the full inspection")
+    sha, release = _PINS["pypa/gh-action-pypi-publish"]
+    uses = _uses_of(jobs["publish"])
+    assert any(u == f"pypa/gh-action-pypi-publish@{sha}" for u in uses), (
+        "publish must keep the exact audited action commit")
+    assert release == "v1.14.2"
+
+
+def test_publish_gains_no_shell_and_no_custom_credential_exchange():
+    """The credentialed job must stay two pinned actions and nothing else."""
+    steps = _steps(_jobs(_wf())["publish"])
+    assert all("run" not in s for s in steps if isinstance(s, dict)), (
+        "the publish job must contain no shell step")
+    assert len(steps) == 2, f"publish must remain two steps, got {len(steps)}"
+
+
+def test_the_helper_pins_the_digest_the_workflow_will_enforce():
+    """The enforced digest is source-controlled, not fetched from anywhere
+    the attacker who repointed the tag also controls."""
+    source = _HELPER.read_text(encoding="utf-8")
+    # Adjacent string literals are how a 71-character digest fits the line
+    # limit; join them before matching so wrapping is not load-bearing.
+    joined = re.sub(r'"\s*\n\s*"', "", source)
+    assert "sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be179ec41775c72c" \
+           "4e3ab2d5" in joined, "the audited digest must be pinned in source"
+    assert "dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in joined
 
 
 def test_release_validation_is_executable_and_unit_tested():

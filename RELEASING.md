@@ -36,10 +36,35 @@ repository's files — they are GitHub/PyPI **settings**:
    protected `main` branch only, and address `can_admins_bypass` (an admin
    bypass makes every other rule advisory). As above, do not configure `v*`
    as an environment deployment tag: it is an input, not this run's ref.
-3. **Create a restrictive, immutable `v*` tag ruleset.** No ruleset or tag
-   protection exists today, so any push-capable identity can create, move,
-   or delete a release tag. Restrict creation; deny updates and deletions
-   so a published tag can never be repointed.
+3. **Protect `v*` tags with TWO rulesets, not one.** Any push-capable
+   identity could otherwise create, move, or delete a release tag. The
+   split is not stylistic — see the correction below.
+
+   - **`immutable-tags`** — target `refs/tags/v*`; rules **Restrict
+     updates** and **Restrict deletions**; **no bypass** (empty bypass
+     list), enforcement Active. A published tag can never be repointed or
+     removed, by anyone, administrators included.
+   - **`controlled-tag-creation`** — target `refs/tags/v*`; rule **Restrict
+     creations** only; bypass **RepositoryRole `admin` only**, mode
+     `always`; enforcement Active. Cutting a release stays possible for an
+     authorized operator and impossible for everyone else.
+
+   **Why not one ruleset.** Carrying creation + update + deletion on a
+   single ruleset with an empty bypass list — the instruction this document
+   used to give — would block **all future `v*` tag creation**, including by
+   the release operator. Ruleset bypass is explicit opt-in: repository
+   administrators are *not* exempt unless added. That configuration makes
+   releasing impossible, which is why it must not be used.
+
+   **Proven, not assumed.** The composition was exercised on a disposable
+   `refs/tags/ztest-step1l-*` pattern with two temporary rulesets of the
+   same shape: creating the tag as the admin was allowed (GitHub logged
+   `Bypassed rule violations`), while force-moving it and deleting it were
+   both refused with `GH013`, and the tag still pointed at its original
+   commit afterwards. Rules from separate rulesets aggregate, and a bypass
+   grant applies only to the ruleset that carries it. The temporary
+   rulesets and tag were removed after the proof; no real `v*` tag was
+   touched.
 4. **Move `OLYMPUS_SIGNING_SEED` from repository scope to the protected
    `release-signing` environment scope** (never `pypi`), and assess
    **rotation**: as a repository-scoped secret it has been exposable to
@@ -57,22 +82,77 @@ repository's files — they are GitHub/PyPI **settings**:
 
 ### MUTABLE_PUBLISH_CONTAINER=BLOCKED
 
+**This section previously described the wrong mechanism.** The blocker is
+real, but the reason recorded through v6 was not. It is corrected here
+because a reviewer cannot validate a blocker whose stated mechanism is
+false.
+
 Inspected at the pinned commit `dc37677b2e1c63e2034f94d8a5b11f265b73ba33`
 (v1.14.2): `pypa/gh-action-pypi-publish` is a composite action that writes a
-Docker action at runtime via `create-docker-action.py`. For the **official**
-action repository it sets the image to its own checked-out `Dockerfile`,
-whose base is **`FROM python:3.13-slim`** — a mutable Docker Hub tag
-resolved at run time. (Forks instead get `docker://ghcr.io/<repo>:<ref>`,
-addressed by tag rather than digest.)
+Docker action at run time via `create-docker-action.py`. That script selects
+the image from the **consumer's** repository id:
 
-Consequence, stated plainly: **this pipeline is NOT fully content-addressed.**
-Every GitHub Action is pinned by commit SHA, but the code that ultimately
-handles the OIDC token and uploads to PyPI runs inside a container image
-that no digest in this repository fixes. Invoking a digest-pinned publisher
-container directly was considered and rejected for now: it would require
-reimplementing the action's OIDC token exchange and input handling outside
-the audited upstream action, which trades a known, documented gap for an
-unaudited bespoke credential path.
+```python
+REPO_ID_GH_ACTION = '178055147'          # the ACTION's own repository
+
+def set_image(ref, repo, repo_id):
+    if repo_id == REPO_ID_GH_ACTION:
+        return str(ACTION_SHELL_CHECKOUT_PATH / 'Dockerfile')
+    return f'docker://ghcr.io/{repo}:{ref.replace("/", "-")}'
+```
+
+`action.yml` supplies `REPO_ID` as `github.repository_id` — *ours*, not the
+action's. The Dockerfile branch therefore fires **only when a workflow runs
+inside `pypa/gh-action-pypi-publish` itself** (its own CI). Every external
+consumer, this repository included, takes the second branch and pulls the
+**prebuilt** image:
+
+```
+ghcr.io/pypa/gh-action-pypi-publish:dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+```
+
+So no base image is resolved on our runner: whatever base PyPA built from
+was fixed when *they* built and pushed that image. The earlier claim that a
+mutable base tag is resolved at our run time was simply wrong, and the
+parenthetical attributing the GHCR path to "forks" was backwards — it is
+the path every consumer takes.
+
+**The blocker survives the correction, for a different reason.** That
+reference is a **tag**, and a tag is a mutable pointer: the GHCR package
+owner can repoint `:dc37677b…` at a different manifest **digest** at any
+time. So **this pipeline is NOT fully content-addressed.** Every GitHub
+Action is pinned by commit SHA, but the container that ultimately handles
+the OIDC token and uploads to PyPI is reached through a name that can move.
+
+**What v7 adds.** `inspect` — which holds neither the signing seed nor the
+OIDC credential — resolves that tag anonymously and fails closed unless it
+still yields the audited digest
+`sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be179ec41775c72c4e3ab2d5`,
+pinned in `scripts/release_pipeline.py` and exercised by
+`tests/test_release_runtime_image.py`. State its limits honestly:
+
+- it **blocks a mismatch that is observable while `inspect` runs** — that is
+  the whole of what it guarantees;
+- it does **not bind the tag**. A repoint landing *after* `inspect` has read
+  the digest is still pulled by `publish`, because the two jobs resolve the
+  same mutable name at different times. This is a **TOCTOU window**, not a
+  closed door, and the gate must not be described as making `publish`
+  ineligible or as catching every repoint;
+- it does **not** make the pipeline content-addressed.
+
+Treat it as an alarm on a door that is still unlocked: worth having, and no
+substitute for a lock.
+
+**Why the digest is not pinned directly.** The image reference is computed
+inside `create-docker-action.py` from `github.action_ref`, which must be a
+git ref — an OCI digest is not a valid `uses:` target — and the action
+exposes no input to override it. Invoking the container directly as
+`docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:…` would be genuinely
+content-addressed and would reuse the same audited container (it does *not*
+require reimplementing the OIDC exchange, contrary to the v6 note), but it
+is **unsupported** by upstream: it bypasses the composite action's PATH
+reset, Python discovery, and input normalization, and makes us own the
+upgrade path. It is therefore **not adopted**.
 
 Until this is resolved — upstream digest-pinned container execution, or a
 reviewed vendored equivalent — activation stays blocked and the claim

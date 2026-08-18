@@ -54,15 +54,20 @@ import email.policy
 import glob
 import gzip
 import hashlib
+import hmac
 import io
 import json
 import os
 import platform
 import re
+import ssl
 import subprocess
 import sys
 import tarfile
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
@@ -1596,6 +1601,316 @@ def check_dists(dist_dir: Path, version: str, *, manifest,
     return {"wheel": wheel.name, "sdist": sdist.name, "version": version}
 
 
+# --- the publisher runtime image ----------------------------------------------
+#
+# WHAT A CONSUMER RUN ACTUALLY PULLS
+# ----------------------------------
+# `pypa/gh-action-pypi-publish` is a composite action. At the pinned commit
+# its `create-docker-action.py` chooses the image it will run:
+#
+#     if repo_id == REPO_ID_GH_ACTION ('178055147'):  # the ACTION's own repo
+#         return <its checked-out Dockerfile>
+#     return f'docker://ghcr.io/{repo}:{ref}'         # every other consumer
+#
+# `REPO_ID` comes from the CONSUMER's `github.repository_id`, so this
+# repository takes the second branch and pulls a PREBUILT GHCR image whose
+# tag is the action commit. The Dockerfile branch — and with it the
+# `FROM python:3.13-slim` base — is resolved when PyPA BUILDS the image, not
+# when we run it.
+#
+# The residual exposure is therefore a MUTABLE POINTER: a SHA-named tag is
+# still a tag, and whoever controls the GHCR package can repoint it. These
+# helpers resolve that tag to its manifest digest and compare it with the
+# digest recorded here.
+#
+# WHAT THIS DOES AND DOES NOT BUY. The gate fails the run on a mismatch that
+# is OBSERVABLE WHILE `inspect` RUNS. It does not bind the tag: a repoint
+# landing after this check has already read the digest is still pulled by
+# `publish`, because the two jobs resolve the same name at different times.
+# This is a TOCTOU window, not a closed door, and it does not make the
+# pipeline content-addressed — see RELEASING.md.
+
+RUNTIME_IMAGE_REGISTRY = "ghcr.io"
+RUNTIME_IMAGE_REPOSITORY = "pypa/gh-action-pypi-publish"
+RUNTIME_IMAGE_REFERENCE = "dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+RUNTIME_IMAGE_DIGEST = ("sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be"
+                        "179ec41775c72c4e3ab2d5")
+
+# Lowercase sha256 plus exactly 64 hex characters. `\A`/`\Z` so a trailing
+# newline or appended junk cannot ride along.
+_IMAGE_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+
+# Explicit media types: without these the registry may answer with a
+# different manifest than the one the runner would pull.
+_MANIFEST_ACCEPT = ", ".join((
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+))
+
+_REGISTRY_TIMEOUT = 15.0
+_MAX_TOKEN_BYTES = 64 * 1024
+
+
+# RFC 6750 b64token: the only shape an anonymous pull token may take. A
+# value outside this set never reaches an Authorization header, so a
+# registry cannot smuggle a newline (header injection), whitespace, or a
+# control character into the request we build from its answer.
+_BEARER_TOKEN_RE = re.compile(r"\A[A-Za-z0-9\-._~+/]+=*\Z")
+_MAX_TOKEN_CHARS = 8192
+
+
+class _RedirectRejected(Exception):
+    """The registry attempted a redirect.
+
+    Deliberately carries NO target: the value is attacker-chosen and must
+    never reach a log line, not even through an exception repr.
+    """
+
+
+class _RejectAllRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow NOTHING.
+
+    Not cross-host, not same-host, not same-path, not a scheme downgrade,
+    not a port change. Any redirect is a second endpoint that was never
+    audited, and the Authorization header must never travel to one. A
+    host-equality test is the wrong control here: https->http on the same
+    host still strips TLS, and a same-host port change still reaches a
+    different listener. There is no redirect this gate needs, so none is
+    permitted.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise _RedirectRejected()
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise _RedirectRejected()
+
+    # 302/303/307/308 share the same refusal; urllib dispatches by status.
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
+def _open_url(request, timeout):
+    """The single network seam. Tests replace this; nothing else opens
+    sockets."""
+    opener = urllib.request.build_opener(_RejectAllRedirects)
+    return opener.open(request, timeout=timeout)
+
+
+def _close_quietly(response) -> None:
+    """A failure while closing must not replace the real error, and must not
+    surface a raw traceback carrying the URL."""
+    closer = getattr(response, "close", None)
+    if closer is None:
+        return
+    try:
+        closer()
+    except Exception:
+        pass
+
+
+def _validated_bearer_token(value) -> str:
+    """The token, or a closed failure. The value is NEVER echoed.
+
+    Validated BEFORE it is interpolated into a header, so a hostile token
+    cannot reach the request at all.
+    """
+    if not isinstance(value, str):
+        raise _fail("the container registry returned a non-string pull token")
+    if not value:
+        raise _fail("the container registry returned an empty pull token")
+    if len(value) > _MAX_TOKEN_CHARS:
+        raise _fail("the container registry pull token exceeded the permitted "
+                    f"length of {_MAX_TOKEN_CHARS} characters")
+    if not _BEARER_TOKEN_RE.match(value):
+        raise _fail("the container registry pull token is not valid bearer "
+                    "credential syntax (value withheld)")
+    return value
+
+
+def _registry_fetch(url: str, headers: dict, *, header_name: str = "",
+                    max_bytes: int = 0) -> tuple[int, list[str], bytes]:
+    """GET `url` and return `(status, header values, body)`.
+
+    EVERY failure — request construction, connection, redirect, response
+    entry, read, header access, and close — is converted here into a closed,
+    sanitized `ReleaseCheckError`. `raise ... from None` throughout: the
+    original exception's repr can carry the full request URL (and with it the
+    scope) or the redirect target, and a chained traceback would print it.
+    Nothing derived from `headers` is ever formatted into a message, because
+    that mapping holds the Authorization credential.
+    """
+    try:
+        request = urllib.request.Request(url, headers=headers, method="GET")
+    except Exception as err:
+        raise _fail("the container registry request could not be constructed "
+                    f"({type(err).__name__})") from None
+
+    response = None
+    try:
+        response = _open_url(request, _REGISTRY_TIMEOUT)
+        status = int(getattr(response, "status", 0) or 0)
+        values = _header_values(response, header_name) if header_name else []
+        body = response.read(max_bytes + 1) if max_bytes else b""
+        if not isinstance(body, bytes):
+            raise _fail("the container registry returned a non-binary body")
+        return status, values, body
+    except ReleaseCheckError:
+        raise
+    except _RedirectRejected:
+        raise _fail("the container registry attempted an HTTP redirect — "
+                    "refusing to follow any redirect (target withheld)") \
+            from None
+    except urllib.error.HTTPError as err:
+        raise _fail("the container registry returned HTTP status "
+                    f"{int(err.code)}") from None
+    except ssl.SSLError:
+        raise _fail("the container registry TLS handshake failed "
+                    "(details withheld)") from None
+    except urllib.error.URLError as err:
+        reason = err.reason
+        kind = (type(reason).__name__ if isinstance(reason, BaseException)
+                else "URLError")
+        raise _fail(f"the container registry was unreachable ({kind})") \
+            from None
+    except TimeoutError:
+        raise _fail("the container registry timed out") from None
+    except RecursionError:
+        raise _fail("the container registry response exceeded safe nesting "
+                    "depth") from None
+    except MemoryError:
+        raise _fail("the container registry response exhausted memory") \
+            from None
+    except OSError as err:
+        raise _fail("the container registry connection failed "
+                    f"({type(err).__name__})") from None
+    except Exception as err:
+        # Catch-all: only the exception TYPE is reported, never its text,
+        # which may quote the URL, the body, or the credential.
+        raise _fail("the container registry request failed "
+                    f"({type(err).__name__})") from None
+    finally:
+        _close_quietly(response)
+
+
+def _require_registry_status(status: int) -> None:
+    if status != 200:
+        raise _fail(f"the container registry returned HTTP status {status}")
+
+
+def _header_values(response, name: str) -> list[str]:
+    """Every value for `name` — a single-value read would silently accept
+    the first of two conflicting digests."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return []
+    get_all = getattr(headers, "get_all", None)
+    if get_all is not None:
+        return [v for v in (get_all(name) or []) if isinstance(v, str)]
+    value = headers.get(name)
+    return [value] if isinstance(value, str) else []
+
+
+def _require_pinned_image(repository: str, reference: str) -> None:
+    """Only the audited image may ever be resolved.
+
+    The registry host is a module constant and the repository and tag are
+    compared literally, so no caller — and no future refactor — can point
+    this check at something else.
+    """
+    if repository != RUNTIME_IMAGE_REPOSITORY:
+        raise _fail("refusing to resolve a container repository other than "
+                    "the pinned publisher image (name withheld)")
+    if reference != RUNTIME_IMAGE_REFERENCE:
+        raise _fail("refusing to resolve an image reference other than the "
+                    "pinned publisher action commit (value withheld)")
+
+
+def _anonymous_pull_token(repository: str) -> str:
+    """An anonymous pull token for the public package. Never logged, never
+    returned to a caller other than the manifest request below."""
+    url = (f"https://{RUNTIME_IMAGE_REGISTRY}/token"
+           f"?service={RUNTIME_IMAGE_REGISTRY}"
+           f"&scope=repository:{urllib.parse.quote(repository)}:pull")
+    status, _values, raw = _registry_fetch(
+        url, {"Accept": "application/json"}, max_bytes=_MAX_TOKEN_BYTES)
+    _require_registry_status(status)
+    if len(raw) > _MAX_TOKEN_BYTES:
+        raise _fail("the container registry token response was unexpectedly "
+                    "large")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _fail("the container registry token response was not valid "
+                    "JSON") from None
+    except RecursionError:
+        # A deeply nested document defeats the decoder before any value is
+        # produced; treat it as hostile input, not an internal error.
+        raise _fail("the container registry token response nested too deeply "
+                    "to decode safely") from None
+    except Exception as err:
+        raise _fail("the container registry token response could not be "
+                    f"decoded ({type(err).__name__})") from None
+    if not isinstance(payload, dict):
+        raise _fail("the container registry token response was not a JSON "
+                    "object")
+    return _validated_bearer_token(
+        payload.get("token") or payload.get("access_token"))
+
+
+def resolve_runtime_image_digest(repository: str, reference: str) -> str:
+    """The manifest digest the pinned tag currently resolves to.
+
+    Fails closed when the digest is missing, malformed, or reported
+    inconsistently. The digest itself is never echoed in a failure.
+    """
+    _require_pinned_image(repository, reference)
+    token = _anonymous_pull_token(repository)
+    url = (f"https://{RUNTIME_IMAGE_REGISTRY}/v2/{repository}"
+           f"/manifests/{reference}")
+    headers = {"Accept": _MANIFEST_ACCEPT,
+               "Authorization": f"Bearer {token}"}
+    status, reported, _body = _registry_fetch(
+        url, headers, header_name="Docker-Content-Digest")
+    _require_registry_status(status)
+    if not reported:
+        raise _fail("the container registry response carried no "
+                    "Docker-Content-Digest header")
+    distinct = {value.strip() for value in reported}
+    if len(distinct) != 1:
+        raise _fail(f"the container registry reported {len(distinct)} "
+                    "conflicting Docker-Content-Digest headers")
+    digest = distinct.pop()
+    if not _IMAGE_DIGEST_RE.match(digest):
+        raise _fail("the container registry reported a malformed image "
+                    "digest (value withheld)")
+    return digest
+
+
+def check_runtime_image(*, repository: str = RUNTIME_IMAGE_REPOSITORY,
+                        reference: str = RUNTIME_IMAGE_REFERENCE,
+                        expected_digest: str = RUNTIME_IMAGE_DIGEST) -> str:
+    """Prove the pinned publisher tag still names the audited manifest.
+
+    Runs in `inspect`, which holds neither the signing seed nor the OIDC
+    credential: the runner that could detect a repoint is not the runner
+    that could exploit one.
+    """
+    if not _IMAGE_DIGEST_RE.match(expected_digest or ""):
+        raise _fail("the expected publisher image digest is not a lowercase "
+                    "sha256 digest")
+    observed = resolve_runtime_image_digest(repository, reference)
+    if not hmac.compare_digest(observed, expected_digest):
+        raise _fail("the pinned publisher image tag no longer resolves to the "
+                    "audited manifest — the SHA-named GHCR tag was repointed "
+                    "(digests withheld; re-resolve manually to compare)")
+    return observed
+
+
 # --- CLI ------------------------------------------------------------------------
 
 def main(argv=None) -> int:
@@ -1640,6 +1955,10 @@ def main(argv=None) -> int:
     p.add_argument("--version", required=True)
     p.add_argument("--manifest")
     p.add_argument("--expected-commit", required=True)
+
+    # No arguments: the image, tag, and digest are all pinned in source.
+    # Anything a caller could supply is something an attacker could supply.
+    sub.add_parser("check-runtime-image")
 
     args = parser.parse_args(argv)
     root = Path(getattr(args, "root", ".")).resolve()
@@ -1694,6 +2013,12 @@ def main(argv=None) -> int:
                         expected_commit=args.expected_commit,
                         source_root=root)
             print("distributions verified and bound to the signed manifest")
+        elif args.command == "check-runtime-image":
+            check_runtime_image()
+            # The digest is NOT printed: this log is public, and echoing the
+            # value invites copying it out of a log rather than the source.
+            print("pinned publisher image still resolves to the audited "
+                  "manifest digest")
     except ReleaseCheckError as err:
         print(f"RELEASE CHECK FAILED: {err}", file=sys.stderr)
         return 1
