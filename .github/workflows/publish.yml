@@ -12,7 +12,9 @@ name: Publish to PyPI
 #             manifest artifact, builds, and uploads untrusted distributions.
 #   inspect — no environment, secret, or OIDC. On a fresh checkout, downloads
 #             BOTH artifacts by ID, cryptographically re-verifies the manifest
-#             and expected commit, then validates the exact dist artifact.
+#             and expected commit, validates the exact dist artifact, and
+#             proves the pinned publisher image tag still resolves to the
+#             audited manifest digest.
 #   publish — environment: pypi. Downloads the artifact ID forwarded by
 #             inspect and publishes it. Two SHA-pinned actions, no shell.
 #
@@ -32,10 +34,27 @@ name: Publish to PyPI
 #
 # SUPPLY-CHAIN STATUS: every action is pinned to a full commit SHA with the
 # audited release named alongside. This pipeline is NOT fully
-# content-addressed: pypa/gh-action-pypi-publish, even at a pinned commit,
-# builds and runs a Docker action from its own `Dockerfile`
-# (`FROM python:3.13-slim`, a mutable tag). Tracked as
-# MUTABLE_PUBLISH_CONTAINER=BLOCKED in RELEASING.md.
+# content-addressed, for the reason below.
+#
+# WHAT THE PUBLISHER ACTION ACTUALLY RUNS. pypa/gh-action-pypi-publish is a
+# composite action whose `create-docker-action.py` picks its image from the
+# CONSUMER's `github.repository_id`: only when that id is the action's own
+# repository does it build the checked-out Dockerfile. Every external
+# consumer — this repository included — instead pulls the prebuilt image
+#   ghcr.io/pypa/gh-action-pypi-publish:<action commit>
+# so no base image is resolved here at run time. The residual exposure is
+# that the reference is a SHA-named TAG, and a tag is a mutable pointer the
+# GHCR package owner can repoint at a different manifest DIGEST.
+#
+# `inspect` therefore resolves that tag and fails the run unless it still
+# names the audited digest. State the limit precisely: the gate BLOCKS A
+# MISMATCH THAT IS OBSERVABLE WHILE `inspect` RUNS. It does not bind the
+# tag. A repoint that lands after `inspect` has read the digest is still
+# pulled by `publish`, because the two jobs resolve the same mutable name
+# at different times — a TOCTOU window, not a closed door. Pinning the
+# digest directly is impossible without abandoning the supported action, so
+# the gap stays tracked as MUTABLE_PUBLISH_CONTAINER=BLOCKED in
+# RELEASING.md.
 #
 # ACTIVATION IS BLOCKED: this workflow is disabled (disabled_manually) and
 # must stay so until every precondition in RELEASING.md is met and a separate
@@ -262,6 +281,12 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
       - name: Run twine validation on the inspected distributions
         run: python -m twine check --strict "$RUNNER_TEMP"/dist/*
+      - name: Resolve the pinned publisher image tag and compare its digest
+        # Anonymous, read-only registry lookup from the job that holds
+        # neither the signing seed nor the OIDC credential. It fails the run
+        # on a mismatch observable at THIS moment; a repoint landing after
+        # this step can still be pulled by `publish` (TOCTOU window).
+        run: python -B scripts/release_pipeline.py check-runtime-image
 
   publish:
     needs: inspect
