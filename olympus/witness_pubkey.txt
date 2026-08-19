@@ -1,9 +1,26 @@
-# Olympus release-signing public keys (Ed25519, hex) — ONE KEY PER LINE.
-# `olympus verify` trusts ONLY the keys listed here (plus OLYMPUS_PINNED_PUBKEY)
+# Olympus release-signing public key (Ed25519, hex) — EXACTLY ONE ACTIVE KEY.
+# `olympus verify` trusts ONLY the key listed here (plus OLYMPUS_PINNED_PUBKEY)
 # for release manifests: a manifest signed with any other key is rejected, not
 # merely checked for internal consistency.
-# Rotation: append the NEW key while the old one still verifies history, switch
-# the signing seed, then remove the old key after the overlap window — see
-# docs/SIGNING.md. Derived from the secret signing seed (held as a GitHub
-# Actions secret); see RELEASING.md for how a release is cut.
+#
+# DO NOT ADD A SECOND LINE. This file is the RELEASE trust anchor and its
+# policy is one active key: scripts/release_pipeline.py refuses to sign,
+# verify, or check distributions when it lists anything else, and CI enforces
+# the same rule. Appending a key does not create an overlap window — it breaks
+# the release pipeline.
+#
+# Rotation is a fail-closed, FORWARD-ONLY FLAG DAY performed while publishing
+# is disabled: replace the single line below in one commit, then record the
+# change in a second commit that cites the first commit's full SHA, as events
+# in docs/RELEASE_SIGNING_KEYS.md. Merge with a merge commit, never squash.
+# A retired key is never reactivated. Procedure: RELEASING.md, "Rotating the
+# release signing key". Retired keys live in that ledger, NOT in this file.
+#
+# Multi-key overlap belongs to the separate runtime/instance trust domain
+# (OLYMPUS_PINNED_PUBKEY), documented in the overlap-rotation section of
+# docs/SIGNING.md. It does not apply here.
+#
+# Derived from the secret signing seed, which MUST live in the protected
+# release-signing environment (it is still repository-scoped today — see
+# activation blocker 4); see RELEASING.md for how a release is cut.
 350f970ac5159b30f6736c124a1e468cd1cc82ddd73cb24799057c5c3b0b0336

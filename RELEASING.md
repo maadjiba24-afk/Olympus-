@@ -66,10 +66,16 @@ repository's files — they are GitHub/PyPI **settings**:
    rulesets and tag were removed after the proof; no real `v*` tag was
    touched.
 4. **Move `OLYMPUS_SIGNING_SEED` from repository scope to the protected
-   `release-signing` environment scope** (never `pypi`), and assess
-   **rotation**: as a repository-scoped secret it has been exposable to
-   every workflow job that requested it, so it must be treated as
-   potentially over-shared and rotated before first use.
+   `release-signing` environment scope** (never `pypi`), and **rotate** it:
+   as a repository-scoped secret it has been exposable to every workflow job
+   that requested it, so it must be treated as potentially over-shared and
+   rotated before first use. **This blocker remains OPEN** — the secret is
+   still repository-scoped and the key has never been rotated
+   ([docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md) records a
+   single activation event and no retirement). The exact ordered procedure is
+   [Rotating the release signing key](#rotating-the-release-signing-key-flag-day)
+   below; it is a flag-day replacement performed while publishing stays
+   disabled.
 5. **Verify the PyPI trusted publisher binding manually**: the PyPI project
    must bind publisher `publish.yml` in this repository AND environment
    `pypi`. This cannot be verified from the repository without credentials
@@ -160,20 +166,181 @@ reviewed vendored equivalent — activation stays blocked and the claim
 
 ## One-time setup
 
-- **Signing seed.** Set `OLYMPUS_SIGNING_SEED` as a secret of the protected
-  **`release-signing` environment**. Repository-scoped placement is
-  forbidden: it exposes the seed to every workflow job that asks for it
-  (activation blocker 4). The signing job derives the Ed25519 key from it, and
+- **Signing seed.** `OLYMPUS_SIGNING_SEED` **must be moved** to a secret of
+  the protected **`release-signing` environment**. It is **not there yet**:
+  the live secret is still repository-scoped, and `release-signing` currently
+  holds **zero** secrets. Repository-scoped placement is forbidden because it
+  exposes the seed to every workflow job that asks for it (activation
+  blocker 4, still open). The signing job derives the Ed25519 key from it, and
   the narrow signer **refuses to sign** unless the derived public key equals
   the pinned key in `olympus/witness_pubkey.txt` exactly.
 - **Pinned public key.** Commit the production public key to
-  `olympus/witness_pubkey.txt` — exactly one key for a release, so signer
-  identity is unambiguous. `olympus verify`, the build job, and the independent
-  inspect job all trust only that key.
+  `olympus/witness_pubkey.txt` — **exactly one active key** for a release, so
+  signer identity is unambiguous. `olympus verify`, the build job, and the
+  independent inspect job all trust only that key. Multi-key overlap is a
+  runtime/instance facility (`OLYMPUS_PINNED_PUBKEY`, see
+  [docs/SIGNING.md](docs/SIGNING.md)) and must never be applied to this file.
+  Every activation and retirement is recorded in
+  [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md).
 - **PyPI trusted publisher.** Create the project on PyPI and add this repo +
   `publish.yml` + environment `pypi` as a Trusted Publisher. The pipeline is
   OIDC-only by design: there is no API-token path, because a long-lived
   token secret would outlive and outrank every gate in the workflow.
+
+## Rotating the release signing key (flag day)
+
+The release trust anchor holds **exactly one active key**, so rotation is not
+an overlap — it is a **fail-closed, forward-only flag-day replacement**. Run
+it while publishing is disabled. The overlap-rotation section of
+[docs/SIGNING.md](docs/SIGNING.md) covers a separate deployment trust domain
+and must not be used here.
+
+**Why a flag day is safe.** Nothing already published stops verifying. A
+released wheel carries its own copy of `witness_pubkey.txt`, so
+`pip install olympus-council==X && olympus verify` keeps checking that wheel
+against the key that was active when it was built. Retired keys stay
+recoverable through [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md)
+and can be pinned explicitly out of band
+(`OLYMPUS_PINNED_PUBKEY=<retired key>`) to check a historical manifest — they
+are never returned to the active set.
+
+**Ordering is enforced by the signer, not by discipline.**
+`scripts/release_pipeline.py` refuses to sign unless the derived public key
+equals the pinned key exactly, so a half-finished rotation cannot produce a
+signature: it can only fail closed.
+
+1. **Confirm publishing is disabled.** `publish.yml` must be
+   `disabled_manually`, with no release in flight. **Do not enable the
+   workflow at any point in this procedure, and do not create a disposable
+   tag or test release to exercise it.** Rotation is complete when the
+   material and the pin agree; proving it end-to-end belongs to the separate,
+   reviewed activation decision (blocker 7).
+2. **Generate the new seed on a clean machine, off-platform.**
+   ```bash
+   olympus keygen --out <path>          # writes mode 0600
+   ```
+   It prints **only** the derived public key and where the seed lives — the
+   seed itself is never printed. Record the public key. Never transcribe,
+   echo, copy, or log the seed, and never place it on a clipboard.
+3. **Back the new seed up securely, before anything is merged.** Take an
+   offline backup of the mode-`0600` seed file — an encrypted volume or a
+   password manager's file attachment, held by whoever may need to retry
+   step 5. Do this **before** the PR in step 4 merges. After that merge the
+   new key is the only key the pipeline will accept, so losing the seed at
+   that point means rotating forward again rather than recovering.
+4. **Replace the pin and record it, in ONE reviewed PR carrying TWO
+   commits.** A ledger event cites the commit that changed the pin, and a
+   commit cannot cite its own hash — so the pin lands first and the ledger
+   references it:
+
+   - **Commit A** — replace the single line in `olympus/witness_pubkey.txt`
+     with the new public key. Nothing else.
+   - **Capture commit A's SHA *and its UTC committer date* now**, after
+     committing A and *before* writing commit B. At this point `HEAD` is
+     commit A:
+     ```bash
+     TZ=UTC0 git show -s --format='%H %cd' --date=format-local:%Y-%m-%d HEAD
+     ```
+     That prints the full 40-character SHA and the committer date **in UTC**
+     on one line — save both. `TZ=UTC0` matters: without it the date is
+     rendered in the committer's local zone and can land a day either side of
+     the UTC date the ledger requires.
+   - **Commit B** — append **two events** to
+     [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md): `RETIRED`
+     for the outgoing key and `ACTIVATED` for its replacement. **Both rows
+     carry the SHA and the UTC date captured above** — not today's date, not
+     the date commit B was written. The two rows describe one event evidenced
+     by one commit, so they share one date.
+   - **Verify afterwards.** Once commit B exists, `git rev-parse HEAD~1`
+     confirms B's parent is A and should match the cited SHA. That is a
+     *check*, not the way A's SHA is obtained — run before B exists, `HEAD~1`
+     names the commit **before** A and would put the wrong SHA in the ledger.
+
+   Push both commits together and open one PR. Do not edit existing ledger
+   events. **Merge with a merge commit — never squash, never rebase**, so
+   commit A survives as an ancestor of `main` and the SHA the ledger cites
+   stays resolvable forever. A squash merge rewrites commit A out of
+   existence and turns every ledger citation into a dangling reference.
+
+   Do this *before* installing the secret. Until the pin matches, every
+   signing attempt fails closed; install the secret first and you get the
+   same failure with less clarity about why.
+5. **Install the matching seed in the `release-signing` environment**, by
+   streaming the seed file straight from disk into the secret — it is never
+   rendered, never on a clipboard, never an argument:
+   ```bash
+   gh secret set OLYMPUS_SIGNING_SEED --env release-signing < <path>
+   ```
+   `gh` reads the secret from stdin when no `--body` flag is given. Never use
+   `--body`, never pass the value as a command argument, never `echo` or
+   `cat` it to a terminal, never let it reach shell history, and never paste
+   it through a clipboard. Never add it to `pypi`.
+6. **Confirm the new environment secret is really there — before deleting
+   anything.** Deleting first would leave no signing material at all if step 5
+   silently failed:
+   ```bash
+   # expect total 1, names ["OLYMPUS_SIGNING_SEED"]
+   gh api repos/<owner>/<repo>/environments/release-signing/secrets \
+     --jq '{total:.total_count, names:[.secrets[].name]}'
+   ```
+   Do not proceed until this shows the name at environment scope.
+7. **Now delete the repository-scoped secret.** Until this is done the old,
+   over-shared value remains reachable by every workflow job that asks for
+   it.
+   ```bash
+   gh secret delete OLYMPUS_SIGNING_SEED          # repository scope
+   ```
+8. **Verify the final placement by metadata only** — no value is ever read,
+   because the API cannot return one:
+   ```bash
+   # repository scope is gone                      → HTTP 404
+   gh api repos/<owner>/<repo>/actions/secrets/OLYMPUS_SIGNING_SEED
+   # environment scope still holds the name        → total 1
+   gh api repos/<owner>/<repo>/environments/release-signing/secrets \
+     --jq '{total:.total_count, names:[.secrets[].name]}'
+   # it never landed in the publishing environment → 0
+   gh api repos/<owner>/<repo>/environments/pypi/secrets --jq '.total_count'
+   ```
+   Be precise about what this proves: **metadata confirms only that a secret
+   of that NAME exists in that SCOPE.** It cannot show the stored value, so it
+   cannot prove the installed seed derives the pinned key — a secret of the
+   right name holding the wrong bytes passes every check above. Also confirm
+   `olympus/witness_pubkey.txt` holds exactly the new key and that the
+   ledger's replayed state agrees — `tests/test_release_signing_keys.py`
+   checks both on every CI run.
+9. **The next signing attempt is the only cryptographic proof.** Whenever a
+   release is next authorised, the `sign` job either derives exactly the
+   pinned key or refuses. A mismatch — wrong seed installed, pin not merged,
+   secret in the wrong scope — cannot yield a signed manifest. That
+   fail-closed check, not any metadata query, is what establishes that the
+   right material is in place.
+
+### Rotation is forward-only
+
+**Before the step-4 PR merges, the rotation can be abandoned safely.** Close
+the PR and destroy the new seed and its backup; `main` is untouched, the old
+key remains active, and nothing has changed.
+
+**Merging the step-4 PR is the point of no return.** From that moment the new
+key is the only key `pinned_key()` accepts, and the old key is retired in the
+ledger. The retired key is also the over-shared one this rotation exists to
+replace, so it is **never reactivated** — not to unblock a failed secret
+install, not to cut an urgent release. Reverting the pin would put a key known
+to have been exposed to every workflow job back into the active trust set.
+
+Recovery is therefore always forward:
+
+- **Secret installation fails or was wrong** — retry step 5 using the
+  securely retained seed from step 3. The pin does not change.
+- **The new seed is lost** — generate another replacement (step 2) and
+  perform **another forward rotation**: a new PR with the same two-commit
+  shape, retiring the key that was just activated and activating its
+  successor. Two rotations in the ledger is a correct history, not a mess to
+  be tidied.
+
+`CORRECTION` events exist only to fix **provenance** — a mistyped commit SHA
+or date in an earlier row. They never change which key is active, and they are
+never a way to undo a rotation.
 
 ## Release checklist
 
