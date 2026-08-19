@@ -5,6 +5,37 @@ Olympus signs two things with one Ed25519 root of trust: the **release manifest*
 flush). This doc is how to hold the key so signatures mean *authenticity*, not
 just internal consistency.
 
+> ## ⚠️ Two signing domains, two rotation policies
+>
+> This document covers seed custody and signing generally; most of it applies
+> to both domains. What differs is **rotation**, and the split is drawn at
+> [Rotating a RUNTIME / instance signing key](#rotating-a-runtime--instance-signing-key-overlap-window)
+> — that section, and only that section, is scoped to runtime signing.
+>
+> **Runtime signing** is a separate deployment trust domain: an Olympus
+> deployment signs its own decision logs and local manifests, and **may** use
+> an instance-specific key rather than the release key. That domain **may**
+> trust several keys at once, which is what makes an overlap-window rotation
+> possible there.
+>
+> **Release signing is different and stricter.** The published-artifact trust
+> anchor, `olympus/witness_pubkey.txt`, holds **exactly one active key**.
+> `scripts/release_pipeline.py` refuses to sign, verify, or check
+> distributions when that file lists anything other than one key, and CI
+> enforces the same rule — so appending a second key to it does not create an
+> overlap window, it **breaks the release pipeline**.
+>
+> - Rotating the **release** key: see
+>   [RELEASING.md → Rotating the release signing key](../RELEASING.md#rotating-the-release-signing-key-flag-day).
+>   It is a fail-closed **flag-day replacement**, performed while publishing is
+>   disabled.
+> - Historical release keys: [docs/RELEASE_SIGNING_KEYS.md](RELEASE_SIGNING_KEYS.md),
+>   an append-only event ledger. Retired release keys are recorded there and
+>   are **not** kept in the active trust set.
+>
+> The multi-key overlap procedure in this document **does not apply to the
+> release key**. Do not apply it to `olympus/witness_pubkey.txt`.
+
 ## The threat the default seed does NOT defend against
 
 The signing key is derived from a seed: `ed25519(sha256(OLYMPUS_SIGNING_SEED))`.
@@ -47,10 +78,12 @@ tampered content, and produce a "valid" signature. So:
      is ambiguous custody and refuses with an error. Use exactly one.
 
 3. **Pin the public key** for verifiers, either:
-   - env: `OLYMPUS_PINNED_PUBKEY=<hex>` (comma-separated for several), or
-   - committed file: `olympus/witness_pubkey.txt` (**one hex key per line**;
-     `#` comments ok). All listed keys are trusted — that's what makes
-     rotation below flag-day-free.
+   - env: `OLYMPUS_PINNED_PUBKEY=<hex>` (comma-separated for several) — this
+     is the runtime pin, and it is where a multi-key overlap belongs; or
+   - committed file: `olympus/witness_pubkey.txt`. The *verifier* accepts one
+     hex key per line, but this file is the **release** trust anchor and its
+     policy is **exactly one active key** — the release pipeline and CI both
+     refuse anything else. Never add a second line to it.
 
    With a pin configured, `verify` requires the manifest's key to **match one
    of the pinned keys** — a manifest re-signed with any other key fails, even
@@ -61,8 +94,13 @@ tampered content, and produce a "valid" signature. So:
    ```bash
    OLYMPUS_SIGNING_SEED_FILE=/etc/olympus/signing_seed olympus sign
    ```
-   The publish workflow sets `OLYMPUS_SIGNING_SEED` from a repo secret, so the
-   shipped wheel's `verification.json` is signed by your production key.
+   The publish workflow reads `OLYMPUS_SIGNING_SEED` in the `sign` job, so the
+   shipped wheel's `verification.json` is signed by your production key. That
+   secret **must live** in the protected `release-signing` environment;
+   repository-scoped placement is forbidden because it exposes the seed to
+   every workflow job that asks for it. In this repository the secret has
+   **not been moved yet** — see activation blocker 4 in
+   [RELEASING.md](../RELEASING.md), which is still open.
 
 5. **Verify** (anywhere, no key needed — verification uses the public pin):
    ```bash
@@ -166,27 +204,37 @@ is one. In order of preference:
 Never echo the seed into logs, traces, or shell history. Olympus never prints or
 records the seed — only the derived **public** key.
 
-## Rotating the signing key
+## Rotating a RUNTIME / instance signing key (overlap window)
 
-Multi-key pinning makes rotation an **overlap window, not a flag day**: every
-key in `witness_pubkey.txt` (one per line) and `OLYMPUS_PINNED_PUBKEY`
-(comma-separated) is trusted, so the old and new keys verify side by side
-while you switch.
+**Scope: this section only, and runtime signing only** — decision logs and an
+instance's own manifests, in a deployment that may use an instance-specific
+key. This procedure **does not apply to the release key**. For that, see
+[RELEASING.md → Rotating the release signing key](../RELEASING.md#rotating-the-release-signing-key-flag-day),
+which is a forward-only flag-day replacement; applying the steps below to
+`olympus/witness_pubkey.txt` breaks the release pipeline, because that file
+must list exactly one key.
+
+Multi-key pinning makes *runtime* rotation an **overlap window, not a flag
+day**: every key in `OLYMPUS_PINNED_PUBKEY` (comma-separated) is trusted, so
+the old and new keys verify side by side while you switch.
 
 1. **Generate the new seed**: `olympus keygen --out /etc/olympus/signing_seed.new`
    (prints the new public key).
-2. **Append the new public key** to `olympus/witness_pubkey.txt` (keep the old
-   line) — both keys are now pinned; nothing already signed stops verifying.
+2. **Add the new public key to the runtime pin set** — extend
+   `OLYMPUS_PINNED_PUBKEY` to list both keys. Both are now trusted; nothing
+   already signed stops verifying. Do **not** add a line to
+   `olympus/witness_pubkey.txt`.
 3. **Switch the seed file**: point `OLYMPUS_SIGNING_SEED_FILE` at the new file
    (or move it over the old path — it must stay mode `0600`).
-4. **Re-sign at the next release** (`olympus sign`) — it is now signed by the
+4. **Re-sign** what must remain trusted (`olympus sign`) — now signed by the
    new key, which verifiers already trust.
-5. **Remove the old public key** from `witness_pubkey.txt` after the overlap
+5. **Drop the old public key** from `OLYMPUS_PINNED_PUBKEY` after the overlap
    window — when everything you still need to verify against the *current* pin
-   set is signed by the new key. Keep an append-only record of retired pubkeys
-   with their date ranges: a historical run signed under a retired key can
-   always be verified by checking against that retired key explicitly; nothing
-   about rotation invalidates already-signed history.
+   set is signed by the new key. Record the retired key and its date range: a
+   historical run signed under a retired key can always be verified by pinning
+   that retired key explicitly; nothing about rotation invalidates
+   already-signed history. Retired **release** keys are recorded in
+   [docs/RELEASE_SIGNING_KEYS.md](RELEASE_SIGNING_KEYS.md).
 
 ## Compromise response (suspected or confirmed seed exposure)
 
@@ -205,20 +253,23 @@ trust, and every minute of overlap is forgeable history.
    escaped — env var via `/proc`/`docker inspect`/crash dump, a
    world-readable file, a backup, shell history, a CI secret — and fix that
    channel first, or the new seed follows the old one out.
-4. **Install and pin the new key** (`OLYMPUS_SIGNING_SEED_FILE=<new path>`,
-   append the new public key to the pin set), then **re-sign** the current
-   release (`olympus sign`) and any artifact that must remain trusted.
+4. **Install and pin the new key** (`OLYMPUS_SIGNING_SEED_FILE=<new path>`).
+   For the runtime pin set, add the new key to `OLYMPUS_PINNED_PUBKEY`. For
+   the **release** anchor, `olympus/witness_pubkey.txt`, *replace* the single
+   line — never append, and never leave the compromised key listed. Then
+   **re-sign** what must remain trusted (`olympus sign`).
 5. **Bound the forgery window.** Everything signed by the compromised key
    after the earliest plausible exposure time is SUSPECT — its signature
    proves nothing. Use out-of-band records to separate before from after: the
    external anchor sink (`olympus verify-anchor` divergences during the
    window are evidence), CI logs of legitimate signings, and release
    timestamps. When in doubt, treat it as forged.
-6. **Record it, permanently.** Append the compromised public key to the
-   retired-key record with its date range, marked **COMPROMISED — never
-   re-trust**. Unlike an ordinarily-retired key, a compromised key must never
-   be used to re-verify "historical" artifacts from inside the forgery
-   window.
+6. **Record it, permanently.** Append a `RETIRED` event for the compromised
+   public key to [docs/RELEASE_SIGNING_KEYS.md](RELEASE_SIGNING_KEYS.md) (or
+   the equivalent runtime record), with its date range and the evidence,
+   marked **COMPROMISED — never re-trust**. Unlike an ordinarily-retired key,
+   a compromised key must never be used to re-verify "historical" artifacts
+   from inside the forgery window.
 
 ## Rules
 
