@@ -66,17 +66,18 @@ repository's files — they are GitHub/PyPI **settings**:
    rulesets and tag were removed after the proof; no real `v*` tag was
    touched.
 4. **Move `OLYMPUS_SIGNING_SEED` from repository scope to the protected
-   `release-signing` environment scope** (never `pypi`), and **rotate** it:
-   as a repository-scoped secret it has been exposable to every workflow job
-   that requested it, so it must be treated as potentially over-shared and
-   rotated before first use. **This blocker remains OPEN** until the newly rotated seed is installed
-   in the protected `release-signing` environment and the repository-scoped
-   secret is deleted. The rotation itself is now recorded in
-   [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md); while the pin
-   and live secret intentionally mismatch, publishing must remain disabled. The exact ordered procedure is
+   `release-signing` environment scope** (never `pypi`) and **rotate it (completed)**. The retired repository-scoped seed was treated as potentially
+   over-shared because every workflow job that requested it could access it.
+   **This blocker is now CLOSED**: the replacement seed is stored only in the
+   protected `release-signing` environment, the repository-scoped copy has
+   been deleted, and `pypi` holds no signing seed. The rotation is recorded in
+   [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md). Publishing
+   remains disabled while the remaining activation blockers are open. The
+   exact ordered procedure is
    [Rotating the release signing key](#rotating-the-release-signing-key-flag-day)
    below; it is a flag-day replacement performed while publishing stays
    disabled.
+
 5. **Verify the PyPI trusted publisher binding manually**: the PyPI project
    must bind publisher `publish.yml` in this repository AND environment
    `pypi`. This cannot be verified from the repository without credentials
@@ -167,14 +168,15 @@ reviewed vendored equivalent — activation stays blocked and the claim
 
 ## One-time setup
 
-- **Signing seed.** `OLYMPUS_SIGNING_SEED` **must be moved** to a secret of
-  the protected **`release-signing` environment**. It is **not there yet**:
-  the live secret is still repository-scoped, and `release-signing` currently
-  holds **zero** secrets. Repository-scoped placement is forbidden because it
-  exposes the seed to every workflow job that asks for it (activation
-  blocker 4, still open). The signing job derives the Ed25519 key from it, and
-  the narrow signer **refuses to sign** unless the derived public key equals
-  the pinned key in `olympus/witness_pubkey.txt` exactly.
+- **Signing seed.** `OLYMPUS_SIGNING_SEED` is stored only as a secret of
+  the protected **`release-signing` environment**. The repository-scoped copy
+  of the retired seed has been deleted, and `pypi` holds no signing seed.
+  Repository-scoped placement remains forbidden because it exposes the seed
+  to every workflow job that asks for it (activation blocker 4, closed). The
+  signing job derives the Ed25519 key from it, and the narrow signer
+  **refuses to sign** unless the derived public key equals the pinned key in
+  `olympus/witness_pubkey.txt` exactly.
+
 - **Pinned public key.** Commit the production public key to
   `olympus/witness_pubkey.txt` — **exactly one active key** for a release, so
   signer identity is unambiguous. `olympus verify`, the build job, and the

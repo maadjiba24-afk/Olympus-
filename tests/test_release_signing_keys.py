@@ -1164,24 +1164,42 @@ def test_metadata_verification_is_described_honestly():
 
 # --- current-state wording -----------------------------------------------------
 
-def test_releasing_says_the_seed_must_move_and_has_not():
-    lowered = _RELEASING.read_text(encoding="utf-8").lower()
-    assert "must be moved" in lowered or "must move" in lowered
-    assert "not there yet" in lowered or "still repository-scoped" in lowered, (
-        "the doc must not imply the seed already lives in release-signing")
-    assert "zero" in lowered or "0 secrets" in lowered, (
-        "the doc should record that release-signing holds no secrets yet")
+_RELEASE_CUSTODY_DOCS = (
+    "RELEASING.md",
+    "docs/SIGNING.md",
+    "olympus/witness_pubkey.txt",
+)
 
 
-def test_no_release_doc_claims_the_seed_already_lives_in_the_environment():
-    for relpath in ("RELEASING.md", "docs/SIGNING.md",
-                    "olympus/witness_pubkey.txt"):
-        flowed = _flow(_ROOT / relpath)
-        for claim in ("is a secret of the protected release-signing",
-                      "sets olympus_signing_seed in the sign job from a "
-                      "secret of the protected"):
-            assert claim not in flowed, (
-                f"{relpath} claims the seed is already relocated: {claim!r}")
+@pytest.mark.parametrize("relpath", _RELEASE_CUSTODY_DOCS)
+def test_release_docs_record_completed_seed_relocation(relpath):
+    flowed = _flow(_ROOT / relpath)
+    assert "release-signing" in flowed
+    assert "repository-scoped copy" in flowed
+    assert "deleted" in flowed
+    assert "pypi holds no signing seed" in flowed
+
+
+def test_releasing_marks_the_relocation_blocker_closed():
+    flowed = _flow(_RELEASING)
+    assert "this blocker is now closed" in flowed
+    assert "publishing remains disabled" in flowed
+
+
+@pytest.mark.parametrize("relpath", _RELEASE_CUSTODY_DOCS)
+def test_no_release_doc_claims_seed_relocation_is_pending(relpath):
+    flowed = _flow(_ROOT / relpath)
+    for stale in (
+        "this blocker remains open",
+        "not there yet",
+        "still repository-scoped",
+        "not been moved yet",
+        "live secret intentionally mismatch",
+        "after this rotation merges. until then",
+        "release-signing currently holds zero",
+    ):
+        assert stale not in flowed, (
+            f"{relpath} still claims relocation is pending: {stale!r}")
 
 
 def test_runtime_is_described_as_a_separate_trust_domain():

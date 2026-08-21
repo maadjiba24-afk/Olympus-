@@ -20,8 +20,8 @@
 # (OLYMPUS_PINNED_PUBKEY), documented in the overlap-rotation section of
 # docs/SIGNING.md. It does not apply here.
 #
-# Derived from the replacement seed, which MUST be installed in the protected
-# release-signing environment after this rotation merges. Until then, the
-# repository-scoped secret still contains the retired key and the signer fails
-# closed; see activation blocker 4 in RELEASING.md.
+# Derived from the replacement seed stored only in the protected
+# release-signing environment. The repository-scoped copy of the retired seed
+# has been deleted, and `pypi` holds no signing seed; see closed activation
+# blocker 4 in RELEASING.md.
 43d47389078aed64d7fd38e97aa6b664b8f094c5b313626d36cace4266c23fbe
