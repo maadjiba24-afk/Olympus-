@@ -95,12 +95,13 @@ tampered content, and produce a "valid" signature. So:
    OLYMPUS_SIGNING_SEED_FILE=/etc/olympus/signing_seed olympus sign
    ```
    The publish workflow reads `OLYMPUS_SIGNING_SEED` in the `sign` job, so the
-   shipped wheel's `verification.json` is signed by your production key. That
-   secret **must live** in the protected `release-signing` environment;
-   repository-scoped placement is forbidden because it exposes the seed to
-   every workflow job that asks for it. In this repository the secret has
-   **not been moved yet** — see activation blocker 4 in
-   [RELEASING.md](../RELEASING.md), which is still open.
+   shipped wheel's `verification.json` is signed by your production key. The
+   replacement seed is stored only in the protected `release-signing`
+   environment; repository-scoped placement remains forbidden because it
+   exposes the seed to every workflow job that asks for it. The
+   repository-scoped copy of the retired seed has been deleted, and `pypi`
+   holds no signing seed. See the closed activation blocker 4 in
+   [RELEASING.md](../RELEASING.md).
 
 5. **Verify** (anywhere, no key needed — verification uses the public pin):
    ```bash
