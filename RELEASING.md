@@ -22,23 +22,33 @@ publish anything. It must NOT be re-enabled until every precondition below is
 met, in order, and none of them can be delivered by a change to this
 repository's files — they are GitHub/PyPI **settings**:
 
-1. **Create and protect the `release-signing` environment.** It does not
-   exist yet. The pipeline signs in a job bound to `release-signing` and
-   publishes from a job bound to `pypi`, so that the signing seed and the
-   PyPI OIDC credential are never reachable from the same environment.
-   Require reviewers and restrict deployments to the protected `main` branch
-   only. In **Deployment branches and tags**, select the branch `main`; do not
-   add a `v*` tag pattern. A dispatched run's triggering ref is `main` even
-   though its separately validated input names a release tag.
-2. **Protect the `pypi` environment.** It currently has no protection rules,
-   no deployment branch/tag policy, and admin bypass enabled — any ref could
-   reach the OIDC credential. Require reviewers, restrict deployments to the
-   protected `main` branch only, and address `can_admins_bypass` (an admin
-   bypass makes every other rule advisory). As above, do not configure `v*`
-   as an environment deployment tag: it is an input, not this run's ref.
-3. **Protect `v*` tags with TWO rulesets, not one.** Any push-capable
-   identity could otherwise create, move, or delete a release tag. The
-   split is not stylistic — see the correction below.
+1. **Protect the `release-signing` environment - PARTIAL, reviewer deferred.**
+   The environment exists with one custom deployment branch policy restricted
+   to the protected `main` branch only. No tag deployment policy is present.
+   Admin bypass is disabled (`can_admins_bypass=false`). Its
+   `protection_rules` contains only `branch_policy`; no `required_reviewers`
+   rule is present. The reviewer requirement remains pending by operator
+   choice, so this item remains partial. The pipeline signs in a job bound to
+   `release-signing` and publishes from a job bound to `pypi`, keeping the
+   signing seed and PyPI OIDC credential in separate environments. A
+   dispatched run's triggering ref is `main`, even though its separately
+   validated input names a release tag.
+
+2. **Protect the `pypi` environment - PARTIAL, reviewer deferred.**
+   The environment exists with one custom deployment branch policy restricted
+   to the protected `main` branch only. No tag deployment policy is present.
+   Admin bypass is disabled (`can_admins_bypass=false`). Its
+   `protection_rules` contains only `branch_policy`; no `required_reviewers`
+   rule is present. The reviewer requirement remains pending by operator
+   choice, so this item remains partial. The environment cannot be reached
+   from another branch or tag, and administrators cannot bypass its branch
+   policy. The workflow dispatch runs from `main`; the validated `v*` release
+   tag is an input, not the run's deployment ref.
+
+3. **Protect `v*` tags with TWO rulesets, not one - CLOSED.**
+   Both required rulesets are active and were verified against their live
+   GitHub configuration. The split is not stylistic; each ruleset owns a
+   different part of the policy:
 
    - **`immutable-tags`** — target `refs/tags/v*`; rules **Restrict
      updates** and **Restrict deletions**; **no bypass** (empty bypass
@@ -78,10 +88,12 @@ repository's files — they are GitHub/PyPI **settings**:
    below; it is a flag-day replacement performed while publishing stays
    disabled.
 
-5. **Verify the PyPI trusted publisher binding manually**: the PyPI project
-   must bind publisher `publish.yml` in this repository AND environment
-   `pypi`. This cannot be verified from the repository without credentials
-   (recorded as PYPI_TRUST_BINDING=UNVERIFIED until an operator confirms).
+5. **Verify the PyPI trusted publisher binding manually - CLOSED.**
+   **PYPI_TRUST_BINDING=VERIFIED** by the operator in the PyPI project UI on
+   2026-08-22. Project `olympus-council` lists exactly one GitHub trusted
+   publisher: repository `maadjiba24-afk/Olympus-`, workflow `publish.yml`,
+   environment `pypi`. No legacy or duplicate publisher was present.
+
 6. **Resolve the mutable publisher container**, tracked as
    **MUTABLE_PUBLISH_CONTAINER=BLOCKED** — see below.
 7. **A separate, reviewed activation authorization** — re-enabling the
@@ -185,9 +197,11 @@ reviewed vendored equivalent — activation stays blocked and the claim
   [docs/SIGNING.md](docs/SIGNING.md)) and must never be applied to this file.
   Every activation and retirement is recorded in
   [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md).
-- **PyPI trusted publisher.** Create the project on PyPI and add this repo +
-  `publish.yml` + environment `pypi` as a Trusted Publisher. The pipeline is
-  OIDC-only by design: there is no API-token path, because a long-lived
+- **PyPI trusted publisher.** The existing `olympus-council` project has
+  exactly one verified GitHub publisher: owner `maadjiba24-afk`, repository
+  `Olympus-`, workflow `publish.yml`, environment `pypi`. No legacy or
+  duplicate publisher was present when verified on 2026-08-22. The pipeline
+  is OIDC-only by design: there is no API-token path, because a long-lived
   token secret would outlive and outrank every gate in the workflow.
 
 ## Rotating the release signing key (flag day)
