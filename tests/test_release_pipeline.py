@@ -959,7 +959,7 @@ def test_releasing_doc_records_every_activation_blocker():
         ("rotation", "seed rotation"),
         ("trusted publisher", "the PyPI binding verification"),
         ("mutable_publish_container=blocked", "the publisher container"),
-        ("pypi_trust_binding=unverified", "the unverified PyPI binding"),
+        ("pypi_trust_binding=verified", "the verified PyPI binding"),
         ("activation authorization", "a separate reviewed authorization"),
     ):
         assert needle in text, f"RELEASING.md missing: {why}"
@@ -996,6 +996,42 @@ def test_releasing_doc_protects_environments_for_the_dispatch_branch():
                 f"{environment} must admit the branch that dispatches the run")
     assert "restrict deployments to `v*` tags" not in lowered, (
         "workflow_dispatch runs on main, not on the tag supplied as input")
+
+
+def test_releasing_doc_records_live_environment_controls_honestly():
+    flowed = " ".join(
+        _RELEASING.read_text(encoding="utf-8").lower().split())
+    assert flowed.count("partial, reviewer deferred") == 2
+    assert flowed.count("can_admins_bypass=false") == 2
+    assert flowed.count("admin bypass is disabled") == 2
+    assert flowed.count("no `required_reviewers` rule is present") == 2
+    assert flowed.count("protected `main` branch only") == 2
+
+
+def test_releasing_doc_records_closed_tag_and_pypi_controls():
+    flowed = " ".join(
+        _RELEASING.read_text(encoding="utf-8").lower().split())
+    activation = flowed[
+        flowed.index("## publication is currently disabled"):
+        flowed.index("### mutable_publish_container=blocked")
+    ]
+
+    tag_status = activation[
+        activation.index("3. **protect"):
+        activation.index("4. **move")
+    ]
+    assert "closed" in tag_status
+
+    pypi_status = activation[
+        activation.index("5. **verify"):
+        activation.index("6. **resolve")
+    ]
+    assert "pypi_trust_binding=verified" in pypi_status
+    assert "maadjiba24-afk/olympus-" in pypi_status
+    assert "publish.yml" in pypi_status
+    assert "environment `pypi`" in pypi_status
+    assert "no legacy or duplicate publisher" in pypi_status
+    assert "pypi_trust_binding=unverified" not in flowed
 
 
 def test_releasing_doc_documents_the_proven_two_ruleset_tag_design():
