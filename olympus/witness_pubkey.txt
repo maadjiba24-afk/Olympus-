@@ -23,4 +23,4 @@
 # Derived from the secret signing seed, which MUST live in the protected
 # release-signing environment (it is still repository-scoped today — see
 # activation blocker 4); see RELEASING.md for how a release is cut.
-350f970ac5159b30f6736c124a1e468cd1cc82ddd73cb24799057c5c3b0b0336
+43d47389078aed64d7fd38e97aa6b664b8f094c5b313626d36cace4266c23fbe
