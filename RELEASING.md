@@ -69,10 +69,11 @@ repository's files — they are GitHub/PyPI **settings**:
    `release-signing` environment scope** (never `pypi`), and **rotate** it:
    as a repository-scoped secret it has been exposable to every workflow job
    that requested it, so it must be treated as potentially over-shared and
-   rotated before first use. **This blocker remains OPEN** — the secret is
-   still repository-scoped and the key has never been rotated
-   ([docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md) records a
-   single activation event and no retirement). The exact ordered procedure is
+   rotated before first use. **This blocker remains OPEN** until the newly rotated seed is installed
+   in the protected `release-signing` environment and the repository-scoped
+   secret is deleted. The rotation itself is now recorded in
+   [docs/RELEASE_SIGNING_KEYS.md](docs/RELEASE_SIGNING_KEYS.md); while the pin
+   and live secret intentionally mismatch, publishing must remain disabled. The exact ordered procedure is
    [Rotating the release signing key](#rotating-the-release-signing-key-flag-day)
    below; it is a flag-day replacement performed while publishing stays
    disabled.

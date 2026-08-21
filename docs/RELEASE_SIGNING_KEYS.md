@@ -87,6 +87,8 @@ second table.
 | # | Date (UTC) | Event | Public key | Commit | Evidence |
 |---|------------|-------|------------|--------|----------|
 | 1 | 2026-06-27 | ACTIVATED | `350f970ac5159b30f6736c124a1e468cd1cc82ddd73cb24799057c5c3b0b0336` | `74ba2144cf6f0a7305181f73e7d6ac4c111cca6d` | Introduced `olympus/witness_pubkey.txt` in "Release 0.18.0: hardening + pinned signing key + strengthened modules" (committed 2026-06-27T15:25:39Z). First release tag carrying it: `v0.18.0`. The preceding tag `v0.17.0` has no `witness_pubkey.txt` at all — release pinning begins here. Key still active and unchanged at `596f07601483268dbf6b32d8976aefc878d2a9d6`, shipped through `v0.27.2`. |
+| 2 | 2026-08-21 | RETIRED | `350f970ac5159b30f6736c124a1e468cd1cc82ddd73cb24799057c5c3b0b0336` | `9aba2e1188f66095877c39ef62852f29993b09c0` | Retired because its seed was repository-scoped and therefore potentially over-shared; final known release under this key: `v0.27.2`. |
+| 3 | 2026-08-21 | ACTIVATED | `43d47389078aed64d7fd38e97aa6b664b8f094c5b313626d36cace4266c23fbe` | `9aba2e1188f66095877c39ef62852f29993b09c0` | Forward-only replacement generated off-platform and backed up in encrypted offline storage before merge; no release tag existed at activation. |
 
 ### Current state
 

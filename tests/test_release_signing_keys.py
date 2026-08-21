@@ -475,11 +475,18 @@ def test_a_correction_never_changes_replay_state():
 # --- ledger doctoring: rows go INSIDE the contiguous table ---------------------
 
 def _doctored_ledger(tmp_path, monkeypatch, *, inside=(), after=()):
-    """Rewrite the ledger with extra rows inside and/or after the table."""
+    """Build a synthetic history rooted at the immutable genesis event.
+
+    Live post-genesis rotations are replaced by ``inside`` so these parser and
+    replay tests remain deterministic as the real append-only ledger grows.
+    """
     lines = _LEDGER.read_text(encoding="utf-8").splitlines()
-    last = max(i for i, ln in enumerate(lines)
-               if ln.strip().startswith("| 1 |"))
-    out = lines[:last + 1] + list(inside) + lines[last + 1:] + list(after)
+    parsed = _ledger_events()
+    first = next(i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("| 1 |"))
+    last = parsed[-1]["line"] - 1
+    assert last >= first
+    out = lines[:first + 1] + list(inside) + lines[last + 1:] + list(after)
     fake = tmp_path / "RELEASE_SIGNING_KEYS.md"
     fake.write_text("\n".join(out) + "\n", encoding="utf-8")
     monkeypatch.setattr(sys.modules[__name__], "_LEDGER", fake)
@@ -572,7 +579,7 @@ def test_a_second_separator_inside_the_rows_is_rejected(tmp_path, monkeypatch):
 def test_a_forward_rotation_appended_in_place_is_accepted(tmp_path,
                                                           monkeypatch):
     """Guard the guard: the strict parser must not reject everything."""
-    active = _anchor_keys()[0]
+    active = _EVENT_1['key']
     rows = [f"| 2 | 2026-09-01 | RETIRED | `{active}` | `{_C}` | rotated |",
             f"| 3 | 2026-09-01 | ACTIVATED | `{_K2}` | `{_C}` | replacement |"]
     _doctored_ledger(tmp_path, monkeypatch, inside=rows)
@@ -589,7 +596,7 @@ def test_a_correction_naming_an_earlier_event_is_accepted(tmp_path,
     events = _ledger_events()
     assert len(events) == 2
     # Provenance only: replay state is untouched.
-    assert _replay(events) == [_anchor_keys()[0]]
+    assert _replay(events) == [_EVENT_1['key']]
 
 
 @pytest.mark.parametrize("date,ok", [
@@ -643,7 +650,7 @@ def test_a_correction_amending_an_earlier_event_is_accepted(tmp_path,
         _row(2, "CORRECTION", _EM_DASH, "amends event 1: SHA was mistyped")])
     events = _ledger_events()
     assert events[1]["amends"] == 1
-    assert _replay(events) == [_anchor_keys()[0]]      # provenance only
+    assert _replay(events) == [_EVENT_1['key']]      # provenance only
 
 
 def test_a_correction_amending_event_zero_is_rejected(tmp_path, monkeypatch):
@@ -665,7 +672,7 @@ def test_a_correction_amending_a_future_event_is_rejected(tmp_path,
     """Event 3 exists, but it comes AFTER this correction."""
     _doctored_ledger(tmp_path, monkeypatch, inside=[
         _row(2, "CORRECTION", _EM_DASH, "amends event 3"),
-        _row(3, "RETIRED", f"`{_anchor_keys()[0]}`", "rotated"),
+        _row(3, "RETIRED", f"`{_EVENT_1['key']}`", "rotated"),
     ])
     with pytest.raises(LedgerError, match="not an earlier event"):
         _ledger_events()
@@ -680,7 +687,7 @@ def test_a_correction_amending_a_nonexistent_event_is_rejected(tmp_path,
 
 
 def test_a_later_correction_may_amend_any_earlier_event(tmp_path, monkeypatch):
-    active = _anchor_keys()[0]
+    active = _EVENT_1['key']
     _doctored_ledger(tmp_path, monkeypatch, inside=[
         _row(2, "RETIRED", f"`{active}`", "rotated"),
         _row(3, "ACTIVATED", f"`{_K2}`", "replacement"),
