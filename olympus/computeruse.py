@@ -571,7 +571,20 @@ def audit(user: str) -> list[dict]:
 
 def _preview(name: str):
     def preview(payload: dict) -> str:
-        return "COMPUTER USE — " + repr(_summary(name, payload))
+        # The audit record deliberately redacts typed text and command args,
+        # but the human approval preview must show exactly what will be sent to
+        # the actuator. The payload is already stored in the same action record;
+        # this does not widen persistence, it only makes approval informed.
+        if name == "computer_type":
+            shown = {"action": name, "text": str(payload.get("text", ""))}
+        elif name == "computer_launch":
+            shown = {"action": name,
+                     "command": str(payload.get("command", ""))}
+        elif name == "computer_key":
+            shown = {"action": name, "keys": str(payload.get("keys", ""))}
+        else:
+            shown = _summary(name, payload)
+        return "COMPUTER USE — " + repr(shown)
     return preview
 
 

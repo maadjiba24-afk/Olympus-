@@ -35,8 +35,8 @@ def reject(user: str, action_id: str, reason: str = "declined"):
 
 def _card(action) -> str:
     what = (action.preview or action.title or "").strip()
-    if len(what) > 400:
-        what = what[:400] + "…"
+    # Never clip an approval card: the gateway chunks long replies for each
+    # transport, while truncation here could hide content that would execute.
     return f"#{action.id} — {what}"
 
 
