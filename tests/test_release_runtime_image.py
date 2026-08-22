@@ -1,4 +1,4 @@
-"""Adversarial unit tests for the GHCR runtime-image digest gate (v7).
+"""Adversarial tests for publisher-image provenance and digest binding.
 
 WHY THIS GATE EXISTS
 --------------------
@@ -14,9 +14,11 @@ the second branch: it pulls a PREBUILT GHCR image addressed by a SHA-NAMED
 TAG. It does not build the Dockerfile and does not resolve `python:3.13-slim`
 at consumer run time — that base is baked in at PyPA's image-build time.
 
-The residual risk is therefore a MUTABLE TAG, not a floating base image: a
-tag is a pointer, and whoever controls the GHCR package can repoint it. This
-gate resolves that tag to its manifest digest and fails closed on any change.
+The former residual risk was therefore a MUTABLE TAG, not a floating base
+image. The publish job now runs the audited manifest by digest through a
+reviewed local Docker-action descriptor. This gate remains as a stricter
+provenance alarm: it resolves the upstream tag and fails closed on any change,
+but a later repoint cannot change the digest-bound publisher runtime.
 
 NO TEST HERE TOUCHES THE NETWORK. Every case drives an injected transport,
 because a gate that only works when GHCR is reachable cannot be proven in CI
@@ -37,6 +39,7 @@ from pathlib import Path
 import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
+_ACTION = _REPO / ".github" / "actions" / "pypi-publish" / "action.yml"
 sys.path.insert(0, str(_REPO / "scripts"))
 
 import release_pipeline as rp  # noqa: E402
@@ -128,12 +131,14 @@ def test_the_module_pins_the_audited_image_identity():
     assert rp.RUNTIME_IMAGE_DIGEST == _GOOD_DIGEST
 
 
-def test_the_pinned_reference_is_the_pinned_action_commit():
-    """The GHCR tag IS the action commit — that is why pinning the `uses:`
-    SHA determines which image a consumer run pulls."""
+def test_the_audit_reference_is_upstream_commit_but_execution_uses_digest():
+    """The tag remains the provenance lookup; it must not select execution."""
     workflow = (_REPO / ".github" / "workflows" / "publish.yml").read_text(
         encoding="utf-8")
-    assert f"pypa/gh-action-pypi-publish@{_IMAGE_TAG}" in workflow
+    action = _ACTION.read_text(encoding="utf-8")
+    assert f"pypa/gh-action-pypi-publish@{_IMAGE_TAG}" not in workflow
+    assert f"gh-action-pypi-publish@{_GOOD_DIGEST}" in action
+    assert f"gh-action-pypi-publish:{_IMAGE_TAG}" not in action
 
 
 # --- 1. the happy path ---------------------------------------------------------

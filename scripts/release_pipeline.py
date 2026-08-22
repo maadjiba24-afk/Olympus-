@@ -1618,17 +1618,12 @@ def check_dists(dist_dir: Path, version: str, *, manifest,
 # `FROM python:3.13-slim` base — is resolved when PyPA BUILDS the image, not
 # when we run it.
 #
-# The residual exposure is therefore a MUTABLE POINTER: a SHA-named tag is
-# still a tag, and whoever controls the GHCR package can repoint it. These
-# helpers resolve that tag to its manifest digest and compare it with the
-# digest recorded here.
-#
-# WHAT THIS DOES AND DOES NOT BUY. The gate fails the run on a mismatch that
-# is OBSERVABLE WHILE `inspect` RUNS. It does not bind the tag: a repoint
-# landing after this check has already read the digest is still pulled by
-# `publish`, because the two jobs resolve the same name at different times.
-# This is a TOCTOU window, not a closed door, and it does not make the
-# pipeline content-addressed — see RELEASING.md.
+# A SHA-named tag is still mutable. These helpers resolve the upstream tag to
+# its manifest digest and compare it with the audited digest recorded here.
+# The publish job no longer executes that tag: its reviewed local Docker
+# action pins the same digest directly. This check therefore acts as a
+# provenance-drift alarm. A repoint after the check cannot affect the image
+# that receives OIDC, because publish pulls the digest — see RELEASING.md.
 
 RUNTIME_IMAGE_REGISTRY = "ghcr.io"
 RUNTIME_IMAGE_REPOSITORY = "pypa/gh-action-pypi-publish"
@@ -1894,11 +1889,10 @@ def resolve_runtime_image_digest(repository: str, reference: str) -> str:
 def check_runtime_image(*, repository: str = RUNTIME_IMAGE_REPOSITORY,
                         reference: str = RUNTIME_IMAGE_REFERENCE,
                         expected_digest: str = RUNTIME_IMAGE_DIGEST) -> str:
-    """Prove the pinned publisher tag still names the audited manifest.
+    """Confirm the upstream publisher tag still names the audited manifest.
 
     Runs in `inspect`, which holds neither the signing seed nor the OIDC
-    credential: the runner that could detect a repoint is not the runner
-    that could exploit one.
+    credential. Publish independently binds execution to `expected_digest`.
     """
     if not _IMAGE_DIGEST_RE.match(expected_digest or ""):
         raise _fail("the expected publisher image digest is not a lowercase "
