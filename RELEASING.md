@@ -19,8 +19,9 @@ See [docs/SUPPORT.md](docs/SUPPORT.md) for the versioning/LTS policy and
 The `Publish to PyPI` workflow is **disabled** on GitHub
 (`disabled_manually`, workflow ID 295240176) and pushing a `v*` tag will not
 publish anything. It must NOT be re-enabled until every precondition below is
-met, in order, and none of them can be delivered by a change to this
-repository's files — they are GitHub/PyPI **settings**:
+met, in order. The list deliberately combines repository controls with
+GitHub/PyPI **settings** so the activation decision has one complete,
+evidence-backed checklist:
 
 1. **Protect the `release-signing` environment - PARTIAL, reviewer deferred.**
    The environment exists with one custom deployment branch policy restricted
@@ -94,13 +95,15 @@ repository's files — they are GitHub/PyPI **settings**:
    publisher: repository `maadjiba24-afk/Olympus-`, workflow `publish.yml`,
    environment `pypi`. No legacy or duplicate publisher was present.
 
-6. **Resolve the mutable publisher container**, tracked as
-   **MUTABLE_PUBLISH_CONTAINER=BLOCKED** — see below.
+6. **Resolve the mutable publisher container - CLOSED.** The publish job now
+   runs the audited PyPA v1.14.2 image by OCI manifest digest through the
+   reviewed local descriptor documented below. The mutable upstream tag no
+   longer selects the code that receives the OIDC credential.
 7. **A separate, reviewed activation authorization** — re-enabling the
    workflow is its own decision with its own review, never a side effect of
    merging this or any other change.
 
-### MUTABLE_PUBLISH_CONTAINER=BLOCKED
+### MUTABLE_PUBLISH_CONTAINER=CLOSED
 
 **This section previously described the wrong mechanism.** The blocker is
 real, but the reason recorded through v6 was not. It is corrected here
@@ -137,14 +140,13 @@ mutable base tag is resolved at our run time was simply wrong, and the
 parenthetical attributing the GHCR path to "forks" was backwards — it is
 the path every consumer takes.
 
-**The blocker survives the correction, for a different reason.** That
+**The blocker survived that correction for a different reason.** That
 reference is a **tag**, and a tag is a mutable pointer: the GHCR package
 owner can repoint `:dc37677b…` at a different manifest **digest** at any
-time. So **this pipeline is NOT fully content-addressed.** Every GitHub
-Action is pinned by commit SHA, but the container that ultimately handles
-the OIDC token and uploads to PyPI is reached through a name that can move.
+time. The supported upstream composite therefore does not bind the container
+that handles the OIDC token and uploads to PyPI to immutable content.
 
-**What v7 adds.** `inspect` — which holds neither the signing seed nor the
+**What v7 added.** `inspect` — which holds neither the signing seed nor the
 OIDC credential — resolves that tag anonymously and fails closed unless it
 still yields the audited digest
 `sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be179ec41775c72c4e3ab2d5`,
@@ -160,23 +162,38 @@ pinned in `scripts/release_pipeline.py` and exercised by
   ineligible or as catching every repoint;
 - it does **not** make the pipeline content-addressed.
 
-Treat it as an alarm on a door that is still unlocked: worth having, and no
-substitute for a lock.
+Treat v7 as the alarm that established and continuously rechecks provenance;
+it did not itself lock the door.
 
-**Why the digest is not pinned directly.** The image reference is computed
-inside `create-docker-action.py` from `github.action_ref`, which must be a
-git ref — an OCI digest is not a valid `uses:` target — and the action
-exposes no input to override it. Invoking the container directly as
-`docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:…` would be genuinely
-content-addressed and would reuse the same audited container (it does *not*
-require reimplementing the OIDC exchange, contrary to the v6 note), but it
-is **unsupported** by upstream: it bypasses the composite action's PATH
-reset, Python discovery, and input normalization, and makes us own the
-upgrade path. It is therefore **not adopted**.
+**Resolution.** The publish job now uses the reviewed local Docker-action
+descriptor at `.github/actions/pypi-publish/action.yml`. That descriptor is
+the normalized inner interface produced by upstream v1.14.2, with the same
+canonical inputs and effective defaults. Its sole execution change is:
 
-Until this is resolved — upstream digest-pinned container execution, or a
-reviewed vendored equivalent — activation stays blocked and the claim
-"fully content-addressed" must not be made anywhere.
+```
+docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be179ec41775c72c4e3ab2d5
+```
+
+The PyPA image and entrypoint are unchanged, so the upstream code still owns
+input normalization, OIDC exchange, attestation generation, metadata checks,
+and Twine upload. The wrapper's Linux check is satisfied by the fixed
+`ubuntu-24.04` runner; its PATH reset and Python discovery existed only to run
+the generator that the committed descriptor replaces.
+
+The publish job checks out only this descriptor directory, with credentials
+disabled, while the inspected distributions remain outside the workspace. It
+then invokes the local action without a shell. The digest, not a tag, now
+selects the container that receives OIDC, closing the inspect-to-publish
+TOCTOU window. The anonymous tag check remains in `inspect` as a stricter
+provenance-drift alarm: a later tag repoint may trigger an investigation, but
+cannot alter the digest-bound publisher runtime.
+
+Exact upstream hashes, license, audit identity, the intentionally narrow
+delta, and the fail-closed upgrade procedure are recorded in
+`.github/actions/pypi-publish/UPSTREAM.md`. **MUTABLE_PUBLISH_CONTAINER is
+CLOSED.** Any upgrade must review and update the descriptor, digest,
+provenance, runtime constants, documentation, and tests together while
+publishing remains disabled.
 
 ## One-time setup
 

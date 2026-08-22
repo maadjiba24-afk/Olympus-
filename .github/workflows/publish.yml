@@ -16,7 +16,8 @@ name: Publish to PyPI
 #             proves the pinned publisher image tag still resolves to the
 #             audited manifest digest.
 #   publish — environment: pypi. Downloads the artifact ID forwarded by
-#             inspect and publishes it. Two SHA-pinned actions, no shell.
+#             inspect, checks out only the repository-owned publisher action
+#             descriptor, and runs the PyPA image by digest. No shell.
 #
 # NO SOURCE CODE, VALIDATOR, OR LOCKFILE IS TRANSFERRED BETWEEN JOBS. Every
 # source-processing job derives those inputs from `${{ github.sha }}`. The two
@@ -32,9 +33,10 @@ name: Publish to PyPI
 # `release-signing` holds the seed, `pypi` holds the publishing trust, and no
 # job holds both. Inspect holds neither.
 #
-# SUPPLY-CHAIN STATUS: every action is pinned to a full commit SHA with the
-# audited release named alongside. This pipeline is NOT fully
-# content-addressed, for the reason below.
+# SUPPLY-CHAIN STATUS: every external action is pinned to a full commit SHA
+# with the audited release named alongside. The publisher runtime itself is
+# pinned to an OCI manifest digest by the repository-owned Docker-action
+# descriptor in `.github/actions/pypi-publish/action.yml`.
 #
 # WHAT THE PUBLISHER ACTION ACTUALLY RUNS. pypa/gh-action-pypi-publish is a
 # composite action whose `create-docker-action.py` picks its image from the
@@ -46,15 +48,15 @@ name: Publish to PyPI
 # that the reference is a SHA-named TAG, and a tag is a mutable pointer the
 # GHCR package owner can repoint at a different manifest DIGEST.
 #
-# `inspect` therefore resolves that tag and fails the run unless it still
-# names the audited digest. State the limit precisely: the gate BLOCKS A
-# MISMATCH THAT IS OBSERVABLE WHILE `inspect` RUNS. It does not bind the
-# tag. A repoint that lands after `inspect` has read the digest is still
-# pulled by `publish`, because the two jobs resolve the same mutable name
-# at different times — a TOCTOU window, not a closed door. Pinning the
-# digest directly is impossible without abandoning the supported action, so
-# the gap stays tracked as MUTABLE_PUBLISH_CONTAINER=BLOCKED in
-# RELEASING.md.
+# The upstream composite action cannot accept a digest override, so this
+# repository vendors only its generated inner Docker-action descriptor. The
+# descriptor preserves the canonical input contract and effective v1.14.2
+# defaults, but replaces the mutable tag with the audited digest. The image's
+# unchanged entrypoint still owns input normalization, OIDC exchange,
+# attestations, and Twine upload. `inspect` retains an anonymous comparison of
+# the upstream tag as a provenance-drift alarm; a repoint after that check
+# cannot affect `publish`, which pulls the recorded digest rather than the
+# tag. Provenance and the review/update procedure live beside the descriptor.
 #
 # ACTIVATION IS BLOCKED: this workflow is disabled (disabled_manually) and
 # must stay so until every precondition in RELEASING.md is met and a separate
@@ -281,11 +283,11 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
       - name: Run twine validation on the inspected distributions
         run: python -m twine check --strict "$RUNNER_TEMP"/dist/*
-      - name: Resolve the pinned publisher image tag and compare its digest
+      - name: Confirm the upstream publisher tag still matches the vendored digest
         # Anonymous, read-only registry lookup from the job that holds
-        # neither the signing seed nor the OIDC credential. It fails the run
-        # on a mismatch observable at THIS moment; a repoint landing after
-        # this step can still be pulled by `publish` (TOCTOU window).
+        # neither the signing seed nor the OIDC credential. This is a
+        # provenance-drift alarm: publish itself is bound to the digest, so a
+        # later tag repoint cannot change the image that receives OIDC.
         run: python -B scripts/release_pipeline.py check-runtime-image
 
   publish:
@@ -297,12 +299,20 @@ jobs:
       contents: read
       id-token: write
     steps:
-      # Inspect forwards the exact dist artifact ID it approved; the
+      # Inspect forwards the exact dist artifact ID it approved. The
       # credentialed job cannot choose another artifact and runs no shell.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           artifact-ids: ${{ needs.inspect.outputs.artifact-id }}
           path: ${{ runner.temp }}/dist
-      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+      # Local actions require a checkout. Restrict it to the audited
+      # descriptor and keep the distributions outside the workspace.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/actions/pypi-publish
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: ./.github/actions/pypi-publish
         with:
           packages-dir: ${{ runner.temp }}/dist

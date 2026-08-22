@@ -36,6 +36,10 @@ _SIGN_LOCK_IN_PATH = _ROOT / "requirements-signing.in"
 _RUNTIME_LOCK_PATH = _ROOT / "requirements.lock"
 _RELEASING = _ROOT / "RELEASING.md"
 _HELPER = _ROOT / "scripts" / "release_pipeline.py"
+_PUBLISHER_ACTION_PATH = (
+    _ROOT / ".github" / "actions" / "pypi-publish" / "action.yml"
+)
+_LOCAL_PUBLISHER_ACTION = "./.github/actions/pypi-publish"
 
 # The immutable pins this pipeline may execute, resolved from the upstream
 # repositories. The comment beside each `uses:` must name the exact release
@@ -49,8 +53,6 @@ _PINS = {
         "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4.6.2"),
     "actions/download-artifact": (
         "d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4.3.0"),
-    "pypa/gh-action-pypi-publish": (
-        "dc37677b2e1c63e2034f94d8a5b11f265b73ba33", "v1.14.2"),
 }
 
 _SHA_RE = re.compile(r"\A[^@\s]+@([0-9a-f]{40})\Z")
@@ -355,6 +357,10 @@ def test_the_signing_seed_is_step_scoped_to_the_signing_step_only():
 def test_every_action_reference_is_a_full_forty_hex_sha():
     for name, job in _jobs(_wf()).items():
         for uses in _uses_of(job):
+            if uses.startswith("./"):
+                assert uses == _LOCAL_PUBLISHER_ACTION, (
+                    f"job {name}: unexpected local action {uses!r}")
+                continue
             assert _SHA_RE.match(uses), (
                 f"job {name}: {uses!r} is not pinned to a 40-hex commit")
 
@@ -363,6 +369,9 @@ def test_every_pin_matches_the_recorded_immutable_sha():
     seen = set()
     for job in _jobs(_wf()).values():
         for uses in _uses_of(job):
+            if uses.startswith("./"):
+                assert uses == _LOCAL_PUBLISHER_ACTION
+                continue
             action, sha = uses.split("@", 1)
             assert action in _PINS, f"unexpected action {action!r}"
             assert sha == _PINS[action][0], (
@@ -375,7 +384,11 @@ def test_every_uses_line_names_the_exact_release_in_a_comment():
     for line in _raw().splitlines():
         if "uses:" not in line:
             continue
-        action = line.split("uses:", 1)[1].strip().split("@", 1)[0]
+        uses = line.split("uses:", 1)[1].strip()
+        if uses.startswith("./"):
+            assert uses == _LOCAL_PUBLISHER_ACTION
+            continue
+        action = uses.split("@", 1)[0]
         _sha, release = _PINS[action]
         comment = line.split("#", 1)
         assert len(comment) == 2, f"no release comment on: {line.strip()}"
@@ -745,15 +758,23 @@ def test_publish_downloads_by_artifact_id_not_merely_by_name():
     assert with_.get("path") == "${{ runner.temp }}/dist"
 
 
-def test_publish_contains_exactly_the_two_allowed_actions_and_no_shell():
+def test_publish_contains_only_the_three_allowed_actions_and_no_shell():
     steps = _steps(_jobs(_wf())["publish"])
-    assert len(steps) == 2, f"publish must hold two steps, got {len(steps)}"
+    assert len(steps) == 3, f"publish must hold three steps, got {len(steps)}"
     for step in steps:
         assert "run" not in step, "the credentialed job must execute no shell"
         assert "env" not in step
-    download, publish = steps
+    download, checkout, publish = steps
     assert download["uses"].startswith("actions/download-artifact@")
-    assert publish["uses"].startswith("pypa/gh-action-pypi-publish@")
+    assert checkout["uses"].startswith("actions/checkout@")
+    checkout_with = checkout.get("with") or {}
+    assert checkout_with == {
+        "ref": "${{ github.sha }}",
+        "sparse-checkout": ".github/actions/pypi-publish",
+        "sparse-checkout-cone-mode": False,
+        "persist-credentials": False,
+    }
+    assert publish["uses"] == _LOCAL_PUBLISHER_ACTION
     assert (publish.get("with") or {}).get("packages-dir") == \
         "${{ runner.temp }}/dist"
 
@@ -958,7 +979,7 @@ def test_releasing_doc_records_every_activation_blocker():
         ("olympus_signing_seed", "the seed-scope migration"),
         ("rotation", "seed rotation"),
         ("trusted publisher", "the PyPI binding verification"),
-        ("mutable_publish_container=blocked", "the publisher container"),
+        ("mutable_publish_container=closed", "the publisher container"),
         ("pypi_trust_binding=verified", "the verified PyPI binding"),
         ("activation authorization", "a separate reviewed authorization"),
     ):
@@ -1013,7 +1034,7 @@ def test_releasing_doc_records_closed_tag_and_pypi_controls():
         _RELEASING.read_text(encoding="utf-8").lower().split())
     activation = flowed[
         flowed.index("## publication is currently disabled"):
-        flowed.index("### mutable_publish_container=blocked")
+        flowed.index("### mutable_publish_container=closed")
     ]
 
     tag_status = activation[
@@ -1082,23 +1103,17 @@ def test_releasing_doc_does_not_instruct_the_forbidden_seed_placement():
         "the doc must not instruct repository-scoped seed placement")
 
 
-def test_the_mutable_publisher_container_is_an_enforced_blocker():
-    """The blocker stands; only its MECHANISM was recorded wrongly.
-
-    v6 claimed a consumer run builds the action's Dockerfile and resolves
-    `FROM python:3.13-slim` at run time. It does not: `create-docker-action.py`
-    takes the Dockerfile branch only when `github.repository_id` equals the
-    ACTION's own repo id, so every external consumer pulls a prebuilt GHCR
-    image instead. The pipeline is still not fully content-addressed, because
-    that image is addressed by a SHA-named — and therefore mutable — tag."""
+def test_the_mutable_publisher_container_blocker_is_closed_by_digest():
+    """The credentialed job must execute the audited manifest, not merely
+    check a mutable name before a later pull."""
     text = _RELEASING.read_text(encoding="utf-8")
-    assert "MUTABLE_PUBLISH_CONTAINER=BLOCKED" in text
+    assert "MUTABLE_PUBLISH_CONTAINER=CLOSED" in text
     workflow = _raw()
-    assert "MUTABLE_PUBLISH_CONTAINER=BLOCKED" in workflow
-    lowered = workflow.lower()
-    assert "not fully" in lowered or "not content-addressed" in lowered, (
-        "the workflow must not claim full content addressing while the "
-        "publisher container is unresolved")
+    assert "MUTABLE_PUBLISH_CONTAINER=BLOCKED" not in workflow
+    action = _PUBLISHER_ACTION_PATH.read_text(encoding="utf-8")
+    assert "docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:" in action
+    assert "gh-action-pypi-publish:" not in action, (
+        "the publisher action must not retain any tag-form image reference")
 
 
 def test_no_document_still_claims_the_dockerfile_is_built_at_consumer_run_time():
@@ -1136,49 +1151,28 @@ def _flowed(path: Path) -> str:
     return re.sub(r"\s+", " ", text.replace("\n#", " "))
 
 
-def test_the_documents_do_not_overclaim_what_the_digest_gate_guarantees():
-    """AUDIT (v8): v7 said the gate ran "before publish becomes eligible"
-    and that `publish` "never becomes eligible" against an unaudited
-    manifest. Both overstate it. The check reads a MUTABLE name at one
-    instant; a repoint landing afterwards is still pulled. The gate blocks
-    only a mismatch observable while `inspect` runs."""
+def test_the_documents_describe_the_tag_check_as_a_provenance_alarm():
+    """The tag lookup remains useful, but it is no longer the binding
+    control: the local action's digest is."""
     for path in (_RELEASING, _WF_PATH):
         flowed = _flowed(path)
-        for overclaim in (
-            "never becomes eligible",
-            "before publish becomes eligible",
-            "before `publish` becomes eligible",
-            "always detected",
-            "detects every repoint",
-        ):
-            assert overclaim not in flowed, (
-                f"{path.name} overclaims the gate: {overclaim!r}")
-        assert "observable" in flowed, (
-            f"{path.name} must scope the guarantee to what inspect can see")
+        assert "provenance-drift alarm" in flowed
+        assert "digest" in flowed
 
 
-def test_the_documents_record_digest_verification_without_overclaiming():
-    """Detection is not prevention: the residual TOCTOU window must be
-    stated, and full content addressing must NOT be claimed."""
+def test_the_documents_record_that_digest_binding_closes_the_toctou_window():
     for path in (_RELEASING, _WF_PATH):
         flowed = _flowed(path)
-        assert "toctou" in flowed or "window" in flowed, (
-            f"{path.name} must disclose the inspect-to-publish window")
-        # The phrase may legitimately appear negated ("NOT fully
-        # content-addressed") or quoted in the prohibition against making
-        # the claim. What must never appear is an AFFIRMATIVE use.
-        claim = "fully content-addressed"
-        for match in re.finditer(re.escape(claim), flowed):
-            before = flowed[max(0, match.start() - 32):match.start()]
-            assert before.rstrip().endswith("not") or before.endswith('"'), (
-                f"{path.name} claims full content addressing at "
-                f"...{flowed[max(0, match.start() - 60):match.end()]!r}")
+        assert "digest" in flowed
+        assert "later tag repoint" in flowed
+        assert "cannot" in flowed
 
 
-def test_the_documents_record_that_direct_digest_invocation_is_not_adopted():
+def test_the_documents_record_the_reviewed_vendored_digest_descriptor():
     lowered = _RELEASING.read_text(encoding="utf-8").lower()
-    assert "unsupported" in lowered, (
-        "the doc must record that direct digest invocation is unsupported")
+    assert ".github/actions/pypi-publish/action.yml" in lowered
+    assert "normalized inner interface" in lowered
+    assert "sole execution change" in lowered
 
 
 # --- the GHCR digest gate lives in the uncredentialed inspect job -------------
@@ -1219,25 +1213,32 @@ def test_inspect_holds_neither_the_signing_seed_nor_oidc():
         "inspect must reference no secret whatsoever")
 
 
-def test_publish_still_depends_on_inspect_and_keeps_the_exact_action_pin():
+def test_publish_depends_on_inspect_and_uses_the_digest_pinned_local_action():
     jobs = _jobs(_wf())
     raw_needs = jobs["publish"].get("needs")
     needs = [raw_needs] if isinstance(raw_needs, str) else list(raw_needs or [])
     assert needs == ["inspect"], (
         "publish must remain gated behind the full inspection")
-    sha, release = _PINS["pypa/gh-action-pypi-publish"]
     uses = _uses_of(jobs["publish"])
-    assert any(u == f"pypa/gh-action-pypi-publish@{sha}" for u in uses), (
-        "publish must keep the exact audited action commit")
-    assert release == "v1.14.2"
+    assert _LOCAL_PUBLISHER_ACTION in uses
+    assert not any(u.startswith("pypa/gh-action-pypi-publish@")
+                   for u in uses), (
+        "the mutable-tag upstream wrapper must not execute in publish")
+    action = yaml.safe_load(_PUBLISHER_ACTION_PATH.read_text(encoding="utf-8"))
+    image = action["runs"]["image"]
+    assert image == (
+        "docker://ghcr.io/pypa/gh-action-pypi-publish@"
+        "sha256:a68d05519f6d7e47372aeaddab80b851b69afa89be179ec4"
+        "1775c72c4e3ab2d5")
 
 
 def test_publish_gains_no_shell_and_no_custom_credential_exchange():
-    """The credentialed job must stay two pinned actions and nothing else."""
+    """The credentialed job may run only pinned actions and the reviewed
+    local Docker descriptor; it must never implement OIDC itself."""
     steps = _steps(_jobs(_wf())["publish"])
     assert all("run" not in s for s in steps if isinstance(s, dict)), (
         "the publish job must contain no shell step")
-    assert len(steps) == 2, f"publish must remain two steps, got {len(steps)}"
+    assert len(steps) == 3, f"publish must remain three steps, got {len(steps)}"
 
 
 def test_the_helper_pins_the_digest_the_workflow_will_enforce():
