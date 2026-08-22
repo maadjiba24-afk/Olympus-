@@ -167,7 +167,7 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
     # conversation snippets from the FTS5 index (may include external content)
     try:
         from . import search
-        for h in search.search(query, limit=limit):
+        for h in search.search(query, limit=limit, owner=user):
             content = getattr(h, "content", "") or ""
             if content:
                 frags.append(Fragment(
