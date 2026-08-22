@@ -8,6 +8,7 @@ rather than re-deriving `workdir()` from whatever context runs them. This is the
 safe alternative to the rejected context-sensitive `workdir()`: the root travels
 *with* the action.
 """
+import json
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,75 @@ def test_pinned_root_is_not_user_editable():
     a2 = actions.get("u", a.id)
     assert a2.payload["_pinned_root"] == orig      # internal field untouched
     assert a2.payload["content"] == "c2"           # normal field still editable
+
+
+def test_initial_payload_cannot_choose_a_different_existing_root(monkeypatch,
+                                                                  tmp_path):
+    """A valid non-system directory is untrusted when the caller chose it."""
+    trusted = tmp_path / "trusted"
+    attacker = tmp_path / "attacker"
+    trusted.mkdir()
+    attacker.mkdir()
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(trusted))
+    actions.grant_scope("u", "exec")
+
+    a = actions.prepare(
+        "u", "write_file",
+        {"path": "outside.txt", "content": "must stay trusted",
+         "_pinned_root": str(attacker)})
+    assert a.payload["_pinned_root"] == str(trusted.resolve())
+
+    done = actions.approve("u", a.id)
+    assert done.status == actions.EXECUTED
+    assert (trusted / "outside.txt").read_text() == "must stay trusted"
+    assert not (attacker / "outside.txt").exists()
+
+
+def test_root_capture_failure_blocks_preparation(monkeypatch):
+    def broken_root():
+        raise OSError("workspace unavailable")
+
+    monkeypatch.setattr(sandbox, "current_root", broken_root)
+    with pytest.raises(
+            RuntimeError, match="could not capture the workspace root"):
+        actions.prepare("u", "write_file", {"path": "x", "content": "y"})
+
+
+def test_prepare_tool_reports_root_capture_failure(monkeypatch):
+    from olympus import memory, tools
+
+    def broken_root():
+        raise OSError("workspace unavailable")
+
+    monkeypatch.setattr(sandbox, "current_root", broken_root)
+    memory.set_user("u")
+    result = tools._prepare_action(
+        "write_file", {"path": "x", "content": "y"})
+
+    assert result == (
+        "Error: could not capture the workspace root for this action.")
+    assert actions.pending("u") == []
+
+
+def test_legacy_pending_action_cannot_execute_a_stored_root(monkeypatch,
+                                                            tmp_path):
+    trusted = tmp_path / "trusted"
+    attacker = tmp_path / "attacker"
+    trusted.mkdir()
+    attacker.mkdir()
+    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(trusted))
+    actions.grant_scope("u", "exec")
+
+    a = actions.prepare(
+        "u", "write_file", {"path": "legacy.txt", "content": "blocked"})
+    path = actions._path("u", a.id)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored.pop("boundary_version")  # exact shape of a pre-upgrade record
+    stored["payload"]["_pinned_root"] = str(attacker)
+    path.write_text(json.dumps(stored), encoding="utf-8")
+
+    done = actions.approve("u", a.id)
+    assert done.status == actions.FAILED
+    assert "legacy trust-boundary format" in done.error
+    assert not (trusted / "legacy.txt").exists()
+    assert not (attacker / "legacy.txt").exists()
