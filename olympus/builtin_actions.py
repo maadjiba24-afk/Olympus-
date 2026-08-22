@@ -336,6 +336,7 @@ def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="save_note", risk_class=actions.TRIVIAL, scope="notes",
         preview=_note_preview, execute=_note_execute, undo=_note_undo,
+        binds_user=True,
         description="Save a note to the user's notes (reversible)."))
     # AP2 payment-mandate authorization — FINANCIAL_LEGAL so it can NEVER
     # auto-run; the human approval signs the mandate. Records only; no rail.
@@ -343,6 +344,7 @@ def register_builtins() -> None:
         name="authorize_payment", risk_class=actions.FINANCIAL_LEGAL,
         scope="payment.authorize", preview=_authorize_payment_preview,
         execute=_authorize_payment_execute,
+        binds_user=True,
         description="Authorize a bounded payment by signing an AP2 mandate "
                     "(records a verified authorization — moves NO money)."))
     actions.register(actions.ActionType(
@@ -419,7 +421,7 @@ def register_builtins() -> None:
     actions.register(actions.ActionType(
         name="write_document", risk_class=actions.NOTABLE, scope="",
         preview=_write_document_preview, execute=_write_document_execute,
-        undo=_write_document_undo,
+        undo=_write_document_undo, binds_user=True,
         description="Create or overwrite a document in the user's workspace "
                     "(reversible)."))
     # Authorized-assessment scope grant (the surveyed agent absorption, ADR 0011).
@@ -431,6 +433,7 @@ def register_builtins() -> None:
         name="authorize_assessment", risk_class=actions.IRREVERSIBLE,
         scope="assess.authorize", preview=_authorize_assessment_preview,
         execute=_authorize_assessment_execute, undo=_authorize_assessment_undo,
+        binds_user=True,
         description="Authorize a bounded, revocable security assessment of your "
                     "own asset(s) — the signed scope grant Aegis's assessment "
                     "tools enforce in code."))

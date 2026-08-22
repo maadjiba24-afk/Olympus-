@@ -88,6 +88,7 @@ class ActionType:
     undo: Callable[[dict], str] | None = None    # reverses it from the result
     description: str = ""
     pins_root: bool = False                      # capture workdir() at prepare
+    binds_user: bool = False                     # derive _user at prepare
 
     @property
     def reversible(self) -> bool:
@@ -111,7 +112,7 @@ def registered() -> dict[str, ActionType]:
 
 PREPARED, APPROVED, EXECUTED, FAILED, REJECTED, UNDONE = (
     "prepared", "approved", "executed", "failed", "rejected", "undone")
-ACTION_BOUNDARY_VERSION = 2
+ACTION_BOUNDARY_VERSION = 3
 
 
 @dataclass
@@ -300,7 +301,7 @@ def _canonical_payload(user: str, action_type: ActionType,
     """
     if not isinstance(payload, dict):
         raise ValueError("action payload must be an object")
-    binds_user = "_user" in payload
+    binds_user = action_type.binds_user or "_user" in payload
     clean = {
         key: value for key, value in payload.items()
         if not (isinstance(key, str) and key.startswith("_"))
