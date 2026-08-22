@@ -1267,12 +1267,14 @@ def _prepare_action(type: str, payload: dict, title: str = None,
     from . import actions, builtin_actions  # noqa: F401  (registers built-ins)
     user = memory.current_user()
     payload = dict(payload or {})
-    payload.setdefault("_user", user)  # some actions need to know the owner
+    payload["_user"] = user  # request a server-derived owner binding
     try:
         action = actions.prepare(user, type, payload, title=title, why=why)
     except ValueError as err:
         return (f"Error: {err}. Registered types: "
                 f"{', '.join(actions.registered())}")
+    except RuntimeError as err:
+        return f"Error: {err}."
     return (f"Prepared action {action.id} ({action.type}, "
             f"{action.risk_class}) — awaiting your approval.\n\n{action.preview}")
 

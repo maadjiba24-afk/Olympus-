@@ -111,6 +111,7 @@ def registered() -> dict[str, ActionType]:
 
 PREPARED, APPROVED, EXECUTED, FAILED, REJECTED, UNDONE = (
     "prepared", "approved", "executed", "failed", "rejected", "undone")
+ACTION_BOUNDARY_VERSION = 1
 
 
 @dataclass
@@ -122,6 +123,7 @@ class Action:
     payload: dict
     risk_class: str
     reversible: bool
+    boundary_version: int = 0          # 0 = legacy payload; never executable
     status: str = PREPARED
     preview: str = ""
     why: str = ""                      # the agent's stated reason, shown on the card
@@ -282,26 +284,49 @@ def _executed_today(user: str, type_name: str) -> int:
 
 # --- the state machine ----------------------------------------------------
 
+def _canonical_payload(user: str, action_type: ActionType,
+                       payload: dict) -> dict:
+    """Return an action payload with trusted internal metadata.
+
+    Tool/model input owns only public fields. Every leading-underscore field
+    is internal to the approval spine and must be derived here, never accepted
+    from the caller. Otherwise an initial payload can choose another tenant
+    via ``_user`` or redirect a file/command action via ``_pinned_root`` even
+    though :func:`edit` correctly refuses to change those fields later.
+
+    Root capture is part of the preview-to-execution security guarantee. If it
+    fails, do not prepare a misleading action that would silently re-derive its
+    root in the later approval context.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("action payload must be an object")
+    binds_user = "_user" in payload
+    clean = {
+        key: value for key, value in payload.items()
+        if not (isinstance(key, str) and key.startswith("_"))
+    }
+    if binds_user:
+        clean["_user"] = memory.safe_id(user)
+    if action_type.pins_root:
+        try:
+            from . import sandbox
+            clean["_pinned_root"] = str(sandbox.current_root())
+        except Exception as err:
+            raise RuntimeError(
+                "could not capture the workspace root for this action"
+            ) from err
+    return clean
+
+
 def prepare(user: str, type_name: str, payload: dict,
             title: str | None = None, why: str = "") -> Action:
     """Create a prepared action with a preview. Never executes."""
     at = _REGISTRY.get(type_name)
     if at is None:
         raise ValueError(f"unknown action type: {type_name}")
-    # Pin the workspace root NOW, on whatever thread prepares/previews this
-    # action, so execution (which may run later from a different context — the
-    # web/CLI approval handler) confines the file operation to the SAME root the
-    # user previewed (ADR 0005: one pinned root through prepare→approve). The
-    # key is `_`-prefixed, so `edit()` treats it as internal and non-editable.
-    if at.pins_root and "_pinned_root" not in payload:
-        try:
-            from . import sandbox
-            # current_root() is the scoped per-worker root when a specialist is
-            # dispatched (M1), else the shared workspace — so preview and
-            # execution share the SAME root even across the thread hop.
-            payload = {**payload, "_pinned_root": str(sandbox.current_root())}
-        except Exception:
-            pass                       # never block preparing an action on this
+    # Establish the tenant and (for workspace actions) preview root at the
+    # trusted boundary. Caller-supplied internal fields are discarded.
+    payload = _canonical_payload(user, at, payload)
     try:
         preview = at.preview(payload)
     except Exception as err:
@@ -310,7 +335,7 @@ def prepare(user: str, type_name: str, payload: dict,
         id=uuid.uuid4().hex[:12], user=memory.safe_id(user), type=type_name,
         title=title or type_name.replace("_", " ").title(),
         payload=payload, risk_class=at.risk_class, reversible=at.reversible,
-        preview=preview, why=why)
+        boundary_version=ACTION_BOUNDARY_VERSION, preview=preview, why=why)
     _save(action)
     _audit(action, "prepared")
     return action
@@ -368,6 +393,17 @@ def can_auto_execute(action: Action, level: int | None = None) -> bool:
 
 
 def _execute(action: Action) -> Action:
+    # Pending records created before internal action metadata became
+    # server-owned cannot be distinguished from caller-forged records. Reject
+    # them after an upgrade and require a fresh preview instead of executing
+    # stale authority.
+    if action.boundary_version != ACTION_BOUNDARY_VERSION:
+        action.status = FAILED
+        action.error = (
+            "action was prepared with a legacy trust-boundary format; "
+            "prepare and review it again")
+        _save(action); _audit(action, "blocked_legacy_boundary")
+        return action
     at = _REGISTRY.get(action.type)
     if at is None:
         action.status = FAILED

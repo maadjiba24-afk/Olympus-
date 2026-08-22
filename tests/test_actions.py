@@ -144,6 +144,24 @@ def test_per_user_action_isolation(reg):
     assert actions.pending("bob") == []
 
 
+def test_initial_user_field_cannot_redirect_a_built_in_note():
+    """End-to-end: Alice's approved action must never write into Bob's store."""
+    from pathlib import Path
+
+    from olympus import config
+
+    actions.grant_scope("alice", "notes")
+    a = actions.prepare(
+        "alice", "save_note",
+        {"title": "tenant-bound", "body": "alice only", "_user": "bob"})
+    done = actions.approve("alice", a.id)
+
+    assert done.status == actions.EXECUTED
+    assert Path(done.result["path"]).parent == (
+        config.MEMORY_DIR / "notes" / "alice")
+    assert not (config.MEMORY_DIR / "notes" / "bob").exists()
+
+
 # --- built-in types registered ------------------------------------------
 
 def test_builtins_registered():
@@ -157,11 +175,14 @@ def test_builtins_registered():
 def test_prepare_action_tool_queues_not_executes():
     from olympus import tools, memory
     memory.set_user("toolu")
-    msg = tools._prepare_action("send_email",
-                                {"to": "a@b.c", "subject": "Hi", "body": "yo"})
+    msg = tools._prepare_action(
+        "send_email",
+        {"to": "a@b.c", "subject": "Hi", "body": "yo",
+         "_user": "mallory"})
     assert "awaiting your approval" in msg
     assert len(actions.pending("toolu")) == 1
     assert actions.pending("toolu")[0].status == actions.PREPARED
+    assert actions.pending("toolu")[0].payload["_user"] == "toolu"
 
 
 # --- edit before approve (user control: Approve / Edit / Reject) ----------
@@ -180,6 +201,25 @@ def test_edit_cannot_touch_internal_fields(reg):
     edited = actions.edit("u", a.id, {"body": "new", "_user": "mallory"})
     assert edited.payload["_user"] == "u"          # internal key protected
     assert edited.payload["body"] == "new"
+
+
+def test_prepare_replaces_all_caller_supplied_internal_fields(reg):
+    """The initial payload is as untrusted as a later edit."""
+    a = actions.prepare(
+        "alice", "t_note",
+        {"body": "hi", "_user": "mallory", "_forged_authority": "yes"})
+    assert a.payload["_user"] == "alice"
+    assert "_forged_authority" not in a.payload
+
+
+def test_prepare_does_not_add_user_to_an_owner_agnostic_action(reg):
+    a = actions.prepare("alice", "t_note", {"body": "hi"})
+    assert a.payload == {"body": "hi"}
+
+
+def test_prepare_requires_an_object_payload(reg):
+    with pytest.raises(ValueError, match="payload must be an object"):
+        actions.prepare("u", "t_note", ["not", "an", "object"])
 
 
 def test_edit_only_prepared_actions(reg):
