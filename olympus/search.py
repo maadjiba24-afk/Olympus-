@@ -2,8 +2,10 @@
 
 Conversations persist to `memory/conversations/<id>.json` (per CLI session,
 Telegram chat, web cookie, …), but nothing could search *across* them. This
-adds the Hermes-style capability: a full-text index over every persisted turn,
-so "what did we decide about pricing last month?" finds the exact exchange.
+adds the Hermes-style capability: a full-text index over persisted turns, so
+"what did we decide about pricing last month?" finds the exact exchange. Every
+row is bound to the trusted memory principal that saved it; searches are always
+restricted to that principal.
 
 Uses SQLite's built-in **FTS5** when the runtime has it (fast, ranked by
 relevance), and transparently falls back to a substring scan when it doesn't —
@@ -18,7 +20,10 @@ import json
 import sqlite3
 from dataclasses import dataclass
 
-from . import config
+from . import config, memory
+
+
+_TURN_COLUMNS = ("owner", "conversation", "role", "content", "turn")
 
 
 def _db_path():
@@ -45,12 +50,29 @@ def _connect() -> tuple[sqlite3.Connection, bool]:
     except sqlite3.OperationalError:
         pass
     fts = _fts5_available(conn)
+    # The pre-owner index is unsafe derived data: it cannot be attributed to a
+    # principal after the fact. Drop it instead of guessing. Reindexing below
+    # rebuilds only conversations with durable ownership metadata.
+    existing = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'"
+    ).fetchone()
+    if existing:
+        columns = tuple(row[1] for row in conn.execute(
+            "PRAGMA table_info(turns)").fetchall())
+        was_fts = "using fts5" in str(existing[0] or "").lower()
+        if columns != _TURN_COLUMNS or was_fts != fts:
+            conn.execute("DROP TABLE turns")
     if fts:
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS turns "
-                     "USING fts5(conversation, role, content, turn UNINDEXED)")
+                     "USING fts5(owner UNINDEXED, conversation, role, "
+                     "content, turn UNINDEXED)")
     else:
         conn.execute("CREATE TABLE IF NOT EXISTS turns "
-                     "(conversation TEXT, role TEXT, content TEXT, turn INT)")
+                     "(owner TEXT NOT NULL, conversation TEXT, role TEXT, "
+                     "content TEXT, turn INT)")
+        conn.execute("CREATE INDEX IF NOT EXISTS turns_owner_idx "
+                     "ON turns(owner)")
+    conn.commit()
     return conn, fts
 
 
@@ -68,30 +90,43 @@ class Hit:
         return f"[{self.conversation}#{self.turn} {self.role}] {snippet}"
 
 
-def _conversations() -> list[tuple[str, list]]:
+def _owner(value: str | None = None) -> str:
+    """The trusted search namespace; never sourced from a tool argument."""
+    return memory.safe_id(memory.current_user() if value is None else value)
+
+
+def _conversations() -> list[tuple[str, list, str]]:
     d = config.MEMORY_DIR / "conversations"
     out = []
     if not d.exists():
         return out
+    # Ownerless snapshots predate this boundary. Never guess who owns them:
+    # they remain unsearchable until explicitly migrated or resaved.
     for path in sorted(d.glob("*.json")):
         try:
-            out.append((path.stem, json.loads(path.read_text(encoding="utf-8"))))
+            owner = memory.conversation_owner(path.stem)
+            if owner is None:
+                continue
+            out.append((path.stem,
+                        json.loads(path.read_text(encoding="utf-8")), owner))
         except (json.JSONDecodeError, OSError):
             continue
     return out
 
 
-def index_conversation(conversation_id: str, history: list[dict]) -> int:
+def index_conversation(conversation_id: str, history: list[dict], *,
+                       owner: str | None = None) -> int:
     """(Re)index one conversation's turns. Returns the number of turns indexed."""
+    principal = _owner(owner)
     conn, _ = _connect()
     try:
-        conn.execute("DELETE FROM turns WHERE conversation = ?",
-                     (conversation_id,))
-        rows = [(conversation_id, str(m.get("role", "")),
+        conn.execute("DELETE FROM turns WHERE owner = ? AND conversation = ?",
+                     (principal, conversation_id))
+        rows = [(principal, conversation_id, str(m.get("role", "")),
                  str(m.get("content", "")), i)
                 for i, m in enumerate(history) if str(m.get("content", "")).strip()]
-        conn.executemany("INSERT INTO turns(conversation, role, content, turn) "
-                         "VALUES (?,?,?,?)", rows)
+        conn.executemany("INSERT INTO turns(owner, conversation, role, "
+                         "content, turn) VALUES (?,?,?,?,?)", rows)
         conn.commit()
         return len(rows)
     finally:
@@ -105,8 +140,8 @@ def reindex() -> int:
     conn.commit()
     conn.close()
     total = 0
-    for cid, history in _conversations():
-        total += index_conversation(cid, history)
+    for cid, history, owner in _conversations():
+        total += index_conversation(cid, history, owner=owner)
     return total
 
 
@@ -185,31 +220,34 @@ def maintain(retain_days: int | None = None) -> dict:
 
 
 def search(query: str, limit: int = 20,
-           conversation: str | None = None) -> list[Hit]:
+           conversation: str | None = None, *,
+           owner: str | None = None) -> list[Hit]:
     """Search indexed turns. Auto-reindexes if the index is empty so a first
     call just works."""
     query = (query or "").strip()
     if not query:
         return []
+    principal = _owner(owner)
     conn, fts = _connect()
     try:
-        if conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0:
+        if conn.execute("SELECT COUNT(*) FROM turns WHERE owner = ?",
+                        (principal,)).fetchone()[0] == 0:
             conn.close()
             reindex()
             conn, fts = _connect()
         params: list = []
         if fts:
             sql = ("SELECT conversation, role, content, turn FROM turns "
-                   "WHERE turns MATCH ?")
-            params.append(query)
+                   "WHERE turns MATCH ? AND owner = ?")
+            params.extend((query, principal))
             if conversation:
                 sql += " AND conversation = ?"
                 params.append(conversation)
             sql += " ORDER BY rank LIMIT ?"
         else:
             sql = ("SELECT conversation, role, content, turn FROM turns "
-                   "WHERE content LIKE ?")
-            params.append(f"%{query}%")
+                   "WHERE owner = ? AND content LIKE ?")
+            params.extend((principal, f"%{query}%"))
             if conversation:
                 sql += " AND conversation = ?"
                 params.append(conversation)
@@ -219,10 +257,15 @@ def search(query: str, limit: int = 20,
             rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             # malformed FTS query (e.g. stray quotes) → fall back to LIKE
-            rows = conn.execute(
-                "SELECT conversation, role, content, turn FROM turns "
-                "WHERE content LIKE ? LIMIT ?",
-                (f"%{query}%", limit)).fetchall()
+            fallback = ("SELECT conversation, role, content, turn FROM turns "
+                        "WHERE owner = ? AND content LIKE ?")
+            fallback_params: list = [principal, f"%{query}%"]
+            if conversation:
+                fallback += " AND conversation = ?"
+                fallback_params.append(conversation)
+            fallback += " LIMIT ?"
+            fallback_params.append(limit)
+            rows = conn.execute(fallback, fallback_params).fetchall()
         return [Hit(*r) for r in rows]
     finally:
         conn.close()

@@ -46,6 +46,7 @@ LEGACY_PRINCIPAL = "api-v1"
 _DERIVED_ROOTS = (
     "users/{uid}",                       # lessons, corrections, feedback, prefs
     "conversations/{uid}.json",          # the snapshot
+    "conversations/{uid}.owner",         # immutable search owner binding
     "sessions/{uid}.journal.jsonl",      # the sealed journal
 )
 

@@ -116,7 +116,7 @@ def test_undo_removes_last_exchange_and_persists(monkeypatch):
                    {"role": "assistant", "content": "a1"},
                    {"role": "user", "content": "q2"},
                    {"role": "assistant", "content": "a2"}]
-    memory.save_conversation("conv-undo", bot.history)
+    memory.save_conversation("conv-undo", bot.history, owner=bot.user)
     out = bot.undo()
     assert "1 exchange" in out
     assert [m["content"] for m in bot.history] == ["q1", "a1"]

@@ -1943,7 +1943,8 @@ class Olympus:
         self.history.append({"role": "assistant", "content": reply})
         self._maybe_compact()
         if self.conversation_id:
-            memory.save_conversation(self.conversation_id, self.history)
+            memory.save_conversation(self.conversation_id, self.history,
+                                     owner=self.user)
         # Count a playbook as used once per turn (the context block is pure).
         try:
             pb = playbooks.match(self.user, user_message)
@@ -2389,7 +2390,8 @@ class Olympus:
         if not removed:
             return "Nothing to undo."
         if self.conversation_id:
-            memory.save_conversation(self.conversation_id, self.history)
+            memory.save_conversation(self.conversation_id, self.history,
+                                     owner=self.user)
         return (f"Removed the last {removed} exchange(s) from the "
                 "conversation. The next question continues from before them.")
 
@@ -2493,7 +2495,8 @@ class Olympus:
             self.history = []
             tail = "cleared the transcript"
         if self.conversation_id:
-            memory.save_conversation(self.conversation_id, self.history)
+            memory.save_conversation(self.conversation_id, self.history,
+                                     owner=self.user)
         return f"Fresh start — {tail} ({turns} turn(s) folded away)."
 
     def set_language(self, value: str) -> str:

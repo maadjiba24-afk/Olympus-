@@ -6,6 +6,7 @@ Layout:
       users/<user-id>/lessons|corrections|feedback/   per-user namespaces
       reports/ upgrades/ prompt_backups/ evals/       always shared (system)
       conversations/<id>.json                persisted chat histories
+      conversations/<id>.owner               trusted search-index owner
       sessions/<id>.journal.jsonl            sealed per-session journal (sessionlog)
       skills/                                the self-built skill library
 
@@ -287,6 +288,45 @@ def _conversation_path(conversation_id: str) -> Path:
     return d / f"{safe_id(conversation_id)}.json"
 
 
+def _conversation_owner_path(conversation_id: str) -> Path:
+    return _conversation_path(conversation_id).with_suffix(".owner")
+
+
+def conversation_owner(conversation_id: str) -> str | None:
+    """Return a snapshot's durable owner, or None for legacy/invalid metadata."""
+    path = _conversation_owner_path(conversation_id)
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw if raw and raw == safe_id(raw) else None
+
+
+def _bind_conversation_owner(conversation_id: str, owner: str) -> str:
+    """Create an immutable owner binding before a snapshot can be indexed."""
+    principal = safe_id(owner)
+    path = _conversation_owner_path(conversation_id)
+    # This metadata is write-once. The lock makes the check/create pair safe
+    # across both threads and processes; exclusive creation prevents a second
+    # writer from replacing an established principal. A torn/invalid file is
+    # refused rather than "repaired" into an attacker-chosen owner.
+    from . import proclock
+    with proclock.lock(f"conversation-owner-{safe_id(conversation_id)}"):
+        existing = conversation_owner(conversation_id)
+        if existing is not None:
+            if existing != principal:
+                raise PermissionError(
+                    "conversation belongs to a different memory principal")
+            return principal
+        if path.exists():
+            raise PermissionError("conversation owner metadata is invalid")
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(principal + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    return principal
+
+
 def load_conversation(conversation_id: str) -> list[dict]:
     path = _conversation_path(conversation_id)
     if path.exists():
@@ -312,9 +352,12 @@ def load_conversation(conversation_id: str) -> list[dict]:
     return []
 
 
-def save_conversation(conversation_id: str, history: list[dict]) -> None:
+def save_conversation(conversation_id: str, history: list[dict], *,
+                      owner: str | None = None) -> None:
     # Atomic publish: load_conversation maps a torn file to [], so a crash
     # mid-write would drop the whole history (ADR 0005).
+    principal = _bind_conversation_owner(
+        conversation_id, current_user() if owner is None else owner)
     p = _conversation_path(conversation_id)
     # The temp name must be unique per WRITER, not per process: two threads of
     # one process saving the same conversation shared `.{name}.{pid}.tmp`, so
@@ -338,7 +381,8 @@ def save_conversation(conversation_id: str, history: list[dict]) -> None:
     # Keep the cross-session search index fresh (best-effort; never block a save).
     try:
         from . import search
-        search.index_conversation(safe_id(conversation_id), history)
+        search.index_conversation(safe_id(conversation_id), history,
+                                  owner=principal)
     except Exception:
         pass
 
