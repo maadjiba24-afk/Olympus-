@@ -610,6 +610,7 @@ def register_actions() -> None:
         actions.register(actions.ActionType(
             name=name, risk_class=actions.IRREVERSIBLE, scope=SCOPE,
             preview=_preview(name), execute=_executor(name),
+            binds_user=True,
             description=f"OS computer use: {name.replace('computer_', '')}"))
     _registered = True
 

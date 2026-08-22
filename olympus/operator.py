@@ -328,7 +328,7 @@ def execute(payload: dict) -> dict:
     params = payload.get("params", {}) or {}
     # Re-check authorization for the acting user at execution time (defense in
     # depth — covers a job prepared earlier whose authorization was since pulled).
-    reason = _gate(payload.get("user", ""), domain)
+    reason = _gate(payload.get("_user", ""), domain)
     if reason:
         raise RuntimeError(reason)
     _, tmpl = _template(domain, name)
@@ -455,17 +455,17 @@ def register_operator_actions() -> None:
     builtin_actions so the capability count includes them)."""
     actions.register(actions.ActionType(
         name="browser_operate", risk_class=actions.NOTABLE, scope=OPERATE_SCOPE,
-        preview=preview, execute=execute,
+        preview=preview, execute=execute, binds_user=True,
         description="Run a reversible/notable operator template on an "
                     "authorized site."))
     actions.register(actions.ActionType(
         name="browser_operate_irreversible", risk_class=actions.IRREVERSIBLE,
-        scope=OPERATE_SCOPE, preview=preview, execute=execute,
+        scope=OPERATE_SCOPE, preview=preview, execute=execute, binds_user=True,
         description="Run an irreversible operator template; always requires "
                     "explicit approval."))
     actions.register(actions.ActionType(
         name="browser_operate_financial", risk_class=actions.FINANCIAL_LEGAL,
-        scope=OPERATE_SCOPE, preview=preview, execute=execute,
+        scope=OPERATE_SCOPE, preview=preview, execute=execute, binds_user=True,
         description="Run a financial/legal operator template (pay/sign/delete): "
                     "always explicit approval, tightest daily cap."))
 
@@ -477,8 +477,7 @@ def run(user: str, domain: str, template: str, params: dict) -> actions.Action:
                               if _template(domain, template)[1] else "notable")
     action = actions.prepare(
         user, type_name,
-        {"domain": domain, "template": template, "params": params,
-         "user": user},
+        {"domain": domain, "template": template, "params": params},
         title=f"Operate '{template}' on {domain}", why="HERMES operator")
     # Fold in earned per-domain trust: a site with a long clean track record may
     # auto-run its safe/reversible actions without a per-action approval. This

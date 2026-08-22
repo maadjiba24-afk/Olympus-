@@ -135,7 +135,7 @@ def test_previous_boundary_version_requires_a_fresh_review(monkeypatch):
     action = actions.prepare(
         "legacy-user", "send_email",
         {"to": "person@example.test", "subject": "fixture", "body": "safe"})
-    action.boundary_version = 1
+    action.boundary_version = actions.ACTION_BOUNDARY_VERSION - 1
     actions._save(action)
 
     done = actions.approve("legacy-user", action.id)
