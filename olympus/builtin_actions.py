@@ -193,6 +193,11 @@ def _run_python_execute(p: dict) -> dict:
 
 
 def _write_file_preview(p: dict) -> str:
+    try:
+        sandbox._guard_write_target(
+            p.get("path", ""), root=p.get("_pinned_root"))
+    except ValueError as err:
+        return f"Write blocked: {err}"
     body = p.get("content", "")
     return (f"Write file '{p.get('path', '?')}' "
             f"({len(body.encode('utf-8'))} bytes) in the workspace:\n"

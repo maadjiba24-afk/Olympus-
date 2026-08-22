@@ -49,6 +49,37 @@ def test_read_file_refuses_credential_file(ws):
     assert sandbox.read_file(".env").startswith("Error")
 
 
+@pytest.mark.parametrize("name", [
+    ".env", "SERVER.PEM", "nested/.AWS/credentials", "nested/ID_RSA.bak",
+])
+def test_write_file_refuses_credential_paths(ws, name):
+    with pytest.raises(ValueError, match="refusing to write a credential"):
+        sandbox.write_file(name, "secret material")
+    assert not (ws / name).exists()
+
+
+def test_write_file_action_preview_and_execution_fail_closed(ws):
+    actions.grant_scope("u", "exec")
+    a = actions.prepare(
+        "u", "write_file", {"path": ".env", "content": "TOKEN=x\n"})
+
+    assert "Write blocked" in a.preview
+    done = actions.approve("u", a.id)
+    assert done.status == actions.FAILED
+    assert "credential file" in done.error
+    assert not (ws / ".env").exists()
+
+
+def test_undo_write_refuses_a_sensitive_result_path(ws):
+    secret = ws / ".env"
+    secret.write_text("TOKEN=real\n")
+
+    with pytest.raises(ValueError, match="credential file"):
+        sandbox.undo_write({
+            "path": str(secret), "existed": True, "prior": "TOKEN=old\n"})
+    assert secret.read_text() == "TOKEN=real\n"
+
+
 # --- ranged read -----------------------------------------------------------
 
 def test_read_file_line_range(ws):

@@ -730,6 +730,20 @@ def check_written(target: Path, content: str) -> str:
     return "verified: written"
 
 
+def _guard_write_target(path: str, root: str | Path | None = None) -> Path:
+    """Resolve a write target and reject credential-bearing paths.
+
+    This is the single path-policy boundary shared by approval previews and
+    execution. Read, search, and edit already use the same sensitive-path
+    deny-list; creating or overwriting a file must not be the bypass around
+    those protections.
+    """
+    target = _confine(path, root)
+    if is_sensitive_path(target):
+        raise ValueError(f"refusing to write a credential file: {path}")
+    return target
+
+
 def write_file(path: str, content: str, *,
                root: str | Path | None = None) -> dict:
     """Create/overwrite a file inside the workspace. Returns a result dict
@@ -739,7 +753,7 @@ def write_file(path: str, content: str, *,
 
     `root` pins the workspace root (the one captured at preview time) so an
     approved write lands where it was previewed — see `_effective_root`."""
-    target = _confine(path, root)
+    target = _guard_write_target(path, root)
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.is_file()
     prior = target.read_text(encoding="utf-8", errors="replace") if existed else None
@@ -752,6 +766,8 @@ def write_file(path: str, content: str, *,
 def undo_write(result: dict) -> str:
     """Reverse a write_file: restore the prior content, or delete a new file."""
     path = Path(result.get("path", ""))
+    if is_sensitive_path(path):
+        raise ValueError(f"refusing to modify a credential file: {path}")
     if result.get("existed") and result.get("prior") is not None:
         path.write_text(result["prior"], encoding="utf-8")
         return f"restored previous contents of {path.name}"
