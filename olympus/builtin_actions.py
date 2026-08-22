@@ -51,7 +51,7 @@ def _note_undo(result: dict) -> str:
 
 def _email_preview(p: dict) -> str:
     return (f"Send email\n  To: {p.get('to', '?')}\n"
-            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')}")
 
 
 def _email_execute(p: dict) -> dict:
@@ -85,7 +85,7 @@ def _webhook_execute(p: dict) -> dict:
 
 def _gmail_send_preview(p: dict) -> str:
     return (f"Send via Gmail\n  To: {p.get('to', '?')}\n"
-            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')[:1000]}")
+            f"  Subject: {p.get('subject', '?')}\n\n{p.get('body', '')}")
 
 
 def _gmail_send_execute(p: dict) -> dict:
@@ -130,7 +130,7 @@ def _cal_create_preview(p: dict) -> str:
     who = ", ".join(p.get("attendees", []) or []) or "(no attendees — personal hold)"
     return (f"Create calendar event\n  '{p.get('summary', '?')}'\n"
             f"  {p.get('start', '?')} → {p.get('end', '?')}\n"
-            f"  Invite: {who}\n  {p.get('description', '')[:300]}")
+            f"  Invite: {who}\n  {p.get('description', '')}")
 
 
 def _cal_create_execute(p: dict) -> dict:
@@ -172,7 +172,6 @@ def _run_command_execute(p: dict) -> dict:
 
 def _run_python_preview(p: dict) -> str:
     code = p.get("code", "")
-    snippet = code if len(code) <= 2000 else code[:2000] + "\n…[truncated]"
     # cmdguard is shell-only and cannot inspect Python semantics, so the preview
     # shows the whole snippet for a human to read before it runs, and names the
     # backend — the real isolation for untrusted code is the docker backend.
@@ -180,7 +179,7 @@ def _run_python_preview(p: dict) -> str:
             "\n  (local backend: runs with your privileges — approve only code "
             "you trust; set OLYMPUS_EXEC_BACKEND=docker to isolate)")
     return (f"Run Python in the workspace ({sandbox.backend()} backend):"
-            f"{note}\n\n{snippet}")
+            f"{note}\n\n{code}")
 
 
 def _run_python_execute(p: dict) -> dict:

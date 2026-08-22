@@ -111,7 +111,7 @@ def registered() -> dict[str, ActionType]:
 
 PREPARED, APPROVED, EXECUTED, FAILED, REJECTED, UNDONE = (
     "prepared", "approved", "executed", "failed", "rejected", "undone")
-ACTION_BOUNDARY_VERSION = 1
+ACTION_BOUNDARY_VERSION = 2
 
 
 @dataclass
@@ -330,7 +330,7 @@ def prepare(user: str, type_name: str, payload: dict,
     try:
         preview = at.preview(payload)
     except Exception as err:
-        preview = f"(could not render preview: {err})"
+        raise ValueError(f"could not render action preview: {err}") from err
     action = Action(
         id=uuid.uuid4().hex[:12], user=memory.safe_id(user), type=type_name,
         title=title or type_name.replace("_", " ").title(),
@@ -352,18 +352,21 @@ def edit(user: str, action_id: str, changes: dict,
     if action.status != PREPARED:
         raise ValueError(f"action is {action.status}, only prepared actions "
                          "can be edited")
+    candidate = dict(action.payload)
     for key, value in (changes or {}).items():
         if key.startswith("_"):       # internal fields are not user-editable
             continue
-        action.payload[key] = value
+        candidate[key] = value
+    at = _REGISTRY.get(action.type)
+    try:
+        preview = at.preview(candidate)
+    except Exception as err:
+        raise ValueError(f"could not render action preview: {err}") from err
+    action.payload = candidate
+    action.preview = preview
     if title:
         action.title = title
     action.edited = True
-    at = _REGISTRY.get(action.type)
-    try:
-        action.preview = at.preview(action.payload)
-    except Exception as err:
-        action.preview = f"(could not render preview: {err})"
     _save(action)
     _audit(action, "edited")
     return action
@@ -409,6 +412,25 @@ def _execute(action: Action) -> Action:
         action.status = FAILED
         action.error = f"unknown action type: {action.type}"
         _save(action); _audit(action, "failed")
+        return action
+    # Approval is meaningful only for the exact preview the person reviewed.
+    # Re-render at the execution boundary to catch a changed payload, a changed
+    # dynamic template/workspace, or a stale preview produced by older code.
+    # Any rendering failure or mismatch is a hard stop: prepare and review a
+    # fresh action instead of executing content that was not actually shown.
+    try:
+        current_preview = at.preview(action.payload)
+    except Exception as err:
+        action.status = FAILED
+        action.error = f"action preview could not be verified: {err}"
+        _save(action); _audit(action, "blocked_preview_error")
+        return action
+    if current_preview != action.preview:
+        action.status = FAILED
+        action.error = (
+            "action preview no longer matches what would execute; "
+            "prepare and review it again")
+        _save(action); _audit(action, "blocked_preview_mismatch")
         return action
     # Shadow boundary, defence in depth (P5-A5). The primary enforcement point
     # is `tools.resolve_handler`, but the approval spine can be reached without

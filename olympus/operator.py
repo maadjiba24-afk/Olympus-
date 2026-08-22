@@ -294,8 +294,19 @@ def preview(payload: dict) -> str:
         return f"(no template '{name}' for {domain})"
     lines = [f"On {domain}, run template '{name}' "
              f"({tmpl.get('risk', 'notable')}):"]
+    params = payload.get("params", {}) or {}
     for s in tmpl.get("steps", []):
-        lines.append(f"  - {s.get('op', '?')} {s.get('selector', '')}".rstrip())
+        op = s.get("op", "?")
+        selector = s.get("selector", "")
+        line = f"  - {op} {selector}".rstrip()
+        if str(op).lower() == "fill":
+            value = s.get("value", "")
+            if isinstance(value, str) and value.startswith("$"):
+                value = str(params.get(value[1:], ""))
+            line += f" with {value!r}"
+        if str(op).lower() == "wait_for" and s.get("gone"):
+            line += " (until gone)"
+        lines.append(line)
     return "\n".join(lines)
 
 
