@@ -71,22 +71,24 @@ def test_gmail_parse_address():
 def test_webhook_handle_payload(monkeypatch):
     monkeypatch.setattr(gateway, "reply_for",
                         lambda bots, user, text, prefix="ol": ["hello " + user])
-    out = webhook_gateway.handle_payload({}, {"user": "u1", "text": "hi"})
+    out = webhook_gateway.handle_payload({}, {"text": "hi"}, owner="u1")
     assert out == {"reply": "hello u1"}
 
 
 def test_webhook_missing_text_raises():
     with pytest.raises(ValueError):
-        webhook_gateway.handle_payload({}, {"user": "u1"})
+        webhook_gateway.handle_payload({}, {}, owner="u1")
 
 
-def test_webhook_anonymous_user(monkeypatch):
+def test_webhook_rejects_caller_supplied_user(monkeypatch):
     seen = {}
     monkeypatch.setattr(gateway, "reply_for",
                         lambda bots, user, text, prefix="ol":
                         seen.update(user=user) or ["ok"])
-    webhook_gateway.handle_payload({}, {"text": "hi"})
-    assert seen["user"] == "anonymous"
+    with pytest.raises(ValueError, match="caller-supplied 'user'"):
+        webhook_gateway.handle_payload(
+            {}, {"user": "victim", "text": "hi"}, owner="webhook-owner")
+    assert seen == {}
 
 
 def test_webhook_secret_check(monkeypatch):
