@@ -26,7 +26,8 @@ from typing import Any, Callable
 
 from . import config
 
-MAX_ACTIVE = 10            # per instance — a goal list, not a backlog dump
+MAX_ACTIVE = 10            # per owner — one tenant cannot starve another
+MAX_TOTAL_GOALS = 1000     # absolute storage ceiling; additions fail closed
 MAX_PROGRESS = 40          # progress notes kept per goal (oldest folded away)
 MAX_CHECKS = 30            # judgments before a goal is marked stalled
 CONFIDENCE_FLOOR = 0.7     # judge must be this sure before a goal closes
@@ -110,17 +111,30 @@ def _mutex():
     return proclock.lock("goals")
 
 
+def _owner(user: str) -> str:
+    return str(user or "shared")
+
+
+def _matches(goal: Goal, goal_id: str, user: str) -> bool:
+    """A goal id is an identifier, never an authorization credential."""
+    return goal.id == goal_id and goal.user == _owner(user)
+
+
 def add(user: str, text: str, contract: str = "") -> str:
     text = (text or "").strip()[:1000]          # bound: goal text can't bloat
     contract = (contract or "").strip()[:1000]
     if not text:
         return "Usage: goal add <what should stay true / get done>"
+    owner = _owner(user)
     with _mutex():
         goals = _load()
-        if sum(g.status == "active" for g in goals) >= MAX_ACTIVE:
+        if sum(g.status == "active" and g.user == owner
+               for g in goals) >= MAX_ACTIVE:
             return (f"There are already {MAX_ACTIVE} active goals — finish or "
                     "drop one first (`goal list`, `goal drop <id>`).")
-        g = Goal(id=uuid.uuid4().hex[:8], user=user, text=text,
+        if len(goals) >= MAX_TOTAL_GOALS:
+            return "Global goal storage capacity reached; no goal was added."
+        g = Goal(id=uuid.uuid4().hex[:8], user=owner, text=text,
                  contract=contract or DEFAULT_CONTRACT,
                  created=time.time())
         goals.append(g)
@@ -131,8 +145,8 @@ def add(user: str, text: str, contract: str = "") -> str:
             "evidence.")
 
 
-def get(goal_id: str) -> Goal | None:
-    return next((g for g in _load() if g.id == goal_id), None)
+def get(goal_id: str, user: str = "shared") -> Goal | None:
+    return next((g for g in _load() if _matches(g, goal_id, user)), None)
 
 
 def active(user: str | None = None) -> list[Goal]:
@@ -140,11 +154,11 @@ def active(user: str | None = None) -> list[Goal]:
             and (user is None or g.user == user)]
 
 
-def note_progress(goal_id: str, note: str) -> None:
+def note_progress(goal_id: str, note: str, user: str = "shared") -> None:
     with _mutex():
         goals = _load()
         for g in goals:
-            if g.id == goal_id:
+            if _matches(g, goal_id, user):
                 g.progress.append({"ts": time.time(),
                                    "note": str(note)[:2000]})
                 g.progress = g.progress[-MAX_PROGRESS:]
@@ -195,7 +209,7 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def wait_on(goal_id: str, pid: int) -> str:
+def wait_on(goal_id: str, pid: int, user: str = "shared") -> str:
     """Park a goal's work cycles while `pid` runs (Hermes `/goal wait`): the
     heartbeat skips it until the process exits, then resumes with a progress
     note — so a goal that spawned a long build/backtest doesn't burn cycles
@@ -203,7 +217,7 @@ def wait_on(goal_id: str, pid: int) -> str:
     with _mutex():
         goals = _load()
         for g in goals:
-            if g.id == goal_id:
+            if _matches(g, goal_id, user):
                 if g.status != "active":
                     return f"Goal {goal_id} is {g.status} — nothing to wait on."
                 if not _pid_alive(pid):
@@ -217,11 +231,12 @@ def wait_on(goal_id: str, pid: int) -> str:
     return f"No goal with id '{goal_id}'."
 
 
-def set_status(goal_id: str, status: str, evidence: str = "") -> str:
+def set_status(goal_id: str, status: str, evidence: str = "",
+               user: str = "shared") -> str:
     with _mutex():
         goals = _load()
         for g in goals:
-            if g.id == goal_id:
+            if _matches(g, goal_id, user):
                 g.status = status
                 if evidence:
                     g.evidence = str(evidence)[:2000]
@@ -315,12 +330,12 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
     try:
         report = runner(g.user, prompt)
     except Exception as err:
-        note_progress(g.id, f"[cycle failed: {err}]")
+        note_progress(g.id, f"[cycle failed: {err}]", user=g.user)
         _telemetry(FAIL, str(err)[:120])
         return f"Goal {g.id}: work cycle failed ({str(err)[:120]})"
-    note_progress(g.id, report)
+    note_progress(g.id, report, user=g.user)
 
-    fresh = get(g.id) or g
+    fresh = get(g.id, user=g.user) or g
     verdict = judge(fresh, judge_fn=judge_fn)
     # Behavioral contract at the completion chokepoint (defense in depth): a
     # goal may close ONLY against concrete evidence at the confidence floor.
@@ -340,7 +355,7 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
     with _mutex():
         goals = _load()
         for stored in goals:
-            if stored.id != g.id:
+            if not _matches(stored, g.id, g.user):
                 continue
             if stored.status != "active":
                 # The other process closed/dropped this goal between our
@@ -422,14 +437,15 @@ def run_due(now: float | None = None,
         if g.wait_pid:
             if _pid_alive(g.wait_pid):
                 continue           # parked on a still-running process
-            note_progress(g.id, f"[process {g.wait_pid} finished — resuming]")
+            note_progress(g.id, f"[process {g.wait_pid} finished — resuming]",
+                          user=g.user)
             with _mutex():
                 goals = _load()
                 for stored in goals:
-                    if stored.id == g.id:
+                    if _matches(stored, g.id, g.user):
                         stored.wait_pid = 0
                 _save(goals)
-            g = get(g.id) or g
+            g = get(g.id, user=g.user) or g
             out.append(work_one(g, runner=runner, judge_fn=judge_fn))
             continue
         if now - max(g.last_worked, g.created) >= interval or not g.progress:

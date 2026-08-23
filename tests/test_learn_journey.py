@@ -158,7 +158,8 @@ def test_goal_wait_parks_and_resumes(monkeypatch):
     goals.add("cli", "run the backtest")
     g = goals.active("cli")[0]
     monkeypatch.setattr(goals, "_pid_alive", lambda pid: True)
-    assert "parked on process 4242" in goals.wait_on(g.id, 4242)
+    assert "parked on process 4242" in goals.wait_on(
+        g.id, 4242, user="cli")
     # While the process runs, the heartbeat skips the goal entirely.
     assert goals.run_due(runner=lambda u, p: "worked",
                          judge_fn=lambda *a: {"done": False}) == []
@@ -169,7 +170,7 @@ def test_goal_wait_parks_and_resumes(monkeypatch):
                             "done": False, "confidence": 0, "evidence": "",
                             "missing": "more"})
     assert len(ran) == 1
-    fresh = goals.get(g.id)
+    fresh = goals.get(g.id, user="cli")
     assert fresh.wait_pid == 0
     notes = [p["note"] for p in fresh.progress]
     assert any("finished — resuming" in n for n in notes)
@@ -179,7 +180,7 @@ def test_goal_wait_validations(monkeypatch):
     goals.add("cli", "g")
     g = goals.active("cli")[0]
     monkeypatch.setattr(goals, "_pid_alive", lambda pid: False)
-    assert "isn't running" in goals.wait_on(g.id, 999999)
+    assert "isn't running" in goals.wait_on(g.id, 999999, user="cli")
     assert "No goal" in goals.wait_on("nope", os.getpid())
 
 

@@ -2969,12 +2969,12 @@ def main(argv: list[str] | None = None) -> int:
         from . import goals
         detail = " ".join(args.detail).strip()
         if args.action == "list":
-            print(goals.summary())
+            print(goals.summary("cli"))
         elif args.action == "add":
             text, _, contract = detail.partition("::")
             print(goals.add("cli", text.strip(), contract.strip()))
         elif args.action == "check":
-            g = goals.get(detail)
+            g = goals.get(detail, user="cli")
             if g is None:
                 print(f"No goal with id '{detail}'.")
                 return 1
@@ -2984,22 +2984,23 @@ def main(argv: list[str] | None = None) -> int:
                   f"evidence: {v['evidence'] or '(none)'}\n"
                   f"missing:  {v['missing'] or '(nothing)'}")
         elif args.action == "work":
-            g = goals.get(detail)
+            g = goals.get(detail, user="cli")
             if g is None:
                 print(f"No goal with id '{detail}'.")
                 return 1
             print(goals.work_one(g))
         elif args.action == "drop":
-            print(goals.set_status(detail, "dropped"))
+            print(goals.set_status(detail, "dropped", user="cli"))
         elif args.action == "done":
             print(goals.set_status(detail, "done",
-                                   evidence="closed manually by the operator"))
+                                   evidence="closed manually by the operator",
+                                   user="cli"))
         elif args.action == "wait":
             parts = detail.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 print("Usage: olympus goal wait <goal id> <pid>")
                 return 1
-            print(goals.wait_on(parts[0], int(parts[1])))
+            print(goals.wait_on(parts[0], int(parts[1]), user="cli"))
     elif args.command == "distill":
         from . import learn
         print(learn.distill(" ".join(args.source), allow_paths=True))

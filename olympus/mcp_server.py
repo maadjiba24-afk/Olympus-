@@ -411,7 +411,7 @@ def handle_message(msg: dict, ask: Callable[[str], str] | None = None,
                 text = ask(message)
             elif name == "olympus_goals":
                 from . import goals
-                text = goals.summary()
+                text = goals.summary(_mcp_user())
             elif name in ("olympus_search_documents", "olympus_list_todos",
                           "olympus_recall_memory"):
                 text = _workspace_tool(name, args)
