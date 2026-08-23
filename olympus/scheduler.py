@@ -41,7 +41,8 @@ _UNITS = {"s": 1, "sec": 1, "second": 1, "seconds": 1,
 
 DAY = 86400
 MIN_INTERVAL = 60          # never busier than once a minute
-MAX_JOBS = 200             # bound stored jobs so the file can't grow unbounded
+MAX_JOBS = 200             # per-owner cap; one tenant cannot evict another
+MAX_TOTAL_JOBS = 2000      # absolute cap; additions fail closed at capacity
 
 
 def parse_interval(text: str) -> int:
@@ -198,6 +199,32 @@ def _save(jobs: list[Job]) -> None:
     atomicio.publish(tmp, p, json.dumps([asdict(j) for j in jobs], indent=2))
 
 
+def _principal(user: str) -> str:
+    return memory.safe_id(user or "shared")
+
+
+def _key(job: Job) -> tuple[str, str]:
+    """A job name is unique only inside its authenticated owner namespace."""
+    return _principal(job.user), job.name
+
+
+def _matches(job: Job, name: str, user: str) -> bool:
+    return _key(job) == (_principal(user), name)
+
+
+def _bounded(jobs: list[Job]) -> list[Job]:
+    """Apply per-owner quotas without silently evicting another tenant."""
+    by_owner: dict[str, list[Job]] = {}
+    for job in jobs:
+        by_owner.setdefault(_principal(job.user), []).append(job)
+    kept: list[Job] = []
+    for owned in by_owner.values():
+        kept.extend(sorted(owned, key=lambda job: job.created)[-MAX_JOBS:])
+    if len(kept) > MAX_TOTAL_JOBS:
+        raise ValueError("global schedule capacity reached")
+    return kept
+
+
 def _mutex():
     """Cross-process lock for every jobs load-modify-save cycle (ADR 0005):
     the heartbeat process runs/marks jobs while web/CLI/gateway processes
@@ -211,16 +238,14 @@ def add(name: str, interval: str | int, prompt: str,
         now: float | None = None, skill: str = "") -> Job:
     now = now if now is not None else time.time()
     secs = interval if isinstance(interval, int) else parse_interval(interval)
+    owner = _principal(user)
     with _mutex():
-        jobs = [j for j in _load() if j.name != name]    # replace by name
+        jobs = [j for j in _load() if not _matches(j, name, owner)]
         job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)),
                   prompt=prompt, deliver_to=deliver_to.strip().lower(),
-                  user=user, created=now, skill=(skill or "").strip())
+                  user=owner, created=now, skill=(skill or "").strip())
         jobs.append(job)
-        # Bound storage: keep the most-recently-created MAX_JOBS.
-        if len(jobs) > MAX_JOBS:
-            jobs = sorted(jobs, key=lambda j: j.created)[-MAX_JOBS:]
-        _save(jobs)
+        _save(_bounded(jobs))
     return job
 
 
@@ -233,16 +258,15 @@ def add_on_exit(name: str, pid: int, prompt: str,
     now = now if now is not None else time.time()
     if not _pid_alive(pid):
         raise ValueError(f"process {pid} isn't running")
+    owner = _principal(user)
     with _mutex():
-        jobs_ = [j for j in _load() if j.name != name]    # replace by name
+        jobs_ = [j for j in _load() if not _matches(j, name, owner)]
         job = Job(name=name, interval=0, prompt=prompt, kind="on_exit",
                   watch_pid=int(pid), label=(label or "").strip(),
-                  deliver_to=deliver_to.strip().lower(), user=user,
+                  deliver_to=deliver_to.strip().lower(), user=owner,
                   created=now)
         jobs_.append(job)
-        if len(jobs_) > MAX_JOBS:
-            jobs_ = sorted(jobs_, key=lambda j: j.created)[-MAX_JOBS:]
-        _save(jobs_)
+        _save(_bounded(jobs_))
     return job
 
 
@@ -258,41 +282,44 @@ def add_on_change(name: str, watch_cmd: str, prompt: str,
     if not watch_cmd.strip():
         raise ValueError("a watched command is required")
     baseline = _watch_hash(watch_cmd)      # capture now so first change fires
+    owner = _principal(user)
     with _mutex():
-        jobs_ = [j for j in _load() if j.name != name]
+        jobs_ = [j for j in _load() if not _matches(j, name, owner)]
         job = Job(name=name, interval=0, prompt=prompt, kind="on_change",
                   watch_cmd=watch_cmd.strip(), last_hash=baseline or "",
                   label=(label or "").strip(),
-                  deliver_to=deliver_to.strip().lower(), user=user,
+                  deliver_to=deliver_to.strip().lower(), user=owner,
                   created=now, last_run=now)
         jobs_.append(job)
-        if len(jobs_) > MAX_JOBS:
-            jobs_ = sorted(jobs_, key=lambda j: j.created)[-MAX_JOBS:]
-        _save(jobs_)
+        _save(_bounded(jobs_))
     return job
 
 
-def remove(name: str) -> bool:
+def remove(name: str, user: str = "shared") -> bool:
     with _mutex():
         jobs = _load()
-        kept = [j for j in jobs if j.name != name]
+        kept = [j for j in jobs if not _matches(j, name, user)]
         _save(kept)
         return len(kept) != len(jobs)
 
 
-def set_enabled(name: str, on: bool) -> bool:
+def set_enabled(name: str, on: bool, user: str = "shared") -> bool:
     with _mutex():
         jobs = _load()
         found = False
         for j in jobs:
-            if j.name == name:
+            if _matches(j, name, user):
                 j.enabled, found = on, True
         _save(jobs)
         return found
 
 
-def jobs() -> list[Job]:
-    return _load()
+def jobs(user: str | None = None) -> list[Job]:
+    loaded = _load()
+    if user is None:
+        return loaded
+    owner = _principal(user)
+    return [job for job in loaded if _principal(job.user) == owner]
 
 
 def due(now: float | None = None) -> list[Job]:
@@ -338,11 +365,12 @@ def changed(now: float | None = None) -> list[tuple]:
     return out
 
 
-def _mark_hash(name: str, new_hash: str, now: float) -> None:
+def _mark_hash(name: str, new_hash: str, now: float,
+               user: str = "shared") -> None:
     with _mutex():
         jobs_ = _load()
         for j in jobs_:
-            if j.name == name:
+            if _matches(j, name, user):
                 j.last_hash = new_hash
                 j.last_run = now
         _save(jobs_)
@@ -353,20 +381,20 @@ def _mark_hash(name: str, new_hash: str, now: float) -> None:
 RESUME_AFTER = int(os.environ.get("OLYMPUS_JOB_RESUME_AFTER", "3600"))
 
 
-def _mark_started(name: str, now: float) -> None:
+def _mark_started(name: str, now: float, user: str = "shared") -> None:
     with _mutex():
         jobs_ = _load()
         for j in jobs_:
-            if j.name == name:
+            if _matches(j, name, user):
                 j.started_at = now
         _save(jobs_)
 
 
-def _mark_ran(name: str, now: float) -> None:
+def _mark_ran(name: str, now: float, user: str = "shared") -> None:
     with _mutex():
         jobs_ = _load()
         for j in jobs_:
-            if j.name == name:
+            if _matches(j, name, user):
                 j.last_run = now
                 j.resume_attempts = 0   # a finished run clears resume state
         _save(jobs_)
@@ -443,20 +471,21 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     ready = due(now)
     # Interrupted runs (process died mid-job) get one resume with a
     # continuation note instead of silently waiting a whole cadence.
-    resumed_names = set()
+    resumed_keys: set[tuple[str, str]] = set()
+    ready_keys = {_key(job) for job in ready}
     for job in interrupted(now):
-        if all(j.name != job.name for j in ready):
-            resumed_names.add(job.name)
+        if _key(job) not in ready_keys:
+            resumed_keys.add(_key(job))
             ready.append(job)
+            ready_keys.add(_key(job))
     # Change-driven jobs: poll their watched output and fire on a difference.
     # The new hash is persisted BEFORE running so the same change fires once,
     # even if the run itself fails.
-    changed_hashes: dict[str, str] = {}
     for job, new_hash in changed(now):
-        if all(j.name != job.name for j in ready):
-            changed_hashes[job.name] = new_hash
-            _mark_hash(job.name, new_hash, now)
+        if _key(job) not in ready_keys:
+            _mark_hash(job.name, new_hash, now, user=job.user)
             ready.append(job)
+            ready_keys.add(_key(job))
     if not ready:
         return log
     if runner is None:
@@ -465,33 +494,33 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
             return orchestrator.Olympus(user=user).ask(prompt)
     for job in ready:
         prompt = _effective_prompt(job)
-        if job.name in resumed_names:
-            _bump_resume(job.name)
+        if _key(job) in resumed_keys:
+            _bump_resume(job.name, user=job.user)
             prompt = ("A previous attempt at this task was interrupted by a "
                       "restart or upgrade before it finished. Redo it in "
                       "full now.\n\n" + prompt)
-        _mark_started(job.name, now)
+        _mark_started(job.name, now, user=job.user)
         try:
             answer = runner(prompt, job.user)
             _deliver(job, answer)
             memory.set_user("shared")
             memory.save("reports", f"Scheduled: {job.name}", answer)
-            log.append(("resumed interrupted job" if job.name in resumed_names
+            log.append(("resumed interrupted job" if _key(job) in resumed_keys
                         else "ran scheduled job") + f" '{job.name}'")
         except Exception as err:
             log.append(f"scheduled job '{job.name}' failed: {str(err)[:120]}")
         finally:
-            _mark_ran(job.name, now)
+            _mark_ran(job.name, now, user=job.user)
             if job.kind == "on_exit":
-                set_enabled(job.name, False)     # one-shot: fired, now dormant
+                set_enabled(job.name, False, user=job.user)
     return log
 
 
-def _bump_resume(name: str) -> None:
+def _bump_resume(name: str, user: str = "shared") -> None:
     with _mutex():
         jobs_ = _load()
         for j in jobs_:
-            if j.name == name:
+            if _matches(j, name, user):
                 j.resume_attempts += 1
         _save(jobs_)
 
@@ -510,8 +539,8 @@ def _human_interval(secs: int) -> str:
     return f"{secs}s"
 
 
-def summary() -> str:
-    js = _load()
+def summary(user: str | None = None) -> str:
+    js = jobs(user)
     if not js:
         return "No scheduled jobs. Add one: olympus schedule add <name> <interval> <prompt>"
     lines = ["Scheduled jobs:"]

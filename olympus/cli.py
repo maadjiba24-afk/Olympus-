@@ -2545,7 +2545,7 @@ def main(argv: list[str] | None = None) -> int:
             print(media.edit_image(prompt, args.name))
     elif args.command == "agenda":
         from . import scheduler
-        print(scheduler.summary())
+        print(scheduler.summary(user="cli"))
         from . import calendar as gcal
         if gcal.configured():
             try:
@@ -2923,7 +2923,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "schedule":
         from . import scheduler
         if args.action == "list":
-            print(scheduler.summary())
+            print(scheduler.summary(user="cli"))
         elif args.action == "add":
             prompt = " ".join(args.prompt).strip()
             if not args.name or not prompt:
@@ -2956,9 +2956,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Scheduled '{job.name}' every "
                       f"{scheduler._human_interval(job.interval)}.")
         elif args.action == "remove":
-            print("Removed." if scheduler.remove(args.name) else "No such job.")
+            print("Removed." if scheduler.remove(args.name, user="cli")
+                  else "No such job.")
         elif args.action in ("enable", "disable"):
-            ok = scheduler.set_enabled(args.name, args.action == "enable")
+            ok = scheduler.set_enabled(args.name, args.action == "enable",
+                                       user="cli")
             print("Updated." if ok else "No such job.")
         elif args.action == "run":
             ran = scheduler.run_due()
