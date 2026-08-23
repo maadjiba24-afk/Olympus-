@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -96,6 +97,23 @@ class ActionType:
 
 
 _REGISTRY: dict[str, ActionType] = {}
+
+
+@contextmanager
+def _owner_context(user: str):
+    """Run an action callback as its authenticated owner.
+
+    Approval may happen in a different request, worker, or conversation from
+    preparation.  Callbacks that select a per-user integration through
+    ``memory.current_user()`` must therefore see the durable ``Action.user``,
+    never whatever tenant happens to be ambient at execution time.
+    """
+    previous = memory.current_user()
+    memory.set_user(user)
+    try:
+        yield
+    finally:
+        memory.set_user(previous)
 
 
 def register(action_type: ActionType) -> None:
@@ -329,7 +347,8 @@ def prepare(user: str, type_name: str, payload: dict,
     # trusted boundary. Caller-supplied internal fields are discarded.
     payload = _canonical_payload(user, at, payload)
     try:
-        preview = at.preview(payload)
+        with _owner_context(user):
+            preview = at.preview(payload)
     except Exception as err:
         raise ValueError(f"could not render action preview: {err}") from err
     action = Action(
@@ -360,7 +379,8 @@ def edit(user: str, action_id: str, changes: dict,
         candidate[key] = value
     at = _REGISTRY.get(action.type)
     try:
-        preview = at.preview(candidate)
+        with _owner_context(action.user):
+            preview = at.preview(candidate)
     except Exception as err:
         raise ValueError(f"could not render action preview: {err}") from err
     action.payload = candidate
@@ -420,7 +440,8 @@ def _execute(action: Action) -> Action:
     # Any rendering failure or mismatch is a hard stop: prepare and review a
     # fresh action instead of executing content that was not actually shown.
     try:
-        current_preview = at.preview(action.payload)
+        with _owner_context(action.user):
+            current_preview = at.preview(action.payload)
     except Exception as err:
         action.status = FAILED
         action.error = f"action preview could not be verified: {err}"
@@ -482,7 +503,8 @@ def _execute(action: Action) -> Action:
         _save(action); _audit(action, "blocked_contract")
         return action
     try:
-        action.result = at.execute(action.payload) or {}
+        with _owner_context(action.user):
+            action.result = at.execute(action.payload) or {}
         action.status = EXECUTED
         action.executed_at = time.time()
         _save(action); _audit(action, "executed")
@@ -556,7 +578,8 @@ def undo(user: str, action_id: str) -> Action:
     if not at or at.undo is None:
         raise ValueError("this action type is not reversible")
     try:
-        at.undo(action.result)
+        with _owner_context(action.user):
+            at.undo(action.result)
         action.status = UNDONE
         _save(action); _audit(action, "undone")
         from . import outcomes
