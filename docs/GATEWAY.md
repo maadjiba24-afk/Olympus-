@@ -38,10 +38,15 @@ A channel is "configured" (and auto-started) when its env vars are present:
 | Discord | `DISCORD_PUBLIC_KEY` (+ bot token) | HTTP | 8486 |
 | Slack | `SLACK_SIGNING_SECRET` (+ `SLACK_BOT_TOKEN`) | HTTP | 8487 |
 | WhatsApp | `WHATSAPP_VERIFY_TOKEN` (+ `WHATSAPP_*`) | HTTP | 8485 |
-| Webhook | `OLYMPUS_WEBHOOK_SECRET` | HTTP | 8488 |
+| Webhook | `OLYMPUS_WEBHOOK_SECRET` + `OLYMPUS_WEBHOOK_USER` | HTTP | 8488 |
 
 The HTTP channels each bind a distinct port; put them behind your reverse proxy
 / tunnel. The polling channels need no inbound port.
+
+The generic webhook secret is bound to exactly one server-configured owner.
+Send only `{"text":"..."}`; a caller-supplied `user` field is rejected. This
+prevents an integration that knows the shared secret from selecting another
+tenant's memory namespace.
 
 ## Security note — channels are untrusted by default
 

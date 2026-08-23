@@ -1,14 +1,15 @@
 """Inbound webhook gateway — a generic HTTP entry point into Olympus.
 
 Any system that can POST JSON can talk to the council: a form, a cron on another
-host, a Zapier/n8n step, a custom app. It POSTs ``{"user": "...", "text": "..."}``
-and gets back ``{"reply": "..."}`` — routed through the SAME shared gateway
-pipeline (per-user memory, slash commands, verified answers) as every messaging
-platform.
+host, a Zapier/n8n step, a custom app. It POSTs ``{"text": "..."}`` and gets
+back ``{"reply": "..."}`` — routed through the SAME shared gateway pipeline
+(per-user memory, slash commands, verified answers) as every messaging
+platform.  The caller never selects that memory namespace: the operator binds
+the endpoint to one owner with ``OLYMPUS_WEBHOOK_USER``.
 
 Auth: set OLYMPUS_WEBHOOK_SECRET and callers must send it in the
-``X-Olympus-Secret`` header (or ``?secret=``). Unset = open (fine behind your
-own network boundary, not for the public internet).
+``X-Olympus-Secret`` header.  Both that secret and ``OLYMPUS_WEBHOOK_USER`` are
+required; the server refuses to start if either is absent.
 """
 
 from __future__ import annotations
@@ -72,20 +73,39 @@ def _secret_ok(supplied: str) -> bool:
     return hmac.compare_digest(want, supplied or "")
 
 
-def handle_payload(bots: dict, payload: dict) -> dict:
-    """Core: turn a {user, text} payload into a {reply} dict. Pure/testable —
-    no HTTP. Raises ValueError on a malformed payload."""
+def _configured_user() -> str:
+    """The server-owned tenant bound to the one configured webhook secret."""
+    return os.environ.get("OLYMPUS_WEBHOOK_USER", "").strip()
+
+
+def configured() -> bool:
+    """Whether the inbound webhook has both halves of its identity binding."""
+    return bool(os.environ.get("OLYMPUS_WEBHOOK_SECRET") and _configured_user())
+
+
+def handle_payload(bots: dict, payload: dict, *, owner: str) -> dict:
+    """Core: turn a {text} payload into a {reply} dict for trusted ``owner``.
+
+    ``owner`` is supplied by server configuration, never by the request.  A
+    public ``user`` field is rejected instead of ignored so an integration
+    cannot mistakenly believe it selected a tenant when it did not.
+    """
     if not isinstance(payload, dict):
         raise ValueError("payload must be a JSON object")
+    if "user" in payload:
+        raise ValueError("caller-supplied 'user' is forbidden; configure "
+                         "OLYMPUS_WEBHOOK_USER on the server")
+    owner = str(owner or "").strip()
+    if not owner:
+        raise ValueError("webhook owner is not configured")
     text = (payload.get("text") or "").strip()
     if not text:
         raise ValueError("missing 'text'")
-    user = (payload.get("user") or "anonymous").strip() or "anonymous"
-    chunks = gateway.reply_for(bots, user, text, prefix="hook")
+    chunks = gateway.reply_for(bots, owner, text, prefix="hook")
     return {"reply": "\n\n".join(chunks)}
 
 
-def _make_handler(bots: dict):
+def _make_handler(bots: dict, owner: str):
     class _Handler(BaseHTTPRequestHandler):
         def _send(self, code: int, obj: dict) -> None:
             body = json.dumps(obj).encode()
@@ -109,7 +129,7 @@ def _make_handler(bots: dict):
             try:
                 length = min(int(self.headers.get("Content-Length", 0)), _MAX_BODY)
                 payload = json.loads(self.rfile.read(length) or b"{}")
-                result = handle_payload(bots, payload)
+                result = handle_payload(bots, payload, owner=owner)
             except ValueError as err:
                 return self._send(400, {"error": str(err)})
             except Exception as err:  # never leak a stack trace
@@ -126,9 +146,9 @@ def run_server(host: str = "127.0.0.1", port: int = 8487) -> None:
     """Serve the generic webhook endpoint.
 
     Binds loopback by DEFAULT (was 0.0.0.0) and refuses to start at all without
-    a secret: an endpoint that runs the council on the operator's key is not
-    something to expose by omission. Exposing it is now two deliberate acts —
-    setting the secret and passing an explicit --host."""
+    a secret and server-owned user: an endpoint that runs the council on the
+    operator's key is not something to expose by omission. Exposing it requires
+    setting both bindings and passing an explicit --host."""
     bots: dict = {}
     if not os.environ.get("OLYMPUS_WEBHOOK_SECRET"):
         raise SystemExit(
@@ -138,6 +158,12 @@ def run_server(host: str = "127.0.0.1", port: int = 8487) -> None:
             "    export OLYMPUS_WEBHOOK_SECRET=$(python3 -c "
             "'import secrets; print(secrets.token_urlsafe(32))')\n"
             "and send it in the X-Olympus-Secret header.")
+    owner = _configured_user()
+    if not owner:
+        raise SystemExit(
+            "refusing to start: OLYMPUS_WEBHOOK_USER is not set.\n"
+            "The shared webhook secret must map to one server-owned memory "
+            "namespace; request bodies are not allowed to choose a user.")
     print(f"⚡ Olympus webhook gateway on {host}:{port}  (auth: on)")
-    print('   POST {"user":"...","text":"..."}  →  {"reply":"..."}')
-    HTTPServer((host, port), _make_handler(bots)).serve_forever()
+    print('   POST {"text":"..."}  →  {"reply":"..."}')
+    HTTPServer((host, port), _make_handler(bots, owner)).serve_forever()

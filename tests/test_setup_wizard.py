@@ -179,7 +179,7 @@ def test_gateway_checklist_status_and_multiselect(monkeypatch, capsys):
     values: dict = {}
     names = list(firstrun._GATEWAYS)
     tg, wh = names.index("telegram") + 1, names.index("webhook") + 1
-    answers = iter([f"{wh}"])                          # configure webhook only
+    answers = iter([f"{wh}", "lab-owner"])             # configure webhook only
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     monkeypatch.setattr(firstrun, "_ask_secret", lambda *_: "s3cret")
     firstrun._configure_gateway(values)
@@ -187,6 +187,7 @@ def test_gateway_checklist_status_and_multiselect(monkeypatch, capsys):
     assert "[x] Telegram" in out and "(configured)" in out
     assert "(not configured)" in out                   # the untouched ones
     assert values["OLYMPUS_WEBHOOK_SECRET"] == "s3cret"
+    assert values["OLYMPUS_WEBHOOK_USER"] == "lab-owner"
 
 
 def test_gateway_checklist_blank_configures_nothing(monkeypatch):

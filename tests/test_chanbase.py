@@ -155,6 +155,15 @@ def test_webhook_server_refuses_to_start_without_a_secret(monkeypatch):
     assert "OLYMPUS_WEBHOOK_SECRET" in str(err.value)
 
 
+def test_webhook_server_refuses_unbound_secret(monkeypatch):
+    from olympus import webhook_gateway
+    monkeypatch.setenv("OLYMPUS_WEBHOOK_SECRET", "synthetic-secret")
+    monkeypatch.delenv("OLYMPUS_WEBHOOK_USER", raising=False)
+    with pytest.raises(SystemExit) as err:
+        webhook_gateway.run_server(host="127.0.0.1", port=0)
+    assert "OLYMPUS_WEBHOOK_USER" in str(err.value)
+
+
 def test_whatsapp_is_closed_without_an_allowlist(monkeypatch):
     from olympus import whatsapp
     monkeypatch.delenv("WHATSAPP_ALLOWED_NUMBERS", raising=False)

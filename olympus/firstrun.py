@@ -408,14 +408,21 @@ _GATEWAYS = {
                "(connect Gmail via the web UI OAuth flow)", True),
               ("OLYMPUS_EMAIL_ALLOW", "Only reply to these senders "
                "(comma-separated; blank = anyone)", False)],
-    "webhook": [("OLYMPUS_WEBHOOK_SECRET", "Shared secret callers must send "
-                 "(blank = open — LAN only!)", True)],
+    "webhook": [("OLYMPUS_WEBHOOK_SECRET", "Shared secret callers must send",
+                 True),
+                ("OLYMPUS_WEBHOOK_USER", "Server-owned user namespace bound "
+                 "to this secret", False)],
 }
 
 
 def _gateway_configured(name: str, values: dict | None = None) -> bool:
     """Whether a platform has at least one of its env vars set (saved or env)."""
     values = values or {}
+    if name == "webhook":
+        # Both are load-bearing: a secret without a server-owned principal
+        # would authenticate the caller but still let its body choose a tenant.
+        return all(os.environ.get(env) or values.get(env)
+                   for env, _desc, _secret in _GATEWAYS[name])
     return any(os.environ.get(env) or values.get(env)
                for env, _desc, _secret in _GATEWAYS[name])
 

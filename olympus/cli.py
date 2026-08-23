@@ -938,8 +938,9 @@ def build_parser() -> argparse.ArgumentParser:
                                            "unread mail via the Gmail adapter")
     p_email.add_argument("--interval", type=int, default=60,
                          help="seconds between inbox polls (default 60)")
-    p_hook = sub.add_parser("webhook", help="serve the inbound webhook gateway "
-                                            "(POST {user,text} → {reply})")
+    p_hook = sub.add_parser("webhook", help="serve the owner-bound inbound "
+                                            "webhook gateway "
+                                            "(POST {text} → {reply})")
     p_hook.add_argument("--host", default="127.0.0.1")
     p_hook.add_argument("--port", type=int, default=8487)
 

@@ -575,7 +575,7 @@ def _channel_registry() -> "dict[str, tuple]":
         "whatsapp": (lambda: env("WHATSAPP_VERIFY_TOKEN"),
                      lambda: whatsapp.run_server(
                          port=_CHANNEL_PORTS["whatsapp"])),
-        "webhook": (lambda: env("OLYMPUS_WEBHOOK_SECRET"),
+        "webhook": (webhook_gateway.configured,
                     lambda: webhook_gateway.run_server(
                         port=_CHANNEL_PORTS["webhook"])),
     }
