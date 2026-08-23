@@ -417,7 +417,18 @@ def interrupted(now: float | None = None) -> list[Job]:
 def _deliver(job: Job, answer: str) -> None:
     """Best-effort delivery to the chosen platform (no-op if unconfigured)."""
     target = job.deliver_to
+    if not target:
+        return
     msg = f"⏰ Scheduled — {job.name}\n\n{answer}"
+    # A scheduled result is proactive output and the configured channel may be
+    # a group.  It must cross the same C0-only broadcast boundary as heartbeat
+    # output, using the durable job owner to select the correct vault namespace.
+    from . import config, egress
+    if config.egress_guard_enabled():
+        decision = egress.guard(
+            msg, egress.ChannelKind.BROADCAST, user=job.user)
+        if decision.verdict is egress.Verdict.HOLD:
+            return
     try:
         if target == "telegram":
             from . import telegram

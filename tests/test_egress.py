@@ -380,6 +380,29 @@ def test_agentbeat_direct_delivery_checks_the_beat_owner(monkeypatch):
     assert seen == ["alice"]
 
 
+def test_scheduler_delivery_checks_job_owner_before_channel(monkeypatch):
+    from olympus import scheduler, security, slack
+    sent = []
+    seen = []
+
+    def held(user):
+        seen.append(user)
+        if user == "alice":
+            return [("vault:synthetic", "synthetic-alice-secret-12345")]
+        return []
+
+    monkeypatch.setattr(security, "_held_secrets", held)
+    monkeypatch.setattr(slack, "notify", lambda text: (sent.append(text) or True))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    job = scheduler.Job(name="daily", interval=3600, prompt="p",
+                        deliver_to="slack", user="alice")
+
+    scheduler._deliver(job, "status: synthetic-alice-secret-12345")
+
+    assert sent == []
+    assert seen == ["alice"]
+
+
 def test_propose_upgrade_withholds_pii_from_github(monkeypatch):
     from olympus import tools, github
     filed = []
