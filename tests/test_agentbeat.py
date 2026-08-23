@@ -39,10 +39,12 @@ def test_substantive_reply_is_delivered(monkeypatch):
     agentbeat.add("u1", 60, "check", now=0.0)
     delivered = []
     monkeypatch.setattr(gateway, "notify_all",
-                        lambda t: delivered.append(t) or ["telegram"])
+                        lambda t, *, user="shared":
+                        delivered.append((t, user)) or ["telegram"])
     log = agentbeat.run_due(now=61.0,
                             runner=lambda b: "Your build broke overnight.")
-    assert delivered and "build broke" in delivered[0]
+    assert delivered and "build broke" in delivered[0][0]
+    assert delivered[0][1] == "u1"
     assert "delivered to telegram" in log[0]
 
 

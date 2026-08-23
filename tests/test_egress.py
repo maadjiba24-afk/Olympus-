@@ -332,6 +332,54 @@ def test_agentbeat_deliver_holds_sensitive_to_direct_channel(monkeypatch):
     assert "held" in where.lower() and sent == []
 
 
+def test_notify_all_checks_the_authenticated_owner_secret_namespace(monkeypatch):
+    from olympus import gateway, security, slack
+    sent = []
+    seen = []
+
+    def held(user):
+        seen.append(user)
+        if user == "alice":
+            return [("vault:synthetic", "synthetic-alice-secret-12345")]
+        return []
+
+    monkeypatch.setattr(security, "_held_secrets", held)
+    monkeypatch.setattr(slack, "notify", lambda text: (sent.append(text) or True))
+    monkeypatch.setattr(gateway, "NOTIFY_CHANNELS", ("slack",))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+
+    delivered = gateway.notify_all(
+        "status: synthetic-alice-secret-12345", user="alice")
+
+    assert delivered == []
+    assert sent == []
+    assert seen == ["alice"]
+
+
+def test_agentbeat_direct_delivery_checks_the_beat_owner(monkeypatch):
+    from olympus import agentbeat, security, slack
+    sent = []
+    seen = []
+
+    def held(user):
+        seen.append(user)
+        if user == "alice":
+            return [("vault:synthetic", "synthetic-alice-secret-12345")]
+        return []
+
+    monkeypatch.setattr(security, "_held_secrets", held)
+    monkeypatch.setattr(slack, "notify", lambda text: (sent.append(text) or True))
+    monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
+    beat = agentbeat.Beat(id="1", user="alice", every=86400, prompt="p",
+                          deliver_to="slack")
+
+    where = agentbeat._deliver(beat, "status: synthetic-alice-secret-12345")
+
+    assert "held" in where.lower()
+    assert sent == []
+    assert seen == ["alice"]
+
+
 def test_propose_upgrade_withholds_pii_from_github(monkeypatch):
     from olympus import tools, github
     filed = []

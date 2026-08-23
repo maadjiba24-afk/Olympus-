@@ -148,7 +148,7 @@ def inflight_take(prefix: str) -> list[dict]:
     return out
 
 
-def notify_all(text: str) -> list[str]:
+def notify_all(text: str, *, user: str = "shared") -> list[str]:
     """Push a proactive message to EVERY configured chat channel and return the
     channels that accepted it. Each gateway's notify() is a no-op returning
     False when that platform isn't configured, so this fans out only where
@@ -158,10 +158,12 @@ def notify_all(text: str) -> list[str]:
     C0-only channel — a payload carrying the user's PII or a stored secret (e.g.
     a heartbeat that echoed private working state to a Telegram group) is a leak.
     When the egress guard is enabled, `guard(..., BROADCAST)` HOLDs such content
-    and it is not broadcast (returns [] — delivered nowhere)."""
+    and it is not broadcast (returns [] — delivered nowhere). ``user`` must be
+    the authenticated owner of user-derived content; the default is reserved
+    for genuinely shared system alerts."""
     from . import config, egress
     if config.egress_guard_enabled():
-        d = egress.guard(text, egress.ChannelKind.BROADCAST, user="shared")
+        d = egress.guard(text, egress.ChannelKind.BROADCAST, user=user)
         if d.verdict is egress.Verdict.HOLD:
             return []
     from . import (discord, googlechat, matrix, mattermost, ntfy,
