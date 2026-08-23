@@ -200,7 +200,7 @@ def test_act_goal_lifecycle():
     assert r["ok"]
     gid = goals.active("admin")[0].id
     assert adminpanel.act("goal_done", {"id": gid})["ok"]
-    assert goals.get(gid).status == "done"
+    assert goals.get(gid, user="admin").status == "done"
     r = adminpanel.act("goal_drop", {"id": "nope"})
     assert r["ok"] and "No goal" in r["message"]     # message passthrough
 

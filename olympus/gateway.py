@@ -281,15 +281,17 @@ def reply_for(bots: dict, user_key: str, text: str,
         if not arg.strip() or sub == "list":
             return chunk(goals.summary(uid))
         if sub == "drop":
-            return chunk(goals.set_status(rest.strip(), "dropped"))
+            return chunk(goals.set_status(
+                rest.strip(), "dropped", user=uid))
         if sub == "done":
             return chunk(goals.set_status(rest.strip(), "done",
-                                          evidence="closed manually"))
+                                          evidence="closed manually",
+                                          user=uid))
         if sub == "wait":
             parts = rest.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 return chunk("Usage: /goal wait <goal id> <pid>")
-            return chunk(goals.wait_on(parts[0], int(parts[1])))
+            return chunk(goals.wait_on(parts[0], int(parts[1]), user=uid))
         text, _, contract = arg.partition("::")
         return chunk(goals.add(uid, text.strip(), contract.strip()))
     if cmd == "/usage":

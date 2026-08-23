@@ -35,8 +35,9 @@ def test_ask_olympus_roundtrip():
                         "text": "the council says: what is 2+2? -> 4"}]
 
 
-def test_olympus_goals_tool():
+def test_olympus_goals_tool(monkeypatch):
     goals.add("mcp", "keep the CI green")
+    monkeypatch.setenv("OLYMPUS_MCP_USER", "mcp")
     res = mcp_server.handle_message(
         _req("tools/call", name="olympus_goals", arguments={}))
     assert "keep the CI green" in res["result"]["content"][0]["text"]

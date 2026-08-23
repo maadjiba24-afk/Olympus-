@@ -512,8 +512,8 @@ function render(d) {
       (x.evidence ? '<br><span class="muted">' + esc(x.evidence) + '</span>'
                   : '') +
       (x.status === 'active' ? '<br>' +
-        btn('mark done', 'goal_done', {id: x.id}) + ' ' +
-        btn('drop', 'goal_drop', {id: x.id}, true) : '')))) :
+        btn('mark done', 'goal_done', {id: x.id, user: x.user}) + ' ' +
+        btn('drop', 'goal_drop', {id: x.id, user: x.user}, true) : '')))) :
       '<p class="muted">none</p>') +
     '<p><input class="act" id="goal_text" size="26" ' +
     'placeholder="new goal"> <input class="act" id="goal_contract" ' +
@@ -716,13 +716,15 @@ def _act_goal_add(p: dict) -> str:
 
 def _act_goal_drop(p: dict) -> str:
     from . import goals
-    return goals.set_status(str(p.get("id", "")), "dropped")
+    return goals.set_status(str(p.get("id", "")), "dropped",
+                            user=str(p.get("user") or "admin"))
 
 
 def _act_goal_done(p: dict) -> str:
     from . import goals
     return goals.set_status(str(p.get("id", "")), "done",
-                            evidence="closed manually from the admin panel")
+                            evidence="closed manually from the admin panel",
+                            user=str(p.get("user") or "admin"))
 
 
 def _act_schedule_add(p: dict) -> str:

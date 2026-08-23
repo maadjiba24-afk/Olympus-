@@ -149,15 +149,18 @@ def dispatch_command(bot, raw: str):
         if not arg.strip() or sub == "list":
             return (True, goals.summary(user), False)
         if sub == "drop":
-            return (True, goals.set_status(rest.strip(), "dropped"), False)
+            return (True, goals.set_status(
+                rest.strip(), "dropped", user=user), False)
         if sub == "done":
             return (True, goals.set_status(rest.strip(), "done",
-                                           evidence="closed manually"), False)
+                                           evidence="closed manually",
+                                           user=user), False)
         if sub == "wait":
             parts = rest.split()
             if len(parts) != 2 or not parts[1].isdigit():
                 return (True, "Usage: /goal wait <goal id> <pid>", False)
-            return (True, goals.wait_on(parts[0], int(parts[1])), False)
+            return (True, goals.wait_on(
+                parts[0], int(parts[1]), user=user), False)
         text, _, contract = arg.partition("::")
         return (True, goals.add(user, text.strip(), contract.strip()), False)
     if name == "/learn":

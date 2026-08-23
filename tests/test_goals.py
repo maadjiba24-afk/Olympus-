@@ -38,7 +38,7 @@ def test_work_cycle_logs_progress_and_stays_open():
     line = goals.work_one(g, runner=lambda u, p: "drafted section 1",
                           judge_fn=_judge(missing="sections 2-3"))
     assert "not done yet" in line
-    fresh = goals.get(g.id)
+    fresh = goals.get(g.id, user="alice")
     assert fresh.status == "active"
     assert fresh.progress and "drafted section 1" in fresh.progress[-1]["note"]
 
@@ -50,15 +50,15 @@ def test_goal_closes_only_on_confident_evidence():
     line = goals.work_one(g, runner=lambda u, p: "I did it, all done!",
                           judge_fn=_judge(done=True, confidence=0.4))
     assert "not done yet" in line
-    assert goals.get(g.id).status == "active"
+    assert goals.get(g.id, user="alice").status == "active"
     # Concrete evidence over the floor — closes.
     line = goals.work_one(
         g, runner=lambda u, p: "report.pdf sent to bob@x.com at 09:12",
         judge_fn=_judge(done=True, confidence=0.95,
                         evidence="report.pdf delivered, receipt logged"))
     assert "COMPLETE" in line
-    assert goals.get(g.id).status == "done"
-    assert "report.pdf" in goals.get(g.id).evidence
+    assert goals.get(g.id, user="alice").status == "done"
+    assert "report.pdf" in goals.get(g.id, user="alice").evidence
 
 
 def test_goal_stalls_after_max_checks(monkeypatch):
@@ -70,7 +70,7 @@ def test_goal_stalls_after_max_checks(monkeypatch):
     line = goals.work_one(g, runner=lambda u, p: "tried again",
                           judge_fn=_judge(missing="the impossible"))
     assert "STALLED" in line
-    assert goals.get(g.id).status == "stalled"
+    assert goals.get(g.id, user="alice").status == "stalled"
 
 
 def test_run_due_works_new_goals_immediately_then_respects_cadence(monkeypatch):
