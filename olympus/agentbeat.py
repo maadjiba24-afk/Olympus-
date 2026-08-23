@@ -174,7 +174,7 @@ def _deliver(beat: Beat, text: str) -> str:
     # gate here too — sensitive beat output is held, not pushed to a group.
     from . import config, egress
     if config.egress_guard_enabled():
-        d = egress.guard(note, egress.ChannelKind.BROADCAST, user="shared")
+        d = egress.guard(note, egress.ChannelKind.BROADCAST, user=beat.user)
         if d.verdict is egress.Verdict.HOLD:
             return "nowhere (held: sensitive content)"
     if beat.deliver_to:
@@ -192,7 +192,7 @@ def _deliver(beat: Beat, text: str) -> str:
                 return beat.deliver_to if fn(note) else "nowhere (channel down)"
             except Exception:
                 return "nowhere (channel errored)"
-    delivered = gateway.notify_all(note)
+    delivered = gateway.notify_all(note, user=beat.user)
     return ", ".join(delivered) if delivered else "nowhere (no channel)"
 
 
