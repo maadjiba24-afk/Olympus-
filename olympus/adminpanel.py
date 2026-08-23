@@ -545,9 +545,12 @@ function render(d) {
       'every ' + dur(j.interval_seconds) + ' &middot; ' + esc(j.prompt) +
       (j.deliver_to ? ' &rarr; ' + esc(j.deliver_to) : '') +
       '<br><span class="muted">last ' + ago(j.last_run) + '</span><br>' +
-      (j.enabled ? btn('disable', 'schedule_disable', {name: j.name})
-                 : btn('enable', 'schedule_enable', {name: j.name})) + ' ' +
-      btn('remove', 'schedule_remove', {name: j.name}, true)))) :
+      (j.enabled ? btn('disable', 'schedule_disable',
+                       {name: j.name, user: j.user})
+                 : btn('enable', 'schedule_enable',
+                       {name: j.name, user: j.user})) + ' ' +
+      btn('remove', 'schedule_remove',
+          {name: j.name, user: j.user}, true)))) :
       '<p class="muted">none</p>') +
     '<p><input class="act" id="sch_name" size="10" placeholder="name"> ' +
     '<input class="act" id="sch_interval" size="8" placeholder="daily"> ' +
@@ -736,7 +739,8 @@ def _act_schedule_add(p: dict) -> str:
 
 def _act_schedule_remove(p: dict) -> str:
     from . import scheduler
-    ok = scheduler.remove(str(p.get("name", "")))
+    user = str(p.get("user") or "admin")
+    ok = scheduler.remove(str(p.get("name", "")), user=user)
     if not ok:
         raise ValueError(f"no schedule named '{p.get('name')}'")
     return f"Removed schedule '{p.get('name')}'."
@@ -744,7 +748,8 @@ def _act_schedule_remove(p: dict) -> str:
 
 def _act_schedule_enabled(p: dict, on: bool) -> str:
     from . import scheduler
-    ok = scheduler.set_enabled(str(p.get("name", "")), on)
+    user = str(p.get("user") or "admin")
+    ok = scheduler.set_enabled(str(p.get("name", "")), on, user=user)
     if not ok:
         raise ValueError(f"no schedule named '{p.get('name')}'")
     return f"Schedule '{p.get('name')}' {'enabled' if on else 'disabled'}."
