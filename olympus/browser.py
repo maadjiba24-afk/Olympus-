@@ -1167,7 +1167,24 @@ class _PlaywrightTransport:
 
 def set_transport_factory(factory: Callable[[], Transport] | None) -> None:
     """Install (or clear) the transport factory used by the global session.
-    Tests pass a FakeTransport factory; clearing falls back to env detection."""
+    Tests pass a FakeTransport factory; clearing falls back to env detection.
+
+    RECONFIGURATION, NOT TEARDOWN. This disconnects the in-process session (see
+    `reset()`) and leaves the durable lease — owner and `lease_id` — exactly as
+    it was. It is a public test/embedder hook, so it is reachable by callers
+    this module does not control; "production does not normally call it" is not
+    a security boundary. Releasing here would let anyone holding a reference to
+    this function hand a credentialed browser to the next claimant by swapping
+    a transport, which is precisely the transfer the lease exists to prevent.
+
+    Swapping the transport does NOT destroy what the old one was connected to:
+    an auto-launched Chromium keeps running with its profile, and a remote
+    browser is entirely external. Ownership therefore still ends only through
+    `relinquish()`, after verified destruction.
+
+    A test that wants a clean world calls `browserlease.clear_for_tests()` in
+    its own fixture.
+    """
     global _TRANSPORT_FACTORY
     _TRANSPORT_FACTORY = factory
     reset()
@@ -1345,7 +1362,10 @@ def _chrome_args(binary: str, port: int, user_data_dir: str,
     return args
 
 
-_launched: Any = None      # (Popen, base_url) of a browser we started
+#: (Popen, base_url, profile_dir) of a browser WE started. The profile path is
+#: tracked so `relinquish()` can delete exactly the directory Olympus created —
+#: never a path derived from anything a caller supplied.
+_launched: Any = None
 
 
 def launch_local(headless: bool = False, timeout: float | None = None) -> str:
@@ -1395,7 +1415,7 @@ def launch_local(headless: bool = False, timeout: float | None = None) -> str:
         try:
             with urllib.request.urlopen(base + "/json/version", timeout=2) as r:
                 if r.status == 200:
-                    _launched = (proc, base)
+                    _launched = (proc, base, profile)
                     err_log.close()
                     return base
         except Exception:
@@ -1453,6 +1473,82 @@ def _browser_engine() -> str:
         ) from err
 
 
+# --- transport identity (env-only; performs NO attach or inspection) --------
+#
+# The ownership check has to happen BEFORE anything touches a browser that may
+# already hold somebody's session, and the remote-CDP rule depends on which
+# transport we are about to use. So the kind must be knowable without building
+# it: `_resolve_page_ws` would already have made an HTTP request to the remote
+# browser's /json endpoint, which is inspection.
+
+FAKE, PLAYWRIGHT, AUTOLAUNCH, REMOTE_CDP, NONE = (
+    "fake", "playwright", "autolaunch", "remote_cdp", "none")
+
+
+def _transport_kind() -> str:
+    """Which transport `_build_transport` would construct, from configuration
+    alone. Pure: no network, no subprocess, no browser inspection."""
+    if _TRANSPORT_FACTORY is not None:
+        return FAKE
+    engine = _browser_engine()
+    endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
+    if engine != "chromium":
+        return PLAYWRIGHT if _autolaunch_enabled() and not endpoint else NONE
+    if endpoint:
+        return REMOTE_CDP
+    if _autolaunch_enabled():
+        return AUTOLAUNCH
+    return NONE
+
+
+def _carries_foreign_state(kind: str) -> bool:
+    """Whether a browser of this kind may ALREADY hold credentials that Olympus
+    did not put there — i.e. whether "first caller claims it" is unsafe.
+
+    Remote CDP always does: the documented setup attaches Olympus to a browser
+    the operator already uses, so its cookie jar predates us. An autolaunched
+    Chromium does once we have started one in this process, because `reset()`
+    does not terminate it and `launch_local` reuses a live one. Playwright
+    builds a fresh ephemeral context per transport, and the fake transport
+    starts empty, so neither carries state across a build.
+    """
+    if kind == REMOTE_CDP:
+        return True
+    if kind == AUTOLAUNCH:
+        return _launched is not None and _launched[0].poll() is None
+    return False
+
+
+def _fingerprint(kind: str) -> str:
+    """A best-effort browser-instance identifier, for operator diagnosis ONLY.
+
+    Chrome's /json/version exposes a browser-level websocket URL containing a
+    per-process UUID. It is recorded in the lease so an operator can tell
+    whether the browser behind a lease is still the same one. It is NEVER
+    consulted to decide ownership: a mismatch does not release a lease and does
+    not admit a different owner (see browserlease's FINGERPRINT note). Returns
+    "" whenever it cannot be obtained — never raises, never blocks a claim.
+    """
+    if kind not in (AUTOLAUNCH, REMOTE_CDP):
+        return ""
+    base = ""
+    if kind == AUTOLAUNCH and _launched is not None:
+        base = str(_launched[1])
+    else:
+        endpoint = os.environ.get("OLYMPUS_BROWSER_CDP_URL", "").strip()
+        if endpoint.startswith(("http://", "https://")):
+            base = endpoint.rstrip("/")
+    if not base:
+        return ""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(base + "/json/version", timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return str(data.get("webSocketDebuggerUrl", ""))[:300]
+    except Exception:
+        return ""
+
+
 def _build_transport() -> Transport:
     if _TRANSPORT_FACTORY is not None:
         return _TRANSPORT_FACTORY()
@@ -1507,8 +1603,13 @@ class BrowserSession:
     egress gate, the untrusted-ingestion flag, and the auditable ledger.
     """
 
-    def __init__(self, transport: Transport) -> None:
+    def __init__(self, transport: Transport, owner: str = "") -> None:
         self._t = transport
+        # The authenticated principal this session is leased to. Set by
+        # `session(owner)`; the cookie-custody methods re-check it against the
+        # durable lease so credential handling is guarded at the method itself,
+        # not only at the factory that handed the object out.
+        self.owner: str = str(owner or "")
         self.url: str = "about:blank"
         # Every CDP call, in order — the replayable/auditable record. Bounded so
         # a long-lived session can't grow it without limit (like a browser's own
@@ -1791,12 +1892,30 @@ class BrowserSession:
             time.sleep(0.3)
         return "Error: no download completed within the timeout."
 
+    def _require_owner(self) -> None:
+        """Re-check this session's owner against the durable lease.
+
+        Cookie custody is the highest-value operation on the object, and the
+        session can outlive the call that created it (it is a process global).
+        Re-verifying here means a stale reference cannot be used to read or
+        plant credentials after the lease moved on. Raises OwnershipRefused.
+        """
+        from . import browserlease
+        browserlease.verify(self.owner)
+
     def get_cookies(self, domain: str = "") -> list[dict]:
         """Read the browser's cookies (CDP Storage.getCookies — all cookies, not
         just the current frame's), optionally filtered to `domain`. Cookies are
         session credentials — the caller (operator.save_auth) stores them ONLY in
         the encrypted vault and only for an authorized domain, never surfaced to
-        the model."""
+        the model.
+
+        Storage.getCookies is browser-wide, so the domain filter alone does NOT
+        make this owner-safe: whatever session the shared browser holds for that
+        domain is returned regardless of who signed in. The lease check is what
+        stops one tenant harvesting another's cookies into their own vault.
+        """
+        self._require_owner()
         res = self._call("Storage.getCookies")
         cookies = (res or {}).get("cookies", []) or []
         d = (domain or "").strip().lower().lstrip(".")
@@ -1811,7 +1930,13 @@ class BrowserSession:
 
     def set_cookies(self, cookies: list[dict]) -> int:
         """Inject cookies (CDP Network.setCookies) to restore a saved session, so
-        the operator need not re-login. Returns how many were set."""
+        the operator need not re-login. Returns how many were set.
+
+        Owner-checked: injecting a session into the shared browser makes it
+        reachable by anything else driving that browser, so it may only happen
+        while the lease is held by the caller these cookies belong to.
+        """
+        self._require_owner()
         clean = [c for c in (cookies or []) if isinstance(c, dict) and c.get("name")]
         if clean:
             self._call("Network.setCookies", cookies=clean)
@@ -2664,17 +2789,76 @@ _session: BrowserSession | None = None
 _lock = threading.Lock()
 
 
-def session() -> BrowserSession:
-    """The process-global session (one persistent connection, daemon-style)."""
+def session(owner) -> BrowserSession:
+    """The installation's browser, leased exclusively to `owner`.
+
+    `owner` is REQUIRED and must be an authenticated principal
+    (`browserlease.require_owner`). There is deliberately no default and no
+    fallback to `memory.current_user()`: the ambient contextvar defaults to
+    "shared", so an implicit default is precisely how the heartbeat — or any
+    new call site whose author did not think about identity — would end up
+    driving somebody's logged-in browser. A missing owner is a TypeError at the
+    call site, which is a bug report; a wrong owner would be a breach.
+
+    Raises `browserlease.OwnershipRefused` when the caller is untrusted or the
+    browser belongs to someone else, and `BrowserUnavailable` when no browser
+    can be built. Tool boundaries translate the former into one constant
+    refusal that discloses nothing about the current owner or page.
+
+    LOCK ORDER: proclock(browser-lease) OUTER, then `_lock` INNER. Never the
+    reverse — see browserlease's LOCK ORDER note.
+    """
     global _session
-    with _lock:
-        if _session is None:
-            _session = BrowserSession(_build_transport())
+    from . import browserlease
+    name = browserlease.require_owner(owner)
+
+    with browserlease._lock():
+        record = browserlease._read()          # raises on a malformed record
+        if record is not None and browserlease.owner_of(record) != name:
+            raise browserlease.OwnershipRefused()
+
+        kind = _transport_kind()
+
+        # UNOWNED + the browser may already hold somebody's session: refuse
+        # before attaching. This is the remote-CDP rule — the documented
+        # "attach to your own browser" setup means the cookie jar predates
+        # Olympus, so first-caller-wins would hand it to whoever asks first.
+        # An operator who intends a specific owner says so with
+        # OLYMPUS_BROWSER_OWNER; that is the only way in.
+        if record is None and _carries_foreign_state(kind):
+            configured = browserlease.configured_owner()
+            if not configured or configured != name:
+                raise browserlease.OwnershipRefused()
+
+        with _lock:
+            if _session is None:
+                # Built BEFORE the claim so a failed build cannot strand a
+                # lease — on the remote path that lease could never be
+                # released, permanently bricking the browser for everyone.
+                transport = _build_transport()
+                _session = BrowserSession(transport, owner=name)
+            elif _session.owner != name:
+                # A session object built for a previous owner (only reachable
+                # if the lease was cleared out from under us). Fail closed.
+                raise browserlease.OwnershipRefused()
+
+        browserlease.claim(name, kind, _fingerprint(kind))
         return _session
 
 
 def reset() -> None:
-    """Drop the global session (used by tests and on reconfiguration)."""
+    """Disconnect the in-process session. DOES NOT RELEASE OWNERSHIP.
+
+    This is a reconnect/disconnect primitive, not a teardown. On every
+    transport except Playwright, `close()` merely drops the connection: the
+    autolaunched Chromium keeps running (nothing terminates it, and
+    `launch_local` reuses a live one), and a remote browser is entirely
+    external. Cookies, tabs, and the profile survive, so releasing the lease
+    here would hand a fully credentialed browser to the next caller.
+
+    Ownership ends only through `relinquish()`, which requires verified
+    destruction first.
+    """
     global _session
     with _lock:
         if _session is not None:
@@ -2683,6 +2867,150 @@ def reset() -> None:
             except Exception:
                 pass
         _session = None
+
+
+def _verify_playwright_destroyed(transport) -> str:
+    """Close a Playwright context+browser and prove it. Returns "" on success,
+    else a reason. Playwright is the one transport whose close() genuinely
+    destroys state: the context is ephemeral (`new_context`, not
+    `launch_persistent_context`), so there is no profile on disk."""
+    try:
+        transport.close()
+    except Exception as err:
+        return f"playwright close failed: {type(err).__name__}"
+    if not getattr(transport, "_closed", False):
+        return "playwright transport did not report itself closed"
+    browser_obj = getattr(transport, "_browser", None)
+    connected = getattr(browser_obj, "is_connected", None)
+    if callable(connected):
+        try:
+            if connected():
+                return "playwright browser is still connected"
+        except Exception:
+            pass                       # a torn-down handle that raises is gone
+    return ""
+
+
+def _verify_autolaunch_destroyed() -> str:
+    """Terminate the exact Chromium child Olympus started and delete the exact
+    mkdtemp profile it created, then prove both. Returns "" on success.
+
+    Deliberately narrow. It touches only the Popen handle in `_launched` and
+    only the profile path recorded alongside it — never a path from
+    configuration or a caller, and never a browser Olympus did not start.
+    """
+    global _launched
+    import shutil
+    import tempfile
+    if _launched is None:
+        return ""                      # nothing of ours is running
+    proc, _base, profile = _launched
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except Exception:
+                proc.kill()
+                proc.wait(timeout=15)
+    except Exception as err:
+        return f"could not terminate the browser process: {type(err).__name__}"
+    if proc.poll() is None:
+        return "browser process is still running"
+
+    # Delete ONLY the directory we created, and only if it still looks like
+    # ours — a mkdtemp path under the temp root with our prefix.
+    profile_path = Path(str(profile))
+    expected = Path(tempfile.gettempdir())
+    if profile_path.name.startswith("olympus-browser-"):
+        try:
+            profile_path.resolve().relative_to(expected.resolve())
+        except (ValueError, OSError):
+            return "browser profile is not in the expected location"
+        try:
+            shutil.rmtree(profile_path, ignore_errors=False)
+        except FileNotFoundError:
+            pass
+        except OSError as err:
+            return f"could not remove the browser profile: {type(err).__name__}"
+        if profile_path.exists():
+            return "browser profile still exists after removal"
+    elif profile_path.exists():
+        return "browser profile is not one Olympus created"
+
+    _launched = None
+    return ""
+
+
+def relinquish(owner) -> str:
+    """Release ownership of the browser — the ONLY way a lease ends.
+
+    Destroys the credentialed state first and verifies the destruction; the
+    lease is dropped only if that verification passes. Any failure leaves the
+    lease HELD, because a half-wiped browser handed to the next owner is the
+    exact breach this whole mechanism exists to prevent.
+
+    Returns "" on success, or a bounded administrative message. Raises
+    OwnershipRefused if `owner` is untrusted or does not hold the lease.
+
+    Remote CDP is refused outright: that browser is the operator's own, Olympus
+    did not provision its profile, and wiping someone's personal cookies/cache/
+    tabs is not a thing this code will do. Reassignment there is an operator
+    action (a fresh dedicated profile + OLYMPUS_BROWSER_OWNER).
+    """
+    global _session
+    from . import browserlease
+    name = browserlease.require_owner(owner)
+
+    # The ENTIRE transaction — validate, destroy, verify, delete — runs inside
+    # one hold of the lease lock. Releasing it around the teardown would
+    # reintroduce the check-then-unlink race: another process could release and
+    # a third could re-claim while we were still tearing down, and our delete
+    # would then remove a live owner's lease.
+    with browserlease._lock():
+        record = browserlease._read()
+        if record is None:
+            return ""                                  # already unowned
+        if browserlease.owner_of(record) != name:
+            raise browserlease.OwnershipRefused()
+        # Pin the generation we validated. The delete at the end re-checks it,
+        # so it can only ever remove THIS lease.
+        lease_id = str(record.get("lease_id") or "")
+
+        kind = str(record.get("transport") or _transport_kind())
+        if kind == REMOTE_CDP:
+            return browserlease.REASSIGN_NOTICE
+
+        with _lock:
+            transport = _session._t if _session is not None else None
+            if kind == PLAYWRIGHT:
+                if transport is not None:
+                    reason = _verify_playwright_destroyed(transport)
+                    if reason:
+                        return f"Error: ownership retained ({reason})."
+                _session = None
+            elif kind == AUTOLAUNCH:
+                if _session is not None:
+                    try:
+                        _session.close()
+                    except Exception:
+                        pass
+                    _session = None
+                reason = _verify_autolaunch_destroyed()
+                if reason:
+                    return f"Error: ownership retained ({reason})."
+            else:
+                # FAKE / NONE: no external process or profile exists. Drop the
+                # in-process session so no stale handle survives the release.
+                if _session is not None:
+                    try:
+                        _session.close()
+                    except Exception:
+                        pass
+                _session = None
+
+        browserlease.release(name, lease_id)
+        return ""
 
 
 # --- provenance-scored skill registry ------------------------------------

@@ -14,11 +14,18 @@ builtin_actions.register_builtins()
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    memory.set_user("shared")
+    # The browser is leased to an AUTHENTICATED principal (browserlease).
+    # These tests run as the local terminal owner; the ambient default
+    # ("shared", the heartbeat namespace) is refused by design.
+    memory.set_user("cli")
+    from olympus import browserlease
+    browserlease.clear_for_tests()
     monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
     monkeypatch.delenv("OLYMPUS_OPERATOR_DOMAINS", raising=False)
     browser.set_transport_factory(None)
     yield
+    browserlease.clear_for_tests()
+    memory.set_user("shared")
     browser.set_transport_factory(None)
 
 
@@ -31,8 +38,8 @@ def test_financial_legal_gets_tightest_tier():
     reg = actions.registered()
     assert reg["browser_operate_financial"].risk_class == actions.FINANCIAL_LEGAL
     # tighter daily cap than the generic irreversible tier
-    assert actions.daily_limit("shared", "browser_operate_financial") \
-        <= actions.daily_limit("shared", "browser_operate_irreversible")
+    assert actions.daily_limit("cli", "browser_operate_financial") \
+        <= actions.daily_limit("cli", "browser_operate_irreversible")
 
 
 # --- #7: browser_act is authorization-gated -------------------------------
@@ -43,7 +50,7 @@ def test_browser_act_refused_when_operator_disabled():
 
 
 def test_browser_act_refused_on_unauthorized_domain(monkeypatch):
-    operator.authorize_site("shared", "shop.com", "manual")   # enables operator
+    operator.authorize_site("cli", "shop.com", "manual")   # enables operator
     fake = browser.FakeTransport(present=["#buy"])
     fake._url = "https://evil.com/"                            # current page NOT authorized
     browser.set_transport_factory(lambda: fake)
@@ -52,7 +59,7 @@ def test_browser_act_refused_on_unauthorized_domain(monkeypatch):
 
 
 def test_browser_act_allowed_on_authorized_domain(monkeypatch):
-    operator.authorize_site("shared", "shop.com", "manual")
+    operator.authorize_site("cli", "shop.com", "manual")
     fake = browser.FakeTransport(present=["#buy"])
     fake._url = "https://shop.com/cart"
     browser.set_transport_factory(lambda: fake)

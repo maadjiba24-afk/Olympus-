@@ -449,6 +449,23 @@ already routes `https://caelarion.com/webhook` to it. To turn it on:
 Accounts (`OLYMPUS_REQUIRE_LOGIN`) are per-user identity on top of the entry
 gate; they are not a substitute for either token.
 
+**Browser tools need accounts.** Olympus drives one browser per installation,
+and it is bound to a single authenticated owner. With `OLYMPUS_REQUIRE_LOGIN`
+unset, the web principal is derived from a caller-supplied `session=` value —
+a conversation selector, not an authentication — so such a caller is refused
+from every browser operation. Set `OLYMPUS_REQUIRE_LOGIN=1` if web users need
+the browser harness. Chat transports (Telegram, Discord, Slack, …) authenticate
+their own users and are unaffected.
+
+If you attach Olympus to an existing browser with `OLYMPUS_BROWSER_CDP_URL`,
+also set `OLYMPUS_BROWSER_OWNER` to the principal that owns it — otherwise
+Olympus refuses to attach rather than letting the first caller inherit whatever
+session that browser is holding. That variable **selects** a trusted owner and
+cannot **promote** one: `shared`, `web-*`, and unrecognised values grant
+nothing. Ownership of a remote browser never transfers automatically; see
+[docs/BROWSER_HARNESS.md](../docs/BROWSER_HARNESS.md#browser-ownership-who-the-browser-belongs-to)
+for provisioning a dedicated profile.
+
 **Why they must differ.** The access token is handed to everyone who uses the
 instance — that is what "entry gate" means. Until W2-1a the admin panel was
 gated on that same token, so **every account that could log in was a full

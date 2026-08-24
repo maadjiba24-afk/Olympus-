@@ -114,8 +114,16 @@ def save_auth(user: str, domain: str) -> str:
     from . import vault
     if not vault.available():
         return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+    # `user` is the durable owner (the CLI principal, the chat uid, or
+    # `action.user` inside an approval callback) — never an ambient default. The
+    # lease check here is what stops one tenant reading whatever session the
+    # shared browser happens to hold for `domain` and filing it in their OWN
+    # vault; domain authorization alone cannot, because it is self-granted.
+    from . import browserlease
     try:
-        cookies = browser.session().get_cookies(domain)
+        cookies = browser.session(user).get_cookies(domain)
+    except browserlease.OwnershipRefused:
+        return browserlease.REFUSAL
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     if not cookies:
@@ -139,8 +147,13 @@ def restore_auth(user: str, domain: str) -> str:
     cookies = blob.get("cookies") if isinstance(blob, dict) else None
     if not cookies:
         return f"No saved session for {domain} — log in once, then save it."
+    # Injecting a session makes it reachable by everything driving this browser,
+    # so it may only happen into a browser this owner holds.
+    from . import browserlease
     try:
-        n = browser.session().set_cookies(cookies)
+        n = browser.session(user).set_cookies(cookies)
+    except browserlease.OwnershipRefused:
+        return browserlease.REFUSAL
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     return f"Restored the {domain} session ({n} cookie(s))."
@@ -326,9 +339,13 @@ def execute(payload: dict) -> dict:
     domain = payload.get("domain", "")
     name = payload.get("template", "")
     params = payload.get("params", {}) or {}
+    # `_user` is server-owned (actions._canonical_payload derives it; a caller
+    # cannot supply it), so it is the durable owner this background job runs as
+    # — both for the authorization re-check and for the browser lease below.
+    acting_user = payload.get("_user", "")
     # Re-check authorization for the acting user at execution time (defense in
     # depth — covers a job prepared earlier whose authorization was since pulled).
-    reason = _gate(payload.get("_user", ""), domain)
+    reason = _gate(acting_user, domain)
     if reason:
         raise RuntimeError(reason)
     _, tmpl = _template(domain, name)
@@ -343,7 +360,9 @@ def execute(payload: dict) -> dict:
         raise RuntimeError(
             "financial/irreversible browser templates are disabled by "
             "default — set OLYMPUS_ENABLE_BROWSER_FINANCIAL=1 to enable them.")
-    sess = browser.session()
+    # Background execution binds to the job's DURABLE owner, never to whatever
+    # namespace is ambient when the heartbeat happens to run this.
+    sess = browser.session(acting_user)
     risk = tmpl.get("risk", "notable")
     healed_note = ""
     try:
@@ -363,7 +382,7 @@ def execute(payload: dict) -> dict:
                 "attestation that you did.") from err
         # Otherwise self-heal: the site likely drifted. Re-observe, look for the
         # moved control, and file a human-reviewed proposal — never auto-rewrite.
-        heal = _heal_and_propose(domain, name, err)
+        heal = _heal_and_propose(domain, name, err, owner=acting_user)
         cand = heal.get("candidate")
         # Gated retry: only a REVERSIBLE (notable) template may auto-retry the
         # healed candidate to finish the run — an irreversible/financial step is
@@ -413,13 +432,17 @@ def _patch_steps(steps: list, index: int, selector: str) -> list:
 
 
 def _heal_and_propose(domain: str, template: str,
-                      err: "browser.TemplateStepError") -> dict:
+                      err: "browser.TemplateStepError",
+                      owner: str = "") -> dict:
     """After a template step failed, re-observe and, if a likely-moved control is
     found, file a Prometheus-style proposal to patch the template. Returns
     {"note", "candidate"} — the candidate selector (or None) lets a reversible
-    template attempt a gated retry. Never auto-rewrites the stored template."""
+    template attempt a gated retry. Never auto-rewrites the stored template.
+
+    `owner` is the job's durable owner: re-observing reads the live credentialed
+    page, so it is owner-gated like every other read."""
     try:
-        cand = browser.session().heal_candidate(err.selector)
+        cand = browser.session(owner).heal_candidate(err.selector)
     except Exception:
         cand = None
     if cand and cand.get("selector"):

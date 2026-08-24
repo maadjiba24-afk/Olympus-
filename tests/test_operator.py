@@ -19,7 +19,15 @@ from olympus.specialists import SPECIALISTS
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     browser.set_transport_factory(None)
+    # The browser is leased to an AUTHENTICATED principal (browserlease): these
+    # tests run as the local terminal owner. The ambient default ("shared") is
+    # the heartbeat's namespace and is refused by design.
+    from olympus import browserlease, memory
+    memory.set_user("cli")
+    browserlease.clear_for_tests()
     yield
+    browserlease.clear_for_tests()
+    memory.set_user("shared")
     browser.set_transport_factory(None)
 
 

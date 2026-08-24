@@ -443,7 +443,7 @@ def test_scrape_with_actions_drives_governed_harness(monkeypatch):
     pages = {"https://app/": {"title": "App", "text": "loaded after click"}}
     browser.set_transport_factory(lambda: browser.FakeTransport(pages))
     try:
-        r = webctx.scrape("https://app/", formats=("markdown",),
+        r = webctx.scrape("https://app/", formats=("markdown",), owner="cli",
                           actions=[{"type": "click", "selector": "#more"},
                                    {"type": "executeJavascript", "script": "alert(1)"}])
         assert "loaded after click" in r.get("markdown", "")
@@ -455,10 +455,11 @@ def test_scrape_with_actions_drives_governed_harness(monkeypatch):
 
 def test_scrape_actions_degrade_without_browser(monkeypatch):
     from olympus import webctx as _w
-    def boom():
+    def boom(owner):                      # session() now takes the principal
         raise RuntimeError("no chrome")
     monkeypatch.setattr("olympus.browser.session", boom)
-    r = _w.scrape("https://app/", actions=[{"type": "click", "selector": "#x"}])
+    r = _w.scrape("https://app/", actions=[{"type": "click", "selector": "#x"}],
+                  owner="cli")
     assert "error" in r and "browser" in r["error"].lower()
 
 
@@ -487,17 +488,18 @@ def test_learned_action_profile_auto_applies_when_opted_in(monkeypatch, tmp_path
         monkeypatch.delenv("OLYMPUS_WEB_AUTO_ACTIONS", raising=False)
         monkeypatch.setattr(tools, "_http_get",
                             lambda u, timeout=30, headers=None: "<body>plain</body>")
-        r_off = webctx.scrape("https://app/", formats=("markdown",))
+        r_off = webctx.scrape("https://app/", formats=("markdown",), owner="cli")
         assert "actions_run" not in r_off
 
         # opted IN: the learned profile drives the governed harness
         monkeypatch.setenv("OLYMPUS_WEB_AUTO_ACTIONS", "1")
-        r_on = webctx.scrape("https://app/", formats=("markdown",))
+        r_on = webctx.scrape("https://app/", formats=("markdown",), owner="cli")
         assert r_on.get("actions_run")                 # profile auto-applied
         assert "loaded after click" in r_on.get("markdown", "")
 
         # explicit empty actions always wins — no harness even when opted in
-        r_none = webctx.scrape("https://app/", formats=("markdown",), actions=[])
+        r_none = webctx.scrape("https://app/", formats=("markdown",), actions=[],
+                              owner="cli")
         assert "actions_run" not in r_none
     finally:
         browser.set_transport_factory(None)

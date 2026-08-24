@@ -542,7 +542,8 @@ _DEFAULT_FORMATS = ("markdown", "links", "metadata")
 def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
            schema: dict | None = None, prompt: str = "",
            attributes: list | None = None, actions: list | None = None,
-           mobile: bool | None = None, location: str = "") -> dict[str, Any]:
+           mobile: bool | None = None, location: str = "",
+           owner: str | None = None) -> dict[str, Any]:
     """Scrape one URL. `formats` any of: markdown, html (cleaned), rawHtml,
     links, images, metadata, branding, jsonld, feeds, summary, json, attributes.
     `schema`+`json` runs verified extraction; `attributes` reads
@@ -562,10 +563,17 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
         if isinstance(learned, list) and learned:
             actions = learned
             auto_actions = True
-    # Interactive path: pre-actions require a real (governed) browser.
+    # Interactive path: pre-actions require a real (governed) browser — and the
+    # browser is a leased, credentialed resource, so resolve the principal here.
+    # A background caller (heartbeat) resolves to the ambient "shared"
+    # namespace, which the lease refuses; it does not fall through to whoever
+    # currently owns the browser.
     if actions:
+        if owner is None:
+            from . import memory
+            owner = memory.current_user()
         res = _scrape_with_actions(url, actions, formats, schema, prompt,
-                                   attributes)
+                                   attributes, owner)
         # A *learned* profile is best-effort enhancement: if it couldn't run (no
         # browser, nav/interaction error), fall back to a plain fetch rather than
         # failing a scrape a plain fetch would have handled. An EXPLICIT actions
@@ -676,17 +684,25 @@ _ACTION_VERBS = {"click", "scroll", "type", "write", "press", "hover",
 
 
 def _scrape_with_actions(url: str, actions: list, formats, schema, prompt,
-                         attributes) -> dict[str, Any]:
+                         attributes, owner: str) -> dict[str, Any]:
     """Drive the page through the governed browser harness (click/scroll/type/
     wait) and then scrape the resulting HTML. The session is the harness's own
     (SSRF-gated navigation, sub-resource gate, replayable ledger); only the safe
-    verbs above run. Degrades to a clear message when no browser is available."""
+    verbs above run. Degrades to a clear message when no browser is available.
+
+    `owner` is the authenticated principal this scrape runs as. Driving the
+    shared browser navigates away from — and can read — whatever authenticated
+    page it is currently on, so this path is owner-leased exactly like the
+    browser tools. Background callers running under the ambient "shared"
+    namespace are refused rather than silently claiming a user's browser."""
     try:
-        from . import browser
+        from . import browser, browserlease
     except Exception:
         return {"url": url, "error": "actions require the browser harness"}
     try:
-        session = browser.session()
+        session = browser.session(owner)
+    except browserlease.OwnershipRefused:
+        return {"url": url, "error": browserlease.REFUSAL}
     except Exception as err:
         return {"url": url,
                 "error": f"browser unavailable ({str(err)[:120]}); install "

@@ -22,6 +22,16 @@ def fake_browser():
 @pytest.fixture(autouse=True)
 def _isolate_skills(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    # The browser is leased to an AUTHENTICATED principal (see browserlease).
+    # These tests exercise the harness as the local terminal owner; the ambient
+    # default ("shared", the heartbeat's namespace) is deliberately refused, so
+    # a test that forgets to name a principal fails closed like production.
+    from olympus import browserlease, memory
+    memory.set_user("cli")
+    browserlease.clear_for_tests()
+    yield
+    browserlease.clear_for_tests()
+    memory.set_user("shared")
 
 
 # --- the capability works (stateful CDP over a pluggable transport) -------
@@ -29,22 +39,22 @@ def _isolate_skills(tmp_path, monkeypatch):
 def test_open_navigates_and_returns_snapshot(fake_browser, monkeypatch):
     # Isolate the harness from DNS: the SSRF gate is tested separately below.
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-    out = browser.session().open("https://example.com/")
+    out = browser.session("cli").open("https://example.com/")
     assert "Example" in out and "hello world" in out
     # Every CDP call is on the auditable/replayable ledger, in order.
-    methods = [c["method"] for c in browser.session().ledger]
+    methods = [c["method"] for c in browser.session("cli").ledger]
     # The sub-resource egress gate is installed BEFORE the first navigation.
     assert methods.index("Network.setBlockedURLs") < methods.index("Page.navigate")
     assert "Runtime.evaluate" in methods
-    assert browser.session().ingested_untrusted is True
+    assert browser.session("cli").ingested_untrusted is True
 
 
 # --- sub-resource egress gate (in-page fetch/beacon SSRF, closed) ---------
 
 def test_subresource_gate_blocks_ssrf_targets(fake_browser, monkeypatch):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-    browser.session().open("https://example.com/")
-    calls = {c["method"]: c["params"] for c in browser.session().ledger}
+    browser.session("cli").open("https://example.com/")
+    calls = {c["method"]: c["params"] for c in browser.session("cli").ledger}
     assert "Network.enable" in calls
     urls = calls["Network.setBlockedURLs"]["urls"]
     # The known cloud-metadata IP, loopback, RFC1918, and file scheme are all
@@ -59,7 +69,7 @@ def test_subresource_gate_blocks_ssrf_targets(fake_browser, monkeypatch):
 
 def test_subresource_gate_installed_once(fake_browser, monkeypatch):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://example.com/")
     sess.open("https://example.com/")
     n = sum(1 for c in sess.ledger if c["method"] == "Network.setBlockedURLs")
@@ -76,7 +86,7 @@ def test_subresource_patterns_are_source_of_truth():
 
 def test_read_selector(fake_browser, monkeypatch):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://example.com/")
     assert sess.read() == "hello world"
 
@@ -88,7 +98,7 @@ def _harness_session(monkeypatch, elements=None, present=None):
     pages = {"https://ex.com/": {"title": "T", "text": "body"}}
     browser.set_transport_factory(lambda: browser.FakeTransport(
         pages=pages, elements=elements, present=present))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://ex.com/")
     return sess
 
@@ -251,7 +261,7 @@ def test_learn_crystallizes_the_flow_into_a_scored_skill(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
-        memory.set_user("shared")
+        memory.set_user("cli")
         sess = _harness_session(monkeypatch, elements=[{"t": "button", "n": "Go"}])
         sess.observe()
         sess.act("click", index=0)
@@ -270,7 +280,7 @@ def test_learn_reports_when_nothing_landed_yet(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
-        memory.set_user("shared")
+        memory.set_user("cli")
         _harness_session(monkeypatch)                # authorized, but no acts
         assert "Nothing to learn" in tools._browser_learn("empty")
     finally:
@@ -299,7 +309,7 @@ def test_learn_persists_the_recipe_on_the_skill(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
-        memory.set_user("shared")
+        memory.set_user("cli")
         sess = _harness_session(monkeypatch, present=["#buy"])
         sess.act("click", selector="#buy")
         tools._browser_learn("checkout")
@@ -419,7 +429,7 @@ def test_attest_human_only_after_the_check_is_cleared(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
-        memory.set_user("shared")
+        memory.set_user("cli")
         sess = _harness_session(monkeypatch)
         # while the checkpoint stands, we refuse to attest (no say-so proofs)
         sess._t.checkpoint = {"type": "captcha", "detail": "recaptcha"}
@@ -439,7 +449,7 @@ def test_cross_origin_frame_crossing_is_governed_per_origin(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")  # top page only
-        memory.set_user("shared")
+        memory.set_user("cli")
         sess = _harness_session(monkeypatch)                      # current: ex.com
         sess._t.frames_list = [
             {"sessionId": "S1", "url": "https://widget.other.com/f"}]
@@ -462,7 +472,7 @@ def test_cross_origin_frame_acting_is_governed_per_origin(monkeypatch):
     try:
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "ex.com")
-        memory.set_user("shared")
+        memory.set_user("cli")
         sess = _harness_session(monkeypatch)
         sess._t.frames_list = [{"sessionId": "S1", "url": "https://pay.other.com/f"}]
         sess._t.frame_present = {"S1": {"#submit"}}
@@ -564,19 +574,19 @@ def test_save_and_restore_auth_via_vault(monkeypatch):
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
         monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-        memory.set_user("shared")
+        memory.set_user("cli")
         user = memory.current_user()
         # a live session with a cookie for shop.com
         browser.set_transport_factory(lambda: browser.FakeTransport())
-        browser.session().set_cookies([{"name": "sid", "value": "xyz",
+        browser.session("cli").set_cookies([{"name": "sid", "value": "xyz",
                                         "domain": "shop.com"}])
         assert "Saved the shop.com session" in operator.save_auth(user, "shop.com")
         # a fresh session has no cookies until we restore
         browser.reset()
-        assert browser.session().get_cookies("shop.com") == []
+        assert browser.session("cli").get_cookies("shop.com") == []
         assert "Restored the shop.com session" in operator.restore_auth(
             user, "shop.com")
-        assert browser.session().get_cookies("shop.com")[0]["value"] == "xyz"
+        assert browser.session("cli").get_cookies("shop.com")[0]["value"] == "xyz"
         # unauthorized domain is refused
         assert "isn't an authorized site" in operator.save_auth(user, "evil.com")
     finally:
@@ -616,7 +626,7 @@ def test_list_and_switch_tabs(monkeypatch):
                     "url": "chrome://x"}]
         browser.set_transport_factory(
             lambda: browser.FakeTransport(targets=targets))
-        sess = browser.session()
+        sess = browser.session("cli")
         tabs = sess.list_tabs()
         assert [t["url"] for t in tabs] == ["https://a.com/", "https://b.com/"]
         assert sess.switch_tab(1) and sess._current_url() == "https://b.com/"
@@ -785,7 +795,7 @@ def test_execute_self_heals_and_files_a_proposal(monkeypatch):
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
         monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-        memory.set_user("shared")
+        memory.set_user("cli")
         user = memory.current_user()
         actions.set_autonomy(user, actions.L4_STANDING)
         actions.grant_scope(user, operator.OPERATE_SCOPE)
@@ -810,7 +820,7 @@ def test_notable_template_self_heals_and_retries_to_completion(monkeypatch):
         monkeypatch.setenv("OLYMPUS_OPERATOR", "1")
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
         monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-        memory.set_user("shared")
+        memory.set_user("cli")
         user = memory.current_user()
         actions.set_autonomy(user, actions.L4_STANDING)
         actions.grant_scope(user, operator.OPERATE_SCOPE)
@@ -835,7 +845,7 @@ def test_irreversible_template_never_auto_retries(monkeypatch):
         monkeypatch.setenv("OLYMPUS_OPERATOR_DOMAINS", "shop.com")
         monkeypatch.setenv("OLYMPUS_ENABLE_BROWSER_FINANCIAL", "1")
         monkeypatch.setattr(security, "url_block_reason", lambda u: None)
-        memory.set_user("shared")
+        memory.set_user("cli")
         user = memory.current_user()
         browser.set_template("shop.com", "pay", "irreversible",
                              [{"op": "assert", "selector": "#pay"}])
@@ -846,7 +856,7 @@ def test_irreversible_template_never_auto_retries(monkeypatch):
             present=["#pay2"]))
         with pytest.raises(RuntimeError) as excinfo:
             operator.execute({"domain": "shop.com", "template": "pay",
-                              "params": {}, "user": user})
+                              "params": {}, "_user": user})
         assert "proposal" in str(excinfo.value).lower()
     finally:
         browser.set_transport_factory(None)
@@ -869,14 +879,14 @@ def test_observe_caps_labels_against_injection(monkeypatch):
 def test_open_refuses_internal_address(fake_browser):
     # Link-local metadata address resolves without DNS and must be refused,
     # before any CDP navigate hits the ledger.
-    out = browser.session().open("http://169.254.169.254/latest/meta-data/")
+    out = browser.session("cli").open("http://169.254.169.254/latest/meta-data/")
     assert out.startswith("Error:")
     assert not any(c["method"] == "Page.navigate"
-                   for c in browser.session().ledger)
+                   for c in browser.session("cli").ledger)
 
 
 def test_open_refuses_non_http_scheme(fake_browser):
-    out = browser.session().open("file:///etc/passwd")
+    out = browser.session("cli").open("file:///etc/passwd")
     assert out.startswith("Error:")
 
 
@@ -997,9 +1007,9 @@ def test_open_blocks_redirect_to_internal_after_landing():
         pages, redirects={"http://93.184.216.34/": "http://169.254.169.254/"})
     browser.set_transport_factory(lambda: t)
     try:
-        out = browser.session().open("http://93.184.216.34/")
+        out = browser.session("cli").open("http://93.184.216.34/")
         assert out.startswith("Error:") and "SECRET" not in out
-        navs = [c["params"]["url"] for c in browser.session().ledger
+        navs = [c["params"]["url"] for c in browser.session("cli").ledger
                 if c["method"] == "Page.navigate"]
         assert navs[-1] == "about:blank"      # left the internal page
     finally:
@@ -1083,7 +1093,7 @@ def test_read_ax_returns_role_and_name(monkeypatch):
     ]
     browser.set_transport_factory(
         lambda: browser.FakeTransport({"https://x/": {}}, ax_nodes=ax))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://x/")
     out = sess.read_ax()
     assert "button: Sign in" in out
@@ -1117,7 +1127,7 @@ def test_save_pdf_writes_workspace_file(monkeypatch, tmp_path):
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path))
     browser.set_transport_factory(lambda: browser.FakeTransport(
         {"https://x/": {"title": "T", "text": "b"}}))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://x/")
     out = sess.save_pdf("receipt.pdf")
     assert "Saved page PDF" in out and "receipt.pdf" in out
@@ -1141,7 +1151,7 @@ def test_console_logs_returns_captured_messages(monkeypatch):
             {"level": "log", "text": "loaded"}]
     browser.set_transport_factory(lambda: browser.FakeTransport(
         {"https://x/": {}}, console=logs))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://x/")
     out = sess.console_logs()
     assert "[error] TypeError: x is undefined" in out
@@ -1152,7 +1162,7 @@ def test_console_logs_returns_captured_messages(monkeypatch):
 def test_console_empty_is_honest(monkeypatch):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     browser.set_transport_factory(lambda: browser.FakeTransport({"https://x/": {}}))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://x/")
     assert "no console messages" in sess.console_logs()
     browser.set_transport_factory(None)

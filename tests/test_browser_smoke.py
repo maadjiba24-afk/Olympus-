@@ -3,7 +3,7 @@
 Opt-in only: skipped unless OLYMPUS_BROWSER_SMOKE=1, because it launches a real
 headless Chrome and needs the optional `websockets` transport dependency. When
 enabled it exercises the *actual* CDP path end to end — launch Chrome, discover
-a page target, drive `browser.session()` (the real `_RealTransport`) at a
+a page target, drive `browser.session("cli")` (the real `_RealTransport`) at a
 loopback page, and read it back — so the live transport can't silently rot.
 
 Run it with:
@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from olympus import browser, security
+from olympus import browser, browserlease, security
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("OLYMPUS_BROWSER_SMOKE"),
@@ -66,11 +66,23 @@ def _wait_devtools(port: int, timeout: float = 20.0) -> None:
 
 
 @pytest.fixture
-def chrome_and_server(tmp_path):
+def chrome_and_server(tmp_path, monkeypatch):
     chrome = _find_chrome()
     if not chrome:
         pytest.skip("no Chrome/Chromium binary found")
     pytest.importorskip("websockets", reason="real transport needs websockets")
+
+    # Olympus refuses to attach to a remote-CDP browser that has no lease unless
+    # an owner is configured, because such a browser is normally someone's own
+    # and may already hold their sessions. That gate is correct and stays.
+    # THIS fixture is the narrow exception: it launches a dedicated headless
+    # Chrome on a throwaway --user-data-dir under tmp_path, so the endpoint
+    # below holds nothing but what this test puts there. We therefore assign
+    # that specific endpoint to the trusted CLI principal. This says nothing
+    # about arbitrary remote browsers, which still require a deliberate
+    # OLYMPUS_BROWSER_OWNER from the operator.
+    monkeypatch.setenv(browserlease.OWNER_ENV, "cli")
+    assert browserlease.configured_owner() == "cli"
 
     # Loopback page server.
     class _H(BaseHTTPRequestHandler):
@@ -113,13 +125,13 @@ def test_real_chrome_open_and_read(chrome_and_server, monkeypatch):
     # Bypass the SSRF gate for this loopback URL only — we're testing transport.
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     try:
-        out = browser.session().open(page_url)
+        out = browser.session("cli").open(page_url)
         assert "Olympus Smoke" in out
         assert "hello from olympus" in out
 
-        assert browser.session().read("main") == "hello from olympus"
+        assert browser.session("cli").read("main") == "hello from olympus"
 
-        methods = [c["method"] for c in browser.session().ledger]
+        methods = [c["method"] for c in browser.session("cli").ledger]
         assert "Page.navigate" in methods and "Runtime.evaluate" in methods
     finally:
         browser.reset()
@@ -132,9 +144,9 @@ def test_real_transport_still_enforces_ssrf(chrome_and_server, monkeypatch):
     monkeypatch.setenv("OLYMPUS_BROWSER_CDP_URL", f"http://127.0.0.1:{dport}")
     browser.set_transport_factory(None)
     try:
-        out = browser.session().open("http://169.254.169.254/latest/meta-data/")
+        out = browser.session("cli").open("http://169.254.169.254/latest/meta-data/")
         assert out.startswith("Error:")
         assert not any(c["method"] == "Page.navigate"
-                       for c in browser.session().ledger)
+                       for c in browser.session("cli").ledger)
     finally:
         browser.reset()

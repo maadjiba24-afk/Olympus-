@@ -32,7 +32,7 @@ def real_session(monkeypatch, tmp_path):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     browser.set_transport_factory(None)
     browser.reset()
-    yield browser.session()
+    yield browser.session("cli")
     browser.reset()
     if browser._launched is not None:
         try:

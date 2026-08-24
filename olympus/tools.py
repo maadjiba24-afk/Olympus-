@@ -1347,10 +1347,57 @@ def _watch_youtube(url: str) -> str:
 
 
 # --- governed browser harness handlers --------------------------------------
+#
+# OWNERSHIP BOUNDARY. The browser is ONE credentialed resource per installation:
+# whoever is signed in through it is signed in for everything that drives it. So
+# every handler below reaches it through `_owned_session()`, which names the
+# calling principal and lets `browser.session()` enforce the durable lease.
+#
+# This includes the plain readers (open/read/read_ax/screenshot/console/
+# save_pdf/exists). They are not operator-gated and they are not stripped from
+# ingesting runs — which is exactly why they were the cheapest cross-tenant read
+# in the system: `browser_open` to a domain the shared browser holds cookies
+# for, then `browser_read`, and another user's authenticated page comes back.
+# There is no such thing as an "unprivileged" reader against a credentialed
+# browser.
+
+
+def _browser_owner() -> str:
+    """The principal a browser operation runs as.
+
+    `memory.current_user()` is the authenticated namespace the request was
+    bound to: `tg-…`/`dc-…` for a chat user, `u-…` for a logged-in web account,
+    `cli` in the terminal, and the durable `action.user` inside an approval
+    callback. `browserlease` decides which of those may hold the browser —
+    notably `web-…` (caller-selectable when OLYMPUS_REQUIRE_LOGIN is off) and
+    `shared` (the heartbeat's ambient namespace) may not.
+    """
+    return memory.current_user()
+
+
+def _owned_session():
+    """(session, None) for the calling principal, or (None, bounded refusal).
+
+    The single door every browser handler goes through. An ownership failure
+    returns one constant string that names no owner, host, URL, tab, cookie,
+    transport, or fingerprint — a denial must not be usable to probe what the
+    browser is doing or for whom.
+    """
+    from . import browserlease
+    try:
+        return browser.session(_browser_owner()), None
+    except browserlease.OwnershipRefused:
+        return None, browserlease.REFUSAL
+    except browser.BrowserUnavailable as err:
+        return None, f"No browser attached: {err}"
+
 
 def _browser_open(url: str) -> str:
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        out = browser.session().open(url)
+        out = sess.open(url)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     try:                                    # feed the self-evolution loop
@@ -1363,8 +1410,11 @@ def _browser_open(url: str) -> str:
 
 
 def _browser_read(selector: str = "") -> str:
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        return browser.session().read(selector)
+        return sess.read(selector)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
@@ -1374,8 +1424,11 @@ def _browser_read_ax(limit: int = 0) -> str:
     # resilient to CSS/DOM churn that breaks selectors. A READER: ingests
     # untrusted page semantics, so it's an INGESTION tool, wrapped and
     # capability-separated exactly like browser_read.
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        return browser.session().read_ax(int(limit))
+        return sess.read_ax(int(limit))
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
@@ -1384,8 +1437,11 @@ def _browser_save_pdf(name: str = "") -> str:
     # Verifiable capture: print the current page to a PDF in the workspace, as
     # durable evidence of what was on screen (a confirmation, a receipt). A
     # first-party WRITE confined to the workspace; refuses a blocked landing.
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        return browser.session().save_pdf(name)
+        return sess.save_pdf(name)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
@@ -1393,8 +1449,11 @@ def _browser_save_pdf(name: str = "") -> str:
 def _browser_console(limit: int = 0) -> str:
     # First-party read of the page's console output (errors/warnings/logs) —
     # debugging signal for web apps and evidence of page behaviour.
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        return browser.session().console_logs(int(limit))
+        return sess.console_logs(int(limit))
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
@@ -1408,9 +1467,12 @@ def _browser_screenshot(question: str = "", selector: str = "",
     # injection is still injection), so it is an INGESTION tool, wrapped and
     # capability-separated.
     from . import media
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        b64 = browser.session().screenshot(selector=selector,
-                                           full_page=bool(full_page))
+        b64 = sess.screenshot(selector=selector,
+                              full_page=bool(full_page))
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     if not b64:
@@ -1424,18 +1486,20 @@ def _operator_authorized_session():
     must be enabled and the CURRENT page's domain authorized. Returns
     (session, None) on success or (None, error_string) to return to the model."""
     from urllib.parse import urlparse
-    user = memory.current_user()
+    user = _browser_owner()
     if not operator.enabled(user):
         return None, ("Error: the operator isn't set up — ask me to set up this "
                       "site first.")
-    try:
-        sess = browser.session()
-    except browser.BrowserUnavailable as err:
-        return None, f"No browser attached: {err}"
+    sess, err = _owned_session()
+    if err:
+        return None, err
     host = (urlparse(sess._current_url() or "").hostname or "").lower()
     if not operator.authorized(user, host):
-        return None, (f"Error: the current page ('{host or 'unknown'}') isn't an "
-                      "authorized site for actions.")
+        # The host is NOT echoed back. Reading the current page's domain
+        # already requires the lease; a refusal that named it would leak the
+        # one fact the lease exists to hide — where the browser currently is.
+        return None, ("Error: the current page isn't an authorized site for "
+                      "actions. Set the site up first, then try again.")
     return sess, None
 
 
@@ -1613,17 +1677,21 @@ def _browser_act(action: str, selector: str = "", text: str = "",
 
 def _operator_enabled_session():
     """Lighter gate for tab navigation: the operator must be enabled, but no
-    current-domain check (you are choosing WHICH tab to go to). Any subsequent
-    act/observe still re-checks the newly-current domain, so this can't reach an
-    unauthorized site's actuator. Returns (session, None) or (None, error)."""
-    user = memory.current_user()
+    current-domain check (you are choosing WHICH tab to go to).
+
+    The domain re-check on the subsequent act/observe is NOT what keeps this
+    safe across tenants — site authorization is self-granted per user, so a
+    second tenant simply authorizes the domain they want. The ownership lease
+    inside `_owned_session()` is the control that matters here: tab
+    enumeration reveals another user's logged-in URLs and titles, so it must
+    not be reachable without holding the browser.
+
+    Returns (session, None) or (None, error)."""
+    user = _browser_owner()
     if not operator.enabled(user):
         return None, ("Error: the operator isn't set up — ask me to set up this "
                       "site first.")
-    try:
-        return browser.session(), None
-    except browser.BrowserUnavailable as err:
-        return None, f"No browser attached: {err}"
+    return _owned_session()
 
 
 def _browser_tabs() -> str:
@@ -1755,14 +1823,20 @@ def _browser_skills(domain: str = "") -> str:
 # --- operator handlers (HERMES, Phase 1) ------------------------------------
 
 def _browser_exists(selector: str) -> str:
+    # A boolean about the CURRENT page is still a read of the credentialed
+    # browser: probed selector-by-selector it discloses another tenant's page
+    # structure one bit at a time. Owner-gated like every other reader.
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        return "yes" if browser.session().exists(selector) else "no"
+        return "yes" if sess.exists(selector) else "no"
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
 
 
 def _browser_login(domain: str) -> str:
-    user = memory.current_user()
+    user = _browser_owner()
     reason = operator._gate(user, domain)         # per-user: env OR opt-in
     if reason:
         return f"Error: {reason}."
@@ -1783,8 +1857,14 @@ def _browser_login(domain: str) -> str:
     if not isinstance(creds, dict) or not creds.get("username"):
         return (f"Error: I don't have saved credentials for '{domain}'. Ask me "
                 "to remember your sign-in for it first.")
+    # Signing in plants a live session in the shared browser, so the lease must
+    # be held BEFORE the credentials are used — otherwise one tenant's login
+    # lands in a browser another tenant is driving.
+    sess, err = _owned_session()
+    if err:
+        return err
     try:
-        ok = browser.session().login(profile, creds)
+        ok = sess.login(profile, creds)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     browser.mark_profile_outcome(domain, ok)

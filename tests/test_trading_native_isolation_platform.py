@@ -91,6 +91,11 @@ def module_scope_imports(path: Path) -> set[str]:
 GUARDED: dict[str, str] = {
     "olympus/proclock.py": "wrapped in try/except ImportError, with fcntl=None "
                            "and a documented degraded path",
+    "olympus/browserlease.py": "imports BOTH fcntl and msvcrt, each wrapped in "
+                               "try/except ImportError with a None fallback — "
+                               "the browser lease needs a real cross-process "
+                               "lock on both platforms, so unlike proclock it "
+                               "has no degraded path to fall back to",
 }
 
 
