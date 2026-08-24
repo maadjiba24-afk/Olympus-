@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from olympus import browser, security
+from olympus import browser, browserlease, security
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("OLYMPUS_BROWSER_SMOKE"),
@@ -66,11 +66,23 @@ def _wait_devtools(port: int, timeout: float = 20.0) -> None:
 
 
 @pytest.fixture
-def chrome_and_server(tmp_path):
+def chrome_and_server(tmp_path, monkeypatch):
     chrome = _find_chrome()
     if not chrome:
         pytest.skip("no Chrome/Chromium binary found")
     pytest.importorskip("websockets", reason="real transport needs websockets")
+
+    # Olympus refuses to attach to a remote-CDP browser that has no lease unless
+    # an owner is configured, because such a browser is normally someone's own
+    # and may already hold their sessions. That gate is correct and stays.
+    # THIS fixture is the narrow exception: it launches a dedicated headless
+    # Chrome on a throwaway --user-data-dir under tmp_path, so the endpoint
+    # below holds nothing but what this test puts there. We therefore assign
+    # that specific endpoint to the trusted CLI principal. This says nothing
+    # about arbitrary remote browsers, which still require a deliberate
+    # OLYMPUS_BROWSER_OWNER from the operator.
+    monkeypatch.setenv(browserlease.OWNER_ENV, "cli")
+    assert browserlease.configured_owner() == "cli"
 
     # Loopback page server.
     class _H(BaseHTTPRequestHandler):
