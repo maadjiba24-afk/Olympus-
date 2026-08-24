@@ -108,7 +108,7 @@ def _session_with_page(monkeypatch, text):
     monkeypatch.setattr(security, "url_block_reason", lambda u: None)
     pages = {"https://ex.com/": {"title": "T", "text": text}}
     browser.set_transport_factory(lambda: browser.FakeTransport(pages=pages))
-    sess = browser.session()
+    sess = browser.session("cli")
     sess.open("https://ex.com/")
     return sess
 

@@ -17,9 +17,16 @@ builtin_actions.register_builtins()      # ensure operate ActionTypes are on the
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    memory.set_user("shared")
+    # The browser is leased to an AUTHENTICATED principal (browserlease).
+    # These tests run as the local terminal owner; the ambient default
+    # ("shared", the heartbeat namespace) is refused by design.
+    memory.set_user("cli")
+    from olympus import browserlease
+    browserlease.clear_for_tests()
     browser.set_transport_factory(None)
     yield
+    browserlease.clear_for_tests()
+    memory.set_user("shared")
     browser.set_transport_factory(None)
 
 
@@ -202,7 +209,7 @@ def test_checkpoint_records_operator_failure(monkeypatch):
 
 def test_run_due_is_noop_when_operator_disabled(monkeypatch):
     monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
-    operator.schedule("shared", "nightly", "shop.com", "buy", 300, {})
+    operator.schedule("cli", "nightly", "shop.com", "buy", 300, {})
     assert operator.run_due(now=10_000) == []
 
 

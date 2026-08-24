@@ -15,6 +15,90 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — The browser is leased to one authenticated owner (P0)
+
+Olympus drives **one** browser per installation. Whoever is signed in through it
+is signed in for everything that touches it — so on a multi-user instance a
+second tenant could reach the first tenant's authenticated pages, tabs, and
+cookies. The browser is now bound to a single authenticated owner by a durable
+lease, and every path to it is checked.
+
+**The cheapest exploit needed no gates at all.** `browser_open`, `browser_read`,
+`browser_read_ax`, `browser_screenshot`, `browser_console`, `browser_save_pdf`
+and `browser_exists` reached the shared session with no operator check, no
+domain check, and no capability separation (they are readers, so they are not
+stripped from ingesting runs, and no capability profile denies them — `guest`
+included). Two calls — `browser_open` at a domain the shared browser holds
+cookies for, then `browser_read` — returned another user's authenticated page.
+The operator-gated tools were reachable too: site authorization is self-service,
+so a second user simply authorized the domain they wanted, then used
+`browser_tabs`/`browser_switch_tab` (which never checked a domain at all) to
+land on a logged-in tab, and `browser_save_auth` to copy that session into
+**their own** vault — durable theft that outlives the victim's session.
+
+**What changed**
+
+* `browser.session(owner)` now **requires** an authenticated principal. There is
+  no default and deliberately no fallback to `memory.current_user()`: the
+  ambient contextvar defaults to `shared`, and an implicit default is exactly
+  how a background job ends up owning a person's logged-in browser. A missing
+  owner is a `TypeError` at the call site — a bug report, not a breach.
+* Trusted principals: platform-authenticated chat identities, logged-in web
+  accounts, the CLI principal, and durable owners propagated through actions and
+  background jobs. **Refused:** empty, `shared`, and `web-*` — with
+  `OLYMPUS_REQUIRE_LOGIN` off, the web principal is derived from a
+  caller-supplied session id, so it is not an authentication.
+* Ownership lives in a durable lease (`MEMORY_DIR/browser_lease.json`, mode
+  0600), not a process global. It survives restart, which is the case that
+  mattered: on the remote-CDP path a fresh process attaches to `pages[0]` —
+  whatever authenticated tab the browser lists first — so the first caller after
+  a restart used to inherit a stranger's session.
+* Every lease mutation — claim, fingerprint backfill, release, corruption
+  handling — runs inside a **real cross-process lock** on both platforms
+  (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows), held across the
+  complete read/validate/write-or-delete transaction. `proclock` is not used
+  here: it degrades to in-process thread locking without `fcntl` (ADR 0005),
+  which is fatal for release. `O_CREAT|O_EXCL` is kept as a second layer, but it
+  protects **creation only** — it does nothing for a read-validate-then-unlink.
+* Each record carries an immutable random `lease_id`. Release must name the
+  exact generation it validated, and the delete re-checks it under the lock, so
+  it is a compare-and-delete. Without that, a paused release could resume after
+  its lease had been released and re-claimed and delete the *new* owner's
+  lease — leaving a live browser with no lease for a third party to claim. The
+  lock file itself is never deleted (unlinking it is its own race).
+* **`reset()` no longer releases ownership.** It is disconnect/reconnect only.
+  On every transport except Playwright, `close()` merely drops the connection —
+  the autolaunched Chromium keeps running and a remote browser is external — so
+  releasing there handed a fully credentialed browser to the next caller.
+* Release (`browser.relinquish(owner)`) requires **verified destruction**:
+  Playwright must confirm the context and browser are closed; an autolaunched
+  Chromium must confirm the exact child process exited and the exact `mkdtemp`
+  profile was deleted. Any failure leaves the lease **held**.
+* A remote browser attached over `OLYMPUS_BROWSER_CDP_URL` is never wiped and
+  never transfers automatically — Olympus does not destroy a profile it did not
+  provision. Attaching to one with no lease requires `OLYMPUS_BROWSER_OWNER`,
+  checked **before** anything inspects the remote browser's targets.
+  `OLYMPUS_BROWSER_OWNER` *selects* which trusted principal owns that browser;
+  it can never *promote* one. Setting it to `shared`, to a `web-*` session id,
+  or to any unrecognised string grants nothing, so an operator typo cannot hand
+  the browser to the heartbeat's namespace and pasting a caller-controlled
+  no-login identity does not turn it into an authentication.
+* There is **no TTL and no idle expiry**. A lease that lapsed on a timer would
+  hand the browser away precisely when the owner stopped watching.
+* Denials return one constant string that names no owner, host, URL, tab title,
+  cookie, transport, or fingerprint. The old "the current page ('host') isn't an
+  authorized site" refusal leaked the one fact the lease exists to hide.
+
+**Not included:** true per-user browser contexts (a separate profile, tab set,
+and cookie jar per owner) remain follow-up hardening. This patch makes the
+browser exclusive, not partitioned.
+
+**Operator impact.** Single-user installs are unchanged. On a multi-user
+instance the second user now receives a refusal where they previously received
+someone else's content. Browser tools require `OLYMPUS_REQUIRE_LOGIN=1` on the
+web transport; see [docs/BROWSER_HARNESS.md](docs/BROWSER_HARNESS.md) for
+provisioning a dedicated browser and reassigning one.
+
 ### Changed — The spend ledger is append-only (W2-2, closes #249)
 
 `usage.record()` rewrote the WHOLE per-day ledger under a cross-process lock on

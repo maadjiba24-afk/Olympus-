@@ -124,3 +124,141 @@ The existing real-browser smoke suites currently exercise Chromium/CDP:
 OLYMPUS_BROWSER_SMOKE=1 pytest tests/test_browser_smoke.py -q
 OLYMPUS_BROWSER_REAL=1 pytest tests/test_browser_real.py -q
 ```
+
+## Browser ownership (who the browser belongs to)
+
+Olympus drives **one** browser per installation. Whoever is signed in through it
+is signed in for everything that touches it — there is no such thing as an
+"unprivileged" read against a credentialed browser. On a multi-user instance
+that makes the browser a shared credential, so it is bound to a single
+authenticated owner by a durable lease.
+
+### Who may own it
+
+| Principal | Owns? |
+|---|---|
+| Chat identity (`tg-`, `dc-`, `sl-`, `sg-`, `wa-`, `email-`, `hook-`) | yes — the platform authenticated it |
+| Logged-in web account (`u:…`), with `OLYMPUS_REQUIRE_LOGIN=1` | yes |
+| CLI (`cli`) | yes — shell access is box ownership |
+| `action.user` / a background job's durable owner | yes |
+| `OLYMPUS_BROWSER_OWNER` | yes — operator-configured |
+| **`web-…` (no accounts configured)** | **no** |
+| **`shared` (the heartbeat's namespace), empty, unrecognised** | **no** |
+
+**Web browser tools require authenticated accounts.** With
+`OLYMPUS_REQUIRE_LOGIN` unset, `web.py` derives the principal from a
+caller-supplied `session=` value — that is a conversation selector, not an
+authentication, and the id leaks through access logs and `Referer` headers. Such
+a caller is refused from every credentialed browser operation. Set
+`OLYMPUS_REQUIRE_LOGIN=1` to use browser tools over the web transport.
+
+Background work is refused for the same reason: the heartbeat runs under
+`shared`, so it can neither claim nor drive a user's browser. An operator job
+executing through the approval spine runs as its own durable `action.user` and
+is unaffected.
+
+### How ownership is recorded
+
+The lease lives in `MEMORY_DIR/browser_lease.json` (mode 0600) and holds a
+schema version, the exact owner identity, the transport kind, a claim timestamp,
+an immutable random `lease_id`, and a diagnostic browser fingerprint.
+
+Every mutation — claim, fingerprint backfill, release, corruption handling —
+runs inside a real cross-process lock (`fcntl.flock` on POSIX,
+`msvcrt.locking` on Windows) held across the whole read/validate/write-or-delete
+transaction. The lock file under `MEMORY_DIR/locks/` is never deleted; only the
+lease record is.
+
+The `lease_id` is defence in depth on top of that lock: releasing requires
+naming the exact generation that was validated, and the delete re-checks it, so
+a release that was interrupted cannot come back and remove a *different* lease
+that has since been claimed by someone else.
+
+The **fingerprint is diagnostic only** — it tells an operator whether the
+browser behind a lease is still the same instance. It is never consulted to
+decide ownership. A mismatch neither releases the lease nor admits a different
+owner.
+
+Two states are deliberately unrecoverable without an operator: a lease record
+that will not parse, and one whose schema this build does not understand. Both
+fail closed — an unreadable lease means "owned", never "free", because "free" is
+the one reading that hands the browser away.
+
+### Reconnect is not release
+
+`browser.reset()` disconnects and reconnects. It **does not** release ownership,
+because on every transport except Playwright `close()` only drops the
+connection: an auto-launched Chromium keeps running with its profile intact
+(nothing terminates it, and `launch_local` reuses a live one), and a remote
+browser is entirely external. Cookies, tabs, and the profile survive a reset, so
+releasing there would hand a fully credentialed browser to the next caller.
+
+There is also **no TTL and no idle timeout**. A lease that lapsed on a timer
+would transfer the browser exactly when the owner stopped watching.
+
+### Releasing and reassigning
+
+`browser.relinquish(owner)` is the only way a lease ends, and it destroys the
+credentialed state first:
+
+* **Playwright** — closes the owned context and browser and verifies both are
+  closed. The context is ephemeral, so nothing persists on disk.
+* **Auto-launched Chromium** — terminates the exact child process Olympus
+  started, waits for confirmed exit, deletes the exact `mkdtemp` profile it
+  created, and verifies the directory is gone.
+
+**Any failure leaves the lease held.** A half-wiped browser handed to the next
+owner is the breach this exists to prevent.
+
+### Remote CDP: ownership does not transfer automatically
+
+A browser attached over `OLYMPUS_BROWSER_CDP_URL` is *your* browser — Olympus
+did not provision its profile and will not wipe your cookies, cache, tabs, or
+storage. `relinquish()` therefore refuses on that transport, and a fingerprint
+change (a browser restart, a different instance on the same port) does **not**
+release the lease either.
+
+Attaching to a remote browser that has no lease requires an explicitly
+configured owner, checked **before** Olympus inspects the browser's targets:
+
+```bash
+export OLYMPUS_BROWSER_OWNER='tg-12345'      # exact principal, as Olympus sees it
+```
+
+Without it, a fresh process would attach to whichever page target the browser
+lists first — potentially someone's authenticated tab — and the first caller
+would inherit it.
+
+`OLYMPUS_BROWSER_OWNER` **selects** an owner; it never **promotes** one. The
+value must already be a trusted principal from the table above. Setting it to
+`shared`, to a `web-…` session id, or to any unrecognised string grants nothing
+at all — so a typo cannot hand the browser to the heartbeat's namespace, and
+pasting a caller-controlled no-login web identity does not turn it into an
+authentication.
+
+**To provision a new dedicated browser** (the safe way to reassign):
+
+```bash
+# 1. Stop pointing Olympus at the old browser.
+unset OLYMPUS_BROWSER_CDP_URL
+
+# 2. Start a browser on a profile directory created for this purpose only.
+mkdir -p ~/olympus-browser-profile
+chrome --remote-debugging-port=9222 --remote-allow-origins='*' \
+       --user-data-dir="$HOME/olympus-browser-profile" \
+       --no-first-run --no-default-browser-check
+
+# 3. Point Olympus at it and name its owner.
+export OLYMPUS_BROWSER_CDP_URL='http://127.0.0.1:9222'
+export OLYMPUS_BROWSER_OWNER='tg-12345'
+```
+
+Use a *fresh* profile directory. Copying an existing one copies the sessions in
+it, which is the situation the lease exists to prevent.
+
+### What this is not
+
+This makes the browser **exclusive**, not **partitioned**. There are no
+per-user browser contexts yet — one owner at a time holds the whole browser.
+True per-user profiles, tab sets, and cookie jars are separate follow-up
+hardening.

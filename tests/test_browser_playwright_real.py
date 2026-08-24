@@ -57,7 +57,7 @@ def real_session(monkeypatch, tmp_path):
     browser.reset()
 
     try:
-        yield browser.session()
+        yield browser.session("cli")
     finally:
         browser.reset()
 
@@ -189,3 +189,75 @@ def test_real_playwright_tabs_are_drivable(real_session):
         real_session._eval("document.getElementById('target').innerText")
         == "SECOND"
     )
+
+
+# --- ownership lease against a REAL Playwright browser --------------------
+
+def test_real_playwright_relinquish_verifiably_destroys_the_browser(
+        monkeypatch, tmp_path):
+    """The Playwright release path, proven against a real browser.
+
+    Everywhere else this path is exercised with a stub transport, which can only
+    show that the verification logic reacts correctly to what a transport
+    reports. This shows the real thing: after `relinquish` the context and
+    browser are genuinely closed, the lease is gone, and the next owner gets a
+    clean browser rather than the previous owner's session.
+    """
+    from olympus import browserlease, config
+
+    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
+    monkeypatch.setenv("OLYMPUS_BROWSER_ENGINE", _ENGINE)
+    monkeypatch.setenv("OLYMPUS_BROWSER_AUTOLAUNCH", "1")
+    monkeypatch.setenv("OLYMPUS_BROWSER_HEADLESS", "1")
+    monkeypatch.setattr(security, "url_block_reason", lambda _url: None)
+    browser.set_transport_factory(None)
+    browser.reset()
+    browserlease.clear_for_tests()
+
+    try:
+        alice, bob = "tg-alice", "tg-bob"
+        sess = browser.session(alice)
+        sess.open(_page("<p id='x'>alice was here</p>"))
+
+        record = browserlease.current()
+        assert record["owner"] == alice
+        assert record["transport"] == browser.PLAYWRIGHT
+        assert record["lease_id"]
+
+        transport = sess._t
+        real_browser = transport._browser
+        assert real_browser.is_connected()
+
+        # Bob is refused while Alice holds it — on a real browser, not a fake.
+        with pytest.raises(browserlease.OwnershipRefused):
+            browser.session(bob)
+
+        # reset() must NOT release: it is disconnect/reconnect only.
+        browser.reset()
+        assert browserlease.current()["owner"] == alice
+        with pytest.raises(browserlease.OwnershipRefused):
+            browser.session(bob)
+
+        # Re-acquire as Alice, then release for real.
+        sess = browser.session(alice)
+        transport = sess._t
+        real_browser = transport._browser
+        assert real_browser.is_connected()
+
+        assert browser.relinquish(alice) == ""
+
+        # Destruction actually happened: the Playwright browser is disconnected
+        # and the transport reports itself closed.
+        assert transport._closed is True
+        assert not real_browser.is_connected()
+        assert browserlease.current() is None
+
+        # Bob now gets a genuinely fresh browser, not Alice's page.
+        bob_sess = browser.session(bob)
+        assert bob_sess is not sess
+        assert browserlease.current()["owner"] == bob
+        assert "alice was here" not in bob_sess.read()
+    finally:
+        browser.reset()
+        browserlease.clear_for_tests()
+        browser.set_transport_factory(None)

@@ -45,6 +45,19 @@ surface. So the surface and its threat model can't drift apart.
 | self-modifying | Changes Olympus's own prompts/skills (gated + reversible). |
 | external actuator | Acts on the outside world (irreversible/scoped). |
 
+**A note on the `browser_*` rows below.** Their "deny-first default" column is
+written against *prompt injection* — an attacker-influenced page trying to reach
+your session — and states its mitigations in terms of **domain**. On a
+multi-user instance the adversary can instead be **another authenticated
+tenant**, and domain authorization does not address that at all: it is
+self-service, so a second user grants themselves whatever domain they want. That
+axis is covered by a separate control, not by the columns below — the browser is
+leased to one authenticated owner
+([BROWSER_HARNESS.md](BROWSER_HARNESS.md#browser-ownership-who-the-browser-belongs-to)),
+and every browser tool, readers included, is refused without that lease. Read
+each row as "given the caller owns the browser, here is what still constrains
+them."
+
 ## The tool surface
 
 | Tool | Capability | Trust boundary | Deny-first default | Abuse case defended |

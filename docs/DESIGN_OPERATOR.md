@@ -148,6 +148,15 @@ controls are **defense-in-depth, not one magic boundary**:
   never transit the model context.
 - DNS-rebind/redirect onto an internal host is already blocked by the harness's
   landed-URL re-check.
+- **Cross-tenant reach into the browser (closed).** Site authorization is
+  self-service, so on a multi-user instance it never protected one user from
+  another: a second tenant simply authorized the domain they wanted. Every
+  control listed above is stated in terms of *domain* and *injection*, and none
+  of them was about *identity*. The browser is now bound to one authenticated
+  owner by a durable lease — see
+  [BROWSER_HARNESS.md](BROWSER_HARNESS.md#browser-ownership-who-the-browser-belongs-to).
+  Ownership is **exclusive, not partitioned**: per-user browser contexts remain
+  follow-up hardening, so one owner at a time holds the whole browser.
 
 If any control can't be satisfied, the operator does nothing and asks.
 

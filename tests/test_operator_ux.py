@@ -14,19 +14,26 @@ builtin_actions.register_builtins()
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    memory.set_user("shared")
+    # The browser is leased to an AUTHENTICATED principal (browserlease).
+    # These tests run as the local terminal owner; the ambient default
+    # ("shared", the heartbeat namespace) is refused by design.
+    memory.set_user("cli")
+    from olympus import browserlease
+    browserlease.clear_for_tests()
     # No OLYMPUS_OPERATOR / _DOMAINS env — prove it works without them.
     monkeypatch.delenv("OLYMPUS_OPERATOR", raising=False)
     monkeypatch.delenv("OLYMPUS_OPERATOR_DOMAINS", raising=False)
     browser.set_transport_factory(None)
     yield
+    browserlease.clear_for_tests()
+    memory.set_user("shared")
     browser.set_transport_factory(None)
 
 
 # --- off by default, friendly refusals ------------------------------------
 
 def test_operator_off_by_default():
-    assert operator.enabled("shared") is False
+    assert operator.enabled("cli") is False
     assert "set it up" in tools._browser_login("amazon.com").lower()
     assert "off" in tools._operator_status().lower()
 
@@ -36,9 +43,9 @@ def test_operator_off_by_default():
 def test_authorize_manual_enables_and_persists(monkeypatch):
     out = tools._operator_authorize_site("Amazon.com", "manual")
     assert "set up" in out.lower() and "sign in yourself" in out.lower()
-    assert operator.enabled("shared") is True
-    assert operator.authorized("shared", "amazon.com") is True
-    assert operator.login_mode("shared", "amazon.com") == "manual"
+    assert operator.enabled("cli") is True
+    assert operator.authorized("cli", "amazon.com") is True
+    assert operator.login_mode("cli", "amazon.com") == "manual"
     # manual sign-in never asks for a password — it points the user to log in
     assert "manual sign-in" in tools._browser_login("amazon.com").lower()
 
@@ -52,10 +59,10 @@ def test_status_lists_authorized_sites():
 
 def test_forget_site_revokes(monkeypatch):
     tools._operator_authorize_site("amazon.com", "manual")
-    assert operator.authorized("shared", "amazon.com")
+    assert operator.authorized("cli", "amazon.com")
     out = tools._operator_forget_site("amazon.com")
     assert "removed" in out.lower()
-    assert operator.authorized("shared", "amazon.com") is False
+    assert operator.authorized("cli", "amazon.com") is False
 
 
 def test_authorization_is_per_user():
@@ -90,9 +97,9 @@ def test_remember_credentials_uses_vault(monkeypatch):
     monkeypatch.setattr(vault, "available", lambda: True)
     monkeypatch.setattr(vault, "put",
                         lambda u, n, v: stored.__setitem__((u, n), v))
-    operator.remember_credentials("shared", "bank.com", "alice", "s3cret")
-    assert stored[("shared", "site:bank.com")]["username"] == "alice"
-    assert operator.login_mode("shared", "bank.com") == "remember"
+    operator.remember_credentials("cli", "bank.com", "alice", "s3cret")
+    assert stored[("cli", "site:bank.com")]["username"] == "alice"
+    assert operator.login_mode("cli", "bank.com") == "remember"
 
 
 # --- the new tools stay bound to the threat model -------------------------
