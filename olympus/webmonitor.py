@@ -200,18 +200,100 @@ def list_text(user: str) -> str:
 
 # --- scheduled check (heartbeat) ------------------------------------------
 
+#: Explicit opt-in to installation-wide fan-out for change alerts. OFF by
+#: default. See `_shared_broadcast_enabled` for why it also requires the guard.
+BROADCAST_ENV = "OLYMPUS_WEB_MONITOR_BROADCAST"
+
+#: Returned in the log when a change was detected but deliberately not sent.
+_NO_ROUTE = ("external alert not delivered: no owner-targeted route exists "
+             "(set OLYMPUS_WEB_MONITOR_BROADCAST=1 with OLYMPUS_EGRESS_GUARD=1 "
+             "to accept installation-wide fan-out)")
+_NEEDS_GUARD = (f"external alert not delivered: {BROADCAST_ENV} requires "
+                "OLYMPUS_EGRESS_GUARD=1")
+
+
+def _shared_broadcast_enabled() -> bool:
+    """Whether the operator has explicitly accepted installation-wide fan-out.
+
+    Requires BOTH `OLYMPUS_WEB_MONITOR_BROADCAST=1` and the egress guard.
+
+    `gateway.notify_all(text, user=owner)` is NOT owner-targeted delivery: the
+    owner selects only the vault the egress guard checks for stored secrets,
+    and the fan-out then calls every configured transport as `notify(text)`.
+    No transport accepts an owner — each resolves one installation-global
+    destination from operator env (TELEGRAM_NOTIFY_CHAT_ID, DISCORD_WEBHOOK_URL,
+    SLACK_NOTIFY_CHANNEL, ...). So this path shows one monitor owner's private
+    watched page to everyone on those shared channels.
+
+    That is sometimes exactly what a single-operator install wants, which is why
+    it is available at all — but it must be asked for. And it is gated on the
+    guard as well, because with the guard off `user=` is not even read: the
+    payload is never classified, so a page echoing the owner's stored secret
+    would go out unexamined. Broadcast without the guard therefore fails closed
+    rather than silently becoming the weakest possible mode.
+    """
+    if os.environ.get(BROADCAST_ENV, "").strip().lower() not in (
+            "1", "true", "yes", "on"):
+        return False
+    from . import config
+    return bool(config.egress_guard_enabled())
+
+
+def _broadcast_requested_without_guard() -> bool:
+    """Opt-in set but the guard is off — the fail-closed case worth explaining
+    in the log, as distinct from never having asked for broadcast at all."""
+    if os.environ.get(BROADCAST_ENV, "").strip().lower() not in (
+            "1", "true", "yes", "on"):
+        return False
+    from . import config
+    return not config.egress_guard_enabled()
+
+
 def run_due(now: float | None = None,
-            notify: Callable[[str], object] | None = None) -> list[str]:
+            notify: Callable[..., object] | None = None) -> list[str]:
     """Check every active monitor whose interval has elapsed; notify on a real
     change. Called by heartbeat.tick. No-op (returns []) unless opted in. Never
-    raises out — a single bad monitor is logged and skipped."""
+    raises out — a single bad monitor is logged and skipped.
+
+    `notify(text, *, user)` — the owner keyword is REQUIRED, and is the exact
+    durable `Monitor.user`. There is deliberately no TypeError-retry fallback
+    for an owner-less callback: that would silently restore the un-owned
+    delivery this contract exists to prevent, so such a notifier fails and the
+    failure is logged.
+
+    DELIVERY IS FAIL-CLOSED BY DEFAULT. A change alert carries one owner's
+    private watched page, and Olympus has no owner-targeted proactive route —
+    every configured destination is installation-global (see
+    `_shared_broadcast_enabled`). The decision order is:
+
+      1. an explicit `notify` callback  → use it, with `user=` the exact owner.
+         This is the extension point a future owner-routing implementation
+         plugs into.
+      2. no callback, and installation-wide fan-out explicitly accepted
+         (`OLYMPUS_WEB_MONITOR_BROADCAST=1` AND `OLYMPUS_EGRESS_GUARD=1`)
+         → `gateway.notify_all(..., user=owner)`. Shared, not owner-targeted.
+      3. otherwise → deliver NOWHERE and say so in the returned log.
+
+    A refused delivery never degrades detection: the change is still recorded,
+    the hash advances and the counter increments, so the operator sees CHANGED
+    in the heartbeat log and the same change does not re-alert every tick. A
+    failing callback is never compensated for by the shared fan-out — that
+    would turn a delivery failure into a disclosure.
+    """
     if not enabled():
         return []
     now = now or time.time()
     from . import webctx
+    # Resolved ONCE per tick so every monitor in this pass is treated the same
+    # way, and so the reason for a refusal can be reported per monitor.
+    no_route_reason = ""
     if notify is None:
-        from . import gateway
-        notify = gateway.notify_all
+        if _shared_broadcast_enabled():
+            from . import gateway
+            notify = gateway.notify_all
+        else:
+            no_route_reason = (_NEEDS_GUARD if _broadcast_requested_without_guard()
+                               else _NO_ROUTE)
 
     import json as _json
 
@@ -219,8 +301,16 @@ def run_due(now: float | None = None,
     # fields the check needs, then RELEASE the lock. Network I/O must never run
     # while the store mutex is held (one slow/hostile site would otherwise
     # freeze add/remove and every other run_due for minutes).
+    #
+    # `user` is part of that snapshot: it is the monitor's DURABLE owner, read
+    # straight off the stored record. It is never re-derived from the ambient
+    # memory namespace (the heartbeat runs as "shared") and never passed
+    # through `memory.safe_id`, which collapses punctuation and truncates at 64
+    # characters — normalizing here would hand the egress guard a different
+    # principal's identity and check the wrong vault.
     with _mutex():
-        due = [{"id": m.id, "url": m.url, "last_hash": m.last_hash,
+        due = [{"id": m.id, "user": m.user, "url": m.url,
+                "last_hash": m.last_hash,
                 "last_markdown": m.last_markdown, "schema": m.schema,
                 "last_json": m.last_json}
                for m in _load()
@@ -269,13 +359,24 @@ def run_due(now: float | None = None,
                 # break out of the code fence in the operator's chat client.
                 snippet = detail.replace("```", "`​``")
                 out.append(f"monitor {mid} {url}: CHANGED")
-                try:
-                    notify(f"🔔 Page changed: {url}\n\n```\n{snippet}\n```")
-                except Exception as err:
-                    # Surface the dropped alert rather than swallowing it; the
-                    # hash still advances so we don't re-notify in a storm.
-                    out.append(f"monitor {mid} {url}: change alert NOT delivered "
-                               f"({str(err)[:60]})")
+                if notify is None:
+                    # Fail closed: detected and recorded, deliberately not sent.
+                    # NEVER fall through to gateway.notify_all here — that is
+                    # the installation-wide fan-out this default exists to
+                    # avoid, and reaching it on the "no route" path would make
+                    # the refusal meaningless.
+                    out.append(f"monitor {mid} {url}: {no_route_reason}")
+                else:
+                    try:
+                        notify(f"🔔 Page changed: {url}\n\n```\n{snippet}\n```",
+                               user=mon["user"])
+                    except Exception as err:
+                        # Surface the dropped alert rather than swallowing it;
+                        # the hash still advances so we don't re-notify in a
+                        # storm. A failed callback is NOT retried through the
+                        # shared fan-out.
+                        out.append(f"monitor {mid} {url}: change alert NOT "
+                                   f"delivered ({str(err)[:60]})")
             else:
                 out.append(f"monitor {mid} {url}: baseline captured")
         updates[mid] = upd
