@@ -536,16 +536,61 @@ def _save_jobs(jobs: list[dict]) -> None:
     tmp.replace(path)
 
 
+def _job_principal(user: str) -> str:
+    """The EXACT durable identity a job belongs to.
+
+    Whitespace-stripped, and the only other normalization is that an absent or
+    empty owner — a record written before jobs carried one — resolves to the
+    shared principal so it stays addressable.
+
+    It deliberately does NOT run ``memory.safe_id``. That function collapses
+    every run of non-[A-Za-z0-9_-] to a single "-" and truncates at 64
+    characters, which is correct for building a filesystem path and wrong for
+    deciding whether two principals are the same person: "tg-a.b", "tg-a-b",
+    "tg-a@b" and "tg-a b" all become "tg-a-b", and any two ids agreeing on
+    their first 64 sanitized characters become one key. Those are distinct
+    principals, not alternate spellings of one, so keying on safe_id would
+    trade this module's name-collision defect for an identity-collision one —
+    the same cross-tenant destruction by a different route.
+
+    Same invariant, and the same reasoning, as ``browserlease.canonical``;
+    kept local here rather than imported so operator-job identity carries no
+    dependency on the browser subsystem.
+    """
+    return str(user or "").strip() or "shared"
+
+
+def _job_key(job: dict) -> tuple[str, str]:
+    """A job name is unique only inside its authenticated owner namespace.
+
+    Job execution was already owner-bound (`run_due` gates and runs each job as
+    its stored `user`), but replacement was keyed on the bare name — so a job
+    called "daily" was one global slot that any tenant could take. Scheduling
+    over it silently deleted the previous owner's automation, with no error and
+    nothing in that owner's own view (`status_summary` is per-user) to show it
+    had gone. That is cross-tenant destruction through a bare identifier.
+
+    Both sides of every comparison go through `_job_principal`, so a stored
+    record and a requesting caller are judged by one identical rule.
+    """
+    return _job_principal(str(job.get("user", ""))), str(job.get("name", ""))
+
+
 def schedule(user: str, name: str, domain: str, template: str,
              interval_secs: int, params: dict | None = None) -> dict:
     """Create/replace a standing operator job. Stored only; it runs on the
-    heartbeat, still through the spine (so approval/scope/budget all apply)."""
+    heartbeat, still through the spine (so approval/scope/budget all apply).
+
+    Replacement is scoped to the requesting owner: scheduling a name only ever
+    displaces that same owner's job of that name, never another tenant's.
+    """
     from . import proclock
     job = {"name": name, "user": user, "domain": domain, "template": template,
            "params": params or {}, "interval": max(300, int(interval_secs)),
            "last_run": 0.0, "enabled": True}
+    mine = (_job_principal(user), name)
     with proclock.lock("operator-jobs"):
-        jobs = [j for j in _load_jobs() if j.get("name") != name]
+        jobs = [j for j in _load_jobs() if _job_key(j) != mine]
         jobs.append(job)
         _save_jobs(jobs)
     return job
