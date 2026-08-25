@@ -112,6 +112,16 @@ def _mutex():
 
 
 def _owner(user: str) -> str:
+    """The durable principal a goal belongs to, VERBATIM.
+
+    The only transformation is that a missing/empty owner becomes "shared" —
+    the legacy default, kept so records written before goals carried an owner
+    stay addressable. Nothing is stripped, case-folded, or truncated, and
+    `memory.safe_id` is deliberately not used: it collapses every run of
+    non-[A-Za-z0-9_-] to a single "-" and cuts at 64 characters, which is right
+    for building a filesystem path and wrong for deciding whether two
+    principals are the same person.
+    """
     return str(user or "shared")
 
 
@@ -387,6 +397,154 @@ def work_one(g: Goal, runner: Callable[[str, str], str] | None = None,
     return f"Goal {g.id}: vanished mid-cycle"
 
 
+# --- closure alerts: owner-bound, and fail-closed by default ---------------
+#
+# A closing goal's log line carries `verdict["evidence"][:160]` (or, on a stall,
+# `verdict["missing"][:120]`) — the concrete artifacts a private objective
+# produced. That is the goal OWNER's data. The heartbeat used to push it with a
+# bare `gateway.notify_all("🎯 " + line)`: no owner argument at all, so the
+# egress guard evaluated the "shared" namespace and the payload fanned out to
+# every configured channel. Measured on this tree before the fix, two owners
+# closing in one tick put BOTH evidence strings on all nine channels, and a
+# secret from owner A's vault classified ALLOW under "shared" that classifies
+# HOLD under A.
+#
+# `notify_all(text, user=owner)` fixes the CLASSIFICATION but not the
+# DESTINATION: the owner picks which vault the guard checks, and the fan-out
+# then calls every transport as `notify(text)`. No transport accepts an owner,
+# and every proactive destination is one installation-global address. Olympus
+# has no verified per-owner proactive route, so there is nothing correct to
+# deliver to — and the default here is therefore to deliver NOWHERE.
+#
+# The closure itself is never affected. The transition is persisted, counters
+# advance, telemetry fires and the heartbeat log still reports COMPLETE/STALLED.
+# Only the external push is withheld, and the reason is stated in the log.
+
+#: Explicit, goal-specific opt-in to installation-wide fan-out. Default off.
+BROADCAST_ENV = "OLYMPUS_GOAL_BROADCAST"
+
+#: Log reasons. Deliberately free of owner ids, evidence, missing-text and
+#: destination names — a refusal must not become the leak it prevents.
+_NO_ROUTE = ("closure alert not delivered: no owner-targeted route "
+             f"(set {BROADCAST_ENV}=1 with OLYMPUS_EGRESS_GUARD=1 to accept "
+             "installation-wide fan-out)")
+_NEEDS_GUARD = (f"closure alert not delivered: {BROADCAST_ENV} requires "
+                "OLYMPUS_EGRESS_GUARD=1")
+
+def _closed_this_cycle(goal: Goal, line: str) -> bool:
+    """Did THIS cycle close THIS goal?
+
+    Anchored to the exact prefixes `work_one` emits, and bound to the goal's own
+    id — not a substring search. `work_one`'s non-closing line is
+
+        Goal <id>: progress logged; not done yet (missing: <verdict.missing>)
+
+    and `missing` is free-form model output. A marker test that matched
+    ANYWHERE in the line would therefore fire on a progress cycle whose
+    `missing` text merely happened to contain " COMPLETE on evidence:" or
+    " STALLED after " — a model can produce either, and an injected page could
+    aim for it — delivering a goal that had not closed at all.
+
+    The closing lines put a SPACE after the id, the progress line a COLON, so
+    an anchored prefix separates them exactly. Including the id also keeps one
+    goal's line from ever being credited to another, and the lowercase
+    "became done mid-cycle" line — another process's close, not ours — matches
+    neither prefix and so never re-alerts.
+    """
+    return line.startswith((
+        f"Goal {goal.id} COMPLETE on evidence:",
+        f"Goal {goal.id} STALLED after {MAX_CHECKS} cycles (missing:",
+    ))
+
+
+def _broadcast_opt_in() -> bool:
+    return os.environ.get(BROADCAST_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _shared_broadcast_enabled() -> bool:
+    """Whether the operator has explicitly accepted installation-wide fan-out.
+
+    Requires BOTH the goal-specific opt-in and the egress guard. The guard is
+    not optional here: with it off, `notify_all`'s `user` argument is never
+    read, so the payload is never classified and a goal whose evidence quotes
+    the owner's own stored secret would go out unexamined. Broadcast without
+    the guard is the weakest possible mode, so it fails closed instead.
+    """
+    if not _broadcast_opt_in():
+        return False
+    return bool(config.egress_guard_enabled())
+
+
+def _broadcast_requested_without_guard() -> bool:
+    """Opt-in set, guard off — worth its own log reason, so an operator who
+    asked for delivery learns why it did not happen."""
+    return _broadcast_opt_in() and not config.egress_guard_enabled()
+
+
+def _deliver_closure(goal: Goal, line: str,
+                     notify: Callable[..., object] | None) -> str:
+    """Deliver one closure alert as its DURABLE owner, or say why it was not.
+
+    Returns a log line; never raises. Decision order:
+
+      1. an injected `notify` callback  → `notify(text, user=goal.user)`. The
+         owner is passed through EXACTLY as `_owner` returns it — the durable
+         principal verbatim, with only a missing/empty owner mapped to
+         "shared", and never `memory.safe_id` (which collapses punctuation and
+         truncates at 64 characters). This is the extension point a real
+         per-owner route plugs into.
+      2. installation-wide fan-out, explicitly accepted → `gateway.notify_all`
+         with the same exact owner, so the guard checks the OWNER's vault.
+      3. otherwise → nothing leaves, and the reason is logged.
+
+    THE STATUS LINE SAYS ONLY WHAT IS KNOWN. `gateway.notify_all` returns the
+    channels that ACCEPTED the alert, and returns `[]` both when the egress
+    guard HOLDS it and when no channel is configured or accepting — so
+    reporting "delivered" on a bare call would claim delivery for a payload
+    that was withheld precisely because it carried the owner's secret. The
+    broadcast path therefore reads the returned list. An injected callback has
+    no such contract, so its success is described as HANDED to the notifier,
+    which is all this function can honestly attest.
+
+    A callback that raises is NEVER retried through the fan-out: that would
+    turn a delivery failure into the disclosure this exists to prevent.
+    """
+    text = "🎯 " + line
+    owner = _owner(goal.user)
+    if notify is not None:
+        try:
+            notify(text, user=owner)
+        except Exception as err:
+            # Surfaced, not swallowed, and not compensated for by a broadcast.
+            # The goal stays closed — delivery is downstream of the transition.
+            return (f"Goal {goal.id}: closure alert NOT delivered "
+                    f"({type(err).__name__})")
+        return (f"Goal {goal.id}: closure alert handed to the owner-targeted "
+                "notifier")
+
+    if not _shared_broadcast_enabled():
+        reason = (_NEEDS_GUARD if _broadcast_requested_without_guard()
+                  else _NO_ROUTE)
+        return f"Goal {goal.id}: {reason}"
+
+    from . import gateway
+    try:
+        accepted = gateway.notify_all(text, user=owner)
+    except Exception as err:
+        return (f"Goal {goal.id}: closure alert NOT delivered "
+                f"({type(err).__name__})")
+    if not accepted:
+        # Held by the guard, or no channel configured/accepting. Which of those
+        # it was is deliberately NOT reported here: naming the destinations, or
+        # distinguishing "held" from "nobody listening", would leak exactly what
+        # the guard withheld the payload to protect.
+        return (f"Goal {goal.id}: closure alert NOT delivered "
+                "(withheld or no channel accepted it)")
+    return (f"Goal {goal.id}: closure alert broadcast to "
+            f"{len(accepted)} installation-wide channel(s)")
+
+
 OK, FAIL, DEGRADED = "ok", "fail", "degraded"
 
 
@@ -418,9 +576,23 @@ def next_due_in(now: float | None = None) -> float | None:
 
 def run_due(now: float | None = None,
             runner: Callable[[str, str], str] | None = None,
-            judge_fn: Callable[..., dict] | None = None) -> list[str]:
+            judge_fn: Callable[..., dict] | None = None,
+            notify: Callable[..., object] | None = None) -> list[str]:
     """Work every active goal whose cadence has elapsed. Called by the
-    heartbeat; returns log lines (empty when nothing was due)."""
+    heartbeat; returns log lines (empty when nothing was due).
+
+    CLOSURE ALERTS ARE SENT FROM HERE, not by the caller. The heartbeat used to
+    scan the returned strings for "COMPLETE"/"STALLED" and push them itself —
+    by which point `Goal.user` was gone, so the alert went out un-owned and
+    installation-wide. Delivery lives where the owner still does; the caller
+    only logs what it is given.
+
+    `notify(text, *, user)` is the owner-aware extension point, invoked with the
+    goal's exact durable owner. Left unset, delivery is fail-closed unless an
+    operator has explicitly accepted installation-wide fan-out — see
+    `_deliver_closure`. Each closure appends one extra log line describing the
+    delivery outcome; the transition line itself is unchanged.
+    """
     interval = goals_every()
     if interval <= 0:
         return []
@@ -446,8 +618,14 @@ def run_due(now: float | None = None,
                         stored.wait_pid = 0
                 _save(goals)
             g = get(g.id, user=g.user) or g
-            out.append(work_one(g, runner=runner, judge_fn=judge_fn))
+            line = work_one(g, runner=runner, judge_fn=judge_fn)
+            out.append(line)
+            if _closed_this_cycle(g, line):
+                out.append(_deliver_closure(g, line, notify))
             continue
         if now - max(g.last_worked, g.created) >= interval or not g.progress:
-            out.append(work_one(g, runner=runner, judge_fn=judge_fn))
+            line = work_one(g, runner=runner, judge_fn=judge_fn)
+            out.append(line)
+            if _closed_this_cycle(g, line):
+                out.append(_deliver_closure(g, line, notify))
     return out

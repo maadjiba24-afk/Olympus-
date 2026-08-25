@@ -15,6 +15,76 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security/Changed — Goal closure alerts no longer broadcast installation-wide (BREAKING, P1)
+
+**A closing goal's evidence is one owner's private data, sent to everyone.**
+When `goals.work_one` closes a goal it emits the concrete evidence that
+satisfied the contract (or, on a stall, what was still missing). The heartbeat
+pushed that with a bare `gateway.notify_all("🎯 " + line)` — no owner argument,
+so `user` defaulted to `"shared"`. Reproduced on this tree: two owners closing
+in one tick put **both** evidence strings on **all nine** configured channels,
+`egress.guard` was invoked as `['shared', 'shared']`, and a secret from owner
+A's vault classified **ALLOW** under `shared` that classifies **HOLD** under A.
+`Goal.user` existed the whole time; `run_due` returned plain strings, so the
+owner was gone before the heartbeat saw it.
+
+Binding the owner fixes the **classification**, not the **destination**. No
+transport accepts an owner — each resolves one installation-global address from
+operator env — so `notify_all(text, user=owner)` still fans out to everyone.
+Olympus has no verified per-owner proactive route, so there is nothing correct
+to deliver to.
+
+- **Delivery moved into `goals.run_due`,** where `Goal.user` is still in scope;
+  the heartbeat now only logs. Each closure appends one log line describing the
+  delivery outcome. **The transition is untouched**: status, evidence, `checks`,
+  telemetry and the COMPLETE/STALLED log line all behave exactly as before, and
+  a withheld or failed delivery never rolls a closure back.
+- **Default sends nothing.** The log carries an explicit "no owner-targeted
+  route" line instead.
+- **To keep the previous behaviour, set BOTH** `OLYMPUS_GOAL_BROADCAST=1` **and**
+  `OLYMPUS_EGRESS_GUARD=1`. The opt-in alone fails closed and says so: with the
+  guard off the owner argument is never read, so the payload would go out
+  unclassified — the weakest possible mode.
+- **That mode is installation-wide, not per-owner.** Every configured channel
+  receives every goal owner's evidence. `user=` only selects whose vault the
+  guard checks. Enable it only where every destination is authorized to receive
+  every owner's evidence, which in practice means a single-operator box.
+- **Injected callbacks are the owner-aware path** and the extension point a real
+  per-owner route plugs into: `notify(text, *, user)`, where `user` is the exact
+  durable `Goal.user`. `goals._owner` passes the stored principal through
+  verbatim and only maps a missing/empty owner to `shared` — it does not strip,
+  normalize, or truncate, and never calls `memory.safe_id`, so punctuation- and
+  length-colliding principals stay distinct. A callback that raises is never
+  retried through the fan-out — that would turn a delivery failure into a
+  disclosure. Legacy records with no owner keep resolving to `shared`, the
+  pre-existing contract.
+
+**Operators upgrading must act.** If you rely on goal completion alerts reaching
+Telegram/Discord/Slack, they stop arriving until you set both variables above.
+Nothing is lost silently — closures are still recorded and visible in the
+heartbeat log. See `.env.example` and
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+The same installation-wide fan-out still applies to `agentbeat._deliver` and
+`scheduler._deliver`, where `user=` likewise binds only the guard. Those are
+tracked separately and are unchanged here.
+
+### Security — Operator jobs are isolated by exact owner (P1, #283)
+
+`operator.schedule()` de-duplicated standing jobs by bare `name`, so a job name
+was one global slot: scheduling `"daily"` silently deleted every other owner's
+job of that name. Execution was already owner-bound — `run_due` gates and runs
+each job as its stored `user` — but replacement was not, and the victim saw no
+error (`status_summary` is per-user, so the job simply stopped appearing).
+
+Replacement is now keyed on `(owner, name)`. The owner side compares the
+**exact** durable principal: `memory.safe_id` collapses punctuation (`tg-a.b`,
+`tg-a@b`, `tg-a b` all become `tg-a-b`) and truncates at 64 characters, so using
+it as an identity would have traded a name collision for an identity collision.
+Records written before jobs carried an owner resolve to the `shared` principal
+and stay addressable. Storage format, locking, the public API, execution gates,
+intervals, approvals and `run_due` behaviour are unchanged.
+
 ### Security/Changed — Web-monitor alerts no longer broadcast installation-wide (BREAKING, P1)
 
 **A change alert is one owner's private page, sent to everyone.** `Monitor.user`
