@@ -69,14 +69,18 @@ def test_run_due_baseline_then_change(store, monkeypatch):
     monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
     webmonitor.add("u1", "https://ex.com/x", interval=1)
     notes = []
-    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: notes.append(t))
+    # Delivery is fail-closed by default (no owner-targeted route exists),
+    # so a test that needs an alert injects an explicit owner-aware
+    # callback rather than relying on the installation-wide fan-out.
+    def _notify(t, *, user):
+        notes.append((t, user))
 
     from olympus import webctx
     # first pass: establish a baseline — no notification on first sight
     monkeypatch.setattr(webctx, "diff",
                         lambda url, prev: {"changed": True, "current_hash": "h1",
                                            "current_markdown": "v1", "diff": ""})
-    log1 = webmonitor.run_due(now=1000)
+    log1 = webmonitor.run_due(now=1000, notify=_notify)
     assert any("baseline" in ln for ln in log1)
     assert notes == []                                 # no alert on baseline
 
@@ -85,9 +89,10 @@ def test_run_due_baseline_then_change(store, monkeypatch):
                         lambda url, prev: {"changed": True, "current_hash": "h2",
                                            "current_markdown": "v2",
                                            "diff": "- v1\n+ v2"})
-    log2 = webmonitor.run_due(now=2000)
+    log2 = webmonitor.run_due(now=2000, notify=_notify)
     assert any("CHANGED" in ln for ln in log2)
-    assert len(notes) == 1 and "Page changed" in notes[0]
+    assert len(notes) == 1 and "Page changed" in notes[0][0]
+    assert notes[0][1] == "u1"                         # egressed as its owner
     assert webmonitor.list_for("u1")[0].changes == 1
 
 
@@ -95,7 +100,11 @@ def test_run_due_no_notify_when_unchanged(store, monkeypatch):
     monkeypatch.setenv("OLYMPUS_WEB_MONITOR", "1")
     webmonitor.add("u1", "https://ex.com/x", interval=1)
     notes = []
-    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: notes.append(t))
+    # Delivery is fail-closed by default (no owner-targeted route exists),
+    # so a test that needs an alert injects an explicit owner-aware
+    # callback rather than relying on the installation-wide fan-out.
+    def _notify(t, *, user):
+        notes.append((t, user))
     from olympus import webctx
     monkeypatch.setattr(webctx, "diff",
                         lambda url, prev: {"changed": False, "current_hash": "h1",
@@ -143,7 +152,8 @@ def test_failing_monitor_backs_off_and_auto_pauses(store, monkeypatch):
     from olympus import webctx
     monkeypatch.setattr(webctx, "diff",
                         lambda url, prev: {"error": "fetch failed"})
-    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: None)
+    # No notify stub needed: default delivery is fail-closed, so run_due
+    # never reaches the installation-wide fan-out.
     # Drive many failing cycles; the effective interval widens, so advance time
     # generously each round to keep it due.
     t = 1000
@@ -171,7 +181,8 @@ def test_run_due_does_not_hold_lock_across_fetch(store, monkeypatch):
         return {"changed": True, "current_hash": "h1",
                 "current_markdown": "v1", "diff": ""}
     monkeypatch.setattr(webctx, "diff", diff_that_touches_store)
-    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: None)
+    # No notify stub needed: default delivery is fail-closed, so run_due
+    # never reaches the installation-wide fan-out.
     webmonitor.run_due(now=1000)
     assert acquired["ok"]                               # add() ran mid-fetch, no deadlock
     assert any(m.url == "https://ex.com/y" for m in webmonitor.list_for("u2"))
@@ -187,11 +198,10 @@ def test_notify_failure_is_surfaced(store, monkeypatch):
                                            "current_hash": next(hashes),
                                            "current_markdown": "v", "diff": "d"})
 
-    def boom(_t):
+    def boom(_t, *, user):
         raise RuntimeError("gateway down")
-    monkeypatch.setattr("olympus.gateway.notify_all", boom)
-    webmonitor.run_due(now=1000)                        # baseline
-    log = webmonitor.run_due(now=2000)                  # change → notify raises
+    webmonitor.run_due(now=1000, notify=boom)           # baseline
+    log = webmonitor.run_due(now=2000, notify=boom)     # change → raises
     assert any("NOT delivered" in ln for ln in log)     # surfaced, not swallowed
 
 
@@ -207,7 +217,11 @@ def test_monitor_json_mode_tracks_structured_change(store, monkeypatch):
     webmonitor.add("u1", "https://shop/x", interval=1,
                    schema={"type": "object"})
     notes = []
-    monkeypatch.setattr("olympus.gateway.notify_all", lambda t: notes.append(t))
+    # Delivery is fail-closed by default (no owner-targeted route exists),
+    # so a test that needs an alert injects an explicit owner-aware
+    # callback rather than relying on the installation-wide fan-out.
+    def _notify(t, *, user):
+        notes.append((t, user))
     from olympus import webctx
     # first check: price 9 (baseline, no alert); second: price 10 (alert)
     seq = iter([{"mode": "json", "changed": True, "current_json": {"price": 9},
@@ -217,10 +231,11 @@ def test_monitor_json_mode_tracks_structured_change(store, monkeypatch):
                                      "from": 9, "to": 10}], "current_hash": "h2"}])
     monkeypatch.setattr(webctx, "diff",
                         lambda url, schema=None, previous_json=None: next(seq))
-    log1 = webmonitor.run_due(now=1000)
+    log1 = webmonitor.run_due(now=1000, notify=_notify)
     assert any("baseline" in ln for ln in log1) and notes == []
-    log2 = webmonitor.run_due(now=2000)
+    log2 = webmonitor.run_due(now=2000, notify=_notify)
     assert any("CHANGED" in ln for ln in log2) and len(notes) == 1
-    assert "price" in notes[0]
+    assert "price" in notes[0][0]
+    assert notes[0][1] == "u1"                         # egressed as its owner
     m = webmonitor.list_for("u1")[0]
     assert m.changes == 1 and m.schema                   # json mode persisted

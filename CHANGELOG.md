@@ -15,6 +15,63 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security/Changed — Web-monitor alerts no longer broadcast installation-wide (BREAKING, P1)
+
+**A change alert is one owner's private page, sent to everyone.** `Monitor.user`
+was persisted correctly, but `webmonitor.run_due` dropped it and fell through to
+`gateway.notify_all`, whose `user` defaults to `"shared"`. So a monitor owned by
+one tenant pushed its watched URL and up to 1500 characters of that page's
+content to every configured channel — readable by every other tenant and every
+member of those groups — and the egress guard checked the **shared** vault for
+stored secrets instead of the owner's, so a page echoing that owner's own secret
+passed the exfiltration check that exists to catch exactly it.
+
+Binding the owner fixes the guard but **not** the disclosure. `notify_all`'s
+`user` argument reaches only `egress.guard`; the fan-out then calls every
+transport as `notify(text)`. No transport accepts an owner — each resolves a
+single installation-global destination from operator env
+(`TELEGRAM_NOTIFY_CHAT_ID`, `DISCORD_WEBHOOK_URL`, `SLACK_NOTIFY_CHANNEL`, …),
+and four of the nine (Discord, ntfy, Mattermost, Google Chat) are webhook- or
+topic-addressed and cannot target an individual at all. Olympus has **no
+per-owner proactive notification route**, so there is nothing correct to send
+to, and with the guard off (the default) `user` is not even read.
+
+- **Delivery is fail-closed by default.** `run_due` no longer calls
+  `gateway.notify_all` or any global channel on its own. **Detection and
+  persistence are unchanged**: the change is still detected, the content hash
+  and the `changes` counter still advance, and the event is still reported in
+  the heartbeat log — now with an explicit line saying the external alert was
+  withheld because no owner-targeted route exists. The same change does not
+  re-alert on the next tick.
+- **To keep the legacy shared fan-out, set BOTH** `OLYMPUS_WEB_MONITOR_BROADCAST=1`
+  **and** `OLYMPUS_EGRESS_GUARD=1`. The opt-in alone fails closed and says so:
+  with the guard disabled the payload is never classified, which is the weakest
+  possible mode and not one this code will select silently.
+- **That mode is installation-wide, not per-owner.** It sends **every** monitor
+  owner's alerts to **every** configured destination, visible to everyone on
+  them. `user=` still binds only the guard's identity — it never selects a
+  recipient. Sensitive payloads may still be held by the guard. Enable it only
+  where every configured destination is authorized to receive every monitor
+  owner's benign alerts, which in practice means a single-operator box.
+- **Injected callbacks are the supported owner-aware path**, and the extension
+  point a future owner-routing implementation plugs into. The contract is
+  `notify(text, *, user)`, where `user` is the exact durable `Monitor.user` —
+  never normalized through `memory.safe_id`, which collapses punctuation and
+  truncates at 64 characters and so would name a different principal. There is
+  deliberately no TypeError retry for an owner-less callback, and a callback
+  that fails is never retried through the fan-out: that would turn a delivery
+  failure into a disclosure.
+
+**Operators upgrading must act.** If you rely on web-monitor alerts reaching
+Telegram/Discord/Slack today, they stop arriving until you set both variables
+above. Nothing is lost silently — changes are still detected, recorded, and
+visible in the heartbeat log. See `.env.example` and
+[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+The same installation-wide fan-out still applies to `agentbeat._deliver` and
+`scheduler._deliver`, where `user=` likewise binds only the guard. Those are
+tracked separately and are unchanged here.
+
 ### Security — The browser is leased to one authenticated owner (P0)
 
 Olympus drives **one** browser per installation. Whoever is signed in through it

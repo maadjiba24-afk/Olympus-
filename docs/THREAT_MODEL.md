@@ -98,6 +98,26 @@ them."
 | `web_diff` | Diff a page's markdown against a prior snapshot | ingests untrusted | Fetch via `_http_get`; content only compared (difflib), never executed; diff output wrapped | SSRF — gated; injected content — only diffed and wrapped, never obeyed |
 | `web_monitor_add` | Register a URL to watch for changes | first-party write | Records to Olympus's own store only — NO fetch here (the gated fetch happens later in `webmonitor.run_due`); the URL is literal-checked with `url_block_reason` up front; watch count capped (≤50) | Adding an internal URL — refused up front; the scheduled check is opt-in (`OLYMPUS_WEB_MONITOR`), gated, and off during replay |
 | `web_monitor_list` | List the URLs you're watching | first-party read | Read-only over Olympus's own watch store | None significant (own state) |
+
+**Web-monitor change alerts are fail-closed.** A change alert carries the
+watched URL and a slice of that page's content, so it is one monitor owner's
+private data. Olympus has **no per-owner proactive notification route**: every
+destination (`TELEGRAM_NOTIFY_CHAT_ID`, `DISCORD_WEBHOOK_URL`,
+`SLACK_NOTIFY_CHANNEL`, …) is a single installation-wide address, and no
+transport's `notify()` accepts an owner. `gateway.notify_all(text, user=…)` uses
+that owner **only** to select whose vault the egress guard checks for stored
+secrets — it never selects a recipient.
+
+So by default `webmonitor.run_due` sends nothing: the change is detected,
+persisted, and reported in the heartbeat log with an explicit "no owner-targeted
+route" line. External delivery happens only when a caller injects its own
+`notify(text, *, user)` callback (the extension point a future owner-routing
+implementation would use), or when an operator sets
+`OLYMPUS_WEB_MONITOR_BROADCAST=1` **together with** `OLYMPUS_EGRESS_GUARD=1` to
+accept installation-wide fan-out — under which every configured channel, and
+everyone on it, receives every monitor owner's alerts. Broadcast without the
+guard fails closed, since with the guard off the payload is never classified at
+all. A failed injected callback is never retried through the fan-out.
 | `assess_scope` | Show active, signed assessment authorizations | first-party read | Read-only over Olympus's own authorization store; agents cannot grant scope (operator-only via the `authorize_assessment` action) | Self-authorization — impossible: no grant tool is exposed; scope is a code-checked, ledger-recorded fact |
 | `assess_recon` | Fingerprint an AUTHORIZED target (status, server/tech headers, missing security headers) | ingests untrusted | `require_scope()` fails closed unless the target is in an active grant; single gated, IP-pinned `_http_probe` GET (SSRF/egress/secret-exfil preamble, no payloads); output wrapped, actuators stripped | Out-of-scope reach — refused in code before any I/O; SSRF/rebinding — pinned; injected response steering scope — wrapped, and the grant list is the only scope |
 | `assess_http_audit` | Audit an AUTHORIZED target's HTTP security headers / cookie flags / CORS | ingests untrusted | Scope-enforced like `assess_recon`; one gated GET; findings carry computed CVSS; output wrapped | Out-of-scope reach — refused; SSRF — gated/pinned; injected content — wrapped |
