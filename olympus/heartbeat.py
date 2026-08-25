@@ -346,11 +346,17 @@ def tick(state: dict, now: float | None = None) -> list[str]:
     # Standing goals: one unit of work + an evidence-based completion judgment
     # per goal per cadence. Only a goal CLOSING (done/stalled) pushes to chat.
     def _job_goals() -> None:
+        # DELIVERY LIVES IN goals.run_due, NOT HERE. This used to push closing
+        # goals with `gateway.notify_all("🎯 " + line)` — no owner argument, so
+        # the egress guard evaluated "shared" instead of the goal's owner and
+        # one tenant's private completion evidence fanned out to every
+        # configured channel. By this point `Goal.user` is gone; `run_due` still
+        # has it, decides delivery there, and reports the outcome as its own log
+        # line. Re-adding a notify call here would both un-own the payload and
+        # double-deliver.
         from . import goals
         for line in goals.run_due(now):
             log.append("Goals: " + line)
-            if "COMPLETE" in line or "STALLED" in line:
-                gateway.notify_all("🎯 " + line)
 
     try:
         _watch_job("goals", _job_goals)

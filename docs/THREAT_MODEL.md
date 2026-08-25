@@ -99,6 +99,27 @@ them."
 | `web_monitor_add` | Register a URL to watch for changes | first-party write | Records to Olympus's own store only — NO fetch here (the gated fetch happens later in `webmonitor.run_due`); the URL is literal-checked with `url_block_reason` up front; watch count capped (≤50) | Adding an internal URL — refused up front; the scheduled check is opt-in (`OLYMPUS_WEB_MONITOR`), gated, and off during replay |
 | `web_monitor_list` | List the URLs you're watching | first-party read | Read-only over Olympus's own watch store | None significant (own state) |
 
+**Standing-goal closure alerts are fail-closed too, and for the same reason.**
+When `goals.work_one` closes a goal it emits the concrete evidence that satisfied
+the contract (or, on a stall, what was still missing) — the goal OWNER's private
+data. The heartbeat used to push that with a bare `gateway.notify_all("🎯 " +
+line)`: no owner argument, so `egress.guard` evaluated the `shared` namespace and
+the payload fanned out to every configured channel. Two owners closing in one
+tick put both evidence strings on every channel, and a secret from one owner's
+vault classified ALLOW under `shared` that classifies HOLD under that owner.
+
+Delivery now happens inside `goals.run_due`, where `Goal.user` still exists, and
+the heartbeat only logs. By default nothing is sent: the transition is persisted,
+counters advance, and the heartbeat log records COMPLETE/STALLED plus an explicit
+"no owner-targeted route" line. External delivery happens only when a caller
+injects its own `notify(text, *, user)` callback — the extension point a real
+per-owner route would use — or when an operator sets `OLYMPUS_GOAL_BROADCAST=1`
+**together with** `OLYMPUS_EGRESS_GUARD=1` to accept installation-wide fan-out.
+The opt-in alone fails closed, since with the guard off the owner argument is
+never read and the payload is never classified. A failed injected callback is
+never retried through the fan-out, and a withheld or failed delivery never rolls
+back the closure.
+
 **Web-monitor change alerts are fail-closed.** A change alert carries the
 watched URL and a slice of that page's content, so it is one monitor owner's
 private data. Olympus has **no per-owner proactive notification route**: every
