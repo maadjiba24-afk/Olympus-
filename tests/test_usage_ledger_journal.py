@@ -66,64 +66,167 @@ def _raise_ebadf(fd):
 # on Windows, so this is the reverse of the defect above: a POSIX-only event the
 # Windows leg cannot see.
 
+# A FOURTH TRAP, and the one that made CI red on a green tree. Classifying by
+# DESCRIPTOR KIND ("file" vs "dir") is not attribution. `record()` itself syncs
+# the journal when the group-commit interval has elapsed — same file, same
+# `os.fsync`, indistinguishable from the exit flush under a kind-only filter.
+# The old probe tried to prevent that by stamping `_LAST_FSYNC[0] = time.time()`
+# immediately before `record()`, reasoning that the interval "must NOT be able
+# to fire". It can: the stamp is taken BEFORE an unbounded amount of work.
+# `record()` then lazily imports `proclock`, waits on the cross-process
+# `usage-ledger` flock, creates directories and estimates cost — and only then
+# reaches `_should_sync_now()` inside `_append_usage`. Measured on the local
+# Windows machine that wrote this, `record()` takes 0.57-0.95 s against a
+# 1000 ms default interval; on a loaded CI runner it crosses 1 s routinely.
+# When it does, the interval fires INSIDE `record()`, the journal is synced with
+# the hook unregistered, and the negative control fails on production code that
+# is behaving exactly as designed.
+#
+# So the probe attributes every sync two ways instead of classifying it:
+#   * DESCRIPTOR IDENTITY — `st_dev:st_ino` from `os.fstat`, compared against
+#     the journal's own stat. Populated on Windows as well as POSIX, so this
+#     works on every leg. It answers WHICH FILE.
+#   * CODE-OBJECT IDENTITY — whether `usage.flush.__code__` is the code object
+#     of a live frame. It answers WHICH CALLABLE, exactly: a name+basename
+#     heuristic would credit any other `flush` in any other `usage.py`.
+# A journal sync from the interval group commit carries `in_flush: false`; the
+# exit hook's carries `in_flush: true`.
+#
+# AND the interval is genuinely suppressed for the two non-forced controls, so
+# each of the three proves a DISTINCT state rather than leaning on attribution
+# to paper over a sync that should not have happened at all. Suppression needs
+# the `_LAST_FSYNC` stamp as well as the long interval — see `_run_probe`.
+
 _PROBE = r'''
-import os, pathlib, stat, sys, time
+import json, os, pathlib, stat, sys, time
 sentinel = pathlib.Path(sys.argv[1])
 memdir = pathlib.Path(sys.argv[2])
 unregister = len(sys.argv) > 3 and sys.argv[3] == "unregister"
+force_interval = len(sys.argv) > 4 and sys.argv[4] == "force-interval"
+
+def _emit(payload):
+    with open(sentinel, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload) + "\n")
+
+# The exit hook's CODE OBJECT, bound after the import below. Initialized to None
+# first so a sync during import is still recorded safely (as not-the-hook)
+# rather than raising NameError inside a patched syscall.
+_FLUSH_CODE = None
 
 _real_fsync = os.fsync
 def traced(fd):
-    result = _real_fsync(fd)          # delegate FIRST
+    result = _real_fsync(fd)          # delegate FIRST — only success is recorded
     try:
-        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        st = os.fstat(fd)
+        kind = "dir" if stat.S_ISDIR(st.st_mode) else "file"
+        ident = "%s:%s" % (st.st_dev, st.st_ino)
     except OSError:
-        kind = "unknown"
-    with open(sentinel, "a", encoding="utf-8") as fh:
-        fh.write("fsync %s\n" % kind)  # only reached if it SUCCEEDED
+        kind, ident = "unknown", ""
+    # WHICH CALLABLE, BY CODE-OBJECT IDENTITY. Matching a frame's function NAME
+    # and FILE BASENAME would credit any other `flush` defined in any other
+    # `usage.py` on the stack; `f_code is usage.flush.__code__` is the exact
+    # function and nothing else. Walk real frames — `traceback.extract_stack`
+    # yields FrameSummary objects, which carry names, not code objects.
+    in_flush = False
+    frame = sys._getframe(1)
+    while frame is not None:
+        if _FLUSH_CODE is not None and frame.f_code is _FLUSH_CODE:
+            in_flush = True
+            break
+        frame = frame.f_back
+    _emit({"event": "fsync", "kind": kind, "ident": ident, "in_flush": in_flush})
     return result
 os.fsync = traced
 
 from olympus import config, memory, usage
 config.MEMORY_DIR = memdir
 memory.set_user("shared")
+_FLUSH_CODE = usage.flush.__code__
 
 if unregister:
     import atexit
     atexit.unregister(usage.flush)
 
-# The interval must NOT be able to fire, so any fsync the sentinel records is
-# the EXIT-TIME one and nothing else.
-usage._LAST_FSYNC[0] = time.time()
+# SUPPRESS THE INTERVAL FOR REAL. `_LAST_FSYNC` starts at 0.0, so
+# `time.time() - 0.0` is ~1.79e9 seconds and clears ANY interval — an hour
+# included. Setting a long interval alone therefore suppresses nothing: the
+# first `record()` still group-commits. Stamping the clock here, with the
+# subprocess timeout far below the configured hour, is what actually makes the
+# interval unreachable. When `force_interval` is set the interval is zero
+# (per-call) and the clock is deliberately left alone so `record()` DOES sync.
+if not force_interval:
+    usage._LAST_FSYNC[0] = time.time()
+
 usage.record("claude-opus-5", 100, 50)
+
+# Publish the journal's identity so the parent can attribute syncs to it by
+# inode rather than by guessing from descriptor kind.
+day = time.strftime("%Y-%m-%d")
+journal = usage._journal_path(memdir / "usage" / ("%s.json" % day))
+if journal.exists():
+    st = journal.stat()
+    _emit({"event": "journal", "ident": "%s:%s" % (st.st_dev, st.st_ino)})
 '''
 
 
-def _run_probe(tmp_path: Path, *, unregister: bool) -> list[str]:
-    """Every fsync the probe process COMPLETED, as "fsync <kind>" lines."""
-    sentinel = tmp_path / ("unreg.txt" if unregister else "reg.txt")
-    memdir = tmp_path / ("mem-unreg" if unregister else "mem-reg")
+def _run_probe(tmp_path: Path, *, unregister: bool,
+               force_interval: bool = False) -> list[dict]:
+    """Every fsync the probe process COMPLETED, as attribution records.
+
+    The group-commit interval is suppressed by BOTH halves, because either
+    alone is insufficient: the environment sets an hour, and the child stamps
+    `_LAST_FSYNC` just before `record()`. A long interval on its own does
+    nothing — `_LAST_FSYNC` starts at 0.0, so the elapsed time is ~1.79e9
+    seconds and clears an hour trivially. `force_interval=True` sets zero
+    (per-call) and skips the stamp, so `record()` deterministically syncs.
+
+    The two flags occupy fixed argv slots (`-` when off) so `force_interval`
+    is meaningful on its own rather than only alongside `unregister`.
+    """
+    tag = ("unreg" if unregister else "reg") + ("-forced" if force_interval else "")
+    sentinel = tmp_path / f"{tag}.jsonl"
+    memdir = tmp_path / f"mem-{tag}"
     memdir.mkdir()
-    args = [sys.executable, "-c", _PROBE, str(sentinel), str(memdir)]
-    if unregister:
-        args.append("unregister")
+    args = [sys.executable, "-c", _PROBE, str(sentinel), str(memdir),
+            "unregister" if unregister else "-",
+            "force-interval" if force_interval else "-"]
+    env = dict(os.environ)
+    env["OLYMPUS_USAGE_FSYNC"] = "interval"          # pin the mode too
+    env["OLYMPUS_USAGE_FSYNC_INTERVAL_MS"] = "0" if force_interval else "3600000"
     subprocess.run(args, cwd=str(_REPO), check=True, capture_output=True,
-                   timeout=120)
+                   timeout=120, env=env)
     if not sentinel.exists():
         return []
-    return [ln for ln in sentinel.read_text(encoding="utf-8").splitlines()
-            if ln.strip()]
+    return [json.loads(ln) for ln in
+            sentinel.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
-def _file_syncs(lines: list[str]) -> list[str]:
-    """Only the syncs of the JOURNAL itself.
+def _journal_ident(records: list[dict]) -> str:
+    for rec in records:
+        if rec.get("event") == "journal":
+            return rec["ident"]
+    return ""
 
-    The create-path parent-directory sync is a different guarantee (the day's
-    first append making its directory entry durable) and fires on POSIX only,
-    so counting it here would make this test's verdict platform-dependent in
-    both directions: noise on Linux, invisible on Windows.
+
+def _journal_syncs(records: list[dict]) -> list[dict]:
+    """Completed syncs OF THE JOURNAL FILE, whoever made them.
+
+    Identified by descriptor identity, not by kind. The create-path
+    parent-DIRECTORY sync is a different guarantee and fires on POSIX only, so
+    counting it would make the verdict platform-dependent in both directions:
+    noise on Linux, invisible on Windows. Matching the journal's own inode
+    excludes it without needing a platform branch.
     """
-    return [ln for ln in lines if ln.endswith(" file")]
+    ident = _journal_ident(records)
+    if not ident:
+        return []
+    return [r for r in records
+            if r.get("event") == "fsync" and r.get("ident") == ident]
+
+
+def _hook_journal_syncs(records: list[dict]) -> list[dict]:
+    """Journal syncs performed BY THE ATEXIT HOOK specifically."""
+    return [r for r in _journal_syncs(records) if r.get("in_flush")]
 
 
 def test_atexit_hook_actually_fsyncs(tmp_path):
@@ -139,28 +242,71 @@ def test_atexit_hook_actually_fsyncs(tmp_path):
     Windows while `flush()` opened the journal read-only and the sync raised
     every single time.
     """
-    synced = _file_syncs(_run_probe(tmp_path, unregister=False))
+    records = _run_probe(tmp_path, unregister=False)
+    assert _journal_ident(records), f"probe never created the journal: {records}"
+    synced = _hook_journal_syncs(records)
     assert synced, (
-        "no COMPLETED fsync of the journal was observed at exit — the atexit "
-        "hook did not run, ran without syncing, or attempted a sync that "
-        "FAILED. A clean exit inside the interval therefore leaves the record "
-        "unflushed.")
+        f"no COMPLETED fsync of the journal BY `usage.flush` was observed at "
+        f"exit ({records}) — the atexit hook did not run, ran without syncing, "
+        f"or attempted a sync that FAILED. A clean exit inside the interval "
+        f"therefore leaves the record unflushed.")
 
 
 def test_atexit_probe_can_fail(tmp_path):
     """THE MUTATION, BUILT IN. The same probe with the hook unregistered must
-    observe NO fsync of the journal.
+    observe no journal sync ATTRIBUTED TO THE HOOK.
 
-    Without this the test above cannot be distinguished from one that passes
-    because something else happened to sync. It is the difference between
-    'we saw a flush' and 'the hook caused the flush'.
+    Without this the sibling above cannot be distinguished from one that passes
+    because something else happened to sync. It is the difference between 'we
+    saw a flush' and 'the hook caused the flush'.
+
+    The interval is genuinely suppressed here — a long interval AND the
+    `_LAST_FSYNC` stamp — so with the hook gone the journal must not be synced
+    AT ALL. That is a strictly stronger statement than "no sync was attributed
+    to the hook", and it is checkable only because the suppression is real:
+    an earlier revision set the hour but not the stamp, so `record()` still
+    group-committed and this control could only ever assert attribution.
+
+    Attribution still matters, and
+    `test_interval_sync_is_not_credited_to_the_atexit_hook` is where it is
+    proved — there the sync is deliberately allowed to happen.
     """
-    lines = _run_probe(tmp_path, unregister=True)
-    synced = _file_syncs(lines)
-    assert synced == [], (
-        f"fsync of the journal was observed with the atexit hook UNREGISTERED "
-        f"({lines}) — the sibling test is therefore not evidence that the hook "
-        f"works, because something else is syncing.")
+    records = _run_probe(tmp_path, unregister=True)
+    assert _journal_ident(records), f"probe never created the journal: {records}"
+    assert _journal_syncs(records) == [], (
+        f"the journal was synced with the atexit hook UNREGISTERED and the "
+        f"group-commit interval suppressed ({records}) — either the suppression "
+        f"is not working or something else syncs the journal, and in both cases "
+        f"the sibling test is not evidence that the hook did it.")
+    assert _hook_journal_syncs(records) == []
+
+
+def test_interval_sync_is_not_credited_to_the_atexit_hook(tmp_path):
+    """THE DISCRIMINATION PROOF, and a regression test for a real CI failure.
+
+    `record()` syncs the journal itself when the group-commit interval has
+    elapsed. That is correct production behaviour, and on a loaded runner it
+    happens INSIDE `record()` — `record()` takes 0.57-0.95 s locally against a
+    1000 ms default, and the old control stamped the interval clock before all
+    of that work. A kind-only filter counted that sync as evidence the exit hook
+    had run and failed the negative control on a healthy tree.
+
+    Here the interval is forced to fire with the hook UNREGISTERED. The journal
+    IS synced — so this is not the "nothing happened" case — and the attribution
+    must still credit it to `record`, never to `flush`.
+    """
+    records = _run_probe(tmp_path, unregister=True, force_interval=True)
+    assert _journal_ident(records), f"probe never created the journal: {records}"
+
+    journal_syncs = _journal_syncs(records)
+    assert journal_syncs, (
+        f"the forced interval did not sync the journal, so this test is not "
+        f"exercising the interleaving it exists for: {records}")
+    assert all(not r["in_flush"] for r in journal_syncs), (
+        f"a sync made by `record`/`_append_usage` was attributed to the atexit "
+        f"hook ({journal_syncs}) — the attribution cannot tell the two apart, "
+        f"which is exactly the defect that made CI red.")
+    assert _hook_journal_syncs(records) == []
 
 
 def test_flush_opens_the_journal_with_write_access(monkeypatch, tmp_path):

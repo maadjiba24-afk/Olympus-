@@ -604,42 +604,127 @@ except browserlease.OwnershipRefused:
     assert not (tmp_path / "browser_lease.json").exists()
 
 
+def test_release_then_reclaim_mints_a_fresh_generation(tmp_path):
+    """The generation semantics the race test rests on, pinned without a race.
+
+    `claim()` PRESERVES `lease_id` while a lease exists — that is what makes a
+    fingerprint backfill safe. But once `release()` has removed a generation,
+    the next `claim()` is a genuinely new lease and MUST get a new `lease_id`;
+    reusing the released one would resurrect a generation a holder had already
+    been told was gone, and would let a stale release delete the new lease.
+    """
+    first = browserlease.claim(A, "fake", "")
+    # Backfill while the lease lives: same generation, fingerprint updated.
+    same = browserlease.claim(A, "fake", "ws://fp/1")
+    assert same["lease_id"] == first["lease_id"], "backfill moved the generation"
+
+    browserlease.release(A, first["lease_id"])
+    assert not browserlease._path().exists()
+
+    second = browserlease.claim(A, "fake", "ws://fp/2")
+    assert second["lease_id"], "a re-claim must have a non-empty generation"
+    assert second["lease_id"] != first["lease_id"], (
+        "a post-release re-claim reused the RELEASED generation")
+    assert second["owner"] == A
+
+    # And the released generation cannot reach back and delete the new one.
+    with pytest.raises(browserlease.OwnershipRefused):
+        browserlease.release(A, first["lease_id"])
+    assert browserlease.current()["lease_id"] == second["lease_id"]
+
+
 def test_process_fingerprint_backfill_races_release(tmp_path):
-    """The backfill is a read-modify-write. Racing a release, the outcome must
-    be one of two consistent states — never a half-written or resurrected
-    record, and never a lease owned by nobody while state exists."""
+    """A cross-process release landing BETWEEN two backfill claims.
+
+    THE OLD ASSERTION WAS WRONG, and CI caught it on a healthy tree: it required
+    `rec["lease_id"] == original`, commented "generation never moved". The
+    generation legitimately moves. The release removes the original generation
+    while the backfill child is still looping, so its next `claim()` finds no
+    record and correctly mints a NEW one — CI observed exactly that (initial
+    `1a198c6b…`, final `55e6452a…`, owner unchanged). Asserting a fixed
+    `lease_id` forbade a correct schedule.
+
+    THE ORDERING IS PINNED, NOT SAMPLED. `time.sleep(0.05)` is gone, and so is
+    the one-way barrier that replaced it: signalling only "the loop has begun"
+    still allowed the backfill child to finish all forty claims before the
+    release child got a timeslice, which would have made the interleaving this
+    test exists for merely likely. The two children now hand off both ways —
+    backfill claims once and waits; release fires and waits; backfill resumes —
+    so the release provably lands between claim #0 and claim #1, and every
+    outcome below is a single determined state rather than a set of
+    alternatives.
+
+    Because the original generation is known to exist at the handoff, the
+    release MUST succeed, a record MUST survive, and it must be a NEW
+    generation — the released one must never come back.
+    """
     out = _run_children(tmp_path, ["""
 print(json.dumps(browserlease.claim('tg-alice', 'fake', '')))
 """])
-    lease_id = json.loads(out[0][0])["lease_id"]
+    original = json.loads(out[0][0])["lease_id"]
 
     res = _run_children(tmp_path, [
+        # Backfill: claim once, hand off, wait for the release, then resume.
         """
-for _ in range(40):
+started = pathlib.Path(sys.argv[1]) / 'backfill-started'
+finished = pathlib.Path(sys.argv[1]) / 'release-finished'
+browserlease.claim('tg-alice', 'fake', 'ws://fp/0')
+started.write_text('go', encoding='utf-8')
+deadline = time.monotonic() + 60
+while not finished.exists():
+    if time.monotonic() > deadline:
+        print('HANDSHAKE-TIMEOUT')
+        raise SystemExit(1)
+    time.sleep(0.01)
+for i in range(1, 40):
     try:
-        browserlease.claim('tg-alice', 'fake', 'ws://fp/' + str(_))
+        browserlease.claim('tg-alice', 'fake', 'ws://fp/' + str(i))
     except browserlease.OwnershipRefused:
         pass
 print('BACKFILL-DONE')
 """,
+        # Release: wait for the first claim, release, then release the backfill.
         f"""
-time.sleep(0.05)
+started = pathlib.Path(sys.argv[1]) / 'backfill-started'
+finished = pathlib.Path(sys.argv[1]) / 'release-finished'
+deadline = time.monotonic() + 60
+while not started.exists():
+    if time.monotonic() > deadline:
+        print('HANDSHAKE-TIMEOUT')
+        raise SystemExit(1)
+    time.sleep(0.01)
 try:
-    browserlease.release('tg-alice', {lease_id!r})
+    browserlease.release('tg-alice', {original!r})
     print('RELEASED')
 except browserlease.OwnershipRefused:
     print('REFUSED')
+finished.write_text('go', encoding='utf-8')
 """])
     assert res[0][0] == "BACKFILL-DONE", res
-    assert res[1][0] in ("RELEASED", "REFUSED"), res
+    assert res[1][0] == "RELEASED", (
+        f"the original generation was live at the handoff, so the release had "
+        f"to succeed: {res}")
 
+    # The backfill resumed after the release, so a record MUST exist.
     path = tmp_path / "browser_lease.json"
-    if path.exists():
-        # Whatever survived must be a fully valid record owned by A.
-        with browserlease._lock():
-            rec = browserlease._decode(path.read_text("utf-8"))
-        assert rec["owner"] == "tg-alice"
-        assert rec["lease_id"] == lease_id        # generation never moved
+    assert path.exists(), "the post-release backfill did not re-claim"
+
+    # It must decode COMPLETELY — `_decode` rejects a torn write, an unknown
+    # schema, a missing/blank owner and a missing lease_id, so this is the
+    # "never half-written or ownerless" assertion.
+    with browserlease._lock():
+        rec = browserlease._decode(path.read_text("utf-8"))
+    assert rec["owner"] == "tg-alice", rec
+    assert rec["transport"] == "fake", rec
+    assert isinstance(rec["lease_id"], str) and rec["lease_id"], rec
+    assert rec["lease_id"] != original, (
+        "the RELEASED generation was resurrected — a holder told its lease was "
+        "gone would still match this record")
+
+    # And the stale generation cannot reach back and delete the live one.
+    with pytest.raises(browserlease.OwnershipRefused):
+        browserlease.release(A, original)
+    assert browserlease.current()["lease_id"] == rec["lease_id"]
 
 
 def test_process_crash_while_holding_the_lock_releases_it(tmp_path):
