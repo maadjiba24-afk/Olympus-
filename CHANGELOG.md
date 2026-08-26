@@ -15,6 +15,302 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Scheduled job reports are private to their owner (P2)
+
+**A job's answer went into a category everyone can read.** `scheduler.run_due`
+executes each job under its durable `job.user`, then wrote the complete answer
+with `memory.set_user("shared")` + `memory.save("reports", ...)`. `reports` is
+installation-global and `memory.search` sweeps every globally-scoped category
+for every caller, so **owner B retrieved owner A's scheduled output with an
+ordinary memory search**. Reproduced on the baseline: the note landed in
+`reports/<stamp>-scheduled-payroll.md`, and B's `memory.search(marker)` returned
+A's answer verbatim. The `set_user("shared")` also left the heartbeat thread's
+ambient namespace on `shared` for the rest of the tick.
+
+- **New private category `job_reports`,** stored at
+  `MEMORY_DIR/owners/<owner-key>/job_reports/`. `reports` stays shared on
+  purpose — `opportunity_scan`, `evolution_audit`, skill curation, feature
+  evolution and the replay gate write genuinely installation-wide notes there,
+  and making it user-scoped would have broken them.
+- **`scheduler._principal` no longer normalizes the owner.** It ran
+  `memory.safe_id`, which merged `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b` —
+  and any two ids sharing a 64-character sanitized prefix — into ONE owner, so
+  their jobs and their reports merged before storage was reached. It is now the
+  exact durable principal (`memory.canonical_owner`), with a missing owner
+  still resolving to `shared` and no fallback from an exact owner to its
+  `safe_id` form (which would let a colliding owner claim a legacy record).
+- **Keyed on the EXACT principal.** `memory.owner_key` pairs a bounded readable
+  label with the COMPLETE SHA-256 digest of the exact owner string.
+  `safe_id` alone is not an identity: it collapses every run of
+  non-`[A-Za-z0-9_-]` to a single `-` and truncates at 64 characters, so
+  `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b` — and any two ids sharing a
+  64-character sanitized prefix — would have shared one directory.
+- **Authorization comes from the trusted request context.** `memory.set_user`
+  now sets an exact-owner ContextVar (`current_owner()`) alongside the
+  `safe_id` path namespace — canonicalized once, so a blank owner cannot give
+  the two contexts different identities — and private categories are
+  authorized on that. An ordinary `memory.search()` reads exactly one private
+  directory, the current owner's own, so `recall_memory` serves an owner their
+  own job reports and no one else's, with **no owner selector** the model
+  could supply.
+- **Every temporary identity switch is token-based.** Introducing an exact
+  owner made the pre-existing "save `current_user()`, re-`set_user` it later"
+  shape an identity CORRUPTION: an ambient owner of `tg-a.b` came back as
+  `tg-a-b`, a different principal, which could then read that principal's
+  private memory. `actions._owner_context`, `discovery`, `operator` and
+  `subagents` now use `memory.user_context` (ContextVar tokens), and a
+  structural test fails the build if the pattern reappears.
+- **The model-facing entry points no longer destroy the identity before the
+  fix can see it.** `scheduler._principal` being exact was not enough: the
+  `schedule_task` TOOL read `current_user()`, so both colliding principals
+  reached `scheduler.add` as one owner and the second job silently REPLACED
+  the first — an owner could delete another owner's schedule by picking the
+  same job name, and every job report then filed under one principal.
+  Reproduced through the real `tools.HANDLERS["schedule_task"]`: two owners,
+  one persisted job. It now binds `current_owner()`, and the tests drive the
+  real handler and `resolve_handler` rather than calling `scheduler.add`
+  directly.
+- **Prepared actions are owned by the exact principal.** `actions` stored
+  `Action.user` and the trusted `_user` payload field as `safe_id(user)` and
+  filed records under `actions/<safe_id>/`, so colliding principals shared one
+  action store: `pending()` listed each other's actions and `get(user, id)`
+  returned them, which made an action ID a cross-owner authorization
+  credential — enough to read, edit, approve, reject or undo someone else's
+  pending action. Records now live under `actions/owners/<owner-key>/` keyed on
+  the exact principal, `Action.user` and `_user` hold the exact string, and
+  every lookup re-checks the stored owner so a directory is a lookup hint and
+  never the authorization. `ACTION_BOUNDARY_VERSION` goes **3 → 4**: a v3
+  record carries a normalized owner that cannot be mapped back, so it is
+  refused at execution and must be prepared again — the same fail-closed rule
+  v3 already applied to v2 records.
+- **The council runtime no longer destroys the exact principal.**
+  `orchestrator.Olympus.__init__` ran `self.user = memory.safe_id(user)`, so
+  every owner-exact store below it was defeated at the top:
+  `Olympus(user="tg-a.b").user` was `"tg-a-b"`. `self.user` is what each
+  `memory.set_user` in `ask`/`ask_stream`/`ask_ephemeral` and each DAG worker
+  thread binds, and what is handed to prefs, vault, actions, operator and
+  trust. The scheduler's DEFAULT production runner is
+  `Olympus(user=job.user).ask(prompt)`, so **a fresh job owned by `tg-a.b`
+  executed with `tg-a-b`'s preferences, granted scopes, capability profile and
+  credential vault**, and only its final report was filed back under `tg-a.b`.
+  It is now `memory.canonical_owner(user)`. `safe_id` stays exactly where it is
+  documented — inside stores that build non-authorizing paths. None of those
+  values may be used to decide who owns private state.
+- **Gateway identities are collision-resistant before they reach the runtime.**
+  The shared router minted `f"{prefix}-{safe_id(user_key)}"`; authenticated
+  email senders `a.b@example.com` and `a-b@example.com` consequently reused one
+  bot, conversation and owner, as did keys sharing a 64-character sanitized
+  prefix. `gateway.principal_id` now domain-separates and length-frames the exact
+  transport key, then encodes the complete SHA-256 digest as URL-safe Base64
+  under an explicit `v2` owner marker. The result remains under 64 path-safe
+  characters, and one resolver is used by onboarding, commands and both
+  steering paths. Historical Telegram,
+  Discord, Slack and WhatsApp ids remain only behind strict transport-specific
+  validation. Ambiguous legacy gateway data is never auto-claimed: its
+  preferences and vault are fail-closed, and its scheduled jobs, goals,
+  heartbeats, web monitors and operator jobs remain inspectable but inert.
+  v1 in-flight hints are dropped rather than replayed, while v2 journals use
+  exact `owner_key` paths and verify their embedded owner before recovery.
+- **The credential vault is keyed on the exact principal (BREAKING).**
+  `vault._load`/`_store` used `memory.safe_id(user)`, so `tg-a.b`, `tg-a@b`,
+  `tg-a b` and `tg-a-b` shared ONE encrypted vault. Reproduced: after
+  `vault.put("tg-a.b", "google", bundle)`, `google_oauth.connected("tg-a-b")`
+  was True, `google_oauth.access_token("tg-a-b")` returned A's token, and
+  `gmail._access_token()` bound as `tg-a-b` **read A's mailbox**. Saved site
+  passwords (`site:<domain>`) and browser session cookies (`cookies:<domain>`)
+  merged the same way. Vaults are now keyed by `memory.storage_key`.
+- **Security preferences are keyed on the exact principal (BREAKING).**
+  `prefs._path` used `users/<safe_id>/prefs.json`, and that one file carries
+  the autonomy level, granted action scopes, per-action daily limits, the
+  capability profile and its `max_autonomy` cap, operator settings and their
+  authorized-site list, the earned-autonomy opt-in, and pending secure-capture
+  state. Reproduced: `set_autonomy("tg-a.b", 4)` made `autonomy_level("tg-a-b")`
+  4, and `grant_scope` leaked identically. Tenant preferences now live at
+  `prefs/owners/<owner-key>.json` — deliberately outside `users/` and
+  `owners/`, the trees a memory export or whole-scope memory delete sweeps, so
+  security settings neither ride along in an archive nor get wiped with notes.
+- **Reserved installation namespaces are an allowlist, not a fallback.**
+  `memory.SYSTEM_OWNERS` is `{"shared", "operator"}`: `shared` is the ambient
+  default the heartbeat and installation-wide settings use (its preferences
+  file stays exactly at `MEMORY_DIR/prefs.json`), and `operator` is the
+  installation's own credential namespace for `opconfig` config secrets and
+  `secretref` entries. These keep their literal storage keys; every other
+  principal is digest-keyed. `owner_key` always appends `-<64 hex>`, so no
+  tenant can produce a bare reserved name. **The reservation is a policy:** a
+  name in that set must never be issued as an authenticated tenant principal,
+  and `memory.assert_not_system_owner` is available for bindings that accept an
+  externally-supplied id.
+- **Pre-existing tenant vaults and preference files are QUARANTINED, not
+  claimed.** Their key is a `safe_id` value that several principals map to, so
+  nothing in the record says whose it is. There is no fallback — not even for a
+  principal whose exact identity equals that string, because that equality is
+  precisely what every collision victim's collider also has. Affected tenants
+  are simply not connected any more and must reconnect, or an operator claims
+  the record explicitly after establishing ownership out of band:
+  `vault.legacy_tenants()`/`legacy_names()`/`migrate_legacy()`/`discard_legacy()`
+  and `prefs.legacy_owners()`/`legacy_keys()`/`migrate_legacy()`/
+  `discard_legacy()`.
+- **An unresolved legacy preference file QUARANTINES its whole collision
+  group.** Refusing to attribute the file and then falling back to ordinary
+  defaults WIDENED privilege — an earlier revision claimed those defaults were
+  fail-closed for every security key, and **that claim was wrong**: a legacy
+  `capability_profile="guest"` read back as `"full"`, a legacy `autonomy=0` as
+  L1, and a strict `action_limits` entry vanished into a class default of 0,
+  which means *unlimited*. `prefs.is_quarantined` is now the single detection
+  API and `prefs.QUARANTINE_POSTURE` the single set of clamped values, applied
+  inside `prefs.get` so every consumer inherits it without re-implementing
+  legacy detection. While unresolved, every principal that normalizes to that
+  file gets: capability profile locked to `guest` (deny posture, `max_autonomy`
+  0), autonomy L0, no granted scopes, earned autonomy off, operator settings and
+  every authorized site off, no pending secure capture, no unattended or
+  standing execution (`can_auto_execute` refuses outright), and a positive
+  `QUARANTINE_DAILY_LIMIT` so a missing action limit cannot mean unlimited.
+  Writing a new exact preference file stores the value but does **not** clear
+  the quarantine — only `migrate_legacy`/`discard_legacy` do.
+- **Legacy scheduler jobs are quarantined, not inherited.** `Job` gains
+  `owner_version`, stamped with `JOB_OWNER_SCHEMA_VERSION`. A job persisted
+  before it holds a normalized `user`, and v4 treated that as ownership:
+  reproduced, a job created by `tg-a.b` and stored as `tg-a-b` was **listed to
+  `tg-a-b` with its prompt, executed by `run_due` under `tg-a-b`'s identity,
+  and its answer filed in `tg-a-b`'s private `job_reports`** — and `tg-a-b`
+  could remove or disable it. Unversioned jobs now never become due, never
+  resume, are never polled for on-change output, are excluded from every
+  owner-filtered `jobs(user)`, and are immune to tenant `remove`/`set_enabled`.
+  They are exempt from a principal's per-owner quota so a legacy file cannot
+  evict live jobs. `jobs()` with no owner, `quarantined()` and
+  `discard_quarantined()` are the operator-wide surfaces. `web._agenda_view`
+  now filters at the source rather than post-filtering the operator-wide feed.
+- **No per-owner action API reads the pre-v4 layout — correcting v4.** v4 let a
+  principal read `actions/<safe_id>/` when its exact identity equalled that
+  normalized string, on the stated reasoning that such a caller "cannot be a
+  collision victim". **That reasoning was wrong.** Equalling a lossy value is
+  exactly what the collider of every victim also does: `tg-a.b` and `tg-a-b`
+  both wrote into `actions/tg-a-b/`, so `tg-a-b` could read `tg-a.b`'s prepared
+  actions — title, rendered preview and full payload. Refusing only to EXECUTE
+  a legacy record (the boundary-version check) was **not sufficient, because an
+  action's contents are private.** `get`/`pending`/`history`/`approve`/
+  `reject`/`undo`/`edit` now read only the owner-keyed directory, for everyone.
+  `pending_all()`, `legacy_actions()` and `discard_legacy_actions()` remain as
+  operator-wide inspection so nothing becomes invisible to an administrator.
+- **Identity-sensitive durable records get the exact principal.** The browser
+  lease, `operator.schedule`/`save_auth`/`restore_auth`, the operator gates and
+  `webmonitor.add`/`list_text` were handed `current_user()`; they now receive
+  `current_owner()`, so colliding principals no longer share a browser lease,
+  an operator job, or a web-monitor registration.
+- **Credential, egress and authorization lookups get the exact principal.**
+  `security.secret_exfil_reason` (which vault is scanned before content leaves
+  the process), the `egress.guard` owner on `send_email`/`call_webhook`/
+  `propose_upgrade`, `gmail`'s per-user OAuth token lookup (which mailbox is
+  reached), the cross-origin browser-frame authorization checks,
+  `operator_authorize_site` / `operator_remember_login` / `operator_trust` /
+  `operator_status` / `operator_history` / `operator_forget_site` /
+  `set_advanced_mode`, and the `write_document` action's execute fallback all
+  read `current_owner()`. A normalized owner there scans the wrong vault,
+  reaches the wrong mailbox, or writes a durable authorization under a
+  colliding principal.
+- **The `olympus monitor` and `olympus memory` CLI groups actually run again.**
+  A pre-existing function-local `from . import memory` inside `cli.main` made
+  `memory` a local for the WHOLE function body, so both command groups raised
+  `UnboundLocalError` before reaching their own logic — which also made the
+  monitor command's owner binding unreachable. The redundant import is gone
+  (the module already imports `memory` at module scope) and the monitor
+  command binds `current_owner()`.
+- **Every generic-category bypass is closed.** `save`, `recent`,
+  `recent_titles`, `prune` and `category_count` resolve the ambient
+  (normalized) namespace, so they now REFUSE a private category rather than
+  reading the shared-owner store, writing under a lossy owner, or pruning a
+  colliding owner's notes. The owner-bound helpers refuse non-private
+  categories symmetrically.
+- **Export, import, retention and backup cover the private tree.**
+  `_memory_roots` now includes `owners/` (a sibling of `users/`, so a
+  CATEGORIES sweep missed it entirely and archives silently dropped every job
+  report), a single-owner export includes only that owner's tree, and
+  `delete_memory` resolves a private category by the exact principal instead of
+  its `safe_id` form. `backup` already walks MEMORY_DIR wholesale. The
+  `OLYMPUS_VAULT_DIR` mirror deliberately EXCLUDES private reports — it is one
+  flat folder per category with no owner dimension — so job reports live only
+  in MEMORY_DIR and its backups, never in the browsable vault.
+- **The caller's namespace is captured and restored,** in a `finally` that
+  covers runner, delivery and save failures alike — the exact previous value
+  via `memory.user_context`'s ContextVar token, never a reset to `shared`.
+- Notes keep the standard versioned markdown format, so export, retention and
+  every category reader treat them like any other note; sanitization still runs
+  through the single `save` door.
+
+**Historical data is not retroactively secured, and this change does not claim
+otherwise.** Scheduled answers written before this release remain in shared
+`reports` and carry no reliable owner metadata, so they are deliberately left
+untouched rather than migrated on a guess. **Operators of a multi-tenant
+instance should review `MEMORY_DIR/reports/*scheduled*.md` and remove anything
+that should not be readable installation-wide.**
+
+**Records created before this release carry a normalized owner, and nobody
+inherits them.** An earlier revision of this work said such a record "belongs
+to whoever's exact principal equals that normalized string". **That was wrong
+and is corrected here**: a `safe_id` value is one that several distinct
+principals map to, so equalling it is not evidence of ownership — it is exactly
+what the collider of every victim also does. Jobs, actions, vaults and
+preference files written before this release are therefore quarantined and
+belong to no principal at all.
+
+Operators upgrading a multi-tenant instance should expect, and plan for:
+
+| Store | Effect on affected tenants | Operator recovery |
+| --- | --- | --- |
+| Credential vault | Google account shows as not connected; saved site logins and session cookies gone | Have the tenant reconnect, or `vault.migrate_legacy(key, owner)` after establishing ownership out of band |
+| Preferences | Autonomy, scopes, action limits, capability profile, operator settings and authorized sites reset to defaults | Tenant re-grants, or `prefs.migrate_legacy(id, owner)` |
+| Scheduled jobs | Job stops running and disappears from the tenant's list | `scheduler.quarantined()` to read it, recreate under the correct principal, then `discard_quarantined()` |
+| Prepared actions | Not visible or approvable by anyone | `actions.legacy_actions()` to read it, prepare again, then `discard_legacy_actions()` |
+
+**Quarantined secrets stay in the outbound floor.** Quarantine removes a
+legacy vault from every CREDENTIAL path — nothing authenticates with a secret
+whose owner is unknown. The always-on outbound scan is the opposite kind of
+check, deciding what must not LEAVE, and there the conservative answer is to
+scan more, not less: `security.secret_exfil_reason` checks every principal in
+the collision group against a matching quarantined vault, in raw, base64, hex
+and URL-encoded form. An earlier revision dropped those secrets from the scan
+entirely and described it as an accepted coverage reduction; it was not
+acceptable, and it is gone. If such a vault exists but cannot be decrypted or
+parsed, outbound sending for that collision group is REFUSED until an operator
+resolves it. `vault.legacy_scan` runs the comparison in-process and returns
+only a generic reason — no secret, label, entry name, vault key or ciphertext
+reaches a caller or a log.
+
+#### What this change does NOT cover
+
+**Olympus is not exact-owner safe end to end, and this release does not claim
+it is.** The scheduler, the action spine, the credential vault, security
+preferences (autonomy, scopes, limits, capability profile, operator settings,
+earned autonomy, secure capture), the browser lease, web monitors and outbound
+egress are exact-owner. Several remaining per-user stores still key themselves
+on `memory.safe_id` INTERNALLY, so passing them an exact principal changes
+nothing — the store normalizes it one line later. Colliding principals
+therefore still share:
+
+| Store | Keyed by | Consequence of a collision |
+| --- | --- | --- |
+| `documents`, `docrag` | `users/<safe_id>/documents/` | Shared document store and RAG index |
+| `todos` | `users/<safe_id>/todos.json` | Shared todo list |
+| `playbooks` | `safe_id(user)` store key | Shared proposed/approved workflows |
+| `emailstyle` | `email_style/<safe_id>.json` | Shared writing-style profile |
+| `search` (conversation index) | `safe_id` `owner` column | Shared conversation search namespace |
+| `assess`, `discovery` | `assess|discovery/<safe_id>/` | Shared findings, authorizations and gap records |
+| `usage`, `gallery` | `safe_id(user)` | Shared spend accounting and gallery root — normalized **by design** (accounting and display, not authorization) |
+
+Each of those needs its own migration — a new owner-keyed layout plus a
+fail-closed legacy quarantine, the pattern `vault` and `prefs` now follow — and
+none is attempted here. `usage` and `gallery` are deliberate: usage accounting
+is a coarse operator-facing ledger, not an authorization boundary.
+
+Call sites that read `memory.current_user()` are correct **only** when the
+value is used to build a path in an already-normalized store, or when the
+caller is a request boundary binding an identity it received from outside. The
+`test_exact_owner_sinks_never_read_the_normalized_namespace` structural test
+names every function where that is NOT true, so a future edit that "simplifies"
+one back to `current_user()` fails the build instead of silently re-merging
+principals.
+
+
 ### Security/Changed — Goal closure alerts no longer broadcast installation-wide (BREAKING, P1)
 
 **A closing goal's evidence is one owner's private data, sent to everyone.**

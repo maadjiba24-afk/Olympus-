@@ -129,7 +129,7 @@ def test_slack_process_event_routes_and_sends(monkeypatch):
     sent = []
     monkeypatch.setattr(slack, "send", lambda ch, txt: sent.append((ch, txt)))
     monkeypatch.setattr(gateway, "reply_for",
-                        lambda bots, uk, text, prefix="": ["hi back"])
+                        lambda bots, uk, text, prefix="", uid=None: ["hi back"])
     slack.process_event({"event": {"type": "message", "text": "hi",
                                    "channel": "C1", "user": "U1"}})
     assert sent == [("C1", "hi back")]
@@ -152,7 +152,7 @@ def test_discord_slash_command_is_deferred_then_followed_up(monkeypatch):
 
     followups = []
     monkeypatch.setattr(gateway, "reply_for",
-                        lambda bots, uk, text, prefix="": [f"got:{text}"])
+                        lambda bots, uk, text, prefix="", uid=None: [f"got:{text}"])
     monkeypatch.setattr(discord, "_followup",
                         lambda app, tok, text: followups.append((app, tok, text)))
     discord.process_command(payload)
@@ -273,7 +273,8 @@ def test_slack_voice_message_processed(monkeypatch):
     monkeypatch.setattr(slack, "_voice_text",
                         lambda event: "[voice note] status update")
     monkeypatch.setattr(slack.gateway, "reply_for",
-                        lambda bots, u, t, prefix: seen.update(text=t) or ["ok"])
+                        lambda bots, u, t, prefix, uid=None:
+                        seen.update(text=t) or ["ok"])
     monkeypatch.setattr(slack, "send", lambda channel, text: None)
     slack.process_event({"event": {"type": "message", "user": "U1",
                                    "channel": "C1", "files": [{}]}}, bots={})
@@ -302,7 +303,7 @@ def test_slack_resume_inflight_redelivers(monkeypatch):
     monkeypatch.setattr(slack, "send",
                         lambda channel, text: sent.append((channel, text)))
     monkeypatch.setattr(slack.gateway, "reply_for",
-                        lambda bots, u, t, prefix: asked.append((u, t))
+                        lambda bots, u, t, prefix, uid=None: asked.append((u, t))
                         or ["the answer"])
     slack.resume_inflight()
     assert asked == [("U7", "long analysis please")]
@@ -318,7 +319,7 @@ def test_discord_resume_uses_notify_webhook(monkeypatch):
     posted = []
     monkeypatch.setattr(discord, "notify", lambda text: posted.append(text))
     monkeypatch.setattr(discord.gateway, "reply_for",
-                        lambda bots, u, t, prefix: ["recovered answer"])
+                        lambda bots, u, t, prefix, uid=None: ["recovered answer"])
     discord.resume_inflight()
     assert posted and "<@77>" in posted[0] and "recovered answer" in posted[0]
 

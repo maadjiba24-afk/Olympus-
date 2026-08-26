@@ -1837,7 +1837,12 @@ def main(argv: list[str] | None = None) -> int:
             else "cli-default")
         _chat(cid)
     elif args.command == "sessions":
-        from . import memory
+        # NO local `from . import memory` here. `memory` is already imported at
+        # module scope, and a function-local import ANYWHERE in `main` makes the
+        # name local for the WHOLE function body — so `olympus memory ...` and
+        # `olympus monitor ...`, which read `memory` in earlier branches, raised
+        # UnboundLocalError before reaching their own logic. That also made the
+        # monitor command's owner binding below unreachable.
         if args.id:
             if not firstrun.ensure_ready():
                 return 1
@@ -1944,7 +1949,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n[written to {args.out}]", file=sys.stderr)
     elif args.command == "monitor":
         from . import webmonitor
-        user = memory.current_user()
+        # EXACT principal: `webmonitor` stores this verbatim as a monitor's
+        # DURABLE owner and later hands it to the egress guard as the identity
+        # whose vault is checked. `current_user()` is safe_id-normalized, so it
+        # would file the monitor under a colliding principal. Today the CLI runs
+        # as the normalization-stable "shared", so the values are identical —
+        # this is the correct spelling for whatever a future CLI binds.
+        user = memory.current_owner()
         if args.monitor_cmd == "add":
             schema = None
             if getattr(args, "schema", None):

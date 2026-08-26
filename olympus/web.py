@@ -74,9 +74,19 @@ def _agenda_view(user: str) -> dict:
     import time as _time
     now = _time.time()
     jobs = []
-    for j in scheduler.jobs():
-        if j.user not in (user, "shared"):
-            continue                      # only this user's (and shared) tasks
+    # Owner-filtered at the SOURCE. This used to read the operator-wide
+    # `scheduler.jobs()` and filter on `j.user`, which surfaced quarantined
+    # legacy jobs — whose recorded owner is a normalized value — to whichever
+    # principal happened to equal it, prompt and all.
+    seen_keys = set()
+    owned = list(scheduler.jobs(user))
+    if scheduler._principal(user) != "shared":
+        owned += list(scheduler.jobs("shared"))
+    for j in owned:
+        key = (j.user, j.name)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         if getattr(j, "kind", "interval") == "on_exit":
             when = f"when {j.label or 'pid ' + str(j.watch_pid)} exits"
             due_in = None

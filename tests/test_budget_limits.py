@@ -156,7 +156,9 @@ def test_limit_records_audit_event(reg):
     a2 = actions.prepare("u", "t_send", {"to": "x@y.z"})
     actions.approve("u", a2.id)
     import json
-    log = (config.MEMORY_DIR / "actions" / "u" / "audit.jsonl").read_text()
+    # The store is owner-keyed now (actions/owners/<owner_key>/), so ask
+    # the module for the directory instead of hardcoding a layout.
+    log = (actions._dir("u") / "audit.jsonl").read_text()
     events = [json.loads(l)["event"] for l in log.splitlines()]
     assert "blocked_rate_limit" in events
 

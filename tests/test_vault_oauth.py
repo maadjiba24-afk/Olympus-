@@ -56,7 +56,9 @@ def test_vault_encrypts_at_rest(monkeypatch):
     # round-trips for the owner
     assert vault.get("u", "google") == secret
     # but the raw stored bytes do NOT contain the plaintext token
-    raw = store.backend().get("vault", "u")
+    # The vault is owner-keyed now (exact principal + SHA-256 digest), so ask
+    # the module for the key instead of hardcoding the old safe_id layout.
+    raw = store.backend().get("vault", vault._key("u"))
     assert b"ya29.SENSITIVE" not in raw and b"1//RT" not in raw
 
 

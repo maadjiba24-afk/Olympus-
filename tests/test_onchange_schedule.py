@@ -106,7 +106,8 @@ def test_chat_onchange_command(tmp_path):
     out = gateway.reply_for({}, "u1", f"/onchange cat {f} :: report the change")
     assert any("Watching" in c for c in out)
     job = next(j for j in scheduler.jobs() if j.kind == "on_change")
-    assert job.user == "ol-u1" and "report the change" in job.prompt
+    assert job.user == gateway.principal_id("u1")
+    assert "report the change" in job.prompt
 
 
 def test_chat_onchange_usage():

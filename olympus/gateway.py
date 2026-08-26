@@ -12,9 +12,12 @@ instances (private memory + persisted history per user).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import queue
+import re
 import threading
 import traceback
 from collections import OrderedDict
@@ -22,6 +25,77 @@ from collections import OrderedDict
 from . import config, memory, orchestrator, steering
 
 CHUNK = 3500
+
+# Transport identities are authorization credentials: every downstream exact-
+# owner store can only isolate the identity it receives.  ``safe_id`` is a path
+# helper, not an identity function; using it here merged authenticated senders
+# such as ``a.b@example.com`` and ``a-b@example.com`` before Olympus saw them.
+#
+# A URL-safe Base64 encoding carries the COMPLETE SHA-256 digest in 43
+# characters.  With a bounded transport prefix, the resulting principal is
+# path-safe and remains below ``safe_id``'s 64-character legacy path limit, so
+# persisted conversations do not truncate the digest one layer later.
+_TRANSPORT_PRINCIPAL_DOMAIN = b"olympus-transport-principal-v2\x00"
+_TRANSPORT_PREFIX = re.compile(r"[A-Za-z0-9_]{1,16}\Z")
+
+
+def principal_id(user_key: str, prefix: str = "ol") -> str:
+    """Mint a collision-resistant principal for an authenticated transport key.
+
+    ``prefix`` domain-separates channels, while the length-framed, exact key is
+    hashed without normalization, case folding or truncation.  The raw key is
+    deliberately absent from the durable principal: email addresses, phone
+    numbers and Matrix ids need not become filenames or log identifiers.
+    """
+    channel = str(prefix)
+    if not _TRANSPORT_PREFIX.fullmatch(channel):
+        raise ValueError("transport prefix must be 1-16 letters, digits or '_'")
+    if user_key is None:
+        raise ValueError("transport user key is required")
+    exact = str(user_key)
+    if not exact.strip():
+        raise ValueError("transport user key is required")
+    channel_bytes = channel.encode("utf-8")
+    key_bytes = exact.encode("utf-8")
+    framed = (
+        _TRANSPORT_PRINCIPAL_DOMAIN
+        + len(channel_bytes).to_bytes(2, "big") + channel_bytes
+        + len(key_bytes).to_bytes(8, "big") + key_bytes
+    )
+    digest = base64.urlsafe_b64encode(hashlib.sha256(framed).digest()) \
+        .decode("ascii").rstrip("=")
+    return f"{channel}-{memory.GATEWAY_OWNER_VERSION}-{digest}"
+
+
+def _resolved_principal(user_key: str, prefix: str,
+                        uid: str | None = None) -> str:
+    """Resolve one gateway request to its exact durable principal.
+
+    Explicit ids are a trusted-transport compatibility surface (Telegram's
+    historic ``tg-<chat id>``, Discord snowflakes, Slack member ids).  Refuse
+    an unsafe, overlong or cross-prefix value so it cannot reintroduce a lossy
+    conversation path or silently bind one channel to another's principal.
+    """
+    channel = str(prefix)
+    if not _TRANSPORT_PREFIX.fullmatch(channel):
+        raise ValueError("transport prefix must be 1-16 letters, digits or '_'")
+    if uid is None:
+        # Preserve identities whose AUTHENTICATED platform keyspace is proven
+        # path-safe and injective.  This is deliberately an allowlist, not a
+        # generic "already looks safe" shortcut: email/webhook/Matrix/phone
+        # keys may contain punctuation and always use the digest constructor.
+        key = str(user_key)
+        if channel == "dc" and re.fullmatch(r"[0-9]{1,32}", key):
+            return f"dc-{key}"
+        if channel == "sl" and re.fullmatch(r"[UW][A-Z0-9]{1,31}", key):
+            return f"sl-{key}"
+        return principal_id(user_key, channel)
+    exact = memory.assert_not_system_owner(uid)
+    if not exact.startswith(f"{channel}-"):
+        raise ValueError("explicit gateway principal has the wrong prefix")
+    if len(exact) > 64 or memory.safe_id(exact) != exact:
+        raise ValueError("explicit gateway principal must be path-safe and bounded")
+    return exact
 
 # Idle gateway sessions are distilled-and-cleared after this many seconds so a
 # long-running gateway process doesn't accumulate unbounded per-user history
@@ -95,6 +169,12 @@ def _inflight_dir():
     return d
 
 
+def _inflight_path(uid: str):
+    """Owner-exact v2 journal path; never fall back to the lossy v1 name."""
+    exact = memory.assert_not_system_owner(uid)
+    return _inflight_dir() / f"{memory.owner_key(exact)}.json"
+
+
 def inflight_mark(uid: str, deliver_key, text: str) -> None:
     """Record that `text` is being processed for `uid` (best-effort).
     `deliver_key` is whatever the platform needs to send a message back
@@ -102,27 +182,29 @@ def inflight_mark(uid: str, deliver_key, text: str) -> None:
     import json as _json
     import time as _time
     try:
-        path = _inflight_dir() / f"{memory.safe_id(uid)}.json"
+        exact = memory.assert_not_system_owner(uid)
+        path = _inflight_path(exact)
         attempts = 1
         if path.exists():
             try:
                 prior = _json.loads(path.read_text(encoding="utf-8"))
-                if prior.get("text") == text:
+                if (prior.get("version") == 2
+                        and prior.get("uid") == exact
+                        and prior.get("text") == text):
                     attempts = int(prior.get("attempts", 1)) + 1
             except (ValueError, OSError):
                 pass
         path.write_text(_json.dumps(
-            {"uid": uid, "key": deliver_key, "text": text,
+            {"version": 2, "uid": exact, "key": deliver_key, "text": text,
              "attempts": attempts, "ts": _time.time()}), encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         pass
 
 
 def inflight_clear(uid: str) -> None:
     try:
-        (_inflight_dir() / f"{memory.safe_id(uid)}.json").unlink(
-            missing_ok=True)
-    except OSError:
+        _inflight_path(uid).unlink(missing_ok=True)
+    except (OSError, ValueError):
         pass
 
 
@@ -138,7 +220,17 @@ def inflight_take(prefix: str) -> list[dict]:
         except (ValueError, OSError):
             path.unlink(missing_ok=True)
             continue
-        if not str(entry.get("uid", "")).startswith(prefix):
+        uid = str(entry.get("uid", ""))
+        # v1 filenames and owner fields were safe_id-normalized and are
+        # ambiguous.  They are short-lived (24h) work hints, not authority: fail
+        # closed by dropping them instead of replaying one user's request as
+        # another.  A v2 file must also prove its filename matches its exact uid.
+        if (entry.get("version") != 2
+                or not uid
+                or path.name != f"{memory.owner_key(uid)}.json"):
+            path.unlink(missing_ok=True)
+            continue
+        if not uid.startswith(prefix):
             continue
         path.unlink(missing_ok=True)      # taken either way
         fresh = _time.time() - float(entry.get("ts", 0)) <= _INFLIGHT_MAX_AGE
@@ -183,7 +275,8 @@ def notify_all(text: str, *, user: str = "shared") -> list[str]:
     return delivered
 
 
-def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
+def try_steer(user_key: str, text: str, prefix: str = "ol",
+              uid: str | None = None) -> list[str] | None:
     """Fast-path `/steer`: handle it synchronously (BEFORE the per-user serial
     worker queue) so the note reaches a pipeline that is already mid-run —
     queued behind the running task it would only be seen after the run ends.
@@ -193,8 +286,8 @@ def try_steer(user_key: str, text: str, prefix: str = "ol") -> list[str] | None:
         return None
     if not arg.strip():
         return chunk("Usage: /steer <note> — nudge the task that's running")
-    uid = f"{prefix}-{memory.safe_id(user_key)}"
-    if steering.put(uid, arg):
+    principal = _resolved_principal(user_key, prefix, uid)
+    if steering.put(principal, arg):
         return chunk("Noted — the running task will see this after its "
                      "next tool call.")
     return chunk("Steering queue is full; note dropped.")
@@ -246,17 +339,17 @@ def reply_for(bots: dict, user_key: str, text: str,
         return chunk("(say something and I'll help)")
     cmd, _, arg = text.partition(" ")
     cmd = cmd.lower()
+    principal = _resolved_principal(user_key, prefix, uid)
 
     if cmd in ("/start", "/help"):
         from . import onboarding
-        wid = uid or f"{prefix}-{memory.safe_id(user_key)}"
-        if cmd == "/start" and onboarding.is_new(wid):
-            onboarding.mark_seen(wid)
+        if cmd == "/start" and onboarding.is_new(principal):
+            onboarding.mark_seen(principal)
             return chunk(onboarding.welcome() + "\n\n" + HELP)
         return chunk(HELP)
     if cmd == "/steer":
         # Fallback for transports that didn't fast-path it; same behavior.
-        return try_steer(user_key, text, prefix)  # type: ignore[return-value]
+        return try_steer(user_key, text, prefix, principal)  # type: ignore[return-value]
     if cmd == "/scan":
         return chunk(orchestrator.opportunity_scan())
     if cmd == "/audit":
@@ -271,7 +364,7 @@ def reply_for(bots: dict, user_key: str, text: str,
         memory.watchlist_add(arg)
         return chunk("Queued — the heartbeat will watch it on its next pass.")
 
-    uid = uid or f"{prefix}-{memory.safe_id(user_key)}"
+    uid = principal
     if cmd in ("/approvals", "/pending", "/approve", "/deny", "/reject"):
         from . import approvals
         handled = approvals.handle_command(uid, cmd, arg)

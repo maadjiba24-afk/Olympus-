@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -129,6 +130,14 @@ def _user_key(payload: dict) -> str:
     return str(user.get("id", "anon"))
 
 
+def _principal(user_key: str) -> str:
+    """Historical Discord principal, accepted only for a real snowflake id."""
+    key = str(user_key)
+    if not re.fullmatch(r"[0-9]{1,32}", key):
+        raise ValueError("Discord request has no valid authenticated user id")
+    return f"dc-{key}"
+
+
 def sync_response(payload: dict) -> dict:
     """The *immediate* JSON response for an interaction. PING is answered with
     PONG; a slash command is acked with a DEFERRED response so Discord's 3s
@@ -169,12 +178,11 @@ def process_command(payload: dict, bots: dict | None = None) -> None:
     deferred ack has already been sent."""
     bots = _BOTS if bots is None else bots
     user_key = _user_key(payload)
+    uid = _principal(user_key)
     text = _command_text(payload.get("data") or {})
     # Journal the in-flight request so a restart can recover it (delivery on
     # resume goes via the notify webhook — the interaction token will have
     # expired by then).
-    from . import memory
-    uid = f"dc-{memory.safe_id(user_key)}"
     gateway.inflight_mark(uid, user_key, text)
     try:
         reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="dc"))
@@ -200,6 +208,7 @@ def resume_inflight() -> None:
     for entry in entries:
         user_key = str(entry.get("key") or "anon")
         try:
+            _principal(user_key)  # validate before replaying trusted work
             reply = "\n".join(gateway.reply_for(
                 _BOTS, user_key, str(entry["text"]), prefix="dc"))
             notify("⚡ I was restarted while answering a request from "

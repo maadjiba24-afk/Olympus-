@@ -261,12 +261,10 @@ def propose_feature(gap: dict, user: str | None = None) -> str:
         "upgrade path (`propose_upgrade` files it upstream).")
     try:
         from . import memory
-        prev = memory.current_user()
-        try:
-            memory.set_user(user)
+        # Token-based: restoring through `current_user()` would hand the
+        # caller back a normalized identity, not its own.
+        with memory.user_context(user):
             path = memory.save("upgrades", title, details)
-        finally:
-            memory.set_user(prev)
         _set_status(user, gap.get("id", ""), "proposed", ref=str(path))
         return f"proposed feature '{topic}' → {path}"
     except Exception as err:

@@ -24,7 +24,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from . import config
+from . import config, memory
 
 MAX_ACTIVE = 10            # per owner — one tenant cannot starve another
 MAX_TOTAL_GOALS = 1000     # absolute storage ceiling; additions fail closed
@@ -565,7 +565,8 @@ def next_due_in(now: float | None = None) -> float | None:
     interval = goals_every()
     if interval <= 0:
         return None
-    goals = active()
+    goals = [g for g in active()
+             if not memory.is_ambiguous_gateway_owner(g.user)]
     if not goals:
         return None
     now = now or time.time()
@@ -606,6 +607,8 @@ def run_due(now: float | None = None,
     now = now or time.time()
     out = []
     for g in active():
+        if memory.is_ambiguous_gateway_owner(g.user):
+            continue
         if g.wait_pid:
             if _pid_alive(g.wait_pid):
                 continue           # parked on a still-running process

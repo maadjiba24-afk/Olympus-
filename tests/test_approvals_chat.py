@@ -76,20 +76,20 @@ def test_non_approval_command_returns_none():
 # --- through the shared gateway ---------------------------------------------
 
 def test_gateway_routes_approve(action_type, monkeypatch):
-    a = _prepare("ol-u7")
+    a = _prepare(gateway.principal_id("u7"))
     out = gateway.reply_for({}, "u7", f"/approve {a.id}")
     assert any("approved and executed" in c for c in out)
 
 
 def test_gateway_lists_approvals(action_type):
-    a = _prepare("ol-u8")
+    a = _prepare(gateway.principal_id("u8"))
     out = gateway.reply_for({}, "u8", "/approvals")
     assert any(a.id in c for c in out)
 
 
 def test_reply_gains_footer_when_turn_holds_action(action_type, monkeypatch):
     def fake_ask(self, msg):
-        _prepare("ol-u9", cmd="deploy prod")
+        _prepare(gateway.principal_id("u9"), cmd="deploy prod")
         return "I prepared the deploy."
     monkeypatch.setattr("olympus.orchestrator.Olympus.ask", fake_ask)
     out = gateway.reply_for({}, "u9", "deploy please")

@@ -217,7 +217,9 @@ def _write_document_preview(p: dict) -> str:
 
 def _write_document_execute(p: dict) -> dict:
     from . import documents, memory
-    user = p.get("_user") or memory.current_user()
+    # `_user` is the trusted, server-derived exact owner; the fallback
+    # must be exact too, or a colliding principal writes as another.
+    user = p.get("_user") or memory.current_owner()
     return documents.save(user, p.get("name", ""), p.get("content", ""))
 
 

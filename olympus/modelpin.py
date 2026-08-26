@@ -31,14 +31,16 @@ def match(pool: config.ModelPool, token: str) -> config.Settings | None:
 
 
 def get_pin(user: str) -> str | None:
-    return prefs.get(memory.safe_id(user), _PREF_KEY)
+    # EXACT principal: prefs are per-owner settings, and `safe_id` here pinned
+    # every colliding principal's conversations to one model.
+    return prefs.get(memory.canonical_owner(user), _PREF_KEY)
 
 
 def set_pin(user: str, token: str) -> str:
     """Pin `user`'s conversations to a configured model, or clear with
     'auto'. Validates against the operator pool so a typo can't strand the
     conversation on nothing."""
-    uid = memory.safe_id(user)
+    uid = memory.canonical_owner(user)
     token = (token or "").strip().lower()
     if token in ("", "auto", "off", "none", "clear"):
         prefs.set(uid, _PREF_KEY, None)

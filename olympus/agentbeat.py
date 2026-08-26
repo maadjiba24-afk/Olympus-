@@ -22,7 +22,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 
-from . import config, scheduler
+from . import config, memory, scheduler
 
 QUIET_TOKEN = "HB_OK"
 
@@ -210,7 +210,8 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
     with _mutex():
         beats = _load()
         for beat in beats:
-            if beat.due(now):
+            if (not memory.is_ambiguous_gateway_owner(beat.user)
+                    and beat.due(now)):
                 beat.last_run = now
                 due.append(beat)
         if due:
@@ -235,5 +236,6 @@ def next_due_in(now: float | None = None) -> float | None:
     beats) — feeds the serverless next-wake computation."""
     now = now if now is not None else time.time()
     waits = [max(0.0, b.every - (now - b.last_run))
-             for b in _load() if b.enabled]
+             for b in _load()
+             if b.enabled and not memory.is_ambiguous_gateway_owner(b.user)]
     return min(waits) if waits else None

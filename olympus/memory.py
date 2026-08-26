@@ -17,6 +17,7 @@ the orchestrator at the start of each conversation turn.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import io
@@ -31,8 +32,32 @@ from pathlib import Path
 from . import config
 
 CATEGORIES = ("lessons", "corrections", "feedback", "reports", "upgrades",
-              "prompt_backups", "evals")
+              "prompt_backups", "evals", "job_reports")
 USER_SCOPED = {"lessons", "corrections", "feedback"}
+
+#: Categories stored per EXACT owner and never swept by a shared read.
+#:
+#: `reports` is deliberately installation-global: `opportunity_scan`,
+#: `evolution_audit`, skill curation, feature evolution and the replay gate all
+#: write genuinely shared system notes there, and every owner is meant to find
+#: them. A scheduled JOB's answer is the opposite — it is one owner's private
+#: output, produced by their prompt under their identity — so it gets its own
+#: category rather than making `reports` user-scoped and breaking the shared
+#: notes that belong there.
+#:
+#: A private category is NEVER part of a shared sweep. An ordinary `search()`
+#: reads exactly one private directory — `current_owner()`'s own — so the owner
+#: of a job report finds it and nobody else does. That authorization comes from
+#: the exact-owner ContextVar the request binding sets; `current_user()` is
+#: `safe_id`-normalized (see `owner_key`) and must never authorize a private
+#: read, because it merges distinct principals.
+#:
+#: The generic `save`/`recent`/`recent_titles`/`prune`/`category_count` resolve
+#: the normalized namespace, so they REFUSE a private category outright. The
+#: `*_for` helpers take the principal as an argument and are the trusted
+#: background/admin path for code that has a durable owner but no request
+#: context (the heartbeat, export, retention).
+PRIVATE_CATEGORIES = frozenset({"job_reports"})
 
 # On-disk format versions (Olympus's data-sovereignty contract — see
 # docs/MEMORY_FORMAT.md). NOTE_SCHEMA_VERSION stamps each markdown note's
@@ -46,29 +71,239 @@ _USER: contextvars.ContextVar[str] = contextvars.ContextVar(
     "olympus_user", default="shared"
 )
 
+#: The EXACT durable principal, kept alongside `_USER`.
+#:
+#: `_USER` is `safe_id`-normalized because it is used to build paths, and that
+#: normalization is lossy: `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b` all become
+#: one value, as do any two ids sharing a 64-character sanitized prefix. It can
+#: therefore never authorize a private read. `_OWNER` carries the principal
+#: verbatim and is what PRIVATE_CATEGORIES are keyed and authorized on. Both are
+#: set together by `set_user`, so every existing caller gets the exact identity
+#: without changing its call.
+_OWNER: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "olympus_owner", default="shared"
+)
+
 
 def safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", str(value)).strip("-")[:64] or "shared"
 
 
+def canonical_owner(owner) -> str:
+    """The EXACT durable principal, with only the legacy default applied.
+
+    A missing/empty/blank owner becomes "shared" — the pre-existing contract
+    everywhere else in the tree — so a legacy record stays addressable instead
+    of acquiring a separate, unreachable blank identity. Nothing else is
+    changed: no stripping of interior characters, no case folding, no
+    truncation, and never `safe_id`.
+    """
+    if owner is None:
+        return "shared"
+    text = str(owner)
+    return text if text.strip() else "shared"
+
+
 def set_user(user: str) -> None:
-    """Set the memory namespace for the current thread/conversation."""
-    _USER.set(safe_id(user))
+    """Set the memory namespace for the current thread/conversation.
+
+    Sets BOTH the `safe_id` path namespace and the exact-owner context, so
+    every existing caller (orchestrator, gateway, tools) supplies the exact
+    principal for private-category authorization without changing its call.
+
+    Canonicalized ONCE, with both values derived from that result. Deriving
+    them independently splits the identity for a blank owner: `safe_id(None)`
+    is the literal string "None" while `canonical_owner(None)` is "shared", so
+    the path namespace and the authorization context would name two different
+    principals.
+    """
+    exact = canonical_owner(user)
+    _USER.set(safe_id(exact))
+    _OWNER.set(exact)
 
 
 def current_user() -> str:
+    """The `safe_id` path namespace. Lossy — never use it as an identity."""
     return _USER.get()
+
+
+def current_owner() -> str:
+    """The EXACT durable principal for the current request. The only value
+    that may authorize a private-category read or write."""
+    return _OWNER.get()
+
+
+@contextlib.contextmanager
+def user_context(user: str):
+    """Run a block as `user`, then restore BOTH contexts to exactly what they
+    were — by ContextVar token, not by re-setting a guessed value like
+    "shared", which discards the caller's namespace just as thoroughly. Unwinds
+    on every exit path, exception included."""
+    exact = canonical_owner(user)
+    user_token = _USER.set(safe_id(exact))
+    owner_token = _OWNER.set(exact)
+    try:
+        yield
+    finally:
+        _OWNER.reset(owner_token)
+        _USER.reset(user_token)
+
+
+def owner_key(owner) -> str:
+    """A path-safe directory key for an EXACT principal.
+
+    `safe_id` alone is not usable as an identity: it collapses every run of
+    non-[A-Za-z0-9_-] to a single "-" and truncates at 64 characters, so
+    `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b` all become one key, as do any two
+    ids agreeing on their first 64 sanitized characters. A private store keyed
+    that way would file two different people's output in one directory.
+
+    The key is a bounded readable label for a human browsing the store, plus
+    the COMPLETE SHA-256 hex digest of the exact canonical principal. The label
+    may collide; the digest is collision-resistant, so the pair is too. The
+    full digest is used rather than a prefix — a truncated hash trades a
+    security property for filename length that nothing here needs.
+    """
+    exact = canonical_owner(owner)
+    digest = hashlib.sha256(exact.encode("utf-8")).hexdigest()
+    label = re.sub(r"[^A-Za-z0-9_-]+", "-", exact).strip("-")[:32] or "owner"
+    return f"{label}-{digest}"
+
+
+#: Reserved, installation-owned namespaces. These are NOT tenants: they name
+#: the installation itself, and their stores are addressed by the literal name
+#: rather than by an owner digest so they stay stable across this migration and
+#: keep working for code that hardcodes them.
+#:
+#: * ``shared`` — the ambient default. The heartbeat and every background task
+#:   with no request context run as ``shared``, and installation-wide settings
+#:   (the daily budget cap, shared system notes) live under it.
+#: * ``operator`` — the installation's own credential namespace: ``opconfig``
+#:   config secrets and ``secretref`` entries.
+#:
+#: THE RESERVATION IS A POLICY, NOT AN INFERENCE. A name in this set must never
+#: be issued as an authenticated tenant principal: anyone bound to the literal
+#: string ``operator`` would address the installation's config-secret vault.
+#: Every real principal Olympus mints is prefixed (``tg-``/``dc-``/``sl-``/
+#: ``u:``/``web-``) or is the literal ``cli``, so nothing collides today, and
+#: `assert_not_system_owner` is available for a binding that accepts an
+#: externally-supplied id.
+SYSTEM_OWNERS = frozenset({"shared", "operator"})
+
+# Gateway prefixes whose pre-v2 identity constructor accepted a keyspace wider
+# than safe_id's alphabet. Their old `<prefix>-<safe_id(raw)>` principals are
+# ambiguous and must not retain unattended authority after the v2 digest mint.
+# Discord/Slack/Telegram/WhatsApp are absent: their preserved platform ids are
+# validated numeric/alphanumeric values at the authenticated transport boundary.
+AMBIGUOUS_GATEWAY_PREFIXES = frozenset(
+    {"ol", "email", "hook", "sg", "mx", "mm", "gc", "sms"})
+GATEWAY_OWNER_VERSION = "v2"
+_GATEWAY_DIGEST = re.compile(r"[A-Za-z0-9_-]{43}\Z")
+
+
+def is_system_owner(owner) -> bool:
+    """True when `owner` names the installation rather than a tenant."""
+    return canonical_owner(owner) in SYSTEM_OWNERS
+
+
+def assert_not_system_owner(owner) -> str:
+    """Return the exact principal, refusing a reserved installation namespace.
+
+    For request bindings that accept an externally-supplied identity: being
+    authenticated as `operator` must never be a way to reach the installation's
+    own credential vault.
+    """
+    exact = canonical_owner(owner)
+    if exact in SYSTEM_OWNERS:
+        raise ValueError(
+            f"'{exact}' is a reserved installation namespace and cannot be a "
+            "tenant principal")
+    return exact
+
+
+def is_ambiguous_gateway_owner(owner) -> bool:
+    """Whether ``owner`` was minted by the old lossy gateway constructor.
+
+    New derived principals are `<prefix>-v2-<full SHA-256 base64url>`. An old
+    principal under a derivation-required channel records only `safe_id(raw)`;
+    it cannot be attributed to one external account and is therefore suitable
+    for operator inspection only, never unattended execution or credentials.
+    """
+    exact = canonical_owner(owner)
+    if is_system_owner(exact):
+        return False
+    for prefix in AMBIGUOUS_GATEWAY_PREFIXES:
+        marker = f"{prefix}-{GATEWAY_OWNER_VERSION}-"
+        if exact.startswith(marker):
+            return _GATEWAY_DIGEST.fullmatch(exact[len(marker):]) is None
+        if exact.startswith(f"{prefix}-"):
+            return True
+    return False
+
+
+def storage_key(owner) -> str:
+    """The storage key for a per-owner private store (vault, prefs).
+
+    A reserved installation namespace keeps its literal name; every tenant is
+    keyed by `owner_key`, the exact principal plus its complete SHA-256 digest.
+    `owner_key` always appends `-<64 hex>`, so it can never collide with a
+    reserved bare name.
+
+    There is deliberately NO fallback to the `safe_id` form. A pre-migration
+    store was keyed by a value that several distinct principals share, so
+    reading it for "whoever's exact identity equals that string" would hand one
+    principal another's credentials — the merge this key exists to remove.
+    """
+    exact = canonical_owner(owner)
+    if exact in SYSTEM_OWNERS:
+        return exact
+    return owner_key(exact)
 
 
 def _dir(category: str, user: str = "shared") -> Path:
     if category not in CATEGORIES:
         raise ValueError(f"unknown memory category: {category}")
-    if category in USER_SCOPED and user != "shared":
+    if category in PRIVATE_CATEGORIES:
+        # `user` here is the EXACT durable principal — never `current_user()`,
+        # which is already normalized and would merge distinct owners.
+        d = config.MEMORY_DIR / "owners" / owner_key(user) / category
+    elif category in USER_SCOPED and user != "shared":
         d = config.MEMORY_DIR / "users" / user / category
     else:
         d = config.MEMORY_DIR / category
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _reject_private(category: str, api: str) -> None:
+    """Generic, ambient-namespace APIs must never touch a private category.
+
+    `save`, `recent`, `recent_titles`, `prune` and `category_count` resolve
+    their directory from `current_user()`, which is `safe_id`-normalized. Using
+    that for a private store would let `recent("job_reports")` read the
+    shared-owner store, `save("job_reports", ...)` write under a lossy owner,
+    and `prune("job_reports")` delete a COLLIDING owner's notes. Rather than
+    quietly resolving to the wrong owner, they refuse and point at the
+    owner-bound API, which takes the principal as an argument.
+    """
+    if category in PRIVATE_CATEGORIES:
+        raise ValueError(
+            f"'{category}' is a private category; {api} resolves the ambient "
+            f"(normalized) namespace and cannot authorize it — use the "
+            f"owner-bound API ({api}_for) with an exact principal")
+
+
+def _require_private(category: str, api: str) -> None:
+    """The owner-bound API is for private categories only.
+
+    Symmetric to `_reject_private`: without this, `save_for(owner, "reports",
+    ...)` would look owner-scoped while writing into the installation-global
+    shared category — the exact confusion this split exists to remove.
+    """
+    if category not in PRIVATE_CATEGORIES:
+        raise ValueError(
+            f"'{category}' is not a private category; {api} is owner-bound — "
+            f"use the ordinary API for shared and user-scoped categories")
 
 
 def _slug(title: str) -> str:
@@ -133,10 +368,21 @@ def save(category: str, title: str, content: str) -> Path:
     path forgets to sanitize — there is only one door into memory, and it is
     guarded. The pass is idempotent, so callers that already sanitize are safe.
     """
+    _reject_private(category, "save")
+    return _save_note(_dir(category, current_user()), category, title, content)
+
+
+def _save_note(d: Path, category: str, title: str, content: str) -> Path:
+    """Write one note into `d`. The single sanitize-and-publish door.
+
+    Factored out of `save()` so the owner-bound `save_for` can target an EXACT
+    principal's directory without going through the ambient ContextVar, while
+    still passing through the same sanitization, the same atomic publish and
+    the same vault-mirror policy. There is still only one writer.
+    """
     from . import security
     title = security.sanitize_for_memory(title)
     content = security.sanitize_for_memory(content)
-    d = _dir(category, current_user())
     # Unique, collision-proof filename (ADR 0005): the old second-granularity
     # name let two concurrent writers of the same title silently overwrite
     # each other. pid + O_EXCL create (atomic across processes) guarantees
@@ -172,6 +418,10 @@ def save(category: str, title: str, content: str) -> Path:
 
 
 # Categories worth reading in a knowledge GUI (Obsidian is just a folder).
+#: Mirrored into OLYMPUS_VAULT_DIR as flat per-category folders. A private
+#: category must NEVER be listed here: the mirror is one directory per
+#: category with no owner dimension, so mirroring `job_reports` would pool
+#: every owner's private output back into one browsable folder.
 _VAULT_CATEGORIES = frozenset({"lessons", "reports", "corrections"})
 
 
@@ -193,14 +443,32 @@ def _mirror_to_vault(category: str, path: Path) -> None:
 
 
 def _search_dirs() -> list[Path]:
-    dirs = [_dir(c) for c in CATEGORIES]
+    """Directories the current request may read.
+
+    A private category is NEVER swept as a shared directory — `_dir(c)` for it
+    would be one global folder any caller could read, which is the defect the
+    category exists to fix. It is added only for `current_owner()`, the exact
+    principal from the trusted request context; `current_user()` is normalized
+    and would merge colliding owners.
+    """
+    dirs = [_dir(c) for c in CATEGORIES if c not in PRIVATE_CATEGORIES]
     if current_user() != "shared":
         dirs += [_dir(c, current_user()) for c in USER_SCOPED]
+    dirs += [_dir(c, current_owner()) for c in PRIVATE_CATEGORIES]
     return dirs
 
 
 def search(query: str, limit: int = 5) -> str:
-    """Ranked keyword search across shared memory + the current user's own."""
+    """Ranked keyword search across shared memory, the current user's own
+    user-scoped notes, and the current owner's private categories.
+
+    THE OWNER IS NOT A PARAMETER. It comes from `current_owner()`, the trusted
+    request context the orchestrator/gateway set from the authenticated
+    principal. A caller-supplied owner selector would be an authorization
+    bypass the model could drive: `recall_memory` passes only a query, and
+    there is deliberately no argument through which a query could name someone
+    else's namespace.
+    """
     terms = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
     scored: list[tuple[float, Path, str]] = []
     for d in _search_dirs():
@@ -225,7 +493,75 @@ def search(query: str, limit: int = 5) -> str:
     return "\n\n".join(out)
 
 
+# --- explicit owner-bound API (private categories) -------------------------
+#
+# Authorization here is an ARGUMENT, never the ambient namespace. A background
+# worker's ContextVar is whatever the last runner happened to leave behind, and
+# it is `safe_id`-normalized on the way in, so it can neither be trusted nor
+# even represent the exact principal. Every private read and write names its
+# owner explicitly.
+
+
+def save_for(owner: str, category: str, title: str, content: str) -> Path:
+    """Save into `owner`'s namespace, independent of the ambient ContextVar.
+
+    Calls `_save_note` directly rather than `save()` — `save()` resolves the
+    ambient namespace and refuses private categories — but shares the same
+    sanitize-and-publish implementation, so there is still exactly one door
+    into memory and it is still guarded.
+    """
+    _require_private(category, "save_for")
+    with user_context(owner):
+        return _save_note(_dir(category, owner), category, title, content)
+
+
+def search_for(owner: str, query: str, limit: int = 5) -> str:
+    """Search shared memory plus `owner`'s own private categories.
+
+    A convenience wrapper that establishes the trusted context explicitly, for
+    background work (the heartbeat) that has a durable owner but no request
+    context. Production request paths call `search()`, which reads the context
+    the authenticated request already set.
+    """
+    with user_context(owner):
+        return search(query, limit)
+
+
+def recent_for(owner: str, category: str, n: int = 5) -> list[str]:
+    """Newest note bodies in `owner`'s private `category` (newest first)."""
+    _require_private(category, "recent_for")
+    files = sorted(_dir(category, owner).glob("*.md"),
+                   key=lambda p: p.name, reverse=True)[:n]
+    return [parse_note(p.read_text(encoding="utf-8", errors="replace"))[1]
+            for p in files]
+
+
+def count_for(owner: str, category: str) -> int:
+    _require_private(category, "count_for")
+    return len(list(_dir(category, owner).glob("*.md")))
+
+
+def prune_for(owner: str, category: str, keep: int = 200) -> int:
+    """Keep only the newest `keep` notes in `owner`'s private `category`.
+
+    Owner-bound like every other private operation, so one tenant's prune can
+    never reach another's store.
+    """
+    _require_private(category, "prune_for")
+    files = sorted(_dir(category, owner).glob("*.md"),
+                   key=lambda p: p.name, reverse=True)
+    removed = 0
+    for path in files[keep:]:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def recent(category: str, n: int = 5) -> str:
+    _reject_private(category, "recent")
     files = list(_dir(category).glob("*.md"))
     if category in USER_SCOPED and current_user() != "shared":
         files += list(_dir(category, current_user()).glob("*.md"))
@@ -242,6 +578,7 @@ def recent(category: str, n: int = 5) -> str:
 def recent_titles(category: str, n: int = 5) -> list[str]:
     """The titles of the most recent notes in a category (newest first) — a
     glanceable list without the bodies."""
+    _reject_private(category, "recent_titles")
     files = list(_dir(category).glob("*.md"))
     if category in USER_SCOPED and current_user() != "shared":
         files += list(_dir(category, current_user()).glob("*.md"))
@@ -261,6 +598,7 @@ def prune(category: str, keep: int = 200) -> str:
     """Keep only the newest `keep` files in a category (current user's
     namespace). Older entries are deleted — Metis distills the durable ones
     into skills before they're pruned, so signal survives, noise doesn't."""
+    _reject_private(category, "prune")
     files = sorted(_dir(category, current_user()).glob("*.md"),
                    key=lambda p: p.name, reverse=True)
     removed = 0
@@ -274,6 +612,7 @@ def prune(category: str, keep: int = 200) -> str:
 
 
 def category_count(category: str) -> int:
+    _reject_private(category, "category_count")
     n = len(list(_dir(category).glob("*.md")))
     if category in USER_SCOPED and current_user() != "shared":
         n += len(list(_dir(category, current_user()).glob("*.md")))
@@ -657,13 +996,30 @@ def _memory_roots(user: str | None = None, all_users: bool = False) -> list[Path
     base = config.MEMORY_DIR
     if all_users:
         roots = [base / c for c in CATEGORIES]
-        roots += [base / "users", base / "conversations"]
+        # `owners/` holds every PRIVATE category, keyed by exact principal. It
+        # is a sibling of `users/`, not a subdirectory of any category, so a
+        # CATEGORIES sweep misses it entirely — an export that omitted it would
+        # silently drop every scheduled job report from the archive.
+        roots += [base / "users", base / "owners", base / "conversations"]
         return [r for r in roots if r.exists()]
-    uid = safe_id(user or "shared")
-    if uid == "shared":
-        return [base / c for c in CATEGORIES if (base / c).exists()]
-    ud = base / "users" / uid
-    return [ud] if ud.exists() else []
+    exact = canonical_owner(user)
+    roots: list[Path] = []
+    if exact == "shared":
+        # The shared scope keeps its global categories AND gains the canonical
+        # shared owner's private tree. A legacy/missing-owner job report is
+        # filed under owner_key("shared"), so omitting it dropped those notes
+        # from the default export and left them behind on a whole-scope delete.
+        roots += [base / c for c in CATEGORIES if (base / c).exists()]
+    else:
+        ud = base / "users" / safe_id(exact)
+        if ud.exists():
+            roots.append(ud)
+    # The owner's private tree, addressed by the EXACT principal. `safe_id`
+    # here would export a colliding owner's notes instead of this one's.
+    od = base / "owners" / owner_key(exact)
+    if od.exists():
+        roots.append(od)
+    return roots
 
 
 def _collect_files(roots: list[Path]) -> list[Path]:
@@ -861,11 +1217,14 @@ def delete_memory(user: str | None = None, *, category: str | None = None,
     tombstoned — when this returns, they are gone."""
     if category is not None and category not in CATEGORIES:
         raise ValueError(f"unknown memory category: {category}")
-    uid = safe_id(user or "shared")
     if category is not None:
-        roots = [_dir(category, uid)]
+        # A private category is keyed on the exact principal; passing the
+        # safe_id form would delete a COLLIDING owner's notes.
+        owner = (user if category in PRIVATE_CATEGORIES
+                 else safe_id(user or "shared"))
+        roots = [_dir(category, owner)]
     else:
-        roots = _memory_roots(uid)
+        roots = _memory_roots(user)
     removed: list[str] = []
     for root in roots:
         if not root.exists():
@@ -948,4 +1307,3 @@ def reset_conversation_count() -> None:
     path = config.MEMORY_DIR / "conversation_count.txt"
     with proclock.lock("conversation-count"):
         path.write_text("0", encoding="utf-8")
-

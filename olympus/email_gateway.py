@@ -52,7 +52,11 @@ def handle_message(bots: dict, msg: dict) -> str | None:
     body = (msg.get("body", "") or "").strip()
     # Give the pipeline the subject as context plus the body as the request.
     text = f"{subject}\n\n{body}".strip() if subject else body
-    chunks = gateway.reply_for(bots, sender, text, prefix="email")
+    # The allowlist already defines mailbox equality case-insensitively. Bind
+    # the owner with the same canonical form so one authenticated mailbox
+    # cannot mint multiple quota/preference identities via header casing.
+    sender_key = sender.strip().lower()
+    chunks = gateway.reply_for(bots, sender_key, text, prefix="email")
     reply = "\n\n".join(chunks)
     gmail.send(sender, _reply_subject(subject), reply)
     return reply

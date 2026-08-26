@@ -147,6 +147,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+#: Ownership schema version stamped on every job this build creates.
+#:
+#: A job written before this version stored `memory.safe_id(user)` in `user`,
+#: so its recorded owner is a value SEVERAL distinct principals map to and the
+#: real one is not recoverable. v4 treated such a job as belonging to whoever's
+#: exact identity equalled that normalized string — which meant the collider
+#: `tg-a-b` inherited `tg-a.b`'s job: its prompt was shown to them, `run_due`
+#: executed it under their identity, and the answer was filed in their private
+#: `job_reports`. Equalling a lossy value is not proof of ownership.
+#:
+#: Unversioned jobs are therefore QUARANTINED: never run, never returned by an
+#: owner-filtered `jobs(user)`, never mutable through `remove`/`set_enabled`.
+#: They stay on disk and are surfaced to operator-wide inspection
+#: (`jobs()` with no owner, and `quarantined()`) so they can be recreated.
+JOB_OWNER_SCHEMA_VERSION = 1
+
+
 @dataclass
 class Job:
     name: str
@@ -165,8 +182,11 @@ class Job:
     resume_attempts: int = 0     # interrupted-run retries (bounded at 1)
     watch_cmd: str = ""          # on_change: command whose output is watched
     last_hash: str = ""          # on_change: last observed output hash
+    owner_version: int = 0       # 0 = pre-v1 owner (normalized); quarantined
 
     def due(self, now: float) -> bool:
+        if quarantined_job(self):
+            return False         # a job with an unattributable owner never runs
         if not self.enabled:
             return False
         if self.kind == "on_exit":
@@ -180,7 +200,25 @@ class Job:
         return (now - self.last_run) >= self.interval
 
 
+def quarantined_job(job: Job) -> bool:
+    """True when a job's recorded owner cannot be attributed to a principal.
+
+    See `JOB_OWNER_SCHEMA_VERSION`. A quarantined job is inert: it never
+    becomes due, never appears in an owner-filtered listing, and no tenant can
+    mutate it. Only operator-wide inspection sees it.
+    """
+    try:
+        wrong_version = (
+            int(getattr(job, "owner_version", 0) or 0)
+            != JOB_OWNER_SCHEMA_VERSION)
+        return wrong_version or memory.is_ambiguous_gateway_owner(job.user)
+    except (TypeError, ValueError):
+        return True                       # unparseable version: fail closed
+
+
 def _load() -> list[Job]:
+    """Every stored job, quarantined ones included. Callers that act on a job
+    must go through `_runnable()` or an owner-filtered API."""
     p = _path()
     if not p.exists():
         return []
@@ -188,6 +226,11 @@ def _load() -> list[Job]:
         return [Job(**d) for d in json.loads(p.read_text(encoding="utf-8"))]
     except (json.JSONDecodeError, TypeError, OSError):
         return []
+
+
+def _runnable() -> list[Job]:
+    """Jobs whose owner is attributable — the only ones that may execute."""
+    return [j for j in _load() if not quarantined_job(j)]
 
 
 def _save(jobs: list[Job]) -> None:
@@ -200,7 +243,26 @@ def _save(jobs: list[Job]) -> None:
 
 
 def _principal(user: str) -> str:
-    return memory.safe_id(user or "shared")
+    """The EXACT durable owner of a job.
+
+    This used to be `memory.safe_id(user or "shared")`, which is lossy: it
+    collapses every run of non-[A-Za-z0-9_-] to a single "-" and truncates at
+    64 characters, so `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b` — and any two
+    ids sharing a 64-character sanitized prefix — became ONE owner. Jobs merged,
+    and so did the report store keyed on `job.user`. `safe_id` is right for
+    building a path and wrong for deciding who someone is.
+
+    A missing/empty owner still resolves to "shared", the legacy default, so
+    records written before jobs carried an owner stay addressable. There is
+    deliberately NO fallback from an exact owner to its `safe_id` form: that
+    would let any colliding owner claim a legacy record.
+
+    HISTORICAL JOBS: a job stored before this change already holds the
+    normalized owner, and the original principal is not recoverable from it.
+    Such a job now belongs to whoever's exact principal equals that normalized
+    string — usually nobody — and may need recreating. See the CHANGELOG.
+    """
+    return memory.canonical_owner(user)
 
 
 def _key(job: Job) -> tuple[str, str]:
@@ -209,20 +271,40 @@ def _key(job: Job) -> tuple[str, str]:
 
 
 def _matches(job: Job, name: str, user: str) -> bool:
+    """Does this job answer to (owner, name)?
+
+    A QUARANTINED job never does. Its stored owner is a normalized value that
+    several principals map to, so allowing a match would let the collider
+    remove it, re-enable it, or have `add` silently replace it — all of which
+    are mutations of a record that is not theirs. Operator recovery goes
+    through `discard_quarantined`, which addresses jobs by index, not by owner.
+    """
+    if quarantined_job(job):
+        return False
     return _key(job) == (_principal(user), name)
 
 
 def _bounded(jobs: list[Job]) -> list[Job]:
-    """Apply per-owner quotas without silently evicting another tenant."""
+    """Apply per-owner quotas without silently evicting another tenant.
+
+    Quarantined jobs are passed through untouched and are exempt from the
+    per-owner cap: they are attributed to a normalized owner that is not a real
+    principal, so counting them against that owner's quota would let a legacy
+    file evict the live jobs of whoever happens to share the normalized name.
+    They still count toward the absolute cap, which is a capacity guard.
+    """
+    held = [j for j in jobs if quarantined_job(j)]
     by_owner: dict[str, list[Job]] = {}
     for job in jobs:
+        if quarantined_job(job):
+            continue
         by_owner.setdefault(_principal(job.user), []).append(job)
     kept: list[Job] = []
     for owned in by_owner.values():
         kept.extend(sorted(owned, key=lambda job: job.created)[-MAX_JOBS:])
-    if len(kept) > MAX_TOTAL_JOBS:
+    if len(kept) + len(held) > MAX_TOTAL_JOBS:
         raise ValueError("global schedule capacity reached")
-    return kept
+    return kept + held
 
 
 def _mutex():
@@ -243,7 +325,8 @@ def add(name: str, interval: str | int, prompt: str,
         jobs = [j for j in _load() if not _matches(j, name, owner)]
         job = Job(name=name, interval=max(MIN_INTERVAL, int(secs)),
                   prompt=prompt, deliver_to=deliver_to.strip().lower(),
-                  user=owner, created=now, skill=(skill or "").strip())
+                  user=owner, created=now, skill=(skill or "").strip(),
+                  owner_version=JOB_OWNER_SCHEMA_VERSION)
         jobs.append(job)
         _save(_bounded(jobs))
     return job
@@ -264,7 +347,7 @@ def add_on_exit(name: str, pid: int, prompt: str,
         job = Job(name=name, interval=0, prompt=prompt, kind="on_exit",
                   watch_pid=int(pid), label=(label or "").strip(),
                   deliver_to=deliver_to.strip().lower(), user=owner,
-                  created=now)
+                  created=now, owner_version=JOB_OWNER_SCHEMA_VERSION)
         jobs_.append(job)
         _save(_bounded(jobs_))
     return job
@@ -289,7 +372,8 @@ def add_on_change(name: str, watch_cmd: str, prompt: str,
                   watch_cmd=watch_cmd.strip(), last_hash=baseline or "",
                   label=(label or "").strip(),
                   deliver_to=deliver_to.strip().lower(), user=owner,
-                  created=now, last_run=now)
+                  created=now, last_run=now,
+                  owner_version=JOB_OWNER_SCHEMA_VERSION)
         jobs_.append(job)
         _save(_bounded(jobs_))
     return job
@@ -315,16 +399,44 @@ def set_enabled(name: str, on: bool, user: str = "shared") -> bool:
 
 
 def jobs(user: str | None = None) -> list[Job]:
-    loaded = _load()
+    """Scheduled jobs.
+
+    `user=None` is OPERATOR-WIDE inspection and deliberately includes
+    quarantined jobs, so an administrator can see what needs recreating. Any
+    owner-filtered listing excludes them: their recorded owner is a normalized
+    value, and returning them to the principal who happens to equal it would
+    expose another tenant's prompt.
+    """
     if user is None:
-        return loaded
+        return _load()
     owner = _principal(user)
-    return [job for job in loaded if _principal(job.user) == owner]
+    return [job for job in _runnable() if _principal(job.user) == owner]
+
+
+def quarantined() -> list[Job]:
+    """Jobs whose owner cannot be attributed — operator inspection only."""
+    return [j for j in _load() if quarantined_job(j)]
+
+
+def discard_quarantined(name: str | None = None) -> int:
+    """Delete quarantined jobs (all of them, or every one with `name`).
+
+    Operator action. Recovery for a legacy job is to READ it here and recreate
+    it under the correct principal; there is deliberately no "adopt" that would
+    guess an owner the record does not contain.
+    """
+    with _mutex():
+        loaded = _load()
+        kept = [j for j in loaded
+                if not quarantined_job(j)
+                or (name is not None and j.name != name)]
+        _save(kept)
+        return len(loaded) - len(kept)
 
 
 def due(now: float | None = None) -> list[Job]:
     now = now if now is not None else time.time()
-    return [j for j in _load() if j.due(now)]
+    return [j for j in _runnable() if j.due(now)]
 
 
 def next_due_in(now: float | None = None) -> float | None:
@@ -333,7 +445,7 @@ def next_due_in(now: float | None = None) -> float | None:
     be re-checked shortly (0 the moment its trigger has fired)."""
     now = now if now is not None else time.time()
     waits = []
-    for j in _load():
+    for j in _runnable():
         if not j.enabled:
             continue
         if j.kind == "on_exit":
@@ -352,7 +464,7 @@ def changed(now: float | None = None) -> list[tuple]:
     the caller persists new_hash so the same change fires only once."""
     now = now if now is not None else time.time()
     out = []
-    for j in _load():
+    for j in _runnable():
         if not j.enabled or j.kind != "on_change":
             continue
         if now - j.last_run < ON_CHANGE_POLL:
@@ -406,7 +518,7 @@ def interrupted(now: float | None = None) -> list[Job]:
     note, instead of silently waiting a whole cadence."""
     now = now if now is not None else time.time()
     out = []
-    for j in _load():
+    for j in _runnable():
         if (j.enabled and j.started_at > j.last_run
                 and now - j.started_at >= RESUME_AFTER
                 and j.resume_attempts < 1):
@@ -511,11 +623,28 @@ def run_due(now: float | None = None, runner=None) -> list[str]:
                       "restart or upgrade before it finished. Redo it in "
                       "full now.\n\n" + prompt)
         _mark_started(job.name, now, user=job.user)
+        # ONE token-based scope around the whole job. The RUNNER mutates the
+        # memory context — the production runner is
+        # `orchestrator.Olympus(user=...).ask()`, which calls
+        # `memory.set_user` — so without this the heartbeat thread keeps
+        # whatever the last job left behind for the rest of its tick. The old
+        # code "fixed" that with `set_user("shared")`, which is not a restore:
+        # it discarded the caller's context just as thoroughly, only quietly.
+        # `user_context` unwinds BOTH the safe namespace and the exact-owner
+        # context by ContextVar token, on every exit path — runner, delivery
+        # and report-save failures included.
         try:
-            answer = runner(prompt, job.user)
-            _deliver(job, answer)
-            memory.set_user("shared")
-            memory.save("reports", f"Scheduled: {job.name}", answer)
+            with memory.user_context(job.user):
+                answer = runner(prompt, job.user)
+                _deliver(job, answer)
+            # A job's answer is the OWNER's private output — their prompt, run
+            # under their identity, against their memory. It used to go into
+            # the installation-global `reports` category, where any other
+            # tenant's ordinary `memory.search` returned it verbatim. It now
+            # goes to that owner's private `job_reports`, addressed by the
+            # exact durable `job.user` rather than by the ambient namespace.
+                memory.save_for(job.user, "job_reports",
+                                f"Scheduled: {job.name}", answer)
             log.append(("resumed interrupted job" if _key(job) in resumed_keys
                         else "ran scheduled job") + f" '{job.name}'")
         except Exception as err:

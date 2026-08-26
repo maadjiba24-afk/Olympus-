@@ -82,7 +82,11 @@ def test_write_document_action_registered_reversible():
 
 def test_write_document_never_auto_executes_even_at_l4(user, monkeypatch):
     from olympus import tools, memory
+    # Both accessors: the write tool rides the approval spine, whose durable
+    # owner is the EXACT principal (`current_owner`), while the document path
+    # itself is built from the normalized namespace (`current_user`).
     monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     monkeypatch.setattr(actions, "autonomy_level", lambda u: actions.L4_STANDING)
     out = tools.HANDLERS["write_document"]("Draft", "# Draft\nbody")
     # staged, not written
@@ -95,6 +99,7 @@ def test_write_document_never_auto_executes_even_at_l4(user, monkeypatch):
 def test_write_document_executes_on_approval(user, monkeypatch):
     from olympus import tools, memory
     monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     tools.HANDLERS["write_document"]("Draft", "# Draft\nbody")
     pend = [a for a in actions.pending(user) if a.type == "write_document"]
     actions.approve(user, pend[0].id)

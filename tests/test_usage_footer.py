@@ -62,7 +62,8 @@ def test_footer_is_opt_in(monkeypatch):
 
 def test_footer_reflects_the_turns_own_spend(monkeypatch):
     def fake_ask(self, msg):
-        _record_as("ol-u3", in_tokens=4000, out_tokens=400)
+        _record_as(gateway.principal_id("u3"), in_tokens=4000,
+                   out_tokens=400)
         return "did work"
     monkeypatch.setattr("olympus.orchestrator.Olympus.ask", fake_ask)
     gateway.reply_for({}, "u3", "/usage on")

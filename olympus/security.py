@@ -489,7 +489,10 @@ def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
     if user is None:
         try:
             from . import memory
-            user = memory.current_user()
+            # The EXACT principal: this selects WHOSE vault is scanned for a
+            # secret about to leave the process. A normalized owner scans a
+            # colliding principal's vault and misses this one's.
+            user = memory.current_owner()
         except Exception:
             user = None
     lowered = text.lower()
@@ -498,6 +501,22 @@ def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
             if form.lower() in lowered:
                 return (f"outbound content contains the stored secret "
                         f"'{label}' (or an encoded form of it)")
+    # A quarantined vault belongs to no principal, so no CREDENTIAL path may
+    # read it — but this is the outbound floor, where the conservative answer
+    # is to scan more, not less. Every principal in the collision group is
+    # checked against it, and an unreadable one refuses the send outright.
+    # `vault.legacy_scan` does the comparison in-process and returns only a
+    # generic reason: no secret, label, entry name or ciphertext reaches here,
+    # so there is nothing for a caller to log or display.
+    if user:
+        try:
+            from . import vault
+            return vault.legacy_scan(
+                user, lambda secret: (len(secret) >= _MIN_SECRET_LEN
+                                      and any(form.lower() in lowered
+                                              for form in _encodings(secret))))
+        except Exception:
+            return None    # no vault key configured at all: nothing to check
     return None
 
 
