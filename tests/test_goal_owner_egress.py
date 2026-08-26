@@ -123,6 +123,29 @@ def _spy_guard(monkeypatch):
     return seen
 
 
+def _allowing_guard_spy(monkeypatch):
+    """Record the exact owner while returning a deterministic ALLOW.
+
+    The caller using this helper exercises owner propagation and transport
+    fan-out, not guard classification.  Real secret-sensitive HOLD behavior is
+    covered separately by
+    ``test_evidence_with_owner_secret_is_held_using_that_owners_vault``.
+    Keeping those contracts separate prevents unrelated classifier or secret
+    state from making the transport test order-dependent.
+    """
+    seen = []
+
+    def allow(_text, channel, *, user, **_kwargs):
+        seen.append(user)
+        return egress.Decision(
+            egress.Verdict.ALLOW, egress.DataClass.PUBLIC, channel,
+            "test fixture: deterministic allow",
+        )
+
+    monkeypatch.setattr(egress, "guard", allow)
+    return seen
+
+
 def _alerts(got):
     return {c: [m for m in got[c] if "Goal" in m] for c in got}
 
@@ -415,7 +438,7 @@ def test_broadcast_with_guard_passes_the_exact_durable_owner(monkeypatch):
     monkeypatch.setenv(goals.BROADCAST_ENV, "1")
     monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
     got = _stub_channels(monkeypatch)
-    seen = _spy_guard(monkeypatch)
+    seen = _allowing_guard_spy(monkeypatch)
     goals.add(A, "alice private objective", "done when shipped")
 
     _run(monkeypatch, {"alice": "benign shipped evidence"})
