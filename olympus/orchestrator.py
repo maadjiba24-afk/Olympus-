@@ -482,7 +482,21 @@ class Olympus:
             if pinned is not None:
                 self.pool = config.ModelPool.of(pinned)
         self.settings = self.pool.primary()
-        self.user = memory.safe_id(user)
+        # THE EXACT durable principal. This was `memory.safe_id(user)`, which
+        # collapses punctuation and truncates at 64 characters — so
+        # `Olympus(user="tg-a.b")` became `tg-a-b`, a DIFFERENT principal, and
+        # every `memory.set_user(self.user)` below bound the run to it. The
+        # scheduler's default runner is `Olympus(user=job.user).ask(...)`, so a
+        # job owned by `tg-a.b` executed with `tg-a-b`'s preferences, vault,
+        # granted scopes and memory before its answer was filed back under
+        # `tg-a.b`. `self.user` is handed to prefs, vault, actions, operator and
+        # trust; every one of those is owner-exact now, and normalizing here
+        # defeated all of them at once.
+        #
+        # Path construction downstream is unaffected: `memory._conversation_path`
+        # and the per-user note directories apply `safe_id` themselves, at the
+        # store, where it is documented and correct.
+        self.user = memory.canonical_owner(user)
         self.conversation_id = conversation_id
         self.history: list[dict[str, Any]] = (
             memory.load_conversation(conversation_id) if conversation_id else []

@@ -115,7 +115,7 @@ def test_dream_all_covers_users_with_material(monkeypatch):
 
 
 def test_chat_wiki_commands():
-    wiki.upsert("ol-u5", "Project Atlas", "Billing rewrite.")
+    wiki.upsert(gateway.principal_id("u5"), "Project Atlas", "Billing rewrite.")
     out = gateway.reply_for({}, "u5", "/wiki")
     assert any("project-atlas" in c for c in out)
     out = gateway.reply_for({}, "u5", "/wiki show project-atlas")

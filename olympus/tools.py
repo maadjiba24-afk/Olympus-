@@ -979,7 +979,7 @@ def _send_email(to: str, subject: str, body: str, *,
     # approval (_approved=True) can still release it — the spine is the gate.
     if not _approved:
         leak = security.secret_exfil_reason(
-            f"{subject}\n\n{body}", user or memory.current_user())
+            f"{subject}\n\n{body}", user or memory.current_owner())
         if leak:
             return f"Error: refused to send — {leak}."
 
@@ -988,7 +988,7 @@ def _send_email(to: str, subject: str, body: str, *,
     # re-guarding there would loop forever (held → execute → send → held → ...).
     if config.egress_guard_enabled() and not _approved:
         d = egress.guard(f"{subject}\n\n{body}", egress.ChannelKind.USER_DIRECTED,
-                         user=user or memory.current_user(),
+                         user=user or memory.current_owner(),
                          asserted=egress.DataClass.OPERATIONAL,
                          action_type="email_egress_held",
                          payload={"to": to, "subject": subject, "body": body})
@@ -1036,7 +1036,7 @@ def _call_webhook(name: str, payload: dict | None = None, *,
     # Always-on exfiltration floor (independent of the opt-in egress guard).
     if not _approved:
         leak = security.secret_exfil_reason(
-            _json.dumps(payload or {}), user or memory.current_user())
+            _json.dumps(payload or {}), user or memory.current_owner())
         if leak:
             return f"Error: refused to call webhook — {leak}."
 
@@ -1045,7 +1045,7 @@ def _call_webhook(name: str, payload: dict | None = None, *,
     if config.egress_guard_enabled() and not _approved:
         d = egress.guard(_json.dumps(payload or {}),
                          egress.ChannelKind.USER_DIRECTED,
-                         user=user or memory.current_user(),
+                         user=user or memory.current_owner(),
                          asserted=egress.DataClass.OPERATIONAL,
                          action_type="webhook_egress_held",
                          payload={"name": name, "payload": payload or {}})
@@ -1079,7 +1079,7 @@ def _spine_action(type_name: str, payload: dict, title: str, noun: str) -> str:
     executing directly: prepare → run-or-hold per policy. Irreversible types
     (email/webhook) always hold for explicit approval; nothing auto-sends."""
     from . import actions, builtin_actions  # noqa: F401 (registers ActionTypes)
-    a = actions.prepare(memory.current_user(), type_name, payload,
+    a = actions.prepare(memory.current_owner(), type_name, payload,
                         title=title, why="requested by a specialist")
     a = actions.auto_or_hold(a)
     if a.status == actions.EXECUTED:
@@ -1265,7 +1265,9 @@ def _prepare_action(type: str, payload: dict, title: str = None,
                     why: str = "") -> str:
     """Queue a real-world action for the user to approve (never executes)."""
     from . import actions, builtin_actions  # noqa: F401  (registers built-ins)
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     payload = dict(payload or {})
     payload["_user"] = user  # request a server-derived owner binding
     try:
@@ -1328,7 +1330,7 @@ def _propose_upgrade(title: str, details: str) -> str:
     # still saved locally; only the public filing is withheld.
     if config.egress_guard_enabled():
         d = egress.guard(f"{title}\n\n{body}", egress.ChannelKind.EXTERNAL_SINK,
-                         user=memory.current_user())
+                         user=memory.current_owner())
         if d.verdict is egress.Verdict.HOLD:
             return (f"Proposal saved to {path}. (GitHub filing withheld by the "
                     f"egress guard: {d.reason})")
@@ -1365,14 +1367,18 @@ def _watch_youtube(url: str) -> str:
 def _browser_owner() -> str:
     """The principal a browser operation runs as.
 
-    `memory.current_user()` is the authenticated namespace the request was
-    bound to: `tg-…`/`dc-…` for a chat user, `u-…` for a logged-in web account,
-    `cli` in the terminal, and the durable `action.user` inside an approval
-    callback. `browserlease` decides which of those may hold the browser —
-    notably `web-…` (caller-selectable when OLYMPUS_REQUIRE_LOGIN is off) and
-    `shared` (the heartbeat's ambient namespace) may not.
+    `memory.current_owner()` is the EXACT authenticated principal the request
+    was bound to: `tg-…`/`dc-…` for a chat user, `u:…` for a logged-in web
+    account, `cli` in the terminal, and the durable `action.user` inside an
+    approval callback. `browserlease` decides which of those may hold the
+    browser — notably `web-…` (caller-selectable when OLYMPUS_REQUIRE_LOGIN is
+    off) and `shared` (the heartbeat's ambient namespace) may not.
+
+    NOT `current_user()`: that is `safe_id`-normalized, so `tg-a.b`, `tg-a@b`
+    and `tg-a b` would all present as one principal and share a lease on a
+    credentialed browser.
     """
-    return memory.current_user()
+    return memory.current_owner()
 
 
 def _owned_session():
@@ -1536,7 +1542,9 @@ def _browser_frames() -> str:
     sess, err = _operator_authorized_session()
     if err:
         return err
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     frames = sess.list_frames()
     if not frames:
         return "No cross-origin frames on this page."
@@ -1557,7 +1565,9 @@ def _browser_frame_observe(index: int = 0) -> str:
     sess, err = _operator_authorized_session()
     if err:
         return err
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     frames = sess.list_frames()
     i = int(index)
     if not (0 <= i < len(frames)):
@@ -1579,7 +1589,9 @@ def _browser_frame_act(index: int = 0, action: str = "click", selector: str = ""
     sess, err = _operator_authorized_session()
     if err:
         return err
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     frames = sess.list_frames()
     i = int(index)
     if not (0 <= i < len(frames)):
@@ -1628,7 +1640,9 @@ def _operator_trust(domain: str = "") -> str:
     # proven themselves enough to auto-run their safe/reversible actions, and how
     # close each is to the next tier. Read-only — never changes the setting.
     from . import memory, trust
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     d = (domain or "").strip().lower()
     if d:
         return (f"{d}: {trust.tier_name(trust.tier(user, d))} "
@@ -1740,12 +1754,12 @@ def _browser_dialog(accept: bool = False, text: str = "") -> str:
 def _browser_save_auth(domain: str) -> str:
     # Persist the current session for a domain (cookies → encrypted vault) so a
     # later run skips re-login. Credentialed: operator-gated, domain-authorized.
-    return operator.save_auth(memory.current_user(), domain)
+    return operator.save_auth(memory.current_owner(), domain)
 
 
 def _browser_restore_auth(domain: str) -> str:
     # Restore a saved session by injecting its vault-stored cookies.
-    return operator.restore_auth(memory.current_user(), domain)
+    return operator.restore_auth(memory.current_owner(), domain)
 
 
 def _browser_upload(selector: str, path: str) -> str:
@@ -1914,7 +1928,7 @@ def _parse_json_arg(raw, default):
 
 
 def _browser_operate(domain: str, template: str, params: str = "") -> str:
-    reason = operator._gate(memory.current_user(), domain)
+    reason = operator._gate(memory.current_owner(), domain)
     if reason:
         return f"Error: {reason}."
     _, tmpl = operator._template(domain, template)
@@ -1926,7 +1940,7 @@ def _browser_operate(domain: str, template: str, params: str = "") -> str:
     except json.JSONDecodeError:
         return "Error: params must be a JSON object."
     try:
-        action = operator.run(memory.current_user(), domain, template, parsed)
+        action = operator.run(memory.current_owner(), domain, template, parsed)
     except browser.BrowserUnavailable as err:
         return f"No browser attached: {err}"
     if action.status == actions_mod().EXECUTED:
@@ -1956,7 +1970,7 @@ def _site_template_record(domain: str, name: str, risk: str, steps: str,
 
 def _operator_schedule(name: str, domain: str, template: str, interval: str,
                        params: str = "") -> str:
-    reason = operator._gate(memory.current_user(), domain)
+    reason = operator._gate(memory.current_owner(), domain)
     if reason:
         return f"Error: {reason}."
     if operator._template(domain, template)[1] is None:
@@ -1967,7 +1981,7 @@ def _operator_schedule(name: str, domain: str, template: str, interval: str,
         return "Error: params must be a JSON object."
     from . import scheduler
     secs = scheduler.parse_interval(interval)
-    job = operator.schedule(memory.current_user(), name, domain, template,
+    job = operator.schedule(memory.current_owner(), name, domain, template,
                             secs, parsed)
     every = scheduler._human_interval(job["interval"])
     return (f"Scheduled operator job '{name}' to run '{template}' on {domain} "
@@ -1994,7 +2008,9 @@ def actions_mod():
 
 
 def _operator_authorize_site(domain: str, login: str = "manual") -> str:
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     login = (login or "manual").strip().lower()
     try:
         operator.authorize_site(user, domain, login)
@@ -2014,7 +2030,7 @@ def _operator_authorize_site(domain: str, login: str = "manual") -> str:
 
 
 def _operator_forget_site(domain: str) -> str:
-    existed = operator.forget_site(memory.current_user(), domain)
+    existed = operator.forget_site(memory.current_owner(), domain)
     d = domain.strip().lower()
     return (f"Done — I removed '{d}' and any saved sign-in for it."
             if existed else f"'{d}' wasn't set up, so there's nothing to remove.")
@@ -2023,7 +2039,7 @@ def _operator_forget_site(domain: str) -> str:
 def _operator_status() -> str:
     # The full plain-English status: on/off, authorized sites, pending
     # approvals, and recent actions (same surface as `olympus operator status`).
-    return operator.status_summary(memory.current_user())
+    return operator.status_summary(memory.current_owner())
 
 
 def _operator_history(limit: int = 20) -> str:
@@ -2033,11 +2049,13 @@ def _operator_history(limit: int = 20) -> str:
         n = int(limit)
     except (TypeError, ValueError):
         n = 20
-    return operator.render_history(memory.current_user(), max(1, min(n, 100)))
+    return operator.render_history(memory.current_owner(), max(1, min(n, 100)))
 
 
 def _operator_remember_login(domain: str) -> str:
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     d = (domain or "").strip().lower()
     if not d:
         return "Error: which site should I remember the sign-in for?"
@@ -2055,7 +2073,9 @@ def _recent_learning() -> str:
 
 
 def _set_advanced_mode(on: bool = True) -> str:
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     val = str(on).strip().lower() in ("1", "true", "yes", "on") \
         if not isinstance(on, bool) else on
     operator.set_advanced(user, val)
@@ -2972,13 +2992,13 @@ def _web_diff(url: str, previous_markdown: str = "",
 def _web_monitor_add(url: str, interval_minutes: int = 60,
                      schema: dict | None = None) -> str:
     from . import webmonitor
-    return webmonitor.add(memory.current_user(), url,
+    return webmonitor.add(memory.current_owner(), url,
                           interval=int(interval_minutes) * 60, schema=schema)
 
 
 def _web_monitor_list() -> str:
     from . import webmonitor
-    return webmonitor.list_text(memory.current_user())
+    return webmonitor.list_text(memory.current_owner())
 
 
 WEB_SCRAPE = {
@@ -4703,7 +4723,9 @@ def _search_sessions(query: str) -> str:
 def _schedule_task(name: str, interval: str, prompt: str,
                    deliver_to: str = "", skill: str = "") -> str:
     from . import scheduler
-    user = memory.current_user()
+    # EXACT principal: authorization / durable-owner sink,
+    # not a filesystem path (see docs/MEMORY_FORMAT.md).
+    user = memory.current_owner()
     job = scheduler.add(name, interval, prompt, deliver_to=deliver_to,
                         user=user, skill=skill)
     every = scheduler._human_interval(job.interval)

@@ -79,7 +79,8 @@ def test_chat_onexit_command(sleeper):
     assert any("Watching pid" in c for c in out)
     job = next(j for j in scheduler.jobs()
                if j.name == f"onexit-{sleeper.pid}")
-    assert job.kind == "on_exit" and job.user == "ol-u1"
+    assert job.kind == "on_exit"
+    assert job.user == gateway.principal_id("u1")
 
 
 def test_chat_onexit_usage_and_dead_pid():

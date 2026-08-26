@@ -82,7 +82,7 @@ def test_specialist_loadout_respects_active_conversation():
 
 
 def test_chat_profile_command_is_view_only():
-    capprofile.assign("ol-u1", "reader")
+    capprofile.assign(gateway.principal_id("u1"), "reader")
     out = gateway.reply_for({}, "u1", "/profile")
     joined = "\n".join(out)
     assert "reader" in joined and "autonomy cap: L1" in joined

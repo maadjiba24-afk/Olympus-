@@ -28,6 +28,7 @@ import hmac
 import json
 import os
 import queue
+import re
 import threading
 import traceback
 import urllib.request
@@ -180,7 +181,15 @@ def extract_messages(payload: dict,
 
 # --- message handling (mirrors the Telegram command set) -----------------
 
+def _principal(sender: str) -> str:
+    """Historical WhatsApp principal for Meta's numeric sender identifier."""
+    value = str(sender)
+    if not re.fullmatch(r"[0-9]{1,32}", value):
+        raise ValueError("WhatsApp request has no valid authenticated sender id")
+    return f"wa-{value}"
+
 def _process(bots: dict, sender: str, text: str) -> None:
+    uid = _principal(sender)
     if not _allowed(sender):
         _send(sender, "This Olympus instance is private.")
         return
@@ -215,8 +224,8 @@ def _process(bots: dict, sender: str, text: str) -> None:
         return
 
     # Per-sender identity: private memory namespace + persisted history.
-    bot = bots.setdefault(sender, orchestrator.Olympus(
-        user=f"wa-{sender}", conversation_id=f"wa-{sender}"))
+    bot = bots.setdefault(uid, orchestrator.Olympus(
+        user=uid, conversation_id=uid))
 
     if cmd == "/undo":
         try:
@@ -242,11 +251,11 @@ def _process(bots: dict, sender: str, text: str) -> None:
 
     # Journal the in-flight request so a gateway restart resumes it.
     from . import gateway
-    gateway.inflight_mark(f"wa-{sender}", sender, text)
+    gateway.inflight_mark(uid, sender, text)
     try:
         _send(sender, bot.ask(text))
     finally:
-        gateway.inflight_clear(f"wa-{sender}")
+        gateway.inflight_clear(uid)
 
 
 class _SenderWorker(threading.Thread):

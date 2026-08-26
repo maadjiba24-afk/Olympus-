@@ -468,8 +468,10 @@ def _heal_and_propose(domain: str, template: str,
 
 def _file_proposal(domain: str, title: str, body: str) -> None:
     """Record a human-reviewable operator proposal in memory (never auto-applied)."""
-    user = memory.current_user()
-    memory.set_user(user)
+    # No re-set: `set_user(current_user())` would overwrite the exact-owner
+    # context with the NORMALIZED namespace, changing the caller's identity.
+    # The ambient context is already this request's, and the save below
+    # targets a SHARED category regardless of owner.
     memory.save("upgrades", title, body)           # sink sanitizes (M0.2)
 
 
@@ -613,6 +615,8 @@ def run_due(now: float | None = None) -> list[str]:
         if not jobs:
             return []
         for j in jobs:
+            if memory.is_ambiguous_gateway_owner(j.get("user")):
+                continue
             if not j.get("enabled", True):
                 continue
             if not enabled(j.get("user", "")):
@@ -729,7 +733,8 @@ def _earned_autonomy_hint() -> str:
     the instant a site surprises us."""
     try:
         from . import trust
-        return trust.earned_hint(memory.current_user())
+        # EXACT principal: earned autonomy is a per-owner trust record.
+        return trust.earned_hint(memory.current_owner())
     except Exception:
         return ""
 
@@ -754,8 +759,10 @@ def propose_profile(domain: str, rationale: str, *, login_url: str = "",
     """Prometheus hook: file a human-reviewable proposal to add/patch a site
     profile. It does NOT apply anything — credentialed recipes are never
     self-modified; a human enacts them with site_profile_record."""
-    user = memory.current_user()
-    memory.set_user(user)
+    # No re-set: `set_user(current_user())` would overwrite the exact-owner
+    # context with the NORMALIZED namespace, changing the caller's identity.
+    # The ambient context is already this request's, and the save below
+    # targets a SHARED category regardless of owner.
     body = (f"Proposed site-profile patch for {domain}\n"
             f"Rationale: {rationale}\n"
             f"login_url: {login_url}\nusername_selector: {username_selector}\n"

@@ -48,7 +48,10 @@ def _access_token() -> str:
     # 1. Per-user OAuth token (multi-user, self-serve connect)
     try:
         from . import google_oauth, memory
-        user = memory.current_user()
+        # EXACT principal: this selects WHOSE OAuth token is used to
+        # reach a mailbox. A normalized owner would hand one
+        # principal another's credential.
+        user = memory.current_owner()
         if google_oauth.connected(user):
             return google_oauth.access_token(user)
     except Exception as err:

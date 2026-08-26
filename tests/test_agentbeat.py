@@ -90,7 +90,8 @@ def test_chat_add_list_drop():
     out = gateway.reply_for({}, "u9", "/heartbeat add 30m watch my goals")
     joined = "\n".join(out)
     assert "every 30 minutes" in joined
-    beat = agentbeat.for_user("ol-u9")[0]
+    uid = gateway.principal_id("u9")
+    beat = agentbeat.for_user(uid)[0]
     assert beat.prompt == "watch my goals"
 
     out = gateway.reply_for({}, "u9", "/heartbeat list")
@@ -98,7 +99,7 @@ def test_chat_add_list_drop():
 
     out = gateway.reply_for({}, "u9", f"/heartbeat drop {beat.id}")
     assert any("Dropped" in c for c in out)
-    assert agentbeat.for_user("ol-u9") == []
+    assert agentbeat.for_user(uid) == []
 
 
 def test_chat_add_requires_prompt():

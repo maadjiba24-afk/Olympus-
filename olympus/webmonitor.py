@@ -29,7 +29,7 @@ import uuid
 from dataclasses import asdict, dataclass, fields
 from typing import Callable
 
-from . import config
+from . import config, memory
 
 MAX_MONITORS = 50                 # per install — a bound, not an ambition
 _MIN_INTERVAL = 15 * 60           # 15 min floor; a watcher can't hammer a site
@@ -311,10 +311,12 @@ def run_due(now: float | None = None,
     with _mutex():
         due = [{"id": m.id, "user": m.user, "url": m.url,
                 "last_hash": m.last_hash,
-                "last_markdown": m.last_markdown, "schema": m.schema,
+               "last_markdown": m.last_markdown, "schema": m.schema,
                 "last_json": m.last_json}
                for m in _load()
-               if m.active and (now - m.last_checked) >= _effective_interval(m)]
+               if (m.active
+                   and not memory.is_ambiguous_gateway_owner(m.user)
+                   and (now - m.last_checked) >= _effective_interval(m))]
     if not due:
         return []
 

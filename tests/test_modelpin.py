@@ -88,9 +88,10 @@ def test_specialist_override_malformed_ignored(monkeypatch):
 
 def test_chat_model_command(monkeypatch):
     _pool_env(monkeypatch)
-    bots = {"ol-u5": object()}
+    uid = gateway.principal_id("u5")
+    bots = {uid: object()}
     out = gateway.reply_for(bots, "u5", "/model haiku")
     assert any("pinned" in c.lower() for c in out)
-    assert "ol-u5" not in bots                     # session rebuilt with pin
+    assert uid not in bots                         # session rebuilt with pin
     out = gateway.reply_for({}, "u5", "/model")
     assert any("claude-haiku-4-5" in c for c in out)

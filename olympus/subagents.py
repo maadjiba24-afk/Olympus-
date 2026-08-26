@@ -73,7 +73,10 @@ def spawn_many(tasks: list[SubTask],
     in the same order as `tasks`. Concurrency is capped like the orchestrator."""
     if not tasks:
         return []
-    user = memory.current_user()
+    # The EXACT principal, not the normalized namespace: a worker thread that
+    # inherited `current_user()` would run as a COLLIDING principal and could
+    # reach that principal's private memory.
+    user = memory.current_owner()
     cap = max_workers or min(config.MAX_CONCURRENT_CALLS, len(tasks))
 
     def _one(t: SubTask) -> tuple[str, str]:

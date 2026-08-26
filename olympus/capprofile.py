@@ -82,16 +82,22 @@ def get(name: str) -> dict | None:
 
 
 def assign(user: str, name: str) -> str:
+    # EXACT principal. A capability profile carries `max_autonomy`, so
+    # normalizing here scoped every colliding principal to one profile:
+    # restricting `tg-a.b` to "guest" restricted `tg-a-b` too, and widening one
+    # widened them all.
     if get(name) is None:
         known = ", ".join(sorted(profiles()))
         return f"No profile '{name}'. Known profiles: {known}."
-    prefs.set(memory.safe_id(user), _PREF_KEY, name.strip().lower())
-    return f"'{memory.safe_id(user)}' is now scoped to the '{name}' profile."
+    uid = memory.canonical_owner(user)
+    prefs.set(uid, _PREF_KEY, name.strip().lower())
+    return f"'{uid}' is now scoped to the '{name}' profile."
 
 
 def clear(user: str) -> str:
-    prefs.set(memory.safe_id(user), _PREF_KEY, None)
-    return f"'{memory.safe_id(user)}' restriction cleared."
+    uid = memory.canonical_owner(user)
+    prefs.set(uid, _PREF_KEY, None)
+    return f"'{uid}' restriction cleared."
 
 
 def of_user(user: str | None = None) -> str:
@@ -99,7 +105,7 @@ def of_user(user: str | None = None) -> str:
     Explicit assignment wins; otherwise chat-channel conversations get the
     OLYMPUS_CHANNEL_PROFILE default (if set); otherwise full."""
     import os
-    uid = memory.safe_id(user) if user else memory.current_user()
+    uid = memory.canonical_owner(user) if user else memory.current_owner()
     assigned = prefs.get(uid, _PREF_KEY)
     if assigned and get(assigned):
         return assigned
@@ -141,7 +147,7 @@ def autonomy_cap(user: str | None = None) -> int:
 
 
 def summary(user: str | None = None) -> str:
-    uid = memory.safe_id(user) if user else memory.current_user()
+    uid = memory.canonical_owner(user) if user else memory.current_owner()
     name = of_user(uid)
     spec = get(name) or {}
     lines = [f"Capability profile for {uid}: {name}"]

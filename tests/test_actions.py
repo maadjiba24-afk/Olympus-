@@ -133,7 +133,9 @@ def test_audit_log_records_transitions(reg):
     actions.approve("u", a.id)
     from olympus import config
     import json
-    log = config.MEMORY_DIR / "actions" / "u" / "audit.jsonl"
+    # The store is owner-keyed now (actions/owners/<owner_key>/), so ask
+    # the module for the directory instead of hardcoding a layout.
+    log = actions._dir("u") / "audit.jsonl"
     events = [json.loads(l)["event"] for l in log.read_text().splitlines()]
     assert "prepared" in events and "approved" in events and "executed" in events
 
@@ -235,7 +237,9 @@ def test_edit_is_audited(reg):
     import json
     a = actions.prepare("u", "t_send", {"to": "x@y.z"})
     actions.edit("u", a.id, {"to": "y@y.z"})
-    log = config.MEMORY_DIR / "actions" / "u" / "audit.jsonl"
+    # The store is owner-keyed now (actions/owners/<owner_key>/), so ask
+    # the module for the directory instead of hardcoding a layout.
+    log = actions._dir("u") / "audit.jsonl"
     events = [json.loads(l)["event"] for l in log.read_text().splitlines()]
     assert "edited" in events
 

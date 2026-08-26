@@ -188,7 +188,9 @@ def test_operator_history_tool_registered_and_on_hermes():
 
 def test_operator_status_tool_uses_rich_summary(user, monkeypatch):
     from olympus import tools, memory
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    # Operator ownership is a DURABLE record, so the tool reads the exact
+    # principal (`current_owner`), not the safe_id path namespace.
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     monkeypatch.setattr(operator.actions, "history", lambda u, limit=0: [])
     operator.authorize_site(user, "acme.com", "manual")
     out = tools.HANDLERS["operator_status"]()
@@ -197,7 +199,9 @@ def test_operator_status_tool_uses_rich_summary(user, monkeypatch):
 
 def test_operator_history_tool_clamps_and_renders(user, monkeypatch):
     from olympus import tools, memory
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    # Operator ownership is a DURABLE record, so the tool reads the exact
+    # principal (`current_owner`), not the safe_id path namespace.
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     rec = [_action("browser_operate", "executed", "acme.com", "reorder", 100)]
     monkeypatch.setattr(operator.actions, "history", lambda u, limit=0: rec)
     assert "acme.com" in tools.HANDLERS["operator_history"](999)

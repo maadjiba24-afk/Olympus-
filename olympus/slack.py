@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,14 @@ from . import gateway
 
 _BOTS: dict = {}
 _DISPATCH = gateway.Dispatcher()
+
+
+def _principal(user_key: str) -> str:
+    """Historical Slack principal, accepted only for a platform member id."""
+    key = str(user_key)
+    if not re.fullmatch(r"[UW][A-Z0-9]{1,31}", key):
+        raise ValueError("Slack request has no valid authenticated user id")
+    return f"sl-{key}"
 
 
 def _post(method: str, payload: dict) -> dict:
@@ -133,10 +142,9 @@ def process_event(payload: dict, bots: dict | None = None) -> None:
         return
     channel = event.get("channel", "")
     user_key = event.get("user", "anon")
+    uid = _principal(user_key)
     # Journal the in-flight request so a restart resumes it (delivered back
     # to the same channel via the bot token, which doesn't expire).
-    from . import memory
-    uid = f"sl-{memory.safe_id(user_key)}"
     gateway.inflight_mark(uid, {"user": user_key, "channel": channel}, text)
     try:
         reply = "\n".join(gateway.reply_for(bots, user_key, text, prefix="sl"))
@@ -161,6 +169,7 @@ def resume_inflight() -> None:
         if not channel:
             continue
         try:
+            _principal(user_key)  # validate before replaying trusted work
             send(channel, "⚡ I was restarted while working on your last "
                           "request — picking it back up now.")
             reply = "\n".join(gateway.reply_for(

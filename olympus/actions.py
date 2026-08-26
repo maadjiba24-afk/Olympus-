@@ -107,13 +107,17 @@ def _owner_context(user: str):
     preparation.  Callbacks that select a per-user integration through
     ``memory.current_user()`` must therefore see the durable ``Action.user``,
     never whatever tenant happens to be ambient at execution time.
+
+    TOKEN-BASED, NOT SAVE-AND-RESTORE. This used to capture
+    ``memory.current_user()`` and re-``set_user`` it on the way out. That value
+    is ``safe_id``-normalized, so restoring through it CHANGED the caller's
+    identity: an ambient owner of ``tg-a.b`` came back as ``tg-a-b`` — a
+    different principal — and could then read that principal's private memory.
+    ``memory.user_context`` unwinds both the path namespace and the exact-owner
+    context by ContextVar token, so the caller gets back exactly what it had.
     """
-    previous = memory.current_user()
-    memory.set_user(user)
-    try:
+    with memory.user_context(user):
         yield
-    finally:
-        memory.set_user(previous)
 
 
 def register(action_type: ActionType) -> None:
@@ -130,7 +134,12 @@ def registered() -> dict[str, ActionType]:
 
 PREPARED, APPROVED, EXECUTED, FAILED, REJECTED, UNDONE = (
     "prepared", "approved", "executed", "failed", "rejected", "undone")
-ACTION_BOUNDARY_VERSION = 3
+#: Bumped to 4 when the action store became owner-exact: `Action.user` and the
+#: trusted `_user` payload field hold the EXACT principal, and records live
+#: under `actions/owners/<owner_key>/`. A v3 record carries a normalized owner
+#: that cannot be mapped back, so it is refused at execution and must be
+#: prepared again — the same fail-closed rule v3 applied to v2 records.
+ACTION_BOUNDARY_VERSION = 4
 
 
 @dataclass
@@ -154,16 +163,86 @@ class Action:
     executed_at: float | None = None
 
 
-# --- store + audit log (per user) ----------------------------------------
+# --- store + audit log (per EXACT owner) ---------------------------------
+#
+# The store used to be `actions/<safe_id(user)>/`. `safe_id` collapses every run
+# of non-[A-Za-z0-9_-] to a single "-" and truncates at 64 characters, so
+# `tg-a.b`, `tg-a@b` and `tg-a b` shared ONE directory: `pending()` listed each
+# other's actions and `get(user, id)` read them, which made an action id an
+# authorization credential between colliding principals.
+#
+# Records live under `actions/owners/<owner_key(exact)>/`, keyed on the exact
+# durable principal.
+#
+# THE PRE-v4 DIRECTORY IS NOT READ BY ANY PER-OWNER API. An earlier revision
+# let a principal read `actions/<safe_id>/` when its exact identity happened to
+# equal that normalized string, on the reasoning that such a caller "cannot be
+# a collision victim". That reasoning was wrong: equalling a lossy value is
+# precisely what every collision victim's collider also does. `tg-a.b` and
+# `tg-a-b` both wrote into `actions/tg-a-b/`, so `tg-a-b` would have read
+# `tg-a.b`'s prepared actions — their title, their rendered preview and their
+# full payload. An action's CONTENT is private, so refusing only to EXECUTE a
+# legacy record (the boundary-version check) is not sufficient.
+#
+# Legacy records therefore remain on disk, readable only through
+# `pending_all()` and `legacy_actions()` — operator-wide inspection — so an
+# administrator can see what needs preparing again.
+
 
 def _dir(user: str) -> Path:
-    d = config.MEMORY_DIR / "actions" / memory.safe_id(user)
+    """The owner-keyed directory for records. Exact principal only."""
+    d = (config.MEMORY_DIR / "actions" / "owners"
+         / memory.owner_key(memory.canonical_owner(user)))
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def _legacy_root() -> Path:
+    """Where pre-v4 `actions/<safe_id>/` directories live. Operator use only —
+    never consulted by a per-owner lookup."""
+    return config.MEMORY_DIR / "actions"
+
+
+def _legacy_dirs() -> list[Path]:
+    root = _legacy_root()
+    if not root.is_dir():
+        return []
+    return [d for d in sorted(root.iterdir())
+            if d.is_dir() and d.name != "owners"]
+
+
 def _path(user: str, action_id: str) -> Path:
     return _dir(user) / f"{action_id}.json"
+
+
+def _read_action(path: Path) -> "Action | None":
+    try:
+        return Action(**json.loads(path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None                # one corrupt record must not hide the rest
+
+
+def _owned_actions(user: str) -> list[Action]:
+    """Every action belonging to this EXACT owner.
+
+    Reads ONLY the owner-keyed directory — see the note above on why the pre-v4
+    layout is not consulted here for anyone. Each record is still re-checked
+    against the caller's exact owner, so a directory is a lookup hint and never
+    the authorization: a mis-filed record (a restored backup, a half-finished
+    migration) is not claimable by whoever's directory it landed in.
+    """
+    exact = memory.canonical_owner(user)
+    seen: set[str] = set()
+    out: list[Action] = []
+    for f in sorted(_dir(exact).glob("*.json")):
+        a = _read_action(f)
+        if a is None or a.id in seen:
+            continue
+        if memory.canonical_owner(a.user) != exact:
+            continue               # never authorize on directory alone
+        seen.add(a.id)
+        out.append(a)
+    return out
 
 
 def _save(action: Action) -> None:
@@ -183,44 +262,94 @@ def _audit(action: Action, event: str) -> None:
 
 
 def get(user: str, action_id: str) -> Action | None:
-    path = _path(user, action_id)
-    if not path.exists():
-        return None
-    return Action(**json.loads(path.read_text(encoding="utf-8")))
+    """One action, by id, for its EXACT owner.
+
+    Knowing an id authorizes nothing: the stored `Action.user` must equal the
+    caller's exact principal.
+    """
+    return next((a for a in _owned_actions(user) if a.id == action_id), None)
 
 
 def pending(user: str) -> list[Action]:
-    out = []
-    for p in sorted(_dir(user).glob("*.json")):
-        a = Action(**json.loads(p.read_text(encoding="utf-8")))
-        if a.status in (PREPARED, APPROVED):
-            out.append(a)
-    return out
+    return [a for a in _owned_actions(user)
+            if a.status in (PREPARED, APPROVED)]
 
 
 def history(user: str, limit: int = 50) -> list[Action]:
-    items = []
-    for p in _dir(user).glob("*.json"):
-        items.append(Action(**json.loads(p.read_text(encoding="utf-8"))))
+    items = _owned_actions(user)
     items.sort(key=lambda a: a.created_at, reverse=True)
     return items[:limit]
 
 
 def pending_all() -> list[Action]:
-    """Pending/approved actions across EVERY user — the operator overview
-    (a user still only ever sees their own via pending()). Read-only."""
-    root = config.MEMORY_DIR / "actions"
+    """Pending/approved actions across EVERY owner — the operator overview
+    (a user still only ever sees their own via pending()). Read-only.
+
+    Scans BOTH layouts, since an install may hold pre-v4 records. This is the
+    ONLY path that reads the pre-v4 layout, and it is operator-wide by
+    definition — no tenant identity is involved, so nothing is attributed to a
+    principal here. It reads the files directly rather than calling `pending()`
+    per directory: a directory name is not an owner in the new layout (it is a
+    digest), and a legacy directory names a principal nobody may claim.
+    """
+    root = _legacy_root()
     if not root.is_dir():
         return []
     out: list[Action] = []
-    for d in sorted(root.iterdir()):
-        if d.is_dir():
-            try:
-                out.extend(pending(d.name))
-            except (json.JSONDecodeError, OSError, TypeError):
-                continue           # one corrupt record must not hide the rest
+    seen: set[str] = set()
+    dirs: list[Path] = []
+    if (root / "owners").is_dir():
+        dirs += [d for d in sorted((root / "owners").iterdir()) if d.is_dir()]
+    dirs += _legacy_dirs()
+    for d in dirs:
+        for f in sorted(d.glob("*.json")):
+            a = _read_action(f)
+            if a is None or a.id in seen:
+                continue
+            seen.add(a.id)
+            if a.status in (PREPARED, APPROVED):
+                out.append(a)
     out.sort(key=lambda a: a.created_at, reverse=True)
     return out
+
+
+def legacy_actions() -> list[Action]:
+    """Every pre-v4 record still on disk — operator inspection only.
+
+    Their recorded owner is a `safe_id` value that several principals map to,
+    so they are not attributable and no per-owner API returns them. An operator
+    reads them here to see what has to be prepared again.
+    """
+    out: list[Action] = []
+    for d in _legacy_dirs():
+        for f in sorted(d.glob("*.json")):
+            a = _read_action(f)
+            if a is not None:
+                out.append(a)
+    out.sort(key=lambda a: a.created_at, reverse=True)
+    return out
+
+
+def discard_legacy_actions() -> int:
+    """Delete every pre-v4 action record. Operator action; returns the count.
+
+    Recovery is to READ a legacy record and prepare it again under the correct
+    principal. There is deliberately no "adopt", which would have to guess an
+    owner the record does not contain.
+    """
+    removed = 0
+    for d in _legacy_dirs():
+        for f in sorted(d.glob("*.json")):
+            f.unlink()
+            removed += 1
+        audit = d / "audit.jsonl"
+        if audit.is_file():
+            audit.unlink()
+        try:
+            d.rmdir()
+        except OSError:
+            pass                   # something else lives there; leave it
+    return removed
 
 
 # --- permission scopes (per user) ----------------------------------------
@@ -261,9 +390,21 @@ _DEFAULT_LIMITS = {
 }
 
 
+#: Daily cap applied while a principal's settings are quarantined. The posture
+#: empties `action_limits`, and the risk-class default for TRIVIAL/NOTABLE is 0
+#: — which means UNLIMITED. A quarantine must never widen a cap, so the missing
+#: entry resolves to this instead. It is at or below every class default.
+QUARANTINE_DAILY_LIMIT = 1
+
+
 def daily_limit(user: str, type_name: str) -> int:
     """Max executions/day for an action type. A per-user override (set via
     `olympus limit`) wins over the risk-class default; 0 means unlimited."""
+    if prefs.is_quarantined(user):
+        # NOT the class default: 0 there means unlimited, so falling through
+        # would turn "we do not know what this principal was limited to" into
+        # "no limit at all".
+        return QUARANTINE_DAILY_LIMIT
     overrides = prefs.get(user, "action_limits", {}) or {}
     if type_name in overrides:
         try:
@@ -325,7 +466,9 @@ def _canonical_payload(user: str, action_type: ActionType,
         if not (isinstance(key, str) and key.startswith("_"))
     }
     if binds_user:
-        clean["_user"] = memory.safe_id(user)
+        # The EXACT durable principal. `safe_id` here merged colliding owners
+        # in the one field the execution path treats as trusted authority.
+        clean["_user"] = memory.canonical_owner(user)
     if action_type.pins_root:
         try:
             from . import sandbox
@@ -352,7 +495,7 @@ def prepare(user: str, type_name: str, payload: dict,
     except Exception as err:
         raise ValueError(f"could not render action preview: {err}") from err
     action = Action(
-        id=uuid.uuid4().hex[:12], user=memory.safe_id(user), type=type_name,
+        id=uuid.uuid4().hex[:12], user=memory.canonical_owner(user), type=type_name,
         title=title or type_name.replace("_", " ").title(),
         payload=payload, risk_class=at.risk_class, reversible=at.reversible,
         boundary_version=ACTION_BOUNDARY_VERSION, preview=preview, why=why)
@@ -405,6 +548,11 @@ def can_auto_execute(action: Action, level: int | None = None) -> bool:
     """
     at = _REGISTRY.get(action.type)
     if at is None:
+        return False
+    if prefs.is_quarantined(action.user):
+        # Explicit, not merely implied by the L0 posture: a caller may supply
+        # its own `level` (earned per-domain trust), and nothing unattended or
+        # standing may run for an identity whose settings are unresolved.
         return False
     if at.scope and at.scope not in granted_scopes(action.user):
         return False
@@ -546,12 +694,15 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     _save(action); _audit(action, "rejected")
     from . import outcomes
     outcomes.record(action.user, action.type, outcomes.REJECTED)
-    # rejections teach future behavior
-    memory.set_user(action.user)
-    memory.save("feedback", f"rejected action: {action.type}",
-                f"User rejected a prepared {action.type} "
-                f"({action.risk_class}).\nReason: {reason or '(none given)'}\n"
-                f"Preview was:\n{action.preview[:1000]}")
+    # Rejections teach future behavior. Token-based: a bare `set_user` here
+    # left the CALLER pointed at the action's owner for the rest of its request,
+    # and restoring through `current_user()` would have changed the caller's
+    # identity to a normalized one.
+    with memory.user_context(action.user):
+        memory.save("feedback", f"rejected action: {action.type}",
+                    f"User rejected a prepared {action.type} "
+                    f"({action.risk_class}).\nReason: {reason or '(none given)'}\n"
+                    f"Preview was:\n{action.preview[:1000]}")
     return action
 
 

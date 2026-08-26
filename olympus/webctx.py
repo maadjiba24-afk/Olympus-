@@ -571,7 +571,9 @@ def scrape(url: str, formats: tuple[str, ...] = _DEFAULT_FORMATS,
     if actions:
         if owner is None:
             from . import memory
-            owner = memory.current_user()
+            # EXACT principal: the browser lease compares durable owners,
+            # and `current_user()` would merge colliding ones.
+            owner = memory.current_owner()
         res = _scrape_with_actions(url, actions, formats, schema, prompt,
                                    attributes, owner)
         # A *learned* profile is best-effort enhancement: if it couldn't run (no

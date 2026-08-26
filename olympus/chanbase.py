@@ -141,8 +141,8 @@ def route(channel: str, prefix: str, sender_id, text: str, bots: dict,
 
       pairing command → access check → rate limit → gateway.reply_for → send
 
-    `send_fn(text)` delivers one reply string on this channel. `uid` is the
-    per-conversation namespace `<prefix>-<sender_id>`. Returns True when a
+    `send_fn(text)` delivers one reply string on this channel. The durable
+    principal is a domain-separated digest of the exact sender id. Returns True when a
     reply (or pairing/deny response) was produced, False when the message was
     dropped (rate-limited). Never raises for control-flow reasons."""
     from . import gateway
@@ -157,9 +157,7 @@ def route(channel: str, prefix: str, sender_id, text: str, bots: dict,
         send_fn("You're sending requests faster than I can safely run them — "
                 "give it a moment.")
         return False
-    uid = f"{prefix}-{sender_id}"
-    for chunk in gateway.reply_for(bots, str(sender_id), text,
-                                   prefix=prefix, uid=uid):
+    for chunk in gateway.reply_for(bots, str(sender_id), text, prefix=prefix):
         send_fn(chunk)
     return True
 
@@ -181,7 +179,5 @@ def collect_reply(channel: str, prefix: str, sender_id, text: str, bots: dict,
         return ("You're sending requests faster than I can safely run them — "
                 "give it a moment.")
     from . import gateway
-    uid = f"{prefix}-{sender_id}"
-    chunks = gateway.reply_for(bots, str(sender_id), text, prefix=prefix,
-                               uid=uid)
+    chunks = gateway.reply_for(bots, str(sender_id), text, prefix=prefix)
     return "\n\n".join(chunks)
