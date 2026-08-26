@@ -412,6 +412,15 @@ def _readiness() -> tuple[bool, dict]:
     # most one contributes and a dev instance is unaffected.
     problems = list(config.staging_problems()) + list(
         config.production_problems())
+    # Named deployments do not become ready merely because a path is writable:
+    # P2A requires receipts proving that mounted state survived container and
+    # host replacement and that a recent off-machine backup restored cleanly.
+    # Dev remains unaffected so local installs do not need deployment evidence.
+    deployment = None
+    if config.deployment_env() in ("staging", "production"):
+        from . import deployreadiness
+        deployment = deployreadiness.report()
+        problems.extend(deployment["problems"])
     writable = config._writable_dir(config.MEMORY_DIR)
     if not writable and not any("not writable" in p for p in problems):
         problems.append(f"memory dir {config.MEMORY_DIR} is not writable")
@@ -424,6 +433,8 @@ def _readiness() -> tuple[bool, dict]:
         "memory_dir_writable": writable,
         "uptime_seconds": metrics.snapshot()["uptime_seconds"],
     }
+    if deployment is not None:
+        payload["deployment_readiness"] = deployment
     if problems:
         payload["problems"] = problems
     return (not problems), payload

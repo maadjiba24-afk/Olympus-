@@ -33,9 +33,11 @@ RUN pip install --no-cache-dir --no-deps .
 RUN groupadd --gid 10001 olympus \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin olympus \
     && mkdir -p /app/memory \
-    && chown -R olympus:olympus /app/memory
+    && chown -R olympus:olympus /app/memory \
+    && chmod 0700 /app/memory
 
-# Declared AFTER the chown above so the volume inherits olympus:olympus.
+# Declared AFTER the ownership/mode change so a new volume inherits both the
+# fixed UID/GID and owner-only permissions.
 VOLUME /app/memory
 
 USER 10001:10001

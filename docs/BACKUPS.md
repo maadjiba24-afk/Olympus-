@@ -50,6 +50,10 @@ replay of *old* runs, never user data): the replay caches `responses/`,
   archives are pruned to `OLYMPUS_BACKUP_KEEP` (default 7).
 - **Fail-safe & alerting.** A failed scheduled backup is captured for the
   operator (`olympus errors`, Telegram) and never crashes the heartbeat.
+- **Evidence-backed readiness.** A completed attempt records whether that exact
+  archive was encrypted and signed and whether both the archive and Ed25519
+  signature sidecar were accepted by the off-machine delivery command.
+  Local-only success remains useful, but cannot satisfy deployment readiness.
 
 ## Set it up (off-droplet delivery)
 
@@ -90,6 +94,8 @@ automatically on `OLYMPUS_BACKUP_EVERY`.
 ```bash
 olympus backup            # make one now (and deliver if OLYMPUS_BACKUP_CMD is set)
 olympus backup --list     # local archives
+olympus backup --drill    # restore newest archive into an isolated temp dir
+# olympus backup --drill /path/to/a/specific/archive.enc
 
 # Restore into a fresh instance (refuses to clobber a non-empty dir):
 olympus restore olympus-backup-YYYYMMDDThhmmssZ.tar.gz.enc --into /app/memory
@@ -103,6 +109,10 @@ whose signing key you no longer have.
 
 ### Drill it
 
-A backup you have never restored is a hope, not a backup. Once in a while,
-restore the latest archive into a throwaway directory (`--into /tmp/restore-test`)
-and confirm the file count and a known user's memory came back.
+A backup you have never restored is a hope, not a backup. `backup --drill` uses
+the normal strict restore implementation (signature, safe extraction, manifest
+hashes), targets an automatically deleted temporary directory, and records a
+receipt bound to the archive SHA-256. It never touches live `MEMORY_DIR`.
+
+For the complete container-replacement, host-reboot, disk, permission, backup,
+and recovery gate, see [Deployment durability readiness](DEPLOYMENT_READINESS.md).
