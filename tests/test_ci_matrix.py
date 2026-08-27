@@ -15,6 +15,25 @@ _CI = _ROOT / ".github" / "workflows" / "ci.yml"
 #: merge path — see test_search_live_probe_exists_but_is_not_a_merge_gate.
 _SEARCH_LIVE = _ROOT / ".github" / "workflows" / "search-live.yml"
 _PYPROJECT = _ROOT / "pyproject.toml"
+_WORKFLOWS = _ROOT / ".github" / "workflows"
+
+# GitHub-hosted workflows execute these JavaScript actions on Node.js 24. Pin
+# the exact, reviewed upstream release commits so a mutable major tag cannot
+# silently replace code between review and execution.
+_NODE24_ACTION_PINS = {
+    "actions/checkout": (
+        "3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
+    "actions/setup-python": (
+        "5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0"),
+    "actions/upload-artifact": (
+        "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
+    "actions/download-artifact": (
+        "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8.0.1"),
+}
+_UPLOAD_ARTIFACT_USE = (
+    "actions/upload-artifact@" +
+    _NODE24_ACTION_PINS["actions/upload-artifact"][0]
+)
 
 
 def _declared_versions() -> set[str]:
@@ -71,6 +90,36 @@ def test_ci_still_hash_pins_dependencies():
     text = _CI.read_text(encoding="utf-8")
     assert "--require-hashes -r requirements.lock" in text, (
         "CI must install with --require-hashes (no unpinned installs)")
+
+
+def test_node24_actions_use_reviewed_immutable_release_pins():
+    """Every use is content-addressed and names the audited upstream tag."""
+    seen = set()
+    workflow_paths = sorted(
+        [*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")])
+    pattern = re.compile(
+        r"^\s*(?:-\s*)?uses:\s*"
+        r"(actions/(?:checkout|setup-python|upload-artifact|download-artifact))"
+        r"@([^\s#]+)(?:\s+#\s*(\S+))?\s*$")
+
+    for path in workflow_paths:
+        for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            match = pattern.match(line)
+            if not match:
+                continue
+            action, sha, release = match.groups()
+            expected_sha, expected_release = _NODE24_ACTION_PINS[action]
+            assert sha == expected_sha, (
+                f"{path.name}:{line_number}: {action} uses {sha}, expected "
+                f"reviewed commit {expected_sha}")
+            assert release == expected_release, (
+                f"{path.name}:{line_number}: {action} must name exact release "
+                f"{expected_release}, got {release!r}")
+            seen.add(action)
+
+    assert seen == set(_NODE24_ACTION_PINS), (
+        f"missing reviewed action(s): {set(_NODE24_ACTION_PINS) - seen}")
 
 
 
@@ -233,8 +282,8 @@ def test_sessionlog_latency_telemetry_is_red_capable():
         "the telemetry script must be executed exactly once per run")
 
     # The artifact must survive a red run — that is when it is worth reading.
-    assert "actions/upload-artifact@v4" in text
-    upload = text.index("actions/upload-artifact@v4")
+    assert _UPLOAD_ARTIFACT_USE in text
+    upload = text.index(_UPLOAD_ARTIFACT_USE)
     assert "if: always()" in text[upload:upload + 200], (
         "the telemetry artifact must upload with `if: always()`")
 
@@ -362,8 +411,8 @@ def test_usage_contention_telemetry_is_red_capable():
     # header comment names the script when explaining the design.
     assert text.count("python scripts/usage_contention_telemetry.py") == 1
 
-    assert "actions/upload-artifact@v4" in text
-    upload = text.index("actions/upload-artifact@v4")
+    assert _UPLOAD_ARTIFACT_USE in text
+    upload = text.index(_UPLOAD_ARTIFACT_USE)
     assert "if: always()" in text[upload:upload + 200], (
         "the telemetry artifact must upload with `if: always()`")
     # Five matrix legs write the same filename, so the artifact NAME must vary.
@@ -539,7 +588,7 @@ def test_both_relocated_contracts_run_exactly_once_per_leg():
 def test_both_telemetry_artifacts_upload_with_if_always():
     text = _SYNC_WF.read_text(encoding="utf-8")
     uploads = [m.start() for m in
-               re.finditer(r"actions/upload-artifact@v4", text)]
+               re.finditer(re.escape(_UPLOAD_ARTIFACT_USE), text)]
     assert len(uploads) == 2, (
         f"expected one artifact per relocated contract, found {len(uploads)}")
 
