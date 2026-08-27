@@ -98,9 +98,9 @@ def prod_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "RETAIN_DAYS", 30)
     monkeypatch.delenv("OLYMPUS_DAILY_BUDGET", raising=False)
     for k in ("OLYMPUS_API_KEYS", "OLYMPUS_ACCESS_TOKEN",
-              "OLYMPUS_REQUIRE_LOGIN", "OLYMPUS_BIND_HOST",
-              "OLYMPUS_MEMORY_DIR"):
+              "OLYMPUS_REQUIRE_LOGIN", "OLYMPUS_BIND_HOST"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OLYMPUS_MEMORY_DIR", str(mem))
     return mem
 
 
@@ -166,12 +166,13 @@ def test_production_refuses_an_unwritable_memory_dir(prod_env, monkeypatch):
         ro.chmod(0o755)
 
 
-def test_production_does_not_require_an_explicit_memory_dir(prod_env):
-    """Relaxed on purpose: the shipped Dockerfile declares `VOLUME
-    /app/memory` and compose mounts the named volume at that DEFAULT path, so
-    demanding the env var would refuse the project's own documented deploy."""
-    assert not any("OLYMPUS_MEMORY_DIR is unset" in p
-                   for p in config.production_problems())
+def test_production_requires_an_explicit_memory_dir(prod_env, monkeypatch):
+    """An implicit image path cannot prove that durable storage is mounted."""
+    monkeypatch.delenv("OLYMPUS_MEMORY_DIR")
+    assert any("OLYMPUS_MEMORY_DIR is unset" in p
+               for p in config.production_problems())
+    with pytest.raises(config.ProductionConfigError):
+        config.require_production_config()
 
 
 # --------------------------------------------------------------------------

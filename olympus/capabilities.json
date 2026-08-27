@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 132,
+    "count": 133,
     "names": [
       "a2a",
       "actions",
@@ -73,6 +73,7 @@
       "crawl",
       "curate",
       "dashboard",
+      "deployment",
       "discord",
       "discover",
       "distill",

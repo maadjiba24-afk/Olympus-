@@ -1,8 +1,9 @@
 # Deploying Olympus to caelarion.com
 
 This puts Olympus on a small always-on server with **automatic HTTPS** (Caddy +
-Let's Encrypt). No certificates to manage, no domain config beyond one DNS
-record. ~15 minutes start to finish.
+Let's Encrypt). A named deployment now stays out of service until the P2A gate
+has direct evidence for its mounted state, lifecycle survival, off-machine
+backup, and restore path.
 
 ## What you need
 - The domain **caelarion.com** (done ✓) — and access to its DNS settings at your
@@ -32,39 +33,64 @@ curl -fsSL https://get.docker.com | sh
 ## Step 3 — get Olympus and configure it
 ```bash
 git clone https://github.com/maadjiba24-afk/Olympus-.git
-cd Olympus-/deploy
+cd Olympus-
+git rev-parse HEAD                         # copy this exact 40-character SHA
+cd deploy
 cp .env.example .env
 # generate two strong secrets:
 echo "OLYMPUS_ACCESS_TOKEN=$(openssl rand -hex 32)"
 echo "OLYMPUS_SECRET_KEY=$(openssl rand -hex 32)"
-nano .env     # paste your ANTHROPIC_API_KEY and the two secrets above
+nano .env     # also set OLYMPUS_BUILD_COMMIT and a real OLYMPUS_BACKUP_CMD
+
+# Build once, then create the production signing root on the private volume.
+docker compose build olympus
+docker compose run --rm olympus \
+  python -m olympus keygen --out /app/memory/signing_seed
 ```
 
-## Step 4 — launch
+Keep an encrypted offline copy of `signing_seed` under separate operator
+custody. Olympus intentionally excludes it from its own backup archive; after a
+total host loss, the same seed is required to authenticate old archives.
+
+## Step 4 — launch the app into the expected not-ready state
 ```bash
-docker compose up -d --build
+docker compose up -d --build olympus
+docker compose exec olympus python -m olympus deployment status
 ```
 
-Caddy will automatically fetch the HTTPS certificate for caelarion.com on first
-request (give it ~30 seconds). Then open **https://caelarion.com**.
+`olympus` is alive, but `/readyz` deliberately remains non-200 at first. Complete
+the container-replacement, host-reboot, backup-delivery, and throwaway-restore
+proof in [DEPLOYMENT_READINESS.md](../docs/DEPLOYMENT_READINESS.md). This is an
+operator procedure on the authorized host; local/mock validation cannot forge
+that production evidence.
+
+## Step 5 — start the full stack after P2A reports READY
+
+```bash
+docker compose exec olympus python -m olympus deployment status
+docker compose up -d
+```
+
+Caddy is health-gated on `/readyz`, so it cannot start before P2A passes. The
+autonomous heartbeat is additionally behind an explicit `autonomy` profile and
+remains disabled throughout this milestone. Caddy will then fetch the HTTPS
+certificate for caelarion.com on first request (give it ~30 seconds). Open
+**https://caelarion.com** only after that.
 
 Because `OLYMPUS_REQUIRE_LOGIN=1` is set, you'll see a login screen — click
 **Create account** to make the first account. Everyone else does the same; each
 person's memory and actions are private to their account.
 
-This also starts the **always-on learning loop** (the `heartbeat` service): even
-while you're asleep or away, Olympus scans the world, learns from queued videos,
-distills the day's experience into new skills, and runs its weekly self-audit —
-sharing the same memory as the chat app. It spends tokens on your key in the
-background, **bounded by `OLYMPUS_DAILY_BUDGET`** (default $20/day; cycles skip
-once the cap is hit). To turn it off, comment out the `heartbeat` service in
-`docker-compose.yml` (or `docker compose stop heartbeat`) — note that setting
-the budget to `0` means *unlimited*, not off. Watch it with
-`docker compose logs -f heartbeat`.
+This does **not** start the self-learning loop. Do not use
+`docker compose --profile autonomy up` during P2A; calibration and autonomy
+remain separate roadmap decisions. `OLYMPUS_DAILY_BUDGET` is still required as
+defence in depth for any later authorized activation, and `0` still means
+unlimited rather than off.
 
-## Step 5 — verify it's healthy
+## Step 6 — verify liveness and readiness
 ```bash
 curl https://caelarion.com/healthz        # -> {"status":"ok",...}
+curl https://caelarion.com/readyz         # -> {"status":"ready",...}
 ```
 Behind your access token, `https://caelarion.com/api/metrics` shows uptime,
 traffic, errors, and today's spend. From the server, `docker compose logs -f
@@ -89,7 +115,8 @@ and then silently persists nothing. Fix it once, before `up`:
 
 ```bash
 docker compose down
-docker run --rm -v olympus-memory:/m alpine chown -R 10001:10001 /m
+docker run --rm -v olympus-memory:/m alpine \
+  sh -c 'chown -R 10001:10001 /m && chmod 0700 /m'
 docker compose up -d --build
 ```
 
@@ -139,6 +166,10 @@ principal who can run file tools can still reach another's gallery directory
 through those tools. Closing that is a workspace-model change, not a gallery one.
 
 ## Verified bring-up (W1-4)
+
+> Historical baseline: these measurements predate the P2A evidence gate. Their
+> `/readyz` result proved config+writability at that commit, not the lifecycle,
+> disk, off-machine backup, and restore receipts now required.
 
 Until this, `docker-compose.staging.yml` said in its own header that it had "NOT
 [been] VERIFIED BY EXECUTION … never been brought up". This section is the record
@@ -406,9 +437,9 @@ Drop `-f docker-compose.local.yml` for the real TLS path — which, on anything 
 is not the host `caelarion.com` resolves to, fails at ACME exactly as above.
 
 ## Optional
-- **Self-learning loop:** runs **by default** (the `heartbeat` service above).
-  Comment it out in `docker-compose.yml` if you want a chat-only instance that
-  learns solely during conversations.
+- **Self-learning loop:** the `heartbeat` service is behind the explicit
+  `autonomy` compose profile and is **off by default**. P2A does not authorize
+  enabling it; activation belongs to a later, separately reviewed milestone.
 - **Google (item #3) / WhatsApp (item #4):** the redirect/webhook URLs are
   already `https://caelarion.com/...`; fill the matching env vars in `.env` and
   `docker compose up -d` again.

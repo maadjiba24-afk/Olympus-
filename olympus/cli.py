@@ -244,12 +244,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_backup = sub.add_parser(
         "backup", help="archive, encrypt, sign, and deliver a data backup of "
                        "your memory/accounts/tokens off-droplet")
-    p_backup.add_argument("--list", action="store_true",
-                          help="list local backup archives instead of making one")
+    backup_action = p_backup.add_mutually_exclusive_group()
+    backup_action.add_argument(
+        "--list", action="store_true",
+        help="list local backup archives instead of making one")
+    backup_action.add_argument(
+        "--drill", nargs="?", const="", metavar="ARCHIVE",
+        help="strictly restore ARCHIVE (or the newest backup) into a throwaway "
+             "directory and record a recovery receipt")
     p_backup.add_argument("--full", action="store_true",
                           help="include the (large, reproducible) replay caches")
     p_backup.add_argument("--no-deliver", action="store_true",
                           help="make the archive but don't run OLYMPUS_BACKUP_CMD")
+    p_deploy = sub.add_parser(
+        "deployment", help="evidence-backed persistent deployment readiness")
+    p_deploy.add_argument(
+        "action", nargs="?", default="status",
+        choices=["status", "challenge", "verify"],
+        help="status (default), or record/verify a lifecycle challenge")
+    p_deploy.add_argument(
+        "kind", nargs="?", choices=["container", "host"],
+        help="lifecycle kind for challenge/verify")
+    p_deploy.add_argument(
+        "--json", action="store_true", dest="as_json",
+        help="print the status or receipt as JSON")
     p_restore = sub.add_parser(
         "restore", help="restore MEMORY_DIR from a backup archive "
                         "(verifies signature + every file hash)")
@@ -1776,6 +1794,36 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         return 0
 
+    elif args.command == "deployment":
+        import json
+        from . import deployreadiness
+
+        if args.action == "status":
+            if args.kind:
+                print("deployment status does not accept a lifecycle kind",
+                      file=sys.stderr)
+                return 2
+            result = deployreadiness.report()
+            print(json.dumps(result, indent=2, sort_keys=True)
+                  if args.as_json else deployreadiness.render(result))
+            return 0 if result["ready"] else 1
+        if not args.kind:
+            print(f"deployment {args.action} requires container or host",
+                  file=sys.stderr)
+            return 2
+        try:
+            result = (deployreadiness.challenge(args.kind)
+                      if args.action == "challenge"
+                      else deployreadiness.verify(args.kind))
+        except deployreadiness.DeploymentEvidenceError as err:
+            print(f"✗ deployment {args.action} refused: {err}")
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True)
+              if args.as_json else
+              f"✓ {args.kind} {args.action} recorded at "
+              f"{result.get('created_utc') or result.get('verified_utc')}")
+        return 0
+
     elif args.command == "backup":
         from . import backup, config
         if args.list:
@@ -1785,6 +1833,19 @@ def main(argv: list[str] | None = None) -> int:
             for b in items:
                 enc = "encrypted" if b["encrypted"] else "PLAINTEXT"
                 print(f"  {b['name']}  ({b['bytes'] // 1024} KB, {enc})")
+            return 0
+        if args.drill is not None:
+            try:
+                res = backup.drill(args.drill or None)
+            except backup.BackupError as err:
+                print(f"✗ restore drill refused: {err}")
+                return 1
+            except Exception as err:
+                print(f"✗ restore drill failed: {type(err).__name__}: {err}")
+                return 1
+            print(f"✓ restore drill recovered {res['restored']} files from "
+                  f"{res['archive_name']} into an isolated temporary directory.")
+            print(f"  archive SHA-256: {res['sha256']}")
             return 0
         res = backup.run(full=args.full, deliver_off=not args.no_deliver)
         if not res.get("ok"):

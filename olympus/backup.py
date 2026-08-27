@@ -231,16 +231,28 @@ def deliver(archive_path: str) -> dict:
                 "encrypt backups (or OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 if the "
                 "destination is itself trusted)."}
 
-    if "{path}" in cmd:
-        argv = [a.replace("{path}", str(archive)) for a in shlex.split(cmd)]
-    else:
-        argv = shlex.split(cmd) + [str(archive)]
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=900)
-    if proc.returncode != 0:
-        raise BackupError(
-            f"delivery command failed (exit {proc.returncode}): "
-            f"{(proc.stderr or proc.stdout or '').strip()[:300]}")
-    return {"delivered": True, "via": shlex.split(cmd)[0]}
+    def _send(path: Path, label: str) -> None:
+        if "{path}" in cmd:
+            argv = [a.replace("{path}", str(path)) for a in shlex.split(cmd)]
+        else:
+            argv = shlex.split(cmd) + [str(path)]
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=900)
+        if proc.returncode != 0:
+            raise BackupError(
+                f"{label} delivery command failed (exit {proc.returncode}): "
+                f"{(proc.stderr or proc.stdout or '').strip()[:300]}")
+
+    _send(archive, "archive")
+    # The signature is a separate file. Shipping only the archive would lose
+    # independent authenticity exactly when the source machine is lost. A
+    # signed backup is therefore delivered as an archive+sidecar pair.
+    signature = archive.parent / (archive.name + ".sig.json")
+    signature_delivered = False
+    if signature.exists():
+        _send(signature, "signature sidecar")
+        signature_delivered = True
+    return {"delivered": True, "signature_delivered": signature_delivered,
+            "via": shlex.split(cmd)[0]}
 
 
 def list_backups() -> list[dict]:
@@ -294,7 +306,20 @@ def run(*, full: bool = False, deliver_off: bool = True) -> dict:
         pruned = prune()
     except Exception:
         pruned = 0
-    return {"ok": True, "pruned": pruned, **res, **delivery}
+    result = {"ok": True, "pruned": pruned, **res, **delivery}
+    # The backup itself remains successful if the small local evidence receipt
+    # cannot be written: capture that as a distinct operational fault and leave
+    # deployment readiness fail-closed instead of lying that no archive exists.
+    try:
+        from . import deployreadiness
+        deployreadiness.record_backup(result)
+        result["evidence_recorded"] = True
+    except Exception as err:
+        from . import errors
+        errors.capture("backup.evidence", err, context=res["name"])
+        result["evidence_recorded"] = False
+        result["evidence_error"] = str(err)[:300]
+    return result
 
 
 # --- restore -------------------------------------------------------------
@@ -419,6 +444,41 @@ def restore(archive_path: str, into: str | Path | None = None, *,
                           f"— nothing was restored.")
     return {"restored": restored, "into": str(dest), "mismatched": mismatched,
             "signature_ok": v["signature_ok"], "signed": v["signed"]}
+
+
+def drill(archive_path: str | None = None) -> dict:
+    """Restore one archive into a throwaway directory and record the proof.
+
+    The live ``MEMORY_DIR`` is never the restore target.  With no explicit
+    archive the newest local backup is used.  The ordinary strict restore path
+    performs signature, extraction, and per-file integrity validation, so this
+    is the same recovery mechanism an operator would use after a loss.
+    """
+    if archive_path:
+        archive = Path(archive_path)
+    else:
+        backups = list_backups()
+        if not backups:
+            raise BackupError("no local backup is available for a restore drill")
+        archive = Path(backups[0]["path"])
+    if not archive.exists():
+        raise BackupError(f"archive not found: {archive}")
+
+    verification = verify_archive(str(archive))
+    with tempfile.TemporaryDirectory(prefix="olympus-restore-drill-") as tmp:
+        result = restore(str(archive), into=Path(tmp))
+
+    from . import deployreadiness
+    receipt = deployreadiness.record_restore(
+        result, archive_name=archive.name, sha256=verification["sha256"])
+    return {
+        "ok": True,
+        "archive": str(archive),
+        "archive_name": archive.name,
+        "sha256": verification["sha256"],
+        "receipt": receipt,
+        **result,
+    }
 
 
 def _rmtree(p: Path) -> None:

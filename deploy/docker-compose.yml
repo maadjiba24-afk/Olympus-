@@ -14,6 +14,12 @@ services:
     build: ..                       # uses the Dockerfile at the repo root
     restart: unless-stopped
     env_file: .env
+    environment:
+      # Structural: swapping the env file must never downgrade this public
+      # profile to dev and bypass production boot/readiness controls.
+      OLYMPUS_ENV: production
+      OLYMPUS_MEMORY_DIR: /app/memory
+      OLYMPUS_BUILD_COMMIT: ${OLYMPUS_BUILD_COMMIT:-unknown}
     command: ["python", "-m", "olympus", "web", "--host", "0.0.0.0", "--port", "8484"]
     volumes:
       - olympus-memory:/app/memory  # persists memory/accounts/vault across restarts
@@ -25,7 +31,7 @@ services:
     # would deadlock the whole stack.
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8484/healthz',timeout=3).status==200 else 1)"]
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8484/readyz',timeout=3).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -50,6 +56,10 @@ services:
     build: ..
     restart: unless-stopped
     env_file: .env
+    environment:
+      OLYMPUS_ENV: production
+      OLYMPUS_MEMORY_DIR: /app/memory
+      OLYMPUS_BUILD_COMMIT: ${OLYMPUS_BUILD_COMMIT:-unknown}
     command: ["python", "-m", "olympus", "whatsapp", "--host", "0.0.0.0", "--port", "8485"]
     volumes:
       - olympus-memory:/app/memory
@@ -90,9 +100,9 @@ services:
     cpus: 1.0
     pids_limit: 256
 
-  # The self-learning loop — ON by default so Olympus keeps learning around the
-  # clock (world scans, YouTube learning, daily skill distillation, weekly
-  # self-audit, plus any scheduled operator jobs), even while you're away.
+  # The self-learning loop — DISABLED by default during P2A. It is isolated
+  # behind the `autonomy` profile so deployment durability/recovery can be
+  # proven without silently enabling unattended model calls or writes.
   #
   # It makes model calls on its own schedule, so it SPENDS TOKENS on YOUR key in
   # the background. That spend is bounded by OLYMPUS_DAILY_BUDGET in .env (set to
@@ -101,13 +111,17 @@ services:
   # UNLIMITED, not off — and under OLYMPUS_ENV=production that value now REFUSES
   # to boot. Leaving it unset is safe: the ceiling falls back to $10/day.
   #
-  # To turn the always-on learning OFF: comment this service out, or
-  # `docker compose stop heartbeat`. It shares the memory volume, so whatever it
-  # learns is immediately available to the chat app.
+  # A later, separately authorized roadmap gate may start it with the explicit
+  # autonomy profile. P2A does not authorize that activation.
   heartbeat:
+    profiles: ["autonomy"]
     build: ..
     restart: unless-stopped
     env_file: .env
+    environment:
+      OLYMPUS_ENV: production
+      OLYMPUS_MEMORY_DIR: /app/memory
+      OLYMPUS_BUILD_COMMIT: ${OLYMPUS_BUILD_COMMIT:-unknown}
     command: ["python", "-m", "olympus", "heartbeat"]
     volumes:
       - olympus-memory:/app/memory
@@ -157,6 +171,10 @@ services:
   #   build: ..
   #   restart: unless-stopped
   #   env_file: .env
+  #   environment:
+  #     OLYMPUS_ENV: production
+  #     OLYMPUS_MEMORY_DIR: /app/memory
+  #     OLYMPUS_BUILD_COMMIT: ${OLYMPUS_BUILD_COMMIT:-unknown}
   #   command: ["sh", "-c", "while true; do python -m olympus backup || true; sleep ${OLYMPUS_BACKUP_EVERY:-86400}; done"]
   #   volumes:
   #     - olympus-memory:/app/memory

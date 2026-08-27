@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
@@ -67,9 +68,12 @@ def test_dev_default_seed_boots_with_warning(monkeypatch, caplog):
 def _boot(extra_env: dict) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if k not in _SEED_ENVS}
     env["OLYMPUS_MODEL"] = "claude-opus-4-8"
-    env.update(extra_env)
-    return subprocess.run([sys.executable, "-m", "olympus", "version"],
-                          capture_output=True, text=True, env=env, timeout=90)
+    with tempfile.TemporaryDirectory(prefix="olympus-prod-boot-") as memory:
+        env["OLYMPUS_MEMORY_DIR"] = memory
+        env.update(extra_env)
+        return subprocess.run([sys.executable, "-m", "olympus", "version"],
+                              capture_output=True, text=True, env=env,
+                              timeout=90)
 
 
 def test_boot_production_default_seed_exits_nonzero():

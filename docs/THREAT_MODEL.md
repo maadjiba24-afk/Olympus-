@@ -45,6 +45,24 @@ surface. So the surface and its threat model can't drift apart.
 | self-modifying | Changes Olympus's own prompts/skills (gated + reversible). |
 | external actuator | Acts on the outside world (irreversible/scoped). |
 
+## Deployment durability evidence
+
+For named staging/production deployments, `/readyz` also enforces the P2A
+durability gate (`deployreadiness`). A writable directory is insufficient: the
+active state path must be an owner-only mount with disk headroom, and receipts
+on that mount must prove container replacement, host reboot, encrypted/signed
+off-machine backup delivery, and a strict throwaway restore of the same archive.
+Malformed, missing, stale, path-mismatched, or build-mismatched evidence fails
+closed. `OLYMPUS_DATABASE_URL` also fails until database-specific recovery
+evidence exists; the filesystem archive does not cover PostgreSQL private data.
+
+The receipt store is not a remote attestation system. A host administrator who
+can write `MEMORY_DIR` can forge it, and uploader exit zero cannot guarantee a
+provider's future retention. That administrator and provider remain explicit
+trust boundaries. The gate proves the local operator exercised the intended
+recovery path; it does not authorize live probes, collection, calibration, or
+autonomy. See [DEPLOYMENT_READINESS.md](DEPLOYMENT_READINESS.md).
+
 **A note on the `browser_*` rows below.** Their "deny-first default" column is
 written against *prompt injection* — an attacker-influenced page trying to reach
 your session — and states its mitigations in terms of **domain**. On a

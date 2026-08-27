@@ -1817,12 +1817,10 @@ def _deployment_problems(mode: str, *, bind_host: str | None = None,
     failure — the rationale is in the message, so the operator does not have to
     find this file to understand the refusal.
 
-    `require_explicit_memory_dir` is False for production on purpose: the
-    shipped Dockerfile declares `VOLUME /app/memory` and the compose file mounts
-    the named volume THERE, so a correct production deploy relies on the default
-    path already being the mounted volume. Demanding the env var would refuse to
-    boot the project's own documented deployment. Writability is still probed,
-    which is what actually catches a read-only or mis-owned mount."""
+    Named deployments require an explicit memory path. The shipped compose
+    profiles set `/app/memory` structurally, so an env-file swap cannot turn a
+    mounted deployment into an implicit image-local default. Writability is
+    still probed, and P2A readiness separately proves it is a mount point."""
     problems: list[str] = []
 
     # 1. Durable state must be on a writable, persistent path. The default lands
@@ -1928,21 +1926,14 @@ def production_problems(*, bind_host: str | None = None) -> list[str]:
     Production previously got only the signing-seed invariant
     (`witness.require_production_seed`), so it could boot with an unlimited
     spend ceiling, no credential while bound off-loopback, or unbounded
-    retention — exactly what staging already refuses. Two checks are relaxed
-    relative to staging because a correct production deploy legitimately does
-    them differently:
-
-      * `OLYMPUS_MEMORY_DIR` need not be set — the shipped Dockerfile/compose
-        mount the named volume at the DEFAULT path, so requiring the env var
-        would refuse the project's own documented deployment. Writability is
-        still probed.
-      * `OLYMPUS_DAILY_BUDGET` need not be set — unset now resolves to the
-        bounded `DEFAULT_DAILY_BUDGET`. An explicitly UNLIMITED value is still
-        refused, which is the actual hazard."""
+    retention — exactly what staging already refuses. One check is relaxed
+    relative to staging: `OLYMPUS_DAILY_BUDGET` need not be set because unset
+    resolves to the bounded `DEFAULT_DAILY_BUDGET`. An explicitly UNLIMITED
+    value is still refused. `OLYMPUS_MEMORY_DIR` is now required in every named
+    deployment; both shipped compose profiles set it structurally."""
     if not is_production():
         return []
     return _deployment_problems("production", bind_host=bind_host,
-                                require_explicit_memory_dir=False,
                                 require_explicit_budget=False)
 
 
