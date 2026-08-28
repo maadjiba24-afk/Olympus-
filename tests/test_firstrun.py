@@ -31,6 +31,7 @@ def clean_env(monkeypatch, tmp_path):
 def test_load_env_file_applies_saved_values():
     firstrun.CONFIG_ENV.write_text(
         "# comment\nANTHROPIC_API_KEY=sk-ant-saved\n\nOLYMPUS_MODEL='m'\n")
+    firstrun.CONFIG_ENV.chmod(0o600)
     assert firstrun.load_env_file() == 2
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-saved"
     assert os.environ["OLYMPUS_MODEL"] == "m"      # quotes stripped
@@ -39,6 +40,7 @@ def test_load_env_file_applies_saved_values():
 def test_env_vars_win_over_saved_file(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real-env")
     firstrun.CONFIG_ENV.write_text("ANTHROPIC_API_KEY=sk-ant-saved\n")
+    firstrun.CONFIG_ENV.chmod(0o600)
     firstrun.load_env_file()
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-real-env"
 
@@ -91,6 +93,7 @@ def test_ensure_ready_noninteractive_fails_politely(monkeypatch, capsys):
 
 def test_ensure_ready_uses_saved_config(monkeypatch):
     firstrun.CONFIG_ENV.write_text("ANTHROPIC_API_KEY=sk-ant-saved\n")
+    firstrun.CONFIG_ENV.chmod(0o600)
     assert firstrun.ensure_ready() is True
 
 
