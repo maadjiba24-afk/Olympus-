@@ -33,7 +33,9 @@ cd deploy
 
 # edit .env:
 # OLYMPUS_BUILD_COMMIT=<the exact value above>
+# set exactly one stable, strong source:
 # OLYMPUS_SECRET_KEY=<stable strong secret>
+# OLYMPUS_SECRET_KEY_FILE=/run/secrets/olympus_vault_key
 # OLYMPUS_BACKUP_CMD=rclone copy {path} <off-machine destination>/
 # OLYMPUS_BACKUP_EVERY=86400
 ```
@@ -41,6 +43,8 @@ cd deploy
 Production compose pins `OLYMPUS_ENV=production` and
 `OLYMPUS_MEMORY_DIR=/app/memory` structurally. An env-file swap therefore cannot
 silently downgrade the service to dev or move durable state inside the image.
+Copied `REPLACE_*` / `CHANGE_ME` credential examples do not count as secrets,
+and a configured but unreadable or weak vault-key source fails closed.
 
 For staging, use a **staging-only** key and destination and set
 `OLYMPUS_STAGING_ALLOW_BACKUP_CMD=1`. Never point staging at production storage.

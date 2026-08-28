@@ -166,7 +166,7 @@ services:
 
   # Off-droplet backups WITHOUT the token-spending heartbeat: this loop only
   # runs `olympus backup` (no model calls), so it's safe to leave on. Set
-  # OLYMPUS_BACKUP_CMD + OLYMPUS_SECRET_KEY in .env first (see docs/BACKUPS.md).
+  # OLYMPUS_BACKUP_CMD + one vault-key source first (see docs/BACKUPS.md).
   # backup:
   #   build: ..
   #   restart: unless-stopped

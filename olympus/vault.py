@@ -2,7 +2,8 @@
 
 OAuth tokens are the keys to a user's email and calendar; they must never sit
 in plaintext on disk. This module encrypts them with a key derived from
-OLYMPUS_SECRET_KEY (any passphrase) using Fernet (AES-128-CBC + HMAC).
+OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE using Fernet
+(AES-128-CBC + HMAC).
 
 Graceful degradation: if `cryptography` isn't installed or no secret key is
 set, the vault refuses to store secrets rather than writing them in the clear,
@@ -15,6 +16,8 @@ import base64
 import hashlib
 import json
 import os
+import re
+from pathlib import Path
 
 from . import config, memory, store  # noqa: F401  (config used elsewhere)
 
@@ -31,16 +34,89 @@ class VaultError(RuntimeError):
     pass
 
 
+_PLACEHOLDER_RE = re.compile(
+    r"(?:replace(?:_|-)?(?:me|with)|change(?:_|-)?me|changeme|"
+    r"your(?:_|-)(?:secret|key|token)|example(?:_|-)(?:secret|key|token))",
+    re.IGNORECASE)
+
+
+def configured() -> bool:
+    """Whether an operator selected either vault-key custody source.
+
+    This deliberately does not imply that the source works.  Backup creation
+    uses the distinction to refuse a plaintext downgrade when a configured
+    file is missing, ambiguous, weak, or unreadable.
+    """
+    return bool((os.environ.get("OLYMPUS_SECRET_KEY") or "").strip()
+                or (os.environ.get("OLYMPUS_SECRET_KEY_FILE") or "").strip())
+
+
+def _configured_passphrase() -> str | None:
+    """Read the one configured vault key, enforcing file custody.
+
+    A configured-but-broken file is a hard error, never an instruction to
+    fall back to plaintext backups.  Named deployments additionally reject
+    obvious example values and short passphrases; development retains the
+    existing compatibility with arbitrary test/local values.
+    """
+    env_secret = (os.environ.get("OLYMPUS_SECRET_KEY") or "").strip()
+    path = (os.environ.get("OLYMPUS_SECRET_KEY_FILE") or "").strip()
+    if env_secret and path:
+        raise VaultError(
+            "both OLYMPUS_SECRET_KEY and OLYMPUS_SECRET_KEY_FILE are set — "
+            "ambiguous vault-key custody; unset one")
+
+    secret = env_secret
+    if path:
+        p = Path(path)
+        if os.name == "posix":
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError as err:
+                raise VaultError(
+                    f"OLYMPUS_SECRET_KEY_FILE points at {path!r} but it "
+                    f"cannot be inspected ({err.__class__.__name__}: {err})"
+                ) from err
+            if mode & 0o077:
+                raise VaultError(
+                    f"vault key file {path!r} has mode {mode:03o} — readable "
+                    f"by group/other. Fix: chmod 600 {path}")
+        try:
+            secret = p.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as err:
+            raise VaultError(
+                f"OLYMPUS_SECRET_KEY_FILE points at {path!r} but it cannot "
+                f"be read ({err.__class__.__name__}: {err})") from err
+        if not secret:
+            raise VaultError(f"vault key file {path!r} is empty")
+
+    if not secret:
+        return None
+
+    mode = (os.environ.get("OLYMPUS_ENV") or "").strip().lower()
+    if mode in ("staging", "production", "prod"):
+        if _PLACEHOLDER_RE.search(secret):
+            raise VaultError(
+                f"{mode} vault key is an example placeholder; generate a "
+                "random stable secret")
+        if len(secret) < 32:
+            raise VaultError(
+                f"{mode} vault key is only {len(secret)} characters; use at "
+                "least 32 random characters")
+    return secret
+
+
 def _fernet() -> "Fernet":
     if not _HAVE_CRYPTO:
         raise VaultError(
             "the 'cryptography' package is required to store credentials "
             "securely — `pip install cryptography`.")
-    passphrase = os.environ.get("OLYMPUS_SECRET_KEY")
+    passphrase = _configured_passphrase()
     if not passphrase:
         raise VaultError(
-            "OLYMPUS_SECRET_KEY is not set — required to encrypt stored "
-            "credentials. Set it to any strong, stable secret string.")
+            "OLYMPUS_SECRET_KEY / OLYMPUS_SECRET_KEY_FILE is not set — "
+            "required to encrypt stored credentials. Configure one strong, "
+            "stable secret source.")
     # Derive a 32-byte Fernet key deterministically from the passphrase.
     key = base64.urlsafe_b64encode(hashlib.sha256(passphrase.encode()).digest())
     return Fernet(key)
@@ -70,8 +146,8 @@ def decrypt_bytes(token: bytes) -> bytes:
     try:
         return _fernet().decrypt(token)
     except (InvalidToken, ValueError):
-        raise VaultError("could not decrypt — wrong OLYMPUS_SECRET_KEY or the "
-                         "data was corrupted/tampered.")
+        raise VaultError("could not decrypt — wrong vault key or the data was "
+                         "corrupted/tampered.")
 
 
 _NS = "vault"
@@ -112,7 +188,7 @@ def _load(user: str) -> dict:
     try:
         return json.loads(_fernet().decrypt(blob).decode())
     except (InvalidToken, ValueError, json.JSONDecodeError):
-        raise VaultError("could not decrypt vault — wrong OLYMPUS_SECRET_KEY?")
+        raise VaultError("could not decrypt vault — wrong vault key?")
 
 
 def _store(user: str, data: dict) -> None:
@@ -189,7 +265,7 @@ def legacy_names(legacy_key: str) -> list[str]:
     try:
         return sorted(json.loads(_fernet().decrypt(blob).decode()).keys())
     except (InvalidToken, ValueError, json.JSONDecodeError):
-        raise VaultError("could not decrypt vault — wrong OLYMPUS_SECRET_KEY?")
+        raise VaultError("could not decrypt vault — wrong vault key?")
 
 
 def migrate_legacy(legacy_key: str, owner: str, *, overwrite: bool = False) -> int:
@@ -214,7 +290,7 @@ def migrate_legacy(legacy_key: str, owner: str, *, overwrite: bool = False) -> i
     try:
         legacy = json.loads(_fernet().decrypt(blob).decode())
     except (InvalidToken, ValueError, json.JSONDecodeError):
-        raise VaultError("could not decrypt vault — wrong OLYMPUS_SECRET_KEY?")
+        raise VaultError("could not decrypt vault — wrong vault key?")
     data = _load(exact)
     moved = 0
     for name, value in legacy.items():

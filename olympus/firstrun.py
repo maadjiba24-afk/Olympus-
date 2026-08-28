@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import getpass
 import os
+import re
 import sys
+import tempfile
 from pathlib import Path
 
 CONFIG_DIR = Path(os.environ.get("OLYMPUS_HOME", Path.home() / ".olympus"))
@@ -23,6 +25,54 @@ CONFIG_ENV = CONFIG_DIR / "config.env"
 _KEY_VARS = ("ANTHROPIC_API_KEY", "OLYMPUS_API_KEY", "OPENAI_API_KEY",
              "OLYMPUS_BASE_URL")
 
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class ConfigFileError(RuntimeError):
+    """The saved config could not be handled without weakening custody."""
+
+
+def _require_private_file(path: Path) -> None:
+    """Refuse a POSIX config file readable by group or other users.
+
+    Windows ACLs are not represented by the POSIX group/other bits exposed by
+    ``stat``, so this check is intentionally POSIX-only.  New files are still
+    created inside the user's profile with inherited Windows ACLs.
+    """
+    if os.name != "posix":
+        return
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as err:
+        raise ConfigFileError(
+            f"saved config {path} cannot be inspected: {err}") from err
+    if mode & 0o077:
+        raise ConfigFileError(
+            f"saved config {path} has mode {mode:03o} and may contain API "
+            f"keys. Fix: chmod 600 {path}")
+
+
+def _validated_lines(values: dict[str, str]) -> list[str]:
+    """Serialize only records the line-oriented env format can represent.
+
+    The admin panel has a strict key allowlist.  Without this check a value
+    containing a newline could append a second, unallowlisted ``KEY=VALUE``
+    record to config.env and take effect after restart.
+    """
+    lines = ["# OLYMPUS saved configuration — created by `olympus setup`.",
+             "# Environment variables override anything here.", ""]
+    for key, value in values.items():
+        if not _ENV_KEY_RE.fullmatch(str(key)):
+            raise ConfigFileError(f"invalid environment key: {key!r}")
+        value = str(value)
+        if any(ch in value for ch in ("\r", "\n", "\x00")):
+            raise ConfigFileError(
+                f"{key} contains a newline or NUL byte; saved config values "
+                "must fit on one line")
+        if value:
+            lines.append(f"{key}={value}")
+    return lines
+
 
 def load_env_file(path: Path | None = None) -> int:
     """Load saved KEY=VALUE lines into the environment (env vars win).
@@ -30,8 +80,14 @@ def load_env_file(path: Path | None = None) -> int:
     path = path or CONFIG_ENV
     if not path.exists():
         return 0
+    _require_private_file(path)
     applied = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as err:
+        raise ConfigFileError(
+            f"saved config {path} cannot be read safely: {err}") from err
+    for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -63,15 +119,50 @@ def _ask_secret(prompt: str) -> str:
 
 
 def _save(values: dict[str, str]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lines = ["# OLYMPUS saved configuration — created by `olympus setup`.",
-             "# Environment variables override anything here.", ""]
-    lines += [f"{k}={v}" for k, v in values.items() if v]
-    CONFIG_ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """Atomically replace config.env with an owner-only file.
+
+    The old implementation wrote with the process umask and chmodded after
+    close.  On a common 022 umask that exposed freshly pasted API keys as 0644
+    for a window, and a chmod failure was silently ignored.  ``mkstemp``
+    creates 0600 before the first byte is written; replacement happens only
+    after the complete file is flushed and fsynced.
+    """
+    lines = _validated_lines(values)
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix":
+        try:
+            CONFIG_DIR.chmod(0o700)
+        except OSError as err:
+            raise ConfigFileError(
+                f"could not make config directory owner-only: {err}") from err
+
+    fd = -1
+    temp_name = ""
     try:
-        CONFIG_ENV.chmod(0o600)             # the file holds API keys
-    except OSError:
-        pass
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".config.env.", suffix=".tmp", dir=CONFIG_DIR)
+        if os.name == "posix":
+            os.fchmod(fd, 0o600)
+        payload = ("\n".join(lines) + "\n").encode("utf-8")
+        with os.fdopen(fd, "wb") as fh:
+            fd = -1                         # fd now belongs to fh
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_name, CONFIG_ENV)
+        temp_name = ""
+        _require_private_file(CONFIG_ENV)
+    except OSError as err:
+        raise ConfigFileError(
+            f"could not save owner-only config {CONFIG_ENV}: {err}") from err
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if temp_name:
+            try:
+                Path(temp_name).unlink()
+            except OSError:
+                pass
     for k, v in values.items():             # take effect immediately
         if v:
             os.environ[k] = v
@@ -82,7 +173,13 @@ def _read_saved() -> dict[str, str]:
     out: dict[str, str] = {}
     if not CONFIG_ENV.exists():
         return out
-    for line in CONFIG_ENV.read_text(encoding="utf-8").splitlines():
+    _require_private_file(CONFIG_ENV)
+    try:
+        content = CONFIG_ENV.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as err:
+        raise ConfigFileError(
+            f"saved config {CONFIG_ENV} cannot be read safely: {err}") from err
+    for line in content.splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
@@ -153,6 +250,12 @@ def open_in_editor() -> str:
     except Exception as err:
         return (f"Could not launch '{editor}': {err}\n"
                 f"Edit it yourself: {CONFIG_ENV}")
+    if os.name == "posix":
+        try:
+            CONFIG_ENV.chmod(0o600)
+            _require_private_file(CONFIG_ENV)
+        except (OSError, ConfigFileError) as err:
+            return f"Edited {CONFIG_ENV}, but could not secure it: {err}"
     return f"Edited {CONFIG_ENV}."
 
 

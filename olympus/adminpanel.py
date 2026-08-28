@@ -633,7 +633,8 @@ function render(d) {
           '{key: "' + s.key + '"})\\'>clear</button>' + restart);
       })) +
       (sec === 'models' && !cf.vault_ready
-        ? '<p class="bad">Secrets need OLYMPUS_SECRET_KEY set on the server ' +
+        ? '<p class="bad">Secrets need OLYMPUS_SECRET_KEY or ' +
+          'OLYMPUS_SECRET_KEY_FILE set on the server ' +
           'before they can be stored (encrypted vault). Non-secret settings ' +
           'work now.</p>' : '')));
   });

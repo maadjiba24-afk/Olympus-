@@ -8,6 +8,8 @@ memory/
 keys.sh
 # the signing seed must never be committed, wherever keygen wrote it
 signing_seed
+vault_key
+olympus_vault_key
 deploy/.env
 deploy/.env.staging
 olympus/verification.json

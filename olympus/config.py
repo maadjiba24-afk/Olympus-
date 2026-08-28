@@ -1791,6 +1791,30 @@ class ProductionConfigError(DeploymentConfigError):
     _MODE = "production"
 
 
+_DEPLOYMENT_SECRET_VARS = (
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLYMPUS_API_KEY",
+    "OLYMPUS_PROVIDER_KEYS", "OLYMPUS_MODELS", "OLYMPUS_API_KEYS",
+    "OLYMPUS_ACCESS_TOKEN", "OLYMPUS_OPERATOR_TOKEN",
+    "OLYMPUS_GOOGLE_CLIENT_SECRET", "OLYMPUS_WEBHOOK_SECRET",
+    "TELEGRAM_BOT_TOKEN", "DISCORD_WEBHOOK_URL", "SLACK_SIGNING_SECRET",
+    "SLACK_BOT_TOKEN", "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN",
+    "WHATSAPP_APP_SECRET", "SMTP_PASS", "OLYMPUS_SIGNING_SEED",
+    "OLYMPUS_WEBHOOKS",
+)
+_PLACEHOLDER_SECRET_RE = re.compile(
+    r"(?:replace(?:_|-)?(?:me|with)|change(?:_|-)?me|changeme|"
+    r"your(?:_|-)(?:secret|key|token)|example(?:_|-)(?:secret|key|token))",
+    re.IGNORECASE)
+
+
+def _looks_like_placeholder_secret(value: str) -> bool:
+    """High-confidence example markers that must not satisfy a named deploy."""
+    text = (value or "").strip()
+    return bool(text and (_PLACEHOLDER_SECRET_RE.search(text)
+                          or text == "..." or text.endswith("-...")
+                          or (text.startswith("<") and text.endswith(">"))))
+
+
 def _writable_dir(path) -> bool:
     """Whether `path` exists (or can be created) and accepts a write.
 
@@ -1822,6 +1846,35 @@ def _deployment_problems(mode: str, *, bind_host: str | None = None,
     mounted deployment into an implicit image-local default. Writability is
     still probed, and P2A readiness separately proves it is a mount point."""
     problems: list[str] = []
+
+    # A copied example value is public knowledge, not a credential.  Presence-
+    # only checks used to accept deploy/.env.example verbatim, allowing a named
+    # deployment to report its access and encryption posture as configured.
+    for name in _DEPLOYMENT_SECRET_VARS:
+        value = os.environ.get(name, "")
+        if _looks_like_placeholder_secret(value):
+            problems.append(
+                f"{name} still contains an example placeholder. Generate a "
+                "real secret and keep it outside source control.")
+
+    access = os.environ.get("OLYMPUS_ACCESS_TOKEN", "").strip()
+    operator = os.environ.get("OLYMPUS_OPERATOR_TOKEN", "").strip()
+    if access and operator and access == operator:
+        problems.append(
+            "OLYMPUS_OPERATOR_TOKEN equals OLYMPUS_ACCESS_TOKEN: every user "
+            "with the entry credential would also become an operator. Generate "
+            "two independent secrets.")
+
+    # A selected vault-key source that is broken or weak is a configuration
+    # error, not equivalent to no optional vault.  In particular it must never
+    # let backup creation silently downgrade to plaintext.
+    from . import vault
+    if vault.configured():
+        try:
+            vault._fernet()
+        except Exception as exc:
+            problems.append(
+                f"vault encryption key is configured but unusable: {exc}")
 
     # 1. Durable state must be on a writable, persistent path. The default lands
     #    inside the image; a container restart would silently destroy every

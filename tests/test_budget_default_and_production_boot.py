@@ -98,7 +98,9 @@ def prod_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "RETAIN_DAYS", 30)
     monkeypatch.delenv("OLYMPUS_DAILY_BUDGET", raising=False)
     for k in ("OLYMPUS_API_KEYS", "OLYMPUS_ACCESS_TOKEN",
-              "OLYMPUS_REQUIRE_LOGIN", "OLYMPUS_BIND_HOST"):
+              "OLYMPUS_OPERATOR_TOKEN", "OLYMPUS_REQUIRE_LOGIN",
+              "OLYMPUS_BIND_HOST", "OLYMPUS_SECRET_KEY",
+              "OLYMPUS_SECRET_KEY_FILE"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("OLYMPUS_MEMORY_DIR", str(mem))
     return mem
@@ -146,6 +148,37 @@ def test_production_refuses_off_loopback_without_a_credential(prod_env):
 def test_a_credential_permits_off_loopback_binding(prod_env, monkeypatch, var):
     monkeypatch.setenv(var, "x")
     assert config.production_problems(bind_host="0.0.0.0") == []
+
+
+@pytest.mark.parametrize("name,value", [
+    ("OLYMPUS_ACCESS_TOKEN", "REPLACE_WITH_RANDOM_HEX"),
+    ("OLYMPUS_API_KEYS", "REPLACE_ME_staging_key_1"),
+    ("ANTHROPIC_API_KEY", "sk-ant-..."),
+    ("OLYMPUS_SIGNING_SEED", "CHANGE_ME"),
+])
+def test_named_deployment_rejects_example_credentials(
+        prod_env, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    problems = config.production_problems()
+    assert any(name in problem and "placeholder" in problem
+               for problem in problems)
+
+
+def test_production_rejects_shared_entry_and_operator_secret(
+        prod_env, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_ACCESS_TOKEN", "one-real-secret")
+    monkeypatch.setenv("OLYMPUS_OPERATOR_TOKEN", "one-real-secret")
+    assert any("equals OLYMPUS_ACCESS_TOKEN" in problem
+               for problem in config.production_problems())
+
+
+def test_configured_broken_vault_key_is_a_deployment_error(
+        prod_env, monkeypatch, tmp_path):
+    missing = tmp_path / "missing-vault-key"
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(missing))
+    problems = config.production_problems()
+    assert any("vault encryption key is configured but unusable" in problem
+               for problem in problems)
 
 
 def test_production_refuses_an_unwritable_memory_dir(prod_env, monkeypatch):

@@ -425,11 +425,21 @@ def report() -> dict[str, Any]:
         "backup_destination", backup_cmd,
         "off-machine backup command is configured" if backup_cmd else
         "OLYMPUS_BACKUP_CMD is not configured"))
-    secret = bool(os.environ.get("OLYMPUS_SECRET_KEY", "").strip())
+    from . import vault
+    secret = False
+    if vault.configured():
+        try:
+            vault._fernet()
+            secret = True
+            secret_detail = "backup encryption secret is configured and usable"
+        except Exception as exc:
+            secret_detail = f"backup encryption secret is unusable: {exc}"
+    else:
+        secret_detail = (
+            "OLYMPUS_SECRET_KEY / OLYMPUS_SECRET_KEY_FILE is not configured")
     checks.append(_check(
         "backup_encryption", secret,
-        "backup encryption secret is configured" if secret else
-        "OLYMPUS_SECRET_KEY is not configured"))
+        secret_detail))
     cadence, cadence_error = _positive_env(
         "OLYMPUS_BACKUP_EVERY", int(getattr(config, "BACKUP_EVERY", 86400)))
     checks.append(_check(

@@ -54,7 +54,8 @@ class DeploymentReadinessTests(unittest.TestCase):
             "OLYMPUS_ENV": "production",
             "OLYMPUS_MEMORY_DIR": str(self.memory),
             "OLYMPUS_BUILD_COMMIT": COMMIT,
-            "OLYMPUS_SECRET_KEY": "test-only-secret",
+            "OLYMPUS_SECRET_KEY": "test-only-secret-0123456789abcdef",
+            "OLYMPUS_SECRET_KEY_FILE": "",
             "OLYMPUS_BACKUP_EVERY": "86400",
             "OLYMPUS_DATABASE_URL": "",
             "OLYMPUS_MIN_FREE_BYTES": "1024",
@@ -129,6 +130,14 @@ class DeploymentReadinessTests(unittest.TestCase):
         self.assertEqual(report["problems"], [])
         self.assertTrue(all(item["status"] == "pass"
                             for item in report["checks"]))
+
+    def test_placeholder_vault_key_cannot_satisfy_encryption_readiness(self):
+        os.environ["OLYMPUS_SECRET_KEY"] = "REPLACE_WITH_RANDOM_HEX"
+
+        check = self._check(deployreadiness.report(), "backup_encryption")
+
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("placeholder", check["detail"])
 
     def test_named_mode_mount_permissions_disk_and_commit_fail_closed(self):
         self.memory_mode = 0o755

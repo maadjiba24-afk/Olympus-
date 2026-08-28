@@ -11,9 +11,10 @@ What it does, and why each part is here:
   that records every file's SHA-256. The replay caches (`responses/`,
   `tool_results/`, `context/`) are large and reproducible, so they're excluded
   unless `--full`; user/account/audit data is always included.
-- **Encrypt at rest** with the vault key (`OLYMPUS_SECRET_KEY`, Fernet). The
-  off-droplet copy must not be plaintext PII/tokens — delivering an unencrypted
-  archive off-machine is refused unless explicitly allowed.
+- **Encrypt at rest** with the vault key (`OLYMPUS_SECRET_KEY` or
+  `OLYMPUS_SECRET_KEY_FILE`, Fernet). The off-droplet copy must not be plaintext
+  PII/tokens — delivering an unencrypted archive off-machine is refused unless
+  explicitly allowed.
 - **Sign** the archive's hash with the witness Ed25519 root of trust, so a
   restored archive is provably the one we wrote (tamper-evident).
 - **Deliver** via `OLYMPUS_BACKUP_CMD` ({path} → archive path): you bring the
@@ -48,7 +49,7 @@ _MANIFEST_NAME = "BACKUP_MANIFEST.json"
 _REPLAY_CACHE = ("responses", "tool_results", "context")
 # Files that must NEVER leave the machine inside an archive, even a full one.
 # The signing seed is the release/audit root of trust; archives are encrypted,
-# but under OLYMPUS_SECRET_KEY — a different (often weaker) custody domain
+# but under the vault key — a different (often weaker) custody domain
 # than the seed itself (docs/SIGNING.md).
 _NEVER_BACKUP = ("signing_seed",)
 _LOCK = threading.Lock()
@@ -84,11 +85,32 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _custody_paths() -> set[Path]:
+    """Exact configured key files that must never enter their own backup.
+
+    The basename guard remains for the default signing-seed location, while
+    this covers custom filenames and the file-backed vault key.
+    """
+    out: set[Path] = set()
+    for name in ("OLYMPUS_SIGNING_SEED_FILE", "OLYMPUS_SECRET_KEY_FILE"):
+        raw = (os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        try:
+            out.add(Path(raw).expanduser().resolve())
+        except OSError:
+            # A broken configured path will be reported by its credential
+            # consumer; it cannot be included if it cannot resolve to a file.
+            pass
+    return out
+
+
 def _included_files(root: Path, *, full: bool) -> list[Path]:
     """Every file under MEMORY_DIR to back up, excluding the backups dir itself
     (no recursive growth), temp files, the signing seed (never leaves the
     machine), and — unless `full` — the replay caches."""
     backups = (root / "backups").resolve()
+    custody_paths = _custody_paths()
     out: list[Path] = []
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.is_symlink():
@@ -100,7 +122,7 @@ def _included_files(root: Path, *, full: bool) -> list[Path]:
         top = rel.parts[0] if rel.parts else ""
         if not full and top in _REPLAY_CACHE:
             continue
-        if p.name in _NEVER_BACKUP:
+        if p.name in _NEVER_BACKUP or rp in custody_paths:
             continue
         if p.name.startswith(".") and p.suffix == ".tmp":
             continue
@@ -161,20 +183,22 @@ def create(*, full: bool = False, label: str = "") -> dict:
             tmp_tar.unlink(missing_ok=True)
 
         # 2) Encrypt at rest if the vault key is configured. Fall back to
-        # plaintext ONLY when no key is set — if a key IS configured but
-        # encryption fails, refuse to write a plaintext backup of the user's
-        # data rather than silently downgrading (the operator believes it's
-        # encrypted).
+        # plaintext ONLY when neither custody source is selected.  `available`
+        # cannot make that distinction: a missing file, ambiguous env+file,
+        # weak deployment key, or broken crypto backend all return False.  A
+        # configured-but-unusable key must refuse rather than silently produce
+        # the plaintext archive the operator explicitly tried to prevent.
         from . import vault
         encrypted = False
         payload = raw
         suffix = ".tar.gz"
-        if vault.available():
+        if vault.configured():
             try:
                 payload = vault.encrypt_bytes(raw)
             except Exception as err:
                 raise BackupError(
-                    "encryption is configured (secret key set) but failed — "
+                    "encryption is configured (vault-key source selected) "
+                    "but failed — "
                     "refusing to write a PLAINTEXT backup of your data: "
                     f"{err}") from err
             encrypted = True
@@ -227,9 +251,10 @@ def deliver(archive_path: str) -> dict:
         raise BackupError(f"archive not found: {archive_path}")
     if not archive.name.endswith(".enc") and not config.backup_allow_plaintext():
         return {"delivered": False, "reason": "refusing to deliver an "
-                "UNENCRYPTED archive off-droplet — set OLYMPUS_SECRET_KEY to "
-                "encrypt backups (or OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 if the "
-                "destination is itself trusted)."}
+                "UNENCRYPTED archive off-droplet — set OLYMPUS_SECRET_KEY or "
+                "OLYMPUS_SECRET_KEY_FILE to encrypt backups (or "
+                "OLYMPUS_BACKUP_ALLOW_PLAINTEXT=1 if the destination is "
+                "itself trusted)."}
 
     def _send(path: Path, label: str) -> None:
         if "{path}" in cmd:

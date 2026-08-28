@@ -52,7 +52,8 @@ olympus operator forget amazon.com
 - **Remember.** Only if you ask: `olympus operator authorize <domain> --remember`.
   You'll then be prompted **privately** (in the interactive app) to type the
   username and password; they go straight into the encrypted vault and the
-  model never sees them. Requires `OLYMPUS_SECRET_KEY` to be set (the vault key).
+  model never sees them. Requires exactly one usable vault-key source:
+  `OLYMPUS_SECRET_KEY` or an owner-only `OLYMPUS_SECRET_KEY_FILE`.
 
 ## How a task actually runs (the safety gates)
 

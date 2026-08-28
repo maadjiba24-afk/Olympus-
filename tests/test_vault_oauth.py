@@ -1,5 +1,6 @@
 """Tests for the secrets vault, storage abstraction, and Google OAuth flow."""
 
+import os
 import time
 
 import pytest
@@ -14,7 +15,10 @@ needs_crypto = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def fresh_store():
+def fresh_store(monkeypatch):
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY_FILE", raising=False)
+    monkeypatch.delenv("OLYMPUS_ENV", raising=False)
     store.reset()
     yield
     store.reset()
@@ -45,6 +49,81 @@ def test_vault_requires_secret_key(monkeypatch):
     assert not vault.available()
     with pytest.raises(vault.VaultError, match="OLYMPUS_SECRET_KEY"):
         vault.put("u", "google", {"x": 1})
+
+
+@needs_crypto
+def test_vault_key_file_roundtrip(monkeypatch, tmp_path):
+    key_file = tmp_path / "vault-key"
+    fd = os.open(key_file, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, b"file-held-vault-secret-0123456789abcdef\n")
+    finally:
+        os.close(fd)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
+    assert vault.configured() and vault.available()
+    vault.put("u", "google", {"token": "private"})
+    assert vault.get("u", "google") == {"token": "private"}
+
+
+@needs_crypto
+def test_vault_key_sources_are_mutually_exclusive(monkeypatch, tmp_path):
+    key_file = tmp_path / "vault-key"
+    key_file.write_text("file-secret", encoding="utf-8")
+    key_file.chmod(0o600)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "env-secret")
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
+    assert vault.configured() is True
+    assert vault.available() is False
+    with pytest.raises(vault.VaultError, match="ambiguous"):
+        vault._fernet()
+
+
+@needs_crypto
+def test_configured_missing_vault_key_file_is_not_unconfigured(monkeypatch,
+                                                                tmp_path):
+    missing = tmp_path / "missing"
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(missing))
+    assert vault.configured() is True
+    assert vault.available() is False
+    with pytest.raises(vault.VaultError, match="cannot be"):
+        vault._fernet()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+@needs_crypto
+def test_vault_key_file_permissions_are_enforced(monkeypatch, tmp_path):
+    key_file = tmp_path / "vault-key"
+    key_file.write_text("file-secret", encoding="utf-8")
+    key_file.chmod(0o644)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
+    with pytest.raises(vault.VaultError, match="644"):
+        vault._fernet()
+
+
+@needs_crypto
+def test_malformed_vault_key_file_fails_closed(monkeypatch, tmp_path):
+    key_file = tmp_path / "vault-key"
+    key_file.write_bytes(b"\xff\xfe\x00")
+    key_file.chmod(0o600)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(key_file))
+    assert vault.configured() is True
+    assert vault.available() is False
+    with pytest.raises(vault.VaultError, match="cannot be read"):
+        vault._fernet()
+
+
+@needs_crypto
+@pytest.mark.parametrize("secret", [
+    "REPLACE_WITH_RANDOM_HEX",
+    "short-production-key",
+])
+def test_named_deployments_reject_placeholder_or_short_vault_keys(
+        monkeypatch, secret):
+    monkeypatch.setenv("OLYMPUS_ENV", "production")
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", secret)
+    assert vault.available() is False
+    with pytest.raises(vault.VaultError, match="placeholder|32 random"):
+        vault._fernet()
 
 
 @needs_crypto
