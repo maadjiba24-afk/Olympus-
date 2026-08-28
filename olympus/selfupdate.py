@@ -31,17 +31,37 @@ def _is_pipx() -> bool:
 
 
 def _installed_from_git() -> bool:
-    """True when the running package has no PyPI release metadata recorded as a
-    normal wheel — i.e. it was installed from the git repo (the install.sh path).
-    Best-effort; defaults to False so we prefer the PyPI upgrade."""
+    """True only with affirmative PEP 610 evidence of a Git installation.
+
+    Missing, corrupt, or structurally invalid metadata is not evidence of a
+    source install.  Those cases deliberately return False so the implicit
+    upgrade path stays on the released PyPI package.  Operators can still
+    request the Git path explicitly with ``olympus upgrade --git``.
+    """
     try:
-        from importlib.metadata import metadata
-        m = metadata("olympus-council")
-        # A VCS install records a direct_url; PyPI installs don't. We can't read
-        # direct_url portably here, so treat a missing version as "from source".
-        return not m.get("Version")
+        import json
+        from importlib.metadata import distribution
+
+        raw = distribution(PACKAGE).read_text("direct_url.json")
+        if not raw:
+            return False
+        direct_url = json.loads(raw)
     except Exception:
-        return True
+        return False
+
+    if not isinstance(direct_url, dict):
+        return False
+    vcs = direct_url.get("vcs_info")
+    if not isinstance(vcs, dict):
+        return False
+    vcs_name = vcs.get("vcs")
+    commit_id = vcs.get("commit_id")
+    return (
+        isinstance(vcs_name, str)
+        and vcs_name.strip().lower() == "git"
+        and isinstance(commit_id, str)
+        and bool(commit_id.strip())
+    )
 
 
 def plan(force_git: bool = False) -> list[str]:
