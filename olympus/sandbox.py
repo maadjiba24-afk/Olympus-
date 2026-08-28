@@ -462,11 +462,33 @@ def _daytona_run(command: str, timeout: int, watch: str | None = None,
     if data.get("_error"):                        # network/parse failure (degraded)
         return Result(False, 127,
                       f"daytona backend error: {str(data['_error'])[:200]}")
-    try:
-        code = int(data.get("exitCode", data.get("code",
-                   data.get("exit_code", 0))) or 0)
-    except (TypeError, ValueError):
-        code = 0
+    # A remote command is successful only when the backend provides an
+    # affirmative, unambiguous exit status.  Missing/malformed status used to
+    # collapse to 0 here, turning a broken or attacker-controlled response into
+    # a false success that downstream automation could trust.
+    status_keys = ("exitCode", "code", "exit_code")
+    raw_statuses = [data[key] for key in status_keys if key in data]
+    if not raw_statuses:
+        return Result(False, 127,
+                      "daytona backend response is missing an exit status")
+    statuses: list[int] = []
+    for raw_status in raw_statuses:
+        if isinstance(raw_status, bool):
+            return Result(False, 127,
+                          "daytona backend returned an invalid exit status")
+        if isinstance(raw_status, int):
+            statuses.append(raw_status)
+            continue
+        if (isinstance(raw_status, str)
+                and re.fullmatch(r"[+-]?\d+", raw_status.strip())):
+            statuses.append(int(raw_status.strip()))
+            continue
+        return Result(False, 127,
+                      "daytona backend returned an invalid exit status")
+    if len(set(statuses)) != 1:
+        return Result(False, 127,
+                      "daytona backend returned conflicting exit statuses")
+    code = statuses[0]
     out = str(data.get("result") or data.get("output")
               or data.get("stdout") or "")
     watched: tuple[str, ...] = ()
