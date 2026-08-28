@@ -25,8 +25,10 @@ of a parser. A test pins the two in sync.
 Design discipline (mirrors `contracts.py` / `security.py`): the predicate core is
 pure — each predicate is `(ctx) -> (ok, detail)` over a supplied context, with no
 I/O or config reads. The enforcement points build the context and act on the
-verdict. Engine-internal errors fail OPEN (the primary spine still guards every
-action); only a genuine, evaluated contract violation fails CLOSED.
+verdict. Engine-internal errors preserve the affected contract's recovery
+directive, so a broken safety contract fails CLOSED while a DEGRADE contract
+remains non-blocking but visibly non-OK. If contracts cannot be loaded at all,
+the operation is blocked because no declared recovery can be trusted.
 """
 
 from __future__ import annotations
@@ -961,19 +963,41 @@ def evaluate(contract: Contract, ctx: dict) -> Verdict:
 def check(operation: str, ctx: dict,
           registry: dict[str, Contract] | None = None) -> Verdict:
     """Evaluate every contract bound to `operation`; return the first violation,
-    else an ok verdict. Never raises on predicate/engine error — a broken
-    predicate degrades to 'ok' so the primary spine remains the real guard
-    (engine failures fail OPEN; evaluated violations fail CLOSED)."""
+    else an ok verdict. Predicate errors preserve the affected contract's
+    recovery directive; loading errors have no trustworthy directive and BLOCK.
+    The exception is captured, but is never converted into an allow verdict."""
     try:
-        for c in contracts_for(operation, registry):
-            v = evaluate(c, ctx)
-            if not v.ok:
-                return v
+        contracts = contracts_for(operation, registry)
     except Exception as err:
         from . import errors, evolve
         errors.capture("behavioral_contracts.check", err, context=operation)
-        evolve.record("abc", evolve.DEGRADED, f"engine error on {operation}")
-        return Verdict(ok=True, contract="", clause="engine-error")
+        evolve.record("abc", evolve.DEGRADED, f"engine load error on {operation}")
+        return Verdict(
+            ok=False,
+            contract=operation,
+            clause="engine-error",
+            reasons=("contract engine could not load policy; operation blocked",),
+            recovery=BLOCK,
+        )
+
+    for c in contracts:
+        try:
+            v = evaluate(c, ctx)
+            if not v.ok:
+                return v
+        except Exception as err:
+            from . import errors, evolve
+            errors.capture("behavioral_contracts.check", err,
+                           context=f"{operation}:{c.name}")
+            evolve.record("abc", evolve.DEGRADED,
+                          f"engine predicate error on {operation}/{c.name}")
+            return Verdict(
+                ok=False,
+                contract=c.name,
+                clause="engine-error",
+                reasons=("contract predicate failed; declared recovery applied",),
+                recovery=c.recovery,
+            )
     return Verdict(ok=True)
 
 

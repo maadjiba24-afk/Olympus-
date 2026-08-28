@@ -65,6 +65,69 @@ def test_enforce_raises_contract_violation_on_hard_stop(monkeypatch):
     assert ei.value.recovery == abc.BLOCK
 
 
+@pytest.mark.parametrize(
+    ("recovery", "blocking"),
+    [(abc.BLOCK, True), (abc.HOLD, True), (abc.REJECT, True),
+     (abc.DEGRADE, False)],
+)
+def test_predicate_error_preserves_declared_recovery(monkeypatch, recovery,
+                                                     blocking):
+    def broken_predicate(_ctx):
+        raise RuntimeError("synthetic predicate failure")
+
+    monkeypatch.setitem(abc._PREDICATES, "test_broken", broken_predicate)
+    contract = abc.Contract(
+        name="engine_failure_contract",
+        operation="test.engine",
+        recovery=recovery,
+        preconditions=("test_broken",),
+    )
+
+    verdict = abc.check("test.engine", {},
+                        registry={contract.name: contract})
+
+    assert not verdict.ok
+    assert verdict.blocking is blocking
+    assert verdict.contract == contract.name
+    assert verdict.clause == "engine-error"
+    assert verdict.recovery == recovery
+
+
+def test_enforce_blocks_when_a_blocking_predicate_errors(monkeypatch):
+    def broken_predicate(_ctx):
+        raise RuntimeError("synthetic predicate failure")
+
+    monkeypatch.setitem(abc._PREDICATES, "test_broken", broken_predicate)
+    contract = abc.Contract(
+        name="load_bearing_gate",
+        operation="test.actuate",
+        recovery=abc.BLOCK,
+        invariants=("test_broken",),
+    )
+
+    with pytest.raises(abc.ContractViolation) as exc:
+        abc.enforce("test.actuate", {}, registry={contract.name: contract})
+
+    assert exc.value.contract == contract.name
+    assert exc.value.clause == "engine-error"
+    assert exc.value.recovery == abc.BLOCK
+
+
+def test_contract_load_error_blocks_unknown_recovery(monkeypatch):
+    def broken_loader(_operation, _registry=None):
+        raise RuntimeError("synthetic policy load failure")
+
+    monkeypatch.setattr(abc, "contracts_for", broken_loader)
+
+    verdict = abc.check("test.load", {})
+
+    assert not verdict.ok
+    assert verdict.blocking
+    assert verdict.contract == "test.load"
+    assert verdict.clause == "engine-error"
+    assert verdict.recovery == abc.BLOCK
+
+
 # --- signed artifacts: tamper refuses to load -----------------------------
 
 @_signing
