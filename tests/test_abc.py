@@ -116,12 +116,17 @@ def test_evaluate_first_failing_clause_wins():
     assert not v.ok and v.clause == "preconditions"
 
 
-def test_check_fails_open_on_engine_error(monkeypatch):
+def test_check_applies_declared_recovery_on_engine_error(monkeypatch):
     def boom(ctx):
         raise RuntimeError("predicate blew up")
     monkeypatch.setitem(abc._PREDICATES, "risk_class_known", boom)
     v = abc.check("action.execute", {"risk_class": "whatever"})
-    assert v.ok                                  # engine error → fail OPEN
+    assert not v.ok
+    assert v.blocking
+    assert v.contract == "action_execution"
+    assert v.clause == "engine-error"
+    assert v.recovery == abc.HOLD
+
 
 def test_enforce_disabled_is_noop(monkeypatch):
     monkeypatch.setenv("OLYMPUS_ABC", "off")
