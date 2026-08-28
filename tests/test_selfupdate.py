@@ -1,8 +1,25 @@
 """Self-update planning and the version command."""
 
+import json
 import sys
 
 from olympus import selfupdate
+
+
+class _Distribution:
+    def __init__(self, direct_url):
+        self.direct_url = direct_url
+
+    def read_text(self, name: str):
+        assert name == "direct_url.json"
+        return self.direct_url
+
+
+def _direct_url(monkeypatch, value):
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _Distribution(value),
+    )
 
 
 def test_plan_force_git():
@@ -27,6 +44,63 @@ def test_plan_git_install(monkeypatch):
     monkeypatch.setattr(selfupdate, "_is_pipx", lambda: False)
     monkeypatch.setattr(selfupdate, "_installed_from_git", lambda: True)
     assert any(a.startswith("git+") for a in selfupdate.plan())
+
+
+def test_git_detection_requires_affirmative_pep610_evidence(monkeypatch):
+    _direct_url(
+        monkeypatch,
+        json.dumps({
+            "url": "https://github.com/maadjiba24-afk/Olympus-",
+            "vcs_info": {"vcs": "Git", "commit_id": "a" * 40},
+        }),
+    )
+
+    assert selfupdate._installed_from_git() is True
+
+
+def test_wheel_and_local_directory_default_to_release(monkeypatch):
+    for value in (
+        None,
+        json.dumps({
+            "url": "file:///workspace/Olympus-",
+            "dir_info": {"editable": True},
+        }),
+    ):
+        _direct_url(monkeypatch, value)
+        assert selfupdate._installed_from_git() is False
+
+
+def test_git_detection_rejects_malformed_metadata(monkeypatch):
+    values = (
+        "{",
+        json.dumps([]),
+        json.dumps({"vcs_info": "git"}),
+        json.dumps({"vcs_info": {"vcs": "git"}}),
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": None}}),
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": False}}),
+        json.dumps({"vcs_info": {"vcs": "git", "commit_id": 7}}),
+    )
+    for value in values:
+        _direct_url(monkeypatch, value)
+        assert selfupdate._installed_from_git() is False
+
+
+def test_metadata_failure_keeps_implicit_upgrade_on_pypi(monkeypatch):
+    def unavailable(_name):
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr("importlib.metadata.distribution", unavailable)
+    monkeypatch.setattr(selfupdate, "_is_pipx", lambda: False)
+
+    assert selfupdate._installed_from_git() is False
+    assert selfupdate.plan() == [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        selfupdate.PACKAGE,
+    ]
 
 
 def test_run_invokes_subprocess(monkeypatch):
