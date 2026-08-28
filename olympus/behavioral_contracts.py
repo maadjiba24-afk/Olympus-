@@ -231,10 +231,12 @@ def _rewrite_verified(ctx: dict) -> tuple[bool, str]:
 def _reflection_within_budget(ctx: dict) -> tuple[bool, str]:
     """The idle-time reflection cycle may only run while inside the daily budget.
     Unattended self-improvement makes many model calls — exactly where a runaway
-    bill happens — so a cycle is HELD (deferred) once the budget is reached."""
-    if ctx.get("reflection_budget_ok", True):
+    bill happens — so a cycle is HELD unless affirmative budget evidence is the
+    Boolean value True.  Missing, malformed, and failed evidence is not consent
+    to start unattended work."""
+    if ctx.get("reflection_budget_ok") is True:
         return True, ""
-    return False, "daily budget reached — reflection cycle deferred"
+    return False, "daily budget unavailable or reached — reflection cycle deferred"
 
 
 @predicate("rewrite_confident")

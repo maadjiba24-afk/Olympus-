@@ -8,8 +8,8 @@ the cycle when the daily budget is reached.
 
 import pytest
 
-from olympus import (behavioral_contracts as abc, config, reflect, reflection,
-                     sleeptime, usage)
+from olympus import (behavioral_contracts as abc, config, errors, reflect,
+                     reflection, sleeptime, usage)
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +69,42 @@ def test_reflection_contract_holds_when_budget_flag_false():
     assert v.blocking and v.recovery == abc.HOLD and v.contract == "reflection_cycle"
     # In budget → the cycle is permitted.
     assert abc.check("reflection.cycle", {"reflection_budget_ok": True}).ok
+
+
+@pytest.mark.parametrize("ctx", [
+    {},
+    {"reflection_budget_ok": None},
+    {"reflection_budget_ok": 1},
+])
+def test_reflection_contract_requires_affirmative_boolean_budget_evidence(ctx):
+    v = abc.check("reflection.cycle", ctx)
+    assert v.blocking
+    assert v.recovery == abc.HOLD
+    assert v.contract == "reflection_cycle"
+
+
+def test_budget_check_error_holds_the_whole_cycle(monkeypatch):
+    ran = []
+    monkeypatch.setattr(reflection, "_target_memory", lambda s: ran.append("m"))
+    monkeypatch.setattr(reflection, "_target_prompts", lambda s: ran.append("p"))
+    monkeypatch.setattr(reflection, "_TARGETS",
+                        (("memory", reflection._target_memory),
+                         ("prompts", reflection._target_prompts)))
+    captured = []
+    monkeypatch.setattr(errors, "capture",
+                        lambda where, err: captured.append(
+                            (where, type(err).__name__)))
+
+    def broken_budget_check():
+        raise RuntimeError("usage ledger unavailable")
+
+    monkeypatch.setattr(usage, "check_budget", broken_budget_check)
+
+    out = reflection.sleep_cycle()
+    assert out["status"] == "held"
+    assert not ran
+    assert "budget" in out["reason"].lower()
+    assert captured == [("reflection.budget_check", "RuntimeError")]
 
 
 # --- budget caps bound the cycle ------------------------------------------

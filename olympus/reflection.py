@@ -37,8 +37,12 @@ class ReflectionBudget:
 
 
 def _budget_ok(budget: ReflectionBudget) -> bool:
-    """Whether we are still inside the daily spend budget (fail OPEN on a broken
-    budget check — a telemetry glitch must not permanently wedge reflection)."""
+    """Whether affirmative evidence says daily reflection spend is permitted.
+
+    An unexpected budget-check failure is not evidence of headroom.  Capture it
+    for the operator and hold unattended reflection until the check recovers.
+    The explicit ``respect_daily_budget=False`` override remains authoritative.
+    """
     if not budget.respect_daily_budget:
         return True
     from . import usage
@@ -47,8 +51,10 @@ def _budget_ok(budget: ReflectionBudget) -> bool:
         return True
     except usage.BudgetExceeded:
         return False
-    except Exception:
-        return True
+    except Exception as err:
+        from . import errors
+        errors.capture("reflection.budget_check", err)
+        return False
 
 
 def _target_memory(settings):
