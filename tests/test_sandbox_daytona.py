@@ -59,6 +59,39 @@ def test_maps_nonzero_exit():
     assert res.ok is False and res.code == 3 and res.output == "nope"
 
 
+def test_numeric_string_exit_status_is_accepted():
+    res = sandbox._daytona_run(
+        "echo hi", 30,
+        submit=lambda c, t: {"exit_code": "0", "stdout": "done"})
+    assert res.ok and res.code == 0 and res.output == "done"
+
+
+def test_missing_exit_status_fails_closed():
+    res = sandbox._daytona_run(
+        "echo hi", 30, submit=lambda c, t: {"result": "looks successful"})
+    assert res.ok is False and res.code == 127
+    assert "missing" in res.output.lower()
+
+
+def test_malformed_exit_statuses_fail_closed():
+    for status in (None, False, 0.5, "zero", ""):
+        res = sandbox._daytona_run(
+            "echo hi", 30,
+            submit=lambda c, t, value=status: {
+                "exitCode": value, "result": "looks successful"})
+        assert res.ok is False and res.code == 127
+        assert "invalid" in res.output.lower()
+
+
+def test_conflicting_exit_statuses_fail_closed():
+    res = sandbox._daytona_run(
+        "echo hi", 30,
+        submit=lambda c, t: {
+            "exitCode": 0, "code": 9, "result": "looks successful"})
+    assert res.ok is False and res.code == 127
+    assert "conflicting" in res.output.lower()
+
+
 def test_non_dict_reply_fails_closed():
     res = sandbox._daytona_run("x", 30, submit=lambda c, t: "not a dict")
     assert res.ok is False and res.code == 127
