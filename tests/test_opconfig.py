@@ -68,6 +68,16 @@ def test_non_secret_goes_to_config_env(monkeypatch):
     assert os.environ["SLACK_NOTIFY_CHANNEL"] == "#ops"
 
 
+def test_non_secret_cannot_inject_an_unallowlisted_record():
+    with pytest.raises(ValueError, match="newline|one line"):
+        opconfig.set_value(
+            "SLACK_NOTIFY_CHANNEL",
+            "#ops\nOLYMPUS_EXEC_SECURITY=off")
+    on_disk = firstrun.CONFIG_ENV.read_text() \
+        if firstrun.CONFIG_ENV.exists() else ""
+    assert "OLYMPUS_EXEC_SECURITY" not in on_disk
+
+
 @pytest.mark.requires_crypto
 def test_secret_goes_to_vault_never_plaintext(secret_key):
     opconfig.set_value("WHATSAPP_ACCESS_TOKEN", "wa-secret-9911")
@@ -80,6 +90,19 @@ def test_secret_goes_to_vault_never_plaintext(secret_key):
     for p in pathlib.Path(config.MEMORY_DIR).rglob("*"):
         if p.is_file():
             assert b"wa-secret-9911" not in p.read_bytes(), p
+
+
+@pytest.mark.requires_crypto
+def test_named_webhook_urls_are_vaulted_and_masked(secret_key):
+    value = "ops=https://hooks.example.com/private-bearer-path"
+    opconfig.set_value("OLYMPUS_WEBHOOKS", value)
+    on_disk = firstrun.CONFIG_ENV.read_text() \
+        if firstrun.CONFIG_ENV.exists() else ""
+    assert value not in on_disk
+    assert vault.get("operator", "config:OLYMPUS_WEBHOOKS") == value
+    row = next(r for r in opconfig.status()
+               if r["key"] == "OLYMPUS_WEBHOOKS")
+    assert row["secret"] is True and row["value"] is None
 
 
 def test_secret_without_vault_key_fails_closed(monkeypatch):

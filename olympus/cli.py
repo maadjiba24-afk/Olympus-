@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mem.add_argument("--id", dest="note_id",
                        help="limit delete to one note (filename or stem)")
     p_mem.add_argument("--encrypt", action="store_true",
-                       help="encrypt the export with OLYMPUS_SECRET_KEY")
+                       help="encrypt the export with the configured vault key")
     p_mem.add_argument("--yes", action="store_true",
                        help="skip the confirmation prompt on delete")
     p_pb = sub.add_parser(
@@ -1030,7 +1030,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from . import firstrun
-    firstrun.load_env_file()        # saved keys apply to every command
+    try:
+        firstrun.load_env_file()    # saved keys apply to every command
+    except firstrun.ConfigFileError as err:
+        print(f"[config] {err}", file=sys.stderr)
+        return 1
     try:                            # vault-stored settings too (env wins)
         from . import opconfig
         opconfig.apply_secrets()
@@ -1099,7 +1103,11 @@ def main(argv: list[str] | None = None) -> int:
             if len(args.kv) < 2:
                 print("Usage: olympus config set <KEY> <VALUE>")
                 return 1
-            print(firstrun.config_set(args.kv[0], " ".join(args.kv[1:])))
+            try:
+                print(firstrun.config_set(args.kv[0], " ".join(args.kv[1:])))
+            except firstrun.ConfigFileError as err:
+                print(f"[config] {err}", file=sys.stderr)
+                return 1
     elif args.command == "doctor":
         from . import doctor
         print(doctor.render())

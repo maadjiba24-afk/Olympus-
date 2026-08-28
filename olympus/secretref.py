@@ -67,7 +67,7 @@ def getenv(name: str, default: str = "") -> str:
 
 def store(name: str, secret: str) -> str:
     """Store `secret` in the vault under a SecretRef name; returns the
-    reference string to put in config. Requires OLYMPUS_SECRET_KEY."""
+    reference string to put in config. Requires a usable vault-key source."""
     from . import vault
     vault.put(_VAULT_USER, f"secretref:{name}", secret)
     return f"vault:{name}"

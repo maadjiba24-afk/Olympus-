@@ -336,7 +336,8 @@ Installation is covered in [Install](#install) above — the one-liner creates a
 private Python environment, installs Olympus, and puts an `olympus` command on
 your PATH. The first run asks one question (which API key you're bringing —
 Anthropic, OpenAI, or any compatible provider like Groq, OpenRouter, or a local
-Ollama), saves it securely (`~/.olympus/config.env`, owner-only), and drops you
+Ollama), saves it to `~/.olympus/config.env` using an atomic owner-only write,
+and drops you
 into chat. From then on it's just:
 
 ```
@@ -777,7 +778,8 @@ proposes meeting times, and prepares the invites — you approve, it acts.
 **Self-serve connect + encrypted credentials.** Users link Google with a click
 ("Connect Google" in the web UI → Google consent → done) via a standard OAuth
 flow; tokens are stored **encrypted at rest** in a secrets vault (Fernet,
-keyed by `OLYMPUS_SECRET_KEY`) and refreshed automatically — never in plaintext.
+keyed by exactly one of `OLYMPUS_SECRET_KEY` or
+`OLYMPUS_SECRET_KEY_FILE`) and refreshed automatically — never in plaintext.
 Set `OLYMPUS_GOOGLE_CLIENT_ID`/`SECRET` to enable it.
 
 **Runs anywhere, database when you want it.** Storage defaults to the local

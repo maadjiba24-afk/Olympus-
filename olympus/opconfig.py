@@ -12,9 +12,10 @@ editable from the browser, with three hard rules:
    inside the room is a lockout/escalation surface) are deliberately
    absent and stay CLI-only.
 2. **Secrets go to the vault, not to disk in the clear.** A secret-classed
-   value is Fernet-encrypted via vault.py (requires OLYMPUS_SECRET_KEY;
-   without one we refuse and say exactly what to set — never a silent
-   plaintext fallback). Non-secret values go to config.env like the wizard's.
+   value is Fernet-encrypted via vault.py (requires exactly one of
+   OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE; without a usable source we
+   refuse and say exactly what to set — never a silent plaintext fallback).
+   Non-secret values go to config.env like the wizard's.
 3. **Honest effect reporting.** Every set/unset says where it took effect:
    applied live in THIS process immediately; other Olympus processes
    (heartbeat, gateways) read it at their next start — each key lists its
@@ -184,6 +185,7 @@ REGISTRY: dict[str, Setting] = {s.key: s for s in (
     Setting("OLYMPUS_EMAIL_ALLOWLIST", _MAIL, "Email recipient allowlist",
             consumers=("heartbeat",)),
     Setting("OLYMPUS_WEBHOOKS", _MAIL, "Named webhooks (name=url,...)",
+            secret=True,  # webhook paths commonly contain bearer credentials
             validate=_v_webhooks, consumers=("heartbeat",)),
     # Model pool — the web process re-keys live (session bots rebuild on a
     # pool fingerprint change); other processes at their next start.
@@ -283,8 +285,8 @@ def set_value(key: str, value: str) -> str:
         except Exception as err:
             raise ValueError(
                 f"cannot store '{setting.label}' encrypted: {err} — set "
-                "OLYMPUS_SECRET_KEY (any passphrase) and retry; secrets are "
-                "never written to disk in the clear") from err
+                "OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE and retry; "
+                "secrets are never written to disk in the clear") from err
         # Belt and braces: if an old plaintext copy exists in config.env
         # (e.g. from the setup wizard), remove it — the vault owns it now.
         saved = _saved_env()
@@ -292,7 +294,11 @@ def set_value(key: str, value: str) -> str:
             saved.pop(key)
             firstrun._save(saved)
     else:
-        firstrun.save_env_value(key, value)
+        try:
+            firstrun.save_env_value(key, value)
+        except firstrun.ConfigFileError as err:
+            raise ValueError(
+                f"cannot save '{setting.label}': {err}") from err
 
     os.environ[key] = value            # live in this process immediately
     where = "the vault (encrypted)" if setting.secret else "config.env"
@@ -370,7 +376,7 @@ def status() -> list[dict]:
 
 
 def vault_ready() -> bool:
-    """Whether secret settings can be stored (crypto + OLYMPUS_SECRET_KEY)."""
+    """Whether secret settings can be stored (crypto + usable vault key)."""
     from . import vault
     try:
         vault._fernet()

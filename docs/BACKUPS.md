@@ -27,7 +27,8 @@ replay of *old* runs, never user data): the replay caches `responses/`,
 
 ## How it's hardened
 
-- **Encrypted before delivery.** With `OLYMPUS_SECRET_KEY` set, the archive is
+- **Encrypted before delivery.** With `OLYMPUS_SECRET_KEY` or
+  `OLYMPUS_SECRET_KEY_FILE` set, the archive is
   encrypted (Fernet / AES-128) before it is delivered off the machine — the
   off-machine copy is not plaintext PII or tokens. (The plaintext `.tar.gz` is
   written to a temp file under the backups dir and encrypted from there, so it
@@ -63,7 +64,9 @@ point `OLYMPUS_BACKUP_CMD` at it — `{path}` is replaced with the archive path:
 
 ```bash
 # in deploy/.env
+# Set exactly one source (a key file must be owner-only):
 OLYMPUS_SECRET_KEY=<a strong, STABLE secret>          # also encrypts the vault
+# OLYMPUS_SECRET_KEY_FILE=/run/secrets/olympus_vault_key
 OLYMPUS_BACKUP_CMD=rclone copy {path} spaces:olympus-backups/
 # OLYMPUS_BACKUP_CMD=aws s3 cp {path} s3://my-bucket/olympus/
 OLYMPUS_BACKUP_EVERY=86400        # daily
@@ -71,8 +74,10 @@ OLYMPUS_BACKUP_KEEP=7
 ```
 
 Olympus never sees your storage credentials — they live in the uploader's own
-config. `OLYMPUS_SECRET_KEY` **must stay constant**: it's the key to both the
-vault and the backups; lose it and old encrypted backups can't be restored.
+config. The selected vault key **must stay constant**: it's the key to both the
+vault and the backups; lose it and old encrypted backups can't be restored. If
+a source is selected but missing, ambiguous, weak in a named deployment, or
+otherwise unusable, backup creation refuses instead of writing plaintext.
 
 ### Running it on a schedule
 
@@ -101,8 +106,8 @@ olympus backup --drill    # restore newest archive into an isolated temp dir
 olympus restore olympus-backup-YYYYMMDDThhmmssZ.tar.gz.enc --into /app/memory
 ```
 
-Restore needs the **same `OLYMPUS_SECRET_KEY`** that created the archive (to
-decrypt) and verifies the signature against the witness key. To restore over an
+Restore needs the **same vault key** that created the archive (to decrypt) and
+verifies the signature against the witness key. To restore over an
 existing instance, stop it and pass `--force`. `--insecure` bypasses the
 signature/hash checks — only for a last-resort recovery of a known-good archive
 whose signing key you no longer have.

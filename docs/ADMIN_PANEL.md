@@ -54,11 +54,14 @@ connector policy — plus adding/removing MCP servers (still passing the
 same security scan as `olympus add-mcp`).
 
 **Where values go.** Secret-classed values are stored in the encrypted
-vault (Fernet, keyed by `OLYMPUS_SECRET_KEY`) and are **never written to
-disk in the clear** — without a secret key the panel refuses and says so.
-Non-secret values go to `~/.olympus/config.env` (0600), the same file the
-setup wizard writes. A stale plaintext copy of a secret in `config.env` is
-removed when the vault takes ownership.
+vault (Fernet, keyed by exactly one of `OLYMPUS_SECRET_KEY` or an owner-only
+`OLYMPUS_SECRET_KEY_FILE`) and are **never written to disk in the clear** —
+without a usable key the panel refuses and says so. Named webhook URLs are
+secret-classed because their paths commonly carry bearer material. Non-secret
+values go to `~/.olympus/config.env`, atomically replaced at mode 0600 on
+POSIX. Newline/NUL values are refused so an allowlisted value cannot append an
+unallowlisted config record. A stale plaintext copy of a secret in
+`config.env` is removed when the vault takes ownership.
 
 **How values load.** Every `olympus <command>` process hydrates saved
 values at start (`config.env`, then vault), with real environment variables
@@ -77,7 +80,8 @@ they're re-read from `connectors.json` on every call.
 auth (`OLYMPUS_ACCESS_TOKEN`, `OLYMPUS_API_KEYS` — changing the lock from
 inside the room), and anything that could weaponize the process
 (`OLYMPUS_PLUGINS_DIR`, `OLYMPUS_EXEC_BACKEND`, `OLYMPUS_MEMORY_DIR`,
-`OLYMPUS_SECRET_KEY`, sovereign/egress policy). Those remain CLI/env-only.
+`OLYMPUS_SECRET_KEY`, `OLYMPUS_SECRET_KEY_FILE`, sovereign/egress policy).
+Those remain CLI/env-only.
 
 ## Access model
 

@@ -113,7 +113,8 @@ def save_auth(user: str, domain: str) -> str:
         return f"Error: '{domain or 'unknown'}' isn't an authorized site."
     from . import vault
     if not vault.available():
-        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+        return ("Error: the secure vault is not configured (set "
+                "OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE).")
     # `user` is the durable owner (the CLI principal, the chat uid, or
     # `action.user` inside an approval callback) — never an ambient default. The
     # lease check here is what stops one tenant reading whatever session the
@@ -142,7 +143,8 @@ def restore_auth(user: str, domain: str) -> str:
         return f"Error: '{domain or 'unknown'}' isn't an authorized site."
     from . import vault
     if not vault.available():
-        return "Error: the secure vault is not configured (set OLYMPUS_SECRET_KEY)."
+        return ("Error: the secure vault is not configured (set "
+                "OLYMPUS_SECRET_KEY or OLYMPUS_SECRET_KEY_FILE).")
     blob = vault.get(user, f"cookies:{domain}")
     cookies = blob.get("cookies") if isinstance(blob, dict) else None
     if not cookies:

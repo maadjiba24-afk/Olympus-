@@ -120,6 +120,7 @@ def backend() -> str:
 # command, and either one leaking ends the security model.
 _ENV_SECRET_DENY = frozenset({
     "OLYMPUS_SECRET_KEY",
+    "OLYMPUS_SECRET_KEY_FILE",
     "OLYMPUS_SIGNING_SEED",
     "OLYMPUS_SIGNING_SEED_FILE",
 })

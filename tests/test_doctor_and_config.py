@@ -1,5 +1,7 @@
 """Tier C: doctor readiness, config show/set (masked), progress modes, dashboard."""
 
+import os
+
 import pytest
 
 from olympus import config, doctor, firstrun
@@ -53,6 +55,42 @@ def test_config_set_masks_secret_in_output(temp_config):
     assert "9999" in msg and "supersecret" not in msg
     # but the real value is written to the file
     assert "sk-supersecret-9999" in (temp_config / "config.env").read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_config_is_private_before_secret_bytes_are_published(temp_config):
+    firstrun.config_set("ANTHROPIC_API_KEY", "sk-owner-only")
+    assert ((temp_config / "config.env").stat().st_mode & 0o777) == 0o600
+    assert (temp_config.stat().st_mode & 0o777) == 0o700
+
+
+def test_config_rejects_newline_injection_without_replacing_file(temp_config):
+    firstrun.config_set("OLYMPUS_FAST", "1")
+    path = temp_config / "config.env"
+    before = path.read_bytes()
+    with pytest.raises(firstrun.ConfigFileError, match="one line"):
+        firstrun.config_set(
+            "SLACK_NOTIFY_CHANNEL",
+            "#ops\nOLYMPUS_EXEC_SECURITY=off")
+    assert path.read_bytes() == before
+    assert "OLYMPUS_EXEC_SECURITY=off" not in path.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_loader_refuses_broadly_readable_saved_secrets(temp_config):
+    firstrun.config_set("ANTHROPIC_API_KEY", "sk-owner-only")
+    path = temp_config / "config.env"
+    path.chmod(0o644)
+    with pytest.raises(firstrun.ConfigFileError, match="chmod 600"):
+        firstrun.load_env_file()
+
+
+def test_loader_reports_malformed_utf8_as_config_error(temp_config):
+    path = temp_config / "config.env"
+    path.write_bytes(b"ANTHROPIC_API_KEY=\xff\n")
+    path.chmod(0o600)
+    with pytest.raises(firstrun.ConfigFileError, match="cannot be read safely"):
+        firstrun.load_env_file()
 
 
 def test_config_set_nonsecret_shows_value(temp_config):

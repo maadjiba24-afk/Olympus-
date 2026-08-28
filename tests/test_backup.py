@@ -3,6 +3,7 @@ signed, integrity-checked on restore, and unable to be tricked into writing
 outside the restore dir or shipping plaintext secrets off the machine."""
 
 import io
+import os
 import tarfile
 
 import pytest
@@ -22,6 +23,9 @@ def mem(tmp_path, monkeypatch):
     (d / "responses").mkdir()
     (d / "responses" / "big.json").write_text("x" * 4096)   # reproducible cache
     monkeypatch.setattr(config, "MEMORY_DIR", d)
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY", raising=False)
+    monkeypatch.delenv("OLYMPUS_SECRET_KEY_FILE", raising=False)
+    monkeypatch.delenv("OLYMPUS_ENV", raising=False)
     return d
 
 
@@ -46,13 +50,36 @@ def test_encryption_failure_refuses_plaintext_downgrade(mem, monkeypatch):
     # write a plaintext archive of the user's data.
     monkeypatch.setenv("OLYMPUS_SECRET_KEY", "a-strong-secret")
     from olympus import vault
-    monkeypatch.setattr(vault, "available", lambda: True)
     monkeypatch.setattr(vault, "encrypt_bytes",
                         lambda raw: (_ for _ in ()).throw(RuntimeError("kms down")))
     with pytest.raises(backup.BackupError, match="refusing to write a PLAINTEXT"):
         backup.create()
     # nothing plaintext was published
     assert not list(backup._backups_dir().glob("*.tar.gz"))
+
+
+def test_broken_configured_key_file_refuses_plaintext_downgrade(
+        mem, monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(mem / "missing-key"))
+    with pytest.raises(backup.BackupError, match="PLAINTEXT"):
+        backup.create()
+    assert not list(backup._backups_dir().glob("*.tar.gz"))
+
+
+def test_custom_custody_files_are_never_included(mem, monkeypatch):
+    vault_key = mem / "custom-vault-material"
+    signing_key = mem / "custom-signing-material"
+    for path in (vault_key, signing_key):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, b"secret material\n")
+        finally:
+            os.close(fd)
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY_FILE", str(vault_key))
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED_FILE", str(signing_key))
+    included = backup._included_files(mem, full=True)
+    assert vault_key not in included
+    assert signing_key not in included
 
 
 def test_full_includes_replay_cache(mem, monkeypatch):

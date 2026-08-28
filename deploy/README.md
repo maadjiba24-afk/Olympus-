@@ -37,6 +37,7 @@ cd Olympus-
 git rev-parse HEAD                         # copy this exact 40-character SHA
 cd deploy
 cp .env.example .env
+chmod 600 .env
 # generate two strong secrets:
 echo "OLYMPUS_ACCESS_TOKEN=$(openssl rand -hex 32)"
 echo "OLYMPUS_SECRET_KEY=$(openssl rand -hex 32)"
