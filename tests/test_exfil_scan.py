@@ -49,6 +49,56 @@ def test_vault_secrets_are_detected(monkeypatch):
     assert reason and "vault:github" in reason
 
 
+def test_owner_resolution_failure_holds_outbound_content(monkeypatch):
+    from olympus import memory
+
+    def unavailable():
+        raise RuntimeError("owner resolver exposed internal detail")
+
+    monkeypatch.setattr(memory, "current_owner", unavailable)
+    reason = security.secret_exfil_reason("an otherwise ordinary message")
+    assert reason and "cannot be checked" in reason
+    assert "internal detail" not in reason
+
+
+def test_active_vault_inventory_failure_holds_outbound_content(monkeypatch):
+    from olympus import vault
+
+    def unavailable(_user):
+        raise RuntimeError("vault backend exposed internal detail")
+
+    monkeypatch.setattr(vault, "names", unavailable)
+    reason = security.secret_exfil_reason(
+        "an otherwise ordinary message", user="alice")
+    assert reason and "cannot be checked" in reason
+    assert "internal detail" not in reason
+
+
+def test_legacy_vault_scan_failure_holds_outbound_content(monkeypatch):
+    from olympus import vault
+
+    def unavailable(_user, _matches):
+        raise RuntimeError("legacy backend exposed internal detail")
+
+    monkeypatch.setattr(vault, "legacy_scan", unavailable)
+    reason = security.secret_exfil_reason(
+        "an otherwise ordinary message", user="alice")
+    assert reason and "cannot be checked" in reason
+    assert "internal detail" not in reason
+
+
+@pytest.mark.requires_crypto
+def test_corrupt_active_vault_holds_outbound_content(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SECRET_KEY", "test-master-key")
+    from olympus import store, vault
+
+    store.backend().put(vault._NS, vault._key("alice"), b"corrupt-ciphertext")
+    reason = security.secret_exfil_reason(
+        "an otherwise ordinary message", user="alice")
+    assert reason and "cannot be checked" in reason
+    assert "corrupt-ciphertext" not in reason
+
+
 # --- wired chokepoints -------------------------------------------------------
 
 def test_http_get_refuses_secret_in_url(env_secret):
