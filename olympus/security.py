@@ -438,6 +438,9 @@ def sanitize_for_prompt(text: str, *, redact_pii: bool | None = None) -> str:
 
 _SECRETISH_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASS|CRED)", re.IGNORECASE)
 _MIN_SECRET_LEN = 8            # shorter values are too collision-prone to match
+_SECRET_SCAN_UNAVAILABLE_REASON = (
+    "outbound content cannot be checked against the stored-secret inventory; "
+    "sending is held until credential-vault access is restored")
 
 
 def _flatten_strings(value) -> list[str]:
@@ -452,19 +455,22 @@ def _flatten_strings(value) -> list[str]:
 
 
 def _held_secrets(user: str | None) -> list[tuple[str, str]]:
-    """(label, value) pairs of secrets this process must never emit."""
+    """(label, value) pairs of secrets this process must never emit.
+
+    Raises when an exact-owner vault exists but cannot be inspected.  The
+    caller turns that uncertainty into a generic refusal: silently dropping
+    the vault from the inventory would turn a protection outage into an
+    exfiltration bypass.
+    """
     import os
     out = [(k, v) for k, v in os.environ.items()
            if _SECRETISH_ENV.search(k) and len(v or "") >= _MIN_SECRET_LEN]
     if user:
-        try:
-            from . import vault
-            for name in vault.names(user):
-                for s in _flatten_strings(vault.get(user, name)):
-                    if len(s) >= _MIN_SECRET_LEN:
-                        out.append((f"vault:{name}", s))
-        except Exception:
-            pass                # no vault key / no entries — nothing to match
+        from . import vault
+        for name in vault.names(user):
+            for s in _flatten_strings(vault.get(user, name)):
+                if len(s) >= _MIN_SECRET_LEN:
+                    out.append((f"vault:{name}", s))
     return out
 
 
@@ -494,13 +500,17 @@ def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
             # colliding principal's vault and misses this one's.
             user = memory.current_owner()
         except Exception:
-            user = None
+            return _SECRET_SCAN_UNAVAILABLE_REASON
     lowered = text.lower()
-    for label, value in _held_secrets(user):
-        for form in _encodings(value):
-            if form.lower() in lowered:
-                return (f"outbound content contains the stored secret "
-                        f"'{label}' (or an encoded form of it)")
+    try:
+        held = _held_secrets(user)
+        for label, value in held:
+            for form in _encodings(value):
+                if form.lower() in lowered:
+                    return (f"outbound content contains the stored secret "
+                            f"'{label}' (or an encoded form of it)")
+    except Exception:
+        return _SECRET_SCAN_UNAVAILABLE_REASON
     # A quarantined vault belongs to no principal, so no CREDENTIAL path may
     # read it — but this is the outbound floor, where the conservative answer
     # is to scan more, not less. Every principal in the collision group is
@@ -516,7 +526,7 @@ def secret_exfil_reason(text: str, user: str | None = None) -> str | None:
                                       and any(form.lower() in lowered
                                               for form in _encodings(secret))))
         except Exception:
-            return None    # no vault key configured at all: nothing to check
+            return _SECRET_SCAN_UNAVAILABLE_REASON
     return None
 
 
