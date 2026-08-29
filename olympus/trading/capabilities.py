@@ -151,6 +151,12 @@ class EvidenceEntry:
         object.__setattr__(self, "stage", LifecycleStage(self.stage))
         object.__setattr__(self, "recorded_at",
                            ensure_utc(self.recorded_at, field_name="recorded_at"))
+        if not isinstance(self.passed, bool):
+            raise ConfigurationError(
+                "evidence passed must be an explicit boolean; an absent or "
+                "malformed verdict cannot count toward capability promotion",
+                stage=self.stage.value,
+                received_type=type(self.passed).__name__)
         if not str(self.reference).strip():
             raise ConfigurationError(
                 "evidence must reference an artefact — an experiment id, a test "
@@ -169,7 +175,10 @@ class EvidenceEntry:
                    recorded_at=datetime.fromisoformat(data["recorded_at"]),
                    reference=str(data.get("reference", "")),
                    summary=str(data.get("summary", "")),
-                   passed=bool(data.get("passed", True)),
+                   # Persisted evidence must carry its own affirmative verdict.
+                   # ``to_dict`` always writes this field, so absence means the
+                   # record is incomplete or corrupt — never that it passed.
+                   passed=data.get("passed"),
                    recorded_by=str(data.get("recorded_by", "system")))
 
 

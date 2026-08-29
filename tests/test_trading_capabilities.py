@@ -169,6 +169,52 @@ def test_a_later_pass_supersedes_an_earlier_failure_without_erasing_it(registry)
     assert len(capability.evidence) == 2, "the failed run is still on record"
 
 
+@pytest.mark.parametrize("verdict", [None, 0, 1, "", "false", [], {}])
+def test_evidence_verdict_must_be_an_explicit_boolean(registry, verdict):
+    """False-looking strings and numbers must not become passing evidence."""
+    declare(registry)
+    with pytest.raises(ConfigurationError, match="explicit boolean"):
+        registry.record_evidence(
+            "cap-1", C.LifecycleStage.PROPOSAL,
+            reference="proposal-1", passed=verdict)
+    assert registry.get("cap-1").evidence == ()
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_explicit_persisted_evidence_verdict_round_trips(registry, verdict):
+    declare(registry)
+    registry.record_evidence(
+        "cap-1", C.LifecycleStage.PROPOSAL,
+        reference="proposal-1", passed=verdict)
+    restored = C.CapabilityRegistry(clock=FixedClock(T0)).get("cap-1")
+    assert restored.evidence[0].passed is verdict
+
+
+@pytest.mark.parametrize("verdict", [pytest.param(None, id="missing"),
+                                      pytest.param("false", id="string"),
+                                      pytest.param(0, id="integer")])
+def test_malformed_persisted_evidence_cannot_authorise_promotion(
+        registry, verdict):
+    """A damaged store record must stop at deserialization, not earn a rung."""
+    capability = declare(registry)
+    payload = capability.to_dict()
+    evidence = {
+        "stage": C.LifecycleStage.PROPOSAL.value,
+        "recorded_at": T0.isoformat(),
+        "reference": "proposal-1",
+        "summary": "",
+        "recorded_by": "system",
+    }
+    if verdict is not None:
+        evidence["passed"] = verdict
+    payload["evidence"] = [evidence]
+    registry._store().put(("cap-1",), payload)
+
+    with pytest.raises(ConfigurationError, match="explicit boolean"):
+        registry.promote("cap-1", actor=OPERATOR, reason="to researching")
+    assert registry._store().get(("cap-1",))["state"] == "proposed"
+
+
 def test_promotion_requires_a_reason(registry):
     declare(registry)
     evidence_for(registry, "cap-1", C.CapabilityState.RESEARCHING)
