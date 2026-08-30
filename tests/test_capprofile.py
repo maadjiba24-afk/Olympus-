@@ -3,7 +3,10 @@ layered on the security gate."""
 
 import json
 
-from olympus import actions, capprofile, config, gateway, memory, specialists
+import pytest
+
+from olympus import (actions, capprofile, config, gateway, memory, prefs,
+                     specialists)
 
 
 def _names(defs):
@@ -41,6 +44,61 @@ def test_allowlist_profile_is_a_whitelist(monkeypatch):
     capprofile.assign("tg-44", "kiosk")
     defs = [{"name": "web_search"}, {"name": "recall_memory"}]
     assert _names(capprofile.filter_tools(defs, "tg-44")) == {"web_search"}
+
+
+@pytest.mark.parametrize("replacement", [
+    None,
+    "{not valid json",
+    "[]",
+    json.dumps({"kiosk": {"deny": 5, "max_autonomy": 4}}),
+    json.dumps({"kiosk": {"deny": [], "max_autonomy": "high"}}),
+])
+def test_assigned_custom_profile_loss_fails_closed(replacement):
+    path = config.MEMORY_DIR / "capability_profiles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        {"kiosk": {"allow": ["web_search"], "max_autonomy": 0}}),
+        encoding="utf-8")
+    capprofile.assign("tg-policy-loss", "kiosk")
+
+    if replacement is None:
+        path.unlink()
+    else:
+        path.write_text(replacement, encoding="utf-8")
+
+    assert capprofile.of_user("tg-policy-loss") == "guest"
+    assert capprofile.autonomy_cap("tg-policy-loss") == 0
+    defs = [{"name": "send_email"}, {"name": "web_search"}]
+    assert _names(capprofile.filter_tools(defs, "tg-policy-loss")) == {
+        "web_search"}
+
+
+@pytest.mark.parametrize("stored", ["missing", "", [], {}, 7])
+def test_malformed_explicit_assignment_fails_closed(stored):
+    prefs.set("local-restricted", "capability_profile", stored)
+    assert capprofile.of_user("local-restricted") == "guest"
+    assert capprofile.autonomy_cap("local-restricted") == 0
+
+
+def test_invalid_channel_default_fails_closed(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_CHANNEL_PROFILE", "missing-profile")
+    assert capprofile.of_user("tg-invalid-default") == "guest"
+    assert capprofile.autonomy_cap("tg-invalid-default") == 0
+    # The channel default does not apply to a local owner.
+    assert capprofile.of_user("local-owner") == "full"
+
+
+def test_custom_file_cannot_shadow_builtin_guest():
+    path = config.MEMORY_DIR / "capability_profiles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "guest": {"deny": [], "allow": [], "max_autonomy": 4},
+    }), encoding="utf-8")
+    capprofile.assign("tg-shadow", "guest")
+
+    assert capprofile.autonomy_cap("tg-shadow") == 0
+    defs = [{"name": "send_email"}, {"name": "web_search"}]
+    assert _names(capprofile.filter_tools(defs, "tg-shadow")) == {"web_search"}
 
 
 def test_channel_default_profile_via_env(monkeypatch):
