@@ -52,6 +52,12 @@ CHANNEL_PREFIXES = ("tg-", "dc-", "sl-", "sg-", "wa-", "email-", "hook-")
 
 _PREF_KEY = "capability_profile"
 
+# If a restriction was explicitly selected but its definition can no longer be
+# resolved, the only safe interpretation is the most restrictive built-in
+# profile.  Falling back to ``full`` would turn a missing/corrupt policy file
+# into an authorization widening.
+_FAIL_CLOSED_PROFILE = "guest"
+
 
 def _custom() -> dict[str, dict]:
     """Operator-defined profiles from capability_profiles.json (same shape as
@@ -64,21 +70,48 @@ def _custom() -> dict[str, dict]:
     out = {}
     if isinstance(data, dict):
         for name, spec in data.items():
-            if isinstance(spec, dict):
-                out[str(name)] = {
-                    "deny": [str(t) for t in spec.get("deny", []) or []],
-                    "allow": [str(t) for t in spec.get("allow", []) or []],
-                    "max_autonomy": int(spec.get("max_autonomy", 4)),
-                }
+            if not isinstance(name, str) or not name.strip() \
+                    or not isinstance(spec, dict):
+                continue
+            deny = spec.get("deny", []) or []
+            allow = spec.get("allow", []) or []
+            cap = spec.get("max_autonomy", 4)
+            if (not isinstance(deny, list)
+                    or not all(isinstance(t, str) and t.strip() for t in deny)
+                    or not isinstance(allow, list)
+                    or not all(isinstance(t, str) and t.strip() for t in allow)
+                    or not isinstance(cap, int) or isinstance(cap, bool)
+                    or not 0 <= cap <= 4):
+                # Ignore this definition as unresolved.  An assignment that
+                # names it will be clamped to the fail-closed profile below.
+                continue
+            out[name] = {
+                "deny": list(deny),
+                "allow": list(allow),
+                "max_autonomy": cap,
+            }
     return out
 
 
 def profiles() -> dict[str, dict]:
-    return {**BUILTIN, **_custom()}
+    # Built-ins are security constants.  A custom file may add profiles, but it
+    # must never shadow ``guest`` (the quarantine/fail-closed posture), or relax
+    # ``reader``/``full`` under a familiar name.
+    return {**_custom(), **BUILTIN}
 
 
 def get(name: str) -> dict | None:
-    return profiles().get((name or "").strip().lower() or None)
+    if not isinstance(name, str):
+        return None
+    return profiles().get(name.strip().lower() or None)
+
+
+def _resolve_name(value) -> str | None:
+    """Return a normalized, currently defined profile name, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip().lower()
+    return name if name and get(name) is not None else None
 
 
 def assign(user: str, name: str) -> str:
@@ -107,12 +140,19 @@ def of_user(user: str | None = None) -> str:
     import os
     uid = memory.canonical_owner(user) if user else memory.current_owner()
     assigned = prefs.get(uid, _PREF_KEY)
-    if assigned and get(assigned):
-        return assigned
+    if assigned is not None:
+        # An explicit restriction is a security decision.  If its custom
+        # definition disappears, becomes corrupt, or the stored name is
+        # malformed, retain a restrictive posture instead of silently widening
+        # the conversation to ``full``.
+        return _resolve_name(assigned) or _FAIL_CLOSED_PROFILE
     if uid.startswith(CHANNEL_PREFIXES):
-        default = os.environ.get("OLYMPUS_CHANNEL_PROFILE", "").strip().lower()
-        if default and get(default):
-            return default
+        configured = os.environ.get("OLYMPUS_CHANNEL_PROFILE", "").strip()
+        if configured:
+            # A non-empty but invalid operator setting is evidence that a
+            # restriction was intended.  Treat loss/corruption of that policy
+            # the same way as an unresolved explicit assignment.
+            return _resolve_name(configured) or _FAIL_CLOSED_PROFILE
     return "full"
 
 
