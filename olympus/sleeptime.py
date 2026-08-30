@@ -32,6 +32,7 @@ no network, mirroring ace.py / transcript.py.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import uuid
@@ -368,21 +369,34 @@ def refine_user(user: str, *, settings=None,
                 auto_apply: bool | None = None) -> dict:
     """One refinement cycle for one user. Returns a summary. Never raises into
     the caller. `auto_apply` overrides the config gate (tests set it True)."""
-    if not isinstance(user, str) or not user.strip():
-        return {"error": "invalid user"}
-    gen = generator or default_generator(settings)
-    ver = verifier or default_verifier(settings)
-    if auto_apply is None:
-        auto_apply = graduated() and config.sleeptime_autoapply()
-
     summary = {"groups": 0, "proposed": 0, "committed": 0,
                "rejected": 0, "clean": True}
+
+    def fail(reason: str) -> None:
+        """Make missing/malformed cycle evidence non-graduating."""
+        summary["clean"] = False
+        summary.setdefault("error", reason)
+
+    if not isinstance(user, str) or not user.strip():
+        fail("invalid user")
+        return summary
+    try:
+        gen = generator or default_generator(settings)
+        ver = verifier or default_verifier(settings)
+        if auto_apply is None:
+            auto_apply = graduated() and config.sleeptime_autoapply()
+    except Exception as err:
+        from . import errors
+        errors.capture("sleeptime.setup", err)
+        fail("refinement setup failed")
+        return summary
     try:
         mems = usermem.active_memories(user)
     except Exception as err:
         from . import errors
         errors.capture("sleeptime.load", err)
-        return {"error": "load failed"}
+        fail("load failed")
+        return summary
 
     groups = consolidation_groups(mems)[:_MAX_PROPOSALS_PER_RUN]
     summary["groups"] = len(groups)
@@ -392,24 +406,59 @@ def refine_user(user: str, *, settings=None,
         except Exception as err:
             from . import errors
             errors.capture("sleeptime.generate", err)
+            fail("generation failed")
             continue
-        if not rewrite or not rewrite.strip():
+        if not isinstance(rewrite, str) or not rewrite.strip():
+            fail("generation produced no usable rewrite")
             continue
         try:
             verdict = ver(grp, rewrite)
         except Exception as err:
             from . import errors
             errors.capture("sleeptime.verify", err)
-            summary["clean"] = False        # a broken verifier is not "clean"
+            fail("verification failed")
             continue
-        supported = bool(verdict.get("supported"))
+        if not isinstance(verdict, dict):
+            fail("verification verdict is not an object")
+            continue
+
+        # Aletheia approval is load-bearing evidence: only the Boolean value
+        # True authorises a proposal.  Truthy strings/numbers must not turn a
+        # malformed model response into an unattended memory rewrite.
+        raw_supported = verdict.get("supported")
+        supported = raw_supported is True
+        if not isinstance(raw_supported, bool):
+            fail("verification verdict has no Boolean supported decision")
+
+        raw_unsupported = verdict.get("unsupported_claims", [])
+        if (not isinstance(raw_unsupported, list)
+                or not all(isinstance(claim, str)
+                           for claim in raw_unsupported)):
+            fail("verification verdict has invalid unsupported claims")
+            raw_unsupported = []
+            supported = False
+        elif raw_unsupported and supported:
+            fail("verification verdict contradicts its unsupported claims")
+            supported = False
+
         # Aletheia's numeric confidence in the rewrite — from the verdict if it
         # gives one, else derived from the support verdict (a supported rewrite
         # with no explicit score is treated as confident).
-        try:
-            confidence = float(verdict["confidence"])
-        except (KeyError, TypeError, ValueError):
+        if "confidence" not in verdict:
             confidence = 1.0 if supported else 0.0
+        else:
+            try:
+                raw_confidence = verdict["confidence"]
+                if (not isinstance(raw_confidence, (int, float))
+                        or isinstance(raw_confidence, bool)):
+                    raise TypeError("confidence is not numeric")
+                confidence = float(raw_confidence)
+                if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                    raise ValueError("confidence outside [0,1]")
+            except (TypeError, ValueError):
+                fail("verification verdict has invalid confidence")
+                confidence = 0.0
+                supported = False
         # Poisoned-feedback defense: a rewrite is model output over (possibly
         # untrusted-derived) memory — defang any injection-shaped imperative
         # BEFORE it can become a stored memory, exactly as the write path does
@@ -426,7 +475,7 @@ def refine_user(user: str, *, settings=None,
             provenance=_merged_provenance(grp),
             sensitivity=_rank_sensitivity(grp),
             verified=supported,
-            unsupported=list(verdict.get("unsupported_claims") or []),
+            unsupported=list(raw_unsupported),
             created_at=time.time(), confidence=confidence)
         if not supported:
             summary["rejected"] += 1
@@ -439,7 +488,7 @@ def refine_user(user: str, *, settings=None,
                 p.applied = True
                 summary["committed"] += 1
             else:
-                summary["clean"] = False     # contract blocked a "verified" one
+                fail("memory rewrite contract rejected")
         _add_proposal(p)
         summary["proposed"] += 1
     return summary
@@ -497,12 +546,27 @@ def run(settings=None) -> list[str]:
     total = {"proposed": 0, "committed": 0, "rejected": 0}
     clean = True
     for uid in users:
-        s = refine_user(uid, settings=settings)
-        if s.get("error"):
-            continue
+        try:
+            s = refine_user(uid, settings=settings)
+        except Exception as err:
+            # `refine_user` promises containment, but the graduation boundary
+            # must remain safe even if a future refactor violates that promise.
+            from . import errors
+            errors.capture("sleeptime.refine", err, context=str(uid))
+            s = {"error": "refinement failed", "clean": False}
+        if not isinstance(s, dict):
+            s = {"error": "invalid refinement summary", "clean": False}
         for k in ("proposed", "committed", "rejected"):
-            total[k] += s.get(k, 0)
-        clean = clean and s.get("clean", True)
+            value = s.get(k, 0)
+            if (not isinstance(value, int) or isinstance(value, bool)
+                    or value < 0):
+                clean = False
+                continue
+            total[k] += value
+        # Graduation needs an affirmative Boolean clean verdict.  Errors,
+        # missing fields, and merely truthy values all reset the streak.
+        cycle_clean = s.get("clean") is True and not s.get("error")
+        clean = clean and cycle_clean
     st = _record_cycle(clean, total["proposed"], total["committed"])
     from . import evolve
     evolve.record("sleeptime", evolve.OK if clean else evolve.DEGRADED,

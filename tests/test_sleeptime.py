@@ -123,6 +123,105 @@ def test_unverified_rewrite_is_never_committed():
     assert props[-1]["unsupported"]
 
 
+@pytest.mark.parametrize("verdict", [
+    None,
+    {},
+    {"supported": "false"},
+    {"supported": 1},
+    {"supported": True, "confidence": True},
+    {"supported": True, "confidence": "0.9"},
+    {"supported": True, "confidence": "nan"},
+    {"supported": True, "confidence": float("nan")},
+    {"supported": True, "confidence": float("inf")},
+    {"supported": True, "confidence": -0.1},
+    {"supported": True, "confidence": 2.0},
+    {"supported": True, "unsupported_claims": "invented a fact"},
+    {"supported": True, "unsupported_claims": [7]},
+    {"supported": True, "unsupported_claims": ["invented a fact"]},
+])
+def test_malformed_verifier_evidence_never_commits(verdict):
+    """Only a well-formed Boolean approval can authorise a rewrite."""
+    u = "malformed-verdict"
+    m1 = _mem(u, "Apollo uses Postgres and Redis for storage", prov=["e1"])
+    m2 = _mem(u, "Apollo storage is Postgres and a Redis cache", prov=["e2"])
+
+    s = sleeptime.refine_user(
+        u, generator=_gen, verifier=lambda sources, rewrite: verdict,
+        auto_apply=True)
+
+    assert s["committed"] == 0
+    assert s["clean"] is False
+    assert s.get("error")
+    assert usermem.get_memory(u, m1["id"])["status"] == usermem.ACTIVE
+    assert usermem.get_memory(u, m2["id"])["status"] == usermem.ACTIVE
+
+
+def test_verifier_exception_is_non_graduating_and_never_commits():
+    u = "verifier-outage"
+    m1 = _mem(u, "Apollo uses Postgres and Redis for storage", prov=["e1"])
+    m2 = _mem(u, "Apollo storage is Postgres and a Redis cache", prov=["e2"])
+
+    def unavailable(sources, rewrite):
+        raise RuntimeError("verifier unavailable")
+
+    s = sleeptime.refine_user(
+        u, generator=_gen, verifier=unavailable, auto_apply=True)
+
+    assert s["committed"] == 0
+    assert s["clean"] is False
+    assert s.get("error") == "verification failed"
+    assert usermem.get_memory(u, m1["id"])["status"] == usermem.ACTIVE
+    assert usermem.get_memory(u, m2["id"])["status"] == usermem.ACTIVE
+
+
+@pytest.mark.parametrize("rewrite", [None, "", 7])
+def test_missing_or_malformed_generation_is_non_graduating(rewrite):
+    u = "generator-output"
+    _mem(u, "Apollo uses Postgres and Redis for storage", prov=["e1"])
+    _mem(u, "Apollo storage is Postgres and a Redis cache", prov=["e2"])
+
+    s = sleeptime.refine_user(
+        u, generator=lambda sources: rewrite, verifier=_verify_ok,
+        auto_apply=True)
+
+    assert s["proposed"] == 0 and s["committed"] == 0
+    assert s["clean"] is False
+    assert s.get("error") == "generation produced no usable rewrite"
+
+
+def test_generator_exception_is_non_graduating():
+    u = "generator-outage"
+    _mem(u, "Apollo uses Postgres and Redis for storage", prov=["e1"])
+    _mem(u, "Apollo storage is Postgres and a Redis cache", prov=["e2"])
+
+    def unavailable(sources):
+        raise RuntimeError("generator unavailable")
+
+    s = sleeptime.refine_user(
+        u, generator=unavailable, verifier=_verify_ok, auto_apply=True)
+
+    assert s["proposed"] == 0 and s["committed"] == 0
+    assert s["clean"] is False
+    assert s.get("error") == "generation failed"
+
+
+def test_refinement_setup_and_load_errors_are_contained(monkeypatch):
+    monkeypatch.setattr(
+        sleeptime, "default_generator",
+        lambda settings: (_ for _ in ()).throw(RuntimeError("setup failed")))
+    setup = sleeptime.refine_user("setup-outage")
+    assert setup["clean"] is False
+    assert setup.get("error") == "refinement setup failed"
+
+    monkeypatch.setattr(sleeptime, "default_generator", lambda settings: _gen)
+    monkeypatch.setattr(sleeptime, "default_verifier", lambda settings: _verify_ok)
+    monkeypatch.setattr(
+        usermem, "active_memories",
+        lambda user: (_ for _ in ()).throw(RuntimeError("load failed")))
+    load = sleeptime.refine_user("load-outage")
+    assert load["clean"] is False and load.get("error") == "load failed"
+
+
 # --- the memory.rewrite contract itself blocks bad commits ----------------
 
 def test_contract_blocks_provenance_drop():
@@ -244,3 +343,39 @@ def test_run_enabled_processes_users(monkeypatch):
     lines = sleeptime.run()
     assert lines and "proposed 1" in lines[0]
     assert sleeptime.state()["clean_cycles"] == 1     # supervised, clean
+
+
+@pytest.mark.parametrize("summary", [
+    "invalid summary",
+    {},
+    {"clean": None},
+    {"clean": "true"},
+    {"clean": 1},
+    {"clean": True, "error": "load failed"},
+    {"clean": True, "proposed": "1"},
+    {"clean": True, "committed": True},
+    {"clean": True, "rejected": -1},
+])
+def test_run_requires_affirmative_clean_evidence(monkeypatch, summary):
+    """Missing, truthy, and error-bearing summaries reset graduation."""
+    monkeypatch.setenv("OLYMPUS_SLEEPTIME", "1")
+    _mem("cycle-evidence", "One memory is enough to enumerate this user")
+    monkeypatch.setattr(sleeptime, "refine_user", lambda *a, **k: summary)
+
+    assert sleeptime.run() == []
+    assert sleeptime.state()["runs"] == 1
+    assert sleeptime.state()["clean_cycles"] == 0
+
+
+def test_run_contains_unexpected_refinement_exception(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_SLEEPTIME", "1")
+    _mem("cycle-exception", "One memory is enough to enumerate this user")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("unexpected refinement failure")
+
+    monkeypatch.setattr(sleeptime, "refine_user", fail)
+
+    assert sleeptime.run() == []
+    assert sleeptime.state()["runs"] == 1
+    assert sleeptime.state()["clean_cycles"] == 0
