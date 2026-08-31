@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from olympus import config, doctor, modelgate
+from olympus import config, doctor, modelgate, modelgrade
 
 
 def _settings() -> config.Settings:
@@ -190,6 +190,79 @@ def test_freeze_marker_delete_unfreezes():
     assert modelgate.unfreeze(_member()) is True
     assert _member() not in modelgate.frozen_members()
     assert doctor._drift_checks()[0].status == doctor.OK
+
+
+def test_legacy_high_freeze_marker_remains_blocking_and_removable(monkeypatch):
+    member = _member()
+    modelgate._write_freeze(member, "high", "legacy drift", "legacy-ref")
+
+    assert modelgate.frozen_members()[member]["severity"] == "high"
+    monkeypatch.setenv("OLYMPUS_MODELGRADE", "1")
+    assert modelgrade.card(member).status == modelgrade.FROZEN
+    assert doctor._drift_checks()[0].status == doctor.WARN
+    assert modelgate.unfreeze(member) is True
+    assert member not in modelgate.frozen_members()
+
+
+def test_corrupt_baseline_fails_closed_without_reseeding():
+    s = _seed_baseline(8.0)
+    path = config.MEMORY_DIR / "modelgate" / "baseline.json"
+    corrupt = b"{not valid json"
+    path.write_bytes(corrupt)
+
+    res = modelgate.run_gate(s, run_fn=make_run_fn(default=8.0))
+
+    assert res.severity == modelgate.QUARANTINE
+    assert res.ok is False
+    assert res.stopped_reason == "baseline_evidence_unavailable"
+    assert path.read_bytes() == corrupt                 # never silently reseeded
+    assert modelgate.frozen_members()[_member()]["severity"] \
+        == modelgate.QUARANTINE
+
+
+@pytest.mark.parametrize("bad_row", (
+    [],
+    {},
+    {"verify": True},
+    {"verify": float("nan")},
+    {"verify": 0.0},
+    {"verify": 10.1},
+))
+def test_malformed_baseline_rows_fail_closed(bad_row):
+    s = _settings()
+    path = config.MEMORY_DIR / "modelgate" / "baseline.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({modelgate.result_key(s): bad_row}),
+                    encoding="utf-8")
+
+    res = modelgate.run_gate(s, run_fn=make_run_fn(default=8.0))
+
+    assert res.severity == modelgate.QUARANTINE
+    assert res.ok is False
+    assert res.stopped_reason == "baseline_evidence_unavailable"
+
+
+@pytest.mark.parametrize("payload", (
+    "{not valid json",
+    "[]",
+    '{"provider/model": {"severity": "info"}}',
+))
+def test_corrupt_freeze_evidence_blocks_qualification_and_fails_doctor(
+        monkeypatch, payload):
+    path = config.MEMORY_DIR / "modelgate" / "freeze.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(modelgate.ModelGateEvidenceError):
+        modelgate.frozen_members()
+    with pytest.raises(modelgate.ModelGateEvidenceError):
+        modelgate.unfreeze(_member())
+
+    monkeypatch.setenv("OLYMPUS_MODELGRADE", "1")
+    card = modelgrade.card(_member())
+    assert card.status == modelgrade.QUARANTINED
+    assert "freeze evidence unavailable" in card.reason
+    assert doctor._drift_checks()[0].status == doctor.FAIL
 
 
 # --- keyed evidence rows (I-M2) --------------------------------------------

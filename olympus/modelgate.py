@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -62,6 +63,11 @@ _CLEAN = frozenset({INFO, NO_BASELINE, SKIPPED, BUDGET_EXHAUSTED,
                     WARN, WARN_PENDING})
 # Verdicts that write a reversible freeze marker.
 _FREEZING = frozenset({FREEZE, BLOCK, QUARANTINE})
+# `_write_freeze` predates the gate-verdict names and is also used by the
+# durability contract with the legacy severity ``high``.  It is still a
+# blocking marker: modelgrade maps every accepted non-quarantine marker to
+# FROZEN and doctor reports it.  Clean verdicts must never be accepted here.
+_FREEZE_MARKER_SEVERITIES = _FREEZING | frozenset({"high"})
 
 _STATE_DIR = "modelgate"
 _RESULTS = "results.jsonl"
@@ -74,6 +80,15 @@ class ProviderUnavailable(Exception):
 
     It signals a CLEAN SKIP of the whole run (exit-0 semantics), never a false
     freeze — a network blip must not look like the model getting worse."""
+
+
+class ModelGateEvidenceError(RuntimeError):
+    """Persisted gate evidence is present but cannot be trusted.
+
+    Absence is a valid first-run state.  A present-but-unreadable baseline or
+    freeze file is different: treating it as absent could silently reseed a
+    degraded baseline or erase a prior freeze from the routing decision.
+    """
 
 
 @dataclass
@@ -357,31 +372,56 @@ def _append_result(row: dict) -> None:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def load_baseline(key: str) -> dict:
-    """The stored per-domain baseline for a full key, or {} if none yet."""
-    path = _dir() / _BASELINE
+def _baseline_document(path: Path) -> dict:
+    """Read the complete baseline document without repairing corrupt state."""
     if not path.exists():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as err:
+        raise ModelGateEvidenceError(
+            "provider-drift baseline evidence is unreadable") from err
+    if not isinstance(data, dict):
+        raise ModelGateEvidenceError(
+            "provider-drift baseline evidence is not an object")
+    return data
+
+
+def load_baseline(key: str) -> dict:
+    """The stored per-domain baseline for a full key, or {} if none yet.
+
+    Missing evidence is a first-run state.  Present evidence that is corrupt,
+    malformed, or non-finite raises instead of collapsing to that same state.
+    """
+    path = _dir() / _BASELINE
+    data = _baseline_document(path)
+    if key not in data:
         return {}
-    row = data.get(key, {}) if isinstance(data, dict) else {}
-    return {str(k): float(v) for k, v in row.items()
-            if isinstance(v, (int, float))}
+    row = data[key]
+    if not isinstance(row, dict) or not row:
+        raise ModelGateEvidenceError(
+            "provider-drift baseline row is malformed")
+    out: dict[str, float] = {}
+    for domain, value in row.items():
+        if (not isinstance(domain, str) or not domain
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))):
+            raise ModelGateEvidenceError(
+                "provider-drift baseline row contains invalid scores")
+        score = float(value)
+        if not math.isfinite(score) or not 1.0 <= score <= 10.0:
+            raise ModelGateEvidenceError(
+                "provider-drift baseline row contains invalid scores")
+        out[domain] = score
+    return out
 
 
 def _write_baseline(key: str, scores: dict) -> None:
     path = _dir() / _BASELINE
     with proclock.lock("modelgate"):
-        data = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                data = {}
-        if not isinstance(data, dict):
-            data = {}
+        # Never overwrite a corrupt baseline with a newly observed run.  That
+        # would turn evidence loss into an implicit baseline reset.
+        data = _baseline_document(path)
         data[key] = {k: round(float(v), 2) for k, v in scores.items()}
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         from . import atomicio
@@ -398,9 +438,19 @@ def frozen_members() -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError) as err:
+        raise ModelGateEvidenceError(
+            "provider-drift freeze evidence is unreadable") from err
+    if not isinstance(data, dict):
+        raise ModelGateEvidenceError(
+            "provider-drift freeze evidence is not an object")
+    for member, marker in data.items():
+        if (not isinstance(member, str) or not member
+                or not isinstance(marker, dict)
+                or marker.get("severity") not in _FREEZE_MARKER_SEVERITIES):
+            raise ModelGateEvidenceError(
+                "provider-drift freeze evidence contains a malformed marker")
+    return data
 
 
 def _write_freeze(member: str, severity: str, reason: str, ref: str) -> None:
@@ -471,7 +521,21 @@ def run_gate(settings: config.Settings, *, corpus: str = "drift",
                           key=key)
 
     result = {"scores": scores, "error_rate": error_rate}
-    baseline = load_baseline(key)
+    try:
+        baseline = load_baseline(key)
+    except ModelGateEvidenceError:
+        # A missing baseline may be seeded; a corrupt baseline may not.  Keep
+        # the freshly measured rows as diagnostic evidence, quarantine the
+        # member, and return an explicit failed verdict.
+        reason = "baseline_evidence_unavailable"
+        _append_result(_result_row(settings, key, scores, total_cost, ts,
+                                   partial=True))
+        _write_freeze(member, QUARANTINE,
+                      "provider-drift baseline evidence is unavailable",
+                      f"{ts:.3f}")
+        return GateResult(ok=False, severity=QUARANTINE, results=rows,
+                          cost=round(total_cost, 6), stopped_reason=reason,
+                          scores=scores, key=key)
     severity = classify(result, baseline)
     reason = ""
 
