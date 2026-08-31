@@ -246,7 +246,9 @@ def _drift_checks() -> list[Check]:
     try:
         frozen = modelgate.frozen_members()
     except Exception:
-        return []
+        return [Check("provider drift", FAIL,
+                      "freeze evidence is unreadable or malformed — model "
+                      "qualification must remain blocked")]
     if not frozen:
         return [Check("provider drift", OK, "no frozen members")]
     blocked = [m for m, v in frozen.items() if v.get("severity") == "block"]

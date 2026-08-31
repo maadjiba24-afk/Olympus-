@@ -594,7 +594,8 @@ def _freeze_state(member: str) -> tuple[str, str]:
         marker = modelgate.frozen_members().get(member)
     except Exception as err:                          # noqa: BLE001
         _capture("modelgrade.frozen_members", err, context=member)
-        return "", ""
+        return (QUARANTINED,
+                "modelgate freeze evidence unavailable — qualification blocked")
     if not isinstance(marker, dict):
         return "", ""
     severity = str(marker.get("severity", ""))
