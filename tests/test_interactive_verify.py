@@ -4,11 +4,14 @@ Before M4 a Zeus DIRECT reply skipped the whole council and shipped entirely
 unverified (#6), and the router's `needs_verification=False` opt-out skipped the
 verify chain SILENTLY (#7). M4 adds a bounded-latency screen on direct replies
 (banner an unsupported factual claim, otherwise pass) and turns every
-verification skip — direct no-claim, clarify, router opt-out, disabled,
-infra error — into a ledgered `verify.exempt` decision that flushes durably to
-the trace, so no skip is invisible.
+verification skip — direct no-claim, clarify, router opt-out, disabled — into
+a ledgered `verify.exempt` decision that flushes durably to the trace. Verifier
+outages and malformed verdicts are visibly bannered and never authorize an
+unmarked reply.
 """
 import json
+
+import pytest
 
 from olympus import config, orchestrator
 
@@ -112,9 +115,9 @@ def test_disabled_tier_ledgers_exemption(monkeypatch):
     assert ex and ex[0]["rationale"]["reason"] == "disabled"
 
 
-# --- (e) verifier infra error → ledgered exemption, reply preserved --------
+# --- (e) unavailable verifier evidence is visible and cannot authorize -----
 
-def test_infra_error_degrades_to_ledgered_exemption(monkeypatch):
+def test_infra_error_is_bannered_and_recorded_as_unavailable(monkeypatch):
     monkeypatch.setenv("OLYMPUS_INTERACTIVE_VERIFY", "on")
     monkeypatch.setenv("OLYMPUS_INTERACTIVE_VERIFY_TIMEOUT", "0")  # no thread cap
     bot = orchestrator.Olympus(user="iv")
@@ -130,9 +133,41 @@ def test_infra_error_degrades_to_ledgered_exemption(monkeypatch):
 
     monkeypatch.setattr(orchestrator.backend, "complete_json", flaky)
     reply = bot.ask("meaning of life?")
-    assert reply == "Answer 42."                # not bannered on infra error
-    ex = _exemptions(bot)
-    assert ex and ex[0]["rationale"]["reason"] == "infra_error"
+    assert reply.startswith("⚠️ UNVERIFIED")
+    assert reply.endswith("Answer 42.")
+    assert not _exemptions(bot)
+    decs = _direct_verify_decs(bot)
+    assert decs and decs[0]["rationale"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("verdict", [
+    [],
+    {},
+    {"checkable": "false", "supported": True, "unsupported_claims": []},
+    {"checkable": True, "supported": 1, "unsupported_claims": []},
+    {"checkable": True, "supported": False, "unsupported_claims": "claim"},
+    {"checkable": True, "supported": False, "unsupported_claims": [""]},
+    {"checkable": True, "supported": False,
+     "unsupported_claims": (["claim"] * 10) + [42]},
+    {"checkable": False, "supported": True,
+     "unsupported_claims": ["contradiction"]},
+    {"checkable": True, "supported": True,
+     "unsupported_claims": ["contradiction"]},
+])
+def test_malformed_direct_verdict_is_bannered(monkeypatch, verdict):
+    monkeypatch.setenv("OLYMPUS_INTERACTIVE_VERIFY", "on")
+    bot, _ = _bot(
+        monkeypatch,
+        route={"mode": "direct", "direct_reply": "Potential factual claim.",
+               "specialists": [], "brief": None,
+               "clarifying_questions": [], "needs_verification": False},
+        verdict=verdict)
+    reply = bot.ask("is this true?")
+    assert reply.startswith("⚠️ UNVERIFIED")
+    assert reply.endswith("Potential factual claim.")
+    assert not _exemptions(bot)
+    decs = _direct_verify_decs(bot)
+    assert decs and decs[0]["rationale"]["status"] == "invalid"
 
 
 # --- (f) clarify turns carry no claim → ledgered exemption -----------------

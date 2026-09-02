@@ -24,6 +24,7 @@ to Claude (full capability) or any OpenAI-compatible endpoint (BYOK).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -126,6 +127,11 @@ _BANNER_UNAVAILABLE = (
     "⚠️ UNVERIFIED — automated fact-verification could not run on this "
     "answer. Treat specific claims with caution.")
 
+_BANNER_SYNTH_UNAVAILABLE = (
+    "⚠️ UNVERIFIED COMPOSITION — automated synthesis-faithfulness "
+    "verification could not establish that this reply stays within the "
+    "verified findings. Treat added claims with caution.")
+
 
 def _banner_rejected(claims: list[str]) -> str:
     lines = "\n".join(f"- {c}" for c in claims[:10]) or "- (unspecified)"
@@ -200,6 +206,65 @@ SYNTH_CHECK_SCHEMA: dict[str, Any] = {
     "required": ["faithful", "unsupported_additions", "confidence"],
     "additionalProperties": False,
 }
+
+
+def _string_evidence_list(value: Any, field: str, limit: int) -> list[str]:
+    """Return a bounded list of explicit strings or reject the evidence.
+
+    Structured-output schemas are sent to every provider, but not every
+    transport enforces them locally.  The orchestration boundary therefore
+    validates the returned object again instead of coercing arbitrary values.
+    """
+    if not isinstance(value, list):
+        raise ValueError(f"{field} is not a list")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field} contains a non-string or empty item")
+        if len(out) < limit:
+            out.append(item.strip()[:300])
+    return out
+
+
+def _validated_direct_verdict(data: Any) -> dict[str, Any]:
+    """Require affirmative, internally consistent direct-check evidence."""
+    required = {"checkable", "supported", "unsupported_claims"}
+    if not isinstance(data, dict) or set(data) != required:
+        raise ValueError("direct-verification verdict has an invalid shape")
+    checkable = data["checkable"]
+    supported = data["supported"]
+    if not isinstance(checkable, bool) or not isinstance(supported, bool):
+        raise ValueError("direct-verification flags are not Boolean")
+    claims = _string_evidence_list(
+        data["unsupported_claims"], "unsupported_claims", 10)
+    if not checkable and claims:
+        raise ValueError("a no-claim verdict contains unsupported claims")
+    if supported and claims:
+        raise ValueError("a supported verdict contains unsupported claims")
+    return {"checkable": checkable, "supported": supported,
+            "unsupported_claims": claims}
+
+
+def _validated_synthesis_verdict(data: Any) -> dict[str, Any]:
+    """Require explicit, finite and internally consistent synthesis evidence."""
+    required = {"faithful", "unsupported_additions", "confidence"}
+    if not isinstance(data, dict) or set(data) != required:
+        raise ValueError("synthesis-verification verdict has an invalid shape")
+    faithful = data["faithful"]
+    confidence = data["confidence"]
+    if not isinstance(faithful, bool):
+        raise ValueError("synthesis faithful verdict is not Boolean")
+    if (isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0):
+        raise ValueError("synthesis confidence is not finite within [0, 1]")
+    additions = _string_evidence_list(
+        data["unsupported_additions"], "unsupported_additions", 20)
+    if faithful and additions:
+        raise ValueError("a faithful verdict contains unsupported additions")
+    return {"faithful": faithful, "unsupported_additions": additions,
+            "confidence": float(confidence)}
 
 _SYNTH_CHECK_SYSTEM = (
     "You are Olympus's synthesis faithfulness checker. The specialist "
@@ -1049,16 +1114,32 @@ class Olympus:
         except replaystore.ReplayDivergence:
             raise                       # never mask a replay divergence
         except Exception as err:
-            # A slow/failed OPTIONAL check must not degrade a casual reply into
-            # a banner — but it is recorded, so the miss is never silent.
             tr.event("direct_verify.failed", error=str(err)[:200])
-            self._record_verify_exempt(tr, "direct", "infra_error")
-            return reply
+            tr.decision(
+                "direct_verify", {"name": "aletheia", "role": "verify"},
+                {"status": "unavailable"}, status="error",
+                inputs=reply, model=None)
+            tr.event("direct_verify.bannered", reason="infra_error")
+            self.report("⚠️ The quick-reply verifier could not run; the "
+                        "reply will carry an UNVERIFIED banner.")
+            return f"{_BANNER_UNAVAILABLE}\n\n{reply}"
 
-        checkable = bool(verdict.get("checkable"))
-        supported = bool(verdict.get("supported"))
-        claims = [c for c in (verdict.get("unsupported_claims") or [])
-                  if isinstance(c, str) and c.strip()][:10]
+        try:
+            verdict = _validated_direct_verdict(verdict)
+        except ValueError as err:
+            tr.event("direct_verify.invalid", error=str(err)[:200])
+            tr.decision(
+                "direct_verify", {"name": "aletheia", "role": "verify"},
+                {"status": "invalid"}, status="violation",
+                inputs=reply, model=None)
+            tr.event("direct_verify.bannered", reason="invalid_evidence")
+            self.report("⚠️ The quick-reply verifier returned invalid "
+                        "evidence; the reply will carry an UNVERIFIED banner.")
+            return f"{_BANNER_UNAVAILABLE}\n\n{reply}"
+
+        checkable = verdict["checkable"]
+        supported = verdict["supported"]
+        claims = verdict["unsupported_claims"]
         if not checkable:
             self._record_verify_exempt(tr, "direct", "no_checkable_claim")
             return reply
@@ -1098,11 +1179,7 @@ class Olympus:
             [{"role": "user", "content": prompt}], SYNTH_CHECK_SCHEMA,
             effort=effortscore.at_least(
                 "medium", effortscore.score(prompt_chars=len(reply))))
-        additions = data.get("unsupported_additions")
-        additions = ([str(c)[:300] for c in additions[:20]]
-                     if isinstance(additions, list) else [])
-        return {"faithful": bool(data.get("faithful", True)),
-                "unsupported_additions": additions}
+        return _validated_synthesis_verdict(data)
 
     def _judge_synthesis(self, verdict: dict, tr: "trace_mod.Trace") -> bool:
         """Feed the faithfulness verdict through the answer.synthesis
@@ -1121,9 +1198,8 @@ class Olympus:
                                reply: str, tr: "trace_mod.Trace") -> str:
         """Blocking-path policy: unfaithful → exactly one recompose with the
         additions named; still unfaithful → UNVERIFIED ADDITIONS banner.
-        Checker infrastructure failure is traced and reported but does NOT
-        banner the user — the findings themselves were already verified, so
-        a missing double-check is not unverified content (ADR 0005 am. 4)."""
+        Missing, malformed or unavailable checker evidence is visibly marked;
+        it can never silently authorize the composed reply."""
         verified = getattr(self, "_synth_check_source", None)
         if (not verified or not config.synth_check_enabled()
                 or self._fast()):
@@ -1134,6 +1210,8 @@ class Olympus:
             raise                       # never mask a replay divergence
         except Exception as err:
             tr.event("synth_check.failed", error=str(err)[:200])
+            self._unverified_banner = _BANNER_SYNTH_UNAVAILABLE
+            tr.event("answer.unverified", reason="synth_check_unavailable")
             self.report("⚠️ Synthesis faithfulness check could not run.")
             return reply
         if self._judge_synthesis(verdict, tr):
@@ -1163,7 +1241,9 @@ class Olympus:
             raise
         except Exception as err:
             tr.event("synth_check.failed", error=str(err)[:200])
-            return reply2               # recomposed against the corrections
+            self._unverified_banner = _BANNER_SYNTH_UNAVAILABLE
+            tr.event("answer.unverified", reason="synth_check_unavailable")
+            return reply2
         if self._judge_synthesis(verdict2, tr):
             return reply2
         self._unverified_banner = _banner_synth(
@@ -1189,7 +1269,8 @@ class Olympus:
         except Exception as err:
             tr.event("synth_check.failed", error=str(err)[:200])
             self.report("⚠️ Synthesis faithfulness check could not run.")
-            return None
+            tr.event("answer.unverified", reason="synth_check_unavailable")
+            return "\n\n---\n" + _BANNER_SYNTH_UNAVAILABLE
         if self._judge_synthesis(verdict, tr):
             return None
         tr.event("answer.unverified", reason="synth_unfaithful")
