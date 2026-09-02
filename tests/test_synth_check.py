@@ -3,10 +3,14 @@
 The specialists' findings are fact-checked upstream; the residual risk on
 the interactive path was Zeus ADDING claims at compose time. Covers: the
 faithful pass-through, unfaithful → exactly one recompose, a second reject →
-UNVERIFIED ADDITIONS banner, checker infrastructure failure (traced, never
-bannered — the findings themselves were verified), the router/env/fast-mode
-skips, the contract wiring, and the streaming trailing-correction note.
+UNVERIFIED ADDITIONS banner, checker infrastructure or evidence failure
+(traced and visibly bannered), the router/env/fast-mode skips, the contract
+wiring, and the streaming trailing-correction note.
 """
+
+import math
+
+import pytest
 
 from olympus import backend
 from olympus import behavioral_contracts as abc_mod
@@ -50,7 +54,7 @@ def _mk_bot(monkeypatch, check_results):
         r = check_results[i]
         if callable(r):
             return r()
-        return dict(r)
+        return dict(r) if isinstance(r, dict) else r
 
     monkeypatch.setattr(backend, "complete_json", fake_complete_json)
     return bot, calls
@@ -82,13 +86,48 @@ def test_unfaithful_twice_ships_with_additions_banner(monkeypatch):
     assert "composed reply v2" in reply        # content still delivered
 
 
-def test_checker_failure_ships_untouched_and_unbannered(monkeypatch):
+def test_checker_failure_marks_composition_unverified(monkeypatch):
     def boom():
         raise RuntimeError("checker died")
     bot, calls = _mk_bot(monkeypatch, [boom])
     reply = bot.ask("question")
-    assert reply == "composed reply v1"
-    assert bot._unverified_banner is None      # findings WERE verified
+    assert reply.startswith("⚠️ UNVERIFIED COMPOSITION")
+    assert reply.endswith("composed reply v1")
+    assert bot._unverified_banner is not None
+
+
+@pytest.mark.parametrize("verdict", [
+    [],
+    {},
+    {"faithful": "false", "unsupported_additions": [], "confidence": 0.9},
+    {"faithful": True, "unsupported_additions": "claim", "confidence": 0.9},
+    {"faithful": False, "unsupported_additions": [42], "confidence": 0.9},
+    {"faithful": False, "unsupported_additions": (["claim"] * 20) + [42],
+     "confidence": 0.9},
+    {"faithful": True, "unsupported_additions": [], "confidence": True},
+    {"faithful": True, "unsupported_additions": [], "confidence": math.nan},
+    {"faithful": True, "unsupported_additions": [], "confidence": math.inf},
+    {"faithful": True, "unsupported_additions": [], "confidence": -0.1},
+    {"faithful": True, "unsupported_additions": [], "confidence": 1.1},
+    {"faithful": True, "unsupported_additions": ["contradiction"],
+     "confidence": 0.9},
+])
+def test_malformed_synthesis_verdict_is_bannered(monkeypatch, verdict):
+    bot, calls = _mk_bot(monkeypatch, [verdict])
+    reply = bot.ask("question")
+    assert reply.startswith("⚠️ UNVERIFIED COMPOSITION")
+    assert reply.endswith("composed reply v1")
+    assert calls["check"] == 1 and calls["synth"] == 1
+
+
+def test_recheck_failure_after_recompose_is_bannered(monkeypatch):
+    def boom():
+        raise RuntimeError("checker died during recheck")
+    bot, calls = _mk_bot(monkeypatch, [UNFAITHFUL, boom])
+    reply = bot.ask("question")
+    assert reply.startswith("⚠️ UNVERIFIED COMPOSITION")
+    assert reply.endswith("composed reply v2")
+    assert calls["check"] == 2 and calls["synth"] == 2
 
 
 def test_env_kill_switch_skips_check(monkeypatch):
@@ -138,3 +177,22 @@ def test_streaming_gets_trailing_correction_note(monkeypatch):
     assert "⚠️ Correction" in joined               # trailing note appended
     assert "X raised $50M in 2025" in joined
     assert pieces[-1].lstrip().startswith("---")   # note is the LAST chunk
+
+
+def test_streaming_checker_failure_gets_trailing_unverified_note(monkeypatch):
+    def boom():
+        raise RuntimeError("checker died")
+    bot, _ = _mk_bot(monkeypatch, [boom])
+
+    class _FakePool:
+        def for_role(self, role):
+            return config.Settings(provider="openai", model="m", api_key="k")
+
+    monkeypatch.setattr(bot, "pool", _FakePool())
+    monkeypatch.setattr(backend, "complete_text",
+                        lambda *a, **k: "streamed reply")
+    pieces = list(bot.ask_stream("question"))
+    joined = "".join(pieces)
+    assert joined.startswith("streamed reply")
+    assert "⚠️ UNVERIFIED COMPOSITION" in joined
+    assert pieces[-1].lstrip().startswith("---")

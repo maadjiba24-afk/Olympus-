@@ -56,12 +56,19 @@ def test_sessions_slash_command_lists():
 
 def test_btw_leaves_no_trace(monkeypatch):
     bot = orchestrator.Olympus(user="btw-u", conversation_id="btw-conv")
+
+    def fake_complete_json(_settings, _system, _messages, schema, **_kwargs):
+        if schema is orchestrator.ROUTE_SCHEMA:
+            return {"mode": "direct", "direct_reply": "42",
+                    "specialists": [], "brief": None,
+                    "clarifying_questions": [],
+                    "needs_verification": False}
+        assert schema is orchestrator._DIRECT_VERIFY_SCHEMA
+        return {"checkable": True, "supported": True,
+                "unsupported_claims": []}
+
     monkeypatch.setattr(orchestrator.backend, "complete_json",
-                        lambda *a, **k: {"mode": "direct",
-                                         "direct_reply": "42",
-                                         "specialists": [], "brief": None,
-                                         "clarifying_questions": [],
-                                         "needs_verification": False})
+                        fake_complete_json)
     before = list(bot.history)
     answer = bot.ask_ephemeral("what is 6x7?")
     assert answer == "42"
