@@ -2,6 +2,8 @@
 
 import threading
 
+import pytest
+
 from olympus import backend, config, consensus, evolve, orchestrator, store
 
 _PASS = ('ok\nVERDICT: {"status": "pass", "unsupported_claims": [], '
@@ -101,10 +103,9 @@ def test_verdict_unions_claims_from_non_pass():
     out = consensus.safest_verdict([
         _v("reject", ["claim A"]),
         _v("warn", ["claim B", "claim A"]),
-        _v("pass", ["ignored"]),
+        _v("pass"),
     ])
     assert out["unsupported_claims"] == ["claim A", "claim B"]   # deduped union
-    assert "ignored" not in out["unsupported_claims"]            # pass excluded
 
 
 def test_verdict_confidence_mean_and_agreement():
@@ -118,6 +119,23 @@ def test_verdict_confidence_mean_and_agreement():
 def test_verdict_empty_is_cautious():
     out = consensus.safest_verdict([])
     assert out["status"] == "warn" and out["confidence"] == 0.0
+
+
+@pytest.mark.parametrize("bad", [
+    {"status": "pass", "unsupported_claims": [], "confidence": "1.0"},
+    {"status": "pass", "unsupported_claims": [], "confidence": True},
+    {"status": "pass", "unsupported_claims": [], "confidence": float("nan")},
+    {"status": "pass", "unsupported_claims": [], "confidence": 10**10000},
+    {"status": "pass", "unsupported_claims": ["conflict"],
+     "confidence": 1.0},
+    {"status": "warn", "unsupported_claims": [object()],
+     "confidence": 0.5},
+    {"status": "warn", "unsupported_claims": [], "confidence": 0.5,
+     "extra": "ignored"},
+])
+def test_verdict_fold_rejects_malformed_evidence(bad):
+    with pytest.raises(ValueError):
+        consensus.safest_verdict([bad])
 
 
 def test_lens_cycles():
@@ -178,6 +196,28 @@ def test_quorum_met_returns_verdict(monkeypatch):
     vs = config.Settings(provider="anthropic", model="claude-opus-4-8")
     content, verdict = bot._verify_consensus("sys", "task", vs, [], [])
     assert verdict is not None and verdict["status"] == "pass"
+
+
+def test_malformed_verdict_does_not_count_toward_quorum(monkeypatch):
+    monkeypatch.setenv("OLYMPUS_CONSENSUS", "1")
+    monkeypatch.setenv("OLYMPUS_CONSENSUS_VERIFIERS", "3")
+    bot = orchestrator.Olympus(user="qinvalid")
+    lock = threading.Lock()
+    replies = iter([
+        _PASS,
+        ('bad\nVERDICT: {"status": "pass", "unsupported_claims": [], '
+         '"confidence": "1.0"}'),
+        "no verdict in this reply",
+    ])
+
+    def fake_run_agent(*_args, **_kwargs):
+        with lock:
+            return next(replies)
+
+    monkeypatch.setattr(backend, "run_agent", fake_run_agent)
+    vs = config.Settings(provider="anthropic", model="claude-opus-4-8")
+    _content, verdict = bot._verify_consensus("sys", "task", vs, [], [])
+    assert verdict is None
 
 
 # --- self-evolution: consensus tunes its own panel over time -------------

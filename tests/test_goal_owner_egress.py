@@ -392,6 +392,7 @@ def test_successful_broadcast_reports_the_channel_count(monkeypatch):
     monkeypatch.setenv(goals.BROADCAST_ENV, "1")
     monkeypatch.setenv("OLYMPUS_EGRESS_GUARD", "1")
     _stub_channels(monkeypatch)                     # telegram + discord accept
+    _allowing_guard_spy(monkeypatch)                # isolate transport count
     goals.add(A, "alice private objective", "done when shipped")
 
     lines = _run(monkeypatch, {"alice": "benign shipped evidence"})
