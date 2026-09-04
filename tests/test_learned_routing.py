@@ -165,6 +165,31 @@ def test_synthetic_rows_never_feed_the_selector(monkeypatch):
     assert pool.for_specialist("argus").model == "claude-opus-4-8"
 
 
+def test_unknown_labels_cannot_supply_incumbent_evidence(monkeypatch):
+    _enable(monkeypatch)
+    _open_gate(monkeypatch)
+    _seed("argus", "claude-haiku-4-5", ro.POSITIVE, 40)
+    rows = ro.events("real-a")
+    for i in range(40):
+        rows.append({
+            "ts": 1.0,
+            "run_id": f"bad-incumbent-{i}",
+            "user": "real-a",
+            "specialist": "argus",
+            "model": "claude-opus-4-8",
+            "role": "reasoning",
+            "task_type": "research",
+            "length_bucket": "s",
+            "outcome_signal": "unsupported-label",
+            "signal_source": ro.SRC_FEEDBACK,
+            "synthetic": False,
+        })
+    ro._save("real-a", rows)
+    lr.clear_cache()
+    pool = config.ModelPool.of(OPUS, HAIKU)
+    assert pool.for_specialist("argus").model == "claude-opus-4-8"
+
+
 def test_agreement_returns_same_model(monkeypatch):
     _enable(monkeypatch)
     _open_gate(monkeypatch)

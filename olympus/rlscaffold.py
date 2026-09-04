@@ -129,10 +129,9 @@ def collect_routing_pairs(rows: list | None = None, *,
     are excluded, so replays never manufacture a signal. Crossing is capped per
     context to bound the pair count."""
     rows = routing_outcomes._all_rows() if rows is None else rows
+    rows = routing_outcomes._labeled(rows)
     by_ctx: dict[tuple, dict] = {}
     for r in rows:
-        if r.get("synthetic"):
-            continue
         sig = r.get("outcome_signal")
         if sig == routing_outcomes.POSITIVE:
             bucket = "pos"

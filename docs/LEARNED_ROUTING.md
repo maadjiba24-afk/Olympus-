@@ -37,7 +37,7 @@ an append-only list capped at 2000, best-effort writes that never raise):
 | `task_type` | a coarse tag grouping the specialist's domain (code / research / finance / …). |
 | `length_bucket` | input-length bucket (`xs`/`s`/`m`/`l`/`xl`). |
 | `outcome_signal` | `positive` / `negative` / `approved_after_edit` / `pending`. |
-| `signal_source` | which tier produced the signal (`feedback` / `review` / `action` / `none`). |
+| `signal_source` | which tier produced the signal (`feedback` / `review` / `none`). |
 | `synthetic` | true for self-generated traffic — excluded from the gate. |
 | `ts`, `user` | timestamp and per-user namespace. |
 
@@ -57,6 +57,13 @@ A routing outcome can be labeled by more than one signal. Highest wins:
 
 `resolve_signal()` implements this order; `record_run()` emits the review-tier
 signal, and `apply_feedback()` later upgrades it to the feedback tier.
+
+Evidence is accepted only when the complete stored row matches this schema and
+the user in the row matches its per-user storage key. Unknown verdicts remain
+`pending`; unknown signals, sources, inconsistent task tags, non-finite
+timestamps, incomplete rows, and non-list store payloads are excluded from the
+gate and every learning consumer. `/api/feedback` rejects a missing or unknown
+verdict with HTTP 400 instead of manufacturing positive or negative evidence.
 
 > An action-outcome tier (from `outcomes.py`) was originally envisioned as a
 > third, lowest source. It is **not** wired: prepared actions aren't linked to a

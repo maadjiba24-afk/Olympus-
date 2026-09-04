@@ -2606,10 +2606,13 @@ class Olympus:
             return "Nothing to rate yet."
         user_msg = self.history[-2].get("content", "")
         reply = self.history[-1].get("content", "")
+        from . import routing_outcomes
+        signal = routing_outcomes.signal_from_feedback(verdict)
+        if signal == routing_outcomes.PENDING:
+            raise ValueError("feedback verdict must be thumbs up or thumbs down")
         # SPEC-04 Phase A: an explicit 👍/👎 is the top-precedence outcome
         # signal — upgrade this run's routing-outcome rows. Best-effort.
         try:
-            from . import routing_outcomes
             routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
         except Exception:
             pass
@@ -2618,14 +2621,13 @@ class Olympus:
         # A rejection is not a completion failure and an approval is not proof of
         # correctness; the record keeps those axes separate. Off-by-default no-op.
         try:
-            pos = str(verdict).lower() in ("up", "good", "positive", "+1", "👍")
             calibration.record_feedback(
                 self.last_run_id or "",
-                calibration.APPROVED if pos else calibration.REJECTED)
+                calibration.APPROVED if signal == routing_outcomes.POSITIVE
+                else calibration.REJECTED)
         except Exception:
             pass
-        verdict = "positive" if verdict.lower() in ("up", "good", "positive",
-                                                    "+1", "👍") else "negative"
+        verdict = signal
         memory.save(
             "feedback", f"{verdict} feedback",
             f"Verdict: {verdict}\n"

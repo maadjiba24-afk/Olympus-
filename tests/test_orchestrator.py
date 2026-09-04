@@ -19,6 +19,25 @@ def test_feedback_records_last_exchange():
     assert "negative" in recorded and "too vague" in recorded
 
 
+def test_invalid_feedback_is_rejected_before_any_evidence_write(monkeypatch):
+    from olympus import calibration, routing_outcomes
+
+    calls = []
+    monkeypatch.setattr(routing_outcomes, "apply_feedback",
+                        lambda *a, **k: calls.append("routing"))
+    monkeypatch.setattr(calibration, "record_feedback",
+                        lambda *a, **k: calls.append("calibration"))
+    monkeypatch.setattr(memory, "save",
+                        lambda *a, **k: calls.append("memory"))
+    bot = orchestrator.Olympus(user="tester")
+    bot.history = [{"role": "user", "content": "How do I budget?"},
+                   {"role": "assistant", "content": "Like this..."}]
+
+    with pytest.raises(ValueError, match="feedback verdict"):
+        bot.feedback("sideways")
+    assert calls == []
+
+
 def test_conversation_persists_across_instances():
     bot = orchestrator.Olympus(user="u1", conversation_id="conv-1")
     bot.history = [{"role": "user", "content": "remember me"},

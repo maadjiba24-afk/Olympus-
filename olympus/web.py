@@ -2535,8 +2535,13 @@ class Handler(BaseHTTPRequestHandler):
             if session.bot is None:
                 self._json({"error": "nothing to rate yet"}, 400)
                 return
-            note = session.bot.feedback(str(payload.get("verdict", "up")),
-                                        str(payload.get("comment", ""))[:500])
+            try:
+                note = session.bot.feedback(
+                    payload.get("verdict"),
+                    str(payload.get("comment", ""))[:500])
+            except (TypeError, ValueError) as err:
+                self._json({"error": str(err)}, 400)
+                return
             self._json({"ok": True, "note": note})
             return
 
