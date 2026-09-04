@@ -203,6 +203,18 @@ def test_on_mode_substitutes_a_qualified_cheaper_candidate(monkeypatch):
     assert row["cell"] == modelgrade.cell_key(cell)
 
 
+def test_on_mode_never_substitutes_without_decision_evidence(monkeypatch):
+    """The live seam keeps its incumbent when the audit row cannot persist."""
+    graded(monkeypatch, "on")
+    cell = cell_of(CODER)
+    seed(OPUS, cell)
+    seed(HAIKU, cell)
+    monkeypatch.setattr(routesub, "_append", lambda _row: False)
+
+    assert POOL.for_specialist(CODER) is OPUS
+    assert rows("decision") == []
+
+
 def test_on_mode_without_evidence_keeps_the_heuristic_pick(monkeypatch):
     """No measured evidence => `untested` => the fail-safe answer is the
     quality-first pick. Enabling the flags on a fresh install changes no route."""
