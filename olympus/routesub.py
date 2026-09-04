@@ -324,11 +324,20 @@ def member_id(member) -> str:
 
 
 def price(member) -> float:
-    """Rough $/Mtok for a member (live pricing when the runtime has it)."""
+    """Rough $/Mtok for a member (live pricing when the runtime has it).
+
+    Price is authorization evidence for a cost-driven substitution: an
+    unavailable or malformed value must not turn a candidate into a free one.
+    The public ``evaluate`` boundary catches this error and keeps the preferred
+    route.
+    """
     try:
-        return float(config.price_per_mtok(getattr(member, "model", "")))
-    except Exception:                                 # noqa: BLE001
-        return 0.0
+        value = float(config.price_per_mtok(getattr(member, "model", "")))
+    except Exception as err:                          # noqa: BLE001
+        raise ValueError("routing price evidence is unavailable") from err
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError("routing price evidence is invalid")
+    return value
 
 
 def mark_warm(member, *, now: float | None = None) -> None:
@@ -540,8 +549,12 @@ def ledger_path(create: bool = False) -> Path:
 
 
 def _append(row: dict) -> bool:
-    """Append one row under the cross-process lock. Never raises: telemetry
-    must not be able to break a routing decision."""
+    """Append one row under the cross-process lock.
+
+    Never raises into routing.  The Boolean is nevertheless authoritative:
+    ``_evaluate`` refuses a substitution whose decision row was not persisted,
+    while best-effort outcome telemetry may simply report ``False``.
+    """
     try:
         line = json.dumps(row, sort_keys=True, default=str)
         with proclock.lock(_LOCK, timeout=10.0):
@@ -762,22 +775,46 @@ def _security(preferred, candidate, security_class) -> tuple[bool, str]:
     by a member that egresses further (04-routing R3 §6: substitution must not
     be able to resurrect a remote model)."""
     try:
-        cls = (config.normalize_data_class(security_class)
-               or config.default_data_class())
-    except Exception:                                 # noqa: BLE001
-        cls = str(security_class or "").strip().lower() or "public"
-    if cls not in allowed_classes():
-        return False, (f"data class '{cls}' is not substitutable "
-                       f"(allowed: {', '.join(allowed_classes())})")
-    cand_local = _is_local(candidate)
-    try:
+        if security_class is None:
+            supplied = False
+        elif isinstance(security_class, str):
+            supplied = bool(security_class.strip())
+        else:
+            return False, ("explicit data class is invalid — fail-closed: "
+                           "no substitution")
+
+        if supplied:
+            cls = config.normalize_data_class(security_class)
+            if cls is None:
+                return False, ("explicit data class is invalid — fail-closed: "
+                               "no substitution")
+        else:
+            default = config.default_data_class()
+            cls = config.normalize_data_class(default)
+            if cls is None:
+                return False, ("default data-class policy is invalid — "
+                               "fail-closed: no substitution")
+
+        classes = allowed_classes()
+        if cls not in classes:
+            return False, (f"data class '{cls}' is not substitutable "
+                           f"(allowed: {', '.join(classes)})")
+
+        # Do not use `_is_local` here: its conservative False fallback is safe
+        # for a candidate, but could erase the fact that the incumbent is local
+        # and thereby authorize a local-to-remote substitution.  This policy
+        # boundary needs affirmative answers for both members.
+        cand_local = bool(config.member_is_local(candidate))
+        preferred_local = bool(config.member_is_local(preferred))
         local_only = bool(config.data_class_local_only(cls))
     except Exception:                                 # noqa: BLE001
-        local_only = False
+        return False, ("data-class or locality policy is unavailable — "
+                       "fail-closed: no substitution")
+
     if local_only and not cand_local:
         return False, (f"data class '{cls}' is local-only and "
                        f"{member_id(candidate)} is not a local member")
-    if _is_local(preferred) and not cand_local:
+    if preferred_local and not cand_local:
         return False, ("substitution would move work from a local member to "
                        f"{member_id(candidate)}, which is not local")
     return True, f"data class '{cls}' permits substitution"
@@ -948,7 +985,16 @@ def _evaluate(current: str, *, members, specialist, preferred, cell,
         selected=(candidate if substituted else preferred),
     )
     recorded = _append(dec.to_row())
-    return Decision(**{**dec.__dict__, "recorded": recorded})
+    if not recorded:
+        # The ledger is part of the authorization contract, not optional
+        # telemetry: without the row there is no durable evidence of the
+        # preferred route, policy checks, downgrade or disclosure.  Preserve
+        # availability by keeping the already-selected quality-first route.
+        return _inert(
+            specialist, preferred, current,
+            "routing decision could not be recorded; keeping the preferred "
+            "route (fail-closed)")
+    return Decision(**{**dec.__dict__, "recorded": True})
 
 
 def choose(members, specialist: str, heuristic_pick, *, cell=None, **kwargs):

@@ -282,6 +282,37 @@ def test_precondition_security_class(env):
     assert_only_blocker(decide(security_class="restricted"), "security_class")
 
 
+@pytest.mark.parametrize("bad_class", ["secret", "public-ish", 7, object()])
+def test_invalid_explicit_security_class_never_defaults_to_public(
+        env, bad_class):
+    """Only an absent class may use the configured default.
+
+    A present-but-invalid classification is untrusted policy evidence, not an
+    unclassified public request, and therefore cannot authorize a route swap.
+    """
+    seed_pair()
+    assert_only_blocker(decide(security_class=bad_class), "security_class")
+
+
+@pytest.mark.parametrize("policy_name,security_class", [
+    ("normalize_data_class", "internal"),
+    ("default_data_class", ""),
+    ("data_class_local_only", "internal"),
+    ("member_is_local", "internal"),
+])
+def test_security_policy_failure_blocks_substitution(
+        monkeypatch, env, policy_name, security_class):
+    """Unavailable classification/locality policy is a refusal, never ALLOW."""
+    seed_pair()
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("routing security policy unavailable")
+
+    monkeypatch.setattr(config, policy_name, boom)
+    assert_only_blocker(decide(security_class=security_class),
+                        "security_class")
+
+
 def test_precondition_security_never_leaves_a_local_member(monkeypatch, env):
     """Substitution can never move work from a local member to a remote one
     (04-routing R3 §6 — it must not be able to resurrect a remote model)."""
@@ -594,6 +625,50 @@ def test_choose_is_inert_when_off(monkeypatch, env):
     monkeypatch.setenv("OLYMPUS_ROUTESUB", "off")
     seed_pair()
     assert routesub.choose([OPUS, HAIKU], "hephaestus", OPUS, cell=CELL) is None
+
+
+@pytest.mark.parametrize("bad_price", ["raises", -0.1, float("nan"),
+                                        float("inf")])
+def test_bad_pricing_evidence_cannot_authorize_a_candidate(
+        monkeypatch, env, bad_price):
+    """Missing or malformed cost evidence keeps the quality-first route.
+
+    Returning 0.0 on a candidate lookup failure made that candidate appear
+    cheaper than every healthy route and could authorize a substitution.
+    """
+    seed_pair()
+    routesub.mark_warm(HAIKU, now=1.0)
+    real_price = config.price_per_mtok
+
+    def fail_candidate_price(model):
+        if "haiku" in str(model).lower():
+            if bad_price == "raises":
+                raise RuntimeError("pricing unavailable")
+            return bad_price
+        return real_price(model)
+
+    monkeypatch.setattr(config, "price_per_mtok", fail_candidate_price)
+    dec = decide(context_tokens=2000)
+    assert not dec.substituted
+    assert dec.selected is OPUS
+    assert dec.recorded is False
+    assert "evaluation failed" in dec.reason
+
+
+def test_unrecorded_decision_cannot_change_the_live_route(monkeypatch, env):
+    """A route change without its required audit row must fail closed."""
+    seed_pair()
+    monkeypatch.setattr(routesub, "_append", lambda _row: False)
+
+    dec = decide(context_tokens=2000)
+
+    assert not dec.substituted
+    assert not dec.counterfactual
+    assert dec.selected is OPUS
+    assert dec.recorded is False
+    assert dec.decision_id == ""
+    assert "could not be recorded" in dec.reason
+    assert not routesub.ledger_path().exists()
 
 
 def test_evaluate_never_raises_and_keeps_the_preferred_route(env):
