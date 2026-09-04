@@ -21,6 +21,11 @@ Doctrine, inherited from outcomes.py and enforced here:
   * **Everything is bounded.** The telemetry log is capped per feature; a
     review is idempotent and cheap; a broken feature's telemetry can never
     take down the reviewer (each step is isolated).
+  * **Security-policy evidence fails closed.** A missing blob is the valid
+    first-run state, but malformed stored state is never rewritten as empty
+    telemetry.  Security consumers can therefore distinguish "not tuned yet"
+    from "the previously tightened policy cannot be trusted" and withhold the
+    capability rather than silently restoring its loose defaults.
 
 Storage: the shared store backend, one blob, capped — same substrate as
 outcomes.py.
@@ -29,6 +34,7 @@ outcomes.py.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -51,6 +57,7 @@ def _guard():
 
 _NS = "evolve"
 _KEY = "telemetry"
+_QUARANTINE_KEY = "telemetry.corrupt"
 _LOCK = threading.Lock()
 _MAX_PER_FEATURE = 500          # bounded ring per feature (oldest dropped)
 _MIN_SAMPLES = 8                # don't infer from a tiny history
@@ -60,6 +67,15 @@ _DEGRADE_FLOOR = 0.75           # success rate below this warrants attention
 OK = "ok"
 FAIL = "fail"
 DEGRADED = "degraded"           # produced a result, but a worse/fallback one
+
+
+class EvolutionStateError(ValueError):
+    """Stored evolution evidence is malformed or cannot be trusted.
+
+    Callers that use evolution only for quality/resource tuning may fall back
+    to their static defaults.  Security consumers must treat this as missing
+    policy evidence and withhold the capability that evidence would widen.
+    """
 
 
 # --- tunable-parameter registry --------------------------------------------
@@ -179,14 +195,39 @@ for _t in (
 
 # --- telemetry --------------------------------------------------------------
 
+def _validate_state(data: dict) -> None:
+    """Validate the portion of the shared blob that can influence tunables."""
+    for feature, feature_state in data.items():
+        if not isinstance(feature_state, dict):
+            raise EvolutionStateError(
+                f"evolution feature {feature!r} must be an object")
+        if "params" not in feature_state:
+            continue
+        params = feature_state["params"]
+        if not isinstance(params, dict):
+            raise EvolutionStateError(
+                f"evolution parameters for {feature!r} must be an object")
+        for name, value in params.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise EvolutionStateError(
+                    f"evolution parameter {feature}.{name} must be numeric")
+            if not math.isfinite(float(value)):
+                raise EvolutionStateError(
+                    f"evolution parameter {feature}.{name} must be finite")
+
+
 def _load() -> dict:
     blob = store.backend().get(_NS, _KEY)
     if not blob:
         return {}
     try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return {}
+        data = json.loads(blob)
+    except (TypeError, ValueError) as err:
+        raise EvolutionStateError("evolution state is not valid JSON") from err
+    if not isinstance(data, dict):
+        raise EvolutionStateError("evolution state root must be an object")
+    _validate_state(data)
+    return data
 
 
 def _save(data: dict) -> None:
@@ -292,15 +333,34 @@ def health(feature: str | None = None) -> dict:
 def current(feature: str, name: str) -> float:
     """The current auto-tuned value of a registered parameter (its default
     until the reviewer has adjusted it). Features call this to pick up their
-    self-tuned setting; a value is always within [lo, hi]."""
+    self-tuned setting; a value is always within [lo, hi]. Malformed evidence
+    raises EvolutionStateError instead of masquerading as an untuned default."""
     t = _TUNABLES.get(f"{feature}.{name}")
     if t is None:
         raise KeyError(f"no tunable '{feature}.{name}'")
     data = _load()
-    val = ((data.get(feature) or {}).get("params", {}) or {}).get(name)
-    if val is None:
+    feature_state = data.get(feature)
+    if feature_state is None:
         return t.default
-    return max(t.lo, min(t.hi, float(val)))
+    if not isinstance(feature_state, dict):
+        raise EvolutionStateError(f"evolution feature {feature!r} is malformed")
+    if "params" not in feature_state:
+        return t.default
+    params = feature_state["params"]
+    if not isinstance(params, dict):
+        raise EvolutionStateError(
+            f"evolution parameters for {feature!r} must be an object")
+    if name not in params:
+        return t.default
+    val = params[name]
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise EvolutionStateError(
+            f"evolution parameter {feature}.{name} must be numeric")
+    val = float(val)
+    if not math.isfinite(val):
+        raise EvolutionStateError(
+            f"evolution parameter {feature}.{name} must be finite")
+    return max(t.lo, min(t.hi, val))
 
 
 def _set_param(feature: str, name: str, value: float) -> None:
@@ -410,13 +470,51 @@ def reset(feature: str | None = None) -> str:
     return ("Reset to defaults (widened back): " + ", ".join(sorted(cleared)))
 
 
+def repair() -> str:
+    """Explicitly quarantine malformed state and restore first-run defaults.
+
+    This is intentionally separate from best-effort telemetry and from the
+    ordinary selective reset path. Recovery can widen previously tightened
+    security knobs, so it must be a deliberate operator command. The original
+    bytes remain available under `_QUARANTINE_KEY` for diagnosis.
+    """
+    with _guard(), _LOCK:
+        backend = store.backend()
+        blob = backend.get(_NS, _KEY)
+        if not blob:
+            return "No evolution state exists; no repair was needed."
+        try:
+            data = json.loads(blob)
+            if not isinstance(data, dict):
+                raise EvolutionStateError(
+                    "evolution state root must be an object")
+            _validate_state(data)
+        except (TypeError, ValueError):
+            backend.put(_NS, _QUARANTINE_KEY, blob)
+            backend.put(_NS, _KEY, b"{}")
+            return ("Malformed evolution state quarantined; all tunables "
+                    "explicitly restored to registered defaults.")
+    return "Evolution state is valid; no repair was performed."
+
+
 def summary() -> dict:
     """Compact health board for the admin panel / CLI."""
-    h = health()
-    return {"features": h,
-            "tunables": {k: {"lo": t.lo, "hi": t.hi,
-                             "current": current(t.feature, t.name)}
-                         for k, t in _TUNABLES.items()}}
+    try:
+        h = health()
+        tunables = {k: {"lo": t.lo, "hi": t.hi,
+                        "current": current(t.feature, t.name)}
+                    for k, t in _TUNABLES.items()}
+    except Exception:
+        return {
+            "state": {
+                "ok": False,
+                "reason": "evolution policy evidence is unreadable or malformed",
+                "recovery": "run `olympus evolve repair` as the operator",
+            },
+            "features": {},
+            "tunables": {},
+        }
+    return {"state": {"ok": True}, "features": h, "tunables": tunables}
 
 
 # --- convenience wrapper for instrumenting a call --------------------------

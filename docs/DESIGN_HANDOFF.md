@@ -127,3 +127,16 @@ auto-*loosening* one never is, so only a human widens it back
 (`olympus evolve reset operator`). This is the same principle as the handoff and
 the earned-autonomy invariants: the machine may move toward caution on its own;
 it may move toward freedom only with a human's hand.
+
+The stored policy is part of that security boundary. A genuinely absent
+evolution blob means a first run and uses the registered defaults. Invalid
+JSON, a non-object root, malformed parameter containers, non-numeric values,
+non-finite values, and storage read failures do **not** mean "use defaults": a
+stricter policy may have been lost. They mark the policy evidence unavailable,
+force every domain to probation, and disable the earned-autonomy boost until an
+operator repairs the state. Best-effort telemetry also refuses to overwrite the
+bad blob, preserving the evidence for diagnosis. This prevents corruption from
+becoming an unauthorized equivalent of `olympus evolve reset operator`.
+The explicit `olympus evolve repair` command is the recovery boundary: it
+quarantines the original bytes and restores registered defaults. Because that
+can widen previously tightened knobs, no background path invokes it.

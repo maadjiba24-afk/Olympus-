@@ -21,6 +21,11 @@ Two hard invariants keep this inside the moat:
      no mutable trust counter for a prompt-injected agent to inflate, and the
      result is always re-capped by the conversation's capability profile — so an
      ingesting or guest run can never be lifted by it.
+  3. The self-tightened policy is evidence, not a hint. If its stored state is
+     malformed or unavailable, Olympus cannot know whether stricter thresholds
+     were previously in force, so the earned-autonomy boost is disabled. Loose
+     defaults are used only for the valid first-run state; widening remains an
+     explicit human reset.
 
 It is OFF until opted in (the ``OLYMPUS_EARNED_AUTONOMY`` instance switch or a
 per-user setting via ``olympus earned-autonomy on``), and it never bypasses a
@@ -30,7 +35,9 @@ caps all still apply underneath it.
 
 from __future__ import annotations
 
+import math
 import time
+from dataclasses import dataclass
 
 from . import actions, config, prefs
 
@@ -60,30 +67,77 @@ _COOLDOWN_SECS = 3600            # 1h to settle after any surprise
 _DAILY_AUTO_CEILING = 25         # max earned auto-runs per domain per day
 
 
-def _tuned(name: str, default: float) -> float:
-    """The current value of a tighten-only earned-autonomy knob, as self-tuned by
-    feature evolution (`evolve.py`, feature 'operator'). Defaults to the constant
-    when evolution is unavailable. The reviewer can only ever move these toward
-    MORE caution (higher bar / longer cooldown / lower ceiling); a human widens
-    them back with `evolve reset`. So reading the live value can only tighten the
-    gate, never loosen it below these defaults."""
+@dataclass(frozen=True)
+class _AutonomyPolicy:
+    establish_after: int
+    cooldown_secs: float
+    daily_ceiling: int
+    evidence_ok: bool
+
+
+_SAFE_POLICY = _AutonomyPolicy(
+    establish_after=100,
+    cooldown_secs=86400.0,
+    daily_ceiling=5,
+    evidence_ok=False,
+)
+
+
+def _policy() -> _AutonomyPolicy:
+    """Load the three tighten-only knobs as one security decision.
+
+    A missing evolution blob is a valid first-run state and `evolve.current`
+    returns the registered defaults.  An unreadable blob or malformed value is
+    different: it may have contained stricter values, so falling back to the
+    loose defaults would silently widen autonomy without a human reset.  In
+    that case return a marked safe policy; callers withhold the boost entirely.
+    """
     try:
         from . import evolve
-        return evolve.current("operator", name)
+        establish = float(evolve.current("operator", "establish_after"))
+        cooldown = float(evolve.current("operator", "cooldown_secs"))
+        ceiling = float(evolve.current("operator", "daily_ceiling"))
+        if not all(math.isfinite(v) for v in (establish, cooldown, ceiling)):
+            return _SAFE_POLICY
+        if not (20 <= establish <= 100):
+            return _SAFE_POLICY
+        if not (3600 <= cooldown <= 86400):
+            return _SAFE_POLICY
+        if not (5 <= ceiling <= 25):
+            return _SAFE_POLICY
+        return _AutonomyPolicy(
+            establish_after=int(establish),
+            cooldown_secs=cooldown,
+            daily_ceiling=int(ceiling),
+            evidence_ok=True,
+        )
     except Exception:
-        return default
+        return _SAFE_POLICY
+
+
+def policy_status() -> dict:
+    """The live earned-autonomy policy and whether its evidence is usable."""
+    policy = _policy()
+    return {
+        "evidence_ok": policy.evidence_ok,
+        "evidence_state": "valid" if policy.evidence_ok else "unavailable",
+        "boost_available": policy.evidence_ok,
+        "establish_after": policy.establish_after,
+        "cooldown_secs": policy.cooldown_secs,
+        "daily_ceiling": policy.daily_ceiling,
+    }
 
 
 def establish_after() -> int:
-    return int(_tuned("establish_after", _ESTABLISHED_AFTER))
+    return _policy().establish_after
 
 
 def cooldown_secs() -> float:
-    return float(_tuned("cooldown_secs", _COOLDOWN_SECS))
+    return _policy().cooldown_secs
 
 
 def daily_ceiling() -> int:
-    return int(_tuned("daily_ceiling", _DAILY_AUTO_CEILING))
+    return _policy().daily_ceiling
 
 _PREF_KEY = "earned_autonomy"
 
@@ -147,13 +201,19 @@ def streak(user: str, domain: str) -> int:
     return s
 
 
-def tier(user: str, domain: str) -> int:
-    s = streak(user, domain)
-    if s >= establish_after():
+def _tier_for_streak(clean_streak: int, policy: _AutonomyPolicy) -> int:
+    if not policy.evidence_ok:
+        return PROBATION
+    if clean_streak >= policy.establish_after:
         return ESTABLISHED
-    if s >= _TRUSTED_AFTER:
+    if clean_streak >= _TRUSTED_AFTER:
         return TRUSTED
     return PROBATION
+
+
+def tier(user: str, domain: str) -> int:
+    policy = _policy()
+    return _tier_for_streak(streak(user, domain), policy)
 
 
 def tier_name(t: int) -> str:
@@ -166,6 +226,19 @@ def _is_surprise(a) -> bool:
     return a.status in (actions.FAILED, actions.REJECTED, actions.UNDONE)
 
 
+def _cooling_remaining(user: str, domain: str, now: float,
+                       cooldown: float) -> float:
+    last = 0.0
+    for action in actions.history(user, limit=1000):
+        if (_is_operate(action) and _domain_of(action) == domain
+                and _is_surprise(action)):
+            last = max(last, getattr(action, "created_at", 0.0) or 0.0)
+    if not last:
+        return 0.0
+    remaining = cooldown - (now - last)
+    return remaining if remaining > 0 else 0.0
+
+
 def cooling_off(user: str, domain: str, *, now: float | None = None) -> float:
     """Seconds remaining in the post-surprise cooling-off window for `domain`
     (0.0 when the domain has settled). While this is positive, earned trust is
@@ -175,14 +248,8 @@ def cooling_off(user: str, domain: str, *, now: float | None = None) -> float:
     if not domain:
         return 0.0
     now = time.time() if now is None else now
-    last = 0.0
-    for a in actions.history(user, limit=1000):
-        if _is_operate(a) and _domain_of(a) == domain and _is_surprise(a):
-            last = max(last, getattr(a, "created_at", 0.0) or 0.0)
-    if not last:
-        return 0.0
-    remaining = cooldown_secs() - (now - last)
-    return remaining if remaining > 0 else 0.0
+    return _cooling_remaining(
+        user, domain, now, _policy().cooldown_secs)
 
 
 def auto_runs_today(user: str, domain: str, *, now: float | None = None) -> int:
@@ -218,14 +285,19 @@ def effective_autonomy(user: str, domain: str, *,
     base = actions.autonomy_level(user)
     if not enabled(user):
         return base
+    policy = _policy()
+    if not policy.evidence_ok:
+        return base
     # A site that recently surprised us must settle before it earns anything back…
-    if cooling_off(user, domain, now=now) > 0:
+    domain = (domain or "").strip().lower()
+    now = time.time() if now is None else now
+    if _cooling_remaining(user, domain, now, policy.cooldown_secs) > 0:
         return base
     # …and even a proven site can't fire an unbounded number of unattended
     # actions in one day — past the ceiling it falls back to asking.
-    if auto_runs_today(user, domain, now=now) >= daily_ceiling():
+    if auto_runs_today(user, domain, now=now) >= policy.daily_ceiling:
         return base
-    t = tier(user, domain)
+    t = _tier_for_streak(streak(user, domain), policy)
     if t >= ESTABLISHED:
         boosted = max(base, actions.L4_STANDING)     # auto-run standing reversible flows
     elif t >= TRUSTED:
@@ -256,18 +328,32 @@ def report(user: str) -> str:
     recently snapped it back to probation."""
     header = ("Earned autonomy: ON" if enabled(user) else
               "Earned autonomy: off (your global autonomy level governs every site)")
+    policy = _policy()
+    if enabled(user) and not policy.evidence_ok:
+        header += ("\n  Policy evidence unavailable — earned-autonomy boost "
+                   "disabled; explicit approval remains required.")
     # Live thresholds — self-tightened by feature evolution when the operator
     # degrades. Surface the tightening so the widening the envelope is visible.
-    est_bar, ceiling = establish_after(), daily_ceiling()
-    if est_bar > _ESTABLISHED_AFTER or ceiling < _DAILY_AUTO_CEILING:
+    est_bar, ceiling = policy.establish_after, policy.daily_ceiling
+    if (policy.evidence_ok and
+            (est_bar > _ESTABLISHED_AFTER or ceiling < _DAILY_AUTO_CEILING)):
         header += (f"\n  (auto-tightened: established at {est_bar} clean runs, "
                    f"ceiling {ceiling}/day — widen with `evolve reset operator`)")
-    graded = [(tier(user, d), streak(user, d), d) for d in domains(user)]
+    graded = []
+    for domain in domains(user):
+        clean_streak = streak(user, domain)
+        graded.append((_tier_for_streak(clean_streak, policy),
+                       clean_streak, domain))
     if not graded:
         return header + "\n  No governed site history yet."
     graded.sort(key=lambda r: (-r[0], -r[1], r[2]))
     lines = [header]
     for t, s, d in graded:
+        if not policy.evidence_ok:
+            lines.append(
+                f"  • {d}: probation (clean streak {s} not used while "
+                "policy evidence is unavailable)")
+            continue
         if t == ESTABLISHED:
             toward = ""
         else:

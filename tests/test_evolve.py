@@ -6,7 +6,7 @@ impose) anything else. A runaway loop must be structurally impossible."""
 
 import pytest
 
-from olympus import config, curator, evolve, goals, moa
+from olympus import config, curator, evolve, goals, moa, store
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +29,78 @@ def test_record_and_health():
 def test_invalid_outcome_ignored():
     evolve.record("x", "nonsense")
     assert evolve.health("x")["x"] == {"samples": 0}
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        b"{not-json",
+        b"[]",
+        b'{"operator":{"params":[]}}',
+        b'{"operator":{"params":{"daily_ceiling":"25"}}}',
+        b'{"operator":{"params":{"daily_ceiling":NaN}}}',
+    ],
+)
+def test_malformed_tunable_evidence_is_rejected(blob):
+    store.backend().put(evolve._NS, evolve._KEY, blob)
+
+    with pytest.raises(evolve.EvolutionStateError):
+        evolve.current("operator", "daily_ceiling")
+
+
+def test_best_effort_telemetry_does_not_overwrite_corrupt_policy_evidence():
+    corrupt = b"{not-json"
+    store.backend().put(evolve._NS, evolve._KEY, corrupt)
+
+    # A later telemetry event must not turn an unreadable, previously tightened
+    # security policy into a new valid blob containing the loose defaults.
+    evolve.record("operator", evolve.OK)
+
+    assert store.backend().get(evolve._NS, evolve._KEY) == corrupt
+
+
+def test_operator_repair_quarantines_corruption_before_restoring_defaults():
+    corrupt = b'{"operator":{"params":{"daily_ceiling":"broken"}}}'
+    store.backend().put(evolve._NS, evolve._KEY, corrupt)
+
+    out = evolve.repair()
+
+    assert "quarantined" in out.lower()
+    assert store.backend().get(evolve._NS, evolve._QUARANTINE_KEY) == corrupt
+    assert store.backend().get(evolve._NS, evolve._KEY) == b"{}"
+    assert evolve.current("operator", "daily_ceiling") == 25
+
+
+def test_operator_repair_never_rewrites_valid_state():
+    evolve._set_param("operator", "daily_ceiling", 20)
+    before = store.backend().get(evolve._NS, evolve._KEY)
+
+    assert "no repair" in evolve.repair().lower()
+    assert store.backend().get(evolve._NS, evolve._KEY) == before
+    assert store.backend().get(evolve._NS, evolve._QUARANTINE_KEY) is None
+
+
+def test_status_surfaces_corrupt_evidence_and_the_explicit_recovery():
+    store.backend().put(evolve._NS, evolve._KEY, b"{not-json")
+
+    status = evolve.summary()
+
+    assert status["state"]["ok"] is False
+    assert "evolve repair" in status["state"]["recovery"]
+    assert status["tunables"] == {}
+
+
+def test_status_surfaces_an_unreadable_backend(monkeypatch):
+    monkeypatch.setattr(
+        evolve,
+        "_load",
+        lambda: (_ for _ in ()).throw(OSError("store offline")),
+    )
+
+    status = evolve.summary()
+
+    assert status["state"]["ok"] is False
+    assert "unreadable" in status["state"]["reason"]
 
 
 def test_telemetry_is_bounded():

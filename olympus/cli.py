@@ -600,10 +600,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("curate", help="grade the skill library; prune what a "
                                   "benchmark proves safe to remove")
     p_evolve = sub.add_parser("evolve", help="feature self-evolution: health "
-                                             "board, run the review, or reset "
-                                             "auto-tuned params to defaults")
+                                             "board, review/reset tunables, "
+                                             "or repair malformed state")
     p_evolve.add_argument("action", nargs="?", default="status",
-                          choices=["status", "review", "reset", "log"])
+                          choices=["status", "review", "reset", "repair", "log"])
     p_evolve.add_argument("feature", nargs="?", default=None,
                           help="feature to reset/filter (default: all)")
     p_sleep = sub.add_parser("sleeptime",
@@ -2292,6 +2292,8 @@ def main(argv: list[str] | None = None) -> int:
             print(evolve.review())
         elif args.action == "reset":
             print(evolve.reset(args.feature))
+        elif args.action == "repair":
+            print(evolve.repair())
         elif args.action == "log":
             import json as _json
             for e in evolve.events(args.feature):

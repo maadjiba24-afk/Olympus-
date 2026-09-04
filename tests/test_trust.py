@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from olympus import actions, capprofile, config, memory, prefs, trust
+from olympus import actions, capprofile, config, memory, prefs, store, trust
 
 
 @pytest.fixture(autouse=True)
@@ -209,6 +209,58 @@ def test_operator_degradation_tightens_trust_knobs_and_can_demote():
     # A human widens it back; the site is established again.
     evolve.reset("operator")
     assert trust.tier(u, "proven.com") == trust.ESTABLISHED
+
+
+def test_unreadable_policy_evidence_disables_the_autonomy_boost(monkeypatch):
+    from olympus import evolve
+
+    u = "policy-read-error"
+    trust.set_enabled(u, True)
+    for i in range(20):
+        _run(u, "proven.com", actions.EXECUTED, ts=100 + i)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("evolution store unavailable")
+
+    monkeypatch.setattr(evolve, "current", unreadable)
+
+    assert trust.policy_status()["evidence_state"] == "unavailable"
+    assert trust.policy_status()["boost_available"] is False
+    assert trust.tier(u, "proven.com") == trust.PROBATION
+    assert trust.effective_autonomy(u, "proven.com") == actions.autonomy_level(u)
+    assert "policy evidence unavailable" in trust.report(u).lower()
+
+
+def test_corrupt_policy_evidence_disables_the_autonomy_boost():
+    from olympus import evolve
+
+    u = "policy-corrupt"
+    trust.set_enabled(u, True)
+    for i in range(20):
+        _run(u, "proven.com", actions.EXECUTED, ts=100 + i)
+
+    store.backend().put(evolve._NS, evolve._KEY, b"{not-json")
+
+    assert trust.tier(u, "proven.com") == trust.PROBATION
+    assert trust.effective_autonomy(u, "proven.com") == actions.autonomy_level(u)
+
+
+def test_malformed_policy_value_disables_the_autonomy_boost():
+    from olympus import evolve
+
+    u = "policy-malformed"
+    trust.set_enabled(u, True)
+    for i in range(20):
+        _run(u, "proven.com", actions.EXECUTED, ts=100 + i)
+
+    store.backend().put(
+        evolve._NS,
+        evolve._KEY,
+        b'{"operator":{"params":{"daily_ceiling":"twenty-five"}}}',
+    )
+
+    assert trust.tier(u, "proven.com") == trust.PROBATION
+    assert trust.effective_autonomy(u, "proven.com") == actions.autonomy_level(u)
 
 
 # --- surfaces ------------------------------------------------------------
