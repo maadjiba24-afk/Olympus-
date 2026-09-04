@@ -2807,7 +2807,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Routing-outcome telemetry (SPEC-04 Phase A — passive; changes no "
               "routing)")
         print(f"  rows total       : {s['total_rows']} "
-              f"(synthetic {s['synthetic_rows']}, pending {s['pending_rows']})")
+              f"(synthetic {s['synthetic_rows']}, pending {s['pending_rows']}, "
+              f"invalid {s['invalid_rows']})")
         print(f"  labeled (real)   : {s['labeled']}")
         print(f"  distinct sources : {s['distinct_users']}")
         if s["task_types"]:

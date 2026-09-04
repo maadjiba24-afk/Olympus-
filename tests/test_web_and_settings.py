@@ -6,7 +6,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
-from olympus import config, web
+from olympus import config, orchestrator, web
 from olympus.openai_compat import extract_json, _to_openai_tools
 from olympus import tools
 
@@ -126,6 +126,22 @@ def test_web_access_token(server, monkeypatch):
 def test_web_feedback_requires_history(server):
     with pytest.raises(urllib.error.HTTPError) as err:
         _post(server, "/api/feedback", {"session": "fresh", "verdict": "up"})
+    assert err.value.code == 400
+
+
+@pytest.mark.parametrize("payload", [
+    {"session": "rated-missing"},
+    {"session": "rated-invalid", "verdict": "sideways"},
+])
+def test_web_feedback_rejects_missing_or_invalid_verdict(server, payload):
+    session = web._session(payload["session"])
+    session.bot = orchestrator.Olympus(user="rated-user")
+    session.bot.history = [
+        {"role": "user", "content": "Question"},
+        {"role": "assistant", "content": "Answer"},
+    ]
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _post(server, "/api/feedback", payload)
     assert err.value.code == 400
 
 

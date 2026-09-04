@@ -23,6 +23,7 @@ test traffic and replays can never satisfy the gate.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 
@@ -42,6 +43,7 @@ NEGATIVE = "negative"                 # 👎 feedback / review retry
 APPROVED_AFTER_EDIT = "approved_after_edit"
 PENDING = "pending"                   # no outcome signal yet
 SIGNALS = (POSITIVE, NEGATIVE, APPROVED_AFTER_EDIT, PENDING)
+LABELED_SIGNALS = (POSITIVE, NEGATIVE, APPROVED_AFTER_EDIT)
 
 # --- signal source tier (for precedence + provenance) ------------------------
 # Precedence: explicit feedback > verify/review verdict. An action-outcome tier
@@ -51,6 +53,7 @@ SIGNALS = (POSITIVE, NEGATIVE, APPROVED_AFTER_EDIT, PENDING)
 SRC_FEEDBACK = "feedback"
 SRC_REVIEW = "review"
 SRC_NONE = "none"
+LABELED_SOURCES = (SRC_FEEDBACK, SRC_REVIEW)
 
 # --- Phase B data gate (see docs/LEARNED_ROUTING.md for the justification) ----
 GATE_MIN_LABELED = 300                # labeled (non-pending) real outcomes
@@ -92,13 +95,22 @@ def length_bucket(text: str) -> str:
 
 
 def signal_from_verdict(verdict: str) -> str:
-    """Map a review/verify verdict to an outcome signal."""
-    return POSITIVE if str(verdict).lower() == "approve" else NEGATIVE
+    """Map only supported review/verify verdicts to an outcome signal."""
+    value = str(verdict).strip().lower()
+    if value == "approve":
+        return POSITIVE
+    if value == "retry":
+        return NEGATIVE
+    return PENDING
 
 
 def signal_from_feedback(verdict: str) -> str:
-    return POSITIVE if str(verdict).lower() in (
-        "up", "good", "positive", "+1", "👍") else NEGATIVE
+    value = str(verdict).strip().lower()
+    if value in ("up", "good", "positive", "+1", "👍"):
+        return POSITIVE
+    if value in ("down", "bad", "negative", "-1", "👎"):
+        return NEGATIVE
+    return PENDING
 
 
 def resolve_signal(*, feedback: str | None = None,
@@ -106,10 +118,14 @@ def resolve_signal(*, feedback: str | None = None,
     """Pick the outcome signal by precedence: explicit feedback > verify/review
     verdict. Returns (signal, source); (PENDING, SRC_NONE) when neither source
     has a signal yet."""
-    if feedback:
-        return feedback, SRC_FEEDBACK
-    if review:
-        return review, SRC_REVIEW
+    if feedback is not None:
+        if feedback in LABELED_SIGNALS:
+            return feedback, SRC_FEEDBACK
+        return PENDING, SRC_NONE
+    if review is not None:
+        if review in LABELED_SIGNALS:
+            return review, SRC_REVIEW
+        return PENDING, SRC_NONE
     return PENDING, SRC_NONE
 
 
@@ -119,8 +135,9 @@ def _load(user: str) -> list:
     if not blob:
         return []
     try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
+        decoded = json.loads(blob)
+        return decoded if isinstance(decoded, list) else []
+    except (TypeError, ValueError, json.JSONDecodeError):
         return []
 
 
@@ -140,9 +157,9 @@ def record_run(user: str, run_id: str, message: str, specialists: list[str], *,
     Best-effort: never raises into the caller. Returns the number of rows added.
     """
     try:
-        review_sig = signal_from_verdict(review_verdict) if review_verdict else None
+        review_sig = (signal_from_verdict(review_verdict)
+                      if review_verdict is not None else None)
         signal, source = resolve_signal(review=review_sig)
-        tt = None
         rows_new = []
         now = time.time()
         for key in specialists:
@@ -178,11 +195,15 @@ def apply_feedback(user: str, run_id: str, verdict: str) -> int:
         return 0
     try:
         sig = signal_from_feedback(verdict)
+        if sig == PENDING:
+            return 0
         updated = 0
+        owner = memory.safe_id(user)
         with _LOCK:
             log = _load(user)
             for row in log:
-                if row.get("run_id") == run_id:
+                if (_valid_row(row) and row["user"] == owner
+                        and row["run_id"] == run_id):
                     row["outcome_signal"] = sig
                     row["signal_source"] = SRC_FEEDBACK
                     updated += 1
@@ -208,19 +229,58 @@ def _all_rows() -> list:
             if not blob:
                 continue
             try:
-                out.extend(json.loads(blob))
-            except (ValueError, json.JSONDecodeError):
+                decoded = json.loads(blob)
+                if not isinstance(decoded, list):
+                    continue
+                # The storage key is the provenance boundary. A row claiming a
+                # different user must not manufacture a second gate source.
+                out.extend(r for r in decoded
+                           if isinstance(r, dict) and r.get("user") == key)
+            except (TypeError, ValueError, json.JSONDecodeError):
                 continue
     except Exception:
         pass
     return out
 
 
+def _valid_row(row) -> bool:
+    """Whether a row matches the schema emitted by :func:`record_run`.
+
+    Stored telemetry is evidence, not configuration. Unknown enum values,
+    incomplete rows, and inconsistent derived fields therefore fail closed and
+    remain visible only in the raw row count; they cannot feed a gate, selector,
+    or offline preference dataset.
+    """
+    if not isinstance(row, dict) or not isinstance(row.get("synthetic"), bool):
+        return False
+    ts = row.get("ts")
+    if (isinstance(ts, bool) or not isinstance(ts, (int, float))
+            or not math.isfinite(ts)):
+        return False
+    required = ("run_id", "user", "specialist", "model", "role",
+                "task_type", "length_bucket")
+    if any(not isinstance(row.get(k), str) or not row[k].strip()
+           for k in required):
+        return False
+    if row["user"] != memory.safe_id(row["user"]):
+        return False
+    if row["task_type"] != task_type(row["specialist"]):
+        return False
+    if row["length_bucket"] not in ("xs", "s", "m", "l", "xl"):
+        return False
+    signal = row.get("outcome_signal")
+    source = row.get("signal_source")
+    if signal == PENDING:
+        return source == SRC_NONE
+    return signal in LABELED_SIGNALS and source in LABELED_SOURCES
+
+
 def _labeled(rows: list) -> list:
     """Rows that count toward the gate: a real (non-synthetic) outcome that has
     an actual signal (not pending)."""
     return [r for r in rows
-            if not r.get("synthetic") and r.get("outcome_signal") != PENDING]
+            if _valid_row(r) and r["synthetic"] is False
+            and r["outcome_signal"] in LABELED_SIGNALS]
 
 
 def stats(rows: list | None = None) -> dict:
@@ -239,8 +299,11 @@ def stats(rows: list | None = None) -> dict:
         signals[s] = signals.get(s, 0) + 1
     return {
         "total_rows": len(rows),
-        "synthetic_rows": sum(1 for r in rows if r.get("synthetic")),
-        "pending_rows": sum(1 for r in rows if r.get("outcome_signal") == PENDING),
+        "invalid_rows": sum(1 for r in rows if not _valid_row(r)),
+        "synthetic_rows": sum(1 for r in rows
+                              if _valid_row(r) and r["synthetic"] is True),
+        "pending_rows": sum(1 for r in rows
+                            if _valid_row(r) and r["outcome_signal"] == PENDING),
         "labeled": len(labeled),
         "task_types": by_type,
         "by_specialist_model": by_model,

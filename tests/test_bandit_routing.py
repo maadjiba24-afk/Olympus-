@@ -51,6 +51,26 @@ def test_warmup_defers_to_heuristic():
     assert bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS) is None
 
 
+def test_unknown_labels_cannot_satisfy_warmup():
+    rows = []
+    for i in range(bandit_routing.MIN_WARMUP):
+        rows.append({
+            "ts": 1.0,
+            "run_id": f"bad-warmup-{i}",
+            "user": "shared",
+            "specialist": "chiron",
+            "model": "claude-opus-4-8",
+            "role": "reasoning",
+            "task_type": "coaching",
+            "length_bucket": "s",
+            "outcome_signal": "unsupported-label",
+            "signal_source": routing_outcomes.SRC_FEEDBACK,
+            "synthetic": False,
+        })
+    routing_outcomes._save("shared", rows)
+    assert bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS) is None
+
+
 # --- exploration: an untried arm is picked first -------------------------
 
 def test_explores_untried_arm():

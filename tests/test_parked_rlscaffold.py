@@ -39,19 +39,20 @@ def _routing_append(user, row):
 def _seed_routing(user="u1", n_ctx=4, per_arm=8):
     """Seed real (non-synthetic) routing outcomes: in each context a good model
     gets POSITIVE and a bad model gets NEGATIVE — a clean, learnable signal."""
+    buckets = ("xs", "s", "m", "l", "xl")
     for c in range(n_ctx):
-        tt = f"task{c}"
+        bucket = buckets[c]
         for i in range(per_arm):
             _routing_append(user, {
-                "ts": 0, "run_id": f"{tt}-w{i}", "user": user,
-                "specialist": "hephaestus", "model": "opus", "role": "primary",
-                "task_type": tt, "length_bucket": "m",
+                "ts": 0, "run_id": f"{bucket}-w{i}", "user": user,
+                "specialist": "argus", "model": "opus", "role": "primary",
+                "task_type": "research", "length_bucket": bucket,
                 "outcome_signal": routing_outcomes.POSITIVE,
                 "signal_source": "feedback", "synthetic": False})
             _routing_append(user, {
-                "ts": 0, "run_id": f"{tt}-l{i}", "user": user,
-                "specialist": "hermes", "model": "haiku", "role": "primary",
-                "task_type": tt, "length_bucket": "m",
+                "ts": 0, "run_id": f"{bucket}-l{i}", "user": user,
+                "specialist": "mnemosyne", "model": "haiku", "role": "primary",
+                "task_type": "research", "length_bucket": bucket,
                 "outcome_signal": routing_outcomes.NEGATIVE,
                 "signal_source": "feedback", "synthetic": False})
 
@@ -66,8 +67,8 @@ def test_routing_pairs_are_matched_context_and_feature_differentiated():
         assert p.source == "routing"
         # chosen is the winner's features, rejected the loser's — and they differ.
         assert p.chosen != p.rejected
-        assert "specialist=hephaestus" in p.chosen
-        assert "specialist=hermes" in p.rejected
+        assert "specialist=argus" in p.chosen
+        assert "specialist=mnemosyne" in p.rejected
 
 
 def test_synthetic_and_pending_rows_are_excluded():
@@ -84,6 +85,23 @@ def test_synthetic_and_pending_rows_are_excluded():
                           "outcome_signal": routing_outcomes.PENDING,
                           "synthetic": False})
     # All synthetic or pending → no learnable pairs.
+    assert rlscaffold.collect_routing_pairs() == []
+
+
+def test_unsupported_provenance_cannot_become_preference_pairs():
+    shared = {
+        "ts": 1.0, "user": "u1", "role": "primary",
+        "task_type": "research", "length_bucket": "m",
+        "signal_source": "invented", "synthetic": False,
+    }
+    _routing_append("u1", {
+        **shared, "run_id": "winner", "specialist": "argus",
+        "model": "opus", "outcome_signal": routing_outcomes.POSITIVE,
+    })
+    _routing_append("u1", {
+        **shared, "run_id": "loser", "specialist": "mnemosyne",
+        "model": "haiku", "outcome_signal": routing_outcomes.NEGATIVE,
+    })
     assert rlscaffold.collect_routing_pairs() == []
 
 
@@ -107,8 +125,8 @@ def test_reward_model_learns_to_rank_and_is_deterministic():
     # Deterministic: identical weights across independent fits.
     assert m1.to_dict() == m2.to_dict()
     # It actually learned the signal: the good specialist outscores the bad one.
-    assert m1.score({"specialist=hephaestus": 1.0}) > \
-        m1.score({"specialist=hermes": 1.0})
+    assert m1.score({"specialist=argus": 1.0}) > \
+        m1.score({"specialist=mnemosyne": 1.0})
     assert s1["accuracy"] >= 0.9 and s1["fitted"]
 
 
@@ -118,8 +136,8 @@ def test_top_features_are_interpretable():
     top = m.top_features()
     pos = dict(top["most_positive"])
     neg = dict(top["most_negative"])
-    assert "specialist=hephaestus" in pos
-    assert "specialist=hermes" in neg
+    assert "specialist=argus" in pos
+    assert "specialist=mnemosyne" in neg
 
 
 def test_fit_on_no_data_is_safe():

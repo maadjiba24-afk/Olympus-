@@ -119,6 +119,27 @@ def test_feedback_upgrades_review_signal(monkeypatch):
     assert r["signal_source"] == ro.SRC_FEEDBACK
 
 
+def test_unknown_review_verdict_is_pending_not_negative():
+    ro.record_run(
+        "alice", "bad-review", "task", ["argus"],
+        models={"argus": "opus"}, roles={"argus": "reasoning"},
+        review_verdict="not-a-review-verdict")
+    row = ro.events("alice")[0]
+    assert row["outcome_signal"] == ro.PENDING
+    assert row["signal_source"] == ro.SRC_NONE
+    assert ro._labeled([row]) == []
+
+
+def test_unknown_feedback_does_not_relabel_a_run():
+    ro.record_run(
+        "alice", "bad-feedback", "task", ["argus"],
+        models={"argus": "opus"}, roles={"argus": "reasoning"},
+        review_verdict="approve")
+    before = ro.events("alice")
+    assert ro.apply_feedback("alice", "bad-feedback", "sideways") == 0
+    assert ro.events("alice") == before
+
+
 # --- 3. caps + per-user scoping (mirrors outcomes.py) ------------------------
 def test_cap_and_rolling_window():
     for i in range(ro._MAX + 50):
@@ -186,6 +207,48 @@ def test_gate_met_only_when_all_thresholds_pass(monkeypatch):
                           roles={k: "reasoning"}, review_verdict="approve")
     g = ro.gate_status()
     assert g["met"] is True and not g["reasons"]
+
+
+def test_malformed_labels_cannot_satisfy_gate():
+    rows = []
+    task_types = ("research", "code", "finance")
+    for i in range(ro.GATE_MIN_LABELED):
+        specialist = ("argus", "hephaestus", "plutus")[i % 3]
+        rows.append({
+            "ts": 1.0,
+            "run_id": f"forged-{i}",
+            "user": f"real-{i % 2}",
+            "specialist": specialist,
+            "model": "opus",
+            "role": "reasoning",
+            "task_type": task_types[i % 3],
+            "length_bucket": "s",
+            "outcome_signal": "unsupported-label",
+            "signal_source": ro.SRC_FEEDBACK,
+            "synthetic": False,
+        })
+    g = ro.gate_status(rows)
+    assert g["met"] is False
+    assert g["labeled"] == 0
+
+
+def test_all_rows_rejects_cross_key_identity_and_non_list_payloads():
+    valid = {
+        "ts": 1.0,
+        "run_id": "forged",
+        "user": "bob",
+        "specialist": "argus",
+        "model": "opus",
+        "role": "reasoning",
+        "task_type": "research",
+        "length_bucket": "s",
+        "outcome_signal": ro.POSITIVE,
+        "signal_source": ro.SRC_FEEDBACK,
+        "synthetic": False,
+    }
+    ro._save("alice", [valid])
+    ro._save("object-payload", valid)
+    assert ro._all_rows() == []
 
 
 # --- 5. non-interference (critical) -----------------------------------------
