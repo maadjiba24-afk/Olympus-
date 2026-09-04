@@ -278,30 +278,25 @@ _SYNTH_CHECK_SYSTEM = (
 def _parse_verdict(text: str) -> tuple[str, dict | None]:
     """Split Aletheia's reply into (content, structured verdict).
 
-    The verdict is the LAST well-formed `VERDICT: {...}` line; a missing or
-    malformed verdict returns None so the caller takes the visible degraded
-    path (ADR 0005: verification is never silently absent)."""
-    for m in reversed(list(_VERDICT_RE.finditer(text or ""))):
+    The final `VERDICT: {...}` marker is authoritative.  If its JSON or schema
+    is malformed, return None rather than falling back to stale earlier
+    evidence, so the caller takes the visible degraded path (ADR 0005:
+    verification is never silently absent)."""
+    source = text or ""
+    matches = list(_VERDICT_RE.finditer(source))
+    if matches:
+        m = matches[-1]
         try:
             data = json.loads(m.group(1))
-        except ValueError:
-            continue
-        if not isinstance(data, dict):
-            continue
-        status = str(data.get("status", "")).strip().lower()
-        if status not in ("pass", "warn", "reject"):
-            continue
-        claims = data.get("unsupported_claims")
-        claims = ([str(c)[:300] for c in claims[:20]]
-                  if isinstance(claims, list) else [])
-        try:
-            conf = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
         except (TypeError, ValueError):
-            conf = 0.0
-        content = (text[:m.start()] + text[m.end():]).strip()
-        return content, {"status": status, "unsupported_claims": claims,
-                         "confidence": conf}
-    return (text or "").strip(), None
+            return source.strip(), None
+        try:
+            verdict = consensus.validate_verdict(data)
+        except ValueError:
+            return source.strip(), None
+        content = (source[:m.start()] + source[m.end():]).strip()
+        return content, verdict
+    return source.strip(), None
 
 
 # --- W2-C6: progress-watchdog wiring (OLYMPUS_WATCHDOG, default off) --------

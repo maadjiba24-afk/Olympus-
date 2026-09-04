@@ -56,13 +56,50 @@ def test_parse_verdict_malformed_returns_none(bad):
     assert verdict is None                      # → visible degraded path
 
 
-def test_parse_verdict_clamps_confidence_and_caps_claims():
+def test_parse_verdict_caps_claims_without_coercing_confidence():
     text = ('VERDICT: {"status": "reject", '
             '"unsupported_claims": ' + str([f"c{i}" for i in range(50)]).replace("'", '"') +
-            ', "confidence": 7}')
+            ', "confidence": 1.0}')
     _, verdict = orchestrator._parse_verdict(text)
     assert verdict["confidence"] == 1.0
     assert len(verdict["unsupported_claims"]) == 20
+
+
+@pytest.mark.parametrize("bad", [
+    ('{"status": "pass", "unsupported_claims": [], '
+     '"confidence": "1.0"}'),
+    ('{"status": "pass", "unsupported_claims": [], '
+     '"confidence": true}'),
+    ('{"status": "pass", "unsupported_claims": [], '
+     '"confidence": 7}'),
+    ('{"status": "pass", "unsupported_claims": [], '
+     '"confidence": NaN}'),
+    ('{"status": "pass", "unsupported_claims": ["contradiction"], '
+     '"confidence": 1.0}'),
+    ('{"status": "warn", "unsupported_claims": [1], '
+     '"confidence": 0.5}'),
+    ('{"status": "warn", "unsupported_claims": [""], '
+     '"confidence": 0.5}'),
+    ('{"status": "warn", "unsupported_claims": [], '
+     '"confidence": 0.5, "extra": true}'),
+    '{"status": "warn", "unsupported_claims": []}',
+])
+def test_parse_verdict_rejects_malformed_evidence(bad):
+    source = "body\nVERDICT: " + bad
+    content, verdict = orchestrator._parse_verdict(source)
+    assert content == source
+    assert verdict is None
+
+
+def test_parse_verdict_does_not_fall_back_past_invalid_latest_evidence():
+    source = (
+        'VERDICT: {"status": "pass", "unsupported_claims": [], '
+        '"confidence": 1.0}\nbody\n'
+        'VERDICT: {"status": "reject", "unsupported_claims": [], '
+        '"confidence": "high"}')
+    content, verdict = orchestrator._parse_verdict(source)
+    assert content == source
+    assert verdict is None
 
 
 # --- the contract ---------------------------------------------------------

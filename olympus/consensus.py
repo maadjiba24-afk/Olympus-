@@ -17,6 +17,7 @@ clock, no rng, no I/O — replay-safe by construction. Opt-in via
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -132,6 +133,52 @@ def decide_weighted(weighted_votes, *, byzantine: bool = False
 # --- verdict aggregation (the orchestrator's use) ------------------------
 
 _SEVERITY = {"reject": 2, "warn": 1, "pass": 0}
+_VERDICT_FIELDS = {"status", "unsupported_claims", "confidence"}
+_VERDICT_STATUSES = frozenset(_SEVERITY)
+_MAX_CLAIMS = 20
+_MAX_CLAIM_CHARS = 300
+
+
+def validate_verdict(value) -> dict:
+    """Return one normalized verifier verdict or reject malformed evidence.
+
+    Provider-side schemas are useful hints, not a trust boundary.  Callers may
+    receive plain JSON text from transports that do not enforce the schema, so
+    a verdict counts toward quorum only when every security-relevant field is
+    explicit, correctly typed, finite, in range, and internally consistent.
+    """
+    if not isinstance(value, dict) or set(value) != _VERDICT_FIELDS:
+        raise ValueError("verifier verdict has an invalid shape")
+
+    raw_status = value["status"]
+    if not isinstance(raw_status, str):
+        raise ValueError("verifier status is not a string")
+    status = raw_status.strip().lower()
+    if status not in _VERDICT_STATUSES:
+        raise ValueError("verifier status is invalid")
+
+    raw_claims = value["unsupported_claims"]
+    if not isinstance(raw_claims, list):
+        raise ValueError("unsupported_claims is not a list")
+    claims: list[str] = []
+    for claim in raw_claims:
+        if not isinstance(claim, str) or not claim.strip():
+            raise ValueError(
+                "unsupported_claims contains a non-string or empty item")
+        if len(claims) < _MAX_CLAIMS:
+            claims.append(claim.strip()[:_MAX_CLAIM_CHARS])
+    if status == "pass" and raw_claims:
+        raise ValueError("a pass verdict contains unsupported claims")
+
+    confidence = value["confidence"]
+    if (isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0.0 <= confidence <= 1.0
+            or not math.isfinite(float(confidence))):
+        raise ValueError("verifier confidence is not finite within [0, 1]")
+
+    return {"status": status, "unsupported_claims": claims,
+            "confidence": float(confidence)}
 
 
 def safest_verdict(verdicts, *, byzantine: bool = False) -> dict:
@@ -149,7 +196,7 @@ def safest_verdict(verdicts, *, byzantine: bool = False) -> dict:
     concern one verifier raised is kept even if outvoted). `confidence` is the
     mean. Returns the standard verdict dict plus an `agreement` fraction and the
     per-status `votes` tally for the audit log."""
-    verdicts = [v for v in verdicts if isinstance(v, dict) and v.get("status")]
+    verdicts = [validate_verdict(v) for v in verdicts]
     if not verdicts:
         return {"status": "warn", "unsupported_claims": [], "confidence": 0.0,
                 "agreement": 0.0, "votes": {}}
