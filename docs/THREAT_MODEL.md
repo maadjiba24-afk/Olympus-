@@ -302,6 +302,26 @@ positive daily action limit and no unattended execution, until an operator
 migrates or discards the file. Writing a new exact preference file does not
 clear it.
 
+*Treating a corrupt CURRENT preference blob as an empty first-run blob.* The v2
+store also used to catch malformed JSON and return `{}`. That silently widened
+an exact owner's authorization even without a legacy collision: an explicit
+guest profile became the local `full` default, autonomy and scopes fell back,
+operator-site restrictions disappeared, and the next unrelated preference
+write atomically replaced the corrupt source with a new partial object. For the
+`shared` installation blob, losing `daily_budget` fell back to installation
+configuration, which can be looser than the saved cap (and an explicitly
+configured zero means unlimited spend). Current preference evidence is now
+strict: missing is valid, while unreadable, invalid-encoding, malformed, or
+non-object state is unavailable. Security reads clamp through
+`QUARANTINE_POSTURE`; a bad shared budget raises a `BudgetExceeded` subtype so
+every model-work entry point pauses; and all writes refuse the blob.
+`prefs.state_status` exposes only state, reason, key names for valid blobs, and
+a recovery command — never preference values.
+Only the explicit `prefs-evidence --repair` path may reset corrupt current
+state, and it first preserves the exact bytes under their SHA-256. Repair is
+never invoked by request or background code, because resetting unknown policy
+can widen it.
+
 *Dropping quarantined secrets from the outbound floor.* Credential paths must
 refuse a vault whose owner is unknown — but the outbound scan asks the opposite
 question, and there the conservative answer is to scan MORE. Every principal in

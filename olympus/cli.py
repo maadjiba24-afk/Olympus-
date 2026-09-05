@@ -731,6 +731,16 @@ def build_parser() -> argparse.ArgumentParser:
         "budget", help="show or set the daily spend cap on your API key (USD)")
     p_budget.add_argument("amount", nargs="?", type=float,
                           help="e.g. 5  (0 removes the cap)")
+    p_prefs_evidence = sub.add_parser(
+        "prefs-evidence",
+        help="inspect strict preference-policy evidence or explicitly preserve "
+             "and reset a corrupt blob")
+    p_prefs_evidence.add_argument(
+        "owner", nargs="?", default="cli",
+        help="exact owner id (use 'shared' for the installation budget)")
+    p_prefs_evidence.add_argument(
+        "--repair", action="store_true",
+        help="preserve corrupt bytes under their SHA-256, then reset to {}")
 
     # --- the Action spine (controlled-autonomy execution) ---
     sub.add_parser("actions", help="list pending actions awaiting approval")
@@ -1388,10 +1398,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  provider/model : {s.provider} / {s.model or '(default)'}")
         print(f"  key configured : {'yes' if firstrun.configured() else 'NO'}")
         b = usage.budget_status()
-        print(f"  daily budget   : "
-              + (f"${b['spent']:.4f} / ${b['limit']:.2f}"
-                 + ("  ⚠ reached" if b["exceeded"] else "")
-                 if b["enabled"] else "off"))
+        if b.get("evidence_state") == "unavailable":
+            print("  daily budget   : EVIDENCE UNAVAILABLE — new model work "
+                  "paused")
+            print(f"  budget recovery: {b['reason']}")
+        else:
+            print(f"  daily budget   : "
+                  + (f"${b['spent']:.4f} / ${b['limit']:.2f}"
+                     + ("  ⚠ reached" if b["exceeded"] else "")
+                     if b["enabled"] else "off"))
         print(f"  accounts       : "
               + ("required (login)" if accounts.require_login() else "open"))
         sov = config.sovereign_status()
@@ -2780,9 +2795,13 @@ def main(argv: list[str] | None = None) -> int:
         elif act == "history":
             print(operator.render_history(user, args.limit))
     elif args.command == "budget":
-        from . import usage
+        from . import prefs, usage
         if args.amount is None:
             b = usage.budget_status()
+            if b.get("evidence_state") == "unavailable":
+                print("Daily-budget policy evidence is unavailable; new model "
+                      "work is paused.\n" + b["reason"])
+                return 1
             if not b["enabled"]:
                 print("No daily budget set. Olympus will not cap spend on your "
                       "API key.\nSet one with `olympus budget 5` (USD/day).")
@@ -2790,7 +2809,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Daily budget: ${b['spent']:.4f} / ${b['limit']:.2f} "
                       f"spent today" + ("  ⚠ reached" if b["exceeded"] else ""))
         else:
-            print(usage.set_budget(args.amount))
+            try:
+                print(usage.set_budget(args.amount))
+            except prefs.PreferencesStateError as err:
+                print(err)
+                return 1
+    elif args.command == "prefs-evidence":
+        from . import prefs
+        import json as _json
+        try:
+            result = (prefs.repair(args.owner) if args.repair
+                      else prefs.state_status(args.owner))
+        except prefs.PreferencesStateError as err:
+            print(_json.dumps({
+                "owner": err.user,
+                "state": "unavailable",
+                "quarantined": True,
+                "reason": err.reason,
+                "repair_command": err.repair_command,
+            }, indent=2))
+            return 1
+        print(_json.dumps(result, indent=2))
+        return (1 if result.get("state") == "unavailable"
+                or result.get("quarantined") else 0)
     elif args.command == "routing-stats":
         if getattr(args, "predictability", False):
             import json as _json

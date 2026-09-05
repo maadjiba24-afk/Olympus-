@@ -140,3 +140,26 @@ becoming an unauthorized equivalent of `olympus evolve reset operator`.
 The explicit `olympus evolve repair` command is the recovery boundary: it
 quarantines the original bytes and restores registered defaults. Because that
 can widen previously tightened knobs, no background path invokes it.
+
+Preference policy now uses the same missing-versus-unavailable distinction.
+An absent exact-owner `prefs.json` is valid first-run state; unreadable bytes,
+invalid UTF-8/JSON, or a non-object root are not. Authorization reads clamp to
+the existing guest/L0/no-scope/no-site quarantine posture, while cosmetic reads
+may use only their explicit display default. The shared daily budget is stricter
+again: falling back to installation configuration can widen a tighter saved cap
+(and an explicitly configured zero means unlimited), so unavailable or
+malformed evidence raises `BudgetPolicyUnavailable`, a `BudgetExceeded` subtype
+that all request, admission, recall, and heartbeat stop paths already honor.
+Status, usage reports, and the dashboard say that evidence is unavailable and
+new model work is paused; they never render corruption as an ordinary fallback.
+
+Preference writes load strictly under the existing per-owner lock and refuse to
+overwrite a bad blob. Recovery is an operator boundary:
+`olympus prefs-evidence <exact-owner> --repair` durably publishes the original
+bytes to a sibling `prefs.corrupt.<sha256-prefix>.json` before replacing the
+live blob with a valid empty object. Missing and valid blobs are not rewritten,
+malformed legacy migration sources are preserved, and no background reader
+calls repair.
+Because resetting can remove a prior restriction, the operator must restore the
+intended profile, autonomy, scopes, limits, operator settings, and (for
+`shared`) daily budget after inspecting the preserved evidence.
