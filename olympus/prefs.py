@@ -7,7 +7,9 @@ because preferences are settings, not learned knowledge.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 
 from . import config, memory
@@ -16,6 +18,45 @@ from . import config, memory
 #: Bumped when the per-principal path changed from `users/<safe_id>/prefs.json`
 #: to `prefs/owners/<owner-key>.json`. See `legacy_owners` for the migration.
 PREFS_KEY_VERSION = 2
+
+# Keep repair archives below the traditional Windows MAX_PATH boundary even
+# when the exact-owner storage key and pytest's temporary root are both long.
+# A 128-bit SHA-256 prefix remains content-addressed; the full digest is
+# returned to the operator, and an existing prefix collision is byte-checked
+# and refused rather than overwritten.
+_QUARANTINE_DIGEST_HEX = 32
+
+
+class PreferencesStateError(RuntimeError):
+    """The current preference-policy blob exists but cannot be trusted.
+
+    Missing is valid first-run state.  Existing-but-unreadable, malformed, or
+    non-object JSON is different: treating it as ``{}`` can discard a guest
+    profile, an L0 autonomy assignment, granted-scope limits, or the global
+    spend cap.  Callers may clamp individual security decisions, but mutations
+    must stop until an operator explicitly repairs the evidence.
+    """
+
+    def __init__(self, user: str, path: Path, reason: str) -> None:
+        self.user = memory.canonical_owner(user)
+        self.path = Path(path)
+        self.reason = str(reason)
+        self.repair_command = _repair_command(self.user)
+        super().__init__(
+            f"Preference policy evidence for '{self.user}' is unavailable "
+            f"({self.reason}). Security decisions are clamped and writes are "
+            f"refused. Inspect or preserve-and-reset it with "
+            f"`{self.repair_command}`.")
+
+
+def _repair_command(user: str) -> str:
+    """Copy-safe command for ordinary ids; never interpolate shell syntax."""
+    exact = memory.canonical_owner(user)
+    if exact and all(ch.isalnum() or ch in "-_.:@" for ch in exact):
+        owner_arg = exact
+    else:
+        owner_arg = "<exact-owner>"
+    return f"olympus prefs-evidence {owner_arg} --repair"
 
 
 def _path(user: str) -> Path:
@@ -90,29 +131,43 @@ QUARANTINE_REASON = (
     "restricted settings can be "
     "trusted.")
 
+# Unlike cosmetic preferences, the installation-wide budget cannot fall back
+# to configuration when its saved blob exists but is unavailable: that can
+# widen a tighter saved cap, and an explicitly configured 0 means unlimited.
+# Its consumer converts this typed state error into BudgetPolicyUnavailable.
+_STRICT_EVIDENCE_KEYS = frozenset({"daily_budget"})
+
 
 def is_quarantined(user: str) -> bool:
-    """True when `user`'s safe_id collision group has an unresolved legacy file.
+    """True when legacy ownership or current evidence is unresolved.
 
     Membership is the collision GROUP, not the individual: `tg-a.b` and
     `tg-a-b` both normalize to `tg-a-b`, and the legacy file names only that
     normalized value. Either of them could be its author, so both are held.
 
-    Reserved installation namespaces are never quarantined — `shared` and
-    `operator` are addressed by literal name under the documented explicit
-    policy, so their files were never ambiguous.
+    Reserved installation namespaces are exempt only from legacy ambiguity.
+    Their exact current files can still be corrupt; in particular, a damaged
+    ``shared`` blob must not turn a saved daily spend cap into "unlimited".
     """
     exact = memory.canonical_owner(user)
-    if memory.is_system_owner(exact):
-        return False
-    if memory.is_ambiguous_gateway_owner(exact):
+    if (not memory.is_system_owner(exact)
+            and (memory.is_ambiguous_gateway_owner(exact)
+                 or (config.MEMORY_DIR / "users" / memory.safe_id(exact)
+                     / "prefs.json").is_file())):
         return True
-    legacy = config.MEMORY_DIR / "users" / memory.safe_id(exact) / "prefs.json"
-    return legacy.is_file()
+    try:
+        load(user)
+    except PreferencesStateError:
+        return True
+    return False
 
 
 def quarantine_reason(user: str) -> str | None:
     """The operator-facing explanation, or None when not quarantined."""
+    try:
+        load(user)
+    except PreferencesStateError as err:
+        return str(err)
     return QUARANTINE_REASON if is_quarantined(user) else None
 
 
@@ -127,13 +182,24 @@ def _posture(key: str):
 
 
 def load(user: str) -> dict:
+    """Load one exact preference object, distinguishing missing from corrupt."""
     path = _path(user)
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-    return {}
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as err:
+        raise PreferencesStateError(
+            user, path, f"unreadable {type(err).__name__}") from err
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as err:
+        raise PreferencesStateError(user, path, "invalid UTF-8") from err
+    except json.JSONDecodeError as err:
+        raise PreferencesStateError(user, path, "malformed JSON") from err
+    if not isinstance(data, dict):
+        raise PreferencesStateError(user, path, "JSON root is not an object")
+    return data
 
 
 def _raw_get(user: str, key: str, default=None):
@@ -147,21 +213,32 @@ def _raw_get(user: str, key: str, default=None):
 
 
 def get(user: str, key: str, default=None):
-    """A preference, clamped to the quarantine posture where one applies."""
+    """A preference, clamped when authorization evidence is unavailable.
+
+    Cosmetic keys may use the caller's explicit display default.  Security
+    keys take ``QUARANTINE_POSTURE``.  Keys whose normal default itself widens
+    policy (currently the shared daily budget, where 0 means unlimited) retain
+    the typed error so their consumer can refuse new work.
+    """
     if key in QUARANTINE_POSTURE and is_quarantined(user):
-        # Note this is a READ clamp, not a write block. An exact file may be
-        # written and kept; it simply does not take effect until an operator
-        # resolves the legacy file, so writing one cannot clear quarantine.
+        # Legacy quarantine is a read clamp: an exact file can be prepared
+        # while the ambiguous source remains out of effect. A corrupt CURRENT
+        # file is different — `set` loads strictly and refuses to overwrite it.
         return _posture(key)
-    return load(user).get(key, default)
+    try:
+        return load(user).get(key, default)
+    except PreferencesStateError:
+        if key in QUARANTINE_POSTURE:
+            return _posture(key)
+        if key in _STRICT_EVIDENCE_KEYS:
+            raise
+        return default
 
 
 def set(user: str, key: str, value) -> None:
     # Cross-process RMW under proclock + atomic replace (ADR 0005): the
     # shared-scope file carries daily_budget — a lost update or torn read
     # here silently deletes the budget guard's persisted cap.
-    import os
-
     from . import proclock
     # Lock on the STORAGE key, not the raw id: two colliding principals now
     # write different files and must not serialize against each other, while
@@ -176,6 +253,99 @@ def set(user: str, key: str, value) -> None:
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         from . import atomicio
         atomicio.publish(tmp, path, json.dumps(data, indent=2))
+
+
+def state_status(user: str) -> dict:
+    """Non-sensitive evidence status for an operator or the CLI."""
+    exact = memory.canonical_owner(user)
+    path = _path(exact)
+    try:
+        data = load(exact)
+    except PreferencesStateError as err:
+        return {
+            "owner": exact,
+            "state": "unavailable",
+            "quarantined": True,
+            "reason": err.reason,
+            "repair_command": err.repair_command,
+        }
+    state = "valid" if path.is_file() else "missing"
+    legacy = is_quarantined(exact)
+    return {
+        "owner": exact,
+        "state": state,
+        "quarantined": legacy,
+        "reason": QUARANTINE_REASON if legacy else None,
+        # Key names make policy presence auditable without exposing values.
+        "keys": sorted(str(key) for key in data),
+        "repair_command": None,
+    }
+
+
+def repair(user: str) -> dict:
+    """Explicitly preserve a corrupt exact blob, then reset it to ``{}``.
+
+    Repair is never called by a reader or background loop.  The original bytes
+    are first durably published beside the source under a content-addressed
+    SHA-256-prefix name; only then is a valid empty object published at
+    ``prefs.json``.  A missing or already-valid file is reported and left
+    byte-for-byte alone.
+    """
+    from . import atomicio, proclock
+
+    exact = memory.canonical_owner(user)
+    path = _path(exact)
+    with proclock.lock(f"prefs-{memory.storage_key(exact)}"):
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            result = state_status(exact)
+            result["repaired"] = False
+            return result
+        except OSError as err:
+            raise PreferencesStateError(
+                exact, path, f"unreadable {type(err).__name__}") from err
+
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict):
+            result = state_status(exact)
+            result["repaired"] = False
+            return result
+
+        digest = hashlib.sha256(raw).hexdigest()
+        quarantine = path.with_name(
+            f"prefs.corrupt.{digest[:_QUARANTINE_DIGEST_HEX]}.json")
+        try:
+            existing = quarantine.read_bytes()
+        except FileNotFoundError:
+            # Do not derive the temporary name from the archive name: doing so
+            # crossed MAX_PATH on Windows for long exact-owner storage keys.
+            tmp_q = quarantine.with_name(f".prefs-repair.{os.getpid()}.tmp")
+            atomicio.publish(tmp_q, quarantine, raw)
+        except OSError as err:
+            raise PreferencesStateError(
+                exact, path, f"quarantine unreadable {type(err).__name__}") from err
+        else:
+            if existing != raw:
+                raise PreferencesStateError(
+                    exact, path, "content-addressed quarantine collision")
+
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        atomicio.publish(tmp, path, json.dumps({}, indent=2))
+        return {
+            "owner": exact,
+            "state": "valid",
+            "quarantined": is_quarantined(exact),
+            "reason": QUARANTINE_REASON if is_quarantined(exact) else None,
+            "keys": [],
+            "repair_command": None,
+            "repaired": True,
+            "quarantined_sha256": digest,
+            "quarantine_file": quarantine.name,
+        }
 
 
 # --- pre-v2 preference files: quarantined, never implicitly claimed -------
@@ -224,8 +394,15 @@ def migrate_legacy(legacy_id: str, owner: str, *, overwrite: bool = False) -> in
     path = config.MEMORY_DIR / "users" / legacy_id / "prefs.json"
     try:
         legacy = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        legacy = {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
+        raise ValueError(
+            "quarantined legacy preference evidence is unreadable or "
+            "malformed; it was preserved. Discard it explicitly if recovery "
+            "is not required") from err
+    if not isinstance(legacy, dict):
+        raise ValueError(
+            "quarantined legacy preference evidence is not a JSON object; it "
+            "was preserved. Discard it explicitly if recovery is not required")
     moved = 0
     for key, value in legacy.items():
         # `_raw_get`, not `get`: the legacy file is still on disk here, so the

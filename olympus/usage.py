@@ -30,6 +30,16 @@ from . import atomicio, config, memory, proclock
 class BudgetExceeded(RuntimeError):
     """Raised when today's estimated spend has reached the daily budget."""
 
+
+class BudgetPolicyUnavailable(BudgetExceeded):
+    """The saved daily-budget policy exists but cannot be trusted.
+
+    This subclasses ``BudgetExceeded`` deliberately: every existing request,
+    heartbeat, recall, and admission catch point already pauses work on that
+    base class, so unavailable evidence cannot slip through a less common
+    model-call path.
+    """
+
 # Approximate USD per 1M tokens (input, output). Used only for local
 # estimation/visibility — never billed. Unknown models fall back to DEFAULT.
 PRICES: dict[str, tuple[float, float]] = {
@@ -1377,15 +1387,27 @@ def today_spend() -> float:
 
 def daily_budget() -> float:
     """Resolved daily USD budget. A saved setting (set via `olympus budget`)
-    wins over the OLYMPUS_DAILY_BUDGET env var; 0 means no cap (the default)."""
+    wins over the OLYMPUS_DAILY_BUDGET env var; an explicit 0 means no cap."""
     from . import prefs
-    val = prefs.get("shared", "daily_budget", None)
+    try:
+        val = prefs.get("shared", "daily_budget", None)
+    except prefs.PreferencesStateError as err:
+        raise BudgetPolicyUnavailable(
+            "Daily-budget policy evidence is unavailable; Olympus paused new "
+            "model work rather than treating the cap as unlimited. Inspect or "
+            "preserve-and-reset the shared preference blob with `olympus "
+            "prefs-evidence shared --repair`, then set the intended cap with "
+            "`olympus budget <amount>`.") from err
     if val is None:
         val = config.DAILY_BUDGET
-    try:
-        return max(0.0, float(val))
-    except (TypeError, ValueError):
-        return 0.0
+    if (isinstance(val, bool) or not isinstance(val, (int, float))
+            or not math.isfinite(float(val))):
+        raise BudgetPolicyUnavailable(
+            "Daily-budget policy evidence is unavailable because the saved "
+            "value is not a finite number; Olympus paused new model work "
+            "rather than treating the cap as unlimited. Replace it explicitly "
+            "with `olympus budget <amount>`.")
+    return max(0.0, float(val))
 
 
 def budget_headroom_low() -> bool:
@@ -1393,9 +1415,12 @@ def budget_headroom_low() -> bool:
 
     The effort scorer consults this before RAISING a run above its
     specialist's floor (ADR 0005 amendment 7): "thinks harder" must never
-    defeat the spend guard. Total: budget errors read as headroom-fine, and
-    with no budget set (limit 0, the default) there is nothing to protect."""
-    limit = daily_budget()
+    defeat the spend guard. Unavailable policy is low headroom by definition;
+    the request-level guard will then refuse the work entirely."""
+    try:
+        limit = daily_budget()
+    except BudgetPolicyUnavailable:
+        return True
     if limit <= 0:
         return False
     return (limit - today_spend()) < limit * 0.10
@@ -1403,8 +1428,19 @@ def budget_headroom_low() -> bool:
 
 def budget_status() -> dict:
     """Snapshot for display: limit, spent, remaining, and whether it's hit."""
-    limit = daily_budget()
     spent = round(today_spend(), 4)
+    try:
+        limit = daily_budget()
+    except BudgetPolicyUnavailable as err:
+        return {
+            "enabled": True,
+            "limit": 0.0,
+            "spent": spent,
+            "remaining": 0.0,
+            "exceeded": True,
+            "evidence_state": "unavailable",
+            "reason": str(err),
+        }
     return {
         "enabled": limit > 0,
         "limit": round(limit, 2),
@@ -1468,6 +1504,11 @@ def report(days: int = 7) -> str:
     """Human-readable spend summary over the last N days."""
     base = config.MEMORY_DIR / "usage"
     if not base.exists():
+        b = budget_status()
+        if b.get("evidence_state") == "unavailable":
+            return ("No usage recorded yet.\nDaily-budget EVIDENCE "
+                    "UNAVAILABLE — new model work paused.\n"
+                    f"Recovery: {b['reason']}")
         return "No usage recorded yet."
     # Snapshots AND journals (W2-2): an uncompacted day has only a .jsonl, and
     # globbing *.json alone would omit it from the report entirely.
@@ -1489,7 +1530,11 @@ def report(days: int = 7) -> str:
     lines.append("")
     lines.append(f"  total ({len(files)}d): ${grand:.4f}")
     b = budget_status()
-    if b["enabled"]:
+    if b.get("evidence_state") == "unavailable":
+        lines.append("  today's budget: EVIDENCE UNAVAILABLE — new model "
+                     "work paused")
+        lines.append(f"  recovery: {b['reason']}")
+    elif b["enabled"]:
         flag = "  ⚠ reached" if b["exceeded"] else ""
         lines.append(f"  today's budget: ${b['spent']:.4f} / ${b['limit']:.2f}"
                      f"{flag}")

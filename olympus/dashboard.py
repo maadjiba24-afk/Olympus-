@@ -23,8 +23,14 @@ def summary() -> dict:
         spend = 0.0
     try:
         budget = usage.daily_budget()
-    except Exception:
+        budget_evidence = "available"
+        budget_reason = None
+    except Exception as err:
+        # A zero here used to render as "no daily cap set".  That turns an
+        # unreadable saved cap into reassuring-but-false operator output.
         budget = 0.0
+        budget_evidence = "unavailable"
+        budget_reason = str(err)
     return {
         "uptime_seconds": snap.get("uptime_seconds"),
         "requests": snap.get("requests"),
@@ -32,6 +38,8 @@ def summary() -> dict:
         "server_errors": snap.get("server_errors"),
         "spend_today": spend,
         "daily_budget": budget,
+        "daily_budget_evidence": budget_evidence,
+        "daily_budget_reason": budget_reason,
         "reports_total": len(reports),
         "errors_total": len(errs),
         "latest_report": reports[-1] if reports else None,
@@ -44,7 +52,12 @@ def summary() -> dict:
     }
 
 
-def _budget_line(spend: float, budget: float) -> str:
+def _budget_line(spend: float, budget: float, evidence: str = "available",
+                 reason: str | None = None) -> str:
+    if evidence == "unavailable":
+        detail = f" — {reason}" if reason else ""
+        return ("Spend today:   daily-budget evidence unavailable — new model "
+                f"work paused{detail}")
     if budget and budget > 0:
         pct = (spend / budget * 100) if budget else 0
         flag = "  ⚠ OVER CAP" if spend > budget else ""
@@ -74,7 +87,9 @@ def render(s: dict | None = None) -> str:
         "=" * 44,
         f"Uptime:        {hours:.1f}h  ({s.get('requests', 0)} requests, "
         f"{s.get('client_errors', 0)} 4xx, {s.get('server_errors', 0)} 5xx)",
-        _budget_line(s.get("spend_today", 0.0), s.get("daily_budget", 0.0)),
+        _budget_line(s.get("spend_today", 0.0), s.get("daily_budget", 0.0),
+                     s.get("daily_budget_evidence", "available"),
+                     s.get("daily_budget_reason")),
         _policy_line(s.get("cost_policy", {})),
         "",
         f"Problem reports: {s['reports_total']}   "
