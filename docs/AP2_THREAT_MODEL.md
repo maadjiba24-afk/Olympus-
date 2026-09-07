@@ -80,6 +80,15 @@ Controls:
 
 Controls: single-use **nonce** recorded on first successful verification;
 **expiry** timestamp; `verify()` rejects an expired or already-consumed mandate.
+The nonce ledger distinguishes missing from invalid state: corrupt,
+wrong-shaped, inconsistent, or unattributed legacy evidence blocks both reads
+and writes. Tenant ledgers use the exact durable principal rather than the
+lossy path label. Their read/modify/write cycle is cross-process serialized,
+and storage re-checks cart-nonce freshness inside that critical section, so two
+approvals cannot both win after checking the same snapshot. Nonce consumption
+is durably published before the authorization record; if the second publish
+fails, the orphan nonce remains consumed. The bounded ledger refuses new work
+when full and never makes room by forgetting replay evidence.
 
 ### T4 — Downgrade / constraint tampering
 
@@ -117,6 +126,14 @@ memory, or model prompts; existing outbound secret-exfiltration scanning applies
   are pre-existing trust anchors, not introduced here.
 - LLM-mediated construction can still be socially engineered; C2.4 (human-visible
   summary) is the backstop, and it depends on the human actually reading it.
+- A nonce-first partial write can consume a nonce without leaving its complete
+  authorization record. This trades availability for replay safety. Olympus
+  surfaces that condition and does not auto-repair, migrate, discard, or reuse
+  the nonce.
+- The cross-process lock is a same-machine POSIX control. On Windows it protects
+  threads in one process, and it does not serialize independent hosts. No live
+  rail may rely on this store until the deployment topology supplies an
+  equivalent transactional nonce-claim primitive.
 
 ## Phase-2 adversarial tests (must pass before "done")
 

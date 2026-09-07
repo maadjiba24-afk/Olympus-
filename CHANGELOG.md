@@ -15,6 +15,38 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Mandate replay evidence fails closed (P2S)
+
+**A damaged nonce ledger became an empty set.** `mandate_store` returned empty
+collections for malformed JSON or the wrong root type. For
+`mandate_nonces`, that converted lost security evidence into "never used" and
+allowed a previously consumed cart nonce through the replay gate. The store
+also keyed mandates with lossy `safe_id`, updated records and nonces through
+unlocked whole-document writes, and published the authorization record before
+its replay tombstone. Colliding owners shared evidence, concurrent approvals
+could both pass, and interruption between the two writes reopened a replay.
+
+- Missing state remains a valid first authorization. Existing invalid UTF-8,
+  malformed JSON, wrong-shaped rows/nonces, duplicate nonces, and any record
+  whose intent/cart nonces are absent from the nonce ledger raise the typed
+  `MandateStateError`. Both record and nonce views stop, writes refuse, and the
+  original bytes remain untouched.
+- Tenant state now uses `memory.storage_key`, binding it to the exact principal.
+  A pre-P2S `safe_id` blob is unattributed collision-group evidence: normal
+  reads and writes refuse it instead of guessing an owner. The reserved
+  installation owners keep their literal compatible keys.
+- `record()` reloads and checks durable freshness under an in-process lock plus
+  the machine-wide `proclock` serialization point. A second concurrent writer
+  sees the first writer's consumed nonce and raises `MandateReplayError`.
+- The consumed-nonce ledger is published **before** the authorization record.
+  A failed second publish leaves a safe orphan tombstone: the record may be
+  unavailable, but retry cannot reuse its nonce. Nonce capacity now refuses
+  new records rather than evicting old replay evidence.
+- `evidence_status()` exposes only owner, health, reason, and counts; it never
+  returns authorization content or malformed source bytes. No reader repairs
+  or deletes evidence. This remains an authorization-only phase with no live
+  payment rail and no autonomous financial execution.
+
 ### Security — Scheduled job reports are private to their owner (P2)
 
 **A job's answer went into a category everyone can read.** `scheduler.run_due`
