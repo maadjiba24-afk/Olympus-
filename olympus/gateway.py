@@ -535,7 +535,10 @@ def reply_for(bots: dict, user_key: str, text: str,
         return chunk(bot.set_contribute(on))
     if cmd == "/growth":
         from . import companion
-        return chunk(companion.summary(uid))
+        try:
+            return chunk(companion.summary(uid))
+        except companion.CompanionStateError as err:
+            return chunk(str(err))
     if cmd == "/reset":
         return chunk(bot.reset())
 

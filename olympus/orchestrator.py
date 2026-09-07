@@ -2062,8 +2062,13 @@ class Olympus:
                         target=companion.maybe_evolve,
                         args=(self.user, count, self.pool.for_role("reasoning")),
                         daemon=True).start()
-            except Exception:
-                pass
+            except Exception as err:
+                # The reply is already complete, so companion persistence is
+                # best-effort here. It must not be silent, however: a corrupt
+                # exact-owner model is preserved and refused by companion.py,
+                # and the operator needs a durable recovery signal.
+                from . import errors
+                errors.capture("companion.note_interaction", err)
         # Opt-in cross-model learning: contribute an anonymized snapshot tagged
         # with the model that produced it (only if this user opted in).
         try:

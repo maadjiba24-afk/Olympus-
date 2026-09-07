@@ -16,12 +16,15 @@ itself the longer you use it.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import math
 import os
 import threading
 import time
 
-from . import config, memory, usermem
+from . import atomicio, config, memory, proclock, usermem
 
 # Serializes read-modify-write of the per-user companion state so concurrent
 # turns (web + Telegram, two tabs) don't lose an exchange increment or let a
@@ -33,6 +36,9 @@ _LOCK = threading.Lock()
 # one user↔Olympus turn — note_interaction() is called once per completed turn.
 EVOLVE_EVERY = int(os.environ.get("OLYMPUS_EVOLVE_EVERY", "6"))
 MODEL_MAX_CHARS = 1400        # keep the injected brief small
+_MAX_STATE_BYTES = 64 * 1024  # > worst-case JSON escaping of MODEL_MAX_CHARS
+_STATE_KEYS = frozenset({"interactions", "evolutions", "model", "updated"})
+_QUARANTINE_DIGEST_HEX = 16
 
 # Growth tiers by lifetime interaction count — what the user sees deepening.
 _LEVELS = [
@@ -44,33 +50,181 @@ _LEVELS = [
 ]
 
 
-def _path(user: str):
-    d = config.MEMORY_DIR / "companion"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{memory.safe_id(user)}.json"
+class CompanionStateError(RuntimeError):
+    """The exact owner's adaptive working-model evidence is unavailable.
+
+    Missing state is valid first use. Existing bytes that cannot be read and
+    validated are different: treating them as empty would both erase evidence
+    on the next write and silently change the private model injected into every
+    answer.
+    """
+
+    def __init__(self, user: str, reason: str) -> None:
+        self.user = memory.canonical_owner(user)
+        self.reason = str(reason)
+        self.repair_command = (
+            "olympus growth --evidence --repair --owner <exact-owner>"
+        )
+        super().__init__(
+            "Companion-model evidence is unavailable "
+            f"({self.reason}). Private-model reads and writes are refused; "
+            "preserve the stored bytes for operator inspection."
+        )
 
 
-def load(user: str) -> dict:
-    p = _path(user)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+def _default_state() -> dict:
     return {"interactions": 0, "evolutions": 0, "model": "", "updated": 0.0}
 
 
+def _dir():
+    d = config.MEMORY_DIR / "companion"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _path(user: str):
+    """Collision-resistant path for one exact owner."""
+    return _dir() / f"{memory.storage_key(user)}.json"
+
+
+def _legacy_path(user: str):
+    """The pre-P2T lossy path, preserved but never implicitly claimed."""
+    return _dir() / f"{memory.safe_id(memory.canonical_owner(user))}.json"
+
+
+def _duplicate_rejecting_object(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _validate_state(user: str, data: object) -> dict:
+    if not isinstance(data, dict):
+        raise CompanionStateError(user, "root is not an object")
+    if set(data) != _STATE_KEYS:
+        raise CompanionStateError(user, "state keys do not match the schema")
+
+    for field in ("interactions", "evolutions"):
+        value = data[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise CompanionStateError(
+                user, f"{field} is not a non-negative integer")
+
+    model = data["model"]
+    if not isinstance(model, str) or len(model) > MODEL_MAX_CHARS:
+        raise CompanionStateError(user, "model is not a bounded string")
+
+    updated = data["updated"]
+    try:
+        updated_value = float(updated)
+    except (OverflowError, TypeError, ValueError) as err:
+        raise CompanionStateError(
+            user, "updated is not a finite timestamp") from err
+    if (isinstance(updated, bool) or not isinstance(updated, (int, float))
+            or not math.isfinite(updated_value) or updated_value < 0):
+        raise CompanionStateError(user, "updated is not a finite timestamp")
+
+    return {
+        "interactions": data["interactions"],
+        "evolutions": data["evolutions"],
+        "model": model,
+        "updated": updated_value,
+    }
+
+
+def _decode_state(user: str, raw: bytes) -> dict:
+    try:
+        text = raw.decode("utf-8")
+    except (AttributeError, UnicodeDecodeError) as err:
+        raise CompanionStateError(user, "state is not valid UTF-8") from err
+    try:
+        data = json.loads(text, object_pairs_hook=_duplicate_rejecting_object)
+    except (json.JSONDecodeError, ValueError) as err:
+        raise CompanionStateError(user, "state is malformed JSON") from err
+    return _validate_state(user, data)
+
+
+def _read_exact(user: str) -> bytes | None:
+    path = _path(user)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_STATE_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise CompanionStateError(
+            user, f"state read failed: {type(err).__name__}") from err
+    if len(raw) > _MAX_STATE_BYTES:
+        raise CompanionStateError(user, "state exceeds the size bound")
+    return raw
+
+
+def _load_exact(user: str) -> dict:
+    raw = _read_exact(user)
+    return _default_state() if raw is None else _decode_state(user, raw)
+
+
+def _state_for_write(user: str, state: object) -> dict:
+    if not isinstance(state, dict):
+        raise ValueError("companion state must be an object")
+    unknown = set(state) - _STATE_KEYS
+    if unknown:
+        raise ValueError("unknown companion state keys: " + ", ".join(sorted(unknown)))
+    candidate = _default_state()
+    candidate.update(state)
+    try:
+        return _validate_state(user, candidate)
+    except CompanionStateError as err:
+        raise ValueError(f"invalid companion state: {err.reason}") from err
+
+
+@contextlib.contextmanager
+def _guard(user: str):
+    """Serialize one exact owner's whole-document update.
+
+    The full digest fits under ``proclock``'s 80-character lock-name bound, so
+    distinct owners cannot collapse onto one truncated lock filename.
+    """
+    exact = memory.canonical_owner(user)
+    digest = hashlib.sha256(exact.encode("utf-8")).hexdigest()
+    with _LOCK, proclock.lock(f"companion-{digest}"):
+        yield exact
+
+
+def _save_locked(user: str, state: dict) -> None:
+    path = _path(user)
+    tmp = path.with_name(f".companion-{os.getpid()}-{threading.get_ident()}.tmp")
+    atomicio.publish(
+        tmp,
+        path,
+        json.dumps(state, indent=2, sort_keys=True),
+    )
+
+
+def load(user: str) -> dict:
+    """Return validated exact-owner state; only a missing file means empty."""
+    return _load_exact(memory.canonical_owner(user))
+
+
 def save(user: str, state: dict) -> None:
-    _path(user).write_text(json.dumps(state, indent=2), encoding="utf-8")
+    """Publish validated state without overwriting unreadable evidence."""
+    exact = memory.canonical_owner(user)
+    candidate = _state_for_write(exact, state)
+    with _guard(exact):
+        _load_exact(exact)  # malformed current bytes are never replaced here
+        _save_locked(exact, candidate)
 
 
 def note_interaction(user: str, now: float | None = None) -> int:
     """Count one exchange (a completed user↔Olympus turn) for this user; return
-    the new total. Atomic across concurrent turns."""
-    with _LOCK:
-        state = load(user)
+    the new total. Atomic across threads and processes supported by proclock."""
+    with _guard(user) as exact:
+        state = _load_exact(exact)
         state["interactions"] = int(state.get("interactions", 0)) + 1
-        save(user, state)
+        _save_locked(exact, state)
         return state["interactions"]
 
 
@@ -109,8 +263,8 @@ _SYNTH_SYSTEM = (
 
 def evolve(user: str, settings: config.Settings | None = None) -> str:
     """Re-distill this user's working model from their own recent history.
-    Returns the updated model text. Best-effort: returns the prior model on any
-    failure so a flaky call never wipes accumulated learning."""
+    Returns the updated model text. Provider failure returns the prior model;
+    unavailable stored evidence raises so it is never treated as first use."""
     from . import backend
     settings = settings or config.Settings.from_env()
     memory.set_user(user)
@@ -140,12 +294,12 @@ def evolve(user: str, settings: config.Settings | None = None) -> str:
     # Re-read under the lock and merge only the model fields, so a concurrent
     # note_interaction()'s exchange increment isn't clobbered by this (slow,
     # off-thread) evolution. The model call itself stays outside the lock.
-    with _LOCK:
-        state = load(user)
+    with _guard(user) as exact:
+        state = _load_exact(exact)
         state["model"] = model[:MODEL_MAX_CHARS]
         state["evolutions"] = int(state.get("evolutions", 0)) + 1
         state["updated"] = now_ts()
-        save(user, state)
+        _save_locked(exact, state)
         return state["model"]
 
 
@@ -158,7 +312,9 @@ def maybe_evolve(user: str, count: int,
     try:
         evolve(user, settings)
         return True
-    except Exception:
+    except Exception as err:
+        from . import errors
+        errors.capture("companion.maybe_evolve", err)
         return False
 
 
@@ -183,3 +339,82 @@ def summary(user: str) -> str:
         lines.append(f"\n(Keep chatting — Olympus adapts to you every "
                      f"{EVOLVE_EVERY} exchanges; next update in ~{nxt}.)")
     return "\n".join(lines)
+
+
+def state_status(user: str) -> dict:
+    """Return non-sensitive operator evidence about one exact-owner store."""
+    exact = memory.canonical_owner(user)
+    path = _path(exact)
+    legacy = _legacy_path(exact)
+    legacy_present = legacy != path and legacy.is_file()
+    try:
+        state = load(exact)
+    except CompanionStateError as err:
+        return {
+            "owner": exact,
+            "state": "unavailable",
+            "reason": err.reason,
+            "model_present": None,
+            "legacy_quarantined": legacy_present,
+            "legacy_file": legacy.name if legacy_present else None,
+            "repair_command": err.repair_command,
+        }
+    return {
+        "owner": exact,
+        "state": "valid" if path.is_file() else "missing",
+        "reason": None,
+        "model_present": bool(state["model"].strip()),
+        "legacy_quarantined": legacy_present,
+        "legacy_file": legacy.name if legacy_present else None,
+        "repair_command": None,
+    }
+
+
+def repair(user: str) -> dict:
+    """Explicitly preserve corrupt exact-owner bytes, then reset state.
+
+    Missing and valid stores are not rewritten. Ambiguous pre-P2T ``safe_id``
+    files are never touched: attributing those bytes to an owner is a separate
+    operator decision.
+    """
+    exact = memory.canonical_owner(user)
+    with _guard(exact):
+        raw = _read_exact(exact)
+        if raw is None:
+            result = state_status(exact)
+            result["repaired"] = False
+            return result
+        try:
+            _decode_state(exact, raw)
+        except CompanionStateError:
+            pass
+        else:
+            result = state_status(exact)
+            result["repaired"] = False
+            return result
+
+        digest = hashlib.sha256(raw).hexdigest()
+        path = _path(exact)
+        quarantine = path.with_name(
+            f"companion.corrupt.{digest[:_QUARANTINE_DIGEST_HEX]}.json")
+        try:
+            existing = quarantine.read_bytes()
+        except FileNotFoundError:
+            tmp_q = path.with_name(f".companion-quarantine-{os.getpid()}.tmp")
+            atomicio.publish(tmp_q, quarantine, raw)
+        except OSError as err:
+            raise CompanionStateError(
+                exact, f"quarantine read failed: {type(err).__name__}") from err
+        else:
+            if existing != raw:
+                raise CompanionStateError(
+                    exact, "content-addressed quarantine collision")
+
+        _save_locked(exact, _default_state())
+        result = state_status(exact)
+        result.update({
+            "repaired": True,
+            "quarantined_sha256": digest,
+            "quarantine_file": quarantine.name,
+        })
+        return result

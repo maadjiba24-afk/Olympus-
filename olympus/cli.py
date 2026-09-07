@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from . import heartbeat, memory, orchestrator
@@ -138,7 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_soul.add_argument("action", nargs="?", default="show",
                         choices=["show", "edit"])
     sub.add_parser("version", help="show the installed Olympus version")
-    sub.add_parser("growth", help="show how Olympus has adapted to you over time")
+    p_growth = sub.add_parser(
+        "growth", help="show how Olympus has adapted to you over time, or "
+                       "inspect/repair its evidence")
+    p_growth.add_argument(
+        "--owner", default="cli",
+        help="exact owner whose companion-model evidence is addressed")
+    p_growth.add_argument(
+        "--evidence", action="store_true",
+        help="show non-sensitive companion evidence status")
+    p_growth.add_argument(
+        "--repair", action="store_true",
+        help="preserve corrupt exact-owner bytes, then reset the state")
     p_up = sub.add_parser("upgrade", help="update Olympus to the latest release")
     p_up.add_argument("--git", action="store_true",
                       help="upgrade from the GitHub repo (latest main) instead "
@@ -1158,7 +1170,26 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Cleared {n} capture file(s).")
     elif args.command == "growth":
         from . import companion
-        print(companion.summary("cli"))
+        try:
+            if args.repair:
+                result = companion.repair(args.owner)
+                print(json.dumps(result, indent=2))
+                return (1 if result.get("state") == "unavailable"
+                        or result.get("legacy_quarantined") else 0)
+            if args.evidence:
+                result = companion.state_status(args.owner)
+                print(json.dumps(result, indent=2))
+                return (1 if result.get("state") == "unavailable"
+                        or result.get("legacy_quarantined") else 0)
+            print(companion.summary(args.owner))
+        except companion.CompanionStateError as err:
+            print(json.dumps({
+                "owner": err.user,
+                "state": "unavailable",
+                "reason": err.reason,
+                "repair_command": err.repair_command,
+            }, indent=2))
+            return 1
     elif args.command == "upgrade":
         from . import selfupdate
         return selfupdate.run(force_git=args.git)
@@ -1471,7 +1502,6 @@ def main(argv: list[str] | None = None) -> int:
                       f"{rep.get('decision_type', '∅')}")
             return 1
     elif args.command == "explain":
-        import json
         from . import trace
         run = trace.load_run(args.id)
         if run:
@@ -1818,7 +1848,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.command == "deployment":
-        import json
         from . import deployreadiness
 
         if args.action == "status":

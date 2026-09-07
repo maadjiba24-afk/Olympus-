@@ -183,3 +183,21 @@ archival protocol can preserve the tombstones. `evidence_status()` exposes
 health and counts without leaking mandate contents, and no read path mutates,
 repairs, migrates, or deletes the source evidence. The no-rail and never-auto-run
 boundaries are unchanged.
+
+The private companion model now follows the same missing-versus-unavailable
+rule. It is injected into routing and synthesis prompts, so malformed state is
+not harmless telemetry: accepting it as empty can remove a learned constraint,
+and a lossy owner key can inject one person's model into another person's
+answer. Exact-owner files therefore use `memory.storage_key`; pre-P2T
+`safe_id` files are preserved but attributed to nobody. Strict decoding rejects
+invalid UTF-8/JSON, duplicate keys, schema drift, invalid counters, an oversized
+model, and a non-finite timestamp before provider invocation or mutation.
+
+Companion updates reload under the owner lock and publish atomically. The
+operator can inspect non-sensitive health with
+`olympus growth --owner <exact-owner> --evidence`. The explicit `--repair`
+addition preserves corrupt exact-owner bytes under a content-addressed sibling
+before resetting them; no reader or background evolution path repairs state,
+and ambiguous legacy files remain untouched. A post-reply persistence failure
+is recorded durably rather than silently swallowed. This hardens collaboration
+context only and grants no execution authority or autonomy.

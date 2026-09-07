@@ -269,6 +269,8 @@ def render_card(user: str) -> str:
         comp = (companion.summary(user) or "").strip()
         if comp and "no adaptation" not in comp.lower():
             lines += ["## How I've adapted to you", comp, ""]
+    except companion.CompanionStateError as err:
+        lines += ["## How I've adapted to you", str(err), ""]
     except Exception:
         pass
     if len(lines) <= 2:
