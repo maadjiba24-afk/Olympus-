@@ -43,10 +43,15 @@ reusing every existing governance mechanism rather than inventing a parallel one
      construction; recovery `block`) — **before** recording anything,
    - records the verified, signed mandate to an append-only per-user store, and
    - returns a result that states, explicitly, `moved_money: false`.
-3. **Persistence + replay defense.** `olympus/mandate_store.py` keeps an
-   append-only record of issued mandates and the set of consumed nonces, so a
-   mandate cannot be recorded twice (replay is refused at the contract layer via
-   the nonce set).
+3. **Persistence + replay defense.** `olympus/mandate_store.py` keeps a bounded
+   history of issued mandates and a non-evicting set of consumed nonces. State
+   is keyed by the exact principal and, on the supported POSIX single-host
+   deployment, the read/modify/write cycle is serialized across processes.
+   Missing state means first use; malformed, wrong-shaped, inconsistent, or
+   unattributed legacy state raises a typed error rather than becoming an empty
+   nonce set. The store publishes nonce consumption before the record, so
+   interruption burns authority instead of reopening replay, and independently
+   rejects an already-consumed cart nonce while holding the write lock.
 
 ## Options considered
 
@@ -65,6 +70,8 @@ reusing every existing governance mechanism rather than inventing a parallel one
 - A real, human-driven authorization flow with zero ability to move money.
 - No new dependency; reuses the spine, the ABC contract, and the Ed25519 subkey.
 - The human always sees the exact bounded authorization before signing it.
+- Corrupt, cross-owner, concurrent, and partially-published replay evidence
+  fails closed and remains available for operator inspection.
 
 **Negative / residual risk (unchanged from ADR 0001)**
 - Mandate-spoofing and construction-injection are *mitigated, not solved*; the
@@ -72,6 +79,13 @@ reusing every existing governance mechanism rather than inventing a parallel one
   record, never a payment.
 - A recorded mandate must not be mistaken for a completed payment; the result
   and preview say so explicitly.
+- Refusing to evict nonce evidence means a full nonce ledger blocks new mandate
+  recording. That availability failure is intentional until an explicit,
+  evidence-preserving archival protocol exists.
+- `proclock` degrades to process-local locking on Windows and does not span
+  multiple hosts. Those topologies must not treat this store as a distributed
+  payment-authorization transaction boundary; the no-live-rail constraint
+  remains mandatory.
 
 ## Non-goals (unchanged)
 

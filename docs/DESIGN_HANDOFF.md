@@ -163,3 +163,23 @@ calls repair.
 Because resetting can remove a prior restriction, the operator must restore the
 intended profile, autonomy, scopes, limits, operator settings, and (for
 `shared`) daily budget after inspecting the preserved evidence.
+
+The AP2 mandate store applies the same evidence rule at the replay boundary.
+Previously, malformed `mandate_nonces` JSON became an empty set -- exactly the
+value that means a cart nonce has never been used. Mandates were also filed
+under lossy `safe_id` keys, and record/nonce documents were replaced without a
+cross-process critical section. Two approvals could race through one snapshot;
+an interruption after record-first publication could leave an authorization
+whose nonce was still reusable.
+
+P2S keys tenant state with `memory.storage_key`, refuses every unattributed
+legacy collision-group blob, parses both documents strictly, and cross-checks
+each stored intent/cart nonce against the consumed ledger. `record()` reloads
+under its owner lock, rejects a durable duplicate, and publishes the nonce
+tombstone before the record. A failed record publish therefore burns the nonce
+instead of reopening it. Replay evidence is never evicted to satisfy a size
+bound: a full ledger refuses new authorization records until a future explicit
+archival protocol can preserve the tombstones. `evidence_status()` exposes
+health and counts without leaking mandate contents, and no read path mutates,
+repairs, migrates, or deletes the source evidence. The no-rail and never-auto-run
+boundaries are unchanged.

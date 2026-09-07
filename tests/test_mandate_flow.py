@@ -98,11 +98,19 @@ def test_store_is_append_only_across_authorizations():
     assert all(r["nonce"] in nonces for r in mandate_store.records("u"))
 
 
-def test_store_corrupt_blob_starts_empty(monkeypatch):
+def test_store_corrupt_blob_fails_closed_and_is_preserved():
     from olympus import store, memory
-    store.backend().put("mandates", memory.safe_id("v"), b"{not json")
-    assert mandate_store.records("v") == []
-    assert mandate_store.consumed_nonces("v") == set()
+    raw = b"{not json"
+    key = memory.storage_key("v")
+    store.backend().put("mandates", key, raw)
+
+    with pytest.raises(mandate_store.MandateStateError,
+                       match="(?i)mandate replay evidence"):
+        mandate_store.records("v")
+    with pytest.raises(mandate_store.MandateStateError):
+        mandate_store.consumed_nonces("v")
+
+    assert store.backend().get("mandates", key) == raw
 
 
 def test_preview_shows_bounded_authorization():
