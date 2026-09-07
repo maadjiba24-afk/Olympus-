@@ -63,6 +63,29 @@ trust boundaries. The gate proves the local operator exercised the intended
 recovery path; it does not authorize live probes, collection, calibration, or
 autonomy. See [DEPLOYMENT_READINESS.md](DEPLOYMENT_READINESS.md).
 
+## Adaptive prompt-evidence boundary
+
+`companion.model_block` injects a compact, private working model into Zeus's
+routing and synthesis prompts. That makes the companion document trusted prompt
+context, not disposable telemetry. Tenant files are keyed by the complete exact
+principal through `memory.storage_key`; an older lossy `safe_id` file is
+unattributed collision-group evidence and is never read implicitly. A missing
+exact file means first use, while unreadable bytes, invalid UTF-8 or JSON,
+duplicate keys, or schema/type/bound violations raise `CompanionStateError` and
+stop prompt assembly before a provider is called. The reader consumes at most
+one bounded document before refusal.
+
+Reads never repair. Updates reload the validated document under the
+owner-specific process lock and publish atomically. The non-sensitive operator
+surface is `olympus growth --owner <exact-owner> --evidence`. Its explicit
+`--repair` mode first preserves corrupt exact-owner bytes in a
+content-addressed sibling and only then resets the live state. It does not claim
+or modify an ambiguous legacy file. Because reset can remove a learned
+restriction, no background path invokes repair. `proclock` supplies
+machine-wide serialization on POSIX and its documented same-process fallback
+on Windows; multi-process Windows deployment remains outside that lock's
+guarantee.
+
 **A note on the `browser_*` rows below.** Their "deny-first default" column is
 written against *prompt injection* — an attacker-influenced page trying to reach
 your session — and states its mitigations in terms of **domain**. On a

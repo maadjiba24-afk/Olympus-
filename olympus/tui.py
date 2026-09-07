@@ -215,7 +215,10 @@ def dispatch_command(bot, raw: str):
         return (True, bot.set_contribute(on), False)
     if name == "/growth":
         from . import companion
-        return (True, companion.summary("cli"), False)
+        try:
+            return (True, companion.summary("cli"), False)
+        except companion.CompanionStateError as err:
+            return (True, str(err), False)
     if name == "/reset":
         return (True, bot.reset(), False)
     if name == "/progress":

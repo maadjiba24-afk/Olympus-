@@ -15,6 +15,51 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Companion working-model evidence fails closed (P2T)
+
+**Damaged private prompt context became an empty first-use state.** The
+per-user companion store supplies a synthesized model of a person's goals,
+preferences, corrections, and communication style to every Zeus prompt.
+Previously it keyed that model with lossy `safe_id`, mapped malformed or
+unreadable JSON to `{}`, and rewrote the whole document without an atomic
+publish or machine-wide critical section. Two colliding principals could share
+private prompt context; a torn or corrupt file silently removed learned
+constraints, and the next interaction overwrote the evidence.
+
+- Tenant state now uses `memory.storage_key`, derived from the complete exact
+  principal. Pre-P2T `companion/<safe_id>.json` files are preserved as
+  unattributed collision-group evidence and are read by nobody. Even a
+  principal textually equal to the old safe key cannot claim the file. Reserved
+  installation owners retain their literal compatible paths.
+- Only a genuinely absent exact-owner file is valid first use. Existing invalid
+  UTF-8, malformed JSON, duplicate keys, wrong/missing/extra schema keys,
+  negative or Boolean counters, oversized/non-string models, and non-finite or
+  unrepresentable timestamps raise `CompanionStateError`; reads are also
+  capped above the largest valid serialized model. Model injection, growth
+  views, interaction updates, and evolution writes all refuse the same source
+  bytes instead of substituting defaults.
+- Every whole-document update reloads beneath the owner-specific `proclock`
+  plus the in-process lock and publishes through `atomicio`; readers therefore
+  see the prior or new validated document, never a partially written one.
+  Machine-wide serialization follows `proclock`'s existing platform contract:
+  POSIX processes are covered; Windows retains its documented in-process
+  fallback.
+- A failure encountered after a reply no longer disappears inside the
+  orchestrator's best-effort completion path: it is captured in the durable
+  error ledger. A corrupt model encountered while assembling a prompt stops
+  before any provider call.
+- `olympus growth --owner <exact-owner> --evidence` reports health without
+  returning model text or corrupt bytes. Gateway and terminal growth views, and
+  the user memory card, expose the same sanitized unavailable state instead of
+  crashing or silently omitting it. Adding `--repair` is the only reset path:
+  it content-addresses and atomically preserves corrupt exact-owner bytes before
+  publishing a valid empty state. Missing and valid state are not rewritten.
+  Ambiguous legacy files are deliberately not repaired or migrated; ownership
+  must be established out of band before an operator reconstructs any learning.
+
+This changes only local adaptive prompt evidence. It does not enable live
+verification fan-out, deployment, package publishing, collection, or autonomy.
+
 ### Security — Mandate replay evidence fails closed (P2S)
 
 **A damaged nonce ledger became an empty set.** `mandate_store` returned empty
