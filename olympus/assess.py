@@ -48,10 +48,13 @@ from __future__ import annotations
 
 import contextvars
 import fnmatch
+import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -59,7 +62,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from . import sarif, security
+from . import atomicio, config, memory, proclock, sarif, security
 
 # ---------------------------------------------------------------------------
 # Bounds — an assessment can never run away with the token budget or wall clock.
@@ -71,6 +74,13 @@ _MAX_ACTIVE_PROBES = 40         # hard cap on active-validation requests (never 
 _MAX_EVIDENCE = 400            # chars of matched-line evidence kept per finding
 _DEFAULT_EXPIRY = 24 * 3600     # a scope grant lasts a day unless overridden
 _MAX_EXPIRY = 30 * 24 * 3600    # ...and never longer than 30 days
+_MAX_AUTH_BYTES = 256 * 1024    # bounded authorization evidence read
+_MAX_AUTH_QUARANTINE_BYTES = 8 * 1024 * 1024
+_MAX_AUTHORIZATIONS = 2048
+_MAX_AUTH_TARGETS = 128
+_AUTH_KEYS = frozenset(
+    {"id", "targets", "created", "expires", "note", "approved_by"})
+_QUARANTINE_DIGEST_HEX = 16
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
               "vendor", "dist", "build", ".mypy_cache", ".tox", "site-packages"}
 _SOURCE_SUFFIXES = {".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rb",
@@ -87,39 +97,198 @@ class AssessScopeError(PermissionError):
     authorization. Always fail-closed: absence of a grant is out-of-scope."""
 
 
+class AssessAuthorizationStateError(AssessScopeError):
+    """The exact owner's authorization evidence cannot be trusted.
+
+    Missing evidence means no grant and is a valid state. Existing bytes that
+    cannot be read and validated are different: silently mapping them to an
+    empty list hides the damaged approval record and lets the next grant erase
+    it. All target-touching paths therefore refuse before I/O until an operator
+    preserves and explicitly repairs the bytes.
+    """
+
+    def __init__(self, user: str, reason: str) -> None:
+        self.user = memory.canonical_owner(user)
+        self.reason = str(reason)
+        self.repair_command = (
+            "olympus assess scope --owner <exact-owner> --evidence --repair")
+        super().__init__(
+            "Assessment authorization evidence is unavailable "
+            f"({self.reason}). Scope reads and writes are refused; preserve "
+            "the stored bytes for operator inspection.")
+
+
 def _user(user: str | None = None) -> str:
-    if user:
-        return user
-    try:
-        from . import memory
-        return memory.current_user()
-    except Exception:
-        return "shared"
+    if user is not None:
+        return memory.canonical_owner(user)
+    return memory.current_owner()
 
 
 def _store_dir(user: str) -> Path:
-    from . import config, memory
-    d = config.MEMORY_DIR / "assess" / memory.safe_id(user)
+    """Private assessment state for one exact owner.
+
+    This directory contains more than authorization data (findings, cached OSV
+    results and learned assessment priors), so moving the boundary here keeps
+    every assessment artifact out of a colliding principal's namespace.
+    """
+    d = config.MEMORY_DIR / "assess" / memory.storage_key(user)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
+def _legacy_store_dir(user: str) -> Path:
+    """Pre-P2U lossy directory, retained but never implicitly claimed."""
+    exact = memory.canonical_owner(user)
+    return config.MEMORY_DIR / "assess" / memory.safe_id(exact)
+
+
 def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    tmp = path.with_name(
+        f".{path.name}-{os.getpid()}-{threading.get_ident()}.tmp")
+    atomicio.publish(tmp, path, text)
 
 
 def _auth_path(user: str) -> Path:
     return _store_dir(user) / "authorizations.json"
 
 
-def _load_auths(user: str) -> list[dict]:
+def _legacy_auth_path(user: str) -> Path:
+    return _legacy_store_dir(user) / "authorizations.json"
+
+
+def _duplicate_rejecting_object(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _validate_timestamp(user: str, value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AssessAuthorizationStateError(
+            user, f"{field} is not a finite timestamp")
     try:
-        data = json.loads(_auth_path(user).read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise AssessAuthorizationStateError(
+            user, f"{field} is not a finite timestamp") from None
+    if not math.isfinite(number) or number < 0:
+        raise AssessAuthorizationStateError(
+            user, f"{field} is not a finite timestamp")
+    return number
+
+
+def _validate_auths(user: str, data: object) -> list[dict]:
+    if not isinstance(data, list):
+        raise AssessAuthorizationStateError(user, "root is not an array")
+    if len(data) > _MAX_AUTHORIZATIONS:
+        raise AssessAuthorizationStateError(
+            user, "authorization count exceeds the bound")
+
+    validated: list[dict] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(data):
+        label = f"authorization {index}"
+        if not isinstance(raw, dict):
+            raise AssessAuthorizationStateError(user, f"{label} is not an object")
+        if set(raw) != _AUTH_KEYS:
+            raise AssessAuthorizationStateError(
+                user, f"{label} keys do not match the schema")
+
+        auth_id = raw["id"]
+        if (not isinstance(auth_id, str) or not auth_id
+                or len(auth_id) > 128 or auth_id in seen_ids):
+            raise AssessAuthorizationStateError(
+                user, f"{label} id is invalid or duplicated")
+        seen_ids.add(auth_id)
+
+        targets = raw["targets"]
+        if (not isinstance(targets, list) or not targets
+                or len(targets) > _MAX_AUTH_TARGETS
+                or any(not isinstance(target, str) or not target
+                       or len(target) > 512 for target in targets)
+                or targets != _normalize_targets(targets)):
+            raise AssessAuthorizationStateError(
+                user, f"{label} targets are not canonical")
+
+        created = _validate_timestamp(user, raw["created"], "created")
+        expires = _validate_timestamp(user, raw["expires"], "expires")
+        note = raw["note"]
+        approved_by = raw["approved_by"]
+        if not isinstance(note, str) or len(note) > 500:
+            raise AssessAuthorizationStateError(
+                user, f"{label} note is not a bounded string")
+        if (not isinstance(approved_by, str) or not approved_by
+                or len(approved_by) > 120):
+            raise AssessAuthorizationStateError(
+                user, f"{label} approved_by is not a bounded string")
+
+        validated.append({
+            "id": auth_id,
+            "targets": list(targets),
+            "created": created,
+            "expires": expires,
+            "note": note,
+            "approved_by": approved_by,
+        })
+    return validated
+
+
+def _decode_auths(user: str, raw: bytes) -> list[dict]:
+    try:
+        text = raw.decode("utf-8")
+    except (AttributeError, UnicodeDecodeError) as err:
+        raise AssessAuthorizationStateError(
+            user, "authorization state is not valid UTF-8") from err
+    try:
+        data = json.loads(text, object_pairs_hook=_duplicate_rejecting_object)
+    except (json.JSONDecodeError, ValueError) as err:
+        raise AssessAuthorizationStateError(
+            user, "authorization state is malformed JSON") from err
+    return _validate_auths(user, data)
+
+
+def _read_auth_bytes(user: str) -> bytes | None:
+    path = _auth_path(user)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_AUTH_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise AssessAuthorizationStateError(
+            user, f"authorization read failed: {type(err).__name__}") from err
+    if len(raw) > _MAX_AUTH_BYTES:
+        raise AssessAuthorizationStateError(
+            user, "authorization state exceeds the size bound")
+    return raw
+
+
+def _load_auths(user: str) -> list[dict]:
+    exact = memory.canonical_owner(user)
+    raw = _read_auth_bytes(exact)
+    return [] if raw is None else _decode_auths(exact, raw)
+
+
+@contextmanager
+def _auth_guard(user: str):
+    """Serialize one exact owner's whole authorization read-modify-write."""
+    exact = memory.canonical_owner(user)
+    digest = hashlib.sha256(exact.encode("utf-8")).hexdigest()
+    with proclock.lock(f"assess-auth-{digest}"):
+        yield exact
+
+
+def _save_auths_locked(user: str, auths: list[dict]) -> None:
+    validated = _validate_auths(user, auths)
+    serialized = json.dumps(
+        validated, sort_keys=True, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > _MAX_AUTH_BYTES:
+        raise AssessAuthorizationStateError(
+            user, "serialized authorization state exceeds the size bound")
+    _atomic_write(_auth_path(user), serialized)
 
 
 def _now() -> float:
@@ -165,20 +334,24 @@ def grant(targets: list[str] | str, *, expires_in: float = _DEFAULT_EXPIRY,
         "note": str(note or "")[:500],
         "approved_by": str(approved_by or "operator")[:120],
     }
-    auths = [a for a in _load_auths(user) if a.get("expires", 0) > created]
-    auths.append(rec)
-    _atomic_write(_auth_path(user), json.dumps(auths, indent=2))
-    return rec
+    with _auth_guard(user) as exact:
+        # Existing malformed bytes are never mapped to [] and overwritten.
+        auths = [
+            a for a in _load_auths(exact) if a.get("expires", 0) > created]
+        auths.append(rec)
+        _save_auths_locked(exact, auths)
+        return rec
 
 
 def revoke(auth_id: str, user: str | None = None) -> bool:
     user = _user(user)
-    auths = _load_auths(user)
-    kept = [a for a in auths if a.get("id") != auth_id]
-    if len(kept) == len(auths):
-        return False
-    _atomic_write(_auth_path(user), json.dumps(kept, indent=2))
-    return True
+    with _auth_guard(user) as exact:
+        auths = _load_auths(exact)
+        kept = [a for a in auths if a.get("id") != auth_id]
+        if len(kept) == len(auths):
+            return False
+        _save_auths_locked(exact, kept)
+        return True
 
 
 def active_authorizations(user: str | None = None) -> list[dict]:
@@ -269,6 +442,113 @@ def scope_summary(user: str | None = None) -> str:
                      f"{a.get('approved_by', '?')})"
                      + (f" — {a['note']}" if a.get("note") else ""))
     return "\n".join(lines)
+
+
+def authorization_status(user: str | None = None) -> dict:
+    """Return non-sensitive evidence about one exact-owner scope store."""
+    exact = _user(user)
+    path = _auth_path(exact)
+    legacy = _legacy_auth_path(exact)
+    try:
+        legacy_present = legacy != path and legacy.is_file()
+    except OSError:
+        legacy_present = True
+    try:
+        auths = _load_auths(exact)
+    except AssessAuthorizationStateError as err:
+        return {
+            "owner": exact,
+            "state": "unavailable",
+            "reason": err.reason,
+            "active_count": None,
+            "legacy_quarantined": legacy_present,
+            "legacy_file": legacy.name if legacy_present else None,
+            "repair_command": err.repair_command,
+        }
+    return {
+        "owner": exact,
+        "state": "valid" if path.is_file() else "missing",
+        "reason": None,
+        "active_count": sum(a["expires"] > _now() for a in auths),
+        "legacy_quarantined": legacy_present,
+        "legacy_file": legacy.name if legacy_present else None,
+        "repair_command": None,
+    }
+
+
+def _read_auth_bytes_for_repair(user: str) -> bytes | None:
+    """Read exact corrupt bytes for quarantine, with a separate safety cap."""
+    path = _auth_path(user)
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_AUTH_QUARANTINE_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise AssessAuthorizationStateError(
+            user, f"authorization repair read failed: {type(err).__name__}") from err
+    if len(raw) > _MAX_AUTH_QUARANTINE_BYTES:
+        raise AssessAuthorizationStateError(
+            user, "authorization state exceeds the repair quarantine bound")
+    return raw
+
+
+def repair_authorizations(user: str | None = None) -> dict:
+    """Preserve corrupt exact-owner authorization bytes, then reset to no grants.
+
+    Valid and missing stores are not rewritten. The pre-P2U ``safe_id`` file is
+    never touched or attributed to an exact owner: multiple principals may have
+    contributed those bytes, so only explicit offline operator adjudication can
+    migrate them.
+    """
+    user = _user(user)
+    with _auth_guard(user) as exact:
+        raw = _read_auth_bytes_for_repair(exact)
+        if raw is None:
+            result = authorization_status(exact)
+            result["repaired"] = False
+            return result
+        try:
+            if len(raw) > _MAX_AUTH_BYTES:
+                raise AssessAuthorizationStateError(
+                    exact, "authorization state exceeds the size bound")
+            _decode_auths(exact, raw)
+        except AssessAuthorizationStateError:
+            pass
+        else:
+            result = authorization_status(exact)
+            result["repaired"] = False
+            return result
+
+        digest = hashlib.sha256(raw).hexdigest()
+        path = _auth_path(exact)
+        quarantine = path.with_name(
+            "authorizations.corrupt."
+            f"{digest[:_QUARANTINE_DIGEST_HEX]}.json")
+        try:
+            with quarantine.open("rb") as handle:
+                existing = handle.read(_MAX_AUTH_QUARANTINE_BYTES + 1)
+        except FileNotFoundError:
+            tmp = path.with_name(
+                f".authorizations-quarantine-{os.getpid()}-"
+                f"{threading.get_ident()}.tmp")
+            atomicio.publish(tmp, quarantine, raw)
+        except OSError as err:
+            raise AssessAuthorizationStateError(
+                exact, f"quarantine read failed: {type(err).__name__}") from err
+        else:
+            if existing != raw:
+                raise AssessAuthorizationStateError(
+                    exact, "content-addressed quarantine collision")
+
+        _save_auths_locked(exact, [])
+        result = authorization_status(exact)
+        result.update({
+            "repaired": True,
+            "quarantined_sha256": digest,
+            "quarantine_file": quarantine.name,
+        })
+        return result
 
 
 # ===========================================================================

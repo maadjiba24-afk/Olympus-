@@ -3229,7 +3229,11 @@ def _assess_scope_reason(err: Exception) -> str:
 
 
 def _assess_scope() -> str:
-    return _assess().scope_summary()
+    a = _assess()
+    try:
+        return a.scope_summary()
+    except a.AssessAuthorizationStateError as err:
+        return _assess_scope_reason(err)
 
 
 def _assess_recon(target: str) -> str:
@@ -3382,9 +3386,12 @@ def _assess_propose_fix(finding_id: str, source_root: str = "") -> str:
 def _assess_selfassess(base_url: str, source_path: str = "",
                        cookie: str = "") -> str:
     import json as _json
-    from . import selfassess
-    out = selfassess.selfassess(base_url, source_path=source_path or None,
-                                cookie=cookie or None)
+    from . import assess, selfassess
+    try:
+        out = selfassess.selfassess(base_url, source_path=source_path or None,
+                                    cookie=cookie or None)
+    except assess.AssessAuthorizationStateError as err:
+        return _assess_scope_reason(err)
     # Keep the tool payload compact: summary + findings, not the whole crawl.
     return _json.dumps({k: v for k, v in out.items() if k != "findings"}
                        | {"findings": out.get("findings", [])},

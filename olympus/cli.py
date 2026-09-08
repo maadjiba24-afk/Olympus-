@@ -449,7 +449,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_auth.add_argument("--hours", type=float, default=24,
                            help="authorization lifetime in hours (default 24)")
     p_as_auth.add_argument("--note", default="")
-    as_sub.add_parser("scope", help="show active assessment authorizations")
+    p_as_scope = as_sub.add_parser(
+        "scope", help="show active assessment authorizations or inspect/repair "
+                      "their evidence")
+    p_as_scope.add_argument(
+        "--owner", default=None,
+        help="exact owner whose private authorization evidence is addressed")
+    p_as_scope.add_argument(
+        "--evidence", action="store_true",
+        help="show non-sensitive authorization evidence status")
+    p_as_scope.add_argument(
+        "--repair", action="store_true",
+        help="preserve corrupt bytes content-addressed, then reset to no grants")
     p_as_rev = as_sub.add_parser("revoke", help="revoke an authorization by id")
     p_as_rev.add_argument("id")
     p_as_recon = as_sub.add_parser("recon", help="fingerprint an authorized target")
@@ -2092,15 +2103,48 @@ def main(argv: list[str] | None = None) -> int:
         from . import assess, tools
         sc = args.assess_cmd
         if sc == "authorize":
-            rec = assess.grant(args.targets, expires_in=args.hours * 3600,
-                               note=args.note, approved_by="operator-cli")
+            try:
+                rec = assess.grant(args.targets, expires_in=args.hours * 3600,
+                                   note=args.note, approved_by="operator-cli")
+            except assess.AssessAuthorizationStateError as err:
+                print(f"Assessment authorization evidence is unavailable: "
+                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                return 1
             print(f"Authorized {', '.join(rec['targets'])} → {rec['id']} "
                   f"(valid {args.hours:g}h). Scope is now enforced in code; only "
                   "these targets can be assessed.")
         elif sc == "scope":
-            print(assess.scope_summary())
+            if args.repair:
+                try:
+                    result = assess.repair_authorizations(args.owner)
+                except assess.AssessAuthorizationStateError as err:
+                    print(json.dumps({
+                        "state": "unavailable",
+                        "reason": err.reason,
+                        "repair_command": err.repair_command,
+                    }, indent=2, sort_keys=True), file=sys.stderr)
+                    return 1
+                print(json.dumps(result, indent=2, sort_keys=True))
+            elif args.evidence:
+                result = assess.authorization_status(args.owner)
+                print(json.dumps(result, indent=2, sort_keys=True))
+                if result["state"] == "unavailable":
+                    return 1
+            else:
+                try:
+                    print(assess.scope_summary(args.owner))
+                except assess.AssessAuthorizationStateError as err:
+                    print(f"Assessment authorization evidence is unavailable: "
+                          f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                    return 1
         elif sc == "revoke":
-            print("Revoked." if assess.revoke(args.id) else "No such authorization.")
+            try:
+                revoked = assess.revoke(args.id)
+            except assess.AssessAuthorizationStateError as err:
+                print(f"Assessment authorization evidence is unavailable: "
+                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                return 1
+            print("Revoked." if revoked else "No such authorization.")
         elif sc == "recon":
             print(tools._assess_recon(args.target))
         elif sc == "audit":
@@ -2150,8 +2194,13 @@ def main(argv: list[str] | None = None) -> int:
                   + (f" — {out['note']}" if out.get("note") else "") + ".")
         elif sc == "selfassess":
             from . import selfassess as _sa
-            out = _sa.selfassess(args.url, source_path=args.source,
-                                 cookie=args.cookie)
+            try:
+                out = _sa.selfassess(args.url, source_path=args.source,
+                                     cookie=args.cookie)
+            except assess.AssessAuthorizationStateError as err:
+                print(f"Assessment authorization evidence is unavailable: "
+                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                return 1
             if out.get("refused"):
                 print(out["error"], file=sys.stderr)
                 return 1
@@ -2173,7 +2222,12 @@ def main(argv: list[str] | None = None) -> int:
         elif sc == "clear":
             print(f"Cleared {assess.clear_findings()} finding(s).")
         else:
-            print(assess.scope_summary())
+            try:
+                print(assess.scope_summary())
+            except assess.AssessAuthorizationStateError as err:
+                print(f"Assessment authorization evidence is unavailable: "
+                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                return 1
     elif args.command == "discover":
         from . import discovery
         dc = args.discover_cmd
