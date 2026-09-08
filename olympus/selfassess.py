@@ -206,7 +206,7 @@ def selfassess(base_url: str, *, source_path: str | None = None,
     # Authorize the loopback target (self-owned) and confine egress to it, so even
     # a hijacked crawl cannot leave the local app. The SSRF loopback allowance is
     # armed ONLY for this exact host:port (and can only be armed for loopback).
-    assess.grant([host], note="self-assessment (local app)")
+    assess.grant([host], note="self-assessment (local app)", user=user)
     phases: list[str] = []
     crawl_urls: list[str] = []
     with security.allow_local_target(host, port), \
@@ -244,7 +244,7 @@ def selfassess(base_url: str, *, source_path: str | None = None,
 
     # Whitebox scans run on local source — no network, no allowance needed.
     if source_path:
-        assess.grant(["local"], note="self-assessment (source)")
+        assess.grant(["local"], note="self-assessment (source)", user=user)
         for label, fn in (("sast", assess.sast_scan), ("secrets", assess.secret_scan),
                           ("deps", assess.dep_audit)):
             try:

@@ -15,6 +15,45 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Assessment-authorization evidence fails closed (P2U)
+
+**Damaged approval state became no grants, then was silently replaced.** The
+assessment authorization document is the predicate that permits recon, audit,
+validation, and self-assessment to touch a target. Previously it was stored
+under lossy `safe_id`, malformed or unreadable JSON was interpreted as `[]`,
+and grant/revoke used an unlocked, non-durable whole-file replacement. Two
+colliding principals could share scope, concurrent updates could disappear,
+and a new grant could erase the only evidence of a damaged approval record.
+
+- The complete assessment directory now uses `memory.storage_key`, derived
+  from the exact principal. This separates authorizations, findings, advisory
+  cache, and learned assessment data. Pre-P2U `assess/<safe_id>/` directories
+  remain untouched, are attributed to nobody, and are never read implicitly.
+- A missing exact-owner authorization file remains the valid no-grant state.
+  Existing invalid UTF-8 or JSON, duplicate keys, wrong roots or schema,
+  duplicate IDs, non-canonical targets, invalid/non-finite timestamps, and
+  bound violations raise `AssessAuthorizationStateError`. Target-touching
+  paths refuse before probe I/O; scope reads, signed-action grants, CLI grants,
+  revocations, and loopback self-assessment refuse the same bytes rather than
+  replacing them.
+- Authorization read-modify-write now reloads beneath a full-digest owner
+  `proclock` and publishes through `atomicio`. Serialized writes are checked
+  against the reader's byte cap before publication, so a successful grant
+  cannot create state the next read must reject. Machine-wide serialization
+  follows `proclock`'s existing platform contract: POSIX processes are covered;
+  Windows retains its documented same-process fallback.
+- `olympus assess scope --owner <exact-owner> --evidence` reports only owner,
+  health, reason, active count, legacy presence, and the recovery command. The
+  explicit `--repair` path preserves corrupt exact-owner bytes in a
+  content-addressed sibling before resetting the live document to no grants.
+  It will not read an unbounded source, rewrite valid/missing state, or claim an
+  ambiguous legacy directory. Repair is never invoked by a normal reader.
+
+This phase makes the authorization decision strict. It does not change the
+separate corruption policy for findings, advisory cache, or learned-assessment
+documents, and it does not enable target access, live verifier fan-out,
+deployment, package publishing, collection, or autonomy.
+
 ### Security — Companion working-model evidence fails closed (P2T)
 
 **Damaged private prompt context became an empty first-use state.** The

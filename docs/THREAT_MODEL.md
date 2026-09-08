@@ -86,6 +86,32 @@ machine-wide serialization on POSIX and its documented same-process fallback
 on Windows; multi-process Windows deployment remains outside that lock's
 guarantee.
 
+## Assessment-authorization evidence boundary
+
+`assess.require_scope` is the code-level predicate before assessment target
+I/O. Its evidence is therefore authorization state, not a disposable cache.
+Each assessment directory is keyed by the complete exact principal through
+`memory.storage_key`; a pre-P2U `assess/<safe_id>/` directory is unattributed
+collision-group evidence and no principal reads it implicitly. A genuinely
+missing exact-owner authorization file means no grants. Existing unreadable
+bytes, invalid UTF-8 or JSON, duplicate keys, schema/type/canonicalization
+failures, and size/count violations raise `AssessAuthorizationStateError`.
+Recon, HTTP audit, active validation, and self-assessment stop before probe I/O;
+scope reads and both direct and signed-action updates refuse without replacing
+the source bytes.
+
+Grant and revoke reload the validated document beneath a full-digest owner
+`proclock`, enforce a serialized byte bound, and publish through `atomicio`.
+The non-sensitive operator view is
+`olympus assess scope --owner <exact-owner> --evidence`. Its explicit
+`--repair` mode first preserves corrupt exact-owner bytes in a
+content-addressed sibling, then resets the live state to no grants. Missing and
+valid state are not rewritten, over-quarantine-bound evidence is left intact,
+and legacy directories are never claimed or modified. Reset can discard prior
+approval evidence, so no normal read, target action, or background path invokes
+repair. Strict corruption handling for the other files in the now-exact-owner
+assessment directory remains a separate boundary.
+
 **A note on the `browser_*` rows below.** Their "deny-first default" column is
 written against *prompt injection* — an attacker-influenced page trying to reach
 your session — and states its mitigations in terms of **domain**. On a
@@ -300,8 +326,8 @@ is accepted.
 
 **What is still normalized, stated plainly.** Olympus is NOT exact-owner safe
 end to end. `documents`, `docrag`, `todos`, `playbooks`, `emailstyle`, the
-conversation search index, `assess` and `discovery` all key themselves on
-`safe_id` internally, so colliding principals still share those stores; `usage`
+conversation search index, and `discovery` all key themselves on `safe_id`
+internally, so colliding principals still share those stores; `usage`
 and `gallery` are normalized deliberately, being accounting and display rather
 than authorization. Each remaining store needs the same treatment `vault` and
 `prefs` received: an owner-keyed layout plus a fail-closed legacy quarantine.
@@ -403,7 +429,7 @@ accept installation-wide fan-out — under which every configured channel, and
 everyone on it, receives every monitor owner's alerts. Broadcast without the
 guard fails closed, since with the guard off the payload is never classified at
 all. A failed injected callback is never retried through the fan-out.
-| `assess_scope` | Show active, signed assessment authorizations | first-party read | Read-only over Olympus's own authorization store; agents cannot grant scope (operator-only via the `authorize_assessment` action) | Self-authorization — impossible: no grant tool is exposed; scope is a code-checked, ledger-recorded fact |
+| `assess_scope` | Show active, signed assessment authorizations | first-party read | Read-only over one exact owner's strictly validated authorization store; corrupt/unreadable evidence is surfaced as a sanitized refusal and never mapped to no grants; agents cannot grant scope (operator-only via the `authorize_assessment` action) | Self-authorization or approval-evidence erasure — impossible: no grant tool is exposed, and damaged scope state refuses readers and writers until explicit preserve-before-reset repair |
 | `assess_recon` | Fingerprint an AUTHORIZED target (status, server/tech headers, missing security headers) | ingests untrusted | `require_scope()` fails closed unless the target is in an active grant; single gated, IP-pinned `_http_probe` GET (SSRF/egress/secret-exfil preamble, no payloads); output wrapped, actuators stripped | Out-of-scope reach — refused in code before any I/O; SSRF/rebinding — pinned; injected response steering scope — wrapped, and the grant list is the only scope |
 | `assess_http_audit` | Audit an AUTHORIZED target's HTTP security headers / cookie flags / CORS | ingests untrusted | Scope-enforced like `assess_recon`; one gated GET; findings carry computed CVSS; output wrapped | Out-of-scope reach — refused; SSRF — gated/pinned; injected content — wrapped |
 | `assess_sast` | Pattern SAST over workspace-confined source (sinks → CWE+CVSS) | first-party read | `require_scope('local')` required; files confined via `sandbox._confine` (no traversal); read-only; bounded file count/size | Arbitrary-file read — refused by `_confine`; running without consent — refused by `require_scope` |

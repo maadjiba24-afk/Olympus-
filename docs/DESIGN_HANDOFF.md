@@ -201,3 +201,25 @@ before resetting them; no reader or background evolution path repairs state,
 and ambiguous legacy files remain untouched. A post-reply persistence failure
 is recorded durably rather than silently swallowed. This hardens collaboration
 context only and grants no execution authority or autonomy.
+
+Assessment authorization now applies that distinction at a target-I/O
+boundary. An absent exact-owner `authorizations.json` means no scope; existing
+bytes that cannot be decoded and schema-checked are unavailable evidence, not
+an empty grant list. Recon, HTTP audit, active validation, self-assessment,
+scope reads, revocation, and both authorization entry points refuse before
+target I/O or mutation. The signed `authorize_assessment` action does not gain
+permission to replace a damaged approval record merely because it traversed
+the approval spine.
+
+The entire assessment directory uses `memory.storage_key`, so scope, findings,
+the advisory cache, and learned assessment state cannot cross a `safe_id`
+collision. Old lossy directories are preserved but claimed by nobody.
+Authorization updates reload under a full-digest owner process lock, validate a
+strict and bounded document, and publish durably through `atomicio`. Operators
+can inspect sanitized health with
+`olympus assess scope --owner <exact-owner> --evidence`; only the explicit
+`--repair` form may content-address and preserve corrupt exact-owner bytes
+before publishing a no-grant document. Evidence too large to preserve within
+the quarantine cap is refused unchanged. This phase does not assign strict
+corruption semantics to the separate findings, advisory-cache, or learned
+assessment documents.
