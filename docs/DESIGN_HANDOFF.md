@@ -223,3 +223,13 @@ before publishing a no-grant document. Evidence too large to preserve within
 the quarantine cap is refused unchanged. This phase does not assign strict
 corruption semantics to the separate findings, advisory-cache, or learned
 assessment documents.
+
+
+The post-PR #309 assessment-result change completes strict evidence semantics
+for findings, learned knowledge and optional advisory cache. Reports and prompt
+consumers expose unavailable state; all use the exact assessment owner. Health
+and explicit preservation-before-reset repair are available through `assess
+evidence`. Findings and learning are serialized but not a single atomic file;
+partial publication is reported. POST_PR309_CLOSURE.md is the finite register,
+with audit, operational and comparison evidence separated from code completion.
+No operational or autonomy restriction is lifted by passing unit tests.

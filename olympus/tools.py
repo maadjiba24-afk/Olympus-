@@ -3224,6 +3224,19 @@ def _assess():
     return assess
 
 
+def _assessment_evidence_visible(fn):
+    from functools import wraps
+
+    @wraps(fn)
+    def call(*args, **kwargs):
+        from .assessment_evidence import AssessEvidenceStateError
+        try:
+            return fn(*args, **kwargs)
+        except AssessEvidenceStateError as err:
+            return _assess_scope_reason(err)
+    return call
+
+
 def _assess_scope_reason(err: Exception) -> str:
     return f"Assessment refused: {err}"
 
@@ -3254,6 +3267,7 @@ def _assess_recon(target: str) -> str:
             f"- Missing security headers: {', '.join(missing) or 'none'}")
 
 
+@_assessment_evidence_visible
 def _assess_http_audit(target: str) -> str:
     a = _assess()
     try:
@@ -3265,6 +3279,7 @@ def _assess_http_audit(target: str) -> str:
     return _fmt_finding_result(f"HTTP audit of {r.get('url', target)}", r)
 
 
+@_assessment_evidence_visible
 def _assess_sast(path: str = ".") -> str:
     a = _assess()
     try:
@@ -3277,6 +3292,7 @@ def _assess_sast(path: str = ".") -> str:
         f"SAST scan of {path} ({r.get('files_scanned', 0)} file(s))", r)
 
 
+@_assessment_evidence_visible
 def _assess_secrets(path: str = ".") -> str:
     a = _assess()
     try:
@@ -3288,6 +3304,7 @@ def _assess_secrets(path: str = ".") -> str:
     return _fmt_finding_result(f"Secret scan of {path}", r)
 
 
+@_assessment_evidence_visible
 def _assess_deps(path: str = ".") -> str:
     a = _assess()
     try:
@@ -3296,9 +3313,16 @@ def _assess_deps(path: str = ".") -> str:
         return _assess_scope_reason(err)
     if r.get("error"):
         return f"dep_audit {path}: {r['error']}"
-    return _fmt_finding_result(f"Dependency audit of {path}", r)
+    coverage = r.get("osv_coverage", {})
+    states = [row["state"] for row in coverage.get("lookups", [])]
+    return (_fmt_finding_result(f"Dependency audit of {path}", r)
+            + "\n\nOSV coverage: " + ("complete for queried declarations" if coverage.get("complete")
+                                       else "disabled or incomplete")
+            + ("; cache publication unconfirmed" if "live-unpersisted" in states else "")
+            + ". " + coverage.get("note", ""))
 
 
+@_assessment_evidence_visible
 def _assess_validate(url: str) -> str:
     a = _assess()
     try:
@@ -3333,6 +3357,7 @@ def _fmt_finding_result(title: str, r: dict) -> str:
     return "\n".join(lines)
 
 
+@_assessment_evidence_visible
 def _record_finding(title: str, severity: str = "medium", cwe: str = "",
                     cvss_vector: str = "", location: str = "", evidence: str = "",
                     remediation: str = "", confidence: str = "medium") -> str:
@@ -3362,27 +3387,32 @@ def _note_knowledge_gap(topic: str, context: str = "") -> str:
             "cycle.")
 
 
+@_assessment_evidence_visible
 def _list_findings() -> str:
     a = _assess()
     return a.export_findings("markdown")
 
 
+@_assessment_evidence_visible
 def _export_findings(fmt: str = "markdown") -> str:
     return _assess().export_findings(fmt)
 
 
+@_assessment_evidence_visible
 def _assess_import_sarif(source: str) -> str:
     import json as _json
     out = _assess().import_sarif(source)
     return _json.dumps(out, indent=2, sort_keys=True)
 
 
+@_assessment_evidence_visible
 def _assess_propose_fix(finding_id: str, source_root: str = "") -> str:
     import json as _json
     out = _assess().propose_fix(finding_id, source_root=source_root or None)
     return _json.dumps(out, indent=2, sort_keys=True, default=str)
 
 
+@_assessment_evidence_visible
 def _assess_selfassess(base_url: str, source_path: str = "",
                        cookie: str = "") -> str:
     import json as _json

@@ -208,6 +208,7 @@ def selfassess(base_url: str, *, source_path: str | None = None,
     # armed ONLY for this exact host:port (and can only be armed for loopback).
     assess.grant([host], note="self-assessment (local app)", user=user)
     phases: list[str] = []
+    evidence_warnings: list[str] = []
     crawl_urls: list[str] = []
     with security.allow_local_target(host, port), \
             assess.confined_egress(user, targets=[host]), \
@@ -217,11 +218,15 @@ def selfassess(base_url: str, *, source_path: str | None = None,
         try:
             assess.recon(base_url, user)
             phases.append("recon")
+        except (assess.AssessEvidenceStateError, assess.AssessAuthorizationStateError):
+            raise
         except Exception:
             pass
         try:
             assess.http_audit(base_url, user=user)
             phases.append("http_audit")
+        except (assess.AssessEvidenceStateError, assess.AssessAuthorizationStateError):
+            raise
         except Exception:
             pass
         crawl_urls, csrf_findings = _discover(base_url, max_pages)
@@ -229,6 +234,8 @@ def selfassess(base_url: str, *, source_path: str | None = None,
         for f in csrf_findings:
             try:
                 assess.record_finding(f, user)
+            except (assess.AssessEvidenceStateError, assess.AssessAuthorizationStateError):
+                raise
             except Exception:
                 continue
         if csrf_findings:
@@ -238,6 +245,8 @@ def selfassess(base_url: str, *, source_path: str | None = None,
             try:
                 assess.validate(url, user)
                 validated += 1
+            except (assess.AssessEvidenceStateError, assess.AssessAuthorizationStateError):
+                raise
             except Exception:
                 continue
         phases.append(f"validate({validated})")
@@ -248,8 +257,14 @@ def selfassess(base_url: str, *, source_path: str | None = None,
         for label, fn in (("sast", assess.sast_scan), ("secrets", assess.secret_scan),
                           ("deps", assess.dep_audit)):
             try:
-                fn(source_path, user=user)
+                result = fn(source_path, user=user)
+                coverage = result.get("osv_coverage", {}) if isinstance(result, dict) else {}
+                if label == "deps" and coverage and (not coverage.get("complete") or any(
+                        row["state"] == "live-unpersisted" for row in coverage.get("lookups", []))):
+                    evidence_warnings.append("Dependency advisory coverage disabled, incomplete, or unpersisted.")
                 phases.append(label)
+            except (assess.AssessEvidenceStateError, assess.AssessAuthorizationStateError):
+                raise
             except Exception:
                 continue
 
@@ -264,4 +279,5 @@ def selfassess(base_url: str, *, source_path: str | None = None,
         "findings": findings,
         "total_findings": len(findings),
         "by_severity": by_sev,
+        "evidence_warnings": evidence_warnings,
     }

@@ -86,6 +86,30 @@ machine-wide serialization on POSIX and its documented same-process fallback
 on Windows; multi-process Windows deployment remains outside that lock's
 guarantee.
 
+## Assessment-result evidence boundary
+
+The other three exact-owner assessment stores now use `assessment_evidence`:
+strict bounded JSON (including duplicate-key/type/finite-value checks), full
+owner read-modify-write locking and durable atomic publication. Missing state
+is legitimate first use; existing damage is unavailable evidence. Findings
+read/export/clear/import cannot silently discard it. Native learning preserves
+agent/replay exclusions; Aegis uses `current_owner()` and reports unavailable
+priors instead of dropping failed reads. Self-assessment rethrows evidence
+failures. Findings and knowledge share a lock but are separately published;
+a failure can leave the finding committed with learning unconfirmed.
+
+Optional OSV failures do not block bundled dependency checks, but they do make
+live coverage explicitly unavailable. Stale/future cache rows are not promoted
+on refresh failure. Publication reloads under the owner lock and merges peer
+updates. Cache and learned free text are sanitized at prompt-consumption
+boundaries; validation is not cryptographic authenticity of a local writer.
+
+`olympus assess evidence <store> --owner <exact-owner>` exposes sanitized health.
+The explicit operator `--repair` first preserves corrupt bytes under their full
+SHA-256 before resetting the selected store. No tool/prompt/reader repairs.
+Unpreservable evidence and conflicting archives are refused unchanged.
+See POST_PR309_CLOSURE.md for bounds, transaction limits and remaining gates.
+
 ## Assessment-authorization evidence boundary
 
 `assess.require_scope` is the code-level predicate before assessment target

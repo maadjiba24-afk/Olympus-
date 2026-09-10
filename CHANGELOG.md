@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+
+### Security — Assessment result evidence closure
+
+Findings, learned assessment knowledge and the optional OSV cache now distinguish
+missing state from unavailable evidence, validate bounded schemas, serialize
+owner-scoped updates and preserve corruption before explicit repair. Reports,
+CLI/tools and self-assessment surface evidence failures; Aegis reads the exact
+owner's knowledge and marks unavailable context explicitly. OSV coverage no
+longer treats lookup failures or stale entries as successful clean results.
+
+Operator health/repair: `olympus assess evidence findings|knowledge|osv-cache
+--owner <exact-owner> [--repair]`. Repair is never automatic or agent-exposed.
+Findings and knowledge remain separately published files; partial publication
+is surfaced, not described as an atomic multi-file commit. See
+`docs/POST_PR309_CLOSURE.md` for limits, validation and remaining release,
+operational, data and comparison gates. No deployment, publishing, collection
+or autonomy is enabled.
+
 ### Security — Assessment-authorization evidence fails closed (P2U)
 
 **Damaged approval state became no grants, then was silently replaced.** The

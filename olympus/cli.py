@@ -461,6 +461,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_as_scope.add_argument(
         "--repair", action="store_true",
         help="preserve corrupt bytes content-addressed, then reset to no grants")
+    p_as_ev = as_sub.add_parser("evidence", help="inspect or explicitly repair assessment evidence")
+    p_as_ev.add_argument("store", choices=("findings", "knowledge", "osv-cache"))
+    p_as_ev.add_argument("--owner", default=None, help="exact evidence owner")
+    p_as_ev.add_argument("--repair", action="store_true",
+                         help="preserve damaged bytes, then reset this store")
     p_as_rev = as_sub.add_parser("revoke", help="revoke an authorization by id")
     p_as_rev.add_argument("id")
     p_as_recon = as_sub.add_parser("recon", help="fingerprint an authorized target")
@@ -2101,133 +2106,172 @@ def main(argv: list[str] | None = None) -> int:
             print(webmonitor.list_text(user))
     elif args.command == "assess":
         from . import assess, tools
-        sc = args.assess_cmd
-        if sc == "authorize":
-            try:
-                rec = assess.grant(args.targets, expires_in=args.hours * 3600,
-                                   note=args.note, approved_by="operator-cli")
-            except assess.AssessAuthorizationStateError as err:
-                print(f"Assessment authorization evidence is unavailable: "
-                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
-                return 1
-            print(f"Authorized {', '.join(rec['targets'])} → {rec['id']} "
-                  f"(valid {args.hours:g}h). Scope is now enforced in code; only "
-                  "these targets can be assessed.")
-        elif sc == "scope":
-            if args.repair:
-                try:
-                    result = assess.repair_authorizations(args.owner)
-                except assess.AssessAuthorizationStateError as err:
-                    print(json.dumps({
-                        "state": "unavailable",
-                        "reason": err.reason,
-                        "repair_command": err.repair_command,
-                    }, indent=2, sort_keys=True), file=sys.stderr)
-                    return 1
+        try:
+            sc = args.assess_cmd
+            if sc == "evidence":
+                result = (assess.repair_evidence(args.store, args.owner) if args.repair
+                          else assess.evidence_status(args.store, args.owner))
                 print(json.dumps(result, indent=2, sort_keys=True))
-            elif args.evidence:
-                result = assess.authorization_status(args.owner)
-                print(json.dumps(result, indent=2, sort_keys=True))
-                if result["state"] == "unavailable":
-                    return 1
-            else:
+                return 1 if result["state"] == "unavailable" else 0
+            elif sc == "authorize":
                 try:
-                    print(assess.scope_summary(args.owner))
+                    rec = assess.grant(args.targets, expires_in=args.hours * 3600,
+                                       note=args.note, approved_by="operator-cli")
                 except assess.AssessAuthorizationStateError as err:
                     print(f"Assessment authorization evidence is unavailable: "
                           f"{err.reason}. {err.repair_command}", file=sys.stderr)
                     return 1
-        elif sc == "revoke":
-            try:
-                revoked = assess.revoke(args.id)
-            except assess.AssessAuthorizationStateError as err:
-                print(f"Assessment authorization evidence is unavailable: "
-                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
-                return 1
-            print("Revoked." if revoked else "No such authorization.")
-        elif sc == "recon":
-            print(tools._assess_recon(args.target))
-        elif sc == "audit":
-            print(tools._assess_http_audit(args.target))
-        elif sc == "sast":
-            print(tools._assess_sast(args.path))
-        elif sc == "secrets":
-            print(tools._assess_secrets(args.path))
-        elif sc == "deps":
-            print(tools._assess_deps(args.path))
-        elif sc == "validate":
-            print(tools._assess_validate(args.url))
-        elif sc == "bench":
-            print(assess.bench_scorecard())
-        elif sc == "insights":
-            print(assess.insights_summary())
-        elif sc == "run":
-            try:
-                r = assess.run_assessment(args.target, source_path=args.source,
-                                          budget_usd=args.budget)
-            except assess.AssessScopeError as err:
-                print(err, file=sys.stderr)
-                return 1
-            print(f"Assessment of {args.target}: phases {', '.join(r['phases'])}; "
-                  f"{r['total_findings']} finding(s)"
-                  + (" [budget stop]" if r.get("budget_stopped") else "") + ".")
-            print()
-            print(assess.export_findings("markdown"))
-            if args.sarif:
-                from pathlib import Path
-                Path(args.sarif).write_text(assess.export_findings("sarif"),
-                                            encoding="utf-8")
-                print(f"\n[SARIF written to {args.sarif}]", file=sys.stderr)
-        elif sc == "report":
-            out = assess.export_findings(args.format)
-            print(out)
-            if args.out:
-                from pathlib import Path
-                Path(args.out).write_text(out, encoding="utf-8")
-                print(f"\n[written to {args.out}]", file=sys.stderr)
-        elif sc == "import-sarif":
-            out = assess.import_sarif(args.file)
-            if out.get("error"):
-                print(f"Import failed: {out['error']}", file=sys.stderr)
-                return 1
-            print(f"Imported {out['imported']} finding(s) from SARIF"
-                  + (f" — {out['note']}" if out.get("note") else "") + ".")
-        elif sc == "selfassess":
-            from . import selfassess as _sa
-            try:
-                out = _sa.selfassess(args.url, source_path=args.source,
-                                     cookie=args.cookie)
-            except assess.AssessAuthorizationStateError as err:
-                print(f"Assessment authorization evidence is unavailable: "
-                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
-                return 1
-            if out.get("refused"):
-                print(out["error"], file=sys.stderr)
-                return 1
-            sev = ", ".join(f"{n} {s}" for s, n in sorted(out["by_severity"].items()))
-            print(f"Self-assessment of {args.url}: phases "
-                  f"{', '.join(out['phases'])}; {out['total_findings']} "
-                  f"finding(s){' (' + sev + ')' if sev else ''}.")
-            print()
-            print(assess.export_findings("markdown"))
-        elif sc == "fix":
-            out = assess.propose_fix(args.finding_id, source_root=args.source)
-            if out.get("error"):
-                print(out["error"], file=sys.stderr)
-                return 1
-            print(f"Proposed fix for {out['finding_id']} ({out.get('cwe')}) — "
-                  "PROPOSAL ONLY, nothing was written:\n")
-            print(out["proposed_patch"])
-            print(f"\n[{out['note']}]", file=sys.stderr)
-        elif sc == "clear":
-            print(f"Cleared {assess.clear_findings()} finding(s).")
-        else:
-            try:
-                print(assess.scope_summary())
-            except assess.AssessAuthorizationStateError as err:
-                print(f"Assessment authorization evidence is unavailable: "
-                      f"{err.reason}. {err.repair_command}", file=sys.stderr)
-                return 1
+                print(f"Authorized {', '.join(rec['targets'])} → {rec['id']} "
+                      f"(valid {args.hours:g}h). Scope is now enforced in code; only "
+                      "these targets can be assessed.")
+            elif sc == "scope":
+                if args.repair:
+                    try:
+                        result = assess.repair_authorizations(args.owner)
+                    except assess.AssessAuthorizationStateError as err:
+                        print(json.dumps({
+                            "state": "unavailable",
+                            "reason": err.reason,
+                            "repair_command": err.repair_command,
+                        }, indent=2, sort_keys=True), file=sys.stderr)
+                        return 1
+                    print(json.dumps(result, indent=2, sort_keys=True))
+                elif args.evidence:
+                    result = assess.authorization_status(args.owner)
+                    print(json.dumps(result, indent=2, sort_keys=True))
+                    if result["state"] == "unavailable":
+                        return 1
+                else:
+                    try:
+                        print(assess.scope_summary(args.owner))
+                    except assess.AssessAuthorizationStateError as err:
+                        print(f"Assessment authorization evidence is unavailable: "
+                              f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                        return 1
+            elif sc == "revoke":
+                try:
+                    revoked = assess.revoke(args.id)
+                except assess.AssessAuthorizationStateError as err:
+                    print(f"Assessment authorization evidence is unavailable: "
+                          f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                    return 1
+                print("Revoked." if revoked else "No such authorization.")
+            elif sc == "recon":
+                print(tools._assess_recon(args.target))
+            elif sc == "audit":
+                rendered = tools._assess_http_audit(args.target)
+                print(rendered)
+                if rendered.startswith("Assessment refused:"):
+                    return 1
+            elif sc == "sast":
+                rendered = tools._assess_sast(args.path)
+                print(rendered)
+                if rendered.startswith("Assessment refused:"):
+                    return 1
+            elif sc == "secrets":
+                rendered = tools._assess_secrets(args.path)
+                print(rendered)
+                if rendered.startswith("Assessment refused:"):
+                    return 1
+            elif sc == "deps":
+                rendered = tools._assess_deps(args.path)
+                print(rendered)
+                if rendered.startswith("Assessment refused:"):
+                    return 1
+            elif sc == "validate":
+                rendered = tools._assess_validate(args.url)
+                print(rendered)
+                if rendered.startswith("Assessment refused:"):
+                    return 1
+            elif sc == "bench":
+                print(assess.bench_scorecard())
+            elif sc == "insights":
+                print(assess.insights_summary())
+            elif sc == "run":
+                try:
+                    r = assess.run_assessment(args.target, source_path=args.source,
+                                              budget_usd=args.budget)
+                except assess.AssessScopeError as err:
+                    print(err, file=sys.stderr)
+                    return 1
+                print(f"Assessment of {args.target}: phases {', '.join(r['phases'])}; "
+                      f"{r['total_findings']} finding(s)"
+                      + (" [budget stop]" if r.get("budget_stopped") else "") + ".")
+                print()
+                print(assess.export_findings("markdown"))
+                if sc == "run":
+                    for phase in r.get("phase_results", []):
+                        if "osv_coverage" in phase:
+                            print("Advisory coverage: " + json.dumps(phase["osv_coverage"]))
+                elif sc == "selfassess":
+                    for warning in out.get("evidence_warnings", []):
+                        print(warning, file=sys.stderr)
+                if args.sarif:
+                    from pathlib import Path
+                    Path(args.sarif).write_text(assess.export_findings("sarif"),
+                                                encoding="utf-8")
+                    print(f"\n[SARIF written to {args.sarif}]", file=sys.stderr)
+            elif sc == "report":
+                out = assess.export_findings(args.format)
+                print(out)
+                if args.out:
+                    from pathlib import Path
+                    Path(args.out).write_text(out, encoding="utf-8")
+                    print(f"\n[written to {args.out}]", file=sys.stderr)
+            elif sc == "import-sarif":
+                out = assess.import_sarif(args.file)
+                if out.get("error"):
+                    print(f"Import failed: {out['error']}", file=sys.stderr)
+                    return 1
+                print(f"Imported {out['imported']} finding(s) from SARIF"
+                      + (f" — {out['note']}" if out.get("note") else "") + ".")
+            elif sc == "selfassess":
+                from . import selfassess as _sa
+                try:
+                    out = _sa.selfassess(args.url, source_path=args.source,
+                                         cookie=args.cookie)
+                except assess.AssessAuthorizationStateError as err:
+                    print(f"Assessment authorization evidence is unavailable: "
+                          f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                    return 1
+                if out.get("refused"):
+                    print(out["error"], file=sys.stderr)
+                    return 1
+                sev = ", ".join(f"{n} {s}" for s, n in sorted(out["by_severity"].items()))
+                print(f"Self-assessment of {args.url}: phases "
+                      f"{', '.join(out['phases'])}; {out['total_findings']} "
+                      f"finding(s){' (' + sev + ')' if sev else ''}.")
+                print()
+                print(assess.export_findings("markdown"))
+                if sc == "run":
+                    for phase in r.get("phase_results", []):
+                        if "osv_coverage" in phase:
+                            print("Advisory coverage: " + json.dumps(phase["osv_coverage"]))
+                elif sc == "selfassess":
+                    for warning in out.get("evidence_warnings", []):
+                        print(warning, file=sys.stderr)
+            elif sc == "fix":
+                out = assess.propose_fix(args.finding_id, source_root=args.source)
+                if out.get("error"):
+                    print(out["error"], file=sys.stderr)
+                    return 1
+                print(f"Proposed fix for {out['finding_id']} ({out.get('cwe')}) — "
+                      "PROPOSAL ONLY, nothing was written:\n")
+                print(out["proposed_patch"])
+                print(f"\n[{out['note']}]", file=sys.stderr)
+            elif sc == "clear":
+                print(f"Cleared {assess.clear_findings()} finding(s).")
+            else:
+                try:
+                    print(assess.scope_summary())
+                except assess.AssessAuthorizationStateError as err:
+                    print(f"Assessment authorization evidence is unavailable: "
+                          f"{err.reason}. {err.repair_command}", file=sys.stderr)
+                    return 1
+        except assess.AssessEvidenceStateError as err:
+            print(f"Assessment refused: {err} {err.repair_command}", file=sys.stderr)
+            return 1
+
     elif args.command == "discover":
         from . import discovery
         dc = args.discover_cmd
