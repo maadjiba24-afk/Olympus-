@@ -152,9 +152,12 @@ class Specialist:
         if self.key == "aegis":
             try:
                 from . import assess, memory
-                return assess.insights_block(memory.current_user())
-            except Exception:
-                return ""
+                return assess.insights_block(memory.current_owner())
+            except assess.AssessEvidenceStateError:
+                return ("\n\n## Assessment experience unavailable\n"
+                        "Stored assessment knowledge could not be validated. "
+                        "Do not infer a clean history or use learned priors. "
+                        "Operator evidence inspection is required.")
         return ""
 
     def run(self, task: str, settings: config.Settings | None = None,

@@ -63,6 +63,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from . import atomicio, config, memory, proclock, sarif, security
+from .assessment_evidence import AssessEvidenceStateError, Store
 
 # ---------------------------------------------------------------------------
 # Bounds — an assessment can never run away with the token budget or wall clock.
@@ -579,12 +580,77 @@ def _findings_path(user: str) -> Path:
     return _store_dir(user) / "findings.json"
 
 
+def _bounded_text(value, limit, *, nonempty=False):
+    if (not isinstance(value, str) or len(value) > limit
+            or (nonempty and not value)):
+        raise ValueError("invalid bounded text")
+
+
+def _cwe(value, *, optional=False):
+    if optional and value == "":
+        return
+    if not isinstance(value, str) or not re.fullmatch(r"CWE-[0-9]{1,10}", value):
+        raise ValueError("invalid CWE")
+
+
+def _finite(value, low, high):
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or not low <= value <= high):
+        raise ValueError("invalid finite number")
+
+
+def _validate_findings(data):
+    if not isinstance(data, list) or len(data) > _MAX_FINDINGS:
+        raise ValueError("invalid findings array")
+    seen = set()
+    for row in data:
+        if not isinstance(row, dict) or set(row) != set(Finding.__annotations__):
+            raise ValueError("invalid finding fields")
+        for key, limit in {"title": 2048, "location": 4096, "evidence": _MAX_EVIDENCE,
+                           "remediation": 8192, "source": 512,
+                           "cvss_vector": 128}.items():
+            _bounded_text(row[key], limit, nonempty=key in ("title", "source"))
+        _cwe(row["cwe"], optional=True)
+        if row["severity"] not in ("critical", "high", "medium", "low", "info", "none", "informational"):
+            raise ValueError("invalid severity")
+        if row["confidence"] not in ("high", "medium", "low"):
+            raise ValueError("invalid confidence")
+        _finite(row["cvss_score"], 0, 10)
+        score, severity = sarif.score_or_none(row["cvss_vector"])
+        if score is None:
+            score = sarif.score_for_label(row["severity"])
+        elif row["severity"] != severity.lower():
+            raise ValueError("severity disagrees with vector")
+        if row["cvss_score"] != score:
+            raise ValueError("score disagrees with vector or label")
+        fp = Finding(**row).fingerprint()
+        if row["id"] != fp or fp in seen:
+            raise ValueError("invalid or duplicate fingerprint")
+        seen.add(fp)
+
+
+def _evidence_store(name: str, user: str | None = None) -> Store:
+    specs = {
+        "findings": (_findings_path, _validate_findings, list, 16 * 1024 * 1024),
+        "knowledge": (_knowledge_path, _validate_knowledge, dict, 512 * 1024),
+        "osv-cache": (_osv_cache_path, _validate_osv_cache, dict, 16 * 1024 * 1024),
+    }
+    path, validator, empty, cap = specs[name]
+    return Store(_user(user), name, path, validator, empty, cap)
+
+
+def evidence_status(store: str, user: str | None = None) -> dict:
+    """Non-sensitive health. No target strings or corrupt bytes are returned."""
+    return _evidence_store(store, user).status()
+
+
+def repair_evidence(store: str, user: str | None = None) -> dict:
+    """Explicit operator repair; never exposed as an agent tool."""
+    return _evidence_store(store, user).repair()
+
+
 def _load_findings(user: str) -> list[dict]:
-    try:
-        data = json.loads(_findings_path(user).read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+    return _evidence_store("findings", user).load()
 
 
 def record_finding(finding: Finding | dict, user: str | None = None) -> dict:
@@ -603,18 +669,34 @@ def record_finding(finding: Finding | dict, user: str | None = None) -> dict:
     f.evidence = (f.evidence or "")[:_MAX_EVIDENCE]
     f.id = f.fingerprint()
 
-    records = _load_findings(user)
-    by_fp = {r.get("id"): i for i, r in enumerate(records)}
-    rec = asdict(f)
-    if f.id in by_fp:
-        records[by_fp[f.id]] = rec
-        dup = True
-    else:
-        if len(records) >= _MAX_FINDINGS:
-            return {"error": f"finding cap reached ({_MAX_FINDINGS})"}
-        records.append(rec)
-        dup = False
-    _atomic_write(_findings_path(user), json.dumps(records, indent=2))
+    store = _evidence_store("findings", user)
+    with store.guard():
+        records = store.load()
+        by_fp = {r["id"]: i for i, r in enumerate(records)}
+        rec = asdict(f)
+        if f.id in by_fp:
+            records[by_fp[f.id]] = rec
+            dup = True
+        else:
+            if len(records) >= _MAX_FINDINGS:
+                return {"error": f"finding cap reached ({_MAX_FINDINGS})"}
+            records.append(rec)
+            dup = False
+        # A known damaged learning store must not be silently replaced after
+        # recording a native finding. Agent/replay findings do not consume it.
+        learns = not _replaying() and f.source in _LEARN_SOURCES and bool(f.cwe)
+        if learns:
+            _load_knowledge(user)
+        store.save_locked(records)
+        if learns and not dup:
+            try:
+                # A duplicate finding never increments a bounded learning
+                # counter, even after its fingerprint ages out of that window.
+                _learn_from_finding(rec, user)
+            except AssessEvidenceStateError as err:
+                raise AssessEvidenceStateError(user, "knowledge",
+                    "finding persisted; learning publication not confirmed; "
+                    "inspect both stores; duplicate retries do not relearn") from err
     # Best-effort ledger note (the audit trail the surveyed agent removed): the authoritative
     # record is the signed authorize_assessment action on the decision log; this
     # just annotates the active trace when one is present.
@@ -626,12 +708,6 @@ def record_finding(finding: Finding | dict, user: str | None = None) -> dict:
                      severity=f.severity, location=f.location)
     except Exception:
         pass
-    # Self-evolution: a finding from one of Olympus's OWN deterministic
-    # scanners/validators accrues into durable assessment knowledge (see
-    # _learn_from_finding). Agent-authored findings (source="agent") are excluded
-    # so nothing an injected page steered into a finding can reach Aegis's prompt.
-    if not dup:
-        _learn_from_finding(rec, user)
     out = dict(rec)
     out["duplicate"] = dup
     return out
@@ -644,10 +720,11 @@ def list_findings(user: str | None = None) -> list[dict]:
 
 
 def clear_findings(user: str | None = None) -> int:
-    user = _user(user)
-    n = len(_load_findings(user))
-    _atomic_write(_findings_path(user), "[]")
-    return n
+    store = _evidence_store("findings", user)
+    with store.guard():
+        n = len(store.load())
+        store.save_locked([])
+        return n
 
 
 # --- find -> fix: propose a governed patch for a recorded finding ----------
@@ -767,8 +844,8 @@ def import_sarif(source: str, user: str | None = None) -> dict[str, Any]:
     `source` is a local file path OR the raw SARIF text. The document is UNTRUSTED
     external data: size-capped, result-count-capped, and every stored text field
     is secret-redacted (`security.sanitize_for_prompt`) before it lands. Findings
-    dedup by fingerprint exactly like native ones. Never raises: a bad document
-    returns an error dict."""
+    dedup by fingerprint exactly like native ones. A bad document returns an
+    error dict. Unavailable persisted evidence raises explicitly."""
     from . import security
     text = source
     try:
@@ -787,6 +864,7 @@ def import_sarif(source: str, user: str | None = None) -> dict[str, Any]:
     except (json.JSONDecodeError, ValueError) as err:
         return {"error": f"not valid JSON/SARIF: {str(err)[:120]}", "imported": 0}
 
+    _load_findings(_user(user))
     parsed = sarif.from_sarif(doc)
     capped = len(parsed) > _MAX_IMPORT_FINDINGS
     stored = []
@@ -796,7 +874,16 @@ def import_sarif(source: str, user: str | None = None) -> dict[str, Any]:
         for key in ("title", "evidence", "remediation", "location", "source"):
             if fd.get(key):
                 fd[key] = security.sanitize_for_prompt(str(fd[key]))
-        stored.append(record_finding(fd, user))
+        try:
+            result = record_finding(fd, user)
+        except AssessEvidenceStateError as err:
+            raise AssessEvidenceStateError(_user(user), err.store,
+                f"SARIF import stopped after {len(stored)} completed records; "
+                "publication of the next record is unconfirmed; inspect before retry") from err
+        if result.get("error"):
+            return {"error": result["error"], "imported": len(stored),
+                    "findings": stored, "partial": True}
+        stored.append(result)
     out: dict[str, Any] = {"imported": len(stored), "findings": stored,
                            "runs": len(doc.get("runs") or []) if isinstance(doc, dict) else 0}
     if capped:
@@ -824,7 +911,7 @@ def _markdown_report(findings: list[dict]) -> str:
     by_sev: dict[str, int] = {}
     for f in findings:
         by_sev[f.get("severity", "?")] = by_sev.get(f.get("severity", "?"), 0) + 1
-    order = ["critical", "high", "medium", "low", "info"]
+    order = ["critical", "high", "medium", "low", "info", "none", "informational"]
     summary = ", ".join(f"{by_sev[s]} {s}" for s in order if s in by_sev)
     lines = [f"# Security Assessment", "",
              f"**{len(findings)} finding(s):** {summary}", ""]
@@ -1503,7 +1590,7 @@ def _parse_package_json(text: str) -> list[tuple[str, str]]:
 # package/version, MERGING live results with the bundled index. Every query goes
 # through the gated tools._http_post_json (SSRF-pinned, confinement permits the
 # trusted api.osv.dev infra); results are cached with a TTL so repeat audits are
-# cheap; any failure degrades silently to the bundled index. Off during replay.
+# cheap; failures retain the bundled index with explicit incomplete coverage. Off during replay.
 
 _OSV_TTL = 24 * 3600
 _OSV_MAX_DEPS = 60              # cap live lookups per audit (bounded egress)
@@ -1521,12 +1608,65 @@ def _osv_cache_path(user: str) -> Path:
     return _store_dir(user) / "osv_cache.json"
 
 
+_OSV_MAX_ENTRIES = 5000
+_OSV_MAX_VULNS = 256
+_OSV_MAX_RESPONSE_BYTES = 4_000_000
+
+
+def _validate_osv_vulns(vulns):
+    if not isinstance(vulns, list) or len(vulns) > _OSV_MAX_VULNS:
+        raise ValueError("invalid advisory collection")
+    ids = set()
+    for row in vulns:
+        if not isinstance(row, dict) or set(row) != {
+                "id", "cwe", "cvss_vector", "severity", "summary"}:
+            raise ValueError("invalid advisory fields")
+        ident = row["id"]
+        if (not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9:._?-]{1,64}", ident)
+                or ident in ids):
+            raise ValueError("invalid advisory id")
+        ids.add(ident)
+        _cwe(row["cwe"], optional=True)
+        _bounded_text(row["cvss_vector"], 128)
+        if row["cvss_vector"] and not re.fullmatch(r"[A-Za-z0-9:./]+", row["cvss_vector"]):
+            raise ValueError("invalid advisory vector")
+        if row["severity"] not in ("critical", "high", "medium", "low", "info", "none", "informational"):
+            raise ValueError("invalid advisory severity")
+        _, severity = sarif.score_or_none(row["cvss_vector"])
+        if severity and row["severity"] != severity.lower():
+            raise ValueError("inconsistent advisory severity")
+        _bounded_text(row["summary"], 200)
+
+
+def _validate_osv_key(key):
+    if not isinstance(key, str) or len(key) > 600:
+        raise ValueError("invalid advisory key")
+    parts = key.split(":")
+    if (len(parts) != 3 or parts[0] not in _OSV_ECOSYSTEM
+            or not re.fullmatch(r"[a-z0-9@_./-]{1,256}", parts[1])
+            or not re.fullmatch(r"[A-Za-z0-9_.+~-]{1,256}", parts[2])):
+        raise ValueError("invalid advisory key")
+
+
+def _validate_osv_cache(data):
+    if not isinstance(data, dict) or len(data) > _OSV_MAX_ENTRIES:
+        raise ValueError("invalid advisory cache")
+    for key, row in data.items():
+        _validate_osv_key(key)
+        if not isinstance(row, dict) or set(row) != {"ts", "vulns"}:
+            raise ValueError("invalid cache entry")
+        _finite(row["ts"], 0, 2**53 - 1)
+        _validate_osv_vulns(row["vulns"])
+
+
 def _osv_cache_load(user: str) -> dict:
-    try:
-        data = json.loads(_osv_cache_path(user).read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return _evidence_store("osv-cache", user).load()
+
+
+def _osv_safe_rows(rows):
+    # Disk validation is not authenticity. Re-defang free text on every read.
+    return [{**row, "summary": security.sanitize_for_memory(row["summary"])[:200]}
+            for row in rows]
 
 
 def _osv_parse_vuln(v: dict) -> dict:
@@ -1539,62 +1679,113 @@ def _osv_parse_vuln(v: dict) -> dict:
     id/cwe/vector are restricted to their safe charset/shape and the free-text
     summary is injection-defanged (`sanitize_for_memory`) — closing a
     prompt-injection channel into a trusted finding."""
-    aliases = v.get("aliases") or []
+    aliases = v.get("aliases", [])
+    if not isinstance(aliases, list) or any(not isinstance(a, str) for a in aliases):
+        raise ValueError("invalid aliases")
     ident = next((a for a in aliases if str(a).startswith("CVE-")),
                  v.get("id", "?"))
     ident = re.sub(r"[^A-Za-z0-9:._-]", "", str(ident))[:64] or "?"
     vector = ""
-    for s in v.get("severity") or []:
+    severities = v.get("severity", [])
+    if not isinstance(severities, list) or any(not isinstance(s, dict) for s in severities):
+        raise ValueError("invalid severity collection")
+    for s in severities:
         if str(s.get("type", "")).upper().startswith("CVSS_V3"):
             vector = re.sub(r"[^A-Za-z0-9:./]", "", str(s.get("score", "")))[:128]
             break
-    dbs = v.get("database_specific") or {}
-    cwes = dbs.get("cwe_ids") or []
+    dbs = v.get("database_specific", {})
+    if not isinstance(dbs, dict):
+        raise ValueError("invalid advisory metadata")
+    cwes = dbs.get("cwe_ids", [])
+    if not isinstance(cwes, list):
+        raise ValueError("invalid CWE collection")
     cwe_m = re.search(r"CWE-\d+", str(cwes[0]).upper()) if cwes else None
     cwe = cwe_m.group(0) if cwe_m else ""
     score, sev_from_vec = sarif.score_or_none(vector)
-    severity = (sev_from_vec or dbs.get("severity") or "high").lower()
-    if severity not in ("critical", "high", "medium", "low", "info"):
+    severity = str(sev_from_vec or dbs.get("severity") or "high").lower()
+    if severity not in ("critical", "high", "medium", "low", "info", "none", "informational"):
         severity = "medium"
     summary = security.sanitize_for_memory(str(v.get("summary", "")))[:200]
     return {"id": ident, "cwe": cwe, "cvss_vector": vector,
             "severity": severity, "summary": summary}
 
 
-def _osv_lookup(ecosystem: str, pkg: str, version: str,
-                user: str | None = None) -> list[dict]:
-    """Cached OSV.dev lookup for one package/version. Returns parsed vuln dicts;
-    [] on any failure (offline-first). Never raises."""
-    user = _user(user)
-    osv_eco = _OSV_ECOSYSTEM.get(ecosystem)
-    if not osv_eco or not pkg or not version:
-        return []
+def _osv_result(ecosystem: str, pkg: str, version: str,
+                user: str | None = None) -> dict:
+    """Explicit coverage; optional feed failures never erase damaged evidence.
+
+    Only fresh validated entries or successful validated responses count as
+    covered. Stale rows are not promoted into findings. Fetches run outside the
+    owner lock; publication reloads and merges under it to retain peer updates.
+    """
+    def result(state, rows=None, *, cache_state="missing", reason=None):
+        return {"state": state, "vulns": rows or [], "cache_state": cache_state,
+                "reason": reason}
+
+    if not _osv_enabled():
+        return result("disabled", cache_state="not-read")
     key = f"{ecosystem}:{pkg}:{version}"
-    cache = _osv_cache_load(user)
-    ent = cache.get(key)
-    if isinstance(ent, dict) and (_now() - ent.get("ts", 0)) < _OSV_TTL:
-        return ent.get("vulns", [])
+    try:
+        _validate_osv_key(key)
+    except ValueError:
+        return result("unavailable", reason="unsupported package/version")
+    store = _evidence_store("osv-cache", user)
+    try:
+        with store.guard():
+            cache = store.load()
+            ent = cache.get(key)
+            if ent is not None and 0 <= _now() - ent["ts"] < _OSV_TTL:
+                return result("fresh", _osv_safe_rows(ent["vulns"]), cache_state="valid")
+    except AssessEvidenceStateError:
+        return result("unavailable", cache_state="unavailable",
+                      reason="cache evidence unavailable; inspect or repair explicitly")
+    cache_state = "stale" if ent is not None else "missing"
     try:
         from . import tools
         resp = tools._http_post_json(
             "https://api.osv.dev/v1/query",
-            {"version": version, "package": {"name": pkg, "ecosystem": osv_eco}})
+            {"version": version, "package": {
+                "name": pkg, "ecosystem": _OSV_ECOSYSTEM[ecosystem]}})
+        if (not isinstance(resp, dict) or resp.get("_error")
+                or set(resp) - {"vulns"}):
+            raise ValueError("invalid advisory response")
+        if len(json.dumps(resp, allow_nan=False).encode("utf-8")) > _OSV_MAX_RESPONSE_BYTES:
+            raise ValueError("advisory response too large")
+        raw = resp.get("vulns", [])  # OSV uses {} for a successful no-match query.
+        if (not isinstance(raw, list) or len(raw) > _OSV_MAX_VULNS
+                or any(not isinstance(v, dict) or not isinstance(v.get("id"), str)
+                       or not v["id"] for v in raw)):
+            raise ValueError("invalid advisory collection")
+        vulns = [_osv_parse_vuln(v) for v in raw]
+        _validate_osv_vulns(vulns)
     except Exception:
-        return ent.get("vulns", []) if isinstance(ent, dict) else []
-    if not isinstance(resp, dict) or resp.get("_error"):
-        return ent.get("vulns", []) if isinstance(ent, dict) else []
-    vulns = [_osv_parse_vuln(v) for v in (resp.get("vulns") or [])
-             if isinstance(v, dict)]
-    cache[key] = {"ts": _now(), "vulns": vulns}
+        return result("unavailable", cache_state=cache_state,
+                      reason="lookup failed or response invalid; live coverage incomplete")
     try:
-        if len(cache) > 5000:                         # bound the cache
-            cache = dict(sorted(cache.items(),
-                                key=lambda kv: kv[1].get("ts", 0),
-                                reverse=True)[:5000])
-        _atomic_write(_osv_cache_path(user), json.dumps(cache))
-    except Exception:
-        pass
-    return vulns
+        with store.guard():
+            cache = store.load()
+            # A peer may have completed a newer query while this one ran.
+            peer = cache.get(key)
+            if peer is not None and peer != ent and 0 <= _now() - peer["ts"] < _OSV_TTL:
+                return result("fresh", _osv_safe_rows(peer["vulns"]), cache_state="valid")
+            cache[key] = {"ts": _now(), "vulns": vulns}
+            if len(cache) > _OSV_MAX_ENTRIES:
+                cache = dict(sorted(cache.items(), key=lambda kv: kv[1]["ts"],
+                                    reverse=True)[:_OSV_MAX_ENTRIES])
+            store.save_locked(cache)
+    except AssessEvidenceStateError:
+        return result("live-unpersisted", _osv_safe_rows(vulns), cache_state="unavailable",
+                      reason="live response validated; cache publication not confirmed")
+    return result("live", _osv_safe_rows(vulns), cache_state="valid")
+
+
+def _osv_lookup(ecosystem: str, pkg: str, version: str,
+                user: str | None = None) -> list[dict]:
+    """Compatibility reader; failure is never an empty successful lookup."""
+    out = _osv_result(ecosystem, pkg, version, user)
+    if out["state"] in ("unavailable", "live-unpersisted"):
+        raise AssessEvidenceStateError(_user(user), "osv-cache", out["reason"])
+    return out["vulns"]
 
 
 def dep_audit(path: str = ".", record: bool = True,
@@ -1634,6 +1825,7 @@ def dep_audit(path: str = ".", record: bool = True,
     osv_on = _osv_enabled()
     findings: list[Finding] = []
     osv_queried = 0
+    coverage = []
     for eco, name, text in manifests:
         deps = _parse_package_json(text) if eco == "npm" else _parse_requirements(text)
         for pkg, version in deps:
@@ -1651,7 +1843,9 @@ def dep_audit(path: str = ".", record: bool = True,
             # Live OSV feed (opt-in, bounded, deduped against the bundled index).
             if osv_on and osv_queried < _OSV_MAX_DEPS:
                 osv_queried += 1
-                for v in _osv_lookup(eco, pkg, version, user):
+                lookup = _osv_result(eco, pkg, version, user)
+                coverage.append({k: v for k, v in lookup.items() if k != "vulns"})
+                for v in lookup["vulns"]:
                     if v["id"] in seen_ids:
                         continue
                     seen_ids.add(v["id"])
@@ -1662,10 +1856,19 @@ def dep_audit(path: str = ".", record: bool = True,
                         evidence=f"OSV.dev: {v['summary'] or v['id']}",
                         remediation=f"Upgrade {pkg}; see advisory {v['id']}.",
                         confidence="high", source="dep_audit"))
+            elif osv_on:
+                coverage.append({"state": "not-queried", "cache_state": "not-read",
+                                 "reason": "per-audit lookup bound"})
     stored = [record_finding(f, user) for f in findings] if record else \
         [asdict(f) for f in findings]
     return {"path": str(path), "manifests": [m[1] for m in manifests],
-            "findings": stored, "count": len(stored), "osv": osv_on}
+            "findings": stored, "count": len(stored), "osv": osv_on,
+            "osv_coverage": {
+                "mode": "opt-in" if osv_on else "disabled",
+                "complete": osv_on and all(r["state"] in ("fresh", "live", "live-unpersisted")
+                                           for r in coverage),
+                "lookups": coverage,
+                "note": "Bundled index is limited; no matches is not proof of safety."}}
 
 
 # ===========================================================================
@@ -2430,55 +2633,69 @@ def _knowledge_path(user: str) -> Path:
     return _store_dir(user) / "knowledge.json"
 
 
+def _validate_knowledge(data):
+    if not isinstance(data, dict) or len(data) > _MAX_KNOWLEDGE_CWES:
+        raise ValueError("invalid knowledge object")
+    for cwe, row in data.items():
+        _cwe(cwe)
+        if (not isinstance(row, dict) or set(row) != {
+                "cwe", "title", "severity", "count", "sources", "fingerprints"}
+                or row["cwe"] != cwe):
+            raise ValueError("invalid knowledge fields")
+        _bounded_text(row["title"], 2048, nonempty=True)
+        if row["severity"] not in ("critical", "high", "medium", "low", "info", "none", "informational"):
+            raise ValueError("invalid severity")
+        if type(row["count"]) is not int or not 1 <= row["count"] <= 2**53 - 1:
+            raise ValueError("invalid counter")
+        sources, fps = row["sources"], row["fingerprints"]
+        if (not isinstance(sources, list) or not sources
+                or any(not isinstance(x, str) or x not in _LEARN_SOURCES for x in sources)
+                or len(sources) != len(set(sources))):
+            raise ValueError("invalid producer provenance")
+        if (not isinstance(fps, list) or not 1 <= len(fps) <= _MAX_KNOWLEDGE_FPS
+                or any(not isinstance(x, str) or not re.fullmatch(r"[0-9a-f]{16}", x)
+                       for x in fps) or len(fps) != len(set(fps))
+                or row["count"] < max(len(fps), len(sources))):
+            raise ValueError("invalid fingerprint provenance")
+
+
 def _load_knowledge(user: str) -> dict:
-    try:
-        data = json.loads(_knowledge_path(user).read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return _evidence_store("knowledge", user).load()
 
 
 def _learn_from_finding(rec: dict, user: str | None = None) -> None:
-    """Accrue a confirmed, Olympus-produced finding into durable knowledge.
-    No-op during replay, for agent-authored findings, or without a CWE — so the
-    self-evolving prompt only ever reflects Olympus's own deterministic output.
-    Best-effort: any failure is swallowed (learning must never break a scan)."""
-    try:
-        if _replaying() or rec.get("source") not in _LEARN_SOURCES:
-            return
-        cwe = rec.get("cwe") or ""
-        if not cwe:
-            return
-        user = _user(user)
-        know = _load_knowledge(user)
+    """Accrue native evidence, exposing failure; replay/agent input is inert."""
+    if _replaying() or rec.get("source") not in _LEARN_SOURCES or not rec.get("cwe"):
+        return
+    user = _user(user)
+    store = _evidence_store("knowledge", user)
+    with store.guard():
+        try:
+            _validate_findings([rec])
+        except (ValueError, TypeError, OverflowError) as err:
+            raise store.error("invalid finding provenance") from err
+        cwe, fp = rec["cwe"], rec["id"]
+        know = store.load()
         entry = know.get(cwe) or {
-            "cwe": cwe, "title": rec.get("title", ""),
-            "severity": rec.get("severity", ""), "count": 0,
-            "sources": [], "fingerprints": []}
-        fp = rec.get("id") or ""
-        if fp and fp in entry["fingerprints"]:
-            return                                    # already counted
-        if fp:
-            entry["fingerprints"] = (entry["fingerprints"] + [fp])[-_MAX_KNOWLEDGE_FPS:]
-        entry["count"] = int(entry.get("count", 0)) + 1
-        src = rec.get("source", "")
-        if src and src not in entry["sources"]:
-            entry["sources"].append(src)
-        entry["title"] = entry.get("title") or rec.get("title", "")
+            "cwe": cwe, "title": rec["title"], "severity": rec["severity"],
+            "count": 0, "sources": [], "fingerprints": []}
+        if fp in entry["fingerprints"]:
+            return
+        entry["fingerprints"] = (entry["fingerprints"] + [fp])[-_MAX_KNOWLEDGE_FPS:]
+        entry["count"] += 1
+        if rec["source"] not in entry["sources"]:
+            entry["sources"].append(rec["source"])
         know[cwe] = entry
-        if len(know) > _MAX_KNOWLEDGE_CWES:           # keep the most-seen classes
-            know = dict(sorted(know.items(),
-                               key=lambda kv: kv[1].get("count", 0),
+        if len(know) > _MAX_KNOWLEDGE_CWES:
+            know = dict(sorted(know.items(), key=lambda kv: kv[1]["count"],
                                reverse=True)[:_MAX_KNOWLEDGE_CWES])
-        _atomic_write(_knowledge_path(user), json.dumps(know, indent=2))
-    except Exception:
-        pass
+        store.save_locked(know)
 
 
 def knowledge(user: str | None = None) -> list[dict]:
     """Accumulated assessment knowledge, most-confirmed class first."""
     know = _load_knowledge(_user(user))
-    rows = [{"cwe": v.get("cwe", k), "title": v.get("title", ""),
+    rows = [{"cwe": v.get("cwe", k), "title": security.sanitize_for_memory(v["title"]),
              "severity": v.get("severity", ""), "count": int(v.get("count", 0)),
              "sources": list(v.get("sources", []))}
             for k, v in know.items()]
