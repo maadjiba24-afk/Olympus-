@@ -37,6 +37,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import memory, owner_evidence as evidence_store
+
 # Bounds — the discovery ledger and each cycle are hard-capped so a runaway
 # signal source can never flood memory or spend unbounded tokens.
 _MAX_GAPS = 200
@@ -73,39 +75,54 @@ def _replaying() -> bool:
 # ---------------------------------------------------------------------------
 
 def _user(user: str | None) -> str:
-    if user:
-        return user
-    try:
-        from . import memory
-        return memory.current_user()
-    except Exception:
-        return "shared"
+    return memory.canonical_owner(memory.current_owner() if user is None else user)
 
 
 def _store_dir(user: str) -> Path:
-    from . import config, memory
-    d = config.MEMORY_DIR / "discovery" / memory.safe_id(user)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return evidence_store.workspace(user) / "discovery"
 
 
 def _gaps_path(user: str) -> Path:
     return _store_dir(user) / "gaps.json"
 
 
+def _validate(data):
+    evidence_store.records(data, _MAX_GAPS)
+    ids, topics = set(), set()
+    for row in data:
+        evidence_store.fields(row, ("id", "kind", "topic", "evidence", "source",
+                                    "status", "hits", "created", "last_seen", "resolved_ref"))
+        for key, cap in (("id", 128), ("topic", _MAX_TOPIC), ("source", 80)):
+            evidence_store.text(row[key], cap)
+        evidence_store.text(row["evidence"], _MAX_EVIDENCE, empty=True)
+        evidence_store.text(row["resolved_ref"], 4096, empty=True)
+        if row["kind"] not in _KINDS or row["status"] not in ("open", "acquired", "proposed"):
+            raise ValueError("invalid gap state")
+        if row["topic"] != _norm(row["topic"]):
+            raise ValueError("invalid normalized topic")
+        pair = row["kind"], row["topic"]
+        if row["id"] in ids or pair in topics:
+            raise ValueError("duplicate gap")
+        ids.add(row["id"]); topics.add(pair)
+        evidence_store.integer(row["hits"], minimum=1)
+        evidence_store.number(row["created"])
+        evidence_store.number(row["last_seen"], minimum=row["created"])
+
+
+def _evidence(user):
+    return evidence_store.JsonStore(user, "discovery", _validate, path=_gaps_path(user))
+
+
+def evidence_status(user=None):
+    return _evidence(_user(user)).status()
+
+
 def _load_gaps(user: str) -> list[dict]:
-    try:
-        data = json.loads(_gaps_path(user).read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+    return _evidence(user).load()
 
 
 def _save_gaps(user: str, gaps: list[dict]) -> None:
-    path = _gaps_path(user)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(gaps, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _evidence(user).save(gaps)
 
 
 def _norm(topic: str) -> str:
@@ -123,31 +140,32 @@ def note_gap(kind: str, topic: str, *, evidence: str = "", source: str = "",
     if not topic:
         raise ValueError("a gap needs a topic")
     user = _user(user)
-    gaps = _load_gaps(user)
-    for g in gaps:
-        if g.get("kind") == kind and _norm(g.get("topic", "")) == topic:
-            g["hits"] = int(g.get("hits", 1)) + 1
-            g["last_seen"] = time.time()
-            if evidence and not g.get("evidence"):
-                g["evidence"] = str(evidence)[:_MAX_EVIDENCE]
-            _save_gaps(user, gaps)
-            return g
-    gap = {
-        "id": f"gap-{int(time.time())}-{os.urandom(3).hex()}",
-        "kind": kind, "topic": topic,
-        "evidence": str(evidence or "")[:_MAX_EVIDENCE],
-        "source": str(source or "unknown")[:80],
-        "status": "open", "hits": 1,
-        "created": time.time(), "last_seen": time.time(),
-        "resolved_ref": "",
-    }
-    gaps.append(gap)
-    if len(gaps) > _MAX_GAPS:
-        # Drop oldest resolved first; if all open, drop the oldest open.
-        gaps.sort(key=lambda g: (g.get("status") == "open", g.get("created", 0)))
-        gaps = gaps[len(gaps) - _MAX_GAPS:]
-    _save_gaps(user, gaps)
-    return gap
+    with _evidence(user).guard():
+        gaps = _load_gaps(user)
+        for g in gaps:
+            if g.get("kind") == kind and _norm(g.get("topic", "")) == topic:
+                g["hits"] = int(g.get("hits", 1)) + 1
+                g["last_seen"] = time.time()
+                if evidence and not g.get("evidence"):
+                    g["evidence"] = str(evidence)[:_MAX_EVIDENCE]
+                _save_gaps(user, gaps)
+                return g
+        gap = {
+            "id": f"gap-{int(time.time())}-{os.urandom(3).hex()}",
+            "kind": kind, "topic": topic,
+            "evidence": str(evidence or "")[:_MAX_EVIDENCE],
+            "source": str(source or "unknown")[:80],
+            "status": "open", "hits": 1,
+            "created": time.time(), "last_seen": time.time(),
+            "resolved_ref": "",
+        }
+        gaps.append(gap)
+        if len(gaps) > _MAX_GAPS:
+            # Drop oldest resolved first; if all open, drop the oldest open.
+            gaps.sort(key=lambda g: (g.get("status") == "open", g.get("created", 0)))
+            gaps = gaps[len(gaps) - _MAX_GAPS:]
+        _save_gaps(user, gaps)
+        return gap
 
 
 def open_gaps(user: str | None = None, kind: str | None = None) -> list[dict]:
@@ -160,14 +178,15 @@ def open_gaps(user: str | None = None, kind: str | None = None) -> list[dict]:
 
 
 def _set_status(user: str, gap_id: str, status: str, ref: str = "") -> None:
-    gaps = _load_gaps(user)
-    for g in gaps:
-        if g.get("id") == gap_id:
-            g["status"] = status
-            if ref:
-                g["resolved_ref"] = ref
-            break
-    _save_gaps(user, gaps)
+    with _evidence(user).guard():
+        gaps = _load_gaps(user)
+        for g in gaps:
+            if g.get("id") == gap_id:
+                g["status"] = status
+                if ref:
+                    g["resolved_ref"] = ref
+                break
+        _save_gaps(user, gaps)
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +210,10 @@ def derive_capability_gaps(user: str | None = None) -> list[dict]:
                 _CAPABILITY, f"reduce friction on '{ref}' actions",
                 evidence=ins.get("message", ""), source="outcomes.friction",
                 user=user))
+    except evidence_store.OwnerEvidenceStateError:
+        raise
     except Exception:
-        pass
+        raise evidence_store.OwnerEvidenceStateError("outcomes", "friction source unavailable")
     return noted
 
 
@@ -229,6 +250,10 @@ def acquire_knowledge(gap: dict, user: str | None = None, runner=None) -> str:
         return "(skipped: empty topic)"
     try:
         from . import research, wiki
+        _load_gaps(user)  # Refuse damage before any provider work.
+        if getattr(wiki, "EXACT_OWNER_NAMESPACE", False) is not True:
+            return ("(queued: wiki publication is unavailable until its owner namespace "
+                    "is qualified; the gap and legacy pages are preserved)")
         report = (runner or research.run)(
             f"Give a clear, current, well-sourced explanation of: {topic}")
         if not _is_substantive(report):

@@ -125,7 +125,7 @@ def test_falls_back_to_lexical_when_embed_fails(user, monkeypatch):
 
 def test_search_documents_tool(user, monkeypatch):
     from olympus import tools, memory
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     _seed(user)
     out = tools.HANDLERS["search_documents"]("lisbon hotel")
     assert "Trip Plan" in out
@@ -224,7 +224,7 @@ def test_retrieve_uses_graph_when_ann_on_and_large(user, monkeypatch):
     assert hits, "graph retrieval returned nothing"
     assert "marker 4" in hits[0]["text"]                      # planted chunk on top
     # the persistent index was built and stored
-    assert store.backend().get(docrag._ANN_NS, memory.safe_id(user)) is not None
+    assert store.backend().get(docrag._ANN_NS, memory.storage_key(user)) is not None
     store.reset()
 
 
@@ -238,5 +238,5 @@ def test_retrieve_exact_when_ann_off(user, monkeypatch):
     hits = docrag.retrieve(user, "find marker 2", k=3)
     assert "marker 2" in hits[0]["text"]
     # no persistent index built on the exact path
-    assert store.backend().get(docrag._ANN_NS, memory.safe_id(user)) is None
+    assert store.backend().get(docrag._ANN_NS, memory.storage_key(user)) is None
     store.reset()

@@ -15,6 +15,24 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Exact-owner workspace and outcome evidence
+
+Workspace documents, retrieval caches, todos, playbooks, email style, discovery
+gaps and outcome ledgers now use versioned exact-owner namespaces. Ambiguous
+legacy bytes stay preserved and unclaimed. Strict bounded validation and complete
+locked updates distinguish missing qualified data from unavailable evidence.
+Search binds exact conversation owners and rebuilds transactionally. Consumers
+report recording failures without relabeling completed actions or qualifying
+partial/stale routing evidence.
+
+Compatibility limits: legacy conversation resaves require qualified attribution;
+discovery wiki publication and principal erasure refuse until their remaining
+ownership prerequisites are complete. No automatic migration, repair or deletion
+is performed. See `docs/POST_PR310_OWNER_OUTCOME.md` for the finite store list,
+accepted limits, validation/delivery gates and C4-C9 blockers. Deployment,
+publishing, collection, learned routing, autonomy and live verifier fan-out remain
+restricted.
+
 
 ### Security — Assessment result evidence closure
 

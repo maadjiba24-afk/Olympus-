@@ -141,8 +141,9 @@ def test_emem_uses_its_explicit_user_not_ambient_context():
     assert "saffron-alice" not in text
 
 
-def test_old_ownerless_index_is_invalidated_instead_of_exposed():
-    path = search._db_path()
+def test_old_ownerless_index_is_preserved_unclaimed():
+    config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    path = str(config.MEMORY_DIR / "search_index.db")
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE turns "
                  "(conversation TEXT, role TEXT, content TEXT, turn INT)")
@@ -151,8 +152,10 @@ def test_old_ownerless_index_is_invalidated_instead_of_exposed():
     conn.commit()
     conn.close()
 
+    before = __import__("pathlib").Path(path).read_bytes()
     memory.set_user("bob")
     assert search.search("legacy private canary") == []
+    assert __import__("pathlib").Path(path).read_bytes() == before
     conn, _ = search._connect()
     try:
         columns = tuple(row[1] for row in conn.execute(

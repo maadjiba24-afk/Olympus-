@@ -184,7 +184,11 @@ def test_unknown_labels_cannot_supply_incumbent_evidence(monkeypatch):
             "signal_source": ro.SRC_FEEDBACK,
             "synthetic": False,
         })
-    ro._save("real-a", rows)
+    from olympus import store, memory
+    import json
+    # Inject damage beneath the validating publication API.
+    store.backend().put(ro._NS, memory.storage_key("real-a"),
+        json.dumps({"version": 2, "owner": "real-a", "data": rows}).encode())
     lr.clear_cache()
     pool = config.ModelPool.of(OPUS, HAIKU)
     assert pool.for_specialist("argus").model == "claude-opus-4-8"

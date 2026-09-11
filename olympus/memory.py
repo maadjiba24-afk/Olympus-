@@ -628,41 +628,56 @@ def _conversation_path(conversation_id: str) -> Path:
 
 
 def _conversation_owner_path(conversation_id: str) -> Path:
-    return _conversation_path(conversation_id).with_suffix(".owner")
+    return config.MEMORY_DIR / "conversations" / f"{safe_id(conversation_id)}.owner-v2"
+
+
+def conversation_binding(conversation_id: str) -> dict | None:
+    """Read exact attribution; old `.owner` files remain preserved and unclaimed."""
+    from . import owner_evidence as evidence
+    raw = evidence.read_bytes(_conversation_owner_path(conversation_id), 32768,
+                              "conversation ownership")
+    if raw is None:
+        return None
+    value = evidence.decode(raw, "conversation ownership", 32768)
+    try:
+        evidence.fields(value, ("version", "owner", "conversation"))
+        if type(value["version"]) is not int or value["version"] != 2:
+            raise ValueError("invalid version")
+        evidence.text(value["owner"], 8192)
+        evidence.text(value["conversation"], 8192)
+        if (value["owner"] != canonical_owner(value["owner"])
+                or safe_id(value["conversation"]) != safe_id(conversation_id)):
+            raise ValueError("invalid attribution")
+    except (TypeError, ValueError, KeyError) as err:
+        raise evidence.OwnerEvidenceStateError("conversation ownership", "invalid binding") from err
+    return value
 
 
 def conversation_owner(conversation_id: str) -> str | None:
-    """Return a snapshot's durable owner, or None for legacy/invalid metadata."""
-    path = _conversation_owner_path(conversation_id)
-    try:
-        raw = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return raw if raw and raw == safe_id(raw) else None
+    binding = conversation_binding(conversation_id)
+    return None if binding is None else binding["owner"]
 
 
 def _bind_conversation_owner(conversation_id: str, owner: str) -> str:
-    """Create an immutable owner binding before a snapshot can be indexed."""
-    principal = safe_id(owner)
+    """Write-once exact owner and exact conversation identity, before snapshot."""
+    from . import owner_evidence as evidence, proclock
+    principal = canonical_owner(owner)
+    evidence.text(principal, 8192)
+    evidence.text(conversation_id, 8192)
     path = _conversation_owner_path(conversation_id)
-    # This metadata is write-once. The lock makes the check/create pair safe
-    # across both threads and processes; exclusive creation prevents a second
-    # writer from replacing an established principal. A torn/invalid file is
-    # refused rather than "repaired" into an attacker-chosen owner.
-    from . import proclock
     with proclock.lock(f"conversation-owner-{safe_id(conversation_id)}"):
-        existing = conversation_owner(conversation_id)
+        existing = conversation_binding(conversation_id)
         if existing is not None:
-            if existing != principal:
-                raise PermissionError(
-                    "conversation belongs to a different memory principal")
+            if existing["owner"] != principal or existing["conversation"] != conversation_id:
+                raise PermissionError("conversation belongs to a different memory principal or identifier")
             return principal
-        if path.exists():
-            raise PermissionError("conversation owner metadata is invalid")
-        with path.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write(principal + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        legacy = path.with_suffix(".owner")
+        snapshot = path.with_suffix(".json")
+        if legacy.exists() or legacy.is_symlink() or snapshot.exists() or snapshot.is_symlink():
+            raise evidence.OwnerEvidenceStateError("conversation ownership", "ambiguous legacy snapshot or binding")
+        evidence.publish(path, json.dumps({"version": 2, "owner": principal,
+                         "conversation": conversation_id}, allow_nan=False).encode(),
+                         "conversation ownership")
     return principal
 
 
@@ -696,7 +711,7 @@ def save_conversation(conversation_id: str, history: list[dict], *,
     # Atomic publish: load_conversation maps a torn file to [], so a crash
     # mid-write would drop the whole history (ADR 0005).
     principal = _bind_conversation_owner(
-        conversation_id, current_user() if owner is None else owner)
+        conversation_id, current_owner() if owner is None else owner)
     p = _conversation_path(conversation_id)
     # The temp name must be unique per WRITER, not per process: two threads of
     # one process saving the same conversation shared `.{name}.{pid}.tmp`, so
@@ -722,8 +737,10 @@ def save_conversation(conversation_id: str, history: list[dict], *,
         from . import search
         search.index_conversation(safe_id(conversation_id), history,
                                   owner=principal)
-    except Exception:
-        pass
+    except Exception as err:
+        from . import errors
+        errors.capture("memory.save_conversation", err,
+                       context="search evidence unavailable; snapshot saved")
 
 
 def _conversation_preview(history: list[dict]) -> str:

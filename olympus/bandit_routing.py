@@ -44,14 +44,11 @@ def enabled() -> bool:
         "1", "true", "yes", "on")
 
 
-def _arms(specialist: str) -> tuple[dict, int]:
-    """Per-model `{model: {n, reward}}` for this specialist and the total pulls,
-    from labeled non-synthetic outcomes. Best-effort: ({}, 0) on any error."""
-    try:
+def _arms(specialist: str, rows=None) -> tuple[dict, int]:
+    """Read qualified evidence; errors are not zero-sample observations."""
+    if rows is None:
         from . import routing_outcomes
         rows = routing_outcomes._labeled(routing_outcomes._all_rows())
-    except Exception:
-        return {}, 0
     arms: dict[str, dict] = {}
     total = 0
     for r in rows:
@@ -122,29 +119,28 @@ def choose(members, specialist: str, heuristic_pick):
 
 
 def status() -> dict:
-    """Operator view: activation state and the per-arm UCB table the bandit would
-    decide from, per specialist."""
+    """Operator view from one complete evidence read."""
     flag = os.environ.get("OLYMPUS_BANDIT_ROUTING", "").strip().lower() in (
         "1", "true", "yes", "on")
+    table, reason = [], None
     try:
         from . import routing_outcomes
         rows = routing_outcomes._labeled(routing_outcomes._all_rows())
-        specialists = sorted({r.get("specialist", "") for r in rows})
+        for spec in sorted({r["specialist"] for r in rows}):
+            arms, total = _arms(spec, rows)
+            for model, a in sorted(arms.items()):
+                table.append({
+                    "specialist": spec, "model": model, "n": a["n"],
+                    "mean_reward": round(a["reward"] / a["n"], 4),
+                    "ucb": round(ucb_score(a["reward"], a["n"], total), 4),
+                    "warm": total >= MIN_WARMUP,
+                })
     except Exception:
-        specialists = []
-    table = []
-    for spec in specialists:
-        arms, total = _arms(spec)
-        for model, a in sorted(arms.items()):
-            table.append({
-                "specialist": spec, "model": model, "n": a["n"],
-                "mean_reward": round(a["reward"] / a["n"], 4) if a["n"] else 0.0,
-                "ucb": round(ucb_score(a["reward"], a["n"], total), 4),
-                "warm": total >= MIN_WARMUP,
-            })
+        table = []
+        reason = "Routing outcome evidence is unavailable; selection remains dormant."
     return {
         "flag_enabled": flag,
-        "active": flag and not os.environ.get("OLYMPUS_REPLAY"),
-        "min_warmup": MIN_WARMUP,
-        "arms": table,
+        "active": flag and reason is None and not os.environ.get("OLYMPUS_REPLAY"),
+        "evidence_state": "unavailable" if reason else "valid", "reason": reason,
+        "min_warmup": MIN_WARMUP, "arms": table,
     }

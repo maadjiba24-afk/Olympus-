@@ -550,6 +550,25 @@ all. A failed injected callback is never retried through the fan-out.
 
 ## The action spine (execution layer)
 
+### Exact-owner workspace and outcome evidence after PR310
+
+The bounded follow-up in `POST_PR310_OWNER_OUTCOME.md` isolates documents,
+document/ANN retrieval, todos, playbooks, email style, discovery gaps, action and
+routing outcomes, and conversation search. It preserves normalized legacy data
+without guessing its owner. New-format damage refuses ordinary replacement and
+is surfaced by CLI/tools, prompts, HTTP views, selectors and offline exports.
+An outcome-recording failure does not turn a completed action into a failed one.
+
+Search ownership metadata binds the exact owner and conversation identifier;
+rebuilds replace rows only after snapshot validation. Unqualified wiki publication
+and incomplete principal erasure explicitly refuse. The latter means that erasure
+is **not currently available or certified**, including through retention sweeps.
+These refusals are named source prerequisites, not production-readiness claims.
+Other normalized stores remain outside this bounded change; global tenant
+isolation, automatic legacy migration, distributed backend transactions and native
+Windows multi-process topology are not established. State administrators remain
+trusted. The same deployment, collection, routing and autonomy restrictions hold.
+
 Tools that *act* (`send_email`, `call_webhook`) and the higher-level action
 types (`gmail_send`, `gmail_draft`, `gmail_archive`, `calendar_create`,
 `save_note`, and the workspace-execution types `run_command` (irreversible),

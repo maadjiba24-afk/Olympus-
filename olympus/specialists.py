@@ -148,7 +148,7 @@ class Specialist:
         prioritises the weakness classes Olympus has most often confirmed."""
         if self.key == "angelos":
             from . import emailstyle, memory
-            return emailstyle.context_block(memory.current_user())
+            return emailstyle.context_block(memory.current_owner())
         if self.key == "aegis":
             try:
                 from . import assess, memory

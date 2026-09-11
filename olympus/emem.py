@@ -164,6 +164,7 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
                     trust=str(e.get("source", "user"))))
     except Exception as err:
         _capture(err)
+    from .owner_evidence import OwnerEvidenceStateError
     # conversation snippets from the FTS5 index (may include external content)
     try:
         from . import search
@@ -174,6 +175,8 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
                     source="conversation",
                     ref=str(getattr(h, "conversation", "")),
                     ts=0.0, text=str(content), trust="external"))
+    except OwnerEvidenceStateError:
+        raise
     except Exception as err:
         _capture(err)
     return frags
@@ -202,9 +205,13 @@ def context_block(user: str, query: str, *, now: float | None = None) -> str:
         return ""
     import time
     now = time.time() if now is None else now
+    from .owner_evidence import OwnerEvidenceStateError
     try:
         episode = reconstruct(query, gather(user, query), now=now,
                               max_fragments=_tuned_max_fragments())
+    except OwnerEvidenceStateError as err:
+        _capture(err)
+        return "\n\n[" + str(err) + "]"
     except Exception as err:
         _capture(err)
         return ""

@@ -22,14 +22,15 @@ import re
 import time
 from pathlib import Path
 
-from . import annindex, config, documents, embed, memory, store
+from . import annindex, config, documents, embed, replaystore
+from . import owner_evidence as evidence
 
 # Persistent HNSW index over the user's document chunks — the one place with a
 # stable, cached, repeatedly-queried corpus, so the graph's amortised speedup
 # actually pays off (unlike a one-shot `nearest` scan). Keyed to a corpus
 # signature so it rebuilds ONLY when documents change.
-_ANN_NS = "docrag.ann"
-_ANN_SIG_NS = "docrag.ann.sig"
+_ANN_NS = "docrag.ann.v2"
+_ANN_SIG_NS = "docrag.ann.sig"  # Legacy bytes are preserved, never attributed.
 _ANN_CANDIDATES = 128        # vector-candidate pool; the lexical floor covers the rest
 
 _CHUNK_CHARS = 1200
@@ -79,35 +80,69 @@ def chunk(text: str, size: int = _CHUNK_CHARS,
 
 
 def _index_path(user: str) -> Path:
-    safe = memory.safe_id(user)
-    base = (config.MEMORY_DIR / "users" / safe) if safe != "shared" \
-        else config.MEMORY_DIR
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "doc_index.json"
+    return evidence.workspace(user) / "doc_index.json"
+
+
+def _vector(value):
+    evidence.records(value, 4096)
+    if not value:
+        raise ValueError("empty vector")
+    for component in value:
+        evidence.number(component, minimum=-float("inf"))
+
+
+def _validate_index(value):
+    if not isinstance(value, dict) or len(value) > 1000:
+        raise ValueError("invalid document index")
+    total = 0
+    for slug, entry in value.items():
+        evidence.text(slug, 128)
+        evidence.fields(entry, ("sha256", "name", "chunks", "embeddings"))
+        if not isinstance(entry["sha256"], str) or not re.fullmatch("[0-9a-f]{64}", entry["sha256"]):
+            raise ValueError("invalid digest")
+        evidence.text(entry["name"], 256)
+        evidence.records(entry["chunks"], 10000)
+        total += len(entry["chunks"])
+        if total > 10000:
+            raise ValueError("chunk bound exceeded")
+        for part in entry["chunks"]:
+            evidence.text(part, _CHUNK_CHARS)
+        vectors = entry["embeddings"]
+        if vectors is not None:
+            evidence.records(vectors, len(entry["chunks"]))
+            if len(vectors) != len(entry["chunks"]):
+                raise ValueError("incomplete embeddings")
+            for vector in vectors:
+                _vector(vector)
+            if len({len(v) for v in vectors}) > 1:
+                raise ValueError("inconsistent dimensions")
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "document retrieval", _validate_index,
+                              empty=dict, max_bytes=32 * 1024 * 1024,
+                              path=_index_path(user))
 
 
 def _load_index(user: str) -> dict:
-    p = _index_path(user)
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return _evidence(user).load()
 
 
 def build_index(user: str) -> dict:
-    """(Re)build the per-document chunk index, re-embedding only documents
-    whose content changed. Returns {slug: {sha256, name, chunks,
-    embeddings|None}}. Best-effort; never raises."""
+    """Refresh intact, owned evidence; missing caches may be built from scratch."""
+    with evidence.guard(user):
+        return _build_index(user)
+
+
+def _build_index(user: str) -> dict:
     cache = _load_index(user)
     fresh: dict = {}
 
     for meta in documents.listing(user):
         slug = meta["slug"]
-        body = documents.read(user, meta["name"])
+        body = documents.read(user, slug)
         if body is None:
-            continue
+            raise evidence.OwnerEvidenceStateError("documents", "document disappeared during retrieval")
 
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
         cached = cache.get(slug)
@@ -128,48 +163,78 @@ def build_index(user: str) -> dict:
             "embeddings": embeddings,
         }
 
-    try:
-        _index_path(user).write_text(
-            json.dumps(fresh),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
+    if fresh != cache and not replaystore.replaying():
+        _evidence(user).save(fresh)
 
     return fresh
 
 
 def _corpus_signature(index: dict) -> bytes:
-    """Fingerprint the embedded corpus using content, legacy mtime, and chunks."""
-    parts = [
-        f"{slug}:{entry.get('sha256')}:{entry.get('mtime')}:"
-        f"{len(entry.get('chunks') or [])}"
-        for slug, entry in sorted(index.items())
-    ]
-    return hashlib.sha256("|".join(parts).encode()).hexdigest().encode()
+    """Bind both content and embedding values to this graph generation."""
+    return hashlib.sha256(json.dumps(index, sort_keys=True, allow_nan=False,
+                                    separators=(",", ":")).encode()).hexdigest().encode()
+
+
+def _validate_graph(value):
+    evidence.fields(value, ("signature", "graph"))
+    if not isinstance(value["signature"], str) or not re.fullmatch("[0-9a-f]{64}", value["signature"]):
+        raise ValueError("invalid graph signature")
+    graph = value["graph"]
+    evidence.fields(graph, ("v", "dim", "entry", "top", "vectors", "levels", "links"))
+    if type(graph["v"]) is not int or graph["v"] != 1:
+        raise ValueError("invalid graph version")
+    evidence.integer(graph["dim"], minimum=1, maximum=4096)
+    evidence.integer(graph["top"], maximum=64)
+    vectors, levels, links = graph["vectors"], graph["levels"], graph["links"]
+    if not isinstance(vectors, dict) or not 1 <= len(vectors) <= 10000:
+        raise ValueError("invalid graph size")
+    if not isinstance(levels, dict) or set(levels) != set(vectors) or graph["entry"] not in vectors:
+        raise ValueError("invalid graph ownership")
+    evidence.records(links, 65)
+    if len(links) != graph["top"] + 1:
+        raise ValueError("invalid graph layers")
+    for key, vector in vectors.items():
+        evidence.text(key, 256)
+        _vector(vector)
+        if len(vector) != graph["dim"]:
+            raise ValueError("invalid graph dimension")
+        evidence.integer(levels[key], maximum=graph["top"])
+    if levels[graph["entry"]] != graph["top"]:
+        raise ValueError("invalid graph entry")
+    for level, layer in enumerate(links):
+        if not isinstance(layer, dict) or set(layer) != {k for k in levels if levels[k] >= level}:
+            raise ValueError("invalid graph layer nodes")
+        for key, neighbors in layer.items():
+            evidence.records(neighbors, 64)
+            if any(not isinstance(n, str) or n not in layer or n == key for n in neighbors):
+                raise ValueError("invalid graph neighbors")
+            if len(set(neighbors)) != len(neighbors):
+                raise ValueError("duplicate graph edge")
+
+
+def _ann_evidence(user):
+    return evidence.JsonStore(user, "document ANN", _validate_graph,
+                              empty=lambda: None, max_bytes=64 * 1024 * 1024,
+                              namespace=_ANN_NS)
 
 
 def _persistent_index(user: str, index: dict, items: dict) -> annindex.HNSW:
-    """Build-or-load the user's persistent HNSW. Loads the cached graph when the
-    corpus signature matches (the common case turn-to-turn); rebuilds and
-    re-persists only when documents changed. Best-effort — a store hiccup just
-    falls back to an in-memory build."""
-    key = memory.safe_id(user)
-    sig = _corpus_signature(index)
-    try:
-        if store.backend().get(_ANN_SIG_NS, key) == sig:
-            idx = annindex.load_index(_ANN_NS, key)
-            if len(idx) == len(items):
-                return idx
-    except Exception:
-        pass
-    idx = annindex.build(items)
-    try:
-        annindex.save_index(_ANN_NS, key, idx)
-        store.backend().put(_ANN_SIG_NS, key, sig)
-    except Exception:
-        pass
-    return idx
+    """Graph and signature publish together; damage never triggers replacement."""
+    cache = _ann_evidence(user)
+    with cache.guard():
+        saved = cache.load()
+        sig = _corpus_signature(index).decode("ascii")
+        if saved is not None and saved["signature"] == sig:
+            if set(saved["graph"]["vectors"]) != set(items):
+                raise evidence.OwnerEvidenceStateError("document ANN", "corpus mismatch")
+            if any(tuple(saved["graph"]["vectors"][key]) != annindex._norm(vector)
+                   for key, vector in items.items()):
+                raise evidence.OwnerEvidenceStateError("document ANN", "embedding mismatch")
+            return annindex.HNSW.from_bytes(json.dumps(saved["graph"]).encode())
+        idx = annindex.build(items)
+        if not replaystore.replaying():
+            cache.save({"signature": sig, "graph": json.loads(idx.to_bytes())})
+        return idx
 
 
 def retrieve(user: str, query: str, k: int = 4) -> list[dict]:
@@ -231,6 +296,8 @@ def context_block(user: str, query: str, k: int = 4,
         return ""
     try:
         hits = retrieve(user, query, k)
+    except evidence.OwnerEvidenceStateError as err:
+        return "\n\n[" + str(err) + "]"
     except Exception:
         return ""
     if not hits:

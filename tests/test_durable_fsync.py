@@ -126,7 +126,7 @@ def test_goals_save_syncs_before_replace(monkeypatch):
 
 def test_todos_save_syncs_before_replace(monkeypatch):
     events = trace(monkeypatch)
-    todos._save("shared", [{"id": "1", "text": "t", "done": False,
+    todos._save("shared", [{"id": "1", "text": "t", "kind": "todo", "done": False,
                             "due": None, "created": 0}])
     assert_data_synced_before_replace(events, label="todos._save")
 

@@ -2,8 +2,8 @@
 
 The documents workspace holds long-form Markdown; this holds the short, tickable
 things: quick notes, todo items, and reminders (a todo with a due time). Storage
-mirrors the memory/documents convention — one JSON file per user under
-`memory/users/<safe_id>/todos.json` — so it is dependency-free and inspectable.
+uses an exact-owner envelope at `owners/<full-owner-key>/workspace-v2/todos.json`.
+Normalized legacy files remain preserved and unclaimed.
 
 An item is just data: `{id, text, kind, done, due, created}`. `kind` is "note"
 (a kept scrap, never "done") or "todo" (tickable); a todo with a `due` timestamp
@@ -15,65 +15,57 @@ managing their own list, not an actuator.
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from pathlib import Path
 
-from . import config, memory
+from . import owner_evidence as evidence
 
 _MAX_ITEMS = 500                 # bound the file
 _MAX_TEXT = 2000                 # a single item's text cap
 
 
 def _path(user: str) -> Path:
-    safe = memory.safe_id(user)
-    base = (config.MEMORY_DIR / "users" / safe) if safe != "shared" \
-        else config.MEMORY_DIR
-    base.mkdir(parents=True, exist_ok=True)
-    return base / "todos.json"
+    return evidence.workspace(user) / "todos.json"
+
+
+def _validate(data):
+    evidence.records(data, _MAX_ITEMS)
+    ids = set()
+    for row in data:
+        evidence.fields(row, ("id", "text", "kind", "done", "due", "created"))
+        evidence.text(row["id"], 64)
+        evidence.text(row["text"], _MAX_TEXT)
+        if row["id"] in ids:
+            raise ValueError("duplicate todo")
+        ids.add(row["id"])
+        if row["kind"] not in ("note", "todo") or type(row["done"]) is not bool:
+            raise ValueError("invalid todo state")
+        evidence.number(row["created"])
+        if row["due"] is not None:
+            evidence.number(row["due"])
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "todos", _validate, path=_path(user))
+
+
+def evidence_status(user):
+    return _evidence(user).status()
 
 
 def _load(user: str) -> list[dict]:
-    p = _path(user)
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
-    if not isinstance(data, list):
-        return []
-    # Normalize every item so downstream code (complete/delete/agenda) can index
-    # keys directly even if the on-disk file was hand-edited or truncated.
-    out = []
-    for it in data:
-        if not isinstance(it, dict) or "id" not in it:
-            continue                    # an item with no id can't be addressed
-        out.append({"id": str(it["id"]), "text": str(it.get("text", "")),
-                    "kind": "note" if it.get("kind") == "note" else "todo",
-                    "done": bool(it.get("done", False)),
-                    "due": it.get("due"), "created": it.get("created", 0)})
-    return out
+    return _evidence(user).load()
 
 
 def _save(user: str, items: list[dict]) -> None:
-    import os
-    if len(items) > _MAX_ITEMS:                 # keep the most recent
-        items = sorted(items, key=lambda d: d.get("created", 0))[-_MAX_ITEMS:]
-    # Atomic publish: _load maps a torn file to [] (ADR 0005).
-    p = _path(user)
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    from . import atomicio
-    atomicio.publish(tmp, p, json.dumps(items, indent=2))
+    if len(items) > _MAX_ITEMS:
+        items = sorted(items, key=lambda row: row["created"])[-_MAX_ITEMS:]
+    _evidence(user).save(items)
 
 
 def _mutex(user: str):
-    """Cross-process lock for todo load-modify-save cycles (ADR 0005): the
-    web process, specialist tools in any pipeline process (including the
-    heartbeat's goal cycles), and the CLI all mutate the same file."""
-    from . import proclock
-    return proclock.lock(f"todos-{user}")
+    return _evidence(user).guard()
 
 
 def _parse_due(due: str | float | None) -> float | None:
@@ -82,6 +74,7 @@ def _parse_due(due: str | float | None) -> float | None:
     if due is None or due == "" or isinstance(due, bool):
         return None                    # bool is an int subclass — never a time
     if isinstance(due, (int, float)):
+        evidence.number(due)
         return float(due)
     s = str(due).strip()
     import datetime
@@ -179,7 +172,10 @@ def render_list(user: str) -> str:
         tag = "" if it["kind"] == "todo" else " (note)"
         when = ""
         if it.get("due") is not None:
-            when = "  ⏰ " + datetime.datetime.fromtimestamp(
-                it["due"]).strftime("%Y-%m-%d %H:%M")
+            try:
+                when = "  ⏰ " + datetime.datetime.fromtimestamp(
+                    it["due"]).strftime("%Y-%m-%d %H:%M")
+            except (ValueError, OverflowError, OSError):
+                when = "  [due date cannot be displayed on this platform]"
         lines.append(f"{box} {it['text']}{tag}{when}   [{it['id']}]")
     return "\n".join(lines)

@@ -6,9 +6,10 @@ This is the data a learned router (Phase B) would train on — the link that doe
 not exist today. Phase A **changes nothing about how routing works**: it only
 writes telemetry.
 
-It deliberately mirrors `outcomes.py`: the same `store` backend, per-user
-scoping (`memory.safe_id`), an append-only capped list, and best-effort writes
-that never raise into the caller (a telemetry failure must never break a run).
+It uses versioned exact-owner envelopes on the configured store backend.
+Updates are serialized on one state directory. Invalid evidence is preserved;
+consumers report recording failures without relabeling the completed run.
+Legacy normalized records never count toward a gate.
 
 `outcome_signal` precedence (highest wins), documented in docs/LEARNED_ROUTING.md:
     explicit user feedback  >  the verify/review verdict.
@@ -22,15 +23,15 @@ test traffic and replays can never satisfy the gate.
 
 from __future__ import annotations
 
-import json
 import math
-import threading
 import time
 
-from . import memory, store
+from . import memory, owner_evidence as evidence
 
-_NS = "routing_outcomes"
-_LOCK = threading.Lock()
+_LEGACY_NS = "routing_outcomes"
+_NS = "routing_outcomes.v2"
+_MAX_OWNERS = 1000
+_MAX_AGGREGATE_ROWS = 100000
 # One row per dispatched specialist per run, so the cap is a little larger than
 # outcomes.py's per-action ledger; still a hard rolling cap (no unbounded growth).
 _MAX = 2000
@@ -130,88 +131,101 @@ def resolve_signal(*, feedback: str | None = None,
 
 
 # --- storage (mirrors outcomes.py) -------------------------------------------
+def _validate(data, owner):
+    evidence.records(data, _MAX)
+    identities = set()
+    for row in data:
+        evidence.fields(row, ("ts", "run_id", "user", "specialist", "model", "role",
+                              "task_type", "length_bucket", "outcome_signal",
+                              "signal_source", "synthetic"))
+        if not _valid_row(row) or row["user"] != evidence.exact(owner):
+            raise ValueError("invalid routing evidence or attribution")
+        identity = row["run_id"], row["specialist"]
+        if identity in identities:
+            raise ValueError("duplicate routing observation")
+        identities.add(identity)
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "routing outcomes", lambda data: _validate(data, user),
+                              max_bytes=8 * 1024 * 1024, namespace=_NS)
+
+
+def evidence_status(user):
+    return _evidence(user).status()
+
+
 def _load(user: str) -> list:
-    blob = store.backend().get(_NS, memory.safe_id(user))
-    if not blob:
-        return []
-    try:
-        decoded = json.loads(blob)
-        return decoded if isinstance(decoded, list) else []
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
+    return _evidence(user).load()
 
 
 def _save(user: str, data: list) -> None:
-    store.backend().put(_NS, memory.safe_id(user), json.dumps(data).encode())
+    _evidence(user).save(data)
+    from . import learned_routing
+    learned_routing.clear_cache()
 
 
 def record_run(user: str, run_id: str, message: str, specialists: list[str], *,
                models: dict[str, str], roles: dict[str, str],
                review_verdict: str | None = None, synthetic: bool = False) -> int:
-    """Append one telemetry row per dispatched specialist for this run.
+    """Record attributable outcomes; refusal is surfaced by the run consumer.
 
-    `models[key]`/`roles[key]` are the model/role the routing ACTUALLY used
-    (read from the deterministic selection, never re-decided). `review_verdict`
-    is the pipeline's verify/review verdict ('approve'|'retry'), the review-tier
-    signal; an explicit feedback signal can upgrade it later via `apply_feedback`.
-    Best-effort: never raises into the caller. Returns the number of rows added.
+    Duplicate retries do not create new qualifying observations. Replay does
+    not read or mutate evidence. Synthetic labels stay excluded from gates.
     """
-    try:
-        review_sig = (signal_from_verdict(review_verdict)
-                      if review_verdict is not None else None)
-        signal, source = resolve_signal(review=review_sig)
-        rows_new = []
-        now = time.time()
-        for key in specialists:
-            rows_new.append({
-                "ts": now,
-                "run_id": run_id,
-                "user": memory.safe_id(user),
-                "specialist": key,
-                "model": models.get(key, ""),
-                "role": roles.get(key, ""),
-                "task_type": task_type(key),
-                "length_bucket": length_bucket(message),
-                "outcome_signal": signal,
-                "signal_source": source,
-                "synthetic": bool(synthetic),
-            })
-        if not rows_new:
-            return 0
-        with _LOCK:
-            log = _load(user)
-            log.extend(rows_new)
-            _save(user, log[-_MAX:])
-        return len(rows_new)
-    except Exception:
+    from . import replaystore
+    if replaystore.replaying():
         return 0
+    if type(synthetic) is not bool:
+        raise ValueError("synthetic must be a boolean")
+    signal, source = resolve_signal(review=(signal_from_verdict(review_verdict)
+                                           if review_verdict is not None else None))
+    owner = evidence.exact(user)
+    now = time.time()
+    rows_new = [{"ts": now, "run_id": run_id, "user": owner, "specialist": key,
+                 "model": models.get(key, ""), "role": roles.get(key, ""),
+                 "task_type": task_type(key), "length_bucket": length_bucket(message),
+                 "outcome_signal": signal, "signal_source": source,
+                 "synthetic": synthetic} for key in dict.fromkeys(specialists)]
+    _validate(rows_new, owner)
+    if not rows_new:
+        return 0
+    with _evidence(owner).guard():
+        log = _load(owner)
+        recorded = {(r["run_id"], r["specialist"]): r for r in log}
+        added = []
+        for row in rows_new:
+            prior = recorded.get((row["run_id"], row["specialist"]))
+            if prior is not None:
+                immutable = ("user", "model", "role", "task_type", "length_bucket", "synthetic")
+                if any(prior[k] != row[k] for k in immutable):
+                    raise evidence.OwnerEvidenceStateError("routing outcomes", "conflicting retry")
+                continue
+            added.append(row)
+        if added:
+            _save(owner, (log + added)[-_MAX:])
+    return len(added)
 
 
 def apply_feedback(user: str, run_id: str, verdict: str) -> int:
-    """A later EXPLICIT feedback signal (👍/👎) upgrades the outcome signal of
-    this run's rows — feedback is the top precedence tier. Best-effort; returns
-    the number of rows updated."""
-    if not run_id:
+    """Update only this exact owner's validated rows; never hide write failure."""
+    from . import replaystore
+    if replaystore.replaying() or not run_id:
         return 0
-    try:
-        sig = signal_from_feedback(verdict)
-        if sig == PENDING:
-            return 0
-        updated = 0
-        owner = memory.safe_id(user)
-        with _LOCK:
-            log = _load(user)
-            for row in log:
-                if (_valid_row(row) and row["user"] == owner
-                        and row["run_id"] == run_id):
-                    row["outcome_signal"] = sig
-                    row["signal_source"] = SRC_FEEDBACK
-                    updated += 1
-            if updated:
-                _save(user, log)
-        return updated
-    except Exception:
+    sig = signal_from_feedback(verdict)
+    if sig == PENDING:
         return 0
+    updated = 0
+    with _evidence(user).guard():
+        log = _load(user)
+        for row in log:
+            if row["run_id"] == run_id:
+                row["outcome_signal"] = sig
+                row["signal_source"] = SRC_FEEDBACK
+                updated += 1
+        if updated:
+            _save(user, log)
+    return updated
 
 
 def events(user: str) -> list:
@@ -221,35 +235,19 @@ def events(user: str) -> list:
 
 # --- aggregation + the Phase B gate (operator/gate view, across sources) -----
 def _all_rows() -> list:
-    """Every stored row across users — used only by the operator gate view."""
-    out: list = []
-    try:
-        for key in store.backend().keys(_NS):
-            blob = store.backend().get(_NS, key)
-            if not blob:
-                continue
-            try:
-                decoded = json.loads(blob)
-                if not isinstance(decoded, list):
-                    continue
-                # The storage key is the provenance boundary. A row claiming a
-                # different user must not manufacture a second gate source.
-                out.extend(r for r in decoded
-                           if isinstance(r, dict) and r.get("user") == key)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-    except Exception:
-        pass
-    return out
+    """Every qualified row, or an explicit refusal; never partial evidence."""
+    values = evidence.namespace_values(_NS, _evidence, max_owners=_MAX_OWNERS,
+                                       max_rows=_MAX_AGGREGATE_ROWS)
+    return [row for rows in values.values() for row in rows]
 
 
 def _valid_row(row) -> bool:
     """Whether a row matches the schema emitted by :func:`record_run`.
 
     Stored telemetry is evidence, not configuration. Unknown enum values,
-    incomplete rows, and inconsistent derived fields therefore fail closed and
-    remain visible only in the raw row count; they cannot feed a gate, selector,
-    or offline preference dataset.
+    incomplete rows, and inconsistent derived fields cannot feed a gate, selector,
+    or offline preference dataset. Stored blobs must validate in their entirety;
+    explicit in-memory analytical inputs retain invalid-row counts.
     """
     if not isinstance(row, dict) or not isinstance(row.get("synthetic"), bool):
         return False
@@ -262,7 +260,9 @@ def _valid_row(row) -> bool:
     if any(not isinstance(row.get(k), str) or not row[k].strip()
            for k in required):
         return False
-    if row["user"] != memory.safe_id(row["user"]):
+    if row["user"] != memory.canonical_owner(row["user"]):
+        return False
+    if ts < 0 or any(len(row[k]) > (8192 if k == "user" else 512) for k in required):
         return False
     if row["task_type"] != task_type(row["specialist"]):
         return False
@@ -312,7 +312,7 @@ def stats(rows: list | None = None) -> dict:
     }
 
 
-def gate_status(rows: list | None = None) -> dict:
+def _gate_status(rows: list | None = None) -> dict:
     """Whether the SPEC-04 Phase B data threshold is met from REAL adoption.
     THIS IS THE GATE CHECK. Synthetic/self-only rows never satisfy it."""
     s = stats(rows)
@@ -337,3 +337,15 @@ def gate_status(rows: list | None = None) -> dict:
                        "distinct_users": GATE_MIN_DISTINCT_USERS},
         "stats": s,
     }
+
+
+def gate_status(rows: list | None = None) -> dict:
+    try:
+        result = _gate_status(rows)
+        result["evidence_state"] = "valid"
+        return result
+    except evidence.OwnerEvidenceStateError as err:
+        return {"met": False, "evidence_state": "unavailable", "reasons": [str(err)],
+                "labeled": None, "task_types": None, "distinct_users": None,
+                "thresholds": {"labeled": GATE_MIN_LABELED, "task_types": GATE_MIN_TASK_TYPES,
+                               "distinct_users": GATE_MIN_DISTINCT_USERS}, "stats": None}

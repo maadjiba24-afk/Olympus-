@@ -188,7 +188,12 @@ def _kv_present(uid: str) -> list[str]:
         return list(_DERIVED_KV_NAMESPACES)
     for ns in _DERIVED_KV_NAMESPACES:
         try:
-            if be.get(ns, uid) is not None:
+            if type(be) is store.FileStore:
+                candidate = config.MEMORY_DIR / "store" / ns / uid
+                present = candidate.exists() or candidate.is_symlink()
+            else:
+                present = be.get(ns, uid) is not None
+            if present:
                 out.append(ns)
         except Exception:                                       # noqa: BLE001
             out.append(ns)
@@ -226,6 +231,12 @@ def inspect_principal(principal: str) -> dict:
     """Everything on disk attributable to `principal`. PURE — reads only."""
     uid = memory.safe_id(principal)
     paths = _paths_for(uid)
+    owned = config.MEMORY_DIR / "owners" / memory.owner_key(principal)
+    qualified = [owned] if owned.exists() or owned.is_symlink() else []
+    for ns in ("outcomes.v2", "routing_outcomes.v2", "playbooks.v2", "docrag.ann.v2"):
+        candidate = config.MEMORY_DIR / "store" / ns / memory.storage_key(principal)
+        if candidate.exists() or candidate.is_symlink():
+            qualified.append(candidate)
     kv = _kv_present(uid)
     turns = _indexed_turns(uid)
     # `paths` is the deletion PREDICTION, and the dry run is a verification
@@ -239,8 +250,12 @@ def inspect_principal(principal: str) -> dict:
     if turns:
         targets.append(_index_label(turns))
     return {
-        "principal": uid,
-        "exists": bool(targets),
+        "principal": memory.canonical_owner(principal),
+        "attribution": "unavailable: legacy normalized candidates are not ownership proof",
+        "qualified_workspace": str(config.MEMORY_DIR / "owners" / memory.owner_key(principal)),
+        "deletion_available": False,
+        "exists": bool(targets or qualified),
+        "qualified_paths": [str(p.relative_to(config.MEMORY_DIR)) for p in qualified],
         "paths": targets,
         "kv_namespaces": kv,
         "indexed_turns": turns,
@@ -304,70 +319,20 @@ def delete_principal(principal: str, *, dry_run: bool = True,
     mid-operation records the intent rather than just losing bytes.
 
     A legal hold refuses outright: a hold outranks a deletion request."""
-    uid = memory.safe_id(principal)
-    plan = inspect_principal(uid)
-    plan.update(dry_run=dry_run, reason=reason, deleted=[], errors=[],
-                refused="")
-
-    if uid in legal_hold():
-        plan["refused"] = (
-            f"principal '{uid}' is under legal hold (OLYMPUS_LEGAL_HOLD). A "
-            f"hold outranks retention and deletion; clear the hold first.")
-        _audit("delete_refused_legal_hold", principal=uid, reason=reason)
-        return plan
-
-    if dry_run:
-        _audit("delete_dry_run", principal=uid, files=plan["files"],
-               bytes=plan["bytes"], reason=reason)
-        return plan
-
-    # Tombstone first: if the process dies between tombstone and unlink, the
-    # journal says the deletion was intended rather than looking corrupted.
-    try:
-        from . import sessionlog
-        records, _status = sessionlog.read_verified(uid)
-        if records:
-            sessionlog.append_tombstone(uid, 1, records[-1]["seq"])
-    except Exception as err:                                    # noqa: BLE001
-        plan["errors"].append(f"tombstone: {type(err).__name__}: {err}")
-
-    for path in _paths_for(uid):
-        rel = str(path.relative_to(config.MEMORY_DIR))
-        try:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-            plan["deleted"].append(rel)
-        except OSError as err:
-            plan["errors"].append(f"{rel}: {err}")
-
-    # KV-backed stores. Deleted through `store.backend()` rather than by path so
-    # the same code removes a file on the file backend and a row on Postgres.
-    from . import store
-    for ns in _DERIVED_KV_NAMESPACES:
-        try:
-            if store.backend().get(ns, uid) is not None:
-                store.backend().delete(ns, uid)
-                plan["deleted"].append(_kv_label(ns, uid))
-        except Exception as err:                                # noqa: BLE001
-            plan["errors"].append(f"store/{ns}: {type(err).__name__}: {err}")
-
-    # The searchable copy of the principal's messages. Purged synchronously —
-    # `search.maintain()` would reap it eventually, but "eventually" is not a
-    # deletion guarantee.
-    try:
-        from . import search
-        removed = search.purge_conversation(uid)
-        if removed:
-            plan["deleted"].append(_index_label(removed))
-    except Exception as err:                                    # noqa: BLE001
-        plan["errors"].append(f"search_index: {type(err).__name__}: {err}")
-
-    plan["verified"] = verify_deleted(uid)
-    _audit("delete", principal=uid, deleted=len(plan["deleted"]),
-           errors=len(plan["errors"]), verified=plan["verified"],
-           reason=reason)
+    plan = inspect_principal(principal)
+    plan["unattributed_candidates"] = plan["paths"]
+    plan["paths"] = []  # No deletion is promised by this refused plan.
+    plan.update(dry_run=dry_run, reason=reason, deleted=[], errors=[], verified=False,
+                refused=("Principal deletion is unavailable: the remaining normalized "
+                         "stores and conversation identifiers do not provide a complete "
+                         "exact-owner deletion map. Preserve legacy and qualified state; "
+                         "no deletion or tombstone was performed."))
+    if memory.safe_id(principal) in legal_hold():
+        plan["refused"] = "Principal is under legal hold; no deletion or tombstone was performed."
+        _audit("delete_refused_legal_hold", principal=memory.canonical_owner(principal), reason=reason)
+    else:
+        _audit("delete_refused_owner_attribution", principal=memory.canonical_owner(principal),
+               dry_run=dry_run, reason=reason)
     return plan
 
 
@@ -382,10 +347,8 @@ def verify_deleted(principal: str) -> bool:
     store, and the full-text index — because a path-only check reported
     `verified=True` while every typed memory the user had ever stated was still
     sitting in `store/usermem.memories/<uid>`."""
-    uid = memory.safe_id(principal)
-    return (not _paths_for(uid)
-            and not _kv_present(uid)
-            and _indexed_turns(uid) == 0)
+    # Full erasure cannot be certified from a partial, lossy namespace inventory.
+    return False
 
 
 def sweep_conversations(retain_days: int | None = None, *,
@@ -459,7 +422,8 @@ def inspect_legacy() -> dict:
         "principal 'api-v1'. Whatever is here is the COMMINGLED memory of "
         "every key holder this deployment ever had, and it cannot be "
         "attributed to any one of them.")
-    info["safe_operations"] = ["inspect", "export", "quarantine", "delete"]
+    info["safe_operations"] = ["inspect", "export", "quarantine"]
+    info["deletion_blocker"] = "Exact-owner erasure inventory is incomplete; principal deletion refuses."
     info["unsafe_operation"] = (
         "adopt — assigning this data to a principal gives one key holder "
         "every other key holder's material. Requires an explicit written "
@@ -551,8 +515,7 @@ def adopt_legacy(principal: str, *, acknowledgement: str = "",
             "acknowledgement, passed verbatim as `acknowledgement=`:\n\n  "
             f'"{ADOPTION_ACK}"\n\n'
             "Prefer `quarantine_legacy()` (reversible, removes the exposure) "
-            "or `delete_principal('api-v1', dry_run=False)` unless you have "
-            "established that exactly one key holder ever used this instance.")
+            "until ownership has been established through operator review.")
     src = config.MEMORY_DIR / "users" / LEGACY_PRINCIPAL
     dst = config.MEMORY_DIR / "users" / uid
     out = {"dry_run": dry_run, "principal": uid, "from": str(src),

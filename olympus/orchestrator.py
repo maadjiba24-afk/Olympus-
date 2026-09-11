@@ -2015,7 +2015,9 @@ class Olympus:
                 self._evolve_record("bandit", "ok" if good else "degraded",
                                     review.get("verdict") or "")
         except Exception:
-            pass
+            message = "Routing outcome evidence is unavailable; this completed run was not confirmed in the outcome ledger."
+            tr.event("outcome_evidence_unavailable", message=message)
+            self.report(message)
 
     def _finish(self, user_message: str, reply: str) -> None:
         # W2-C6: the run ended — close its progress lease (a no-op when the
@@ -2041,7 +2043,7 @@ class Olympus:
             if pb:
                 playbooks.mark_used(self.user, pb["id"])
         except Exception:
-            pass
+            self.report("Playbook usage evidence is unavailable; this turn's use was not confirmed.")
         # Learn durable facts about this user in the background (cheap model),
         # so the reply is never delayed by it. Best-effort; guarded inside.
         if config.MEMORY_ENABLED:
@@ -2617,10 +2619,11 @@ class Olympus:
             raise ValueError("feedback verdict must be thumbs up or thumbs down")
         # SPEC-04 Phase A: an explicit 👍/👎 is the top-precedence outcome
         # signal — upgrade this run's routing-outcome rows. Best-effort.
+        routing_warning = ""
         try:
             routing_outcomes.apply_feedback(self.user, self.last_run_id, verdict)
         except Exception:
-            pass
+            routing_warning = " Routing outcome feedback could not be confirmed; its evidence is unavailable."
         # Calibration Record: an explicit 👍/👎 is EXPLICIT-level evidence about
         # this run — append it as new feedback (never rewrites the observation).
         # A rejection is not a completion failure and an approval is not proof of
@@ -2641,7 +2644,7 @@ class Olympus:
             + f"\n## Olympus replied\n{str(reply)[:2000]}",
         )
         return ("Thanks — noted. Olympus learns from this in its daily "
-                "learning cycle.")
+                "learning cycle." + routing_warning)
 
 
 # --- conversation-triggered self-audit ---------------------------------------
