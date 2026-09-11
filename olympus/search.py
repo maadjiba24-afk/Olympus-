@@ -10,7 +10,7 @@ restricted to that principal.
 Uses SQLite's built-in **FTS5** when the runtime has it (fast, ranked by
 relevance), and transparently falls back to a substring scan when it doesn't —
 so it works everywhere, no extra dependency. The index is derived data
-(`memory/search_index.db`); it can be rebuilt from the conversation files at any
+(`memory/search_index-v2.db`; legacy index preserved unclaimed); it can be rebuilt from the conversation files at any
 time with `reindex()`.
 """
 
@@ -18,17 +18,19 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
+from functools import wraps
+from pathlib import Path
 from dataclasses import dataclass
 
-from . import config, memory
+from . import config, memory, owner_evidence as evidence
 
 
 _TURN_COLUMNS = ("owner", "conversation", "role", "content", "turn")
 
 
 def _db_path():
-    config.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    return str(config.MEMORY_DIR / "search_index.db")
+    return str(config.MEMORY_DIR / "search_index-v2.db")
 
 
 def _fts5_available(conn: sqlite3.Connection) -> bool:
@@ -41,39 +43,77 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
 
 
 def _connect() -> tuple[sqlite3.Connection, bool]:
-    conn = sqlite3.connect(_db_path())
-    # WAL: readers never block the writer (gateways index while chat searches),
-    # and a crash mid-write can't corrupt the index. Best-effort — some
-    # filesystems (network mounts) refuse WAL; the default journal still works.
+    path = Path(_db_path())
+    evidence._parents(path, "conversation search")
+    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm"), Path(str(path) + "-journal")):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 128 * 1024 * 1024:
+            raise evidence.OwnerEvidenceStateError("conversation search", "invalid database file or size")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
+    conn = sqlite3.connect(str(path))
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass
-    fts = _fts5_available(conn)
-    # The pre-owner index is unsafe derived data: it cannot be attributed to a
-    # principal after the fact. Drop it instead of guessing. Reindexing below
-    # rebuilds only conversations with durable ownership metadata.
-    existing = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'"
-    ).fetchone()
-    if existing:
-        columns = tuple(row[1] for row in conn.execute(
-            "PRAGMA table_info(turns)").fetchall())
-        was_fts = "using fts5" in str(existing[0] or "").lower()
-        if columns != _TURN_COLUMNS or was_fts != fts:
-            conn.execute("DROP TABLE turns")
-    if fts:
-        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS turns "
-                     "USING fts5(owner UNINDEXED, conversation, role, "
-                     "content, turn UNINDEXED)")
-    else:
-        conn.execute("CREATE TABLE IF NOT EXISTS turns "
-                     "(owner TEXT NOT NULL, conversation TEXT, role TEXT, "
-                     "content TEXT, turn INT)")
-        conn.execute("CREATE INDEX IF NOT EXISTS turns_owner_idx "
-                     "ON turns(owner)")
-    conn.commit()
-    return conn, fts
+        existing = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'").fetchone()
+        if existing:
+            columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(turns)"))
+            if columns != _TURN_COLUMNS:
+                raise evidence.OwnerEvidenceStateError("conversation search", "invalid database schema")
+            fts = "using fts5" in str(existing[0] or "").lower()
+        elif existed:
+            raise evidence.OwnerEvidenceStateError("conversation search", "incomplete database schema")
+        else:
+            fts = _fts5_available(conn)
+            if fts:
+                conn.execute("CREATE VIRTUAL TABLE turns USING fts5(owner UNINDEXED, conversation, role, content, turn UNINDEXED)")
+            else:
+                conn.execute("CREATE TABLE turns (owner TEXT NOT NULL, conversation TEXT, role TEXT, content TEXT, turn INT)")
+                conn.execute("CREATE INDEX turns_owner_idx ON turns(owner)")
+            conn.commit()
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass  # The existing filesystem fallback remains supported.
+        return conn, fts
+    except Exception:
+        conn.close()
+        raise
+
+
+def _errors(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            with evidence.guard("search-v2", "search-database"):
+                return fn(*args, **kwargs)
+        except (sqlite3.Error, OSError) as err:
+            raise evidence.OwnerEvidenceStateError("conversation search", "database or snapshot unavailable") from err
+    return wrapped
+
+
+def _rows(principal, conversation_id, history):
+    try:
+        evidence.text(principal, 8192)
+        evidence.text(conversation_id, 8192)
+        evidence.records(history, 10000)
+        rows = []
+        total = 0
+        for i, message in enumerate(history):
+            if not isinstance(message, dict):
+                raise ValueError("invalid turn")
+            role, content = message.get("role"), message.get("content")
+            evidence.text(role, 128)
+            evidence.text(content, 1000000, empty=True)
+            total += len(content.encode("utf-8"))
+            if total > 16 * 1024 * 1024:
+                raise ValueError("history too large")
+            if content.strip():
+                rows.append((principal, conversation_id, role, content, i))
+        return rows
+    except (ValueError, TypeError, KeyError) as err:
+        raise evidence.OwnerEvidenceStateError("conversation search", "invalid turn evidence") from err
 
 
 @dataclass(frozen=True)
@@ -92,59 +132,93 @@ class Hit:
 
 def _owner(value: str | None = None) -> str:
     """The trusted search namespace; never sourced from a tool argument."""
-    return memory.safe_id(memory.current_user() if value is None else value)
+    return memory.canonical_owner(memory.current_owner() if value is None else value)
 
 
-def _conversations() -> list[tuple[str, list, str]]:
-    d = config.MEMORY_DIR / "conversations"
+def _conversations(owner=None) -> list[tuple[str, list, str]]:
+    directory = config.MEMORY_DIR / "conversations"
+    evidence._parents(directory, "conversation search")
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise evidence.OwnerEvidenceStateError("conversation search", "invalid snapshot directory")
     out = []
-    if not d.exists():
-        return out
-    # Ownerless snapshots predate this boundary. Never guess who owns them:
-    # they remain unsearchable until explicitly migrated or resaved.
-    for path in sorted(d.glob("*.json")):
-        try:
-            owner = memory.conversation_owner(path.stem)
-            if owner is None:
-                continue
-            out.append((path.stem,
-                        json.loads(path.read_text(encoding="utf-8")), owner))
-        except (json.JSONDecodeError, OSError):
+    for i, path in enumerate(sorted(directory.glob("*.json"))):
+        if i >= 10000:
+            raise evidence.OwnerEvidenceStateError("conversation search", "snapshot-count bound exceeded")
+        binding = memory.conversation_binding(path.stem)
+        if binding is None or (owner is not None and binding["owner"] != owner):
             continue
+        raw = evidence.read_bytes(path, 16 * 1024 * 1024, "conversation search")
+        if raw is None:
+            raise evidence.OwnerEvidenceStateError("conversation search", "snapshot disappeared")
+        history = evidence.decode(raw, "conversation search", 16 * 1024 * 1024)
+        _rows(binding["owner"], path.stem, history)
+        out.append((path.stem, history, binding["owner"]))
     return out
 
 
+@_errors
 def index_conversation(conversation_id: str, history: list[dict], *,
                        owner: str | None = None) -> int:
     """(Re)index one conversation's turns. Returns the number of turns indexed."""
     principal = _owner(owner)
+    rows = _rows(principal, conversation_id, history)
     conn, _ = _connect()
     try:
-        conn.execute("DELETE FROM turns WHERE owner = ? AND conversation = ?",
-                     (principal, conversation_id))
-        rows = [(principal, conversation_id, str(m.get("role", "")),
-                 str(m.get("content", "")), i)
-                for i, m in enumerate(history) if str(m.get("content", "")).strip()]
-        conn.executemany("INSERT INTO turns(owner, conversation, role, "
-                         "content, turn) VALUES (?,?,?,?,?)", rows)
-        conn.commit()
+        with conn:
+            conn.execute("DELETE FROM turns WHERE owner = ? AND conversation = ?", (principal, conversation_id))
+            conn.executemany("INSERT INTO turns(owner, conversation, role, content, turn) VALUES (?,?,?,?,?)", rows)
         return len(rows)
     finally:
         conn.close()
 
 
-def reindex() -> int:
-    """Rebuild the whole index from the conversation files. Returns turn count."""
+@_errors
+def reindex(*, owner=None) -> int:
+    """Validate every included snapshot before one transactional replacement."""
+    principal = None if owner is None else _owner(owner)
+    rows = []
+    for cid, history, attributed in _conversations(principal):
+        rows.extend(_rows(attributed, cid, history))
+        if len(rows) > 100000:
+            raise evidence.OwnerEvidenceStateError("conversation search", "rebuild row bound exceeded")
     conn, _ = _connect()
-    conn.execute("DELETE FROM turns")
-    conn.commit()
-    conn.close()
-    total = 0
-    for cid, history, owner in _conversations():
-        total += index_conversation(cid, history, owner=owner)
-    return total
+    try:
+        with conn:
+            if principal is None:
+                conn.execute("DELETE FROM turns")
+            else:
+                conn.execute("DELETE FROM turns WHERE owner = ?", (principal,))
+            conn.executemany("INSERT INTO turns(owner, conversation, role, content, turn) VALUES (?,?,?,?,?)", rows)
+        return len(rows)
+    finally:
+        conn.close()
 
 
+@_errors
+def purge_owner(owner: str) -> int:
+    conn, _ = _connect()
+    try:
+        with conn:
+            cursor = conn.execute("DELETE FROM turns WHERE owner = ?", (_owner(owner),))
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
+@_errors
+def owner_turns(owner: str) -> int:
+    conn, _ = _connect()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM turns WHERE owner = ?", (_owner(owner),)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+@_errors
 def purge_conversation(conversation_id: str) -> int:
     """Drop every indexed turn for one conversation. Returns rows removed.
 
@@ -164,6 +238,7 @@ def purge_conversation(conversation_id: str) -> int:
         conn.close()
 
 
+@_errors
 def indexed_turns(conversation_id: str) -> int:
     """How many turns remain indexed for one conversation (verification)."""
     conn, _ = _connect()
@@ -175,6 +250,7 @@ def indexed_turns(conversation_id: str) -> int:
         conn.close()
 
 
+@_errors
 def maintain(retain_days: int | None = None) -> dict:
     """Index hygiene, run by the heartbeat's maintenance sweep (a long-lived
     server rarely restarts, so startup-time pruning would never fire):
@@ -219,6 +295,7 @@ def maintain(retain_days: int | None = None) -> dict:
         conn.close()
 
 
+@_errors
 def search(query: str, limit: int = 20,
            conversation: str | None = None, *,
            owner: str | None = None) -> list[Hit]:
@@ -233,7 +310,7 @@ def search(query: str, limit: int = 20,
         if conn.execute("SELECT COUNT(*) FROM turns WHERE owner = ?",
                         (principal,)).fetchone()[0] == 0:
             conn.close()
-            reindex()
+            reindex(owner=principal)
             conn, fts = _connect()
         params: list = []
         if fts:

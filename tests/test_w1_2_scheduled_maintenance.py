@@ -83,7 +83,7 @@ def test_unset_policy_reports_the_deployment_block(monkeypatch):
 # ACCEPTANCE 2 — policy SET actually deletes, through the heartbeat.
 # =========================================================================
 
-def test_set_policy_deletes_through_the_heartbeat(monkeypatch):
+def test_set_policy_refuses_unqualified_deletion_through_the_heartbeat(monkeypatch):
     """TRAP 2. `dry_run` defaults to True, so a scheduler that omits it runs
     forever, logs plausible output and deletes nothing. Files must be present
     before and GONE after — driven through `tick`, not by calling the sweep."""
@@ -95,9 +95,10 @@ def test_set_policy_deletes_through_the_heartbeat(monkeypatch):
 
     _tick()
 
-    assert not stale.exists(), (
-        "the scheduled sweep did not delete an over-age conversation — "
-        "dry_run=False almost certainly did not reach sweep_conversations()")
+    assert stale.exists(), "the scheduled sweep deleted unqualified legacy state"
+    refused = retention.sweep_conversations(dry_run=False)
+    assert refused["removed"] == 0
+    assert retention.audit_log()[-2]["event"] == "delete_refused_owner_attribution"
     assert fresh.exists(), "the sweep deleted a conversation inside the policy"
 
 
@@ -144,7 +145,7 @@ def test_legal_hold_survives_the_scheduled_sweep(monkeypatch):
     _tick()
 
     assert held.exists(), "a principal under OLYMPUS_LEGAL_HOLD was deleted"
-    assert not doomed.exists(), "the sweep did not run at all"
+    assert doomed.exists(), "an incomplete owner map authorized deletion"
 
     res = retention.sweep_conversations(dry_run=True)
     assert "held-one" in res["held"], "the hold was not counted"

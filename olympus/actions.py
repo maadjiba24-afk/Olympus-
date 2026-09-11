@@ -663,6 +663,23 @@ def _execute(action: Action) -> Action:
     return action
 
 
+def _record_outcome(action: Action, signal: str) -> None:
+    """A recording failure never changes the result of an executed action."""
+    try:
+        from . import outcomes
+        outcomes.record(action.user, action.type, signal)
+    except Exception:
+        warning = (f"Outcome evidence unavailable: action is {action.status}; "
+                   "recording was not confirmed. Do not repeat the action to repair telemetry.")
+        action.error = (action.error + "\n" if action.error else "") + warning
+        try:
+            _save(action)
+            _audit(action, "outcome_evidence_unavailable")
+        except Exception as err:
+            from . import errors
+            errors.capture("actions.outcome_evidence", err, context=warning)
+
+
 def approve(user: str, action_id: str) -> Action:
     """Explicit human approval → executes immediately. The gate."""
     action = get(user, action_id)
@@ -676,8 +693,7 @@ def approve(user: str, action_id: str) -> Action:
     result = _execute(action)
     if result.status == EXECUTED:      # record the outcome only if it actually ran
         from . import outcomes
-        outcomes.record(action.user, action.type,
-                        outcomes.APPROVED_AFTER_EDIT if action.edited
+        _record_outcome(action, outcomes.APPROVED_AFTER_EDIT if action.edited
                         else outcomes.APPROVED)
     return result
 
@@ -693,7 +709,7 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     action.error = reason
     _save(action); _audit(action, "rejected")
     from . import outcomes
-    outcomes.record(action.user, action.type, outcomes.REJECTED)
+    _record_outcome(action, outcomes.REJECTED)
     # Rejections teach future behavior. Token-based: a bare `set_user` here
     # left the CALLER pointed at the action's owner for the rest of its request,
     # and restoring through `current_user()` would have changed the caller's
@@ -733,9 +749,10 @@ def undo(user: str, action_id: str) -> Action:
             at.undo(action.result)
         action.status = UNDONE
         _save(action); _audit(action, "undone")
-        from . import outcomes
-        outcomes.record(action.user, action.type, outcomes.UNDONE)
     except Exception as err:
         action.error = f"undo failed: {err}"
         _save(action); _audit(action, "undo_failed")
+    else:
+        from . import outcomes
+        _record_outcome(action, outcomes.UNDONE)
     return action

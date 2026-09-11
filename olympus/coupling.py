@@ -156,17 +156,8 @@ def _specialist_secs(rec: dict) -> dict[str, float]:
 def _run_task_types() -> dict[str, str]:
     """run_id → task_type, joined from routing_outcomes rows (majority label
     when a run's rows disagree). Best-effort; {} when the store is empty."""
-    try:
-        from . import routing_outcomes, store
-        if isinstance(store.backend(), store.FileStore):
-            # I-P1 guard: FileStore lazily mkdirs its namespace dir on any
-            # read — skip entirely when nothing was ever written, so this
-            # module provably performs zero writes under MEMORY_DIR.
-            if not (config.MEMORY_DIR / "store" / "routing_outcomes").exists():
-                return {}
-        rows = routing_outcomes._all_rows()
-    except Exception:
-        return {}
+    from . import routing_outcomes
+    rows = routing_outcomes._all_rows()
     votes: dict[str, Counter] = defaultdict(Counter)
     for r in rows:
         if isinstance(r, dict) and r.get("run_id") and r.get("task_type"):

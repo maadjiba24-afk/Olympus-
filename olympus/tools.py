@@ -1104,17 +1104,17 @@ def _ask_user(question: str, options=None) -> str:
 
 def _refresh_email_style() -> str:
     from . import emailstyle, memory
-    return emailstyle.refresh(memory.current_user())
+    return emailstyle.refresh(memory.current_owner())
 
 
 def _list_documents() -> str:
     from . import documents
-    return documents.render_list(memory.current_user())
+    return documents.render_list(memory.current_owner())
 
 
 def _read_document(name: str) -> str:
     from . import documents
-    body = documents.read(memory.current_user(), name)
+    body = documents.read(memory.current_owner(), name)
     if body is None:
         return f"No document named '{name}'. Use list_documents to see them."
     return body
@@ -1122,7 +1122,7 @@ def _read_document(name: str) -> str:
 
 def _search_documents(query: str) -> str:
     from . import docrag
-    return docrag.render_search(memory.current_user(), query)
+    return docrag.render_search(memory.current_owner(), query)
 
 
 def _triage_inbox(query: str = "in:inbox", max_results: int = 20) -> str:
@@ -1136,13 +1136,13 @@ def _triage_inbox(query: str = "in:inbox", max_results: int = 20) -> str:
 
 def _list_todos() -> str:
     from . import todos
-    return todos.render_list(memory.current_user())
+    return todos.render_list(memory.current_owner())
 
 
 def _add_todo(text: str, kind: str = "todo", due: str = "") -> str:
     from . import todos
     try:
-        it = todos.add(memory.current_user(), text, kind=kind, due=due or None)
+        it = todos.add(memory.current_owner(), text, kind=kind, due=due or None)
     except ValueError as err:
         return f"Couldn't add that: {err}"
     what = "Note" if it["kind"] == "note" else "Todo"
@@ -1152,7 +1152,7 @@ def _add_todo(text: str, kind: str = "todo", due: str = "") -> str:
 
 def _complete_todo(item_id: str) -> str:
     from . import todos
-    ok = todos.complete(memory.current_user(), item_id, True)
+    ok = todos.complete(memory.current_owner(), item_id, True)
     return "Marked done." if ok else f"No item with id '{item_id}'."
 
 
@@ -1284,7 +1284,7 @@ def _prepare_action(type: str, payload: dict, title: str = None,
 def _propose_playbook(name: str, steps: list) -> str:
     """Suggest saving a repeatable workflow (the user approves before it runs)."""
     from . import playbooks
-    user = memory.current_user()
+    user = memory.current_owner()
     try:
         pb = playbooks.propose(user, name, list(steps or []))
     except ValueError as err:
@@ -2083,6 +2083,17 @@ def _set_advanced_mode(on: bool = True) -> str:
             "action IDs)." if val else
             "Advanced mode off — I'll keep things simple and plain-English.")
 
+
+from . import owner_evidence as _owner_evidence
+
+_refresh_email_style = _owner_evidence.tool_errors(_refresh_email_style)
+_list_documents = _owner_evidence.tool_errors(_list_documents)
+_read_document = _owner_evidence.tool_errors(_read_document)
+_search_documents = _owner_evidence.tool_errors(_search_documents)
+_list_todos = _owner_evidence.tool_errors(_list_todos)
+_add_todo = _owner_evidence.tool_errors(_add_todo)
+_complete_todo = _owner_evidence.tool_errors(_complete_todo)
+_propose_playbook = _owner_evidence.tool_errors(_propose_playbook)
 
 HANDLERS: dict[str, Callable[..., str]] = {
     # web fallback — only dispatched on non-Anthropic providers (on Anthropic
@@ -4729,6 +4740,7 @@ _SEARCH_DISTILL_THRESHOLD = 1800     # chars of rendered hits before distilling
 # threshold above that would never fire.)
 
 
+@_owner_evidence.tool_errors
 def _search_sessions(query: str) -> str:
     from . import search
     hits = search.search(query, limit=10)

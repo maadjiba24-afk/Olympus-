@@ -14,16 +14,14 @@ user approves it. Stored on the same backend as everything else.
 
 from __future__ import annotations
 
-import json
 import re
-import threading
 import time
 import uuid
 
-from . import memory, store
+from . import owner_evidence as evidence
 
-_NS = "playbooks"
-_LOCK = threading.Lock()
+_LEGACY_NS = "playbooks"
+_NS = "playbooks.v2"
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = frozenset(("the", "for", "and", "run", "this", "that", "your", "with",
                    "now", "please", "again", "let", "make", "give"))
@@ -40,18 +38,46 @@ def _tok(text: str) -> set[str]:
             if len(w) > 2 and w not in _STOP}
 
 
+def _validate(data):
+    evidence.records(data, _MAX_PLAYBOOKS)
+    ids, names = set(), set()
+    for row in data:
+        evidence.fields(row, ("id", "name", "version", "steps", "status",
+                              "created_at", "updated_at", "use_count", "last_used_at"))
+        evidence.text(row["id"], 64)
+        evidence.text(row["name"], _MAX_NAME_LEN)
+        if row["id"] in ids or row["name"].lower() in names:
+            raise ValueError("duplicate playbook")
+        ids.add(row["id"]); names.add(row["name"].lower())
+        evidence.integer(row["version"], minimum=1)
+        evidence.integer(row["use_count"])
+        evidence.number(row["created_at"])
+        evidence.number(row["updated_at"], minimum=row["created_at"])
+        if row["last_used_at"] is not None:
+            evidence.number(row["last_used_at"])
+        if row["status"] not in (ACTIVE, PROPOSED, DEPRECATED):
+            raise ValueError("invalid status")
+        evidence.records(row["steps"], _MAX_STEPS)
+        if not row["steps"]:
+            raise ValueError("missing steps")
+        for step in row["steps"]:
+            evidence.text(step, _MAX_STEP_LEN)
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "playbooks", _validate, namespace=_NS)
+
+
+def evidence_status(user):
+    return _evidence(user).status()
+
+
 def _load(user: str) -> list:
-    blob = store.backend().get(_NS, memory.safe_id(user))
-    if not blob:
-        return []
-    try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return []
+    return _evidence(user).load()
 
 
 def _save(user: str, data: list) -> None:
-    store.backend().put(_NS, memory.safe_id(user), json.dumps(data).encode())
+    _evidence(user).save(data)
 
 
 def _find(items: list, name_or_id: str) -> dict | None:
@@ -70,7 +96,7 @@ def save(user: str, name: str, steps: list[str], status: str = ACTIVE) -> dict:
     if not name or not steps:
         raise ValueError("a playbook needs a name and at least one step")
     now = time.time()
-    with _LOCK:
+    with _evidence(user).guard():
         items = _load(user)
         existing = _find(items, name)
         if not existing and len(items) >= _MAX_PLAYBOOKS:
@@ -91,11 +117,11 @@ def save(user: str, name: str, steps: list[str], status: str = ACTIVE) -> dict:
 
 
 def propose(user: str, name: str, steps: list[str]) -> dict:
-    """Agent-suggested procedure — saved as 'proposed' until the user approves.
-    Won't clobber an existing active playbook of the same name."""
-    if _find([p for p in _load(user) if p["status"] == ACTIVE], name):
-        raise ValueError("an active playbook with that name already exists")
-    return save(user, name, steps, status=PROPOSED)
+    """An unapproved proposal cannot replace an existing active procedure."""
+    with _evidence(user).guard():
+        if _find([p for p in _load(user) if p["status"] == ACTIVE], name):
+            raise ValueError("an active playbook with that name already exists")
+        return save(user, name, steps, status=PROPOSED)
 
 
 def approve(user: str, name_or_id: str) -> dict | None:
@@ -103,7 +129,7 @@ def approve(user: str, name_or_id: str) -> dict | None:
 
 
 def _set_status(user: str, name_or_id: str, status: str) -> dict | None:
-    with _LOCK:
+    with _evidence(user).guard():
         items = _load(user)
         pb = _find(items, name_or_id)
         if pb:
@@ -114,7 +140,7 @@ def _set_status(user: str, name_or_id: str, status: str) -> dict | None:
 
 
 def delete(user: str, name_or_id: str) -> bool:
-    with _LOCK:
+    with _evidence(user).guard():
         items = _load(user)
         pb = _find(items, name_or_id)
         if not pb:
@@ -134,7 +160,7 @@ def list_all(user: str, status: str | None = None) -> list:
 
 
 def mark_used(user: str, name_or_id: str) -> None:
-    with _LOCK:
+    with _evidence(user).guard():
         items = _load(user)
         pb = _find(items, name_or_id)
         if pb:
@@ -171,9 +197,12 @@ def _format(pb: dict) -> str:
 
 
 def context_block(user: str, message: str) -> str:
-    """Inject the matching playbook's steps, if any. Pure — does not mark use."""
-    pb = match(user, message)
-    return _format(pb) if pb else ""
+    """Validated owned procedure, or explicit sanitized unavailability."""
+    try:
+        pb = match(user, message)
+        return _format(pb) if pb else ""
+    except evidence.OwnerEvidenceStateError as err:
+        return "\n\n[" + str(err) + "]"
 
 
 def run_block(user: str, name_or_id: str) -> str | None:

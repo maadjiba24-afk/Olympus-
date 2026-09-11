@@ -136,20 +136,19 @@ def test_principal_isolation_survives_a_restore(store, tmp_path, monkeypatch):
     memory.set_user("shared")
 
 
-def test_a_deleted_principal_stays_deleted_across_a_restore(store, tmp_path,
+def test_refused_erasure_does_not_claim_a_clean_backup(store, tmp_path,
                                                             monkeypatch):
-    """P5-A12 across the backup boundary: a right-to-be-forgotten deletion must
-    not be silently undone by restoring a backup taken AFTER it. (A backup
-    taken BEFORE the deletion legitimately still contains the data — that is
-    what backup-expiry documentation in the retention report is for.)"""
+    """An unqualified erasure refusal preserves data and cannot clean a backup."""
     _seed(("alice", "bob"))
-    retention.delete_principal("alice", dry_run=False, reason="rtbf")
+    refusal = retention.delete_principal("alice", dry_run=False, reason="rtbf")
+    assert refusal["refused"] and refusal["verified"] is False
     archive = Path(backup.create()["path"])          # taken AFTER the deletion
 
     clean = tmp_path / "restored"
     backup.restore(str(archive), into=clean, force=True)
     monkeypatch.setattr(config, "MEMORY_DIR", clean)
-    assert not retention.inspect_principal("alice")["exists"]
+    assert retention.inspect_principal("alice")["exists"]
+    assert retention.verify_deleted("alice") is False
     assert retention.inspect_principal("bob")["exists"]
 
 

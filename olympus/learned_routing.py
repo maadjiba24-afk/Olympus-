@@ -49,8 +49,8 @@ _WEIGHT = {"positive": 1.0, "approved_after_edit": 0.5, "negative": 0.0}
 
 _Z = 1.96                              # 95% Wilson interval
 
-# The ledger is re-read at most once per TTL (it's a few thousand rows of JSON;
-# for_specialist runs several times per request).
+# Retained compatibility cache interface; decisions now validate fresh evidence.
+# A cached positive gate must not survive damage to its source ledger.
 _CACHE_TTL = 60.0
 _cache: dict = {"ts": 0.0, "cells": None, "gate_met": None}
 _CACHE_LOCK = threading.Lock()
@@ -109,14 +109,8 @@ def _aggregate() -> tuple[dict, bool]:
 
 
 def _cells() -> tuple[dict, bool]:
-    now = time.time()
-    with _CACHE_LOCK:
-        if _cache["cells"] is not None and now - _cache["ts"] < _CACHE_TTL:
-            return _cache["cells"], _cache["gate_met"]
-    cells, gate_met = _aggregate()
-    with _CACHE_LOCK:
-        _cache.update(ts=now, cells=cells, gate_met=gate_met)
-    return cells, gate_met
+    """Validate durable evidence for every decision; stale success is not proof."""
+    return _aggregate()
 
 
 def choose(members, specialist: str, heuristic_pick):
@@ -156,14 +150,17 @@ def choose(members, specialist: str, heuristic_pick):
 def status() -> dict:
     """Operator/auditor view for `olympus routing-stats`: activation state and
     the per-cell evidence table the selector would decide from."""
+    evidence_state, reason = "valid", None
     try:
-        cells, gate_met = _aggregate()   # fresh, not cached — it's a CLI view
+        cells, gate_met = _aggregate()
     except Exception:
         cells, gate_met = {}, False
+        evidence_state, reason = "unavailable", "Routing outcome evidence is unavailable; selection remains dormant."
     flag = os.environ.get("OLYMPUS_LEARNED_ROUTING", "").strip().lower() in (
         "1", "true", "yes", "on")
     return {
         "flag_enabled": flag,
+        "evidence_state": evidence_state, "reason": reason,
         "gate_met": gate_met,
         "active": flag and gate_met and not os.environ.get("OLYMPUS_REPLAY"),
         "min_cell_samples": MIN_CELL_SAMPLES,

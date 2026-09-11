@@ -161,3 +161,12 @@ it is large enough to matter). Unset `OLYMPUS_LEARNED_ROUTING` to revert to the
 pure heuristic instantly; the ledger keeps accumulating either way. Any internal
 selector failure (unreadable ledger, bad rows) silently falls back to the
 heuristic — routing can never break on telemetry.
+
+The post-PR310 outcome store uses exact-owner version-2 envelopes in
+`routing_outcomes.v2`. Historical normalized blobs remain preserved and unclaimed.
+Any invalid/unreadable qualified blob refuses the complete aggregate; CLI and
+selector status explicitly report unavailable evidence. The selector revalidates
+durable evidence on every decision, so a cached positive gate cannot conceal
+subsequent damage. Retained duplicate run/specialist retries do not mint new rows.
+These integrity checks do not prove that sources are independently genuine, and
+they do not authorize activation. See `POST_PR310_OWNER_OUTCOME.md` for limits.

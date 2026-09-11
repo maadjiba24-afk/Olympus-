@@ -58,8 +58,9 @@ def test_acquire_knowledge_degrades_without_result():
     assert len(discovery.open_gaps(kind="knowledge")) == 1      # stays open
 
 
-def test_acquire_knowledge_learns_substantive(monkeypatch):
+def test_acquire_knowledge_learns_only_with_qualified_mock_destination(monkeypatch):
     from olympus import wiki
+    monkeypatch.setattr(wiki, "EXACT_OWNER_NAMESPACE", True, raising=False)
     saved = {}
     monkeypatch.setattr(wiki, "upsert",
                         lambda user, title, content, **k: saved.setdefault("slug", "quic") or "quic")

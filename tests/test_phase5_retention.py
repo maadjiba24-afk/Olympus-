@@ -125,16 +125,14 @@ def test_dry_run_changes_nothing(store):
     assert plan["deleted"] == []
 
 
-def test_the_dry_run_predicts_exactly_what_deletion_removes(store):
-    """P5-A11 stated precisely: the plan and the outcome must agree, or the
-    dry run is decoration."""
+def test_refused_dry_run_promises_no_deletion(store):
     _make_principal("alice")
-    predicted = set(retention.delete_principal("alice")["paths"])
-    assert predicted
-    actual = set(retention.delete_principal(
-        "alice", dry_run=False, reason="test")["deleted"])
-    assert actual == predicted, (
-        f"dry run promised {predicted}, deletion removed {actual}")
+    plan = retention.delete_principal("alice")
+    assert plan["refused"] and plan["paths"] == []
+    assert plan["unattributed_candidates"]
+    actual = retention.delete_principal("alice", dry_run=False, reason="test")
+    assert actual["deleted"] == plan["paths"] == []
+    assert retention.inspect_principal("alice")["exists"]
 
 
 def test_the_sweep_dry_run_lists_candidates_without_deleting(store,
@@ -151,52 +149,43 @@ def test_the_sweep_dry_run_lists_candidates_without_deleting(store,
     assert retention.inspect_principal("stale")["exists"]
 
     out2 = retention.sweep_conversations(dry_run=False)
-    assert out2["removed"] == 1
-    assert not retention.inspect_principal("stale")["exists"]
+    assert out2["removed"] == 0
+    assert retention.inspect_principal("stale")["exists"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # P5-A12 — deletion removes ALL derived data
 # ══════════════════════════════════════════════════════════════════════════
 
-def test_deletion_removes_every_derived_store(store):
-    """Deleting the snapshot but leaving the sealed journal is not deletion —
-    the journal replays the whole conversation back."""
+def test_unqualified_deletion_preserves_every_derived_store(store):
     _make_principal("alice", turns=4)
     uid = memory.safe_id("alice")
-    assert (config.MEMORY_DIR / "conversations" / f"{uid}.json").exists()
-    assert (config.MEMORY_DIR / "sessions" / f"{uid}.journal.jsonl").exists()
+    paths = [config.MEMORY_DIR / "conversations" / f"{uid}.json",
+             config.MEMORY_DIR / "sessions" / f"{uid}.journal.jsonl"]
+    before = [p.read_bytes() for p in paths]
+    history = sessionlog.recover_history("alice")
+    out = retention.delete_principal("alice", dry_run=False, reason="rtbf")
+    assert out["refused"] and out["verified"] is False and out["deleted"] == []
+    assert [p.read_bytes() for p in paths] == before
+    assert sessionlog.recover_history("alice") == history
     assert (config.MEMORY_DIR / "users" / uid).exists()
 
-    out = retention.delete_principal("alice", dry_run=False, reason="rtbf")
-    assert out["errors"] == [], out["errors"]
-    assert out["verified"] is True
-    assert not (config.MEMORY_DIR / "conversations" / f"{uid}.json").exists()
-    assert not (config.MEMORY_DIR / "sessions" / f"{uid}.journal.jsonl").exists()
-    assert not (config.MEMORY_DIR / "users" / uid).exists()
-    # and the content is genuinely unrecoverable from the journal
-    assert sessionlog.recover_history("alice") in (None, [])
 
-
-def test_deletion_is_verified_not_assumed(store):
-    """Step 13's rule applied to deletion. `verified` must be computed from the
-    filesystem after the fact, not set optimistically."""
+def test_incomplete_owner_map_never_certifies_erasure(store):
     _make_principal("bob")
-    assert retention.verify_deleted("bob") is False
     out = retention.delete_principal("bob", dry_run=False)
-    assert out["verified"] is True
-    assert retention.verify_deleted("bob") is True
+    assert out["verified"] is False and out["refused"]
+    assert retention.verify_deleted("bob") is False
+    assert retention.verify_deleted("never-seen-owner") is False
 
 
-def test_deletion_tombstones_the_journal_before_removing_it(store):
-    """If the process dies between tombstone and unlink, the journal must say
-    the deletion was INTENDED rather than looking corrupted."""
-    import inspect
-    src = inspect.getsource(retention.delete_principal)
-    i_tomb = src.find("append_tombstone")
-    i_unlink = src.find("shutil.rmtree")
-    assert i_tomb != -1 and i_unlink != -1 and i_tomb < i_unlink, (
-        "the journal is removed before it is tombstoned")
+def test_refused_deletion_does_not_tombstone_a_journal(store, monkeypatch):
+    _make_principal("alice")
+    def forbidden(*args, **kwargs):
+        pytest.fail("a refused deletion must not append a tombstone")
+    monkeypatch.setattr(sessionlog, "append_tombstone", forbidden)
+    out = retention.delete_principal("alice", dry_run=False)
+    assert out["refused"] and sessionlog.recover_history("alice")
 
 
 def test_deleting_one_principal_leaves_another_intact(store):
@@ -205,7 +194,7 @@ def test_deleting_one_principal_leaves_another_intact(store):
     _make_principal("alice")
     _make_principal("bob")
     retention.delete_principal("alice", dry_run=False)
-    assert not retention.inspect_principal("alice")["exists"]
+    assert retention.inspect_principal("alice")["exists"]
     assert retention.inspect_principal("bob")["exists"]
     memory.set_user("bob")
     assert "content for bob" in memory.search("content", limit=5)
@@ -233,14 +222,15 @@ def test_legal_hold_also_exempts_the_sweep(store, monkeypatch):
     assert retention.inspect_principal("held")["exists"]
 
 
-def test_every_deletion_is_audited(store):
+def test_every_deletion_refusal_is_audited(store):
     _make_principal("alice")
-    retention.delete_principal("alice")                       # dry run
+    retention.delete_principal("alice")
     retention.delete_principal("alice", dry_run=False, reason="rtbf request")
-    events = [r["event"] for r in retention.audit_log()]
-    assert "delete_dry_run" in events and "delete" in events
-    rec = [r for r in retention.audit_log() if r["event"] == "delete"][0]
-    assert rec["reason"] == "rtbf request" and rec["verified"] is True
+    records = retention.audit_log()
+    assert len(records) == 2
+    assert all(r["event"] == "delete_refused_owner_attribution" for r in records)
+    assert records[-1]["reason"] == "rtbf request"
+    assert records[0]["dry_run"] is True and records[-1]["dry_run"] is False
 
 
 def test_the_audit_log_is_append_only_and_skips_corruption(store):
@@ -265,8 +255,7 @@ def test_legacy_inspection_explains_why_it_cannot_be_attributed(store):
     assert info["exists"] is True
     assert "COMMINGLED" in info["why_it_exists"]
     assert "adopt" in info["unsafe_operation"]
-    assert set(info["safe_operations"]) == {"inspect", "export", "quarantine",
-                                            "delete"}
+    assert set(info["safe_operations"]) == {"inspect", "export", "quarantine"}
 
 
 def test_adoption_without_the_acknowledgement_is_refused(store):
@@ -340,11 +329,11 @@ def test_legacy_export_is_non_destructive(store, tmp_path):
     assert retention.inspect_principal(retention.LEGACY_PRINCIPAL)["exists"]
 
 
-def test_legacy_can_simply_be_deleted(store):
+def test_legacy_deletion_requires_qualified_inventory(store):
     _make_principal(retention.LEGACY_PRINCIPAL)
     out = retention.delete_principal(retention.LEGACY_PRINCIPAL,
                                      dry_run=False, reason="phase5 cleanup")
-    assert out["verified"] is True
+    assert out["verified"] is False and out["refused"]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -391,7 +380,7 @@ def test_inspect_reports_kv_and_index_footprint(store, monkeypatch):
     assert info["indexed_turns"] > 0
 
 
-def test_delete_principal_removes_kv_backed_stores(store):
+def test_refused_delete_preserves_ambiguous_kv_stores(store):
     from olympus import store as kvstore
     _make_principal("kvuser")
     _seed_kv_footprint("kvuser")
@@ -399,12 +388,12 @@ def test_delete_principal_removes_kv_backed_stores(store):
 
     plan = retention.delete_principal("kvuser", dry_run=False, reason="rtbf")
 
-    assert plan["verified"] is True, plan
+    assert plan["verified"] is False and plan["refused"], plan
     for ns in retention._DERIVED_KV_NAMESPACES:
-        assert kvstore.backend().get(ns, safe) is None, f"{ns} survived deletion"
+        assert kvstore.backend().get(ns, safe) == b'[{"text": "sensitive-canary"}]'
 
 
-def test_delete_principal_purges_the_search_index(store):
+def test_refused_delete_preserves_search_index(store):
     from olympus import search
     _make_principal("kvuser")
     safe = memory.safe_id("kvuser")
@@ -413,7 +402,7 @@ def test_delete_principal_purges_the_search_index(store):
 
     retention.delete_principal("kvuser", dry_run=False, reason="rtbf")
 
-    assert search.indexed_turns(safe) == 0
+    assert search.indexed_turns(safe) > 0
 
 
 def test_verify_deleted_is_false_while_typed_memories_remain(store):

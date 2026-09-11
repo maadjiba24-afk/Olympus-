@@ -246,9 +246,19 @@ def test_all_rows_rejects_cross_key_identity_and_non_list_payloads():
         "signal_source": ro.SRC_FEEDBACK,
         "synthetic": False,
     }
-    ro._save("alice", [valid])
-    ro._save("object-payload", valid)
-    assert ro._all_rows() == []
+    import pytest
+    from olympus import store, memory
+    from olympus.owner_evidence import OwnerEvidenceStateError
+    with pytest.raises(OwnerEvidenceStateError):
+        ro._save("alice", [valid])
+    with pytest.raises(OwnerEvidenceStateError):
+        ro._save("object-payload", valid)
+    raw = json.dumps({"version": 2, "owner": "alice", "data": [valid]}).encode()
+    store.backend().put(ro._NS, memory.storage_key("alice"), raw)
+    with pytest.raises(OwnerEvidenceStateError):
+        ro._all_rows()
+    assert ro.gate_status()["evidence_state"] == "unavailable"
+    assert store.backend().get(ro._NS, memory.storage_key("alice")) == raw
 
 
 # --- 5. non-interference (critical) -----------------------------------------

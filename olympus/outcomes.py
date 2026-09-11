@@ -1,8 +1,8 @@
 """Outcome tracking — what worked, what the user changed, what they declined.
 
 The growth loop's honest core: every time the user approves, edits-then-approves,
-or rejects a prepared action, that's ground-truth feedback on whether Olympus got
-it right. We log those outcomes per action type, compute a track record, and
+or rejects a prepared action, that is feedback about acceptance and edits,
+not verification that the action was correct. We log those outcomes per action type, compute a track record, and
 surface *insights* ("you've edited 4 of the last 5 emails before sending") — but
 we never silently change behavior off them. Improvement is suggested to the user,
 not imposed: no dark patterns, no manipulation, no hidden self-modification.
@@ -12,14 +12,12 @@ Stored on the shared store backend, per user, capped.
 
 from __future__ import annotations
 
-import json
-import threading
 import time
 
-from . import memory, store
+from . import owner_evidence as evidence
 
-_NS = "outcomes"
-_LOCK = threading.Lock()
+_LEGACY_NS = "outcomes"
+_NS = "outcomes.v2"
 _MAX = 1000
 
 # outcome kinds for a prepared action
@@ -33,29 +31,45 @@ _INSIGHT_RATE = 0.5                 # edit+reject share that warrants a nudge
 
 
 def record(user: str, ref: str, outcome: str, kind: str = "action") -> None:
-    """Append one outcome event (best-effort; never raises into the caller)."""
-    try:
-        with _LOCK:
-            log = _load(user)
-            log.append({"ts": time.time(), "kind": kind, "ref": ref,
-                        "outcome": outcome})
-            _save(user, log[-_MAX:])
-    except Exception:
-        pass
+    """Append validated evidence; consumers must report persistence failures.
+
+    The associated action may already be complete. A telemetry error must not
+    relabel it failed, retry it, or claim that feedback was recorded.
+    """
+    from . import replaystore
+    if replaystore.replaying():
+        return
+    with _evidence(user).guard():
+        log = _load(user)
+        log.append({"ts": time.time(), "kind": kind, "ref": ref, "outcome": outcome})
+        _save(user, log[-_MAX:])
+
+
+def _validate(data):
+    evidence.records(data, _MAX)
+    for row in data:
+        evidence.fields(row, ("ts", "kind", "ref", "outcome"))
+        evidence.number(row["ts"])
+        evidence.text(row["kind"], 128)
+        evidence.text(row["ref"], 512)
+        if row["outcome"] not in (APPROVED, APPROVED_AFTER_EDIT, REJECTED, UNDONE):
+            raise ValueError("unknown outcome")
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "outcomes", _validate, namespace=_NS)
+
+
+def evidence_status(user):
+    return _evidence(user).status()
 
 
 def _load(user: str) -> list:
-    blob = store.backend().get(_NS, memory.safe_id(user))
-    if not blob:
-        return []
-    try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return []
+    return _evidence(user).load()
 
 
 def _save(user: str, data: list) -> None:
-    store.backend().put(_NS, memory.safe_id(user), json.dumps(data).encode())
+    _evidence(user).save(data)
 
 
 def events(user: str) -> list:
@@ -100,3 +114,8 @@ def insights(user: str) -> list[dict]:
                     f"playbook so Olympus prepares them the way you want."),
             })
     return out
+
+
+def owner_events() -> dict:
+    """Complete bounded owner-attributed action evidence for offline consumers."""
+    return evidence.namespace_values(_NS, _evidence)

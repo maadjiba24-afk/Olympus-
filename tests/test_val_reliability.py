@@ -933,7 +933,7 @@ def test_two_threads_saving_one_conversation_use_distinct_temp_files(
     # names: the temp file is fully written (and now synced), nothing is
     # published yet.
     def gated_replace(src, dst, *a, **kw):
-        if str(src).endswith(".tmp") and "conversations" in str(src):
+        if str(dst).endswith(".json") and "conversations" in str(dst):
             with guard:
                 counter["n"] += 1
                 nth = counter["n"]
@@ -1708,7 +1708,7 @@ def test_a_journal_from_a_newer_minor_writer_still_reads():
 
 def test_a_conversation_snapshot_without_a_journal_still_loads():
     """The oldest format of all: a pre-C1 install has snapshots and no journal
-    at all. It must load, and journaling must start cleanly from there."""
+    at all. Reading preserves it; an ordinary resave cannot claim its owner."""
     cid = "schema-2"
     p = _snapshot(cid)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1718,9 +1718,12 @@ def test_a_conversation_snapshot_without_a_journal_still_loads():
     assert not _journal(cid).exists()
     assert memory.load_conversation(cid) == hist
     assert sessionlog.journal_status(cid) == "absent"
-    memory.save_conversation(cid, hist + _turn(2))
-    assert sessionlog.journal_status(cid) == "ok"
-    assert sessionlog.recover_history(cid) == hist + _turn(2)
+    from olympus.owner_evidence import OwnerEvidenceStateError
+    before = p.read_bytes()
+    with pytest.raises(OwnerEvidenceStateError, match="ambiguous legacy"):
+        memory.save_conversation(cid, hist + _turn(2))
+    assert sessionlog.journal_status(cid) == "absent"
+    assert p.read_bytes() == before
 
 
 def test_an_older_ledger_chain_verifies_and_resumes():

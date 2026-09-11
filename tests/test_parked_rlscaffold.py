@@ -72,37 +72,34 @@ def test_routing_pairs_are_matched_context_and_feature_differentiated():
 
 
 def test_synthetic_and_pending_rows_are_excluded():
-    _routing_append("s", {"specialist": "hephaestus", "model": "opus",
-                          "role": "primary", "task_type": "t", "length_bucket": "m",
-                          "outcome_signal": routing_outcomes.POSITIVE,
-                          "synthetic": True})
-    _routing_append("s", {"specialist": "hermes", "model": "haiku",
-                          "role": "primary", "task_type": "t", "length_bucket": "m",
-                          "outcome_signal": routing_outcomes.NEGATIVE,
-                          "synthetic": True})
-    _routing_append("s", {"specialist": "hephaestus", "model": "opus",
-                          "role": "primary", "task_type": "t", "length_bucket": "m",
-                          "outcome_signal": routing_outcomes.PENDING,
-                          "synthetic": False})
-    # All synthetic or pending → no learnable pairs.
+    for rid, specialist, signal, synthetic in (
+        ("one", "hephaestus", routing_outcomes.POSITIVE, True),
+        ("two", "hermes", routing_outcomes.NEGATIVE, True),
+        ("three", "hephaestus", routing_outcomes.PENDING, False),
+    ):
+        _routing_append("s", {"ts": 1.0, "run_id": rid, "user": "s",
+            "specialist": specialist, "model": "owned-model", "role": "primary",
+            "task_type": routing_outcomes.task_type(specialist), "length_bucket": "m",
+            "outcome_signal": signal, "synthetic": synthetic,
+            "signal_source": routing_outcomes.SRC_NONE if signal == routing_outcomes.PENDING
+                             else routing_outcomes.SRC_FEEDBACK})
     assert rlscaffold.collect_routing_pairs() == []
 
 
-def test_unsupported_provenance_cannot_become_preference_pairs():
-    shared = {
-        "ts": 1.0, "user": "u1", "role": "primary",
-        "task_type": "research", "length_bucket": "m",
-        "signal_source": "invented", "synthetic": False,
-    }
-    _routing_append("u1", {
-        **shared, "run_id": "winner", "specialist": "argus",
-        "model": "opus", "outcome_signal": routing_outcomes.POSITIVE,
-    })
-    _routing_append("u1", {
-        **shared, "run_id": "loser", "specialist": "mnemosyne",
-        "model": "haiku", "outcome_signal": routing_outcomes.NEGATIVE,
-    })
-    assert rlscaffold.collect_routing_pairs() == []
+def test_unsupported_provenance_makes_export_evidence_unavailable():
+    import json
+    from olympus import memory
+    from olympus.owner_evidence import OwnerEvidenceStateError
+    invalid = {"ts": 1.0, "user": "u1", "role": "primary",
+        "task_type": "research", "length_bucket": "m", "signal_source": "invented",
+        "synthetic": False, "run_id": "winner", "specialist": "argus",
+        "model": "opus", "outcome_signal": routing_outcomes.POSITIVE}
+    raw = json.dumps({"version": 2, "owner": "u1", "data": [invalid]}).encode()
+    key = memory.storage_key("u1")
+    store.backend().put(routing_outcomes._NS, key, raw)
+    with pytest.raises(OwnerEvidenceStateError):
+        rlscaffold.collect_routing_pairs()
+    assert store.backend().get(routing_outcomes._NS, key) == raw
 
 
 def test_action_outcomes_become_pairs_vs_baseline():

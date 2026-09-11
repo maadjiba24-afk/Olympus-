@@ -35,14 +35,14 @@ def test_save_is_reversible(user):
     documents.save(user, "doc", "v1")
     res = documents.save(user, "doc", "v2")
     assert documents.read(user, "doc") == "v2"
-    documents.undo_save(res)
+    documents.undo_save(res, user=user)
     assert documents.read(user, "doc") == "v1"
 
 
 def test_undo_new_document_deletes_it(user):
     res = documents.save(user, "fresh", "hello")
     assert documents.exists(user, "fresh")
-    documents.undo_save(res)
+    documents.undo_save(res, user=user)
     assert not documents.exists(user, "fresh")
 
 
@@ -85,7 +85,7 @@ def test_write_document_never_auto_executes_even_at_l4(user, monkeypatch):
     # Both accessors: the write tool rides the approval spine, whose durable
     # owner is the EXACT principal (`current_owner`), while the document path
     # itself is built from the normalized namespace (`current_user`).
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     monkeypatch.setattr(memory, "current_owner", lambda: user)
     monkeypatch.setattr(actions, "autonomy_level", lambda u: actions.L4_STANDING)
     out = tools.HANDLERS["write_document"]("Draft", "# Draft\nbody")
@@ -98,7 +98,7 @@ def test_write_document_never_auto_executes_even_at_l4(user, monkeypatch):
 
 def test_write_document_executes_on_approval(user, monkeypatch):
     from olympus import tools, memory
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     monkeypatch.setattr(memory, "current_owner", lambda: user)
     tools.HANDLERS["write_document"]("Draft", "# Draft\nbody")
     pend = [a for a in actions.pending(user) if a.type == "write_document"]
@@ -110,7 +110,7 @@ def test_write_document_executes_on_approval(user, monkeypatch):
 
 def test_read_and_list_tools(user, monkeypatch):
     from olympus import tools, memory
-    monkeypatch.setattr(memory, "current_user", lambda: user)
+    monkeypatch.setattr(memory, "current_owner", lambda: user)
     documents.save(user, "Notes", "# Notes\nx")
     assert "# Notes" in tools.HANDLERS["read_document"]("Notes")
     assert "Notes" in tools.HANDLERS["list_documents"]()

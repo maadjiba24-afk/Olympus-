@@ -67,7 +67,11 @@ def test_unknown_labels_cannot_satisfy_warmup():
             "signal_source": routing_outcomes.SRC_FEEDBACK,
             "synthetic": False,
         })
-    routing_outcomes._save("shared", rows)
+    from olympus import store, memory
+    import json
+    # Inject damage beneath the validating publication API.
+    store.backend().put(routing_outcomes._NS, memory.storage_key("shared"),
+        json.dumps({"version": 2, "owner": "shared", "data": rows}).encode())
     assert bandit_routing.choose([OPUS, HAIKU], "chiron", OPUS) is None
 
 

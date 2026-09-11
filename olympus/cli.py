@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from . import heartbeat, memory, orchestrator
+from . import heartbeat, memory, orchestrator, owner_evidence
 
 # The label every surface MUST attach to a pass produced under the public
 # default seed — a default-seed pass proves integrity, never authenticity.
@@ -1063,6 +1063,7 @@ def command_names() -> list[str]:
     return sorted(names)
 
 
+@owner_evidence.cli_errors
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2973,6 +2974,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         from . import routing_outcomes as ro
         g = ro.gate_status()
+        if g.get("evidence_state") == "unavailable":
+            print("Routing evidence UNAVAILABLE: " + "; ".join(g["reasons"]))
+            return 1
         s = g["stats"]
         print("Routing-outcome telemetry (SPEC-04 Phase A — passive; changes no "
               "routing)")

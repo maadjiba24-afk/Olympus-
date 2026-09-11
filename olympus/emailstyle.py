@@ -27,13 +27,12 @@ Config: OLYMPUS_EMAIL_STYLE=0 disables; OLYMPUS_EMAIL_STYLE_TTL_DAYS
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
 from pathlib import Path
 
-from . import config
+from . import config, memory, owner_evidence as evidence
 
 
 def enabled() -> bool:
@@ -42,10 +41,7 @@ def enabled() -> bool:
 
 
 def _path(user: str) -> Path:
-    from . import memory
-    d = config.MEMORY_DIR / "email_style"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"{memory.safe_id(user)}.json"
+    return evidence.workspace(user) / "email_style.json"
 
 
 def _ttl_days() -> int:
@@ -93,13 +89,15 @@ def build(user: str, pool: config.ModelPool | None = None,
           samples: list[str] | None = None) -> str | None:
     """(Re)build the style profile for `user` from sent mail. Returns the
     guide, or None when there wasn't enough signal / it's disabled / it
-    failed. Never raises."""
+    failed. Invalid stored evidence raises an explicit refusal."""
     if not enabled():
         return None
+    _load(user)  # Refuse damaged evidence before provider or email access.
     from . import backend, gmail, security
     if samples is None:
         try:
-            samples = gmail.list_sent_bodies()
+            with memory.user_context(user):
+                samples = gmail.list_sent_bodies()
         except Exception:
             samples = []
     cleaned = [c for c in (_clean(s) for s in (samples or [])) if len(c) > 40]
@@ -127,21 +125,30 @@ def build(user: str, pool: config.ModelPool | None = None,
     guide = security.sanitize_for_memory(str(data.get("guide") or "").strip())
     if not guide:
         return None
-    _path(user).write_text(
-        json.dumps({"guide": guide, "built": time.time(),
-                    "samples": len(cleaned)}),
-        encoding="utf-8")
+    with _evidence(user).guard():
+        _evidence(user).save({"guide": guide, "built": time.time(),
+                              "samples": len(cleaned)})
     return guide
 
 
+def _validate(data):
+    evidence.fields(data, ("guide", "built", "samples"))
+    evidence.text(data["guide"], 16000)
+    evidence.number(data["built"])
+    evidence.integer(data["samples"], minimum=3, maximum=10000)
+
+
+def _evidence(user):
+    return evidence.JsonStore(user, "email style", _validate, empty=lambda: None,
+                              max_bytes=128 * 1024, path=_path(user))
+
+
+def evidence_status(user):
+    return _evidence(user).status()
+
+
 def _load(user: str) -> dict | None:
-    p = _path(user)
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    return _evidence(user).load()
 
 
 def is_stale(user: str) -> bool:
@@ -160,7 +167,10 @@ def context_block(user: str) -> str:
     """Prompt block for Angelos: the user's voice guide, or '' when none."""
     if not enabled():
         return ""
-    g = guide(user)
+    try:
+        g = guide(user)
+    except evidence.OwnerEvidenceStateError as err:
+        return "\n\n[" + str(err) + "]"
     if not g:
         return ""
     return ("\n\n## The user's email writing style (match it when drafting "

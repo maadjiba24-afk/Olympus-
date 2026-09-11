@@ -172,10 +172,11 @@ def collect_routing_pairs(rows: list | None = None, *,
 def collect_action_pairs(users: list | None = None) -> list[PreferencePair]:
     """Pointwise action outcomes as pairs-vs-baseline: APPROVED ≻ baseline,
     baseline ≻ REJECTED/UNDONE, APPROVED_AFTER_EDIT a half-win."""
-    users = _known_users() if users is None else users
+    logs = (outcomes.owner_events() if users is None
+            else {user: outcomes.events(user) for user in sorted(set(users))})
     pairs: list[PreferencePair] = []
-    for user in sorted(set(users)):
-        for e in outcomes.events(user):
+    for user in sorted(logs):
+        for e in logs[user]:
             ref, kind = str(e.get("ref", "")), str(e.get("kind", "action"))
             if not ref:
                 continue
@@ -195,12 +196,8 @@ def collect_action_pairs(users: list | None = None) -> list[PreferencePair]:
 
 
 def _known_users() -> list:
-    """Users that have an action-outcome log (best-effort)."""
-    try:
-        from . import store
-        return list(store.backend().keys(outcomes._NS))
-    except Exception:
-        return []
+    """Exact owners verified from envelopes; backend failures remain unavailable."""
+    return sorted(outcomes.owner_events())
 
 
 def collect_pairs(*, users: list | None = None) -> list[PreferencePair]:

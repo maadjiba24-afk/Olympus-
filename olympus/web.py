@@ -35,6 +35,19 @@ from . import (accounts, actions, builtin_actions, config, metrics,  # noqa: F40
                openai_server, orchestrator, streamguard, usage)
 
 
+def _owner_evidence_response(fn):
+    """HTTP consumers distinguish unavailable evidence from empty successful data."""
+    from functools import wraps
+    from .owner_evidence import OwnerEvidenceStateError
+    @wraps(fn)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except OwnerEvidenceStateError as err:
+            self._json({"error": str(err), "evidence_state": "unavailable"}, 503)
+    return wrapped
+
+
 def _user_for(sid: str) -> str:
     return f"web-{sid}"
 
@@ -2219,6 +2232,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return _user_for(sid)
 
+    @_owner_evidence_response
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         if url.path == "/healthz":
@@ -2445,6 +2459,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, f"<!doctype html><meta charset=utf-8>{body}".encode(),
                    "text/html; charset=utf-8")
 
+    @_owner_evidence_response
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/v1/chat/completions", "/v1/messages"):
@@ -2553,8 +2568,8 @@ class Handler(BaseHTTPRequestHandler):
                     a = actions.approve(user, aid)
                     msg = a.error or "executed"
                 elif op == "reject":
-                    actions.reject(user, aid, str(payload.get("reason", "")))
-                    msg = "rejected"
+                    a = actions.reject(user, aid, str(payload.get("reason", "")))
+                    msg = a.error or "rejected"
                 elif op == "undo":
                     a = actions.undo(user, aid)
                     msg = a.error or "reversed"
