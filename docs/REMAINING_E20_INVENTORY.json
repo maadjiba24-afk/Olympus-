@@ -1,0 +1,2699 @@
+{
+  "baseline": "da69df5bdbd52eb52d2c14d09bcfa9ada56eba84",
+  "baseline_tree": "5061f63f41b7902c6b6637e2b653c420de8d2f68",
+  "scope": "All executable except handlers whose complete body is pass in the baseline olympus/**/*.py. Every listed handler requires review; this is not a count of confirmed defects. Other swallowed defaults remain covered by the named storage/consumer work items.",
+  "count": 299,
+  "handlers": [
+    {
+      "path": "olympus/actions.py",
+      "line": 350,
+      "scope": "discard_legacy_actions",
+      "exception": "OSError",
+      "source_sha256": "74947a39c0af9c8d6d1a442867b221ede664a463de3e8954d467f37c8764502f",
+      "status": "review_pending",
+      "id": "E20-001"
+    },
+    {
+      "path": "olympus/actions.py",
+      "line": 412,
+      "scope": "daily_limit",
+      "exception": "(TypeError, ValueError)",
+      "source_sha256": "74947a39c0af9c8d6d1a442867b221ede664a463de3e8954d467f37c8764502f",
+      "status": "review_pending",
+      "id": "E20-002"
+    },
+    {
+      "path": "olympus/adminpanel.py",
+      "line": 783,
+      "scope": "_spawn.runner",
+      "exception": "Exception",
+      "source_sha256": "62ed096cd5f4afd9bd42b6ff45d37328fb76ac8e0d28cfb742408a0df5700824",
+      "status": "review_pending",
+      "id": "E20-003"
+    },
+    {
+      "path": "olympus/agentbeat.py",
+      "line": 138,
+      "scope": "_compact_context",
+      "exception": "Exception",
+      "source_sha256": "496b4d4818da15d86e6eb7c051f6ab2bb4c4067e48f66e466744df8e82f0c95f",
+      "status": "review_pending",
+      "id": "E20-004"
+    },
+    {
+      "path": "olympus/agentbeat.py",
+      "line": 145,
+      "scope": "_compact_context",
+      "exception": "Exception",
+      "source_sha256": "496b4d4818da15d86e6eb7c051f6ab2bb4c4067e48f66e466744df8e82f0c95f",
+      "status": "review_pending",
+      "id": "E20-005"
+    },
+    {
+      "path": "olympus/agentbeat.py",
+      "line": 187,
+      "scope": "_deliver",
+      "exception": "Exception",
+      "source_sha256": "496b4d4818da15d86e6eb7c051f6ab2bb4c4067e48f66e466744df8e82f0c95f",
+      "status": "review_pending",
+      "id": "E20-006"
+    },
+    {
+      "path": "olympus/anchor.py",
+      "line": 242,
+      "scope": "_alert",
+      "exception": "Exception",
+      "source_sha256": "a19ba14ae6e21b27fbd5e237b5ad83367e5b088e0314aeb124315daafc0aeec9",
+      "status": "review_pending",
+      "id": "E20-007"
+    },
+    {
+      "path": "olympus/anchor.py",
+      "line": 247,
+      "scope": "_alert",
+      "exception": "Exception",
+      "source_sha256": "a19ba14ae6e21b27fbd5e237b5ad83367e5b088e0314aeb124315daafc0aeec9",
+      "status": "review_pending",
+      "id": "E20-008"
+    },
+    {
+      "path": "olympus/anchor.py",
+      "line": 252,
+      "scope": "_alert",
+      "exception": "Exception",
+      "source_sha256": "a19ba14ae6e21b27fbd5e237b5ad83367e5b088e0314aeb124315daafc0aeec9",
+      "status": "review_pending",
+      "id": "E20-009"
+    },
+    {
+      "path": "olympus/assess.py",
+      "line": 517,
+      "scope": "repair_authorizations",
+      "exception": "AssessAuthorizationStateError",
+      "source_sha256": "f3009b26bc2241914de50199d6161f9bbff896bf7c2c70f0ce59c3032b06aa97",
+      "status": "review_pending",
+      "id": "E20-010"
+    },
+    {
+      "path": "olympus/assess.py",
+      "line": 709,
+      "scope": "record_finding",
+      "exception": "Exception",
+      "source_sha256": "f3009b26bc2241914de50199d6161f9bbff896bf7c2c70f0ce59c3032b06aa97",
+      "status": "review_pending",
+      "id": "E20-011"
+    },
+    {
+      "path": "olympus/assess.py",
+      "line": 1540,
+      "scope": "_load_advisories",
+      "exception": "Exception",
+      "source_sha256": "f3009b26bc2241914de50199d6161f9bbff896bf7c2c70f0ce59c3032b06aa97",
+      "status": "review_pending",
+      "id": "E20-012"
+    },
+    {
+      "path": "olympus/assess.py",
+      "line": 2855,
+      "scope": "containment",
+      "exception": "Exception",
+      "source_sha256": "f3009b26bc2241914de50199d6161f9bbff896bf7c2c70f0ce59c3032b06aa97",
+      "status": "review_pending",
+      "id": "E20-013"
+    },
+    {
+      "path": "olympus/assessment_evidence.py",
+      "line": 188,
+      "scope": "Store.repair",
+      "exception": "AssessEvidenceStateError",
+      "source_sha256": "0589908892ce9bb8f56ca2cb9c38e5b7a1e03e1b458c6afab70f821be48391af",
+      "status": "review_pending",
+      "id": "E20-014"
+    },
+    {
+      "path": "olympus/atomicio.py",
+      "line": 89,
+      "scope": "publish",
+      "exception": "OSError",
+      "source_sha256": "d915664eba1ea6e907b89f6b652ff3e664d116ae03312d09f5907415d2c517c9",
+      "status": "review_pending",
+      "id": "E20-015"
+    },
+    {
+      "path": "olympus/backup.py",
+      "line": 101,
+      "scope": "_custody_paths",
+      "exception": "OSError",
+      "source_sha256": "0018271a21e2bad0056c4d0469874d2131d42c7512866bd615721ee46e589063",
+      "status": "review_pending",
+      "id": "E20-016"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 557,
+      "scope": "_RealTransport._arm",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-017"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 562,
+      "scope": "_RealTransport._arm",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-018"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 643,
+      "scope": "_RealTransport._send_nowait",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-019"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 665,
+      "scope": "_RealTransport.reattach",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-020"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 688,
+      "scope": "_RealTransport._reconnect",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-021"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 693,
+      "scope": "_RealTransport._reconnect",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-022"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 755,
+      "scope": "_RealTransport.close",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-023"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 1433,
+      "scope": "launch_local",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-024"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 1874,
+      "scope": "BrowserSession.download",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-025"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 2432,
+      "scope": "BrowserSession._observe_raw",
+      "exception": "(TypeError, ValueError)",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-026"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 2867,
+      "scope": "reset",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-027"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 2889,
+      "scope": "_verify_playwright_destroyed",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-028"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 2932,
+      "scope": "_verify_autolaunch_destroyed",
+      "exception": "FileNotFoundError",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-029"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 2996,
+      "scope": "relinquish",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-030"
+    },
+    {
+      "path": "olympus/browser.py",
+      "line": 3008,
+      "scope": "relinquish",
+      "exception": "Exception",
+      "source_sha256": "96bb13efb95bbff3087a7119772ec181e09ebceebc4eafb5a5a7c8f3051721a2",
+      "status": "review_pending",
+      "id": "E20-031"
+    },
+    {
+      "path": "olympus/browserlease.py",
+      "line": 218,
+      "scope": "is_trusted",
+      "exception": "Exception",
+      "source_sha256": "18ea5e253d8620ddc4dc3a9323b458e3292fcc850577e437031b5f5d2f87b2a7",
+      "status": "review_pending",
+      "id": "E20-032"
+    },
+    {
+      "path": "olympus/browserlease.py",
+      "line": 385,
+      "scope": "_remove_if",
+      "exception": "FileNotFoundError",
+      "source_sha256": "18ea5e253d8620ddc4dc3a9323b458e3292fcc850577e437031b5f5d2f87b2a7",
+      "status": "review_pending",
+      "id": "E20-033"
+    },
+    {
+      "path": "olympus/browserlease.py",
+      "line": 445,
+      "scope": "_release_file_lock",
+      "exception": "OSError",
+      "source_sha256": "18ea5e253d8620ddc4dc3a9323b458e3292fcc850577e437031b5f5d2f87b2a7",
+      "status": "review_pending",
+      "id": "E20-034"
+    },
+    {
+      "path": "olympus/browserlease.py",
+      "line": 632,
+      "scope": "clear_for_tests",
+      "exception": "(FileNotFoundError, OSError)",
+      "source_sha256": "18ea5e253d8620ddc4dc3a9323b458e3292fcc850577e437031b5f5d2f87b2a7",
+      "status": "review_pending",
+      "id": "E20-035"
+    },
+    {
+      "path": "olympus/calibration.py",
+      "line": 240,
+      "scope": "_log_failure",
+      "exception": "OSError",
+      "source_sha256": "55d0cff241f5d4a3fc3e91182f46b0a98e2e2db8280504c35f5b302f984675c6",
+      "status": "review_pending",
+      "id": "E20-036"
+    },
+    {
+      "path": "olympus/calibration.py",
+      "line": 507,
+      "scope": "_append",
+      "exception": "Exception",
+      "source_sha256": "55d0cff241f5d4a3fc3e91182f46b0a98e2e2db8280504c35f5b302f984675c6",
+      "status": "review_pending",
+      "id": "E20-037"
+    },
+    {
+      "path": "olympus/chanbase.py",
+      "line": 119,
+      "scope": "deny_once",
+      "exception": "Exception",
+      "source_sha256": "f57dec34d3b9f928f923e9cda4e1c073a64c8621b305101f0dda42297b9d8ae0",
+      "status": "review_pending",
+      "id": "E20-038"
+    },
+    {
+      "path": "olympus/cli.py",
+      "line": 1080,
+      "scope": "main",
+      "exception": "Exception",
+      "source_sha256": "a9882fa69a32a4c1ba93c703529cb9a88b1248b62f268504ae17fb208bc35142",
+      "status": "review_pending",
+      "id": "E20-039"
+    },
+    {
+      "path": "olympus/cli.py",
+      "line": 2646,
+      "scope": "main",
+      "exception": "KeyboardInterrupt",
+      "source_sha256": "a9882fa69a32a4c1ba93c703529cb9a88b1248b62f268504ae17fb208bc35142",
+      "status": "review_pending",
+      "id": "E20-040"
+    },
+    {
+      "path": "olympus/code_eval.py",
+      "line": 125,
+      "scope": "load_tasks",
+      "exception": "(json.JSONDecodeError, OSError)",
+      "source_sha256": "1d93e1f470e7b15e1e92c357f2cc878bb1b25359571c674bf3c3506782b91640",
+      "status": "review_pending",
+      "id": "E20-041"
+    },
+    {
+      "path": "olympus/codegraph_analysis.py",
+      "line": 171,
+      "scope": "communities",
+      "exception": "(ValueError, json.JSONDecodeError)",
+      "source_sha256": "b87f750f00db760c766d995819e0e202be14054342cbe0e850da5e75acb2b9c3",
+      "status": "review_pending",
+      "id": "E20-042"
+    },
+    {
+      "path": "olympus/codegraph_analysis.py",
+      "line": 351,
+      "scope": "token_benchmark",
+      "exception": "OSError",
+      "source_sha256": "b87f750f00db760c766d995819e0e202be14054342cbe0e850da5e75acb2b9c3",
+      "status": "review_pending",
+      "id": "E20-043"
+    },
+    {
+      "path": "olympus/codegraph_watch.py",
+      "line": 34,
+      "scope": "_snapshot",
+      "exception": "OSError",
+      "source_sha256": "3c8b622c32d5143acbb4cfdc4e09fd28eedece0a677bf063a842b7202ddf0f25",
+      "status": "review_pending",
+      "id": "E20-044"
+    },
+    {
+      "path": "olympus/codegraph_watch.py",
+      "line": 75,
+      "scope": "watch",
+      "exception": "Exception",
+      "source_sha256": "3c8b622c32d5143acbb4cfdc4e09fd28eedece0a677bf063a842b7202ddf0f25",
+      "status": "review_pending",
+      "id": "E20-045"
+    },
+    {
+      "path": "olympus/codegraph_watch.py",
+      "line": 77,
+      "scope": "watch",
+      "exception": "KeyboardInterrupt",
+      "source_sha256": "3c8b622c32d5143acbb4cfdc4e09fd28eedece0a677bf063a842b7202ddf0f25",
+      "status": "review_pending",
+      "id": "E20-046"
+    },
+    {
+      "path": "olympus/companion.py",
+      "line": 389,
+      "scope": "repair",
+      "exception": "CompanionStateError",
+      "source_sha256": "8b01ce28e7db9e78fd4b01b6697ba4f55e071c8dc22665e76c5359701a2ab396",
+      "status": "review_pending",
+      "id": "E20-047"
+    },
+    {
+      "path": "olympus/compare.py",
+      "line": 138,
+      "scope": "_prune",
+      "exception": "OSError",
+      "source_sha256": "8e560f4c9c87025c56443aab98f367a1e298d08b84a11618383cc28f73fa5b51",
+      "status": "review_pending",
+      "id": "E20-048"
+    },
+    {
+      "path": "olympus/compare.py",
+      "line": 196,
+      "scope": "_record_vote",
+      "exception": "OSError",
+      "source_sha256": "8e560f4c9c87025c56443aab98f367a1e298d08b84a11618383cc28f73fa5b51",
+      "status": "review_pending",
+      "id": "E20-049"
+    },
+    {
+      "path": "olympus/computeruse.py",
+      "line": 626,
+      "scope": "<module>",
+      "exception": "Exception",
+      "source_sha256": "0d402135b19689951a4321da6481f859ddaa4b829acc273979a8835de35807fd",
+      "status": "review_pending",
+      "id": "E20-050"
+    },
+    {
+      "path": "olympus/config.py",
+      "line": 253,
+      "scope": "specialist_role",
+      "exception": "Exception",
+      "source_sha256": "546bff2f5a5e394a08370a428ce986a5a2690b1ff6fedc51bae6d0ba2b5c8f76",
+      "status": "review_pending",
+      "id": "E20-051"
+    },
+    {
+      "path": "olympus/config.py",
+      "line": 375,
+      "scope": "ModelPool._env_members",
+      "exception": "(json.JSONDecodeError, AttributeError, TypeError)",
+      "source_sha256": "546bff2f5a5e394a08370a428ce986a5a2690b1ff6fedc51bae6d0ba2b5c8f76",
+      "status": "review_pending",
+      "id": "E20-052"
+    },
+    {
+      "path": "olympus/config.py",
+      "line": 1425,
+      "scope": "free_chats_per_ip",
+      "exception": "ValueError",
+      "source_sha256": "546bff2f5a5e394a08370a428ce986a5a2690b1ff6fedc51bae6d0ba2b5c8f76",
+      "status": "review_pending",
+      "id": "E20-053"
+    },
+    {
+      "path": "olympus/config.py",
+      "line": 1673,
+      "scope": "known_settings",
+      "exception": "OSError",
+      "source_sha256": "546bff2f5a5e394a08370a428ce986a5a2690b1ff6fedc51bae6d0ba2b5c8f76",
+      "status": "review_pending",
+      "id": "E20-054"
+    },
+    {
+      "path": "olympus/connectors.py",
+      "line": 342,
+      "scope": "_raw_mcp_definitions",
+      "exception": "(json.JSONDecodeError, OSError)",
+      "source_sha256": "9c4a53db55de0429c46b307b16f57479385c6a5d071cd43d5261c98274d6bd63",
+      "status": "review_pending",
+      "id": "E20-055"
+    },
+    {
+      "path": "olympus/connectors.py",
+      "line": 349,
+      "scope": "_raw_mcp_definitions",
+      "exception": "json.JSONDecodeError",
+      "source_sha256": "9c4a53db55de0429c46b307b16f57479385c6a5d071cd43d5261c98274d6bd63",
+      "status": "review_pending",
+      "id": "E20-056"
+    },
+    {
+      "path": "olympus/ctxbudget.py",
+      "line": 114,
+      "scope": "_quarantine",
+      "exception": "OSError",
+      "source_sha256": "1b6988b6f9738ea5cecd3f1fef5210c80e60e2f550208ae3808eb54aa43c9705",
+      "status": "review_pending",
+      "id": "E20-057"
+    },
+    {
+      "path": "olympus/ctxheat.py",
+      "line": 317,
+      "scope": "_capture",
+      "exception": "Exception",
+      "source_sha256": "299fe004ccc1d4fefcbcaa2bdd6ddc8b834192aec4a81547e6f3e26384b16c79",
+      "status": "review_pending",
+      "id": "E20-058"
+    },
+    {
+      "path": "olympus/curator.py",
+      "line": 126,
+      "scope": "curate",
+      "exception": "Exception",
+      "source_sha256": "0b4745a2f85879cc558a5ef3942e91ec549671c71ab8a995566364b49b3129c6",
+      "status": "review_pending",
+      "id": "E20-059"
+    },
+    {
+      "path": "olympus/curator.py",
+      "line": 187,
+      "scope": "curate",
+      "exception": "Exception",
+      "source_sha256": "0b4745a2f85879cc558a5ef3942e91ec549671c71ab8a995566364b49b3129c6",
+      "status": "review_pending",
+      "id": "E20-060"
+    },
+    {
+      "path": "olympus/deployreadiness.py",
+      "line": 118,
+      "scope": "_atomic_json",
+      "exception": "OSError",
+      "source_sha256": "ce7ab55b3d9e6d3e90734d22fbbbba77db8701343c5fcdd1b747dd2f9982df7f",
+      "status": "review_pending",
+      "id": "E20-061"
+    },
+    {
+      "path": "olympus/deployreadiness.py",
+      "line": 368,
+      "scope": "report",
+      "exception": "OSError",
+      "source_sha256": "ce7ab55b3d9e6d3e90734d22fbbbba77db8701343c5fcdd1b747dd2f9982df7f",
+      "status": "review_pending",
+      "id": "E20-062"
+    },
+    {
+      "path": "olympus/deployreadiness.py",
+      "line": 387,
+      "scope": "report",
+      "exception": "OSError",
+      "source_sha256": "ce7ab55b3d9e6d3e90734d22fbbbba77db8701343c5fcdd1b747dd2f9982df7f",
+      "status": "review_pending",
+      "id": "E20-063"
+    },
+    {
+      "path": "olympus/discord.py",
+      "line": 216,
+      "scope": "resume_inflight",
+      "exception": "Exception",
+      "source_sha256": "034cbcd7a82f09d6be8e71f740e840c4bb898f1e4a0a27d68eac901f71db5364",
+      "status": "review_pending",
+      "id": "E20-064"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 596,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-065"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 625,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-066"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 638,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-067"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 652,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-068"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 668,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-069"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 688,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-070"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 701,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-071"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 719,
+      "scope": "config_skew",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-072"
+    },
+    {
+      "path": "olympus/doctor.py",
+      "line": 812,
+      "scope": "capability_summary",
+      "exception": "Exception",
+      "source_sha256": "ea6c9238b0c352034811240eb3201fdf8e1ab76f045d57427fc10a3ee8a3121f",
+      "status": "review_pending",
+      "id": "E20-073"
+    },
+    {
+      "path": "olympus/domainlore.py",
+      "line": 159,
+      "scope": "_load",
+      "exception": "OSError",
+      "source_sha256": "72cd9df5b78876a0361433c8d6ea0547b8b241e960d7985effe011d573c715e4",
+      "status": "review_pending",
+      "id": "E20-074"
+    },
+    {
+      "path": "olympus/domainlore.py",
+      "line": 262,
+      "scope": "observe",
+      "exception": "Exception",
+      "source_sha256": "72cd9df5b78876a0361433c8d6ea0547b8b241e960d7985effe011d573c715e4",
+      "status": "review_pending",
+      "id": "E20-075"
+    },
+    {
+      "path": "olympus/domainlore.py",
+      "line": 296,
+      "scope": "hint",
+      "exception": "(ValueError, TypeError)",
+      "source_sha256": "72cd9df5b78876a0361433c8d6ea0547b8b241e960d7985effe011d573c715e4",
+      "status": "review_pending",
+      "id": "E20-076"
+    },
+    {
+      "path": "olympus/domainlore.py",
+      "line": 422,
+      "scope": "_load_staged",
+      "exception": "OSError",
+      "source_sha256": "72cd9df5b78876a0361433c8d6ea0547b8b241e960d7985effe011d573c715e4",
+      "status": "review_pending",
+      "id": "E20-077"
+    },
+    {
+      "path": "olympus/domainlore.py",
+      "line": 505,
+      "scope": "clear_staged",
+      "exception": "Exception",
+      "source_sha256": "72cd9df5b78876a0361433c8d6ea0547b8b241e960d7985effe011d573c715e4",
+      "status": "review_pending",
+      "id": "E20-078"
+    },
+    {
+      "path": "olympus/dytopo.py",
+      "line": 199,
+      "scope": "route",
+      "exception": "Exception",
+      "source_sha256": "efbeec6bc9abde7adc0e9ef4998e4b80001db936f49671a68a16a23610a3ae4c",
+      "status": "review_pending",
+      "id": "E20-079"
+    },
+    {
+      "path": "olympus/egress.py",
+      "line": 164,
+      "scope": "_record",
+      "exception": "Exception",
+      "source_sha256": "94d66fb7302138557181f34de30e46b0accd9d9ffa52d0d43e89f8e769ef31ca",
+      "status": "review_pending",
+      "id": "E20-080"
+    },
+    {
+      "path": "olympus/emem.py",
+      "line": 223,
+      "scope": "context_block",
+      "exception": "Exception",
+      "source_sha256": "73476b92eb02506b2da55a67f7d9b52eb9d9e757ccff0d6d4395a77ec0a4aef3",
+      "status": "review_pending",
+      "id": "E20-081"
+    },
+    {
+      "path": "olympus/errors.py",
+      "line": 55,
+      "scope": "capture",
+      "exception": "Exception",
+      "source_sha256": "2e4c5aedbe3069ccc311730ed9f7f36ff715e2bd72cd87a148216fcbf1a75589",
+      "status": "review_pending",
+      "id": "E20-082"
+    },
+    {
+      "path": "olympus/errors.py",
+      "line": 62,
+      "scope": "capture",
+      "exception": "Exception",
+      "source_sha256": "2e4c5aedbe3069ccc311730ed9f7f36ff715e2bd72cd87a148216fcbf1a75589",
+      "status": "review_pending",
+      "id": "E20-083"
+    },
+    {
+      "path": "olympus/evals.py",
+      "line": 47,
+      "scope": "load_benchmarks",
+      "exception": "(json.JSONDecodeError, OSError)",
+      "source_sha256": "8f4d560660ed842d8c82bafeaeafa5ed0d2bba2f5e843f7e1a7304a7c2ffc934",
+      "status": "review_pending",
+      "id": "E20-084"
+    },
+    {
+      "path": "olympus/evolve.py",
+      "line": 250,
+      "scope": "record",
+      "exception": "Exception",
+      "source_sha256": "8458634ea7a4895ca3773332bf75176a094069433b7703c85fe8ca8a9e227829",
+      "status": "review_pending",
+      "id": "E20-085"
+    },
+    {
+      "path": "olympus/evolve.py",
+      "line": 286,
+      "scope": "log_event",
+      "exception": "Exception",
+      "source_sha256": "8458634ea7a4895ca3773332bf75176a094069433b7703c85fe8ca8a9e227829",
+      "status": "review_pending",
+      "id": "E20-086"
+    },
+    {
+      "path": "olympus/evolve.py",
+      "line": 440,
+      "scope": "review",
+      "exception": "Exception",
+      "source_sha256": "8458634ea7a4895ca3773332bf75176a094069433b7703c85fe8ca8a9e227829",
+      "status": "review_pending",
+      "id": "E20-087"
+    },
+    {
+      "path": "olympus/experiments.py",
+      "line": 128,
+      "scope": "_report",
+      "exception": "Exception",
+      "source_sha256": "512ef8788ea23087f94610d601eff44753b1ee31801fceb7b17cc54b29072a31",
+      "status": "review_pending",
+      "id": "E20-088"
+    },
+    {
+      "path": "olympus/firstrun.py",
+      "line": 164,
+      "scope": "_save",
+      "exception": "OSError",
+      "source_sha256": "72878f04e994edb8559e77eee3e4e2c8aa33f0d4b4095bf07896baff83cc7c48",
+      "status": "review_pending",
+      "id": "E20-089"
+    },
+    {
+      "path": "olympus/firstrun.py",
+      "line": 370,
+      "scope": "_choose",
+      "exception": "ValueError",
+      "source_sha256": "72878f04e994edb8559e77eee3e4e2c8aa33f0d4b4095bf07896baff83cc7c48",
+      "status": "review_pending",
+      "id": "E20-090"
+    },
+    {
+      "path": "olympus/firstrun.py",
+      "line": 592,
+      "scope": "setup_missing",
+      "exception": "Exception",
+      "source_sha256": "72878f04e994edb8559e77eee3e4e2c8aa33f0d4b4095bf07896baff83cc7c48",
+      "status": "review_pending",
+      "id": "E20-091"
+    },
+    {
+      "path": "olympus/firstrun.py",
+      "line": 717,
+      "scope": "wizard",
+      "exception": "Exception",
+      "source_sha256": "72878f04e994edb8559e77eee3e4e2c8aa33f0d4b4095bf07896baff83cc7c48",
+      "status": "review_pending",
+      "id": "E20-092"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 195,
+      "scope": "inflight_mark",
+      "exception": "(ValueError, OSError)",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-093"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 200,
+      "scope": "inflight_mark",
+      "exception": "(OSError, ValueError)",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-094"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 207,
+      "scope": "inflight_clear",
+      "exception": "(OSError, ValueError)",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-095"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 273,
+      "scope": "notify_all",
+      "exception": "Exception",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-096"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 319,
+      "scope": "_set_fast",
+      "exception": "Exception",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-097"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 577,
+      "scope": "reset_idle_sessions",
+      "exception": "Exception",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-098"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 753,
+      "scope": "_Supervisor._write_status",
+      "exception": "Exception",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-099"
+    },
+    {
+      "path": "olympus/gateway.py",
+      "line": 814,
+      "scope": "_Supervisor.wait",
+      "exception": "KeyboardInterrupt",
+      "source_sha256": "e2555bc0552859236f3637645a487a0886d25769d66aab7ea9383cfe249a227a",
+      "status": "review_pending",
+      "id": "E20-100"
+    },
+    {
+      "path": "olympus/gmail.py",
+      "line": 141,
+      "scope": "_received",
+      "exception": "(ValueError, TypeError, OverflowError)",
+      "source_sha256": "46b5467af951d7f1fcb21a08b87ab3b7b86d2d3eb08b9bd90c3cdcdfa15ffc42",
+      "status": "review_pending",
+      "id": "E20-101"
+    },
+    {
+      "path": "olympus/goals.py",
+      "line": 557,
+      "scope": "_telemetry",
+      "exception": "Exception",
+      "source_sha256": "962e5025e620170a786a8edccd9f7ec62ce93e584a130efb60dbf8170df50987",
+      "status": "review_pending",
+      "id": "E20-102"
+    },
+    {
+      "path": "olympus/goals.py",
+      "line": 605,
+      "scope": "run_due",
+      "exception": "Exception",
+      "source_sha256": "962e5025e620170a786a8edccd9f7ec62ce93e584a130efb60dbf8170df50987",
+      "status": "review_pending",
+      "id": "E20-103"
+    },
+    {
+      "path": "olympus/health.py",
+      "line": 56,
+      "scope": "_memory",
+      "exception": "OSError",
+      "source_sha256": "394675e578fe934ab232a5830be55f0325a9eb320b07b992c8e1ecc059c37a7a",
+      "status": "review_pending",
+      "id": "E20-104"
+    },
+    {
+      "path": "olympus/health.py",
+      "line": 201,
+      "scope": "_config",
+      "exception": "Exception",
+      "source_sha256": "394675e578fe934ab232a5830be55f0325a9eb320b07b992c8e1ecc059c37a7a",
+      "status": "review_pending",
+      "id": "E20-105"
+    },
+    {
+      "path": "olympus/heartbeat.py",
+      "line": 45,
+      "scope": "_wd_capture",
+      "exception": "Exception",
+      "source_sha256": "0d96804b4afb1cd4d756396c517136f0792caa88080d5e4b448ad9e9272dc824",
+      "status": "review_pending",
+      "id": "E20-106"
+    },
+    {
+      "path": "olympus/heartbeat.py",
+      "line": 712,
+      "scope": "_install_shutdown._stop",
+      "exception": "Exception",
+      "source_sha256": "0d96804b4afb1cd4d756396c517136f0792caa88080d5e4b448ad9e9272dc824",
+      "status": "review_pending",
+      "id": "E20-107"
+    },
+    {
+      "path": "olympus/heartbeat.py",
+      "line": 719,
+      "scope": "_install_shutdown",
+      "exception": "(ValueError, OSError, AttributeError)",
+      "source_sha256": "0d96804b4afb1cd4d756396c517136f0792caa88080d5e4b448ad9e9272dc824",
+      "status": "review_pending",
+      "id": "E20-108"
+    },
+    {
+      "path": "olympus/ingestgate.py",
+      "line": 744,
+      "scope": "_record_refusal",
+      "exception": "Exception",
+      "source_sha256": "7fdf89a87e15f6614a18f5b63d0d4029eceb80bb68f874099ecf718b6fd75d65",
+      "status": "review_pending",
+      "id": "E20-109"
+    },
+    {
+      "path": "olympus/interaction.py",
+      "line": 124,
+      "scope": "reporting_provider.provider",
+      "exception": "Exception",
+      "source_sha256": "882ad6e4aeb479a7c2c1a82357375c43900ad79f5c3f4d0d026f74dcd9ff4096",
+      "status": "review_pending",
+      "id": "E20-110"
+    },
+    {
+      "path": "olympus/learn.py",
+      "line": 173,
+      "scope": "_telemetry",
+      "exception": "Exception",
+      "source_sha256": "1bb6aadf23528e77b5821a8a8e65d9b972764d7aedab745626a7d31bea4d05c3",
+      "status": "review_pending",
+      "id": "E20-111"
+    },
+    {
+      "path": "olympus/llm.py",
+      "line": 80,
+      "scope": "_observe_ctx",
+      "exception": "Exception",
+      "source_sha256": "f74d80ba4e1ceab64003a2c7e437e3e81100e89815fa53fde02a0221c9153913",
+      "status": "review_pending",
+      "id": "E20-112"
+    },
+    {
+      "path": "olympus/mcp_client.py",
+      "line": 129,
+      "scope": "_run_sync.worker",
+      "exception": "Exception",
+      "source_sha256": "2d6b1af55f80302820663c4944987121117585360a6e41de7be1c98e344fdaeb",
+      "status": "review_pending",
+      "id": "E20-113"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 416,
+      "scope": "_save_note",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-114"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 441,
+      "scope": "_mirror_to_vault",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-115"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 558,
+      "scope": "prune_for",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-116"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 609,
+      "scope": "prune",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-117"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 703,
+      "scope": "load_conversation",
+      "exception": "Exception",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-118"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 857,
+      "scope": "sweep_dated_files",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-119"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 894,
+      "scope": "sweep_orphan_responses",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-120"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 916,
+      "scope": "sweep_tool_results",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-121"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 985,
+      "scope": "sweep_evidence",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-122"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 995,
+      "scope": "sweep_evidence",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-123"
+    },
+    {
+      "path": "olympus/memory.py",
+      "line": 1258,
+      "scope": "delete_memory",
+      "exception": "OSError",
+      "source_sha256": "08aab9e1ff9937ca68dbab7b4ce5b16e258277aa5bd27a07d52758bd71c5d80a",
+      "status": "review_pending",
+      "id": "E20-124"
+    },
+    {
+      "path": "olympus/metrics.py",
+      "line": 50,
+      "scope": "snapshot",
+      "exception": "Exception",
+      "source_sha256": "1d5949364f034c7a588448fa920a613ae9a5b7ae5ccb5bd17250df3af5b3b7da",
+      "status": "review_pending",
+      "id": "E20-125"
+    },
+    {
+      "path": "olympus/moa.py",
+      "line": 89,
+      "scope": "_drafts",
+      "exception": "Exception",
+      "source_sha256": "e486419728dde43cbb9b0ff2f2ee3b7342bff6d17363913da05560fcd5856b67",
+      "status": "review_pending",
+      "id": "E20-126"
+    },
+    {
+      "path": "olympus/moa.py",
+      "line": 124,
+      "scope": "_save_trace",
+      "exception": "Exception",
+      "source_sha256": "e486419728dde43cbb9b0ff2f2ee3b7342bff6d17363913da05560fcd5856b67",
+      "status": "review_pending",
+      "id": "E20-127"
+    },
+    {
+      "path": "olympus/modelgrade.py",
+      "line": 327,
+      "scope": "_capture",
+      "exception": "Exception",
+      "source_sha256": "d17b2c5920c2de3e60b87e6881427a441f828726ebe3f7adfe2906acb3143561",
+      "status": "review_pending",
+      "id": "E20-128"
+    },
+    {
+      "path": "olympus/onboarding.py",
+      "line": 56,
+      "scope": "mark_seen",
+      "exception": "Exception",
+      "source_sha256": "05027802e23d384e1e997c7d6fcb55dbfaebc9bb0cfb9a7ef11c2db376726293",
+      "status": "review_pending",
+      "id": "E20-129"
+    },
+    {
+      "path": "olympus/onboarding.py",
+      "line": 68,
+      "scope": "reset",
+      "exception": "Exception",
+      "source_sha256": "05027802e23d384e1e997c7d6fcb55dbfaebc9bb0cfb9a7ef11c2db376726293",
+      "status": "review_pending",
+      "id": "E20-130"
+    },
+    {
+      "path": "olympus/opconfig.py",
+      "line": 328,
+      "scope": "unset",
+      "exception": "Exception",
+      "source_sha256": "b719557e933d6de11fb9cc84dce58fe2b7b48e568ee1087f73f0abcc4aa76dca",
+      "status": "review_pending",
+      "id": "E20-131"
+    },
+    {
+      "path": "olympus/openai_compat.py",
+      "line": 188,
+      "scope": "_record_usage",
+      "exception": "Exception",
+      "source_sha256": "16a2f78e2b980e0e0bf28c768f0f72619a5fec7dd61edce3dcbf8501f9f8d7ba",
+      "status": "review_pending",
+      "id": "E20-132"
+    },
+    {
+      "path": "olympus/operator.py",
+      "line": 99,
+      "scope": "forget_site",
+      "exception": "Exception",
+      "source_sha256": "9afc2ae8a6b364c0de1fb5ebdc0543f8ed8cc3aa0a6ae2e3bfcbea2f6c98d3a4",
+      "status": "review_pending",
+      "id": "E20-133"
+    },
+    {
+      "path": "olympus/operator.py",
+      "line": 336,
+      "scope": "_record_health",
+      "exception": "Exception",
+      "source_sha256": "9afc2ae8a6b364c0de1fb5ebdc0543f8ed8cc3aa0a6ae2e3bfcbea2f6c98d3a4",
+      "status": "review_pending",
+      "id": "E20-134"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 338,
+      "scope": "_wd_capture",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-135"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 403,
+      "scope": "_RunWatch._release",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-136"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 475,
+      "scope": "_RunWatch.check",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-137"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 1077,
+      "scope": "Olympus._signal_knowledge_gap",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-138"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 1666,
+      "scope": "Olympus._evolve_record",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-139"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2079,
+      "scope": "Olympus._finish",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-140"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2093,
+      "scope": "Olympus._finish",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-141"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2153,
+      "scope": "Olympus._compress_history",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-142"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2259,
+      "scope": "Olympus._log_ace",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-143"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2569,
+      "scope": "Olympus.reset",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-144"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2636,
+      "scope": "Olympus.feedback",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-145"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 2992,
+      "scope": "daily_learning",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-146"
+    },
+    {
+      "path": "olympus/orchestrator.py",
+      "line": 3078,
+      "scope": "gate_skills",
+      "exception": "Exception",
+      "source_sha256": "5af8cfedaadb854636239cfe87b508f88f5c73326887c190e72bca69d755d867",
+      "status": "review_pending",
+      "id": "E20-147"
+    },
+    {
+      "path": "olympus/otel.py",
+      "line": 162,
+      "scope": "export_run",
+      "exception": "Exception",
+      "source_sha256": "56801ba589fb36d17af6559d8f0bdffef60c337ba112d6e1c3951fb2327557f6",
+      "status": "review_pending",
+      "id": "E20-148"
+    },
+    {
+      "path": "olympus/otel.py",
+      "line": 187,
+      "scope": "export_run",
+      "exception": "Exception",
+      "source_sha256": "56801ba589fb36d17af6559d8f0bdffef60c337ba112d6e1c3951fb2327557f6",
+      "status": "review_pending",
+      "id": "E20-149"
+    },
+    {
+      "path": "olympus/owner_evidence.py",
+      "line": 115,
+      "scope": "publish",
+      "exception": "OSError",
+      "source_sha256": "1068a34aae4948547aabfb3d6566597a153c4089f366e81d39474d0720c4f718",
+      "status": "review_pending",
+      "id": "E20-150"
+    },
+    {
+      "path": "olympus/pairing.py",
+      "line": 53,
+      "scope": "_save",
+      "exception": "OSError",
+      "source_sha256": "bc86b8bd063907ba8f083e1446c5c5b61833e20b4e0c5d6d0e0b377e99d1d7e4",
+      "status": "review_pending",
+      "id": "E20-151"
+    },
+    {
+      "path": "olympus/pluginstore.py",
+      "line": 66,
+      "scope": "_save_manifest",
+      "exception": "OSError",
+      "source_sha256": "d73017c2763e1b4b09f7b8a5f43203095c0f0816b96ce935dbd227108a90bfd8",
+      "status": "review_pending",
+      "id": "E20-152"
+    },
+    {
+      "path": "olympus/pluginstore.py",
+      "line": 180,
+      "scope": "install",
+      "exception": "OSError",
+      "source_sha256": "d73017c2763e1b4b09f7b8a5f43203095c0f0816b96ce935dbd227108a90bfd8",
+      "status": "review_pending",
+      "id": "E20-153"
+    },
+    {
+      "path": "olympus/proclock.py",
+      "line": 239,
+      "scope": "slot",
+      "exception": "OSError",
+      "source_sha256": "1db1ecd592222703fd55d783fc6fa1f5002616a36a3e841f64ae3e0f1891a8f6",
+      "status": "review_pending",
+      "id": "E20-154"
+    },
+    {
+      "path": "olympus/proclock.py",
+      "line": 244,
+      "scope": "slot",
+      "exception": "OSError",
+      "source_sha256": "1db1ecd592222703fd55d783fc6fa1f5002616a36a3e841f64ae3e0f1891a8f6",
+      "status": "review_pending",
+      "id": "E20-155"
+    },
+    {
+      "path": "olympus/recall.py",
+      "line": 263,
+      "scope": "_run_extractor",
+      "exception": "Exception",
+      "source_sha256": "436a96b7f943ae79d79e9283d24476bc38db385bcfc3e9eb811739f41ba35a83",
+      "status": "review_pending",
+      "id": "E20-156"
+    },
+    {
+      "path": "olympus/recall.py",
+      "line": 287,
+      "scope": "flush_slice",
+      "exception": "Exception",
+      "source_sha256": "436a96b7f943ae79d79e9283d24476bc38db385bcfc3e9eb811739f41ba35a83",
+      "status": "review_pending",
+      "id": "E20-157"
+    },
+    {
+      "path": "olympus/recall.py",
+      "line": 366,
+      "scope": "_heat_safe",
+      "exception": "Exception",
+      "source_sha256": "436a96b7f943ae79d79e9283d24476bc38db385bcfc3e9eb811739f41ba35a83",
+      "status": "review_pending",
+      "id": "E20-158"
+    },
+    {
+      "path": "olympus/replaygate.py",
+      "line": 218,
+      "scope": "self_check",
+      "exception": "Exception",
+      "source_sha256": "2b3f52bb3703c44b2c32323c48a607b2fe8bc1314aad52eec6e45f0d54cadccb",
+      "status": "review_pending",
+      "id": "E20-159"
+    },
+    {
+      "path": "olympus/replaygate.py",
+      "line": 227,
+      "scope": "self_check",
+      "exception": "Exception",
+      "source_sha256": "2b3f52bb3703c44b2c32323c48a607b2fe8bc1314aad52eec6e45f0d54cadccb",
+      "status": "review_pending",
+      "id": "E20-160"
+    },
+    {
+      "path": "olympus/replaystore.py",
+      "line": 106,
+      "scope": "_canonical_default",
+      "exception": "Exception",
+      "source_sha256": "296b12e4472e9d26a30e2e558f4cefa097f4cd503b657c7e06b9bc2cf3e0372c",
+      "status": "review_pending",
+      "id": "E20-161"
+    },
+    {
+      "path": "olympus/routesub.py",
+      "line": 235,
+      "scope": "quality_floor",
+      "exception": "Exception",
+      "source_sha256": "93755aa306ca8491dc09086d1cd961b3dc114c0db4172ce69c62aa4185b45228",
+      "status": "review_pending",
+      "id": "E20-162"
+    },
+    {
+      "path": "olympus/routesub.py",
+      "line": 250,
+      "scope": "ttl_days",
+      "exception": "Exception",
+      "source_sha256": "93755aa306ca8491dc09086d1cd961b3dc114c0db4172ce69c62aa4185b45228",
+      "status": "review_pending",
+      "id": "E20-163"
+    },
+    {
+      "path": "olympus/routesub.py",
+      "line": 290,
+      "scope": "_capture",
+      "exception": "Exception",
+      "source_sha256": "93755aa306ca8491dc09086d1cd961b3dc114c0db4172ce69c62aa4185b45228",
+      "status": "review_pending",
+      "id": "E20-164"
+    },
+    {
+      "path": "olympus/routesub.py",
+      "line": 374,
+      "scope": "_cell_key",
+      "exception": "Exception",
+      "source_sha256": "93755aa306ca8491dc09086d1cd961b3dc114c0db4172ce69c62aa4185b45228",
+      "status": "review_pending",
+      "id": "E20-165"
+    },
+    {
+      "path": "olympus/routesub.py",
+      "line": 391,
+      "scope": "cell_for",
+      "exception": "Exception",
+      "source_sha256": "93755aa306ca8491dc09086d1cd961b3dc114c0db4172ce69c62aa4185b45228",
+      "status": "review_pending",
+      "id": "E20-166"
+    },
+    {
+      "path": "olympus/sandbox.py",
+      "line": 517,
+      "scope": "_kill",
+      "exception": "OSError",
+      "source_sha256": "888ca8fa165c5e6e177450c1eea653cf8c97905d5f8bd1aba76da64abdeec721",
+      "status": "review_pending",
+      "id": "E20-167"
+    },
+    {
+      "path": "olympus/sandbox.py",
+      "line": 521,
+      "scope": "_kill",
+      "exception": "subprocess.TimeoutExpired",
+      "source_sha256": "888ca8fa165c5e6e177450c1eea653cf8c97905d5f8bd1aba76da64abdeec721",
+      "status": "review_pending",
+      "id": "E20-168"
+    },
+    {
+      "path": "olympus/sarif.py",
+      "line": 297,
+      "scope": "_severity_from_result",
+      "exception": "(TypeError, ValueError)",
+      "source_sha256": "c4ad6bea043c0a1017399e2ab74af001f3d3f617da538e5e1a58c44540a4cb33",
+      "status": "review_pending",
+      "id": "E20-169"
+    },
+    {
+      "path": "olympus/scaffold_evolve.py",
+      "line": 157,
+      "scope": "propose",
+      "exception": "OSError",
+      "source_sha256": "a3720740b2b9e8df0828db290ca70afd04f66e9d53a11d1290f1cbf5b7ea582a",
+      "status": "review_pending",
+      "id": "E20-170"
+    },
+    {
+      "path": "olympus/scaffold_evolve.py",
+      "line": 205,
+      "scope": "_archive",
+      "exception": "Exception",
+      "source_sha256": "a3720740b2b9e8df0828db290ca70afd04f66e9d53a11d1290f1cbf5b7ea582a",
+      "status": "review_pending",
+      "id": "E20-171"
+    },
+    {
+      "path": "olympus/scheduler.py",
+      "line": 560,
+      "scope": "_deliver",
+      "exception": "Exception",
+      "source_sha256": "a43fd9c01dbc3868f09b16dc11efb3609eaed96e0ff7ea6e44b1bc5e02e0eba6",
+      "status": "review_pending",
+      "id": "E20-172"
+    },
+    {
+      "path": "olympus/search.py",
+      "line": 77,
+      "scope": "_connect",
+      "exception": "sqlite3.OperationalError",
+      "source_sha256": "bae572621aed0f4b98d2b9727c60abfacf8016a4b00ad6666bed0c0bcfdac805",
+      "status": "review_pending",
+      "id": "E20-173"
+    },
+    {
+      "path": "olympus/selfassess.py",
+      "line": 223,
+      "scope": "selfassess",
+      "exception": "Exception",
+      "source_sha256": "0dd20c0980d79e2bc549c18e4c21b70774e0b802de6fe85ccdcea039ba9b5557",
+      "status": "review_pending",
+      "id": "E20-174"
+    },
+    {
+      "path": "olympus/selfassess.py",
+      "line": 230,
+      "scope": "selfassess",
+      "exception": "Exception",
+      "source_sha256": "0dd20c0980d79e2bc549c18e4c21b70774e0b802de6fe85ccdcea039ba9b5557",
+      "status": "review_pending",
+      "id": "E20-175"
+    },
+    {
+      "path": "olympus/selfupdate.py",
+      "line": 96,
+      "scope": "pending_work",
+      "exception": "Exception",
+      "source_sha256": "5aca593bc48195df2a0ae5399b85abfbb56b6896a3a89d0c57ebe98f50a3b695",
+      "status": "review_pending",
+      "id": "E20-176"
+    },
+    {
+      "path": "olympus/selfupdate.py",
+      "line": 103,
+      "scope": "pending_work",
+      "exception": "Exception",
+      "source_sha256": "5aca593bc48195df2a0ae5399b85abfbb56b6896a3a89d0c57ebe98f50a3b695",
+      "status": "review_pending",
+      "id": "E20-177"
+    },
+    {
+      "path": "olympus/selfupdate.py",
+      "line": 120,
+      "scope": "write_handoff",
+      "exception": "OSError",
+      "source_sha256": "5aca593bc48195df2a0ae5399b85abfbb56b6896a3a89d0c57ebe98f50a3b695",
+      "status": "review_pending",
+      "id": "E20-178"
+    },
+    {
+      "path": "olympus/sessionlog.py",
+      "line": 141,
+      "scope": "_quarantine",
+      "exception": "OSError",
+      "source_sha256": "4d6fa437f52a29d2db1cffd9d4db7e166888e12ad2664e5ea298db5dbf1228a9",
+      "status": "review_pending",
+      "id": "E20-179"
+    },
+    {
+      "path": "olympus/sessionlog.py",
+      "line": 497,
+      "scope": "compact",
+      "exception": "OSError",
+      "source_sha256": "4d6fa437f52a29d2db1cffd9d4db7e166888e12ad2664e5ea298db5dbf1228a9",
+      "status": "review_pending",
+      "id": "E20-180"
+    },
+    {
+      "path": "olympus/sessionlog.py",
+      "line": 613,
+      "scope": "delete_session",
+      "exception": "OSError",
+      "source_sha256": "4d6fa437f52a29d2db1cffd9d4db7e166888e12ad2664e5ea298db5dbf1228a9",
+      "status": "review_pending",
+      "id": "E20-181"
+    },
+    {
+      "path": "olympus/signal.py",
+      "line": 141,
+      "scope": "run_bot",
+      "exception": "Exception",
+      "source_sha256": "6cbaf4e9d325cfe73b31516d1897be1391991edcd3b6254e42b6baee564dcbad",
+      "status": "review_pending",
+      "id": "E20-182"
+    },
+    {
+      "path": "olympus/skills.py",
+      "line": 143,
+      "scope": "_save_emb_cache",
+      "exception": "OSError",
+      "source_sha256": "22bfc3ca61eeb562abd81f45ce0b6b18f949431023a6e6b37db39eb5c3c09b46",
+      "status": "review_pending",
+      "id": "E20-183"
+    },
+    {
+      "path": "olympus/slack.py",
+      "line": 156,
+      "scope": "process_event",
+      "exception": "Exception",
+      "source_sha256": "e5bcd5302bef018167971d84b5ecfe222f271349a94303e99478ec8e55ea8955",
+      "status": "review_pending",
+      "id": "E20-184"
+    },
+    {
+      "path": "olympus/slack.py",
+      "line": 178,
+      "scope": "resume_inflight",
+      "exception": "Exception",
+      "source_sha256": "e5bcd5302bef018167971d84b5ecfe222f271349a94303e99478ec8e55ea8955",
+      "status": "review_pending",
+      "id": "E20-185"
+    },
+    {
+      "path": "olympus/slack.py",
+      "line": 223,
+      "scope": "_Handler.do_POST",
+      "exception": "Exception",
+      "source_sha256": "e5bcd5302bef018167971d84b5ecfe222f271349a94303e99478ec8e55ea8955",
+      "status": "review_pending",
+      "id": "E20-186"
+    },
+    {
+      "path": "olympus/specialists.py",
+      "line": 433,
+      "scope": "_description_vectors",
+      "exception": "Exception",
+      "source_sha256": "1bf9a59ddb5757b5a07a3b0b09d6516a95b50ce6b7b731f42a742cd0bf94a4c1",
+      "status": "review_pending",
+      "id": "E20-187"
+    },
+    {
+      "path": "olympus/specialists.py",
+      "line": 442,
+      "scope": "_description_vectors",
+      "exception": "Exception",
+      "source_sha256": "1bf9a59ddb5757b5a07a3b0b09d6516a95b50ce6b7b731f42a742cd0bf94a4c1",
+      "status": "review_pending",
+      "id": "E20-188"
+    },
+    {
+      "path": "olympus/specialists.py",
+      "line": 556,
+      "scope": "<module>",
+      "exception": "Exception",
+      "source_sha256": "1bf9a59ddb5757b5a07a3b0b09d6516a95b50ce6b7b731f42a742cd0bf94a4c1",
+      "status": "review_pending",
+      "id": "E20-189"
+    },
+    {
+      "path": "olympus/streamguard.py",
+      "line": 256,
+      "scope": "json_prefix_viable",
+      "exception": "ValueError",
+      "source_sha256": "0a994d4f955c26654ad075b9eeea5854856c9f83f4e56be11299fe1fe4c3025a",
+      "status": "review_pending",
+      "id": "E20-190"
+    },
+    {
+      "path": "olympus/streamguard.py",
+      "line": 819,
+      "scope": "record_pathology",
+      "exception": "Exception",
+      "source_sha256": "0a994d4f955c26654ad075b9eeea5854856c9f83f4e56be11299fe1fe4c3025a",
+      "status": "review_pending",
+      "id": "E20-191"
+    },
+    {
+      "path": "olympus/support.py",
+      "line": 45,
+      "scope": "report",
+      "exception": "Exception",
+      "source_sha256": "37c6b05e82f31295bab150993a2fb201be54d44fb4c1d4714503fd8a4bc191d1",
+      "status": "review_pending",
+      "id": "E20-192"
+    },
+    {
+      "path": "olympus/telegram.py",
+      "line": 172,
+      "scope": "_deny",
+      "exception": "Exception",
+      "source_sha256": "631ed8cce0fc2b4f8085b3dbae88943ae005a24de6cfce2637b59aaa21ba80e6",
+      "status": "review_pending",
+      "id": "E20-193"
+    },
+    {
+      "path": "olympus/telegram.py",
+      "line": 307,
+      "scope": "_ChatWorker.run",
+      "exception": "Exception",
+      "source_sha256": "631ed8cce0fc2b4f8085b3dbae88943ae005a24de6cfce2637b59aaa21ba80e6",
+      "status": "review_pending",
+      "id": "E20-194"
+    },
+    {
+      "path": "olympus/telegram.py",
+      "line": 334,
+      "scope": "run_bot",
+      "exception": "Exception",
+      "source_sha256": "631ed8cce0fc2b4f8085b3dbae88943ae005a24de6cfce2637b59aaa21ba80e6",
+      "status": "review_pending",
+      "id": "E20-195"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 121,
+      "scope": "extract_json_object",
+      "exception": "(ValueError, TypeError)",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-196"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 337,
+      "scope": "_coerce_value",
+      "exception": "ValueError",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-197"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 517,
+      "scope": "_load_stats",
+      "exception": "(OSError, ValueError)",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-198"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 523,
+      "scope": "_load_stats",
+      "exception": "OSError",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-199"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 556,
+      "scope": "record_repair",
+      "exception": "Exception",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-200"
+    },
+    {
+      "path": "olympus/toolcall_repair.py",
+      "line": 589,
+      "scope": "repair_rate",
+      "exception": "(OSError, ValueError)",
+      "source_sha256": "643079582519920dfec25cfdcbfbb5ed46f7930c4e08e2ef051c405a12d1b395",
+      "status": "review_pending",
+      "id": "E20-201"
+    },
+    {
+      "path": "olympus/tools.py",
+      "line": 683,
+      "scope": "_http_get",
+      "exception": "Exception",
+      "source_sha256": "5252feb99178147ec9afcec344b8b8c5634eacb4c3d29ba1851294d6f666d815",
+      "status": "review_pending",
+      "id": "E20-202"
+    },
+    {
+      "path": "olympus/tools.py",
+      "line": 953,
+      "scope": "_restore_prompt",
+      "exception": "OSError",
+      "source_sha256": "5252feb99178147ec9afcec344b8b8c5634eacb4c3d29ba1851294d6f666d815",
+      "status": "review_pending",
+      "id": "E20-203"
+    },
+    {
+      "path": "olympus/tools.py",
+      "line": 1413,
+      "scope": "_browser_open",
+      "exception": "Exception",
+      "source_sha256": "5252feb99178147ec9afcec344b8b8c5634eacb4c3d29ba1851294d6f666d815",
+      "status": "review_pending",
+      "id": "E20-204"
+    },
+    {
+      "path": "olympus/tools.py",
+      "line": 1890,
+      "scope": "_browser_login",
+      "exception": "Exception",
+      "source_sha256": "5252feb99178147ec9afcec344b8b8c5634eacb4c3d29ba1851294d6f666d815",
+      "status": "review_pending",
+      "id": "E20-205"
+    },
+    {
+      "path": "olympus/tools.py",
+      "line": 4767,
+      "scope": "_search_sessions",
+      "exception": "Exception",
+      "source_sha256": "5252feb99178147ec9afcec344b8b8c5634eacb4c3d29ba1851294d6f666d815",
+      "status": "review_pending",
+      "id": "E20-206"
+    },
+    {
+      "path": "olympus/trace.py",
+      "line": 163,
+      "scope": "Trace.flush",
+      "exception": "Exception",
+      "source_sha256": "b3fec718143947e8dd11a7eef371ec37e450ab60bcb9e6ed31c4f0422c5be54b",
+      "status": "review_pending",
+      "id": "E20-207"
+    },
+    {
+      "path": "olympus/trace.py",
+      "line": 202,
+      "scope": "Trace.flush",
+      "exception": "Exception",
+      "source_sha256": "b3fec718143947e8dd11a7eef371ec37e450ab60bcb9e6ed31c4f0422c5be54b",
+      "status": "review_pending",
+      "id": "E20-208"
+    },
+    {
+      "path": "olympus/trading/backtest.py",
+      "line": 491,
+      "scope": "BacktestEngine.run",
+      "exception": "TradingError",
+      "source_sha256": "188f21f924a2cebf65c06a00c9dc93851c7de76aec0c59a9b417a1ea5db9941e",
+      "status": "review_pending",
+      "id": "E20-209"
+    },
+    {
+      "path": "olympus/trading/backtest.py",
+      "line": 705,
+      "scope": "BacktestEngine._clear_run_state",
+      "exception": "Exception",
+      "source_sha256": "188f21f924a2cebf65c06a00c9dc93851c7de76aec0c59a9b417a1ea5db9941e",
+      "status": "review_pending",
+      "id": "E20-210"
+    },
+    {
+      "path": "olympus/trading/capabilities.py",
+      "line": 389,
+      "scope": "CapabilityRegistry._write",
+      "exception": "Exception",
+      "source_sha256": "2b0276f460310ae7194bf2f1a180dab8a35fe87bc1671f084d2fdc79ed058818",
+      "status": "review_pending",
+      "id": "E20-211"
+    },
+    {
+      "path": "olympus/trading/champion.py",
+      "line": 530,
+      "scope": "ChampionChallengerBoard.run_contest",
+      "exception": "Exception",
+      "source_sha256": "a8ba9ab4027e2a97b711c64340008a77bc7d26f129bc916bab88ad9005da5cbd",
+      "status": "review_pending",
+      "id": "E20-212"
+    },
+    {
+      "path": "olympus/trading/champion.py",
+      "line": 595,
+      "scope": "ChampionChallengerBoard.install",
+      "exception": "Exception",
+      "source_sha256": "a8ba9ab4027e2a97b711c64340008a77bc7d26f129bc916bab88ad9005da5cbd",
+      "status": "review_pending",
+      "id": "E20-213"
+    },
+    {
+      "path": "olympus/trading/drift.py",
+      "line": 688,
+      "scope": "DeteriorationMonitor._write",
+      "exception": "Exception",
+      "source_sha256": "3e2fec33bcfb8289a2d0f16f63382e92042f4990139a6cf39b0e5102411a6c88",
+      "status": "review_pending",
+      "id": "E20-214"
+    },
+    {
+      "path": "olympus/trading/evolution.py",
+      "line": 258,
+      "scope": "EvolutionLedger.record",
+      "exception": "Exception",
+      "source_sha256": "ab66276e3bcdc0e4591e3ae496beafc4658f92224f60cf41b9050a5217ef022f",
+      "status": "review_pending",
+      "id": "E20-215"
+    },
+    {
+      "path": "olympus/trading/execution.py",
+      "line": 422,
+      "scope": "ExecutionEngine._settle_rejected",
+      "exception": "TradingError",
+      "source_sha256": "2e9a27d93c2bbf2e5beb11eee094013995a1f38ef278aa05d3ea0d7577d526e9",
+      "status": "review_pending",
+      "id": "E20-216"
+    },
+    {
+      "path": "olympus/trading/execution.py",
+      "line": 619,
+      "scope": "ExecutionEngine._record",
+      "exception": "Exception",
+      "source_sha256": "2e9a27d93c2bbf2e5beb11eee094013995a1f38ef278aa05d3ea0d7577d526e9",
+      "status": "review_pending",
+      "id": "E20-217"
+    },
+    {
+      "path": "olympus/trading/forecast.py",
+      "line": 141,
+      "scope": "_bar_delta",
+      "exception": "Exception",
+      "source_sha256": "bca870a44b16db283e9c807f499144fbae5b822c7fe27bc7ab8dbc331c375f6a",
+      "status": "review_pending",
+      "id": "E20-218"
+    },
+    {
+      "path": "olympus/trading/forecast.py",
+      "line": 817,
+      "scope": "ForecastService._abstention",
+      "exception": "Exception",
+      "source_sha256": "bca870a44b16db283e9c807f499144fbae5b822c7fe27bc7ab8dbc331c375f6a",
+      "status": "review_pending",
+      "id": "E20-219"
+    },
+    {
+      "path": "olympus/trading/governance.py",
+      "line": 244,
+      "scope": "authorise",
+      "exception": "Exception",
+      "source_sha256": "582089046a78247a5a559cf510eb09d1c337c53ec3931266aca2fe873928e6a7",
+      "status": "review_pending",
+      "id": "E20-220"
+    },
+    {
+      "path": "olympus/trading/hypotheses.py",
+      "line": 608,
+      "scope": "HypothesisEngine._write",
+      "exception": "Exception",
+      "source_sha256": "a4dfb07dd7c611d444982b56516b7cea6debbde420314b34466a11b48cfb43e4",
+      "status": "review_pending",
+      "id": "E20-221"
+    },
+    {
+      "path": "olympus/trading/ingest.py",
+      "line": 635,
+      "scope": "IngestionService._persist_raw",
+      "exception": "Exception",
+      "source_sha256": "5cffb51c7d51cf1b53868cc4c365c2b083588b5737be0fdf59e44293f9fb31a2",
+      "status": "review_pending",
+      "id": "E20-222"
+    },
+    {
+      "path": "olympus/trading/ingest.py",
+      "line": 649,
+      "scope": "IngestionService._record_audit",
+      "exception": "Exception",
+      "source_sha256": "5cffb51c7d51cf1b53868cc4c365c2b083588b5737be0fdf59e44293f9fb31a2",
+      "status": "review_pending",
+      "id": "E20-223"
+    },
+    {
+      "path": "olympus/trading/killswitch.py",
+      "line": 159,
+      "scope": "KillSwitchRegistry._record",
+      "exception": "Exception",
+      "source_sha256": "94e55b197b6681923d7baf2de1171a72d52bd9f1446858fb049599713863bd8f",
+      "status": "review_pending",
+      "id": "E20-224"
+    },
+    {
+      "path": "olympus/trading/killswitch.py",
+      "line": 434,
+      "scope": "AutoTripRules._with_portfolio_fallbacks",
+      "exception": "Exception",
+      "source_sha256": "94e55b197b6681923d7baf2de1171a72d52bd9f1446858fb049599713863bd8f",
+      "status": "review_pending",
+      "id": "E20-225"
+    },
+    {
+      "path": "olympus/trading/killswitch.py",
+      "line": 442,
+      "scope": "AutoTripRules._with_portfolio_fallbacks",
+      "exception": "Exception",
+      "source_sha256": "94e55b197b6681923d7baf2de1171a72d52bd9f1446858fb049599713863bd8f",
+      "status": "review_pending",
+      "id": "E20-226"
+    },
+    {
+      "path": "olympus/trading/knowledge.py",
+      "line": 596,
+      "scope": "KnowledgeBase._emit",
+      "exception": "Exception",
+      "source_sha256": "32c67328698e810d44b36b536929c592f985ad400ca954e6f94230f2c30dd805",
+      "status": "review_pending",
+      "id": "E20-227"
+    },
+    {
+      "path": "olympus/trading/lab.py",
+      "line": 667,
+      "scope": "ResearchLab._write",
+      "exception": "Exception",
+      "source_sha256": "e5cd718c935ab331cd2a22e900d7d0fe79060d7c3c5cdccda850e6736fe9944e",
+      "status": "review_pending",
+      "id": "E20-228"
+    },
+    {
+      "path": "olympus/trading/lab.py",
+      "line": 733,
+      "scope": "ResearchLab.run",
+      "exception": "Exception",
+      "source_sha256": "e5cd718c935ab331cd2a22e900d7d0fe79060d7c3c5cdccda850e6736fe9944e",
+      "status": "review_pending",
+      "id": "E20-229"
+    },
+    {
+      "path": "olympus/trading/modes.py",
+      "line": 499,
+      "scope": "ModeController._commit",
+      "exception": "Exception",
+      "source_sha256": "c6cf7d36e97465fbd29aa9ef19d56c419785e883deb9892671a16d7c83f22ccc",
+      "status": "review_pending",
+      "id": "E20-230"
+    },
+    {
+      "path": "olympus/trading/monitor.py",
+      "line": 603,
+      "scope": "TradingMonitor._record",
+      "exception": "BaseException",
+      "source_sha256": "da49d0125cec408eb14426956ac8eb1132c8f6dab77a8caa05316c1369bc0e9f",
+      "status": "review_pending",
+      "id": "E20-231"
+    },
+    {
+      "path": "olympus/trading/monitor.py",
+      "line": 678,
+      "scope": "TradingMonitor._note_error",
+      "exception": "BaseException",
+      "source_sha256": "da49d0125cec408eb14426956ac8eb1132c8f6dab77a8caa05316c1369bc0e9f",
+      "status": "review_pending",
+      "id": "E20-232"
+    },
+    {
+      "path": "olympus/trading/native/cgroups.py",
+      "line": 175,
+      "scope": "_probe_v2",
+      "exception": "OSError",
+      "source_sha256": "f04493a4dc40cc2c1269c5ccdbda0c641dfceacbff238896776c43e0ab217ac6",
+      "status": "review_pending",
+      "id": "E20-233"
+    },
+    {
+      "path": "olympus/trading/native/cgroups.py",
+      "line": 192,
+      "scope": "_probe_v2",
+      "exception": "OSError",
+      "source_sha256": "f04493a4dc40cc2c1269c5ccdbda0c641dfceacbff238896776c43e0ab217ac6",
+      "status": "review_pending",
+      "id": "E20-234"
+    },
+    {
+      "path": "olympus/trading/native/cgroups.py",
+      "line": 228,
+      "scope": "_probe_v1",
+      "exception": "OSError",
+      "source_sha256": "f04493a4dc40cc2c1269c5ccdbda0c641dfceacbff238896776c43e0ab217ac6",
+      "status": "review_pending",
+      "id": "E20-235"
+    },
+    {
+      "path": "olympus/trading/native/cgroups.py",
+      "line": 331,
+      "scope": "CgroupScope._create_v1",
+      "exception": "OSError",
+      "source_sha256": "f04493a4dc40cc2c1269c5ccdbda0c641dfceacbff238896776c43e0ab217ac6",
+      "status": "review_pending",
+      "id": "E20-236"
+    },
+    {
+      "path": "olympus/trading/native/checkpoint.py",
+      "line": 357,
+      "scope": "CheckpointStore.save",
+      "exception": "Exception",
+      "source_sha256": "3b1ecbcc3d0f7de8e1ec05bb890a8364ea7d1d7e1060cb8d38a97a40c5f9c116",
+      "status": "review_pending",
+      "id": "E20-237"
+    },
+    {
+      "path": "olympus/trading/native/durable.py",
+      "line": 179,
+      "scope": "_fsync_directory",
+      "exception": "OSError",
+      "source_sha256": "ae3f2c78bf0b07704b2dcabab09128c6845328a11a2e7c90a2e0f66e8bb2f604",
+      "status": "review_pending",
+      "id": "E20-238"
+    },
+    {
+      "path": "olympus/trading/native/durable.py",
+      "line": 220,
+      "scope": "replace_durably",
+      "exception": "OSError",
+      "source_sha256": "ae3f2c78bf0b07704b2dcabab09128c6845328a11a2e7c90a2e0f66e8bb2f604",
+      "status": "review_pending",
+      "id": "E20-239"
+    },
+    {
+      "path": "olympus/trading/native/forecaster.py",
+      "line": 68,
+      "scope": "_estimators",
+      "exception": "Exception",
+      "source_sha256": "eb44c80d6e11edd9dce4d5cebab2bdd0a620aa92ace114eeb447674eb4280359",
+      "status": "review_pending",
+      "id": "E20-240"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 413,
+      "scope": "_tmpfs_probe",
+      "exception": "OSError",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-241"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 528,
+      "scope": "_apply_confinement._preexec",
+      "exception": "OSError",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-242"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 545,
+      "scope": "_apply_confinement._preexec",
+      "exception": "(ValueError, OSError)",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-243"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 553,
+      "scope": "_apply_confinement._preexec",
+      "exception": "Exception",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-244"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 576,
+      "scope": "_drain",
+      "exception": "OSError",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-245"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 1517,
+      "scope": "IsolatedWorker._launch",
+      "exception": "subprocess.TimeoutExpired",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-246"
+    },
+    {
+      "path": "olympus/trading/native/isolation.py",
+      "line": 1602,
+      "scope": "IsolatedWorker._kill_group",
+      "exception": "Exception",
+      "source_sha256": "7e8b12ce4c7a9b51a94c60d671a5bd6e3122e10c5b48aeb9e9aef2a2fabb36b0",
+      "status": "review_pending",
+      "id": "E20-247"
+    },
+    {
+      "path": "olympus/trading/native/pipeline.py",
+      "line": 99,
+      "scope": "capabilities",
+      "exception": "Exception",
+      "source_sha256": "3b6b079b17cf167eb301b6a9ad006c8158c546981f4df9d2ae5652bbb33c503d",
+      "status": "review_pending",
+      "id": "E20-248"
+    },
+    {
+      "path": "olympus/trading/native/pipeline.py",
+      "line": 464,
+      "scope": "Trainer._record",
+      "exception": "Exception",
+      "source_sha256": "3b6b079b17cf167eb301b6a9ad006c8158c546981f4df9d2ae5652bbb33c503d",
+      "status": "review_pending",
+      "id": "E20-249"
+    },
+    {
+      "path": "olympus/trading/native/torchutil.py",
+      "line": 88,
+      "scope": "configure_determinism",
+      "exception": "Exception",
+      "source_sha256": "71e0e141a8b29262406fc29ed3cb6ddd29c57f18de1fd7ce959fc089e3652384",
+      "status": "review_pending",
+      "id": "E20-250"
+    },
+    {
+      "path": "olympus/trading/oms.py",
+      "line": 380,
+      "scope": "OrderStore._audit",
+      "exception": "Exception",
+      "source_sha256": "9179e206ae3293d2d2761cede7feaec50cdc71fa46c993dcbee76dc9d57b0e5a",
+      "status": "review_pending",
+      "id": "E20-251"
+    },
+    {
+      "path": "olympus/trading/outcomes.py",
+      "line": 774,
+      "scope": "OutcomeJournal.resolve",
+      "exception": "Exception",
+      "source_sha256": "98fd9ce83d1080ce1210ffe1ec03fa0047eff54003886f73cd4e25305ddabe3f",
+      "status": "review_pending",
+      "id": "E20-252"
+    },
+    {
+      "path": "olympus/trading/pipeline.py",
+      "line": 188,
+      "scope": "TradingPipeline._record",
+      "exception": "Exception",
+      "source_sha256": "d5c20d1303e94e318ab1cab3d80cd4ed93bfbebfe5ce94bf5c94929670259a3d",
+      "status": "review_pending",
+      "id": "E20-253"
+    },
+    {
+      "path": "olympus/trading/proposals.py",
+      "line": 443,
+      "scope": "ProposalRegister._put",
+      "exception": "Exception",
+      "source_sha256": "26a5ab7dad8e2c0de9cbfa79d7be6ac870ea49f81b104ac833e650293f38279d",
+      "status": "review_pending",
+      "id": "E20-254"
+    },
+    {
+      "path": "olympus/trading/reconcile.py",
+      "line": 375,
+      "scope": "Reconciler._trip_desync",
+      "exception": "Exception",
+      "source_sha256": "bb8c64191bcf10c148265d6a49ce18b97f54e21bddf47387eb076e363b733a01",
+      "status": "review_pending",
+      "id": "E20-255"
+    },
+    {
+      "path": "olympus/trading/reconcile.py",
+      "line": 388,
+      "scope": "Reconciler._record",
+      "exception": "Exception",
+      "source_sha256": "bb8c64191bcf10c148265d6a49ce18b97f54e21bddf47387eb076e363b733a01",
+      "status": "review_pending",
+      "id": "E20-256"
+    },
+    {
+      "path": "olympus/trading/registry.py",
+      "line": 199,
+      "scope": "ModelRegistry._record_event",
+      "exception": "Exception",
+      "source_sha256": "523616244695dbac8506d58d138c8d046d82e87ae6a9805e94707e4470119efe",
+      "status": "review_pending",
+      "id": "E20-257"
+    },
+    {
+      "path": "olympus/trading/risk.py",
+      "line": 364,
+      "scope": "LimitsStore.save",
+      "exception": "Exception",
+      "source_sha256": "eedef733902510148e18134628114f442d0ca51036df4bd2cbfc079a14e77ebc",
+      "status": "review_pending",
+      "id": "E20-258"
+    },
+    {
+      "path": "olympus/trading/risk.py",
+      "line": 1010,
+      "scope": "RiskEngine.authorise",
+      "exception": "Exception",
+      "source_sha256": "eedef733902510148e18134628114f442d0ca51036df4bd2cbfc079a14e77ebc",
+      "status": "review_pending",
+      "id": "E20-259"
+    },
+    {
+      "path": "olympus/trading/rollback.py",
+      "line": 436,
+      "scope": "DeploymentLedger._write",
+      "exception": "Exception",
+      "source_sha256": "389ab050404aeb6695698f0e20895a8e006979b1d9e86cf3d48326cfd58cc2bd",
+      "status": "review_pending",
+      "id": "E20-260"
+    },
+    {
+      "path": "olympus/trading/strategy.py",
+      "line": 973,
+      "scope": "StrategyManager._record_event",
+      "exception": "Exception",
+      "source_sha256": "601ebc213ac78e0627c923f1a1101304fcdedbe949606cd7a44c875e51d77f3e",
+      "status": "review_pending",
+      "id": "E20-261"
+    },
+    {
+      "path": "olympus/treesearch.py",
+      "line": 298,
+      "scope": "_result",
+      "exception": "Exception",
+      "source_sha256": "91f93a4ae995ab5adc1d85450c60fe409859c212cd71c36cf77a2b27745bdc49",
+      "status": "review_pending",
+      "id": "E20-262"
+    },
+    {
+      "path": "olympus/tui.py",
+      "line": 304,
+      "scope": "start_background_task.work",
+      "exception": "Exception",
+      "source_sha256": "66480f73f041879a33de2833b3fd6d5b5a1cd13c71a626c6fdb7ab2e51d53215",
+      "status": "review_pending",
+      "id": "E20-263"
+    },
+    {
+      "path": "olympus/tui.py",
+      "line": 445,
+      "scope": "editor_compose",
+      "exception": "OSError",
+      "source_sha256": "66480f73f041879a33de2833b3fd6d5b5a1cd13c71a626c6fdb7ab2e51d53215",
+      "status": "review_pending",
+      "id": "E20-264"
+    },
+    {
+      "path": "olympus/tui.py",
+      "line": 486,
+      "scope": "welcome_banner",
+      "exception": "Exception",
+      "source_sha256": "66480f73f041879a33de2833b3fd6d5b5a1cd13c71a626c6fdb7ab2e51d53215",
+      "status": "review_pending",
+      "id": "E20-265"
+    },
+    {
+      "path": "olympus/tui.py",
+      "line": 619,
+      "scope": "run",
+      "exception": "Exception",
+      "source_sha256": "66480f73f041879a33de2833b3fd6d5b5a1cd13c71a626c6fdb7ab2e51d53215",
+      "status": "review_pending",
+      "id": "E20-266"
+    },
+    {
+      "path": "olympus/usage.py",
+      "line": 877,
+      "scope": "_report_flush_failure",
+      "exception": "Exception",
+      "source_sha256": "fb66bc34b7d1442a6ac4c34cc71d299fda74dbebc7746c2f43262679ffcf21b8",
+      "status": "review_pending",
+      "id": "E20-267"
+    },
+    {
+      "path": "olympus/usage.py",
+      "line": 1200,
+      "scope": "_fsync_ledger",
+      "exception": "Exception",
+      "source_sha256": "fb66bc34b7d1442a6ac4c34cc71d299fda74dbebc7746c2f43262679ffcf21b8",
+      "status": "review_pending",
+      "id": "E20-268"
+    },
+    {
+      "path": "olympus/usermem.py",
+      "line": 274,
+      "scope": "render_card",
+      "exception": "Exception",
+      "source_sha256": "25c63827034ae636c3f05b5be8f45165d405b5dddfd99536ffd7898512124c3b",
+      "status": "review_pending",
+      "id": "E20-269"
+    },
+    {
+      "path": "olympus/watchdog.py",
+      "line": 659,
+      "scope": "_capture",
+      "exception": "Exception",
+      "source_sha256": "2274153ece30d2bac66395f6a48a4de428cc97972b4bdfba51e5d27cc82d205a",
+      "status": "review_pending",
+      "id": "E20-270"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 492,
+      "scope": "_signing_posture",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-271"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 2062,
+      "scope": "Handler._send",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-272"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 2181,
+      "scope": "Handler._drain_refused_body",
+      "exception": "(OSError, EOFError, ValueError)",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-273"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 2186,
+      "scope": "Handler._drain_refused_body",
+      "exception": "OSError",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-274"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 2838,
+      "scope": "Handler.do_POST",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-275"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 2845,
+      "scope": "Handler.do_POST",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-276"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 3086,
+      "scope": "Handler._v1_run",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-277"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 3093,
+      "scope": "Handler._v1_run",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-278"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 3266,
+      "scope": "Handler._disclose_stream_abort",
+      "exception": "Exception",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-279"
+    },
+    {
+      "path": "olympus/web.py",
+      "line": 3385,
+      "scope": "_install_shutdown",
+      "exception": "(ValueError, OSError, AttributeError)",
+      "source_sha256": "eb30d23120799bbc0cd26610498636afaba2baf7908b79789d6f6f48d6ac59a6",
+      "status": "review_pending",
+      "id": "E20-280"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 314,
+      "scope": "_MarkdownExtractor.handle_endtag",
+      "exception": "(ValueError, RecursionError)",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-281"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 398,
+      "scope": "parse_page",
+      "exception": "Exception",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-282"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 627,
+      "scope": "_observe",
+      "exception": "Exception",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-283"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 874,
+      "scope": "_extract_attributes",
+      "exception": "Exception",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-284"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 1249,
+      "scope": "generate_llmstxt",
+      "exception": "Exception",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-285"
+    },
+    {
+      "path": "olympus/webctx.py",
+      "line": 1491,
+      "scope": "_parse_pdf",
+      "exception": "Exception",
+      "source_sha256": "5aae2176abe9d8c91f9f1409f7dafb1efcb92a4ca0748cbaf72c5cd5670c557f",
+      "status": "review_pending",
+      "id": "E20-286"
+    },
+    {
+      "path": "olympus/webmonitor.py",
+      "line": 74,
+      "scope": "_load",
+      "exception": "OSError",
+      "source_sha256": "497b327192d4be8136acf6d21bd470eb486eecec3b291add0e1e0537688ad1a0",
+      "status": "review_pending",
+      "id": "E20-287"
+    },
+    {
+      "path": "olympus/webmonitor.py",
+      "line": 144,
+      "scope": "add",
+      "exception": "ValueError",
+      "source_sha256": "497b327192d4be8136acf6d21bd470eb486eecec3b291add0e1e0537688ad1a0",
+      "status": "review_pending",
+      "id": "E20-288"
+    },
+    {
+      "path": "olympus/webproposals.py",
+      "line": 129,
+      "scope": "_load",
+      "exception": "OSError",
+      "source_sha256": "6c1c075a20342e495c9e7468594bf6b56610e1f31d76ef3bbf58fd9442e8dc3b",
+      "status": "review_pending",
+      "id": "E20-289"
+    },
+    {
+      "path": "olympus/webreflect.py",
+      "line": 156,
+      "scope": "run_due",
+      "exception": "Exception",
+      "source_sha256": "274e4736566492dfaf42118b07b2c1acee789f0c9f00e44dc529c376655c9cb6",
+      "status": "review_pending",
+      "id": "E20-290"
+    },
+    {
+      "path": "olympus/webreflect.py",
+      "line": 178,
+      "scope": "run_due",
+      "exception": "Exception",
+      "source_sha256": "274e4736566492dfaf42118b07b2c1acee789f0c9f00e44dc529c376655c9cb6",
+      "status": "review_pending",
+      "id": "E20-291"
+    },
+    {
+      "path": "olympus/whatsapp.py",
+      "line": 280,
+      "scope": "_SenderWorker.run",
+      "exception": "Exception",
+      "source_sha256": "5c107c53da0a3d2a40a4666ce77340083596dcae67bf57b6e37c1300d18a6cf9",
+      "status": "review_pending",
+      "id": "E20-292"
+    },
+    {
+      "path": "olympus/whatsapp.py",
+      "line": 368,
+      "scope": "run_server",
+      "exception": "Exception",
+      "source_sha256": "5c107c53da0a3d2a40a4666ce77340083596dcae67bf57b6e37c1300d18a6cf9",
+      "status": "review_pending",
+      "id": "E20-293"
+    },
+    {
+      "path": "olympus/whatsapp.py",
+      "line": 379,
+      "scope": "run_server",
+      "exception": "KeyboardInterrupt",
+      "source_sha256": "5c107c53da0a3d2a40a4666ce77340083596dcae67bf57b6e37c1300d18a6cf9",
+      "status": "review_pending",
+      "id": "E20-294"
+    },
+    {
+      "path": "olympus/wiki.py",
+      "line": 106,
+      "scope": "_parse",
+      "exception": "ValueError",
+      "source_sha256": "520e85c52d42c43c918aaacfe76fedbc3bcfa47bb74ffb74016e283949516d57",
+      "status": "review_pending",
+      "id": "E20-295"
+    },
+    {
+      "path": "olympus/wiki.py",
+      "line": 113,
+      "scope": "_parse",
+      "exception": "ValueError",
+      "source_sha256": "520e85c52d42c43c918aaacfe76fedbc3bcfa47bb74ffb74016e283949516d57",
+      "status": "review_pending",
+      "id": "E20-296"
+    },
+    {
+      "path": "olympus/wiki.py",
+      "line": 271,
+      "scope": "_recent_material",
+      "exception": "Exception",
+      "source_sha256": "520e85c52d42c43c918aaacfe76fedbc3bcfa47bb74ffb74016e283949516d57",
+      "status": "review_pending",
+      "id": "E20-297"
+    },
+    {
+      "path": "olympus/wiki.py",
+      "line": 279,
+      "scope": "_recent_material",
+      "exception": "Exception",
+      "source_sha256": "520e85c52d42c43c918aaacfe76fedbc3bcfa47bb74ffb74016e283949516d57",
+      "status": "review_pending",
+      "id": "E20-298"
+    },
+    {
+      "path": "olympus/wiki.py",
+      "line": 407,
+      "scope": "users_with_material",
+      "exception": "Exception",
+      "source_sha256": "520e85c52d42c43c918aaacfe76fedbc3bcfa47bb74ffb74016e283949516d57",
+      "status": "review_pending",
+      "id": "E20-299"
+    }
+  ]
+}

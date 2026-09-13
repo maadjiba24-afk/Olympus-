@@ -15,6 +15,18 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Fixed — Liveness and memory-card age
+
+Liveness now measures process uptime without reading the usage ledger, using a
+monotonic clock. Readiness retains its configuration and writable-state checks;
+the authenticated metrics endpoint retains spend reporting. Memory cards and
+the memory-card CLI report creation age from `created_at`, independently of
+reinforcement, and label unavailable creation evidence instead of inventing age.
+
+The complete remaining C4-C9 / E1-E31 register is maintained in
+`docs/REMAINING_HARDENING.md`. These fixes do not complete that program or
+activate collection, routing, deployment or autonomy.
+
 ### Security — Exact-owner workspace and outcome evidence
 
 Workspace documents, retrieval caches, todos, playbooks, email style, discovery
