@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import threading
 import time
 import uuid
@@ -202,7 +203,7 @@ def tombstone(user: str, mem_id: str) -> bool:
 def effective_confidence(mem: dict, now: float | None = None) -> float:
     """Confidence after time decay since last use (reinforcement resets age)."""
     now = now or time.time()
-    age_days = max(0.0, (now - mem.get("last_used_at", mem["created_at"])) / 86400)
+    age_days = max(0.0, (now - mem.get("last_used_at", mem.get("created_at"))) / 86400)
     half = max(1, mem.get("half_life_days", 365))
     return mem["confidence"] * (0.5 ** (age_days / half))
 
@@ -253,10 +254,20 @@ def render_card(user: str) -> str:
         now = _time.time()
         for m in sorted(mems, key=lambda m: -effective_confidence(m, now)):
             eff = effective_confidence(m, now)
-            age_d = int((now - float(m.get("created", now))) / 86400)
+            created = m.get("created_at")
+            # Missing or damaged age evidence is not a newly created memory.
+            # Recency affects confidence; it must not replace creation age.
+            age = "age unavailable"
+            if isinstance(created, (int, float)) and not isinstance(created, bool):
+                try:
+                    created = float(created)
+                except OverflowError:
+                    created = math.inf
+                if math.isfinite(created):
+                    age = f"{int(max(0.0, now - created) / 86400)}d old"
             lines.append(f"- {m['content']}")
             lines.append(f"  `{m.get('type', '?')} · conf {eff:.2f} · "
-                         f"{age_d}d old · id {m['id']}`")
+                         f"{age} · id {m['id']}`")
         lines.append("")
     held = candidates(user)
     if held:

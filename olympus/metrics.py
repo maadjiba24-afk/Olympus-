@@ -12,7 +12,7 @@ import threading
 import time
 
 _LOCK = threading.Lock()
-_START = time.time()
+_START = time.monotonic()
 _C = {"requests": 0, "client_errors": 0, "server_errors": 0}
 _BY_PATH: dict[str, int] = {}
 
@@ -31,6 +31,15 @@ def record_response(path: str, code: int) -> None:
             _BY_PATH[path] += 1
 
 
+def uptime_seconds() -> float:
+    """Process uptime without reading configuration, storage or spend evidence.
+
+    Liveness must remain available when durable state is unavailable. A
+    monotonic clock also keeps wall-clock corrections out of this measurement.
+    """
+    return round(max(0.0, time.monotonic() - _START), 1)
+
+
 def snapshot() -> dict:
     """Operational summary: uptime, traffic, errors, and today's spend."""
     from . import usage
@@ -38,7 +47,7 @@ def snapshot() -> dict:
         counters = dict(_C)
         by_path = dict(_BY_PATH)
     out = {
-        "uptime_seconds": round(time.time() - _START, 1),
+        "uptime_seconds": uptime_seconds(),
         "requests": counters["requests"],
         "client_errors": counters["client_errors"],
         "server_errors": counters["server_errors"],
@@ -56,6 +65,6 @@ def reset() -> None:
     """For tests."""
     global _START
     with _LOCK:
-        _START = time.time()
+        _START = time.monotonic()
         _C.update(requests=0, client_errors=0, server_errors=0)
         _BY_PATH.clear()

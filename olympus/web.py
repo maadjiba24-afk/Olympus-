@@ -444,7 +444,7 @@ def _readiness() -> tuple[bool, dict]:
         "commit": info["commit"],
         "shadow_mode": shadow.enabled(),
         "memory_dir_writable": writable,
-        "uptime_seconds": metrics.snapshot()["uptime_seconds"],
+        "uptime_seconds": metrics.uptime_seconds(),
     }
     if deployment is not None:
         payload["deployment_readiness"] = deployment
@@ -2240,7 +2240,7 @@ class Handler(BaseHTTPRequestHandler):
             # cheap and must NOT consult config or disk — a liveness probe that
             # fails on a full disk causes a restart loop instead of an alert.
             self._json({"status": "ok",
-                        "uptime_seconds": metrics.snapshot()["uptime_seconds"]})
+                        "uptime_seconds": metrics.uptime_seconds()})
             return
         if url.path == "/readyz":
             # READINESS: "this instance can serve a correct request." Distinct
