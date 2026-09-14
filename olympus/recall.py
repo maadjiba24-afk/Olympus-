@@ -141,6 +141,16 @@ def _maybe_embed(user: str, mem: dict) -> None:
 
 
 def _gate(user: str, cand: dict, event_id: str) -> str:
+    """Serialize policy inspection and mutation; embedding calls occur after commit."""
+    pending_embeddings = []
+    with usermem._guard(user):
+        action = _gate_decide(user, cand, event_id, pending_embeddings)
+    for mem in pending_embeddings:
+        _maybe_embed(user, mem)
+    return action
+
+
+def _gate_decide(user: str, cand: dict, event_id: str, pending_embeddings: list) -> str:
     """Apply the write policy to one candidate. Returns the action taken."""
     floor = config.MEMORY_CONFIDENCE_FLOOR
     if float(cand.get("confidence", 0)) < floor:
@@ -164,13 +174,12 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
         # for a fresh, corroborated fact to replace.
         existing_conf = usermem.effective_confidence(existing)
         if float(cand["confidence"]) >= max(floor, existing_conf):
-            new = usermem.add_memory(
-                user, type=cand["type"], content=cand["content"],
+            new = usermem.replace_memory(
+                user, existing["id"], type=cand["type"], content=cand["content"],
                 confidence=cand["confidence"], key=cand.get("key"),
                 importance=cand.get("importance", 0.5),
                 provenance=[event_id])
-            usermem.supersede(user, existing["id"], new)
-            _maybe_embed(user, new)
+            pending_embeddings.append(new)
             return "superseded"
         usermem.add_candidate(user, {**cand, "reason": "conflict",
                                      "conflicts_with": existing["id"],
@@ -194,7 +203,7 @@ def _gate(user: str, cand: dict, event_id: str) -> str:
                              confidence=cand["confidence"], key=cand.get("key"),
                              importance=cand.get("importance", 0.5),
                              provenance=[event_id])
-    _maybe_embed(user, mem)
+    pending_embeddings.append(mem)
     return "committed"
 
 
@@ -228,6 +237,11 @@ def extract(user: str, user_msg: str, reply: str,
                                  event_kind="turn",
                                  event_payload={"user": user_msg[:500]},
                                  report=report)
+    except usermem.oe.OwnerEvidenceStateError as err:
+        from . import errors
+        errors.capture("recall.extract", err)
+        return {"evidence_state": "unavailable", "error": str(err),
+                "publication_state": "reread required; no automatic retry"}
     except Exception as err:
         from . import errors
         errors.capture("recall.extract", err, context=(user_msg or "")[:120])
@@ -241,6 +255,9 @@ def _run_extractor(user: str, convo: str, settings: config.Settings,
     `report(line)` (optional) surfaces gated-in facts as "🧠 remembered: …" so
     memory activity is observable in the moment. Best-effort — a broken reporter
     never breaks extraction."""
+    # Refuse unavailable ownership/evidence before spending on extraction.
+    usermem.all_memories(user)
+    relgraph.nodes(user)
     summary: dict[str, int] = {}
     out = backend.complete_json(
         settings, _EXTRACT_SYSTEM,
@@ -297,6 +314,11 @@ def flush_slice(user: str, history_text: str,
         summary = _run_extractor(user, convo, settings,
                                  event_kind="compaction_flush",
                                  event_payload={"chars": len(history_text)})
+    except usermem.oe.OwnerEvidenceStateError as err:
+        from . import errors
+        errors.capture("recall.flush_slice", err)
+        return {"evidence_state": "unavailable", "error": str(err),
+                "publication_state": "reread required; no automatic retry"}
     except Exception as err:
         from . import errors
         errors.capture("recall.flush_slice", err)

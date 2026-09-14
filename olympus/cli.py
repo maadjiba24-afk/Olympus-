@@ -168,12 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_mem.add_argument(
         "action", nargs="?", default="list",
         choices=["card", "list", "candidates", "approve", "reject", "forget", "search",
-                 "migrate", "export", "import", "delete"])
+                 "migrate", "export", "import", "delete", "state-status", "initialize-empty"])
     p_mem.add_argument("arg", nargs="*",
                        help="id (approve/reject/forget), query (search), or "
                             "archive path (export/import)")
     p_mem.add_argument("--user", help="memory namespace for export/delete "
                                       "(default: shared)")
+    p_mem.add_argument("--state", choices=["memory", "graph"], default="memory",
+                       help="typed memory or relationship graph state")
+    p_mem.add_argument("--acknowledge-unclaimed-legacy", action="store_true",
+                       help="initialize NEW empty exact-owner state while preserving unclaimed legacy bytes")
     p_mem.add_argument("--all", action="store_true",
                        help="export every user's memory, not just one")
     p_mem.add_argument("--out", help="archive path for export")
@@ -1228,6 +1232,18 @@ def main(argv: list[str] | None = None) -> int:
         from . import usermem, recall
         user = "cli"
         arg = " ".join(args.arg).strip()
+        if args.action in ("state-status", "initialize-empty"):
+            from . import relgraph
+            snapshot = (usermem if args.state == "memory" else relgraph)._state(args.user or user)
+            try:
+                result = (snapshot.status() if args.action == "state-status" else
+                          snapshot.initialize_empty(
+                              acknowledge_legacy=args.acknowledge_unclaimed_legacy))
+            except ValueError as err:
+                print(str(err))
+                return 1
+            print(json.dumps(result, indent=2))
+            return 1 if result["state"] == "unavailable" else 0
         if args.action == "migrate":
             r = memory.migrate_notes()
             print(f"Migrated {r['migrated']} note(s) to schema v"
@@ -1299,17 +1315,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  [{c['id']}] ({c['type']}, {c.get('reason','')}) "
                       f"{c['content']}\n     → memory approve {c['id']} | reject {c['id']}")
         elif args.action == "approve":
-            c = usermem.pop_candidate(user, arg)
-            if not c:
-                print("No such candidate.")
-            else:
-                usermem.add_memory(user, type=c["type"], content=c["content"],
-                                   confidence=c.get("confidence", 0.7),
-                                   key=c.get("key"),
-                                   importance=c.get("importance", 0.5),
-                                   sensitivity=c.get("sensitivity", "normal"),
-                                   provenance=c.get("provenance", []))
-                print("Saved.")
+            saved = usermem.approve_candidate(user, arg)
+            print("Saved." if saved else "No such candidate.")
         elif args.action == "reject":
             print("Dismissed." if usermem.pop_candidate(user, arg) else "No such candidate.")
         elif args.action == "forget":

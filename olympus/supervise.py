@@ -95,7 +95,7 @@ def run_supervised_cycle(settings=None, *, generator=None, verifier=None) -> dic
     # -- one supervised consolidation pass per user (apply hard-off) --------
     summary_by_user: dict[str, dict] = {}
     try:
-        users = list(store.backend().keys(usermem._MEMS))
+        users = usermem.owners()
     except Exception as err:
         users = []
         errors.append(f"user enumeration failed: {err}")

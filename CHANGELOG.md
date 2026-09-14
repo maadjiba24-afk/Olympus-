@@ -15,6 +15,21 @@ carries a migration note here.
 
 ## [Unreleased]
 
+### Security — Exact-owner memory and graph snapshots (M02)
+
+Typed events, memories and candidates now share one validated exact-owner
+snapshot; graph nodes and edges share another. Approval, supersession and graph
+updates preserve atomic publication. CLI/web approval and recall use these
+operations; unavailable state is explicit and ambiguous normalized legacy bytes
+remain unclaimed. `memory state-status` inspects the evidence; the separately
+acknowledged `initialize-empty` command starts new state without migrating or
+resetting existing data. See `docs/M02_MEMORY_GRAPH.md` for migration limits.
+File writers retain the state-directory process lock; the new Postgres snapshot
+path uses a database transaction and owner lock. Native Windows remains one
+process per state directory pending M13. Real Postgres validation, both operator
+platform legs and protected delivery are required before this batch is closed.
+M03-M19 and production/genuine-data/measurement gates remain open.
+
 ### Fixed — Liveness and memory-card age
 
 Liveness now measures process uptime without reading the usage ledger, using a

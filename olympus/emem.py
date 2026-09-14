@@ -142,6 +142,7 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
     the whole thing never raises into the caller."""
     frags: list[Fragment] = []
     from . import usermem
+    from .owner_evidence import OwnerEvidenceStateError
     # typed memories (carry provenance + trust)
     try:
         for m in usermem.active_memories(user)[:limit]:
@@ -150,6 +151,8 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
                 ts=float(m.get("last_used_at") or m.get("created_at") or 0),
                 text=str(m.get("content", "")),
                 trust=str(m.get("sensitivity", "normal"))))
+    except OwnerEvidenceStateError:
+        raise
     except Exception as err:
         _capture(err)
     # raw event log (the provenance source of truth)
@@ -162,6 +165,8 @@ def gather(user: str, query: str, *, limit: int = 40) -> list[Fragment]:
                     source="event", ref=str(e.get("id", "")),
                     ts=float(e.get("ts") or 0), text=str(text),
                     trust=str(e.get("source", "user"))))
+    except OwnerEvidenceStateError:
+        raise
     except Exception as err:
         _capture(err)
     from .owner_evidence import OwnerEvidenceStateError

@@ -402,8 +402,8 @@ def users_with_material() -> list[str]:
     if users_dir.exists():
         out |= {p.name for p in users_dir.iterdir() if p.is_dir()}
     try:
-        from . import store
-        out |= set(store.backend().keys("usermem.memories"))
+        from . import usermem
+        out |= set(usermem.owners())
     except Exception:
         pass
     return sorted(out)

@@ -182,6 +182,10 @@ class JsonStore:
     max_bytes: int = 4 * 1024 * 1024
     path: Path | None = None
     namespace: str | None = None
+    backend_override: object | None = None
+
+    def _backend(self):
+        return self.backend_override if self.backend_override is not None else store.backend()
 
     @property
     def key(self):
@@ -193,7 +197,7 @@ class JsonStore:
     def _file(self):
         if self.path is not None:
             return self.path
-        backend = store.backend()
+        backend = self._backend()
         if type(backend) is store.FileStore:
             return config.MEMORY_DIR / "store" / self.namespace / self.key
         return None
@@ -203,7 +207,7 @@ class JsonStore:
             path = self._file()
             if path is not None:
                 return read_bytes(path, self.max_bytes, self.name)
-            return store.backend().get(self.namespace, self.key)
+            return self._backend().get(self.namespace, self.key)
         except OwnerEvidenceStateError:
             raise
         except Exception as err:
@@ -243,7 +247,7 @@ class JsonStore:
                 publish(path, raw, self.name)
             else:
                 try:
-                    store.backend().put(self.namespace, self.key, raw)
+                    self._backend().put(self.namespace, self.key, raw)
                 except Exception as err:
                     raise OwnerEvidenceStateError(self.name, "backend publication unconfirmed") from err
 

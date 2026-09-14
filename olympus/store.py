@@ -16,6 +16,8 @@ Values are opaque bytes (the vault stores ciphertext here).
 from __future__ import annotations
 
 import os
+import contextlib
+import hashlib
 import re
 from pathlib import Path
 
@@ -82,6 +84,40 @@ class PostgresStore:
 
     def _conn(self):
         return self._psycopg.connect(self._dsn, autocommit=True)
+
+    @contextlib.contextmanager
+    def owner_transaction(self, ns: str, key: str):
+        """Serialize a bounded owner's snapshot RMW on the database itself.
+
+        The advisory lock also covers absent rows. Every read and publication
+        uses this connection/transaction; a failed operation rolls back. Other
+        legacy KV callers still require the M12 caller-by-caller conversion.
+        """
+        lock_id = int.from_bytes(hashlib.sha256(
+            (ns + "\0" + key).encode()).digest()[:8], "big", signed=True)
+        with self._conn() as conn:
+            with conn.transaction():
+                conn.execute("SET LOCAL lock_timeout = '60s'")
+                conn.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+
+                class OwnerTransaction:
+                    def get(self, namespace, owner_key):
+                        if (namespace, owner_key) != (ns, key):
+                            raise ValueError("transaction owner mismatch")
+                        row = conn.execute(
+                            "SELECT v FROM olympus_kv WHERE ns=%s AND k=%s",
+                            (ns, key)).fetchone()
+                        return bytes(row[0]) if row else None
+
+                    def put(self, namespace, owner_key, value):
+                        if (namespace, owner_key) != (ns, key):
+                            raise ValueError("transaction owner mismatch")
+                        conn.execute(
+                            "INSERT INTO olympus_kv (ns,k,v) VALUES (%s,%s,%s) "
+                            "ON CONFLICT (ns,k) DO UPDATE SET v=EXCLUDED.v",
+                            (ns, key, value))
+
+                yield OwnerTransaction()
 
     def put(self, ns: str, key: str, value: bytes) -> None:
         with self._conn() as conn:

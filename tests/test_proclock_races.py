@@ -774,7 +774,9 @@ def test_usermem_guard_takes_a_cross_process_lock(monkeypatch):
                                                 real(name, *a, **kw))[1])
     with usermem._guard("someone"):
         pass
-    assert any(n.startswith("usermem-") for n in taken), taken
+    import hashlib
+    expected = "owner-evidence-" + hashlib.sha256(b"usermem.state.v3\0someone").hexdigest()
+    assert expected in taken, taken
 
 
 def test_relgraph_guard_takes_a_cross_process_lock(monkeypatch):
@@ -786,4 +788,6 @@ def test_relgraph_guard_takes_a_cross_process_lock(monkeypatch):
                                                 real(name, *a, **kw))[1])
     with relgraph._guard("someone"):
         pass
-    assert any(n.startswith("relgraph-") for n in taken), taken
+    import hashlib
+    expected = "owner-evidence-" + hashlib.sha256(b"relgraph.state.v3\0someone").hexdigest()
+    assert expected in taken, taken

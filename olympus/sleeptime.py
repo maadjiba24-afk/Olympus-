@@ -538,7 +538,7 @@ def run(settings=None) -> list[str]:
     if not config.sleeptime_enabled():
         return []
     try:
-        users = store.backend().keys(usermem._MEMS)
+        users = usermem.owners()
     except Exception as err:
         from . import errors
         errors.capture("sleeptime.enumerate", err)
