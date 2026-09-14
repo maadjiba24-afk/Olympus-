@@ -132,8 +132,16 @@ def test_memory_card_does_not_invent_age_for_bad_creation_evidence(monkeypatch, 
     monkeypatch.setattr(usermem.time, "time", lambda: now)
     mem = usermem.add_memory("card-owner", type="preference", content="concise",
                              confidence=0.8)
-    usermem._mutate("card-owner", mem["id"],
-                    lambda row: row.update(created_at=created))
+    from olympus.owner_evidence import OwnerEvidenceStateError
+    if created is None:
+        usermem._mutate("card-owner", mem["id"], lambda row: row.update(created_at=None))
+    else:
+        before = usermem.all_memories("card-owner")
+        with pytest.raises(OwnerEvidenceStateError):
+            usermem._mutate("card-owner", mem["id"], lambda row: row.update(created_at=created))
+        assert usermem.all_memories("card-owner") == before
+    # Defensive UI rendering still must not invent age for an unusable input.
+    monkeypatch.setattr(usermem, "active_memories", lambda owner: [{**mem, "created_at": created}])
     card = usermem.render_card("card-owner")
     assert f"age unavailable · id {mem['id']}" in card
     assert "0d old" not in card

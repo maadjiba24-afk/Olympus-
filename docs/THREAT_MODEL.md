@@ -594,3 +594,23 @@ enforced **even when approvals are granted** — the gate sits inside
 `sandbox.run()`, below every approval path. Catastrophic commands are refused,
 not confirmed. Proven in `tests/test_cmdguard.py`
 (`test_sandbox_refuses_a_denied_command`).
+
+
+### M02 memory and relationship evidence
+
+`usermem.state.v3` and `relgraph.state.v3` contain validated exact-owner
+envelopes. Each owner snapshot is the publication unit for coupled collections;
+consumer approval and graph mutation never split removal and addition across
+separate writes. Ordinary reads and updates refuse corrupted/wrong-owner state.
+Legacy normalized namespaces are not ownership proof, and remain preserved and
+unclaimed. Explicit empty initialization is not migration or erasure.
+
+`tests/test_memory_graph_owner_evidence.py` covers ownership collisions,
+malformed evidence, failure before/after publication, concurrent approval,
+independent POSIX writers, actual in-memory HTTP dispatch and mock database
+rollback. Real Postgres and native Windows/POSIX validation remain delivery
+gates. The database transaction applies only to these new snapshots; M12
+conversion of other backend callers and M13 Windows topology remain open.
+Background proposal/wiki/snapshot ownership and recovery remain M03, and full
+legacy attribution/export/erasure remain M09. No activation or expanded autonomy
+is authorized by these storage changes.

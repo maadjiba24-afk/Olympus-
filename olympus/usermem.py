@@ -5,24 +5,22 @@ the source of truth) and a typed memory projection the agent reads from. Every
 memory is inspectable, user-editable, carries provenance and confidence, and
 decays unless reinforced — so the agent's recollection stays honest and current.
 
-Storage rides the existing `store` backend (local files by default, Postgres
-when OLYMPUS_DATABASE_URL is set). To stay backend-agnostic over a plain kv
-interface, each user's events / memories / candidates are single JSON documents,
-and every load-modify-save runs under `_guard()` — a thread lock AND a
-`proclock` flock, so the web server and the heartbeat mutating the same user
-concurrently cannot lose each other's writes on the default file backend.
+Storage uses one validated exact-owner snapshot for events, memories and
+candidates. Approval and supersession publish atomically. Normalized legacy
+values remain unclaimed and preserved; explicit empty initialization is separate
+from migration. File writers serialize on the state directory; Postgres writers
+use a transaction-scoped database lock. Native Windows remains single-process
+per state directory until M13. Operator/backend validation is required.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
 import math
-import threading
 import time
 import uuid
 
-from . import memory, store
+from . import memory, store, memory_evidence
+from . import owner_evidence as oe
 
 # the nine memory types from the architecture
 TYPES = ("identity", "preference", "project", "behavioral", "task",
@@ -37,7 +35,6 @@ HALF_LIFE = {
 
 ACTIVE, SUPERSEDED, TOMBSTONED = "active", "superseded", "tombstoned"
 
-_LOCK = threading.Lock()
 _EVENTS, _MEMS, _CANDS = "usermem.events", "usermem.memories", "usermem.candidates"
 _MAX_EVENTS = 2000          # cap raw provenance; typed memory is the durable view
 _MAX_MEMORIES = 500         # per user; prune the weakest beyond this (cost/bloat)
@@ -45,41 +42,70 @@ _MAX_CANDIDATES = 100       # per user; bound the approval queue
 _MAX_CONTENT = 600          # per memory; truncate to bound context + storage
 
 
+def _validate_state(data):
+    from . import memory_evidence as me
+    oe.fields(data, (_EVENTS, _MEMS, _CANDS))
+    for row in me.rows(data[_EVENTS], _MAX_EVENTS):
+        me.timestamp(row["ts"])
+        oe.text(row["kind"], 256)
+        oe.text(row["source"], 256)
+        if not isinstance(row["payload"], dict):
+            raise ValueError("invalid event payload")
+    for row in me.rows(data[_MEMS], _MAX_MEMORIES * 3):
+        if row["type"] not in TYPES or row["status"] not in (ACTIVE, SUPERSEDED, TOMBSTONED):
+            raise ValueError("invalid memory type or status")
+        oe.text(row["content"], _MAX_CONTENT, empty=True)
+        me.probability(row["confidence"])
+        me.probability(row["importance"])
+        oe.number(row["half_life_days"], minimum=1)
+        me.timestamp(row["last_used_at"])
+        if row.get("created_at") is not None:
+            me.timestamp(row["created_at"])
+        oe.integer(row["use_count"])
+        me.strings(row["provenance"])
+        if row.get("key") is not None:
+            oe.text(row["key"], 1024, empty=True)
+        oe.text(row["sensitivity"], 128)
+        if row.get("superseded_by") is not None:
+            oe.text(row["superseded_by"], 128)
+            if row["superseded_by"] == row["id"]:
+                raise ValueError("self supersession")
+        if "embedding" in row:
+            oe.records(row["embedding"], 16384)
+            for number in row["embedding"]:
+                oe.number(number, minimum=-1e100)
+    for row in me.rows(data[_CANDS], _MAX_CANDIDATES):
+        if row["type"] not in TYPES:
+            raise ValueError("invalid candidate type")
+        oe.text(row["content"], _MAX_CONTENT, empty=True)
+        me.timestamp(row["created_at"])
+        for field, default in (("confidence", .7), ("importance", .5)):
+            me.probability(row.get(field, default))
+        me.strings(row.get("provenance", []))
+        if row.get("conflicts_with") is not None:
+            oe.text(row["conflicts_with"], 128)
+
+
+def _state(user):
+    return memory_evidence.Snapshot(user, "usermem.state.v3",
+                                    (_EVENTS, _MEMS, _CANDS), _validate_state)
+
+
 def _load(ns: str, user: str) -> list:
-    blob = store.backend().get(ns, memory.safe_id(user))
-    if not blob:
-        return []
-    try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return []
+    return _state(user).load(ns)
 
 
 def _save(ns: str, user: str, data: list) -> None:
-    store.backend().put(ns, memory.safe_id(user),
-                        json.dumps(data).encode("utf-8"))
+    _state(user).save(ns, data)
 
 
-@contextlib.contextmanager
 def _guard(user: str):
-    """Serialize one user's load-modify-save across threads AND processes.
+    return _state(user).transaction()
 
-    Every mutation here is a whole-document RMW over a `store` key, and a blind
-    `put` is defined as replace-whole-value (ADR 0005) — so two concurrent
-    writers do not merge, the loser's entire memory list is discarded. A
-    `threading.Lock` alone only ordered writers *inside one interpreter*, while
-    the shipped topology runs the web server and the heartbeat as separate
-    processes against the same MEMORY_DIR: the heartbeat's goal cycle extracts
-    memories for the same user the web process is talking to. That is a silent
-    lost update of durable user data, which is why the module docstring's
-    "multi-process deployments should use the DB" was never an adequate answer —
-    the file backend is the default.
 
-    `prefs.set` already established the fix: hold `proclock` (an flock, so it is
-    honored across processes) around the read+write, not just a thread lock."""
-    from . import proclock
-    with _LOCK, proclock.lock(f"usermem-{memory.safe_id(user)}"):
-        yield
+def owners():
+    """Enumerate envelope principals, never normalized backend keys."""
+    return sorted(oe.namespace_values("usermem.state.v3", lambda user: _state(user).document))
 
 
 # --- event log -----------------------------------------------------------
@@ -188,10 +214,49 @@ def set_embedding(user: str, mem_id: str, vector: list) -> dict | None:
 
 
 def supersede(user: str, old_id: str, new_mem: dict) -> dict:
-    """Replace a memory with a newer one, keeping the old as history."""
-    _mutate(user, old_id, lambda m: (m.__setitem__("status", SUPERSEDED),
-                                     m.__setitem__("superseded_by", new_mem["id"])))
-    return new_mem
+    """Supersede only with the owner's already-persisted replacement row."""
+    with _guard(user):
+        old = get_memory(user, old_id)
+        new = get_memory(user, new_mem["id"])
+        if old is None or new != new_mem or old_id == new_mem["id"]:
+            raise ValueError("supersession needs distinct owner-bound memories")
+        if old["status"] == SUPERSEDED and old["superseded_by"] == new["id"]:
+            return new
+        if old["status"] != ACTIVE or new["status"] != ACTIVE:
+            raise ValueError("supersession needs active memories")
+        _mutate(user, old_id, lambda m: m.update(
+            status=SUPERSEDED, superseded_by=new["id"]))
+        return new
+
+
+def replace_memory(user, old_id, **fields):
+    """Publish the new memory and old-memory supersession in one snapshot."""
+    with _guard(user):
+        old = get_memory(user, old_id)
+        if old is None or old["status"] != ACTIVE:
+            raise ValueError("replacement source is no longer active")
+        new = add_memory(user, **fields)
+        return supersede(user, old_id, new)
+
+
+def approve_candidate(user, cand_id):
+    """Consume a candidate only in the same publication as its accepted memory."""
+    with _guard(user):
+        candidate = next((c for c in candidates(user) if c["id"] == cand_id), None)
+        if candidate is None:
+            return None
+        fields = {name: candidate[name] for name in (
+            "type", "content", "confidence", "key", "importance", "sensitivity", "provenance"
+        ) if name in candidate}
+        fields.setdefault("confidence", .7)
+        if candidate.get("conflicts_with"):
+            result = replace_memory(user, candidate["conflicts_with"], **fields)
+        else:
+            result = add_memory(user, **fields)
+        if get_memory(user, result["id"]) is None:
+            raise ValueError("approved memory would be pruned; candidate preserved")
+        pop_candidate(user, cand_id)
+        return result
 
 
 def tombstone(user: str, mem_id: str) -> bool:

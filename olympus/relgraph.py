@@ -14,16 +14,13 @@ usual approval gate.
 
 from __future__ import annotations
 
-import contextlib
-import json
 import re
-import threading
 import uuid
 
-from . import memory, store
+from . import memory, store, memory_evidence
+from . import owner_evidence as oe
 
 _NODES, _EDGES = "relgraph.nodes", "relgraph.edges"
-_LOCK = threading.Lock()
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = frozenset(("the", "and", "for", "inc", "llc", "ltd", "corp", "co"))
 
@@ -44,32 +41,45 @@ def _tok(text: str) -> set[str]:
             if len(w) > 1 and w not in _STOP}
 
 
+def _validate_state(data):
+    oe.fields(data, (_NODES, _EDGES))
+    nodes = memory_evidence.rows(data[_NODES], _MAX_NODES)
+    ids = {n["id"] for n in nodes}
+    labels = set()
+    for node in nodes:
+        oe.text(node["label"], _MAX_LABEL)
+        oe.text(node["kind"], 128)
+        if node["label"].lower() in labels:
+            raise ValueError("duplicate entity label")
+        labels.add(node["label"].lower())
+    for edge in memory_evidence.rows(data[_EDGES], 20000):
+        if edge["src"] not in ids or edge["dst"] not in ids or edge["src"] == edge["dst"]:
+            raise ValueError("invalid edge endpoint")
+        oe.text(edge["rel"], 256)
+        memory_evidence.probability(edge["confidence"])
+        for key in ("valid_from", "valid_to"):
+            if edge.get(key) is not None:
+                memory_evidence.timestamp(edge[key])
+        if (edge.get("valid_from") is not None and edge.get("valid_to") is not None
+                and edge["valid_to"] < edge["valid_from"]):
+            raise ValueError("inverted relation interval")
+
+
+def _state(user):
+    return memory_evidence.Snapshot(user, "relgraph.state.v3", (_NODES, _EDGES),
+                                    _validate_state)
+
+
 def _load(ns: str, user: str) -> list:
-    blob = store.backend().get(ns, memory.safe_id(user))
-    if not blob:
-        return []
-    try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return []
+    return _state(user).load(ns)
 
 
 def _save(ns: str, user: str, data: list) -> None:
-    store.backend().put(ns, memory.safe_id(user), json.dumps(data).encode())
+    _state(user).save(ns, data)
 
 
-
-@contextlib.contextmanager
 def _guard(user: str):
-    """Serialize one user's graph RMW across threads AND processes.
-
-    Same defect and same fix as `usermem._guard`: nodes and edges are whole-JSON
-    documents in the kv store, a blind put replaces the whole value, and the
-    heartbeat writes this graph (via the recall extractor) at the same time the
-    web process does. A thread lock cannot order writers in two interpreters."""
-    from . import proclock
-    with _LOCK, proclock.lock(f"relgraph-{memory.safe_id(user)}"):
-        yield
+    return _state(user).transaction()
 
 
 # --- nodes & edges -------------------------------------------------------
@@ -100,6 +110,7 @@ def add_node(user: str, label: str, kind: str = OTHER) -> dict | None:
     return dict(node)
 
 
+@memory_evidence.transaction(_state)
 def add_edge(user: str, src_label: str, rel: str, dst_label: str,
              confidence: float = 0.7, src_kind: str = OTHER,
              dst_kind: str = OTHER, valid_from: float | None = None,
@@ -114,6 +125,10 @@ def add_edge(user: str, src_label: str, rel: str, dst_label: str,
     keep their old identity and behaviour."""
     rel = (rel or "").strip().lower().replace(" ", "_")
     if not rel:
+        return None
+    existing_labels = {n["label"].lower() for n in nodes(user)}
+    requested = {_clean_label(src_label).lower(), _clean_label(dst_label).lower()}
+    if len(existing_labels | requested) > _MAX_NODES:
         return None
     src = add_node(user, src_label, src_kind)
     dst = add_node(user, dst_label, dst_kind)
@@ -189,6 +204,7 @@ def _node_by_id(nodes_: list, nid: str) -> dict | None:
     return next((n for n in nodes_ if n["id"] == nid), None)
 
 
+@memory_evidence.transaction(_state)
 def forget(user: str, label: str) -> bool:
     """Remove an entity and every edge touching it."""
     with _guard(user):
@@ -221,6 +237,7 @@ def find_entities(user: str, text: str) -> list[dict]:
     return out
 
 
+@memory_evidence.transaction(_state)
 def neighbors(user: str, node_id: str,
               as_of: float | None = None) -> list[tuple[str, dict]]:
     """One hop in BOTH directions: returns (phrase, node) for each connection,
@@ -243,6 +260,7 @@ def neighbors(user: str, node_id: str,
     return out
 
 
+@memory_evidence.transaction(_state)
 def relations_at(user: str, label: str, at: float | None = None) -> list[dict]:
     """Every edge touching an entity that was VALID at time `at` — the 'true at
     T' temporal query. `at=None` returns all edges regardless of interval."""
@@ -254,6 +272,7 @@ def relations_at(user: str, label: str, at: float | None = None) -> list[dict]:
             if (e["src"] == nid or e["dst"] == nid) and _valid_at(e, at)]
 
 
+@memory_evidence.transaction(_state)
 def describe(user: str, label: str) -> str:
     """Human-readable one-entity view (for `olympus graph <entity>`)."""
     ents = find_entities(user, label)
@@ -266,6 +285,7 @@ def describe(user: str, label: str) -> str:
     return "\n".join(lines)
 
 
+@memory_evidence.transaction(_state)
 def context_block(user: str, message: str) -> str:
     """Surface the people/orgs connected to entities named in this turn.
     Returns '' when the turn names no known entity, so it costs no tokens."""

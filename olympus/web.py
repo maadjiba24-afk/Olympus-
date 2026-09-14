@@ -2689,15 +2689,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if kind == "memory":
                     if op == "approve":
-                        c = usermem.pop_candidate(user, mid)
-                        if c:
-                            usermem.add_memory(
-                                user, type=c["type"], content=c["content"],
-                                confidence=c.get("confidence", 0.7),
-                                key=c.get("key"),
-                                importance=c.get("importance", 0.5),
-                                sensitivity=c.get("sensitivity", "normal"),
-                                provenance=c.get("provenance", []))
+                        if usermem.approve_candidate(user, mid) is None:
+                            self._json({"error": "No such candidate."}, 404)
+                            return
                     elif op == "reject":
                         usermem.pop_candidate(user, mid)
                     elif op == "forget":
