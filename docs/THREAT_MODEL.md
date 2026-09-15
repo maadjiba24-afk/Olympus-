@@ -614,3 +614,27 @@ conversion of other backend callers and M13 Windows topology remain open.
 Background proposal/wiki/snapshot ownership and recovery remain M03, and full
 legacy attribution/export/erasure remain M09. No activation or expanded autonomy
 is authorized by these storage changes.
+
+
+### M04: exact-owner file notes and recoverable action evidence
+
+Private lessons/corrections/feedback and action notes use the complete exact-owner
+key. Normalized legacy notes are preserved and unavailable for automatic attribution.
+All live note readers validate bounded UTF-8/metadata/owner/content and reject
+links, reparse points and incomplete mutation journals. Journal recovery checks
+every target before changing any; an independently changed target blocks recovery.
+Save-note execution and undo couple canonical note state to the durable action
+receipt. Undo does not trust an arbitrary result path or another action's identity.
+
+Archive checksums detect damage, not authorship. Operator restore is explicitly
+scoped and validates all members before mutation. Recovery copies contain sensitive
+before/after bytes and remain private state: active-note deletion does not certify
+principal erasure. Optional mirrors are owner-keyed and report failure separately
+from canonical save; old mixed mirrors are unclaimed. Shared installation notes
+remain shared intentionally; scheduled job reports remain excluded from mirroring.
+
+The state administrator remains trusted. Native Windows keeps the single-process
+restriction and lacks the POSIX directory-fsync guarantee. M03 recovery across
+other stores, M09 full erasure, M11 encryption migration, M12 backend-wide transactions,
+M13 Windows launch topology and M14 production evidence remain open. This work
+neither activates collection/routing/autonomy nor authorizes live verifier fan-out.

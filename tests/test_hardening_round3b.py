@@ -69,10 +69,13 @@ def test_vault_mirror_writes_through(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     monkeypatch.setenv("OLYMPUS_VAULT_DIR", str(vault))
     memory.set_user("shared")
-    memory.save("lessons", "vault test", "a lesson body")
-    mirrored = list((vault / "lessons").glob("*.md"))
+    canonical = memory.save("lessons", "vault test", "a lesson body")
+    mirrored = list((vault / "olympus-notes-v2" / memory.owner_key("shared")
+                     / "lessons").glob("*.md"))
     assert len(mirrored) == 1
-    assert "a lesson body" in mirrored[0].read_text()
+    assert mirrored[0].read_bytes() == canonical.read_bytes()
+    assert "a lesson body" in mirrored[0].read_text(encoding="utf-8")
+    assert not (vault / "lessons").exists(), "must not repopulate the old mixed mirror"
 
 
 def test_vault_mirror_off_by_default(tmp_path, monkeypatch):
@@ -83,10 +86,19 @@ def test_vault_mirror_off_by_default(tmp_path, monkeypatch):
 
 
 def test_vault_mirror_never_breaks_save(tmp_path, monkeypatch):
-    # An unwritable vault path must not break the canonical save.
-    monkeypatch.setenv("OLYMPUS_VAULT_DIR", "/proc/definitely/not/writable")
+    # An owned non-directory blocks mirrors on Windows and POSIX alike. Never
+    # use /proc here: on Windows it can address a real directory on the drive.
+    blocked = tmp_path / "blocked-vault"
+    blocked.write_bytes(b"preserve this obstruction")
+    monkeypatch.setenv("OLYMPUS_VAULT_DIR", str(blocked / "child"))
     memory.set_user("shared")
-    assert memory.save("reports", "resilient", "body").exists()
+    with pytest.warns(RuntimeWarning, match="optional mirror evidence unavailable"):
+        result = memory.save_with_status("reports", "resilient", "body")
+    from pathlib import Path
+    assert Path(result["path"]).is_file()
+    assert result["canonical_saved"] is True
+    assert result["mirror"]["state"] == "unavailable"
+    assert blocked.read_bytes() == b"preserve this obstruction"
 
 
 # --- visible memory activity (#39) ------------------------------------------

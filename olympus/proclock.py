@@ -51,7 +51,12 @@ def _safe(name: str) -> str:
 
 
 def _lock_path(name: str):
+    import os
+    from .assessment_evidence import _windows_extended_path
+    from pathlib import Path
     d = config.MEMORY_DIR / "locks"
+    if os.name == "nt":
+        d = Path(_windows_extended_path(d))
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{_safe(name)}.lock"
 

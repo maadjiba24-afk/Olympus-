@@ -3,7 +3,8 @@
 Layout:
     memory/
       lessons/ corrections/ feedback/        shared (system-generated)
-      users/<user-id>/lessons|corrections|feedback/   per-user namespaces
+      owners/<owner-key>/lessons|corrections|feedback/   exact private notes
+      users/<safe-id>/                         ambiguous legacy, preserved
       reports/ upgrades/ prompt_backups/ evals/       always shared (system)
       conversations/<id>.json                persisted chat histories
       conversations/<id>.owner               trusted search-index owner
@@ -52,8 +53,8 @@ USER_SCOPED = {"lessons", "corrections", "feedback"}
 #: `safe_id`-normalized (see `owner_key`) and must never authorize a private
 #: read, because it merges distinct principals.
 #:
-#: The generic `save`/`recent`/`recent_titles`/`prune`/`category_count` resolve
-#: the normalized namespace, so they REFUSE a private category outright. The
+#: Generic APIs now resolve exact owners for USER_SCOPED notes. They retain
+#: the explicit job_reports refusal as the established scheduler API boundary. The
 #: `*_for` helpers take the principal as an argument and are the trusted
 #: background/admin path for code that has a durable owner but no request
 #: context (the heartbeat, export, retention).
@@ -63,9 +64,9 @@ PRIVATE_CATEGORIES = frozenset({"job_reports"})
 # docs/MEMORY_FORMAT.md). NOTE_SCHEMA_VERSION stamps each markdown note's
 # frontmatter; ARCHIVE_SCHEMA_VERSION stamps an export's manifest. Import
 # refuses any archive version it doesn't understand rather than guessing.
-NOTE_SCHEMA_VERSION = 1
-ARCHIVE_SCHEMA_VERSION = 1
-SUPPORTED_ARCHIVE_VERSIONS = frozenset({1})
+NOTE_SCHEMA_VERSION = 2
+ARCHIVE_SCHEMA_VERSION = 2
+SUPPORTED_ARCHIVE_VERSIONS = frozenset({1, 2})
 
 _USER: contextvars.ContextVar[str] = contextvars.ContextVar(
     "olympus_user", default="shared"
@@ -261,49 +262,29 @@ def storage_key(owner) -> str:
 
 
 def _dir(category: str, user: str = "shared") -> Path:
-    if category not in CATEGORIES:
-        raise ValueError(f"unknown memory category: {category}")
-    if category in PRIVATE_CATEGORIES:
-        # `user` here is the EXACT durable principal — never `current_user()`,
-        # which is already normalized and would merge distinct owners.
-        d = config.MEMORY_DIR / "owners" / owner_key(user) / category
-    elif category in USER_SCOPED and user != "shared":
-        d = config.MEMORY_DIR / "users" / user / category
-    else:
-        d = config.MEMORY_DIR / category
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """Create the directory and retain the configured root's path spelling.
+
+    Windows extended paths belong at the I/O boundary inside notes.mkdir;
+    returning that spelling here breaks existing Path containment consumers.
+    """
+    from . import note_evidence as notes
+    with notes.guard():
+        path = notes.directory(user, category)
+        notes.mkdir(path)
+        return path
 
 
 def _reject_private(category: str, api: str) -> None:
-    """Generic, ambient-namespace APIs must never touch a private category.
-
-    `save`, `recent`, `recent_titles`, `prune` and `category_count` resolve
-    their directory from `current_user()`, which is `safe_id`-normalized. Using
-    that for a private store would let `recent("job_reports")` read the
-    shared-owner store, `save("job_reports", ...)` write under a lossy owner,
-    and `prune("job_reports")` delete a COLLIDING owner's notes. Rather than
-    quietly resolving to the wrong owner, they refuse and point at the
-    owner-bound API, which takes the principal as an argument.
-    """
+    """Preserve the scheduler's explicit owner-bound job-report API contract."""
     if category in PRIVATE_CATEGORIES:
         raise ValueError(
-            f"'{category}' is a private category; {api} resolves the ambient "
-            f"(normalized) namespace and cannot authorize it — use the "
-            f"owner-bound API ({api}_for) with an exact principal")
+            f"'{category}' is a private category; use the owner-bound API "
+            f"({api}_for) with an exact principal")
 
 
 def _require_private(category: str, api: str) -> None:
-    """The owner-bound API is for private categories only.
-
-    Symmetric to `_reject_private`: without this, `save_for(owner, "reports",
-    ...)` would look owner-scoped while writing into the installation-global
-    shared category — the exact confusion this split exists to remove.
-    """
     if category not in PRIVATE_CATEGORIES:
-        raise ValueError(
-            f"'{category}' is not a private category; {api} is owner-bound — "
-            f"use the ordinary API for shared and user-scoped categories")
+        raise ValueError(f"'{category}' is not a private category; {api} is owner-bound")
 
 
 def _slug(title: str) -> str:
@@ -321,6 +302,9 @@ def render_note(title: str, content: str, *,
                 created: str | None = None) -> str:
     """A note's on-disk text: a small versioned frontmatter block, then the
     same `# title` + body Olympus has always written."""
+    if schema_version == 2:
+        from . import note_evidence as notes
+        return notes.render("shared", "lessons", title, content, created=created).decode("utf-8")
     created = created or time.strftime("%Y%m%d-%H%M%S")
     return _frontmatter(schema_version, created) + f"# {title}\n\n{content.strip()}\n"
 
@@ -360,159 +344,153 @@ def note_title(text: str) -> str:
 
 
 def save(category: str, title: str, content: str) -> Path:
-    """Save into the current user's namespace (or shared for system work).
+    """Compatibility Path API; optional mirror failures also produce a receipt/warning."""
+    return Path(save_with_status(category, title, content)["path"])
 
-    Sanitization is enforced HERE, at the sink: every title and body written to
-    durable memory is defanged (`security.sanitize_for_memory`) regardless of
-    whether the caller remembered to. This closes the bypass where a new writer
-    path forgets to sanitize — there is only one door into memory, and it is
-    guarded. The pass is idempotent, so callers that already sanitize are safe.
-    """
+
+def save_with_status(category: str, title: str, content: str) -> dict:
+    """Canonical save and explicit optional-mirror outcome for CLI/tool consumers."""
     _reject_private(category, "save")
-    return _save_note(_dir(category, current_user()), category, title, content)
+    from . import note_evidence as notes
+    path = notes.create(current_owner(), category, title, content)
+    mirror = _mirror_to_vault(category, path)
+    return {"path": str(path), "canonical_saved": True, "mirror": mirror}
+
+
+def retry_note_mirror(owner: str, category: str, filename: str) -> dict:
+    """Retry only an existing exact-owner derived copy; never create another note."""
+    from . import note_evidence as notes
+    if (not isinstance(filename, str) or Path(filename).name != filename
+            or not filename.endswith(".md") or "/" in filename or "\\" in filename):
+        raise ValueError("select a canonical note filename")
+    with user_context(owner), notes.guard():
+        root = notes._check_scope(current_owner(), category)
+        path = root / filename
+        notes.validate_note(notes.read_raw(path), current_owner(), category)
+        return _mirror_to_vault(category, path)
 
 
 def _save_note(d: Path, category: str, title: str, content: str) -> Path:
-    """Write one note into `d`. The single sanitize-and-publish door.
-
-    Factored out of `save()` so the owner-bound `save_for` can target an EXACT
-    principal's directory without going through the ambient ContextVar, while
-    still passing through the same sanitization, the same atomic publish and
-    the same vault-mirror policy. There is still only one writer.
-    """
-    from . import security
-    title = security.sanitize_for_memory(title)
-    content = security.sanitize_for_memory(content)
-    # Unique, collision-proof filename (ADR 0005): the old second-granularity
-    # name let two concurrent writers of the same title silently overwrite
-    # each other. pid + O_EXCL create (atomic across processes) guarantees
-    # every save lands in its own file; the timestamp prefix is unchanged so
-    # date-parsing readers (first 14 digits) and name-sorted listings keep
-    # working.
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    base = f"{stamp}-{os.getpid()}-{_slug(title)}"
-    body = render_note(title, content)
-    # Write the body FULLY to a private tmp file, then publish it under the
-    # unique name with os.link — atomic and exclusive (EEXIST on collision),
-    # so a reader can never glob a half-written note and a crash mid-write
-    # leaves only an invisible tmp, never a corrupt note.
-    tmp = d / f".tmp-{os.getpid()}-{threading.get_ident()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(body)
-    try:
-        for n in range(1000):
-            path = d / (f"{base}.md" if n == 0 else f"{base}-{n}.md")
-            try:
-                os.link(tmp, path)
-            except FileExistsError:
-                continue
-            _mirror_to_vault(category, path)
-            return path
-        raise OSError(f"could not allocate a unique note file for '{base}'")
-    finally:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+    from . import note_evidence as notes
+    owner = current_owner()
+    if notes.logical(d) != notes.logical(notes.directory(owner, category)):
+        raise notes.NoteStateError("note sink does not match the bound owner")
+    path = notes.create(owner, category, title, content)
+    _mirror_to_vault(category, path)
+    return path
 
 
 # Categories worth reading in a knowledge GUI (Obsidian is just a folder).
-#: Mirrored into OLYMPUS_VAULT_DIR as flat per-category folders. A private
-#: category must NEVER be listed here: the mirror is one directory per
-#: category with no owner dimension, so mirroring `job_reports` would pool
-#: every owner's private output back into one browsable folder.
+#: Mirrors use a new full exact-owner key plus category. Old flat mirrors
+#: remain unclaimed and untouched. job_reports remains excluded entirely by
+#: its established private-report contract.
 _VAULT_CATEGORIES = frozenset({"lessons", "reports", "corrections"})
 
 
-def _mirror_to_vault(category: str, path: Path) -> None:
-    """Write-through mirror into OLYMPUS_VAULT_DIR — a plain-markdown knowledge
-    base the user curates in any editor/GUI. A MIRROR, not a second source of
-    truth: the gated store stays canonical; deleting/editing vault files never
-    affects Olympus. Best-effort — a broken vault path must never break a save."""
+def _mirror_to_vault(category: str, path: Path) -> dict:
+    """Optional derived copy; a mirror failure never repeats a committed note."""
+    from . import note_evidence as notes, note_archive
     vault = os.environ.get("OLYMPUS_VAULT_DIR", "").strip()
     if not vault or category not in _VAULT_CATEGORIES:
-        return
+        return {"state": "disabled", "canonical_saved": True}
+    owner = notes.category_owner(current_owner(), category)
+    receipt = config.MEMORY_DIR / "note-mirror-v2" / owner_key(owner) / (path.name + ".json")
+    result = {"version": 2, "owner": owner, "note": notes.relative(path),
+              "canonical_saved": True, "state": "unavailable"}
     try:
-        out = Path(vault).expanduser() / category
-        out.mkdir(parents=True, exist_ok=True)
-        (out / path.name).write_text(path.read_text(encoding="utf-8"),
-                                     encoding="utf-8")
-    except OSError:
-        pass
+        with notes.guard():
+            raw = notes.read_raw(path)
+            notes.validate_note(raw, owner, category)
+            # New owner-aware tree; previous flat/mixed mirrors stay untouched.
+            output = Path(vault).expanduser() / "olympus-notes-v2" / owner_key(owner) / category / path.name
+            note_archive.external_publish(output, raw)
+            if note_archive.external_read(output, notes.MAX_NOTE) != raw:
+                raise OSError("mirror verification failed")
+            result.update(state="available", sha256=notes.digest(raw))
+    except (OSError, ValueError, notes.evidence.OwnerEvidenceStateError):
+        result["reason"] = "mirror publication unconfirmed; canonical note is saved; do not repeat it"
+    try:
+        with notes.guard():
+            notes.publish(receipt, json.dumps(result, sort_keys=True).encode())
+    except (OSError, notes.evidence.OwnerEvidenceStateError):
+        result["receipt_state"] = "unavailable"
+    if result["state"] != "available" or result.get("receipt_state"):
+        notes.mirror_warning("Canonical note saved; optional mirror evidence unavailable. Inspect memory notes-status.")
+    return result
 
 
 def _search_dirs() -> list[Path]:
-    """Directories the current request may read.
-
-    A private category is NEVER swept as a shared directory — `_dir(c)` for it
-    would be one global folder any caller could read, which is the defect the
-    category exists to fix. It is added only for `current_owner()`, the exact
-    principal from the trusted request context; `current_user()` is normalized
-    and would merge colliding owners.
-    """
-    dirs = [_dir(c) for c in CATEGORIES if c not in PRIVATE_CATEGORIES]
-    if current_user() != "shared":
-        dirs += [_dir(c, current_user()) for c in USER_SCOPED]
-    dirs += [_dir(c, current_owner()) for c in PRIVATE_CATEGORIES]
+    from . import note_evidence as notes
+    dirs = [notes.directory("shared", c) for c in CATEGORIES if c not in PRIVATE_CATEGORIES]
+    if current_owner() != "shared":
+        dirs += [notes.directory(current_owner(), c) for c in USER_SCOPED]
+    dirs += [notes.directory(current_owner(), c) for c in PRIVATE_CATEGORIES]
     return dirs
 
 
-def search(query: str, limit: int = 5) -> str:
-    """Ranked keyword search across shared memory, the current user's own
-    user-scoped notes, and the current owner's private categories.
+def _note_rows(category, owner, *, include_shared):
+    from . import note_evidence as notes
+    with notes.guard():
+        rows = notes.notes(owner, category)
+        if include_shared and category in USER_SCOPED and canonical_owner(owner) != "shared":
+            rows += notes.notes("shared", category)
+        return rows
 
-    THE OWNER IS NOT A PARAMETER. It comes from `current_owner()`, the trusted
-    request context the orchestrator/gateway set from the authenticated
-    principal. A caller-supplied owner selector would be an authorization
-    bypass the model could drive: `recall_memory` passes only a query, and
-    there is deliberately no argument through which a query could name someone
-    else's namespace.
-    """
+
+def _recent_rows(category, owner, n, include_shared):
+    from . import note_evidence as notes
+    notes.evidence.integer(n, minimum=0, maximum=notes.MAX_FILES)
+    return sorted(_note_rows(category, owner, include_shared=include_shared),
+                  key=lambda row: row["path"].name, reverse=True)[:n]
+
+
+def _prune_rows(owner, category, keep):
+    from . import note_evidence as notes
+    notes.evidence.integer(keep, minimum=0, maximum=notes.MAX_FILES)
+    with notes.guard():
+        rows = sorted(notes.notes(owner, category), key=lambda row: row["path"].name, reverse=True)
+        return len(notes.delete_rows(rows[keep:]))
+
+
+def search(query: str, limit: int = 5) -> str:
+    from . import note_evidence as notes
+    notes.evidence.text(query, 32768, empty=True)
+    notes.evidence.integer(limit, minimum=0, maximum=100)
     terms = [t for t in re.split(r"\W+", query.lower()) if len(t) > 2]
-    scored: list[tuple[float, Path, str]] = []
-    for d in _search_dirs():
-        for path in d.glob("*.md"):
-            _, body = parse_note(path.read_text(encoding="utf-8", errors="replace"))
-            lower = body.lower()
-            # diminishing returns per term + title hits weighted higher
-            title = lower.splitlines()[0] if lower else ""
-            score = 0.0
-            for t in terms:
-                hits = lower.count(t)
-                if hits:
-                    score += 1 + min(hits, 5) * 0.2 + (2 if t in title else 0)
-            if score:
-                scored.append((score, path, body))
-    scored.sort(key=lambda x: -x[0])
+    scored = []
+    with notes.guard():
+        for category in CATEGORIES:
+            for row in _note_rows(category, current_owner(), include_shared=True):
+                lower = row["body"].lower()
+                title = lower.splitlines()[0] if lower else ""
+                score = sum(1 + min(lower.count(t), 5) * 0.2 + (2 if t in title else 0)
+                            for t in terms if t in lower)
+                if score:
+                    scored.append((score, row))
+    scored.sort(key=lambda item: (-item[0], str(item[1]["path"])))
     if not scored:
         return "No memory entries match that query."
-    out = []
-    for _, path, body in scored[:limit]:
-        out.append(f"--- {path.parent.name}/{path.name} ---\n{body[:1500]}")
-    return "\n\n".join(out)
+    return "\n\n".join(
+        f"--- {row['category']}/{row['path'].name} ---\n{row['body'][:1500]}"
+        for _, row in scored[:limit])
 
 
 # --- explicit owner-bound API (private categories) -------------------------
 #
 # Authorization here is an ARGUMENT, never the ambient namespace. A background
 # worker's ContextVar is whatever the last runner happened to leave behind, and
-# it is `safe_id`-normalized on the way in, so it can neither be trusted nor
+# The historical namespace is `safe_id`-normalized, so it can neither be trusted nor
 # even represent the exact principal. Every private read and write names its
 # owner explicitly.
 
 
 def save_for(owner: str, category: str, title: str, content: str) -> Path:
-    """Save into `owner`'s namespace, independent of the ambient ContextVar.
-
-    Calls `_save_note` directly rather than `save()` — `save()` resolves the
-    ambient namespace and refuses private categories — but shares the same
-    sanitize-and-publish implementation, so there is still exactly one door
-    into memory and it is still guarded.
-    """
     _require_private(category, "save_for")
+    from . import note_evidence as notes
     with user_context(owner):
-        return _save_note(_dir(category, owner), category, title, content)
+        path = notes.create(owner, category, title, content)
+        _mirror_to_vault(category, path)
+        return path
 
 
 def search_for(owner: str, query: str, limit: int = 5) -> str:
@@ -528,95 +506,45 @@ def search_for(owner: str, query: str, limit: int = 5) -> str:
 
 
 def recent_for(owner: str, category: str, n: int = 5) -> list[str]:
-    """Newest note bodies in `owner`'s private `category` (newest first)."""
     _require_private(category, "recent_for")
-    files = sorted(_dir(category, owner).glob("*.md"),
-                   key=lambda p: p.name, reverse=True)[:n]
-    return [parse_note(p.read_text(encoding="utf-8", errors="replace"))[1]
-            for p in files]
+    return [row["body"] for row in _recent_rows(category, owner, n, False)]
 
 
 def count_for(owner: str, category: str) -> int:
     _require_private(category, "count_for")
-    return len(list(_dir(category, owner).glob("*.md")))
+    return len(_note_rows(category, owner, include_shared=False))
 
 
 def prune_for(owner: str, category: str, keep: int = 200) -> int:
-    """Keep only the newest `keep` notes in `owner`'s private `category`.
-
-    Owner-bound like every other private operation, so one tenant's prune can
-    never reach another's store.
-    """
     _require_private(category, "prune_for")
-    files = sorted(_dir(category, owner).glob("*.md"),
-                   key=lambda p: p.name, reverse=True)
-    removed = 0
-    for path in files[keep:]:
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            pass
-    return removed
+    return _prune_rows(owner, category, keep)
 
 
 def recent(category: str, n: int = 5) -> str:
     _reject_private(category, "recent")
-    files = list(_dir(category).glob("*.md"))
-    if category in USER_SCOPED and current_user() != "shared":
-        files += list(_dir(category, current_user()).glob("*.md"))
-    files = sorted(files, key=lambda p: p.name, reverse=True)[:n]
-    if not files:
+    rows = _recent_rows(category, current_owner(), n, True)
+    if not rows:
         return f"(no {category} recorded yet)"
-    return "\n\n".join(
-        f"--- {p.name} ---\n"
-        f"{parse_note(p.read_text(encoding='utf-8', errors='replace'))[1][:1500]}"
-        for p in files
-    )
+    return "\n\n".join(f"--- {row['path'].name} ---\n{row['body'][:1500]}" for row in rows)
 
 
 def recent_titles(category: str, n: int = 5) -> list[str]:
-    """The titles of the most recent notes in a category (newest first) — a
-    glanceable list without the bodies."""
     _reject_private(category, "recent_titles")
-    files = list(_dir(category).glob("*.md"))
-    if category in USER_SCOPED and current_user() != "shared":
-        files += list(_dir(category, current_user()).glob("*.md"))
-    files = sorted(files, key=lambda p: p.name, reverse=True)[:n]
-    out: list[str] = []
-    for p in files:
-        body = parse_note(p.read_text(encoding="utf-8", errors="replace"))[1]
-        first = body.lstrip().splitlines()[0] if body.strip() else ""
-        # Strip only the single leading "# " heading marker — NOT a character
-        # class (lstrip("# ") would mangle a title like "#1 priority").
-        title = first[2:] if first.startswith("# ") else first
-        out.append(title.strip() or p.stem)
-    return out
+    return [note_title(row["body"]) or row["path"].stem
+            for row in _recent_rows(category, current_owner(), n, True)]
 
 
 def prune(category: str, keep: int = 200) -> str:
-    """Keep only the newest `keep` files in a category (current user's
-    namespace). Older entries are deleted — Metis distills the durable ones
-    into skills before they're pruned, so signal survives, noise doesn't."""
     _reject_private(category, "prune")
-    files = sorted(_dir(category, current_user()).glob("*.md"),
-                   key=lambda p: p.name, reverse=True)
-    removed = 0
-    for path in files[keep:]:
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            pass
-    return f"Pruned {removed} old {category} entries (kept {min(len(files), keep)})."
+    removed = _prune_rows(current_owner(), category, keep)
+    from . import note_evidence as notes
+    remaining = len(notes.notes(current_owner(), category))
+    return f"Pruned {removed} old {category} entries (kept {remaining})."
 
 
 def category_count(category: str) -> int:
     _reject_private(category, "category_count")
-    n = len(list(_dir(category).glob("*.md")))
-    if category in USER_SCOPED and current_user() != "shared":
-        n += len(list(_dir(category, current_user()).glob("*.md")))
-    return n
+    return len(_note_rows(category, current_owner(), include_shared=True))
 
 
 # --- persisted conversations ---------------------------------------------
@@ -1005,43 +933,13 @@ def sweep_evidence(retain_days: int) -> int:
 # future Olympus refuses an archive it doesn't understand instead of guessing.
 
 def _memory_roots(user: str | None = None, all_users: bool = False) -> list[Path]:
-    """The on-disk roots that make up 'memory' for an export/delete scope.
-
-    - all_users: every shared category, every per-user namespace, conversations.
-    - user='shared' (default): the shared (system) categories only.
-    - user=<id>: just that person's namespace (`users/<id>/`)."""
-    base = config.MEMORY_DIR
-    if all_users:
-        roots = [base / c for c in CATEGORIES]
-        # `owners/` holds every PRIVATE category, keyed by exact principal. It
-        # is a sibling of `users/`, not a subdirectory of any category, so a
-        # CATEGORIES sweep misses it entirely — an export that omitted it would
-        # silently drop every scheduled job report from the archive.
-        roots += [base / "users", base / "owners", base / "conversations"]
-        return [r for r in roots if r.exists()]
-    exact = canonical_owner(user)
-    roots: list[Path] = []
-    if exact == "shared":
-        # The shared scope keeps its global categories AND gains the canonical
-        # shared owner's private tree. A legacy/missing-owner job report is
-        # filed under owner_key("shared"), so omitting it dropped those notes
-        # from the default export and left them behind on a whole-scope delete.
-        roots += [base / c for c in CATEGORIES if (base / c).exists()]
-    else:
-        ud = base / "users" / safe_id(exact)
-        if ud.exists():
-            roots.append(ud)
-    # The owner's private tree, addressed by the EXACT principal. `safe_id`
-    # here would export a colliding owner's notes instead of this one's.
-    od = base / "owners" / owner_key(exact)
-    if od.exists():
-        roots.append(od)
-    return roots
+    from . import note_archive
+    return note_archive.roots(user, all_users)
 
 
 def _collect_files(roots: list[Path]) -> list[Path]:
-    files = {p for r in roots for p in r.rglob("*") if p.is_file()}
-    return sorted(files)
+    from . import note_archive
+    return note_archive.collect(roots)
 
 
 def _sha256(data: bytes) -> str:
@@ -1054,22 +952,8 @@ def _created_from_name(name: str) -> str:
 
 
 def migrate_notes() -> dict:
-    """Upgrade frontmatter-less (v0) notes to the current note schema in place,
-    preserving the body verbatim. Returns {scanned, migrated}. Idempotent —
-    notes already at the current version are left untouched."""
-    scanned = migrated = 0
-    for root in _memory_roots(all_users=True):
-        for path in root.rglob("*.md"):
-            scanned += 1
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if note_schema_version(text) >= NOTE_SCHEMA_VERSION:
-                continue
-            created = _created_from_name(path.name)
-            body = text if text.endswith("\n") else text + "\n"
-            path.write_text(_frontmatter(NOTE_SCHEMA_VERSION, created) + body,
-                            encoding="utf-8")
-            migrated += 1
-    return {"scanned": scanned, "migrated": migrated}
+    from . import note_archive
+    return note_archive.migrate()
 
 
 def _maybe_decrypt(raw: bytes) -> bytes:
@@ -1089,44 +973,8 @@ def _maybe_decrypt(raw: bytes) -> bytes:
 
 def export_memory(out_path, *, user: str | None = None, all_users: bool = False,
                   encrypt: bool = False) -> dict:
-    """Write a self-describing tar.gz of the scoped memory to `out_path`.
-
-    The archive holds `manifest.json` (schema_version + every file's path,
-    sha256 and size) and `data/<relpath>` members byte-for-byte. Returns the
-    manifest. With encrypt=True the whole archive is Fernet-encrypted via
-    vault.py."""
-    files = _collect_files(_memory_roots(user, all_users))
-    manifest = {
-        "schema_version": ARCHIVE_SCHEMA_VERSION,
-        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "scope": {"all": True} if all_users
-                 else {"user": safe_id(user or "shared")},
-        "files": [],
-    }
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for p in files:
-            rel = p.relative_to(config.MEMORY_DIR).as_posix()
-            data = p.read_bytes()
-            manifest["files"].append(
-                {"path": rel, "sha256": _sha256(data), "bytes": len(data)})
-            info = tarfile.TarInfo(name=f"data/{rel}")
-            info.size = len(data)
-            info.mtime = 0
-            tar.addfile(info, io.BytesIO(data))
-        mdata = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-        minfo = tarfile.TarInfo(name="manifest.json")
-        minfo.size = len(mdata)
-        minfo.mtime = 0
-        tar.addfile(minfo, io.BytesIO(mdata))
-    raw = buf.getvalue()
-    if encrypt:
-        from . import vault
-        raw = vault._fernet().encrypt(raw)
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(raw)
-    return manifest
+    from . import note_archive
+    return note_archive.export(out_path, user=user, all_users=all_users, encrypt=encrypt)
 
 
 def _gate_import(manifest: dict, origin: str) -> None:
@@ -1175,89 +1023,16 @@ def _gate_import(manifest: dict, origin: str) -> None:
             "Nothing was restored.") from refusal
 
 
-def import_memory(archive, *, overwrite: bool = True) -> dict:
-    """Restore a memory export into MEMORY_DIR. Validates the manifest's
-    schema_version and REFUSES an unknown one (raises ValueError) rather than
-    importing data it can't vouch for. Returns {schema_version, restored,
-    count, verified}."""
-    raw = _maybe_decrypt(Path(archive).read_bytes())
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
-        try:
-            mf = tar.extractfile("manifest.json")
-        except KeyError:
-            mf = None
-        if mf is None:
-            raise ValueError(
-                "not an Olympus memory export — no manifest.json inside.")
-        manifest = json.loads(mf.read().decode("utf-8"))
-        version = manifest.get("schema_version")
-        if version not in SUPPORTED_ARCHIVE_VERSIONS:
-            raise ValueError(
-                f"refusing to import unknown schema_version {version!r} "
-                f"(this build supports {sorted(SUPPORTED_ARCHIVE_VERSIONS)}). "
-                "Upgrade Olympus, or migrate the archive first.")
-        _gate_import(manifest, str(archive))     # W2-C5, before any restore
-        restored, verified = [], 0
-        for entry in manifest.get("files", []):
-            rel = entry["path"]
-            member = tar.extractfile(f"data/{rel}")
-            if member is None:
-                continue
-            data = member.read()
-            if entry.get("sha256") and _sha256(data) == entry["sha256"]:
-                verified += 1
-            dest = config.MEMORY_DIR / rel
-            # Importing an archive is a trust boundary (the data-sovereignty
-            # contract supports archives produced elsewhere), and entry["path"]
-            # is attacker-controlled — reject any path that escapes MEMORY_DIR so
-            # a crafted `../../` or absolute entry can't overwrite files outside.
-            try:
-                dest_r, mem_r = dest.resolve(), config.MEMORY_DIR.resolve()
-            except (OSError, RuntimeError):
-                continue
-            if dest_r != mem_r and mem_r not in dest_r.parents:
-                continue
-            if dest.exists() and not overwrite:
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)
-            restored.append(rel)
-    return {"schema_version": version, "restored": sorted(restored),
-            "count": len(restored), "verified": verified}
+def import_memory(archive, *, overwrite: bool = True, user=None, all_users=None) -> dict:
+    from . import note_archive
+    return note_archive.restore(archive, overwrite=overwrite, user=user, all_users=all_users)
 
 
 def delete_memory(user: str | None = None, *, category: str | None = None,
-                  note_id: str | None = None) -> list[str]:
-    """Hard-delete scoped memory from disk and return exactly the relative
-    paths removed. Scope narrows from the user's whole namespace, to one
-    category, to a single note (by filename or stem). Files are unlinked, not
-    tombstoned — when this returns, they are gone."""
-    if category is not None and category not in CATEGORIES:
-        raise ValueError(f"unknown memory category: {category}")
-    if category is not None:
-        # A private category is keyed on the exact principal; passing the
-        # safe_id form would delete a COLLIDING owner's notes.
-        owner = (user if category in PRIVATE_CATEGORIES
-                 else safe_id(user or "shared"))
-        roots = [_dir(category, owner)]
-    else:
-        roots = _memory_roots(user)
-    removed: list[str] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        for p in sorted(root.rglob("*")):
-            if not p.is_file():
-                continue
-            if note_id is not None and note_id not in (p.name, p.stem):
-                continue
-            rel = p.relative_to(config.MEMORY_DIR).as_posix()
-            try:
-                p.unlink()
-                removed.append(rel)
-            except OSError:
-                pass
-    return sorted(removed)
+                  note_id: str | None = None, preview=None) -> list[str]:
+    """Delete selected canonical file notes; retained recovery bytes are not erasure."""
+    from . import note_archive
+    return note_archive.delete(user, category=category, note_id=note_id, preview=preview)
 
 
 # --- Heartbeat state -----------------------------------------------------

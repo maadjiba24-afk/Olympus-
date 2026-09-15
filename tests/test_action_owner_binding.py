@@ -47,6 +47,7 @@ def test_owner_agnostic_action_remains_owner_agnostic():
 
 
 def test_direct_note_prepare_cannot_fall_back_to_shared_storage():
+    from olympus import memory, note_evidence
     actions.grant_scope("alice", "notes")
     action = actions.prepare(
         "alice", "save_note", {"title": "fixture", "body": "alice only"})
@@ -54,7 +55,7 @@ def test_direct_note_prepare_cannot_fall_back_to_shared_storage():
     assert action.payload["_user"] == "alice"
     done = actions.approve("alice", action.id)
     assert done.status == actions.EXECUTED
-    assert config.MEMORY_DIR / "notes" / "alice" in Path(
+    assert config.MEMORY_DIR / "owners" / memory.owner_key("alice") / "action_notes" in note_evidence.logical(
         done.result["path"]).parents
     assert not (config.MEMORY_DIR / "notes" / "shared").exists()
 

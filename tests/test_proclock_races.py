@@ -512,16 +512,18 @@ def test_heartbeat_state_save_is_atomic(monkeypatch):
 
 def test_memory_save_never_exposes_partial_notes(monkeypatch):
     """The note body must be fully written BEFORE the .md name appears
-    (publish via os.link), so a concurrent glob never reads half a note."""
+    (publish via atomic replacement), so a reader never sees half a note."""
     memory.set_user("shared")
     seen = []
-    real_link = os.link
+    real_replace = os.replace
 
     def spy(src, dst):
-        seen.append(Path(src).read_text(encoding="utf-8"))
-        return real_link(src, dst)
+        if str(dst).endswith(".md"):
+            assert not Path(dst).exists()
+            seen.append(Path(src).read_text(encoding="utf-8"))
+        return real_replace(src, dst)
 
-    monkeypatch.setattr(os, "link", spy)
+    monkeypatch.setattr(os, "replace", spy)
     p = memory.save("reports", "publish check", "the whole body")
     assert seen and "the whole body" in seen[0]    # complete at publish time
     assert "the whole body" in p.read_text(encoding="utf-8")

@@ -515,6 +515,38 @@ def _wd_open(tr: "trace_mod.Trace") -> "_RunWatch | None":
         return None
 
 
+
+def _bind_note_owner(*, instance=False):
+    """Bind exact memory authority during a call/resumption, restoring its caller."""
+    from functools import wraps
+    from inspect import isgeneratorfunction
+    def decorate(function):
+        if isgeneratorfunction(function):
+            @wraps(function)
+            def streaming(*args, **kwargs):
+                owner = args[0].user if instance else "shared"
+                iterator = function(*args, **kwargs)
+                try:
+                    while True:
+                        with memory.user_context(owner):
+                            try:
+                                value = next(iterator)
+                            except StopIteration:
+                                return
+                        yield value
+                finally:
+                    with memory.user_context(owner):
+                        iterator.close()
+            return streaming
+        @wraps(function)
+        def calling(*args, **kwargs):
+            owner = args[0].user if instance else "shared"
+            with memory.user_context(owner):
+                return function(*args, **kwargs)
+        return calling
+    return decorate
+
+
 class Olympus:
     """Stateful conversation handler running the full pipeline.
 
@@ -1307,6 +1339,7 @@ class Olympus:
 
     # -- public entry point --------------------------------------------------
 
+    @_bind_note_owner(instance=True)
     def _run_one(self, key: str, task: str, tr: "trace_mod.Trace",
                  settings_override: config.Settings | None = None,
                  retry_index: int = 0,
@@ -1327,7 +1360,6 @@ class Olympus:
         `tr` is passed in (not stored on self) so the run's Trace reaches this
         method safely across the dispatch ThreadPoolExecutor.
         """
-        memory.set_user(self.user)  # worker threads get their own context
         # W2-C6: the run's progress lease (None unless OLYMPUS_WATCHDOG is
         # armed). Checked BEFORE any work starts, so a refused run — the
         # terminal state the ladder's "refuse unsafe continuation" step
@@ -2310,6 +2342,7 @@ class Olympus:
         reply = self._maybe_check_synthesis(user_message, brief, reply, tr)
         return self._apply_unverified_banner(reply)
 
+    @_bind_note_owner(instance=True)
     def ask(self, user_message: str) -> str:
         error = self.settings.validate()
         if error:
@@ -2318,7 +2351,6 @@ class Olympus:
             usage.check_budget()
         except usage.BudgetExceeded as err:
             return str(err)
-        memory.set_user(self.user)
         tr = trace_mod.Trace("ask", self.user)
         # Freeze the conversation history AS OF run start: _route hashes
         # `self.history + [user_message]`, so a faithful replay must restore the
@@ -2358,6 +2390,7 @@ class Olympus:
         self._finish(user_message, reply)
         return reply
 
+    @_bind_note_owner(instance=True)
     def ask_stream(self, user_message: str):
         """Generator yielding the final answer token-by-token.
 
@@ -2373,7 +2406,6 @@ class Olympus:
         except usage.BudgetExceeded as err:
             yield str(err)
             return
-        memory.set_user(self.user)
         tr = trace_mod.Trace("ask_stream", self.user)
         # Record the input and the history-as-of-run-start like ask() does,
         # otherwise every streamed run is non-replayable (replay_run raises "no
@@ -2492,6 +2524,7 @@ class Olympus:
         return (f"Removed the last {removed} exchange(s) from the "
                 "conversation. The next question continues from before them.")
 
+    @_bind_note_owner(instance=True)
     def ask_ephemeral(self, question: str) -> str:
         """Answer a side question WITHOUT leaving a trace: nothing is appended
         to history, persisted, extracted into memory, or counted toward the
@@ -2505,7 +2538,6 @@ class Olympus:
             usage.check_budget()
         except usage.BudgetExceeded as err:
             return str(err)
-        memory.set_user(self.user)
         tr = trace_mod.Trace("ask_ephemeral", self.user)
         tr.meta = {"input": question, "conversation_id": None}
         try:
@@ -2547,6 +2579,7 @@ class Olympus:
         return (f"Primary model → {new_primary.provider}/{name} "
                 f"(was {old.model or 'default'}).\n{self.pool.assignment()}")
 
+    @_bind_note_owner(instance=True)
     def reset(self) -> str:
         """Distill the conversation into durable state, then clear it.
 
@@ -2556,7 +2589,6 @@ class Olympus:
         it, so the next turn starts clean but not amnesiac. Durable per-user
         memory (lessons/facts) is untouched — only the working transcript is
         distilled. Used by /reset and by scheduled gateway session resets."""
-        memory.set_user(self.user)
         turns = len([m for m in self.history if m.get("role") == "user"])
         if not self.history:
             return "Nothing to reset — the conversation is already empty."
@@ -2596,19 +2628,19 @@ class Olympus:
                                      owner=self.user)
         return f"Fresh start — {tail} ({turns} turn(s) folded away)."
 
+    @_bind_note_owner(instance=True)
     def set_language(self, value: str) -> str:
         """Set this user's persistent language preference ('auto' to detect)."""
-        memory.set_user(self.user)
         return i18n.set_preference(self.user, value)
 
+    @_bind_note_owner(instance=True)
     def set_contribute(self, on: bool) -> str:
         """Opt this user in/out of the shared cross-model learning pool."""
-        memory.set_user(self.user)
         return contrib.set_enabled(self.user, on)
 
+    @_bind_note_owner(instance=True)
     def feedback(self, verdict: str, comment: str = "") -> str:
         """Record a 👍/👎 on the last exchange — fuel for the learning cycle."""
-        memory.set_user(self.user)
         if len(self.history) < 2:
             return "Nothing to rate yet."
         user_msg = self.history[-2].get("content", "")
@@ -2636,13 +2668,14 @@ class Olympus:
         except Exception:
             pass
         verdict = signal
-        memory.save(
-            "feedback", f"{verdict} feedback",
-            f"Verdict: {verdict}\n"
-            + (f"Comment: {comment}\n" if comment else "")
-            + f"\n## User asked\n{str(user_msg)[:1000]}\n"
-            + f"\n## Olympus replied\n{str(reply)[:2000]}",
-        )
+        with memory.user_context(self.user):
+            memory.save(
+                "feedback", f"{verdict} feedback",
+                f"Verdict: {verdict}\n"
+                + (f"Comment: {comment}\n" if comment else "")
+                + f"\n## User asked\n{str(user_msg)[:1000]}\n"
+                + f"\n## Olympus replied\n{str(reply)[:2000]}",
+            )
         return ("Thanks — noted. Olympus learns from this in its daily "
                 "learning cycle." + routing_warning)
 
@@ -2928,9 +2961,9 @@ def _budget_skip() -> str | None:
         return f"[skipped to stay within the daily budget — {err}]"
 
 
+@_bind_note_owner()
 def opportunity_scan(settings: config.Settings | None = None) -> str:
     """Argus surfs the web for opportunities & world events; report → memory."""
-    memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
     task = (
@@ -2943,9 +2976,9 @@ def opportunity_scan(settings: config.Settings | None = None) -> str:
     return report
 
 
+@_bind_note_owner()
 def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     """Mnemosyne watches one YouTube video and stores what it learned."""
-    memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
     task = (
@@ -2959,11 +2992,11 @@ def watch_and_learn(url: str, settings: config.Settings | None = None) -> str:
     return summary
 
 
+@_bind_note_owner()
 def daily_learning(settings: config.Settings | None = None) -> str:
     """Metis distills the last day of experience into skills — the mechanism
     that makes Olympus smarter day by day, across every model users bring."""
     from . import skills
-    memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
     cross_model = contrib.digest(40)
@@ -2992,13 +3025,13 @@ def daily_learning(settings: config.Settings | None = None) -> str:
     except Exception:
         pass
     # Hygiene: distillation done, prune raw shared memory and the contrib queue.
-    memory.set_user("shared")
     memory.prune("lessons", keep=300)
     memory.prune("corrections", keep=200)
     contrib.clear_old(keep=200)
     return report
 
 
+@_bind_note_owner()
 def train_specialists(settings: config.Settings | None = None,
                       focus: int = 2) -> str:
     """Systematically strengthen the council: ensure every user-facing
@@ -3008,7 +3041,6 @@ def train_specialists(settings: config.Settings | None = None,
     """
     from . import evals
     settings = settings or config.Settings.from_env()
-    memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
 
@@ -3047,6 +3079,7 @@ def train_specialists(settings: config.Settings | None = None,
     return summary
 
 
+@_bind_note_owner()
 def gate_skills(settings: config.Settings | None = None) -> str:
     """Prove provisional skills with a before/after benchmark; keep the ones
     that measurably raise the score, revert the rest. The safety net that lets
@@ -3057,7 +3090,6 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     """
     from . import evals, skills
     settings = settings or config.Settings.from_env()
-    memory.set_user("shared")
 
     provisional = skills.list_provisional()
     if not provisional:
@@ -3156,6 +3188,7 @@ def gate_skills(settings: config.Settings | None = None) -> str:
     return msg
 
 
+@_bind_note_owner()
 def gate_prompt(agent: str, new_prompt: str, reason: str,
                 settings: config.Settings | None = None) -> str:
     """Apply a prompt change ONLY if a before/after benchmark shows it does not
@@ -3174,7 +3207,6 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
 
     from . import evals, tools
     settings = settings or config.Settings.from_env()
-    memory.set_user("shared")
 
     stem = Path(agent).stem
     path = config.PROMPTS_DIR / f"{stem}.md"
@@ -3214,12 +3246,12 @@ def gate_prompt(agent: str, new_prompt: str, reason: str,
     return f"Prompt '{stem}' reverted — benchmark regressed [{before}→{after}]. {restored}"
 
 
+@_bind_note_owner()
 def evolution_audit(settings: config.Settings | None = None) -> str:
     """Prometheus audits Olympus, upgrades prompts, files proposals."""
     # System work runs in the SHARED namespace — never a triggering user's.
     # (This routine can be launched from a background thread spawned inside a
     # user request, which would otherwise inherit that user's memory context.)
-    memory.set_user("shared")
     if (skip := _budget_skip()):
         return skip
 

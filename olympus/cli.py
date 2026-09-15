@@ -168,12 +168,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_mem.add_argument(
         "action", nargs="?", default="list",
         choices=["card", "list", "candidates", "approve", "reject", "forget", "search",
-                 "migrate", "export", "import", "delete", "state-status", "initialize-empty"])
+                 "migrate", "export", "import", "delete", "state-status", "initialize-empty",
+                 "notes-status", "notes-initialize", "notes-recover", "notes-retry-action", "notes-retry-mirror"])
     p_mem.add_argument("arg", nargs="*",
                        help="id (approve/reject/forget), query (search), or "
                             "archive path (export/import)")
     p_mem.add_argument("--user", help="memory namespace for export/delete "
                                       "(default: shared)")
+    p_mem.add_argument("--decision", choices=["resume", "rollback"],
+                       help="explicit decision for a preserved note transaction")
     p_mem.add_argument("--state", choices=["memory", "graph"], default="memory",
                        help="typed memory or relationship graph state")
     p_mem.add_argument("--acknowledge-unclaimed-legacy", action="store_true",
@@ -609,6 +612,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dist.add_argument("source", nargs="+", help="url | file/dir | description")
     p_jour = sub.add_parser("journey", help="the timeline of what Olympus "
                                             "has learned (show/rm entries)")
+    p_jour.add_argument("--user", default="cli", help="exact note owner (operator CLI)")
     p_jour.add_argument("action", nargs="?", default="list",
                         choices=["list", "show", "rm"])
     p_jour.add_argument("ref", nargs="?", default="",
@@ -1069,6 +1073,16 @@ def command_names() -> list[str]:
 
 @owner_evidence.cli_errors
 def main(argv: list[str] | None = None) -> int:
+    from .owner_evidence import OwnerEvidenceStateError
+    try:
+        return _main(argv)
+    except OwnerEvidenceStateError as err:
+        print(json.dumps({"state": "unavailable", "store": err.store,
+                          "reason": err.reason}, indent=2))
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1232,6 +1246,32 @@ def main(argv: list[str] | None = None) -> int:
         from . import usermem, recall
         user = "cli"
         arg = " ".join(args.arg).strip()
+        if args.action in ("notes-status", "notes-initialize", "notes-recover", "notes-retry-action", "notes-retry-mirror"):
+            from . import note_evidence as notes
+            try:
+                if args.action == "notes-status":
+                    result = notes.status(args.user or user, args.category)
+                elif args.action == "notes-initialize":
+                    if not args.category:
+                        raise ValueError("notes-initialize requires --category")
+                    result = notes.initialize(args.user or user, args.category,
+                                              acknowledge_legacy=args.acknowledge_unclaimed_legacy)
+                elif args.action == "notes-retry-action":
+                    from . import actions
+                    action = actions.retry_note(args.user or user, arg)
+                    result = {"state": "available", "action": action.id,
+                              "status": action.status, "error": action.error}
+                elif args.action == "notes-retry-mirror":
+                    if not args.category:
+                        raise ValueError("notes-retry-mirror requires --category")
+                    result = memory.retry_note_mirror(args.user or user, args.category, arg)
+                else:
+                    result = notes.recover(arg, args.decision)
+            except ValueError as err:
+                print(f"[refused] {err}")
+                return 1
+            print(json.dumps(result, indent=2))
+            return 1 if result["state"] == "unavailable" else 0
         if args.action in ("state-status", "initialize-empty"):
             from . import relgraph
             snapshot = (usermem if args.state == "memory" else relgraph)._state(args.user or user)
@@ -1266,7 +1306,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("Which archive? Use: memory import <archive>")
                 return 1
             try:
-                r = memory.import_memory(src)
+                if args.all and args.user:
+                    raise ValueError("select --user or --all, not both")
+                if not args.all and not args.user:
+                    raise ValueError("import requires an explicit --user EXACT_OWNER or --all")
+                r = memory.import_memory(src, user=args.user, all_users=args.all)
             except ValueError as err:
                 print(f"[refused] {err}")
                 return 1
@@ -1275,18 +1319,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "delete":
             target = args.user or "shared"
             # Show what will go before doing it, then require confirmation.
-            from . import config as _cfg
-            roots = (memory._memory_roots(target) if not args.category
-                     else [memory._dir(args.category, memory.safe_id(target))])
-            doomed = [p.relative_to(_cfg.MEMORY_DIR).as_posix()
-                      for r in roots if r.exists()
-                      for p in sorted(r.rglob("*")) if p.is_file()
-                      and (args.note_id is None
-                           or args.note_id in (p.name, p.stem))]
+            from . import note_archive
+            preview = note_archive.delete_preview(target, category=args.category,
+                                                  note_id=args.note_id)
+            doomed = [item["path"] for item in preview["files"]]
             if not doomed:
                 print("Nothing matches that scope — nothing deleted.")
                 return 0
-            print(f"This will permanently delete {len(doomed)} file(s):")
+            print(f"This will remove {len(doomed)} canonical note file(s); recovery copies remain:")
             for rel in doomed:
                 print(f"  {rel}")
             if not args.yes:
@@ -1295,8 +1335,8 @@ def main(argv: list[str] | None = None) -> int:
                     print("Aborted — nothing deleted.")
                     return 0
             removed = memory.delete_memory(target, category=args.category,
-                                           note_id=args.note_id)
-            print(f"Deleted {len(removed)} file(s).")
+                                           note_id=args.note_id, preview=preview)
+            print(f"Deleted {len(removed)} canonical note file(s). Recovery copies remain; this is not principal erasure.")
         elif args.action == "card":
             from . import usermem as _um
             print(_um.render_card(args.user or user))
@@ -3270,11 +3310,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "journey":
         from . import journey
         if args.action == "list":
-            print(journey.timeline())
+            print(journey.timeline(args.user))
         elif args.action == "show":
-            print(journey.show(args.ref))
+            print(journey.show(args.ref, args.user))
         elif args.action == "rm":
-            print(journey.remove(args.ref))
+            print(journey.remove(args.ref, args.user))
     elif args.command == "moa":
         from . import moa
         print(moa.one_shot(" ".join(args.prompt)))

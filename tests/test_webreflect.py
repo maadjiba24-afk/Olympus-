@@ -62,10 +62,11 @@ def test_run_due_surfaces_once_then_dedups(env):
 
 
 def test_lesson_persisted(env, monkeypatch):
+    from olympus import memory, note_evidence
     _seed()
-    saved = {}
-    monkeypatch.setattr("olympus.memory.save",
-                        lambda cat, title, body: saved.update(
-                            {"cat": cat, "body": body}))
-    webreflect.run_due(now=10**9, notify=lambda t: None)
-    assert saved.get("cat") == "lessons" and "JSON-LD" in saved.get("body", "")
+    with memory.user_context("caller@private"):
+        webreflect.run_due(now=10**9, notify=lambda t: None)
+        assert memory.current_owner() == "caller@private"
+    rows = note_evidence.notes("shared", "lessons")
+    assert len(rows) == 1 and "JSON-LD" in rows[0]["body"]
+    assert note_evidence.notes("caller@private", "lessons") == []

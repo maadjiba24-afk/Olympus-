@@ -22,9 +22,8 @@ from . import actions, calendar, config, gmail, memory, sandbox, tools
 # --- save_note: trivial, reversible -------------------------------------
 
 def _notes_dir(user: str) -> Path:
-    d = config.MEMORY_DIR / "notes" / memory.safe_id(user)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    from . import note_evidence as notes
+    return notes.io(notes.directory(user, notes.ACTION_CATEGORY))
 
 
 def _note_preview(p: dict) -> str:
@@ -32,19 +31,24 @@ def _note_preview(p: dict) -> str:
 
 
 def _note_execute(p: dict) -> dict:
-    user = p.get("_user", "shared")
-    fname = f"{int(time.time())}-{memory.safe_id(p.get('title', 'note'))}.md"
-    path = _notes_dir(user) / fname
-    path.write_text(f"# {p.get('title', 'note')}\n\n{p.get('body', '')}\n",
-                    encoding="utf-8")
-    return {"path": str(path)}
+    from . import note_evidence as notes
+    user = memory.canonical_owner(p.get("_user", "shared"))
+    if user != memory.current_owner():
+        raise notes.NoteStateError("action owner context mismatch")
+    action_id = p.get("_action_id")
+    if not isinstance(action_id, str) or not action_id:
+        raise notes.NoteStateError("durable action identity is missing")
+    path = notes.create(user, notes.ACTION_CATEGORY, p.get("title", "note"),
+                        p.get("body", ""), action_id=action_id, commit=p.get("_note_commit"))
+    return notes.note_result(path, user, notes.ACTION_CATEGORY)
 
 
 def _note_undo(result: dict) -> str:
-    path = Path(result.get("path", ""))
-    if path.exists():
-        path.unlink()
-    return "note deleted"
+    from . import note_evidence as notes
+    result = dict(result)
+    action_id = result.pop("_action_id", None)
+    commit = result.pop("_note_commit", None)
+    return notes.undo_note(result, memory.current_owner(), action_id=action_id, commit=commit)
 
 
 # --- send_email: irreversible, scope-gated ------------------------------

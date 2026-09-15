@@ -1,126 +1,116 @@
-"""`/journey` — the browsable timeline of what Olympus has learned.
-
-`/learned` answers "what happened recently"; this answers "how did the
-system get here": every skill built (and whether it proved out), every
-lesson, correction and prompt upgrade, in one chronological view — with the
-ability to inspect any entry in full and to delete the ones that shouldn't
-shape future behaviour (a wrong lesson keeps doing damage until removed).
-
-Entries get a short stable ref (content-addressed from their path) so
-`journey show <ref>` / `journey rm <ref>` work across renders. Deleting a
-skill archives it recoverably (skills.archive); deleting a memory note
-removes the file — both are the operator curating the system's memory,
-which is exactly the surface the learning loop expects to be curated.
-"""
-
+"""Owner-bound learning timeline with content-bound destructive references."""
 from __future__ import annotations
 
 import hashlib
-import re
 import time
 from pathlib import Path
 
-from . import config, memory, skills
+from . import config, memory, skills, note_evidence as notes
 
-# Memory categories that represent LEARNING (not operational logs).
 _CATEGORIES = ("lessons", "corrections", "feedback", "upgrades")
-_KIND_ICON = {"skill": "🛠", "lessons": "📖", "corrections": "✏️",
-              "feedback": "👍", "upgrades": "⬆️"}
+_KIND_ICON = {"skill": "🛠", "lessons": "📖", "corrections": "✏️", "feedback": "👍", "upgrades": "⬆️"}
 
 
-def _ref(path: Path) -> str:
-    return hashlib.sha256(str(path).encode()).hexdigest()[:8]
+def _ref(path: Path, raw: bytes | None = None) -> str:
+    raw = notes.read_raw(path) if raw is None else raw
+    if raw is None:
+        raise notes.NoteStateError("journey entry disappeared")
+    return hashlib.sha256(str(notes.logical(path)).encode() + b"\0" + raw).hexdigest()
 
 
 def _note_entries(user: str) -> list[dict]:
     out = []
-    for cat in _CATEGORIES:
-        dirs = [memory._dir(cat)]
-        if cat in memory.USER_SCOPED and user != "shared":
-            dirs.append(memory._dir(cat, user))
-        for d in dirs:
-            for p in d.glob("*.md"):
-                # filenames: YYYYMMDD-HHMMSS[-pid]-slug.md (the pid segment
-                # was added by ADR 0005's collision-proof memory.save; old
-                # notes don't have it — tolerate both)
-                try:
-                    ts = time.mktime(time.strptime(p.name[:15],
-                                                   "%Y%m%d-%H%M%S"))
-                except ValueError:
-                    ts = p.stat().st_mtime
-                try:                     # the real title lives in the note
-                    title = memory.note_title(
-                        p.read_text(encoding="utf-8"))
-                except OSError:
-                    title = ""
-                if not title:            # fallback: derive from the stem
-                    m = re.match(r"\d{8}-\d{6}-(?:\d+-)?(.*)", p.stem)
-                    title = (m.group(1) if m else p.stem).replace("-", " ") \
-                        or p.stem
-                out.append({"ref": _ref(p), "ts": ts, "kind": cat,
-                            "title": title, "path": p})
+    for category in _CATEGORIES:
+        for row in memory._note_rows(category, user, include_shared=True):
+            created = row["meta"].get("created")
+            try:
+                stamp = time.mktime(time.strptime(created or row["path"].name[:15], "%Y%m%d-%H%M%S"))
+            except (ValueError, OverflowError):
+                stamp = notes.io(row["path"]).stat().st_mtime
+            out.append({"ref": _ref(row["path"], row["raw"]), "ts": stamp,
+                        "kind": category, "title": memory.note_title(row["body"]),
+                        "path": row["path"], "sha256": row["sha256"], "owner": row["owner"]})
     return out
 
 
 def _skill_entries() -> list[dict]:
     out = []
-    for p in skills._dir().glob("*.md"):
-        text = p.read_text(encoding="utf-8", errors="replace")
-        title = skills._title(text) or p.stem
-        prov = "<!-- provisional -->" in text
-        out.append({"ref": _ref(p), "ts": p.stat().st_mtime, "kind": "skill",
-                    "title": title + (" (provisional)" if prov else ""),
-                    "path": p})
+    for path in notes.inventory(config.MEMORY_DIR / "skills"):
+        if path.suffix != ".md":
+            continue
+        raw = notes.read_raw(path)
+        if raw is None:
+            raise notes.NoteStateError("skill disappeared during journey inspection")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError as err:
+            raise notes.NoteStateError("invalid UTF-8 skill in journey") from err
+        title = skills._title(text) or path.stem
+        out.append({"ref": _ref(path, raw), "ts": notes.io(path).stat().st_mtime,
+                    "kind": "skill", "title": title + (" (provisional)" if "<!-- provisional -->" in text else ""),
+                    "path": path, "sha256": notes.digest(raw), "owner": "shared"})
     return out
 
 
-def entries(user: str = "shared") -> list[dict]:
-    """Every learning event, oldest first."""
-    return sorted(_note_entries(memory.safe_id(user)) + _skill_entries(),
-                  key=lambda e: e["ts"])
+def entries(user: str | None = None) -> list[dict]:
+    exact = memory.current_owner() if user is None else memory.canonical_owner(user)
+    with notes.guard():
+        return sorted(_note_entries(exact) + _skill_entries(), key=lambda entry: (entry["ts"], entry["ref"]))
 
 
-def timeline(user: str = "shared", limit: int = 30) -> str:
-    """Human-readable journey, newest last (reads bottom-up like a log)."""
-    evs = entries(user)
-    if not evs:
-        return ("Nothing learned yet — the journey starts once skills, "
-                "lessons, or corrections accumulate.")
-    lines = [f"Learning journey — {len(evs)} event(s), showing the last "
-             f"{min(limit, len(evs))}. `journey show <ref>` for detail, "
-             "`journey rm <ref>` to remove one."]
-    for e in evs[-limit:]:
-        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["ts"]))
-        icon = _KIND_ICON.get(e["kind"], "·")
-        lines.append(f"  {when}  {icon} [{e['ref']}] {e['kind']}: {e['title']}")
+def timeline(user: str | None = None, limit: int = 30) -> str:
+    notes.evidence.integer(limit, minimum=1, maximum=notes.MAX_FILES)
+    rows = entries(user)
+    if not rows:
+        return "Nothing learned yet — the journey starts once skills, lessons, or corrections accumulate."
+    lines = [f"Learning journey — {len(rows)} event(s), showing the last {min(limit, len(rows))}. "
+             "`journey show <ref>` for detail, `journey rm <ref>` to remove one."]
+    for entry in rows[-limit:]:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(entry["ts"]))
+        lines.append(f"  {when}  {_KIND_ICON.get(entry['kind'], '·')} [{entry['ref']}] "
+                     f"{entry['kind']}: {entry['title']}")
     return "\n".join(lines)
 
 
-def _find(ref: str, user: str = "shared") -> dict | None:
-    return next((e for e in entries(user) if e["ref"] == ref), None)
+def _find(ref: str, user: str | None = None) -> dict | None:
+    matches = [entry for entry in entries(user) if entry["ref"] == ref]
+    if len(matches) > 1:
+        raise notes.NoteStateError("ambiguous journey reference")
+    return matches[0] if matches else None
 
 
-def show(ref: str, user: str = "shared") -> str:
-    e = _find(ref, user)
-    if e is None:
-        return f"No journey entry '{ref}' — see `journey` for refs."
-    body = e["path"].read_text(encoding="utf-8", errors="replace")[:8000]
-    return f"[{e['ref']}] {e['kind']}: {e['title']}\n\n{body}"
+def show(ref: str, user: str | None = None) -> str:
+    with notes.guard():
+        entry = _find(ref, user)
+        if entry is None:
+            return f"No journey entry '{ref}' — see `journey` for current refs."
+        raw = notes.read_raw(entry["path"])
+        if notes.digest(raw) != entry["sha256"]:
+            raise notes.NoteStateError("journey entry changed during read")
+        return f"[{entry['ref']}] {entry['kind']}: {entry['title']}\n\n{raw.decode('utf-8')[:8000]}"
 
 
-def remove(ref: str, user: str = "shared") -> str:
-    """Delete one learning event. Skills archive recoverably; notes unlink."""
-    e = _find(ref, user)
-    if e is None:
-        return f"No journey entry '{ref}' — see `journey` for refs."
-    if e["kind"] == "skill":
-        name = skills._title(e["path"].read_text(encoding="utf-8",
-                                                 errors="replace")) \
-            or e["path"].stem
-        return "Removed: " + skills.archive(name, "removed via journey")
-    try:
-        e["path"].unlink()
-    except OSError as err:
-        return f"Could not remove [{ref}]: {err}"
-    return (f"Removed {e['kind']} entry '{e['title']}' — it will no longer "
-            "shape future answers.")
+def remove(ref: str, user: str | None = None) -> str:
+    exact = memory.current_owner() if user is None else memory.canonical_owner(user)
+    with notes.guard():
+        entry = _find(ref, exact)
+        if entry is None:
+            return f"No journey entry '{ref}' — see `journey` for current refs."
+        if entry["owner"] != exact and exact not in memory.SYSTEM_OWNERS | {"cli"}:
+            return "Shared system entries can be removed only by the installation operator."
+        raw = notes.read_raw(entry["path"])
+        if notes.digest(raw) != entry["sha256"]:
+            raise notes.NoteStateError("journey entry changed before removal")
+        if entry["kind"] == "skill":
+            # Same recovery protocol preserves the actual inspected skill bytes;
+            # never derive another source path from its possibly different title.
+            backup = config.MEMORY_DIR / "skill_backups" / ("pruned-journey-" + ref + ".md")
+            prior = notes.read_raw(backup)
+            if prior is not None and prior != raw:
+                raise notes.NoteStateError("skill recovery destination conflicts")
+            changes = {notes.relative(entry["path"]): None, notes.relative(backup): raw}
+            expected = {notes.relative(entry["path"]): entry["sha256"], notes.relative(backup): notes.digest(prior)}
+            notes.transact(changes, expected)
+            return "Removed: archived '" + entry["title"] + "' → skill_backups/" + backup.name
+        notes.delete_rows([entry])
+        return f"Removed {entry['kind']} entry '{entry['title']}' — it will no longer shape future answers."

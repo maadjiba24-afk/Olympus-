@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from olympus import config, memory
+from olympus import config, memory, note_evidence
 
 
 # --- helpers -------------------------------------------------------------
@@ -136,12 +136,16 @@ def test_import_rejects_path_traversal(tmp_path):
     # A crafted archive whose manifest path escapes MEMORY_DIR must not write
     # outside it — importing is a trust boundary for archives made elsewhere.
     archive = tmp_path / "evil.tar.gz"
+    import hashlib
     _make_archive(archive,
                   {"schema_version": memory.ARCHIVE_SCHEMA_VERSION,
-                   "files": [{"path": "../escape.txt", "sha256": ""}]},
+                   "scope": {"all": True},
+                   "files": [{"path": "../escape.txt", "bytes": 5,
+                              "sha256": hashlib.sha256(b"pwned").hexdigest()}]},
                   files=[("../escape.txt", b"pwned")])
-    result = memory.import_memory(archive)
-    assert result["count"] == 0                                # entry skipped
+    with pytest.raises(ValueError, match="unsafe note path"):
+        memory.import_memory(archive)
+    assert not config.MEMORY_DIR.exists()
     assert not (config.MEMORY_DIR.parent / "escape.txt").exists()
 
 
@@ -168,8 +172,8 @@ def test_targeted_delete_removes_only_named_files():
     memory.set_user("shared")
 
     removed = memory.delete_memory("bob", category="corrections")
-    rel_drop = drop.relative_to(config.MEMORY_DIR).as_posix()
-    rel_keep = keep.relative_to(config.MEMORY_DIR).as_posix()
+    rel_drop = note_evidence.relative(drop)
+    rel_keep = note_evidence.relative(keep)
 
     assert removed == [rel_drop]          # exactly the one named category
     assert not drop.exists()              # gone from disk
@@ -185,7 +189,7 @@ def test_delete_by_note_id_removes_single_file():
     memory.set_user("shared")
 
     removed = memory.delete_memory("carol", category="lessons", note_id=a.stem)
-    assert removed == [a.relative_to(config.MEMORY_DIR).as_posix()]
+    assert removed == [note_evidence.relative(a)]
     assert not a.exists() and b.exists()
 
 

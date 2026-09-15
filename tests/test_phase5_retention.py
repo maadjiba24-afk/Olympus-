@@ -1,8 +1,9 @@
 """Phase 5 P5-10/P5-11 — retention policy surface and legacy namespace.
 
-Gates proved here: P5-A11 (retention dry run is accurate), P5-A12 (deletion
-removes or tombstones all required derived data), P5-A13 (legacy shared
-namespace is not auto-assigned).
+Gates proved here: refused deletion preserves state and never certifies erasure;
+legacy shared data is not automatically assigned. Complete qualified deletion
+remains unresolved under M09. Legacy fixtures use historical on-disk notes,
+not the exact-owner notes created by the current memory API.
 
 The theme throughout: this module ships a MECHANISM and refuses to invent a
 POLICY. Tests assert both halves — that the mechanism works, and that the
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import shutil
 import time
 
@@ -29,16 +31,25 @@ def store(tmp_path, monkeypatch):
     return tmp_path / "mem"
 
 
-def _make_principal(uid: str, *, turns: int = 3) -> None:
-    """A principal with the full derived footprint: notes, snapshot, journal."""
-    memory.set_user(uid)
-    memory.save("lessons", f"{uid}-note", f"content for {uid}")
-    history = []
-    for i in range(turns):
-        history += [{"role": "user", "content": f"q{i} for {uid}"},
-                    {"role": "assistant", "content": f"a{i} for {uid}"}]
-    memory.save_conversation(uid, history)
-    memory.set_user("shared")
+def _make_principal(uid: str, *, turns: int = 3,
+                    legacy_notes: bool = False) -> Path:
+    """Owned note, snapshot and journal; legacy layout is explicitly selected."""
+    with memory.user_context(uid):
+        if legacy_notes:
+            directory = config.MEMORY_DIR / "users" / memory.safe_id(uid) / "lessons"
+            directory.mkdir(parents=True, exist_ok=True)
+            note = directory / "20200101-000000-legacy.md"
+            note.write_text(memory.render_note(
+                f"{uid}-note", f"content for {uid}", schema_version=1,
+                created="20200101-000000"), encoding="utf-8")
+        else:
+            note = memory.save("lessons", f"{uid}-note", f"content for {uid}")
+        history = []
+        for i in range(turns):
+            history += [{"role": "user", "content": f"q{i} for {uid}"},
+                        {"role": "assistant", "content": f"a{i} for {uid}"}]
+        memory.save_conversation(uid, history)
+    return note
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -154,14 +165,18 @@ def test_the_sweep_dry_run_lists_candidates_without_deleting(store,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# P5-A12 — deletion removes ALL derived data
+# P5-A12 / M09 — incomplete attribution must preserve ALL derived data
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_unqualified_deletion_preserves_every_derived_store(store):
-    _make_principal("alice", turns=4)
+    note = _make_principal("alice", turns=4)
     uid = memory.safe_id("alice")
+    legacy = config.MEMORY_DIR / "users" / uid / "lessons" / "mixed.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"# unclaimed legacy material\n")
     paths = [config.MEMORY_DIR / "conversations" / f"{uid}.json",
-             config.MEMORY_DIR / "sessions" / f"{uid}.journal.jsonl"]
+             config.MEMORY_DIR / "sessions" / f"{uid}.journal.jsonl",
+             note, legacy]
     before = [p.read_bytes() for p in paths]
     history = sessionlog.recover_history("alice")
     out = retention.delete_principal("alice", dry_run=False, reason="rtbf")
@@ -169,6 +184,7 @@ def test_unqualified_deletion_preserves_every_derived_store(store):
     assert [p.read_bytes() for p in paths] == before
     assert sessionlog.recover_history("alice") == history
     assert (config.MEMORY_DIR / "users" / uid).exists()
+    assert (config.MEMORY_DIR / "owners" / memory.owner_key("alice")).exists()
 
 
 def test_incomplete_owner_map_never_certifies_erasure(store):
@@ -250,7 +266,7 @@ def test_the_audit_log_is_append_only_and_skips_corruption(store):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_legacy_inspection_explains_why_it_cannot_be_attributed(store):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
     info = retention.inspect_legacy()
     assert info["exists"] is True
     assert "COMMINGLED" in info["why_it_exists"]
@@ -259,7 +275,7 @@ def test_legacy_inspection_explains_why_it_cannot_be_attributed(store):
 
 
 def test_adoption_without_the_acknowledgement_is_refused(store):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
     for ack in ("", "yes", "I agree", retention.ADOPTION_ACK[:-5]):
         with pytest.raises(retention.LegacyAdoptionRefused) as exc:
             retention.adopt_legacy("alice", acknowledgement=ack,
@@ -271,7 +287,7 @@ def test_adoption_without_the_acknowledgement_is_refused(store):
 
 
 def test_a_refused_adoption_is_audited(store):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
     with pytest.raises(retention.LegacyAdoptionRefused):
         retention.adopt_legacy("alice", acknowledgement="nope")
     assert any(r["event"] == "legacy_adopt_refused"
@@ -279,12 +295,20 @@ def test_a_refused_adoption_is_audited(store):
 
 
 def test_adoption_with_the_acknowledgement_works_and_is_audited(store):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    note = _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
+    before = note.read_bytes()
     out = retention.adopt_legacy("alice",
                                  acknowledgement=retention.ADOPTION_ACK,
                                  dry_run=False)
     assert out["adopted"] is True
     assert retention.inspect_principal("alice")["exists"]
+    target = config.MEMORY_DIR / "users" / "alice" / "lessons" / note.name
+    assert target.read_bytes() == before
+    # Acknowledged relocation of mixed legacy bytes is not ownership proof.
+    # M04 readers must keep them unavailable until a qualified M09 migration.
+    from olympus.owner_evidence import OwnerEvidenceStateError
+    with pytest.raises(OwnerEvidenceStateError, match="unclaimed legacy"):
+        memory.search_for("alice", "content")
     assert any(r["event"] == "legacy_adopt" for r in retention.audit_log())
 
 
@@ -307,7 +331,8 @@ def test_no_code_path_adopts_the_legacy_namespace_automatically():
 def test_quarantine_is_reversible(store):
     """The recommended default action: it removes the cross-principal exposure
     immediately and keeps the data for a considered decision."""
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    note = _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
+    before = note.read_bytes()
     dry = retention.quarantine_legacy()
     assert dry["moved"] is False
     assert retention.inspect_principal(retention.LEGACY_PRINCIPAL)["exists"]
@@ -320,17 +345,34 @@ def test_quarantine_is_reversible(store):
     back = retention.restore_legacy_quarantine()
     assert back["restored"] is True
     assert (config.MEMORY_DIR / "users" / retention.LEGACY_PRINCIPAL).exists()
+    assert note.read_bytes() == before
 
 
 def test_legacy_export_is_non_destructive(store, tmp_path):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    note = _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
+    before = note.read_bytes()
     out = retention.export_legacy(tmp_path / "out")
     assert out["exported"] is True and out["bytes"] > 0
     assert retention.inspect_principal(retention.LEGACY_PRINCIPAL)["exists"]
+    assert note.read_bytes() == before
+    assert (Path(out["path"]) / "lessons" / note.name).read_bytes() == before
+
+
+def test_legacy_commands_do_not_claim_new_exact_owner_notes(store, tmp_path):
+    note = _make_principal(retention.LEGACY_PRINCIPAL)
+    before = note.read_bytes()
+    assert retention.export_legacy(tmp_path / "export")["exported"] is False
+    assert retention.quarantine_legacy(dry_run=False)["moved"] is False
+    assert retention.adopt_legacy(
+        "alice", acknowledgement=retention.ADOPTION_ACK,
+        dry_run=False)["adopted"] is False
+    assert note.read_bytes() == before
+    assert "content for api-v1" in memory.search_for("api-v1", "content")
+    assert "content for api-v1" not in memory.search_for("alice", "content")
 
 
 def test_legacy_deletion_requires_qualified_inventory(store):
-    _make_principal(retention.LEGACY_PRINCIPAL)
+    _make_principal(retention.LEGACY_PRINCIPAL, legacy_notes=True)
     out = retention.delete_principal(retention.LEGACY_PRINCIPAL,
                                      dry_run=False, reason="phase5 cleanup")
     assert out["verified"] is False and out["refused"]

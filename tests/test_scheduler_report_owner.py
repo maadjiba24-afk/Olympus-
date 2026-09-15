@@ -951,13 +951,19 @@ def _mcp_request(owner, query, monkeypatch):
 def test_real_dispatch_binding_establishes_the_exact_principal(monkeypatch):
     from olympus import mcp_server
 
+    seen = []
+    original = memory.search
+    def search(*args, **kwargs):
+        seen.append((memory.current_owner(), memory.current_user()))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(memory, "search", search)
     for who in _IDENTITIES:
         monkeypatch.setenv("OLYMPUS_MCP_USER", who)
         memory.set_user("someone-else-entirely")
         mcp_server._workspace_tool("olympus_recall_memory", {"query": "x"})
-        assert memory.current_owner() == who, (
-            f"the dispatch binding did not establish {who!r} exactly")
-        assert memory.current_user() == memory.safe_id(who)
+        assert seen[-1] == (who, memory.safe_id(who))
+        assert memory.current_owner() == "someone-else-entirely"
+        assert memory.current_user() == memory.safe_id("someone-else-entirely")
 
 
 def test_sequential_requests_for_colliding_principals_stay_isolated(monkeypatch):
@@ -985,16 +991,21 @@ def test_returning_from_an_action_does_not_downgrade_the_request_principal(
     _plant_collider_secret()
 
     monkeypatch.setenv("OLYMPUS_MCP_USER", a)
-    mcp_server._workspace_tool("olympus_recall_memory", {"query": "AAMARK"})
-    with actions._owner_context("tg-bob"):
-        pass
-
-    assert memory.current_owner() == a
+    memory.set_user("caller@outside")
+    original = memory.search
+    def search(*args, **kwargs):
+        assert memory.current_owner() == a
+        with actions._owner_context("tg-bob"):
+            assert memory.current_owner() == "tg-bob"
+        assert memory.current_owner() == a
+        return original(*args, **kwargs)
+    monkeypatch.setattr(memory, "search", search)
     out = mcp_server._workspace_tool("olympus_recall_memory",
                                      {"query": "AAMARK"})
     assert "AAMARK" in out
     assert "COLLIDER-ONLY-SECRET" not in mcp_server._workspace_tool(
         "olympus_recall_memory", {"query": "COLLIDER-ONLY-SECRET"})
+    assert memory.current_owner() == "caller@outside"
 
 
 # --- identity-sensitive durable ownership reaches the exact owner ----------
@@ -1341,6 +1352,7 @@ def test_a_misfiled_record_is_not_authorized_by_its_directory():
     from olympus import actions
 
     planted = actions._dir(_PUNCT_B) / "misfiled.json"
+    planted.parent.mkdir(parents=True, exist_ok=True)
     planted.write_text(_json.dumps({
         "id": "misfiled", "user": _PUNCT_A, "type": "p2test", "title": "t",
         "payload": {}, "risk_class": actions.NOTABLE, "reversible": True,

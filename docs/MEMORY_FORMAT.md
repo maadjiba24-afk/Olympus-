@@ -1,85 +1,72 @@
-# The Memory Format — a data-sovereignty contract
+# File-memory ownership, format and recovery
 
-Olympus's memory lives in plain files under `MEMORY_DIR`, not an opaque binary
-store. That is a deliberate promise: you can **version** it, **carry it out**
-whole, **grep** it, and **delete exactly what you name** — and prove each of
-those, byte for byte. This document is that contract.
+This is the file-note contract. It is not a complete platform backup or
+principal-erasure guarantee. Backend snapshots, derived journals, credentials,
+legal holds and retained recovery copies require the M09/M11/M12 work tracked in
+`REMAINING_HARDENING.md`.
 
-Contrast with a churning binary store (e.g. Ruflo's `agentdb.rvf`, a moving
-alpha target): their format *is* versioned (`rvf_version`), which is the right
-instinct — so Olympus versions too, but over files you can read and own.
+## Layout and ownership
 
-## Layout
+| Path under `MEMORY_DIR` | Meaning |
+| --- | --- |
+| `lessons/`, `corrections/`, `feedback/` | Explicitly shared installation notes |
+| `reports/`, `upgrades/`, `prompt_backups/`, `evals/` | Shared system notes |
+| `owners/<owner-key>/lessons/`, `corrections/`, `feedback/` | Private notes for the exact owner |
+| `owners/<owner-key>/job_reports/` | Private scheduled-job answers; existing contract retained |
+| `owners/<owner-key>/action_notes/` | Exact-owner, action-bound notes |
+| `users/<safe-id>/…`, `notes/<safe-id>/` | Ambiguous legacy notes; preserved and never automatically attributed |
+| `note-transactions-v2/` | Protected before/after bytes, active pointer and terminal recovery receipts |
+| `note-undo-v2/`, `note-mirror-v2/` | Owner-bound undo receipts and optional-mirror status |
+| `conversations/<id>.json` | Conversation snapshots; independent attribution contract |
 
+`memory.owner_key` includes the complete SHA-256 digest of the canonical exact
+principal. Case, punctuation and Unicode differences are retained. Blank/missing
+owners retain the established `shared` default; they do not create another
+identity. `current_user()` remains a lossy compatibility namespace and must not
+authorize private operations. Use `current_owner()` and token-restoring
+`user_context(exact_owner)` at request/background boundaries.
+
+Generic save/recent/title/count/prune APIs now resolve exact owners for the
+three user-scoped categories. Search combines that owner's private notes with
+intentional installation-shared notes. It never reads another owner's notes.
+The model-facing recall tool has no owner selector. Journey uses the actual
+request owner and references containing a hash of both the path and inspected
+bytes; stale references cannot delete revised content. Shared journey deletion
+requires the installation operator.
+
+`job_reports` retains the explicit `save_for` / `recent_for` / `count_for` /
+`prune_for` contract: generic category operations refuse it, and `*_for`
+category operations refuse non-private categories. `search_for` is the trusted
+explicit-owner search adapter. Existing v0/v1 job reports remain readable because
+their directory already used the full owner digest.
+
+A private legacy store makes a not-yet-initialized exact namespace unavailable,
+not successfully empty. An operator may explicitly start a NEW empty namespace:
+
+```bash
+olympus memory notes-status --user 'exact-owner'
+olympus memory notes-initialize --user 'exact-owner' --category lessons --acknowledge-unclaimed-legacy
 ```
-MEMORY_DIR/
-  lessons/ corrections/ feedback/        shared (system-generated) notes
-  reports/ upgrades/ prompt_backups/ evals/   always-shared system notes
-  users/<user-id>/lessons|corrections|feedback/    per-user namespaces
-  owners/<owner-key>/job_reports/        PRIVATE per-exact-owner notes
-  conversations/<id>.json                persisted chat histories
-```
 
-Per-user categories keep one person's `lessons`, `corrections`, and `feedback`
-out of everyone else's sessions.
+Initialization preserves every legacy byte, never migrates or assigns it, and
+is idempotent without clearing newer notes. Each category requires its own
+choice. Genuine ownership migration remains M09. Do not run this on operator
+data as part of test validation.
 
-### Private categories and `owner_key`
-
-`job_reports` (a scheduled job's answer) is a **private** category. It is never
-part of a shared sweep and is not in the per-user `users/<user-id>/` tree.
-
-An ordinary `memory.search()` reads exactly **one** private directory: the
-current owner's own, resolved from `current_owner()`. So the owner of a job
-report finds it through the normal `recall_memory` tool and nobody else does.
-`search()` takes no `owner` argument — the principal comes from the trusted
-request binding, never from the caller, so the model cannot name a namespace.
-
-The generic `save` / `recent` / `recent_titles` / `prune` / `category_count`
-resolve the *normalized* ambient namespace, so they **refuse** a private
-category rather than silently operating on the wrong owner. The owner-bound
-`save_for` / `search_for` / `recent_for` / `count_for` / `prune_for` take the
-principal as an argument; they are the trusted background/admin path for code
-that has a durable owner but no request context (the heartbeat, export,
-retention), and they refuse non-private categories symmetrically.
-
-Two reasons it is not simply another `USER_SCOPED` category:
-
-* `users/<user-id>/` is keyed by the ambient namespace, which passes through
-  `safe_id` — that collapses every run of non-`[A-Za-z0-9_-]` to a single `-`
-  and truncates at 64 characters, so `tg-a.b`, `tg-a@b`, `tg-a b` and `tg-a-b`
-  become one directory, as do any two ids sharing a 64-character sanitized
-  prefix. Fine for a path; wrong for an identity.
-* `memory.owner_key(owner)` therefore keys on the **exact** principal: a
-  bounded readable label for a human browsing the store, plus the complete
-  SHA-256 hex digest of the exact canonical string. The label may collide; the
-  digest is collision-resistant, so the pair is too.
-* A missing/blank owner canonicalizes to `shared`, the legacy default used
-  everywhere else, rather than minting a blank identity nobody can authenticate
-  as.
-* Authorization for a private read comes from `current_owner()` — an
-  exact-owner ContextVar set alongside the `safe_id` path namespace by
-  `memory.set_user`. `current_user()` is normalized and must never authorize
-  one. The generic `save`/`recent`/`recent_titles`/`prune`/`category_count`
-  refuse private categories rather than resolving them against the normalized
-  namespace.
-* `owners/` is a SIBLING of `users/`, not a subdirectory of a category, so any
-  export/retention sweep must list it explicitly — `_memory_roots` does.
-
-`job_reports` is deliberately **not** mirrored into `OLYMPUS_VAULT_DIR`: the
-mirror is one flat folder per category with no owner dimension, so mirroring it
-would pool every owner's private output back into one browsable directory.
-
-`reports/` stays installation-global on purpose — `opportunity_scan`,
-`evolution_audit`, skill curation, feature evolution and the replay gate all
-write genuinely shared system notes there, and every owner is meant to find
-them.
+Optional vault mirrors use `olympus-notes-v2/<owner-key>/<category>/<filename>`.
+Old flat mirrors stay untouched and unclaimed. `job_reports` remains completely
+excluded. The canonical note and optional mirror have separate outcomes:
+`save_with_status` and the lesson tool return both, `notes-status` lists failed
+mirror receipts, and `notes-retry-mirror FILENAME --user OWNER --category CATEGORY`
+retries the existing derived copy without creating another canonical note.
+The Path-returning `save` compatibility API also emits a warning on mirror failure.
 
 ### The action store is owner-keyed too
 
 ```
 MEMORY_DIR/
   actions/owners/<owner-key>/<id>.json      prepared/executed actions
-  actions/owners/<owner-key>/audit.jsonl    immutable state-transition log
+  actions/owners/<owner-key>/audit.jsonl    auxiliary transition log (not immutable)
   actions/<safe-id>/                        PRE-v4 layout, read fail-closed
 ```
 
@@ -169,7 +156,7 @@ because the record does not contain the information needed to do so.
 ### `current_user()` vs `current_owner()`
 
 `orchestrator.Olympus` holds the EXACT principal in `self.user`: it is the
-value bound by every `memory.set_user` in the ask paths and DAG worker threads,
+value bound during ask calls, each stream resumption, and DAG worker execution,
 and the one handed to prefs, vault, actions, operator and trust. Normalizing it
 there defeats all of those at once, whatever the stores below do.
 
@@ -177,7 +164,7 @@ there defeats all of those at once, whatever the stores below do.
 | --- | --- | --- |
 | Building a path in a `safe_id`-keyed store | `current_user()` | The store normalizes anyway; the value IS the path segment |
 | Authorization, credentials, durable record ownership | `current_owner()` | `safe_id` collapses punctuation and truncates at 64 chars, merging distinct principals |
-| A request boundary binding an identity from outside | `set_user(<exact input>)` | Sets both contexts, canonicalized once |
+| Scoped request or background binding | `user_context(<exact input>)` | Sets both contexts and restores the caller, including errors |
 | Background work with no request context | `*_for(owner, …)` | Takes the durable principal as an argument |
 
 ### Gateway transport principals
@@ -213,11 +200,11 @@ they expire within 24 hours, they are dropped without replay instead of being
 adopted. v2 records are stored under `owner_key(uid)` and verify that their
 exact embedded uid matches the filename before replay.
 
-Several stores — `documents`, `docrag`, `todos`, `playbooks`, `emailstyle`, the
-conversation search index, `assess`, `discovery` — still key on `safe_id`
-internally, so handing them an exact principal changes nothing until each is
-migrated the way `vault` and `prefs` were. `usage` and `gallery` are normalized
-by design: they are accounting and display, not authorization.
+PR #311 repaired its documented owner workspace/outcome stores, and PR #313
+repaired typed-memory and relationship-graph snapshots. Remaining normalized
+stores, including gallery and usage, are unfinished M05-M08 work; normalization
+is not an accepted private-ownership boundary. See the complete store inventory
+and E1-E31 dispositions in `REMAINING_HARDENING.md`.
 
 **Equalling a `safe_id` value never proves ownership.** It is one that several
 principals map to, so the principal whose exact identity matches it is as
@@ -225,79 +212,103 @@ likely to be the collider as the owner. Any store migrating to owner keys must
 quarantine its legacy records for explicit operator resolution rather than
 handing them to whoever matches.
 
-## Note format and `schema_version`
+## Note format and bounds
 
-Each markdown note carries a small frontmatter block, then the title and body:
+New notes use schema version 2: strict UTF-8 Markdown with the exact fields
+`schema_version`, `created`, JSON-encoded `owner_json`, `category`, full
+`body_sha256` and `operation`. The digest covers the complete title/body after
+normalizing CRLF to LF. Duplicate/missing fields, unknown versions, malformed
+dates, nonregular/reparse paths, mismatched owners/categories and changed bodies
+are unavailable evidence. Hashes detect damage; a state administrator remains
+trusted and they are not signatures.
 
-```
----
-schema_version: 1
-created: 20260621-143000
----
-# A short title
+Existing shared v0/v1 notes remain readable. Unattributed notes in a NEW private
+user-scoped directory are refused; old normalized notes remain unclaimed.
+`memory migrate` uses preserved before/after bytes and does not invent an owner
+for ambiguous legacy data. Existing private job-report v1 notes are retained
+without inferring an owner from a readable path label.
 
-The body of the note.
-```
+Bounds: 8,192 owner characters, 512 title characters, 500,000 body characters,
+1 MiB per note/file, 10,000 inventory entries, 64 MiB per side of a batch, and
+192 MiB per serialized recovery plan. Archive decoding has both compressed and
+expanded bounds. Refusal preserves the original evidence. Hidden staging is
+bounded and not read as a note; unexplained hidden entries are unavailable.
 
-- **`schema_version`** (`NOTE_SCHEMA_VERSION`, currently `1`) versions the note
-  format itself.
-- **Frontmatter-less notes are valid v0.** Every reader tolerates a note with
-  no frontmatter (`parse_note` returns `({}, text)`), so memory written by older
-  Olympus still loads unchanged.
-- **`olympus memory migrate`** upgrades v0 notes to the current schema in place,
-  preserving the body verbatim and keeping the note's original date. It is
-  idempotent — already-current notes are left untouched.
+## Recoverable publication and actions
 
-`parse_note(text) -> (meta, body)` is the single split point; `note_title` and
-`note_schema_version` build on it. Readers (`search`, `recent`, prompt-backup
-restore, eval-score parsing) all read the *body*, never the frontmatter.
+File mutations use unique exclusive staging, file fsync, atomic replacement,
+and strict POSIX directory fsync. Native Windows uses extended-length paths
+without changing registry policy. It retains the documented single-process per
+state-directory restriction; thread serialization is supported. M13 remains
+open for native process locking/launcher enforcement and real host topology.
 
-## Export / import — portable and lossless
+Before changing a batch, a private journal preserves every target's before/after
+bytes. A durable active pointer makes readers/writers refuse until the mutation
+completes or an operator recovers it. Recovery validates ALL targets before
+changing any and refuses independently changed data. Resume/rollback has one
+terminal decision; a completed decision cannot be changed or replayed over
+subsequent work.
 
 ```bash
-olympus memory export --user alice --out alice.tar.gz     # one namespace
-olympus memory export --all --out everything.tar.gz       # every user + shared
+olympus memory notes-status --user 'exact-owner'
+olympus memory notes-recover TRANSACTION_ID --decision resume
+# Or choose rollback after inspecting the preserved targets and plan.
+```
+
+Save-note execution publishes the note and EXECUTED action record in the same
+recoverable batch. Undo validates exact owner, durable action ID, constrained
+canonical filename and original content hash, then publishes the deletion,
+undo receipt and UNDONE action record together. An arbitrary path, another
+action's result, stale content or unconfirmed absence is refused. Repeating a
+confirmed undo verifies its receipt without deleting anything new.
+
+An interruption before a note starts may leave an APPROVED record. After
+journal recovery, `memory notes-retry-action ACTION_ID --user OWNER` can retry
+that previously approved note through the original preview, permission, quota
+and behavioral-contract gates. Terminal actions are inspected rather than
+executed/count-recorded again. Auxiliary audit/outcome failure does not turn a
+confirmed note into a request to repeat it. These auxiliary logs are not an
+immutable signed ledger; M19 remains open for other action/evidence surfaces.
+
+## Export and import
+
+```bash
+olympus memory export --user alice --out alice.tar.gz
+olympus memory export --all --out file-memory.tar.gz
 olympus memory export --user alice --out alice.enc --encrypt
-olympus memory import alice.tar.gz
+olympus memory import alice.tar.gz --user alice
+olympus memory import file-memory.tar.gz --all
 ```
 
-An export is a `tar.gz` containing:
+Schema-2 archives contain a declared scope, complete file inventory, byte counts
+and SHA-256 values, plus `data/<relative-path>` payloads. All entries are validated
+before any restored target changes: schema, checksum, UTF-8 note metadata,
+owner/path attribution, archive member type, duplicate/case-colliding names,
+traversal, size limits and the existing optional ingestion gate. Schema-1 archives
+remain supported; legacy normalized paths are restored as unclaimed evidence.
+Unsigned archive metadata is not proof of genuine ownership.
 
-- **`manifest.json`** — `{schema_version, created, scope, files:[{path, sha256,
-  bytes}]}`. The `schema_version` here is `ARCHIVE_SCHEMA_VERSION`.
-- **`data/<relpath>`** — every file, byte for byte, at its path relative to
-  `MEMORY_DIR`.
+The CLI requires an explicit matching owner or `--all` for import. Scoped exports
+cover that owner's file-note roots; `--all` also preserves the existing
+administrative file-memory roots. Neither claims complete principal backup.
+Scope metadata is validated even for empty archives. Conflicts during publication
+use the same preserved recovery protocol. `overwrite=False` reports existing
+files skipped; success counts describe only verified restored targets.
 
-Import is **safe by refusal**: it validates `schema_version` against
-`SUPPORTED_ARCHIVE_VERSIONS` and raises rather than best-effort importing an
-archive it doesn't understand, and rejects any tarball with no `manifest.json`.
-On success each file's SHA-256 is checked against the manifest. **export →
-delete → import restores the files byte-for-byte** (proven in
-`tests/test_memory_contract.py`).
+Optional Fernet export encryption preserves the existing vault interface and
+key compatibility. Password-hard KDF, key migration and rotation are M11, still
+open. Wrong/missing keys refuse restoration.
 
-### Optional at-rest encryption
+## Targeted deletion and retention
 
-`--encrypt` wraps the whole archive with Fernet using the **same key
-`vault.py` already derives from `OLYMPUS_SECRET_KEY`** — no new crypto
-dependency. Import auto-detects an encrypted export (a plain export starts with
-the gzip magic `1f 8b`; anything else is decrypted first) and fails with a clear
-message if the key is wrong or missing.
+The preview and effect use the same exact-owner file-note inventory and content
+fingerprints. Changes after preview refuse deletion. `prune` and explicit delete
+use recoverable transactions and report actual removed canonical paths; I/O
+failure is not silently counted as success. Legacy ambiguous notes are untouched.
 
-## Targeted, verifiable delete
-
-```bash
-olympus memory delete --user alice                    # the whole namespace
-olympus memory delete --user alice --category lessons # one category
-olympus memory delete --user alice --category lessons --id 20260621-143000-foo
-```
-
-`delete_memory` **hard-deletes** (unlinks — not tombstones) and returns exactly
-the relative paths it removed; the CLI lists them and, unless `--yes` is given,
-requires typing `delete` to confirm. When it returns, the named files are gone
-from disk — nothing else is touched.
-
-## Retention vs. sovereignty
-
-`prune()` (newest-N per category) and `sweep_dated_files()` (age-based) bound
-*automatic* growth. The contract here is the *manual*, user-driven side: your
-right to take your memory with you, inspect it, and erase it on demand.
+**Recovery plans retain original bytes.** These operations remove selected active
+file notes; they are not whole-principal erasure, destruction of all recovery
+copies, or legal-hold processing. M09 must cover the complete platform, derived
+copies and backend records before those gates can close. Prompt-backup readers
+accept the new unique note names and validate their bytes; complete prompt,
+benchmark and proposal recovery coupling is M03.

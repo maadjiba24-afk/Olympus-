@@ -211,7 +211,8 @@ def self_check(prompts=None, *, make_bot=None, report=None) -> dict:
                 "results": results}
 
     body = summary + "\n\n" + _failure_body(results)
-    memory.save("corrections", "Replay self-check FAILED", body)
+    with memory.user_context("shared"):
+        memory.save("corrections", "Replay self-check FAILED", body)
     try:
         from . import telegram
         telegram.notify("⚠️ Olympus replay self-check FAILED\n\n" + body)
