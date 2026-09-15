@@ -267,40 +267,40 @@ def evolve(user: str, settings: config.Settings | None = None) -> str:
     unavailable stored evidence raises so it is never treated as first use."""
     from . import backend
     settings = settings or config.Settings.from_env()
-    memory.set_user(user)
-    state = load(user)
-    prior = state.get("model", "")
+    with memory.user_context(user):
+        state = load(user)
+        prior = state.get("model", "")
 
-    mems = usermem.active_memories(user)
-    facts = "\n".join(f"- ({m['type']}) {m['content']}" for m in mems[:30]) or "(none yet)"
-    feedback = memory.recent("feedback", 8)
-    corrections = memory.recent("corrections", 5)
+        mems = usermem.active_memories(user)
+        facts = "\n".join(f"- ({m['type']}) {m['content']}" for m in mems[:30]) or "(none yet)"
+        feedback = memory.recent("feedback", 8)
+        corrections = memory.recent("corrections", 5)
 
-    prompt = (
-        f"## Current working model\n{prior or '(empty — first time)'}\n\n"
-        f"## Durable facts known about this user\n{facts}\n\n"
-        f"## Recent feedback they gave (👍/👎)\n{feedback or '(none)'}\n\n"
-        f"## Recent corrections made to answers\n{corrections or '(none)'}\n\n"
-        "Update the working model from this evidence. Keep it tight."
-    )
-    try:
-        model = backend.complete_text(settings, _SYNTH_SYSTEM,
-                                      [{"role": "user", "content": prompt}],
-                                      effort="low").strip()
-    except Exception:
-        return prior
-    if not model:
-        return prior
-    # Re-read under the lock and merge only the model fields, so a concurrent
-    # note_interaction()'s exchange increment isn't clobbered by this (slow,
-    # off-thread) evolution. The model call itself stays outside the lock.
-    with _guard(user) as exact:
-        state = _load_exact(exact)
-        state["model"] = model[:MODEL_MAX_CHARS]
-        state["evolutions"] = int(state.get("evolutions", 0)) + 1
-        state["updated"] = now_ts()
-        _save_locked(exact, state)
-        return state["model"]
+        prompt = (
+            f"## Current working model\n{prior or '(empty — first time)'}\n\n"
+            f"## Durable facts known about this user\n{facts}\n\n"
+            f"## Recent feedback they gave (👍/👎)\n{feedback or '(none)'}\n\n"
+            f"## Recent corrections made to answers\n{corrections or '(none)'}\n\n"
+            "Update the working model from this evidence. Keep it tight."
+        )
+        try:
+            model = backend.complete_text(settings, _SYNTH_SYSTEM,
+                                          [{"role": "user", "content": prompt}],
+                                          effort="low").strip()
+        except Exception:
+            return prior
+        if not model:
+            return prior
+        # Re-read under the lock and merge only the model fields, so a concurrent
+        # note_interaction()'s exchange increment isn't clobbered by this (slow,
+        # off-thread) evolution. The model call itself stays outside the lock.
+        with _guard(user) as exact:
+            state = _load_exact(exact)
+            state["model"] = model[:MODEL_MAX_CHARS]
+            state["evolutions"] = int(state.get("evolutions", 0)) + 1
+            state["updated"] = now_ts()
+            _save_locked(exact, state)
+            return state["model"]
 
 
 def maybe_evolve(user: str, count: int,

@@ -160,14 +160,14 @@ def curate(settings: config.Settings | None = None,
                             "regress the benchmark; kept")
 
     if consolidations:
-        memory.save(
-            "lessons", "Curator: consolidation recommendations",
-            "The skill curator flagged near-duplicate skills. On the next "
-            "learning cycle, merge each pair into ONE skill (update the "
-            "target, then the duplicate will be pruned once redundant):\n"
-            + "\n".join(f"- merge '{v['name']}' into '{v.get('target') or '?'}'"
-                        f" — {v['reason']}" for v in consolidations))
-
+        with memory.user_context("shared"):
+            memory.save(
+                "lessons", "Curator: consolidation recommendations",
+                "The skill curator flagged near-duplicate skills. On the next "
+                "learning cycle, merge each pair into ONE skill (update the "
+                "target, then the duplicate will be pruned once redundant):\n"
+                + "\n".join(f"- merge '{v['name']}' into '{v.get('target') or '?'}'"
+                            f" — {v['reason']}" for v in consolidations))
     parts = [f"graded {len(library)}"]
     if pruned:
         parts.append(f"pruned {len(pruned)}: " + "; ".join(pruned))

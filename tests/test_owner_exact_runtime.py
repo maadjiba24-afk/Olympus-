@@ -191,12 +191,34 @@ def test_ask_ephemeral_binds_the_exact_principal(who, monkeypatch, _probe):
 
     _stub_model(monkeypatch)
     memory.set_user("someone-else-entirely")
+    caller = (memory.current_owner(), memory.current_user())
     bot = orchestrator.Olympus(user=who)
-    try:
+    # The existing verification gate may prepend its explicit UNVERIFIED
+    # notice. It must still return the owned model response, not hide a crash.
+    assert bot.ask_ephemeral("hello").endswith("THE-ANSWER")
+    assert _probe["self.user"] == who
+    assert _probe["current_owner"] == who
+    assert _probe["current_user"] == memory.safe_id(who)
+    assert (memory.current_owner(), memory.current_user()) == caller
+
+
+@pytest.mark.parametrize("who", [A, LONG_A])
+def test_ask_ephemeral_restores_caller_after_pipeline_failure(who, monkeypatch):
+    from olympus import orchestrator
+
+    memory.set_user("outer.owner@exact")
+    caller = (memory.current_owner(), memory.current_user())
+    bot = orchestrator.Olympus(user=who)
+
+    def interrupted(question, trace):
+        assert memory.current_owner() == who
+        assert memory.current_user() == memory.safe_id(who)
+        raise RuntimeError("owned pipeline failure")
+
+    monkeypatch.setattr(bot, "_pipeline", interrupted)
+    with pytest.raises(RuntimeError, match="owned pipeline failure"):
         bot.ask_ephemeral("hello")
-    except Exception:
-        pass                     # only the binding is under test here
-    assert memory.current_owner() == who
+    assert (memory.current_owner(), memory.current_user()) == caller
 
 
 def test_worker_threads_bind_the_exact_owner_not_the_namespace(monkeypatch):

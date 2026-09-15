@@ -30,7 +30,7 @@ import os
 import time
 from typing import Callable
 
-from . import config
+from . import config, memory, note_evidence as notes
 
 _DEFAULT_EVERY = 24 * 3600        # once a day is plenty for a slow-moving corpus
 _MIN_DOMAINS = 3                  # need a little corpus before a pattern is real
@@ -56,24 +56,27 @@ def _state_path():
 
 
 def _load_state() -> dict:
-    p = _state_path()
-    if not p.exists():
+    raw = notes.read_raw(_state_path())
+    if raw is None:
         return {"seen": [], "last_run": 0.0}
     try:
-        d = json.loads(p.read_text(encoding="utf-8"))
-        return {"seen": list(d.get("seen", []))[:2000],
-                "last_run": float(d.get("last_run", 0.0))}
-    except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        return {"seen": [], "last_run": 0.0}
+        value = notes._json(raw)
+        notes.evidence.fields(value, ("seen", "last_run"))
+        notes.evidence.records(value["seen"], 2000)
+        for key in value["seen"]:
+            notes.evidence.text(key, 1024)
+        notes.evidence.number(value["last_run"], minimum=0)
+        return value
+    except (ValueError, TypeError) as err:
+        raise notes.NoteStateError("web reflection acknowledgement state is damaged") from err
 
 
 def _save_state(state: dict) -> None:
-    p = _state_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    from . import atomicio
-    atomicio.publish(tmp, p, json.dumps({"seen": state["seen"][-2000:],
-                                         "last_run": state["last_run"]}))
+    with notes.guard():
+        path = _state_path()
+        raw = json.dumps({"seen": state["seen"][-2000:], "last_run": state["last_run"]}).encode()
+        notes.transact({notes.relative(path): raw},
+                       {notes.relative(path): notes.digest(notes.read_raw(path))})
 
 
 def discoveries() -> list[dict]:
@@ -136,25 +139,26 @@ def run_due(now: float | None = None,
         return []
     now = now or time.time()
     try:
-        state = _load_state()
-        if (now - state["last_run"]) < _every():
-            return []
-        found = discoveries()
-        fresh = [d for d in found if d["key"] not in set(state["seen"])]
-        state["last_run"] = now
-        state["seen"] = state["seen"] + [d["key"] for d in fresh]
-        _save_state(state)
-        if not fresh:
-            return []
-        # Persist as a lesson (sanitized at the memory sink) so the knowledge
-        # outlives the process, and notify the operator once.
-        body = "\n".join(f"- [{d['kind']}] {d['title']}: {d['detail']}"
-                         for d in fresh)
-        try:
-            from . import memory
-            memory.save("lessons", "web discoveries", body)
-        except Exception:
-            pass
+        with memory.user_context("shared"), notes.guard():
+            notes.notes("shared", "lessons")  # Unavailable is not empty evidence.
+            state = _load_state()
+            if (now - state["last_run"]) < _every():
+                return []
+            found = discoveries()
+            fresh = [d for d in found if d["key"] not in set(state["seen"])]
+            state["last_run"] = now
+            state["seen"] = (state["seen"] + [d["key"] for d in fresh])[-2000:]
+            if not fresh:
+                _save_state(state)
+                return []
+            body = "\n".join(f"- [{d['kind']}] {d['title']}: {d['detail']}" for d in fresh)
+            state_path = notes.relative(_state_path())
+            before = notes.digest(notes.read_raw(_state_path()))
+            # Acknowledging discoveries and publishing their lesson are one
+            # recoverable mutation. No lost lesson hidden by the dedup counter.
+            notes.create("shared", "lessons", "web discoveries", body,
+                         commit=lambda result: (
+                             {state_path: json.dumps(state).encode()}, {state_path: before}))
         # Turn proposal-kind discoveries into auto-drafted, human-actionable
         # build proposals (idempotent; deduped by discovery key). Drafting the
         # *current* set — not just the fresh ones — lets a pattern that predates
@@ -180,5 +184,7 @@ def run_due(now: float | None = None,
         out = [f"web reflection: {d['title']}" for d in fresh]
         out += [f"build proposal drafted: {p.title}" for p in drafted]
         return out
+    except notes.evidence.OwnerEvidenceStateError:
+        raise
     except Exception:
         return []

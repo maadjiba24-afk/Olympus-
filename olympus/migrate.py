@@ -71,10 +71,10 @@ def import_dir(root: str, user: str = "cli", *,
             mem.read_text(encoding="utf-8", errors="replace"))
         # split on markdown headings / bullet groups into individual lessons
         chunks = [c.strip() for c in re.split(r"\n#{1,6} |\n\n", text) if c.strip()]
-        memory.set_user("shared")
-        for i, chunk in enumerate(chunks):
-            memory.save("lessons", f"Imported memory {i + 1}", chunk[:4000])
-            summary["memories"] += 1
+        with memory.user_context("shared"):
+            for i, chunk in enumerate(chunks):
+                memory.save("lessons", f"Imported memory {i + 1}", chunk[:4000])
+                summary["memories"] += 1
 
     # --- profile (USER.md) ---------------------------------------------
     usr = _find(base, "USER.md", "user.md")

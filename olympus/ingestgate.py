@@ -162,7 +162,7 @@ KINDS: dict[str, dict] = {
             "optional": {"user": str, "origin": str},
         },
         "persistent": True, "provenance_required": True,
-        "version_key": _V, "known_majors": _MAJ1,
+        "version_key": _V, "known_majors": frozenset({1, 2}),
     },
     "session_import": {
         "max_bytes": 8 * 1024 * 1024,

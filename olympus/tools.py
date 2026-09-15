@@ -915,45 +915,43 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
 
 
 def _restore_prompt(agent: str) -> str:
-    stem = Path(agent).stem
-    path = config.PROMPTS_DIR / f"{stem}.md"
-    if not path.is_file():
-        return f"Error: unknown agent prompt '{stem}'."
-    bdir = config.MEMORY_DIR / "prompt_backups"
-    # Both name shapes: "...-<stem>.md" and the collision-suffixed
-    # "...-<stem>-<n>.md" that memory.save can produce (ADR 0005).
-    backups = sorted(
-        set(bdir.glob(f"*-{stem}.md")) | set(bdir.glob(f"*-{stem}-[0-9]*.md")),
-        reverse=True,
-    ) if bdir.exists() else []
-    if not backups:
-        return f"Error: no backups exist for '{stem}'."
-    newest = backups[0]
-    text = newest.read_text(encoding="utf-8")
-    # drop any versioned frontmatter, then the "# <stem>" header memory.save
-    # added, and the trailing update-reason comment
-    _, text = memory.parse_note(text)
-    lines = text.splitlines()
-    if lines and lines[0].startswith("# "):
-        lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
-    # The update-reason comment is always appended last; drop it and anything
-    # after it (robust to an old multi-line reason, not just its first line).
-    for i, l in enumerate(lines):
-        if l.startswith("<!-- update reason:"):
-            lines = lines[:i]
-            break
-    body = "\n".join(lines)
-    path.write_text(body.strip() + "\n", encoding="utf-8")
-    # Consume the backup we just restored from so this is a real rollback STACK:
-    # a second restore steps back to the prior version instead of re-applying the
-    # same newest one forever (the previous behavior could only ever undo the
-    # most recent update).
-    try:
-        newest.unlink()
-    except OSError:
-        pass
-    return f"Prompt '{stem}' restored from {newest.name}."
-
+    from . import note_evidence as notes
+    with notes.guard():
+        stem = Path(agent).stem
+        path = config.PROMPTS_DIR / f"{stem}.md"
+        if not path.is_file():
+            return f"Error: unknown agent prompt '{stem}'."
+        from . import note_evidence as notes, note_archive
+        backups = [row for row in notes.notes("shared", "prompt_backups")
+                   if memory.note_title(row["body"]) == stem]
+        backups.sort(key=lambda row: (notes.io(row["path"]).stat().st_mtime_ns,
+                                     row["path"].name), reverse=True)
+        if not backups:
+            return f"Error: no backups exist for '{stem}'."
+        chosen = backups[0]
+        newest, text = chosen["path"], chosen["body"]
+        lines = text.splitlines()
+        if lines and lines[0].startswith("# "):
+            lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
+        # The update-reason comment is always appended last; drop it and anything
+        # after it (robust to an old multi-line reason, not just its first line).
+        for i, l in enumerate(lines):
+            if l.startswith("<!-- update reason:"):
+                lines = lines[:i]
+                break
+        body = "\n".join(lines)
+        # Recheck the exact source before changing the prompt. External prompt
+        # recovery/benchmark-state coupling remains in M03; never silently consume
+        # a damaged backup or report a failed deletion as a successful restore.
+        if notes.digest(notes.read_raw(newest)) != chosen["sha256"]:
+            raise notes.NoteStateError("prompt backup changed before restore")
+        note_archive.external_publish(path, (body.strip() + "\n").encode())
+        # Consume the backup we just restored from so this is a real rollback STACK:
+        # a second restore steps back to the prior version instead of re-applying the
+        # same newest one forever (the previous behavior could only ever undo the
+        # most recent update).
+        notes.delete_rows([chosen])
+        return f"Prompt '{stem}' restored from {newest.name}."
 
 def _send_email(to: str, subject: str, body: str, *,
                 user: str | None = None, _approved: bool = False) -> str:
@@ -2104,8 +2102,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "recall_fact": lambda query: facts.lookup(query),
     "cache_fact": lambda claim, verdict, source="": facts.record(claim, verdict, source),
     # content is sanitized so injection-shaped text can't poison future recall
-    "save_lesson": lambda title, content: str(
-        memory.save("lessons", title, content)),      # sink sanitizes (M0.2)
+    "save_lesson": lambda title, content: json.dumps(
+        memory.save_with_status("lessons", title, content)),      # sink sanitizes (M0.2)
     "watch_youtube": _watch_youtube,
     "read_inbox": lambda query="in:inbox", max_results=10: _read_inbox(query, max_results),
     "read_email": lambda message_id: _read_email(message_id),

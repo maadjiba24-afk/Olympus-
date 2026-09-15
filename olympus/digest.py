@@ -75,8 +75,12 @@ def learned_recently(now: float | None = None) -> str:
     for heading, category in _SECTIONS:
         try:
             titles = memory.recent_titles(category, 3)
-        except Exception:
-            titles = []
+        except Exception as err:
+            from .owner_evidence import OwnerEvidenceStateError
+            if isinstance(err, OwnerEvidenceStateError):
+                lines.append(f"{heading}: evidence unavailable ({err.reason}); inspect memory notes-status.")
+                continue
+            raise
         if titles:
             lines.append("")
             lines.append(f"{heading}:")

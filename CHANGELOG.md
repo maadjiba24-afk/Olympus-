@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — M04 exact-owner file-note hardening
+
+- Separate private lessons, corrections, feedback and save-note actions by exact
+  owner; preserve ambiguous legacy data with explicit status/initialization.
+- Validate bounded note evidence and use durable, recoverable transactions for
+  mutations, imports, deletion, save-note execution and undo. Undo binds the
+  durable action, exact owner and inspected content.
+- Connect journey, tools/CLI/MCP, companion/wiki, orchestration and shared
+  background callers. Optional mirror failures have distinct outcomes/retry;
+  old mixed mirrors and scheduler job-report restrictions are preserved.
+- Preserve schema-1 archive/shared-note compatibility, validate all archive
+  members before mutation, and retain before/after recovery copies. This does
+  not close M09 erasure, M11 crypto migration, M13 topology or production gates.
+- Document optional note-mirror and web-reflection settings without enabling
+  them. Integration fixtures verify exact-owner mirror bytes, request context
+  restoration and legacy/current data preservation on Windows and POSIX.
+- M04 Windows/POSIX validation and protected delivery are still required.
+- Retain the configured root's path spelling in the directory API on Windows;
+  extended paths remain internal to directory creation and note I/O. Hostile
+  owner containment assertions remain intact, with long-path private-report
+  save/read/isolation/prune coverage in the native Windows test.
+
+
 All notable changes to Olympus are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

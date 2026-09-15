@@ -253,6 +253,7 @@ def _recent_material(user: str, since: float, seen_ids: set[str] | None = None) 
     """What accumulated since the last dream: active typed memories and the
     latest lessons/corrections/feedback notes. Bounded — a dream reads a
     digest, not the archive."""
+    from .owner_evidence import OwnerEvidenceStateError
     parts: list[str] = []
     try:
         from . import usermem
@@ -268,16 +269,20 @@ def _recent_material(user: str, since: float, seen_ids: set[str] | None = None) 
             parts.append("Typed memories:\n" + "\n".join(
                 f"- [{m.get('type')}] {m.get('content', '')[:300]}"
                 for m in fresh[:40]))
+    except OwnerEvidenceStateError:
+        raise
     except Exception:
         pass
     try:
-        memory.set_user(user)
-        for category in ("lessons", "corrections", "feedback"):
-            notes = memory.recent(category, n=6)
-            if notes and not notes.startswith("(no "):
-                parts.append(f"{category.title()}:\n{notes[:2500]}")
-    except Exception:
-        pass
+        with memory.user_context(user):
+            for category in ("lessons", "corrections", "feedback"):
+                notes = memory.recent(category, n=6)
+                if notes and not notes.startswith("(no "):
+                    parts.append(f"{category.title()}:\n{notes[:2500]}")
+    except OwnerEvidenceStateError:
+        raise
+    except Exception as err:
+        raise OwnerEvidenceStateError("file notes", "wiki note evidence could not be read") from err
     text = "\n\n".join(parts)
     return text[:DREAM_BATCH_CHARS]
 

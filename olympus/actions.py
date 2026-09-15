@@ -15,12 +15,15 @@ Lifecycle:                 ┌────────── reject ────
     prepare → PREPARED ──→ approve → APPROVED → execute →┴ EXECUTED ─→ undo ─→ UNDONE
                                                           └ FAILED
 
-Every transition is appended to an immutable per-user audit log.
+Transitions are also appended to an auxiliary per-user audit log; it is not
+an immutable authority (M19).
 """
 
 from __future__ import annotations
 
 import json
+import re
+from functools import wraps
 import time
 import uuid
 from contextlib import contextmanager
@@ -28,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, memory, prefs
+from . import config, memory, prefs, note_evidence as notes
 
 # --- risk classes --------------------------------------------------------
 # Ordered by how much trust an action needs before it may run un-prompted.
@@ -193,7 +196,6 @@ def _dir(user: str) -> Path:
     """The owner-keyed directory for records. Exact principal only."""
     d = (config.MEMORY_DIR / "actions" / "owners"
          / memory.owner_key(memory.canonical_owner(user)))
-    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -212,17 +214,41 @@ def _legacy_dirs() -> list[Path]:
 
 
 def _path(user: str, action_id: str) -> Path:
+    if not isinstance(action_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", action_id):
+        raise ValueError("invalid action identity")
     return _dir(user) / f"{action_id}.json"
 
 
 def _read_action(path: Path) -> "Action | None":
+    raw = notes.read_raw(path)
+    if raw is None:
+        return None
     try:
-        return Action(**json.loads(path.read_text(encoding="utf-8")))
-    except (json.JSONDecodeError, OSError, TypeError):
-        return None                # one corrupt record must not hide the rest
+        value = notes._json(raw)
+        action = Action(**value)
+        if (not isinstance(action.id, str) or action.id != path.stem
+                or not isinstance(action.user, str)
+                or not isinstance(action.type, str)
+                or not isinstance(action.payload, dict)
+                or not isinstance(action.result, dict)
+                or action.status not in (PREPARED, APPROVED, EXECUTED, FAILED, REJECTED, UNDONE)):
+            raise ValueError("invalid action record")
+        notes.evidence.exact(action.user)
+        for name in ("title", "preview", "why", "error"):
+            notes.evidence.text(getattr(action, name), 500000, empty=True)
+        for name in ("created_at", "approved_at", "executed_at"):
+            stamp = getattr(action, name)
+            if stamp is not None:
+                notes.evidence.number(stamp)
+        notes.evidence.integer(action.boundary_version)
+        if type(action.reversible) is not bool or type(action.edited) is not bool:
+            raise ValueError("invalid action flags")
+        return action
+    except (ValueError, TypeError) as err:
+        raise notes.NoteStateError("action record is damaged; preserve it") from err
 
 
-def _owned_actions(user: str) -> list[Action]:
+def _owned_actions_unlocked(user: str) -> list[Action]:
     """Every action belonging to this EXACT owner.
 
     Reads ONLY the owner-keyed directory — see the note above on why the pre-v4
@@ -234,7 +260,9 @@ def _owned_actions(user: str) -> list[Action]:
     exact = memory.canonical_owner(user)
     seen: set[str] = set()
     out: list[Action] = []
-    for f in sorted(_dir(exact).glob("*.json")):
+    for f in notes.inventory(_dir(exact)):
+        if f.suffix != ".json":
+            continue
         a = _read_action(f)
         if a is None or a.id in seen:
             continue
@@ -245,20 +273,81 @@ def _owned_actions(user: str) -> list[Action]:
     return out
 
 
+def _owned_actions(user):
+    with notes.guard():
+        return _owned_actions_unlocked(user)
+
+
 def _save(action: Action) -> None:
-    _path(action.user, action.id).write_text(
-        json.dumps(asdict(action), indent=2), encoding="utf-8")
+    path = _path(action.user, action.id)
+    raw = json.dumps(asdict(action), indent=2).encode("utf-8")
+    if action.type == "save_note":
+        with notes.guard():
+            before = notes.read_raw(path)
+            notes.transact({notes.relative(path): raw},
+                           {notes.relative(path): notes.digest(before)})
+    else:
+        notes.mkdir(path.parent)
+        notes.publish(path, raw)
 
 
 def _audit(action: Action, event: str) -> None:
-    """Append an immutable record of every state transition."""
+    """Auxiliary transition log; it is not an immutable audit authority (M19)."""
     log = _dir(action.user) / "audit.jsonl"
-    with log.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "ts": time.time(), "action_id": action.id, "type": action.type,
-            "event": event, "status": action.status,
-            "risk": action.risk_class,
-        }) + "\n")
+    try:
+        notes.mkdir(log.parent)
+        notes.read_raw(log, notes.MAX_BATCH)  # Refuse linked/nonregular audit sinks.
+        with notes.io(log).open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": time.time(), "action_id": action.id, "type": action.type,
+                "event": event, "status": action.status,
+                "risk": action.risk_class,
+            }) + "\n")
+    except (OSError, notes.evidence.OwnerEvidenceStateError):
+        if action.type != "save_note":
+            raise
+        warning = "Canonical action saved; auxiliary audit unavailable. Do not repeat the action."
+        action.error = (action.error + "\n" if action.error else "") + warning
+        try:
+            _save(action)
+        except Exception as err:
+            notes.mirror_warning(warning + " Warning receipt unconfirmed: " + str(err))
+        else:
+            notes.mirror_warning(warning)
+
+
+def _note_transition(function):
+    """Serialize the complete read/modify/act/confirm path for note actions."""
+    @wraps(function)
+    def wrapped(first, *args, **kwargs):
+        action = first if isinstance(first, Action) else get(first, args[0])
+        if action is None or action.type != "save_note":
+            return function(first, *args, **kwargs)
+        with notes.guard():
+            current = get(action.user, action.id)
+            if current is None or current.type != "save_note":
+                raise notes.NoteStateError("action changed before transition")
+            if isinstance(first, Action):
+                if asdict(current) != asdict(first):
+                    raise notes.NoteStateError("stale action object; reload its recorded state")
+                first = current
+            return function(first, *args, **kwargs)
+    return wrapped
+
+
+def _note_commit(action, status):
+    """Bind the action receipt to the very transaction which changes its note."""
+    path = _path(action.user, action.id)
+    before = notes.read_raw(path)
+    def commit(result):
+        action.result = result
+        action.status = status
+        action.error = ""
+        if status == EXECUTED:
+            action.executed_at = time.time()
+        return ({notes.relative(path): json.dumps(asdict(action), indent=2).encode()},
+                {notes.relative(path): notes.digest(before)})
+    return commit
 
 
 def get(user: str, action_id: str) -> Action | None:
@@ -267,7 +356,10 @@ def get(user: str, action_id: str) -> Action | None:
     Knowing an id authorizes nothing: the stored `Action.user` must equal the
     caller's exact principal.
     """
-    return next((a for a in _owned_actions(user) if a.id == action_id), None)
+    with notes.guard():
+        exact = memory.canonical_owner(user)
+        action = _read_action(_path(exact, action_id))
+        return action if action is not None and memory.canonical_owner(action.user) == exact else None
 
 
 def pending(user: str) -> list[Action]:
@@ -504,6 +596,7 @@ def prepare(user: str, type_name: str, payload: dict,
     return action
 
 
+@_note_transition
 def edit(user: str, action_id: str, changes: dict,
          title: str | None = None) -> Action:
     """Modify a PREPARED action before approving it — the user stays in
@@ -564,6 +657,7 @@ def can_auto_execute(action: Action, level: int | None = None) -> bool:
     return lvl >= _min_level_to_auto(action.risk_class)
 
 
+@_note_transition
 def _execute(action: Action) -> Action:
     # Pending records created before internal action metadata became
     # server-owned cannot be distinguished from caller-forged records. Reject
@@ -652,10 +746,18 @@ def _execute(action: Action) -> Action:
         return action
     try:
         with _owner_context(action.user):
-            action.result = at.execute(action.payload) or {}
+            payload = dict(action.payload)
+            if action.type == "save_note":
+                payload["_action_id"] = action.id
+                payload["_note_commit"] = _note_commit(action, EXECUTED)
+            action.result = at.execute(payload) or {}
         action.status = EXECUTED
-        action.executed_at = time.time()
-        _save(action); _audit(action, "executed")
+        if action.type != "save_note":
+            action.executed_at = time.time()
+            _save(action)
+        _audit(action, "executed")
+    except notes.NoteStateError:
+        raise  # Journal may contain the completed action. Never overwrite it as failed.
     except Exception as err:
         action.status = FAILED
         action.error = str(err)
@@ -680,6 +782,7 @@ def _record_outcome(action: Action, signal: str) -> None:
             errors.capture("actions.outcome_evidence", err, context=warning)
 
 
+@_note_transition
 def approve(user: str, action_id: str) -> Action:
     """Explicit human approval → executes immediately. The gate."""
     action = get(user, action_id)
@@ -698,6 +801,7 @@ def approve(user: str, action_id: str) -> Action:
     return result
 
 
+@_note_transition
 def reject(user: str, action_id: str, reason: str = "") -> Action:
     """Decline a prepared action — recorded as a learning signal."""
     action = get(user, action_id)
@@ -722,6 +826,7 @@ def reject(user: str, action_id: str, reason: str = "") -> Action:
     return action
 
 
+@_note_transition
 def auto_or_hold(action: Action, level: int | None = None) -> Action:
     """Run automatically if policy allows; otherwise leave it for approval.
     `level` optionally supplies an earned per-domain autonomy level (see
@@ -734,21 +839,34 @@ def auto_or_hold(action: Action, level: int | None = None) -> Action:
     return action  # stays PREPARED, awaiting the human
 
 
+@_note_transition
 def undo(user: str, action_id: str) -> Action:
     """Reverse a reversible, executed action."""
     action = get(user, action_id)
     if action is None:
         raise ValueError("no such action")
     at = _REGISTRY.get(action.type)
-    if action.status != EXECUTED:
+    already_undone = action.type == "save_note" and action.status == UNDONE
+    if action.status != EXECUTED and not already_undone:
         raise ValueError(f"action is {action.status}, cannot undo")
     if not at or at.undo is None:
         raise ValueError("this action type is not reversible")
     try:
         with _owner_context(action.user):
-            at.undo(action.result)
+            result = dict(action.result)
+            if action.type == "save_note":
+                result["_action_id"] = action.id
+                if not already_undone:
+                    result["_note_commit"] = _note_commit(action, UNDONE)
+            at.undo(result)
+        if already_undone:
+            return action
         action.status = UNDONE
-        _save(action); _audit(action, "undone")
+        if action.type != "save_note":
+            _save(action)
+        _audit(action, "undone")
+    except notes.NoteStateError:
+        raise
     except Exception as err:
         action.error = f"undo failed: {err}"
         _save(action); _audit(action, "undo_failed")
@@ -756,3 +874,29 @@ def undo(user: str, action_id: str) -> Action:
         from . import outcomes
         _record_outcome(action, outcomes.UNDONE)
     return action
+
+
+@_note_transition
+def retry_note(user: str, action_id: str) -> Action:
+    """Operator retry of an already approved note after journal recovery.
+
+    An existing terminal action is inspected, not executed or counted again.
+    A still-approved action passes the SAME preview/scope/quota/contract gates.
+    """
+    action = get(user, action_id)
+    if action is None or action.type != "save_note":
+        raise ValueError("no such save-note action")
+    if action.status == EXECUTED:
+        result = action.result
+        operation = notes.digest(("note-action\0" + action.user + "\0" + action.id).encode())
+        if result.get("note") != operation + ".md" or result.get("operation") != operation:
+            raise notes.NoteStateError("completed note result belongs to another action")
+        expected = notes.directory(action.user, notes.ACTION_CATEGORY) / result["note"]
+        if notes.note_result(expected, action.user, notes.ACTION_CATEGORY) != result:
+            raise notes.NoteStateError("completed action note changed")
+        return action
+    if action.status == UNDONE:
+        return undo(user, action_id)
+    if action.status != APPROVED or action.approved_at is None:
+        raise ValueError("only an already approved note can be retried; prepare/review others")
+    return _execute(action)

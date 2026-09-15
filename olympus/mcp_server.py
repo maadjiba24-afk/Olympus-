@@ -310,16 +310,16 @@ def _workspace_tool(name: str, args: dict) -> str:
     """Read-only workspace reads, scoped to the exposed user."""
     from . import memory
     user = _mcp_user()
-    memory.set_user(user)
-    if name == "olympus_search_documents":
-        from . import docrag
-        return docrag.render_search(user, str(args.get("query", "")))
-    if name == "olympus_list_todos":
-        from . import todos
-        return todos.render_list(user)
-    if name == "olympus_recall_memory":
-        return memory.search(str(args.get("query", "")), limit=8)
-    raise KeyError(name)
+    with memory.user_context(user):
+        if name == "olympus_search_documents":
+            from . import docrag
+            return docrag.render_search(user, str(args.get("query", "")))
+        if name == "olympus_list_todos":
+            from . import todos
+            return todos.render_list(user)
+        if name == "olympus_recall_memory":
+            return memory.search(str(args.get("query", "")), limit=8)
+        raise KeyError(name)
 
 
 def _governed_tool(name: str, args: dict) -> str:
@@ -330,21 +330,21 @@ def _governed_tool(name: str, args: dict) -> str:
     authorization that cannot be initiated across the MCP boundary."""
     from . import memory
     user = _mcp_user()
-    memory.set_user(user)
-    if name == "olympus_assess_report":
-        from . import assess
-        fmt = str(args.get("format", "markdown")).strip().lower()
-        if fmt not in ("markdown", "json", "sarif"):
-            fmt = "markdown"
-        return assess.export_findings(fmt, user=user)
-    if name == "olympus_assess_scorecard":
-        from . import assess
-        return (assess.bench_scorecard() + "\n\n"
-                + assess.containment_scorecard(user=user))
-    if name == "olympus_discover_report":
-        from . import discovery
-        return discovery.report(user=user)
-    raise KeyError(name)
+    with memory.user_context(user):
+        if name == "olympus_assess_report":
+            from . import assess
+            fmt = str(args.get("format", "markdown")).strip().lower()
+            if fmt not in ("markdown", "json", "sarif"):
+                fmt = "markdown"
+            return assess.export_findings(fmt, user=user)
+        if name == "olympus_assess_scorecard":
+            from . import assess
+            return (assess.bench_scorecard() + "\n\n"
+                    + assess.containment_scorecard(user=user))
+        if name == "olympus_discover_report":
+            from . import discovery
+            return discovery.report(user=user)
+        raise KeyError(name)
 
 
 def _result(rid, payload: dict) -> dict:

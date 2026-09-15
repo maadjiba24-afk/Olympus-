@@ -47,7 +47,7 @@ def test_approve_executes(reg):
 
 
 def test_reject_records_feedback(reg):
-    from olympus import memory
+    from olympus import memory, note_evidence
     a = actions.prepare("u", "t_send", {"to": "x@y.z"})
     actions.reject("u", a.id, "wrong recipient")
     assert actions.get("u", a.id).status == actions.REJECTED
@@ -150,7 +150,7 @@ def test_initial_user_field_cannot_redirect_a_built_in_note():
     """End-to-end: Alice's approved action must never write into Bob's store."""
     from pathlib import Path
 
-    from olympus import config
+    from olympus import config, memory, note_evidence
 
     actions.grant_scope("alice", "notes")
     a = actions.prepare(
@@ -159,8 +159,8 @@ def test_initial_user_field_cannot_redirect_a_built_in_note():
     done = actions.approve("alice", a.id)
 
     assert done.status == actions.EXECUTED
-    assert Path(done.result["path"]).parent == (
-        config.MEMORY_DIR / "notes" / "alice")
+    assert note_evidence.logical(done.result["path"]).parent == (
+        config.MEMORY_DIR / "owners" / memory.owner_key("alice") / "action_notes")
     assert not (config.MEMORY_DIR / "notes" / "bob").exists()
 
 
