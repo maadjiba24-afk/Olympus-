@@ -881,25 +881,8 @@ def _read_source_file(path: str) -> str:
 
 
 def _apply_prompt(agent: str, new_prompt: str, reason: str) -> str:
-    """RAW prompt writer — the low-level apply+backup primitive. NOT a tool and
-    NOT public: the only caller is `orchestrator.gate_prompt`, which measures a
-    before/after benchmark around it and rolls back via `_restore_prompt` on any
-    regression. There is no ungated public path to this function (M0.4)."""
-    stem = Path(agent).stem  # tolerate 'argus.md' or 'prompts/argus'
-    path = config.PROMPTS_DIR / f"{stem}.md"
-    if not path.is_file():
-        return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
-    old = path.read_text(encoding="utf-8")
-    # Body is the verbatim old prompt (restore_prompt depends on this);
-    # the update reason rides in a SINGLE-LINE trailing comment that restore
-    # strips. Flatten any newlines in the (free-form model) reason so the
-    # comment can't span multiple lines and leave a stray `... -->` behind on
-    # restore.
-    flat_reason = " ".join((reason or "").split())
-    memory.save("prompt_backups", stem,
-                f"{old}\n<!-- update reason: {flat_reason} -->")
-    path.write_text(new_prompt.strip() + "\n", encoding="utf-8")
-    return f"Prompt '{stem}' updated. Previous version backed up to memory/prompt_backups."
+    """Compatibility internal entry; all prompt changes now use the public gate."""
+    return _update_prompt(agent, new_prompt, reason)
 
 
 def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
@@ -915,43 +898,13 @@ def _update_prompt(agent: str, new_prompt: str, reason: str) -> str:
 
 
 def _restore_prompt(agent: str) -> str:
-    from . import note_evidence as notes
-    with notes.guard():
-        stem = Path(agent).stem
-        path = config.PROMPTS_DIR / f"{stem}.md"
-        if not path.is_file():
-            return f"Error: unknown agent prompt '{stem}'."
-        from . import note_evidence as notes, note_archive
-        backups = [row for row in notes.notes("shared", "prompt_backups")
-                   if memory.note_title(row["body"]) == stem]
-        backups.sort(key=lambda row: (notes.io(row["path"]).stat().st_mtime_ns,
-                                     row["path"].name), reverse=True)
-        if not backups:
-            return f"Error: no backups exist for '{stem}'."
-        chosen = backups[0]
-        newest, text = chosen["path"], chosen["body"]
-        lines = text.splitlines()
-        if lines and lines[0].startswith("# "):
-            lines = lines[2:] if len(lines) > 1 and not lines[1].strip() else lines[1:]
-        # The update-reason comment is always appended last; drop it and anything
-        # after it (robust to an old multi-line reason, not just its first line).
-        for i, l in enumerate(lines):
-            if l.startswith("<!-- update reason:"):
-                lines = lines[:i]
-                break
-        body = "\n".join(lines)
-        # Recheck the exact source before changing the prompt. External prompt
-        # recovery/benchmark-state coupling remains in M03; never silently consume
-        # a damaged backup or report a failed deletion as a successful restore.
-        if notes.digest(notes.read_raw(newest)) != chosen["sha256"]:
-            raise notes.NoteStateError("prompt backup changed before restore")
-        note_archive.external_publish(path, (body.strip() + "\n").encode())
-        # Consume the backup we just restored from so this is a real rollback STACK:
-        # a second restore steps back to the prior version instead of re-applying the
-        # same newest one forever (the previous behavior could only ever undo the
-        # most recent update).
-        notes.delete_rows([chosen])
-        return f"Prompt '{stem}' restored from {newest.name}."
+    """Restore a specific predecessor, preserving backups and recovery evidence."""
+    from . import prompt_evidence
+    try:
+        return prompt_evidence.restore(agent)["message"]
+    except Exception as err:
+        return f"Prompt restore unavailable: {err}. Inspect prompt-status; preserve evidence."
+
 
 def _send_email(to: str, subject: str, body: str, *,
                 user: str | None = None, _approved: bool = False) -> str:

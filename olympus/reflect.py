@@ -52,13 +52,13 @@ class FailureSignal:
 # --- mining ----------------------------------------------------------------
 
 def _recent_trace_files(limit_files: int = 10):
+    from . import note_evidence
     base = config.MEMORY_DIR / "traces"
-    if not base.exists():
-        return []
-    return sorted(base.glob("*.jsonl"), reverse=True)[:limit_files]
+    return sorted((p for p in note_evidence.inventory(base) if p.suffix == ".jsonl"),
+                  reverse=True)[:limit_files]
 
 
-def mine_failures(*, limit_runs: int = 200, agents=None) -> list[FailureSignal]:
+def mine_failures(*, limit_runs: int = 200, agents=None, strict=True) -> list[FailureSignal]:
     """Scan the recent decision log (newest first) for failure signals. The
     strongest per-agent signal is a `"violation"` decision — an output-contract
     failure already attributed to a specialist key; run-level `*.error`/`*.failed`
@@ -69,18 +69,37 @@ def mine_failures(*, limit_runs: int = 200, agents=None) -> list[FailureSignal]:
     seen = 0
     for path in _recent_trace_files():
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+            from . import note_evidence, owner_evidence
+            raw = note_evidence.read_raw(path, 16 * 1024 * 1024)
+            if raw is None:
+                raise ValueError("enumerated trace disappeared")
+            lines = raw.decode("utf-8").splitlines()
+            if strict and raw and not raw.endswith(b"\n"):
+                raise ValueError("incomplete trace tail")
+        except (OSError, ValueError, owner_evidence.OwnerEvidenceStateError):
+            if strict:
+                raise
             continue
         for line in reversed(lines):
             if seen >= limit_runs:
                 return out
             try:
-                run = json.loads(line)
+                run = owner_evidence.decode(line.encode(), "failure trace", 1024 * 1024) if strict else json.loads(line)
             except (json.JSONDecodeError, ValueError):
+                if strict:
+                    raise ValueError("malformed trace record: " + path.name)
                 continue
             if not isinstance(run, dict):
+                if strict:
+                    raise ValueError("invalid trace shape: " + path.name)
                 continue          # a trace is untrusted — tolerate any shape
+            if strict:
+                owner_evidence.text(run.get("id"), 1024)
+                for key in ("decisions", "events"):
+                    values = run.get(key, [])
+                    owner_evidence.records(values, 20000)
+                    if not all(isinstance(value, dict) for value in values):
+                        raise ValueError("invalid trace " + key)
             seen += 1
             rid = str(run.get("id", ""))
             decisions = run.get("decisions")
@@ -149,8 +168,17 @@ def run_cycle(agent: str, *, settings=None, proposer: ProposerFn,
         return {"agent": agent, "status": "error", "kept": False,
                 "failures": 0, "gate": f"unsafe agent key {agent!r}"}
 
-    sigs = failures_for(agent, signals if signals is not None
-                        else mine_failures(agents=[agent]))
+    from . import prompt_evidence
+    pending = prompt_evidence.status(agent)
+    if pending["state"] != "available":
+        return {"agent": agent, "status": "unavailable", "kept": False,
+                "failures": None, "gate": "Prompt recovery required: " + str(pending)}
+    try:
+        sigs = failures_for(agent, signals if signals is not None
+                            else mine_failures(agents=[agent], strict=True))
+    except Exception as err:
+        return {"agent": agent, "status": "unavailable", "kept": False,
+                "failures": None, "gate": "Failure evidence unavailable: " + str(err)}
     if len(sigs) < min_failures:
         return {"agent": agent, "status": "no-signal", "kept": False,
                 "failures": len(sigs)}
@@ -172,23 +200,12 @@ def run_cycle(agent: str, *, settings=None, proposer: ProposerFn,
 
     run_ids = sorted({s.run_id for s in sigs if s.run_id})
     reason = f"reflection: {len(sigs)} mined failure(s) for {agent}"
-    gate = orchestrator.gate_prompt(agent, new_prompt, reason, settings)
-    kept = "gated & kept" in gate
-    refused = gate.startswith("Cannot") or gate.startswith("Error")
-    status = "kept" if kept else ("refused" if refused else "reverted")
-
-    # Witness-signed, append-only record of the change (whatever the outcome):
-    # the prompt actually on disk after gating, its provenance, and the decision.
-    applied = agent_mod.load_prompt(agent)
-    prov = deltas.Provenance(source="reflect", run_id=",".join(run_ids),
-                             trust="operator", detail=reason)
-    snap = deltas.record_snapshot(
-        f"prompt:{agent}", kind="prompt",
-        state={"prompt": applied, "kept": kept, "gate": gate},
-        delta={"failures": len(sigs), "proposed_chars": len(new_prompt)},
-        provenance=prov)
-    return {"agent": agent, "status": status, "kept": kept, "gate": gate,
-            "snapshot": snap["snapshot_hash"], "failures": len(sigs)}
+    result = orchestrator.gate_prompt_result(agent, new_prompt, reason, settings,
+        provenance=deltas.Provenance(source="reflect", run_id=",".join(run_ids),
+                                    trust="operator", detail=reason).to_dict())
+    return {"agent": agent, "status": result["status"], "kept": result["kept"],
+            "gate": result["message"], "operation": result.get("operation"),
+            "snapshot": result.get("snapshot"), "failures": len(sigs)}
 
 
 def prometheus_proposer(settings=None) -> ProposerFn:
@@ -211,6 +228,16 @@ def prometheus_proposer(settings=None) -> ProposerFn:
     return propose
 
 
+def _shared_context(fn):
+    from functools import wraps
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with memory.user_context("shared"):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_shared_context
 def reflect(settings=None, *, agents=None, proposer: ProposerFn | None = None,
             min_failures: int = 1) -> str:
     """Mine recent failures and run a gated reflection cycle for each affected,
@@ -218,8 +245,10 @@ def reflect(settings=None, *, agents=None, proposer: ProposerFn | None = None,
     work; runs in the shared namespace. Returns a human-readable summary."""
     from . import evals
 
-    memory.set_user("shared")
-    signals = mine_failures()
+    try:
+        signals = mine_failures(strict=True)
+    except Exception as err:
+        return "Reflection evidence unavailable: " + str(err)
     if not signals:
         return "Reflection: no failure signals to act on."
     proposer = proposer or prometheus_proposer(settings)
@@ -244,6 +273,10 @@ def reflect(settings=None, *, agents=None, proposer: ProposerFn | None = None,
         parts.append(f"improved: {', '.join(kept)}")
     if reverted:
         parts.append(f"reverted (regressed): {', '.join(reverted)}")
+    unavailable = [r["agent"] + ": " + r.get("gate", r["status"]) for r in results
+                   if r["status"] in ("error", "unavailable", "refused")]
+    if unavailable:
+        parts.append("requires attention: " + "; ".join(unavailable))
     if not kept and not reverted:
         parts.append("no change kept")
     return " — ".join(parts)

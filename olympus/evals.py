@@ -36,9 +36,46 @@ JUDGE_SCHEMA = {
 }
 
 
-def load_benchmarks() -> list[dict]:
+from contextlib import contextmanager
+from contextvars import ContextVar
+_BENCHMARK_SNAPSHOT = ContextVar("benchmark_snapshot", default=None)
+
+
+@contextmanager
+def benchmark_snapshot(items):
+    from copy import deepcopy
+    token = _BENCHMARK_SNAPSHOT.set(deepcopy(items))
+    try:
+        yield
+    finally:
+        _BENCHMARK_SNAPSHOT.reset(token)
+
+
+def load_benchmarks(*, strict=False) -> list[dict]:
     """Built-in benchmark items plus any Olympus auto-generated for new domains."""
+    if _BENCHMARK_SNAPSHOT.get() is not None:
+        from copy import deepcopy
+        return deepcopy(_BENCHMARK_SNAPSHOT.get())
     path = Path(__file__).resolve().parent / "benchmarks.json"
+    if strict:
+        from . import note_archive, note_evidence, owner_evidence as oe
+        items = oe.decode(note_archive.external_read(path, 4 * 1024 * 1024), "benchmark", 4 * 1024 * 1024)
+        raw = note_evidence.read_raw(config.MEMORY_DIR / "benchmarks_extra.json", 4 * 1024 * 1024)
+        if raw is not None:
+            extra_items = oe.decode(raw, "benchmark extra", 4 * 1024 * 1024)
+            oe.records(extra_items, 2000)
+            items += extra_items
+        oe.records(items, 4000)
+        seen = set()
+        for row in items:
+            if not isinstance(row, dict):
+                raise ValueError("invalid benchmark row")
+            for key in ("id", "specialist", "task", "criteria"):
+                oe.text(row.get(key), 32000)
+            if row["id"] in seen:
+                raise ValueError("duplicate benchmark identity")
+            seen.add(row["id"])
+        return items
     items = json.loads(path.read_text(encoding="utf-8"))
     extra = config.MEMORY_DIR / "benchmarks_extra.json"
     if extra.exists():
@@ -410,6 +447,16 @@ def run(settings: config.Settings | None = None,
                 f"## Assistant answer\n{answer}"}],
             JUDGE_SCHEMA, effort="medium",
         )
+        if _BENCHMARK_SNAPSHOT.get() is not None:
+            # A mutation gate must retain actual typed judge evidence. The
+            # general diagnostic harness's historic coercion/clamping is not
+            # proof that a malformed verdict qualifies a prompt publication.
+            from . import owner_evidence as oe
+            if not isinstance(answer, str):
+                raise ValueError("benchmark answer evidence unavailable")
+            oe.fields(verdict, ("score", "justification"))
+            oe.integer(verdict["score"], minimum=1, maximum=10)
+            oe.text(verdict["justification"], 32000)
         judge_score = max(1, min(10, int(verdict["score"])))
         # Objective assertions (if the item has any) proportionally cap the judge
         # score — deterministic, judge-independent. No `checks` → obj=1.0, so the

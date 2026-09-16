@@ -25,8 +25,27 @@ def _assistant_turn(response) -> dict[str, Any]:
             "content": json.loads(response.to_json())["content"]}
 
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+_PROMPT_OVERRIDE = ContextVar("benchmark_prompt_override", default=None)
+
+
+@contextmanager
+def benchmark_prompt(stem, text):
+    """A candidate is visible only to this benchmark context, never live readers."""
+    token = _PROMPT_OVERRIDE.set({stem: text})
+    try:
+        yield
+    finally:
+        _PROMPT_OVERRIDE.reset(token)
+
+
 def load_prompt(stem: str) -> str:
-    return (config.PROMPTS_DIR / f"{stem}.md").read_text(encoding="utf-8")
+    override = _PROMPT_OVERRIDE.get() or {}
+    if stem in override:
+        return override[stem]
+    from . import prompt_evidence
+    return prompt_evidence.read_effective(stem)
 
 
 def run_agent(

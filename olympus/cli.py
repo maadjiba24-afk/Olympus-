@@ -647,14 +647,20 @@ def build_parser() -> argparse.ArgumentParser:
                                   "cycle, list/apply/revert reversible rewrites")
     p_sleep.add_argument("action", nargs="?", default="status",
                          choices=["status", "run", "proposals", "apply",
-                                  "revert"])
+                                  "revert", "state-status", "initialize-empty",
+                                  "cycles-initialize", "retry-quarantine", "retry-cycle"])
     p_sleep.add_argument("ident", nargs="?", default=None,
                          help="user (proposals) or snapshot id (revert)")
-    sub.add_parser(
+    p_sleep.add_argument("--user", default=None, help="exact owner, default cli")
+    p_sleep.add_argument("--acknowledge-legacy", action="store_true",
+                         help="initialize NEW empty state; preserve unclaimed legacy bytes")
+    p_supervise = sub.add_parser(
         "sleeptime-supervise",
         help="run ONE supervised reflection cycle (apply hard-off), print the "
              "evidence report, grade it CLEAN/DIRTY on the signed scoreboard — "
              "the executable form of the 10-clean-cycle graduation rule")
+    p_supervise.add_argument("--cycle-id", default=None,
+                             help="retry one recorded cycle without repeating provider work")
     p_paylive = sub.add_parser(
         "pay-live",
         help="LIVE payment cutover status: which human acts are still missing "
@@ -863,10 +869,18 @@ def build_parser() -> argparse.ArgumentParser:
         "wiki", help="the memory wiki: concept pages maintained by nightly "
                      "dreaming (list | show <page> | lint | dream | rm <page>)")
     p_wiki.add_argument("action", nargs="?", default="list",
-                        choices=["list", "show", "lint", "dream", "rm"])
+                        choices=["list", "show", "lint", "dream", "rm", "state-status", "initialize-empty"])
     p_wiki.add_argument("page", nargs="?", default="")
     p_wiki.add_argument("--user", default="shared",
                         help="memory namespace (default: shared)")
+    p_wiki.add_argument("--acknowledge-legacy", action="store_true",
+                        help="preserve legacy pages and explicitly initialize an empty exact-owner wiki")
+    p_prompt_status = sub.add_parser("prompt-status", help="inspect prompt publication and recovery evidence")
+    p_prompt_status.add_argument("agent")
+    p_prompt_recover = sub.add_parser("prompt-recover", help="recover one specific prompt operation without model calls")
+    p_prompt_recover.add_argument("agent")
+    p_prompt_recover.add_argument("operation")
+    p_prompt_recover.add_argument("--decision", choices=["finish", "rollback"], required=True)
     p_restrict = sub.add_parser(
         "restrict", help="scope a conversation/user to a capability profile "
                          "(full | reader | guest | custom)")
@@ -2492,12 +2506,8 @@ def _main(argv: list[str] | None = None) -> int:
             import json as _json
             print(_json.dumps(evolve.summary(), indent=2))
     elif args.command == "sleeptime-supervise":
-        from . import memory as _mem, supervise
-        report = supervise.run_supervised_cycle()
-        rendered = supervise.render_report(report)
-        print(rendered)
-        _mem.save("reports", "sleeptime supervision cycle", rendered)
-        return 0 if report["grade"] == "CLEAN" else 1
+        from . import hardening_commands
+        return hardening_commands.supervised_command(args)
     elif args.command == "pay-live":
         from . import paylive
         import json as _json
@@ -2522,40 +2532,8 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"\nsigned export: {report.get('snapshot_hash', '')[:16]}")
         return 0
     elif args.command == "sleeptime":
-        from . import sleeptime, config as _cfg
-        import json as _json
-        if args.action == "run":
-            lines = sleeptime.run()
-            print("\n".join(lines) if lines
-                  else ("Sleep-time is disabled (set OLYMPUS_SLEEPTIME=1)."
-                        if not _cfg.sleeptime_enabled()
-                        else "Nothing to refine."))
-        elif args.action == "proposals":
-            user = args.ident or "cli"
-            props = sleeptime.proposals(user)
-            if not props:
-                print("No proposals.")
-            for p in props:
-                print(sleeptime.render_diff(p))
-                print()
-        elif args.action == "revert":
-            if not args.ident:
-                print("Usage: olympus sleeptime revert <snapshot-id> "
-                      "(see `sleeptime status`).")
-            else:
-                user = "cli"
-                ok = sleeptime.revert(user, args.ident)
-                print("Reverted." if ok else "No such snapshot.")
-        elif args.action == "apply":
-            print("Auto-apply is governed: enable a graduated loop with "
-                  "OLYMPUS_SLEEPTIME_AUTOAPPLY=1; manual apply of a single "
-                  "proposal is intentionally not exposed.")
-        else:
-            st = sleeptime.state()
-            st["graduated"] = sleeptime.graduated()
-            st["enabled"] = _cfg.sleeptime_enabled()
-            st["autoapply"] = _cfg.sleeptime_autoapply()
-            print(_json.dumps(st, indent=2))
+        from . import hardening_commands
+        return hardening_commands.sleeptime_command(args)
     elif args.command == "liveeval":
         from . import liveeval
         import json as _json
@@ -3415,26 +3393,11 @@ def _main(argv: list[str] | None = None) -> int:
                 return 1
             print("Removed (if it existed).")
     elif args.command == "wiki":
-        from . import wiki
-        if args.action == "list":
-            print(wiki.summary(args.user))
-        elif args.action == "show":
-            if not args.page:
-                print("Usage: olympus wiki show <page>")
-                return 1
-            print(wiki.read(args.user, args.page))
-        elif args.action == "lint":
-            issues = wiki.lint(args.user)
-            print("\n".join(issues) if issues
-                  else "Wiki is fresh — no issues.")
-        elif args.action == "dream":
-            print(wiki.dream(args.user))
-        elif args.action == "rm":
-            if not args.page:
-                print("Usage: olympus wiki rm <page>")
-                return 1
-            print("Removed." if wiki.remove(args.user, args.page)
-                  else "No such page.")
+        from . import hardening_commands
+        return hardening_commands.wiki_command(args)
+    elif args.command in ("prompt-status", "prompt-recover"):
+        from . import hardening_commands
+        return hardening_commands.prompt_command(args)
     elif args.command == "restrict":
         from . import capprofile
         if args.list_profiles:

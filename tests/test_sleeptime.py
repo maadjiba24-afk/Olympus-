@@ -45,11 +45,11 @@ def _gen(sources):
 
 
 def _verify_ok(sources, rewrite):
-    return {"supported": True}
+    return {"supported": True, "confidence": .95}
 
 
 def _verify_bad(sources, rewrite):
-    return {"supported": False, "unsupported_claims": ["invented a fact"]}
+    return {"supported": False, "confidence": .2, "unsupported_claims": ["invented a fact"]}
 
 
 def test_supervised_proposes_without_committing():
@@ -303,19 +303,17 @@ def test_poisoned_rewrite_is_sanitized_before_it_can_be_stored():
 
 # --- graduation / streak --------------------------------------------------
 
-def test_clean_cycles_advance_and_reset(monkeypatch):
+def test_clean_cycles_advance_and_reset(qualify_sleeptime):
     assert sleeptime.state()["clean_cycles"] == 0
-    sleeptime._record_cycle(clean=True, proposed=1, committed=0)
-    sleeptime._record_cycle(clean=True, proposed=1, committed=0)
+    qualify_sleeptime(2)
     assert sleeptime.state()["clean_cycles"] == 2
     sleeptime._record_cycle(clean=False, proposed=0, committed=0)   # rejection
     assert sleeptime.state()["clean_cycles"] == 0                    # reset
 
 
-def test_graduated_after_threshold(monkeypatch):
+def test_graduated_after_threshold(monkeypatch, qualify_sleeptime):
     monkeypatch.setattr(config, "SLEEPTIME_GRADUATION", 3)
-    for _ in range(3):
-        sleeptime._record_cycle(clean=True, proposed=0, committed=0)
+    qualify_sleeptime(3)
     assert sleeptime.graduated() is True
 
 
@@ -362,7 +360,7 @@ def test_run_requires_affirmative_clean_evidence(monkeypatch, summary):
     _mem("cycle-evidence", "One memory is enough to enumerate this user")
     monkeypatch.setattr(sleeptime, "refine_user", lambda *a, **k: summary)
 
-    assert sleeptime.run() == []
+    assert "evidence unavailable" in sleeptime.run()[0].lower()
     assert sleeptime.state()["runs"] == 1
     assert sleeptime.state()["clean_cycles"] == 0
 
@@ -376,6 +374,6 @@ def test_run_contains_unexpected_refinement_exception(monkeypatch):
 
     monkeypatch.setattr(sleeptime, "refine_user", fail)
 
-    assert sleeptime.run() == []
+    assert "evidence unavailable" in sleeptime.run()[0].lower()
     assert sleeptime.state()["runs"] == 1
     assert sleeptime.state()["clean_cycles"] == 0

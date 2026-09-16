@@ -560,8 +560,8 @@ is surfaced by CLI/tools, prompts, HTTP views, selectors and offline exports.
 An outcome-recording failure does not turn a completed action into a failed one.
 
 Search ownership metadata binds the exact owner and conversation identifier;
-rebuilds replace rows only after snapshot validation. Unqualified wiki publication
-and incomplete principal erasure explicitly refuse. The latter means that erasure
+rebuilds replace rows only after snapshot validation. M03 below connects qualified
+wiki publication; incomplete principal erasure still explicitly refuses. Erasure
 is **not currently available or certified**, including through retention sweeps.
 These refusals are named source prerequisites, not production-readiness claims.
 Other normalized stores remain outside this bounded change; global tenant
@@ -611,9 +611,39 @@ independent POSIX writers, actual in-memory HTTP dispatch and mock database
 rollback. Real Postgres and native Windows/POSIX validation remain delivery
 gates. The database transaction applies only to these new snapshots; M12
 conversion of other backend callers and M13 Windows topology remain open.
-Background proposal/wiki/snapshot ownership and recovery remain M03, and full
+Background proposal/wiki/snapshot ownership and recovery are implemented in M03
+below, pending its delivery gates. Full
 legacy attribution/export/erasure remain M09. No activation or expanded autonomy
 is authorized by these storage changes.
+
+### M03: consolidation and prompt evidence
+
+Exact-owner sleeptime proposals, complete before/after memory snapshots and
+application acknowledgement share the existing typed-memory backend transaction.
+Approval/revert compare full source versions; a retry never creates a second
+rewrite. Signed cycle evidence is the sole graduation-counter authority, with a
+durable prepared report for signing/anchor retries. Missing confidence, empty or
+unsigned work and partial source enumeration do not qualify. Supervision remains
+apply-off; no activation flags are written. Quarantine is a recoverable outbox.
+
+Wiki pages/checkpoints use one strict exact-owner snapshot and the note journal.
+Generation consumes enveloped source data, validates the entire output and
+compares source versions before atomic/recoverable publication. Discovery saves
+its owner/gap-bound result before publishing the destination and gap receipt
+together; retrying prepared publication does not repeat research. Unclaimed
+normalized legacy bytes remain untouched. An unavailable wiki is visible in
+CLI/gateway/context rather than presented as an empty successful lookup.
+
+Prompt candidates are visible only in the benchmark context until the pinned
+before/after cases pass. A durable operation binds exact original/candidate bytes,
+benchmark evidence, backup and signed receipt. Ordinary readers see the original
+while completion is unconfirmed. Recovery never selects an unrelated latest
+backup or overwrites an intervening operator edit. Missing/malformed benchmark
+or trace evidence cannot authorize a prompt mutation. Shared installation prompts
+and operator reports are intentional scope. Retained signed windows are locally
+verifiable, not immutable independent evidence; configured anchors must confirm
+the current head before qualification. M09 archival/erasure and M13 native Windows
+process topology remain open. See `M03_SLEEPTIME_WIKI.md` for commands and limits.
 
 
 ### M04: exact-owner file notes and recoverable action evidence

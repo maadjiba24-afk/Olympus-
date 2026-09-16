@@ -58,18 +58,14 @@ def test_acquire_knowledge_degrades_without_result():
     assert len(discovery.open_gaps(kind="knowledge")) == 1      # stays open
 
 
-def test_acquire_knowledge_learns_only_with_qualified_mock_destination(monkeypatch):
+def test_acquire_knowledge_publishes_to_actual_exact_owner_wiki():
     from olympus import wiki
-    monkeypatch.setattr(wiki, "EXACT_OWNER_NAMESPACE", True, raising=False)
-    saved = {}
-    monkeypatch.setattr(wiki, "upsert",
-                        lambda user, title, content, **k: saved.setdefault("slug", "quic") or "quic")
     discovery.note_gap("knowledge", "QUIC congestion control")
     gap = discovery.open_gaps(kind="knowledge")[0]
     report = "QUIC congestion control resembles TCP CUBIC/BBR. " * 8
     out = discovery.acquire_knowledge(gap, runner=lambda q: report)
     assert "learned" in out
-    assert saved.get("slug") == "quic"
+    assert "QUIC congestion" in wiki.read("shared", "quic-congestion-control")
     assert discovery.open_gaps(kind="knowledge") == []          # resolved
 
 

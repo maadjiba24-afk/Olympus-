@@ -282,6 +282,12 @@ def test_context_compaction_enabled_but_all_prior_is_inactive(monkeypatch):
 def test_w2_i92_liveness_is_a_pure_read_no_network_no_model_calls(monkeypatch):
     """W2-I9.2 — liveness adds NO measurement load: no socket is opened and no
     provider entry point is invoked. Everything it needs is already on disk."""
+    # SSL subclasses socket.socket at import time. Load the clients before
+    # replacing that class so this test also runs independently of suite order.
+    import http.client
+    import urllib.request
+    from olympus import llm
+
     called: list[str] = []
 
     def forbidden(name):
@@ -293,15 +299,12 @@ def test_w2_i92_liveness_is_a_pure_read_no_network_no_model_calls(monkeypatch):
     monkeypatch.setattr(socket, "socket", forbidden("socket.socket"))
     monkeypatch.setattr(socket, "create_connection",
                         forbidden("socket.create_connection"))
-    import http.client
-    import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", forbidden("urlopen"))
     monkeypatch.setattr(http.client.HTTPConnection, "request",
                         forbidden("HTTPConnection.request"))
     monkeypatch.setattr(http.client.HTTPSConnection, "request",
                         forbidden("HTTPSConnection.request"))
 
-    from olympus import llm
     for entry in ("complete", "stream_text", "client", "server_web_search",
                   "server_web_fetch"):
         monkeypatch.setattr(llm, entry, forbidden(f"llm.{entry}"))

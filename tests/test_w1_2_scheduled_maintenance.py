@@ -21,6 +21,19 @@ import pytest
 from olympus import config, heartbeat, memory, retention, sessionlog
 
 
+@pytest.fixture(autouse=True)
+def owned_scheduler_providers(monkeypatch):
+    # A configured model is supplied by conftest. Do not let unrelated due
+    # learning cadences reach a provider while exercising the real maintenance
+    # dispatch, retention policy, journal publication and legal-hold checks.
+    from olympus import backend, llm
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("owned maintenance fixture: model work is unavailable")
+    monkeypatch.setattr(backend, "run_agent_counted", unavailable)
+    monkeypatch.setattr(backend, "complete_json", unavailable)
+    monkeypatch.setattr(llm, "client", unavailable)
+
+
 # --- helpers ---------------------------------------------------------------
 
 def _old_conversation(cid: str, *, age_days: float) -> "object":

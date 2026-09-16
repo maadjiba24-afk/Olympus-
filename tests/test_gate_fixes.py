@@ -14,6 +14,12 @@ from olympus import config, evals, orchestrator, skills
 _S = config.Settings(provider="anthropic", model="x", api_key="k")
 
 
+def _bench(score, identifiers):
+    return {"avg": score, "items": [
+        {"id": key, "score": score, "justification": "Owned mock benchmark"}
+        for key in identifiers]}
+
+
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
@@ -61,7 +67,7 @@ def test_gate_prompt_keeps_change_on_non_regression(tmp_path, monkeypatch):
     d = _prompt_dir(tmp_path, monkeypatch)
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     scores = iter([7.0, 8.0])              # before, after — improvement
-    monkeypatch.setattr(evals, "run", lambda *a, **k: {"avg": next(scores)})
+    monkeypatch.setattr(evals, "run", lambda *a, **k: _bench(next(scores), k["only"]))
     out = orchestrator.gate_prompt("plutus", "NEW PROMPT", "sharper", settings=_S)
     assert "kept" in out.lower()
     assert (d / "plutus.md").read_text(encoding="utf-8").strip() == "NEW PROMPT"
@@ -71,7 +77,7 @@ def test_gate_prompt_reverts_change_on_regression(tmp_path, monkeypatch):
     d = _prompt_dir(tmp_path, monkeypatch)
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     scores = iter([8.0, 6.0])              # before, after — regression
-    monkeypatch.setattr(evals, "run", lambda *a, **k: {"avg": next(scores)})
+    monkeypatch.setattr(evals, "run", lambda *a, **k: _bench(next(scores), k["only"]))
     out = orchestrator.gate_prompt("plutus", "NEW PROMPT", "risky", settings=_S)
     assert "revert" in out.lower()
     # rolled back to the original prompt, not left in the regressed state

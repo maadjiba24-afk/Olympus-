@@ -44,7 +44,12 @@ _MAX_CONTENT = 600          # per memory; truncate to bound context + storage
 
 def _validate_state(data):
     from . import memory_evidence as me
-    oe.fields(data, (_EVENTS, _MEMS, _CANDS))
+    expected = {_EVENTS, _MEMS, _CANDS}
+    if isinstance(data, dict) and "sleeptime.v1" in data:
+        from .sleeptime_evidence import validate as validate_sleep
+        validate_sleep(data["sleeptime.v1"])
+        expected.add("sleeptime.v1")
+    oe.fields(data, expected)
     for row in me.rows(data[_EVENTS], _MAX_EVENTS):
         me.timestamp(row["ts"])
         oe.text(row["kind"], 256)
@@ -88,7 +93,8 @@ def _validate_state(data):
 
 def _state(user):
     return memory_evidence.Snapshot(user, "usermem.state.v3",
-                                    (_EVENTS, _MEMS, _CANDS), _validate_state)
+                                    (_EVENTS, _MEMS, _CANDS), _validate_state,
+                                    strict_durability=True)
 
 
 def _load(ns: str, user: str) -> list:

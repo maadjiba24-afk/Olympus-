@@ -93,8 +93,12 @@ def _wiki_block(user: str, user_message: str) -> str:
     try:
         from . import wiki
         return wiki.context_block(user, user_message)
-    except Exception:
-        return ""
+    except Exception as err:
+        from . import deltas, errors
+        errors.capture("orchestrator.wiki", err)
+        return "\n\n" + deltas.enveloped(
+            "Wiki evidence is unavailable. Do not describe this as an empty or successful lookup.",
+            source="wiki-availability") + "\n"
 
 
 def _silent(_: str) -> None:
@@ -3191,59 +3195,16 @@ def gate_skills(settings: config.Settings | None = None) -> str:
 @_bind_note_owner()
 def gate_prompt(agent: str, new_prompt: str, reason: str,
                 settings: config.Settings | None = None) -> str:
-    """Apply a prompt change ONLY if a before/after benchmark shows it does not
-    regress the affected specialist's score; otherwise roll it back. This is the
-    single, code-enforced prompt-write path (M0.4): the public `update_prompt`
-    tool routes here, and the raw writer `tools._apply_prompt` is reachable only
-    from inside this function — there is no ungated way to write a prompt.
+    """The single public prompt writer, with a typed recoverable implementation."""
+    return gate_prompt_result(agent, new_prompt, reason, settings)["message"]
 
-    A prompt is an *upgrade* of an existing agent (unlike a new skill, which must
-    justify itself), so the bar is non-regression: keep on after >= before,
-    revert on any drop. When the agent has no benchmark coverage the guarantee
-    cannot be honored, so the change is REFUSED (fail closed) — the caller must
-    generate coverage first; there is no unmeasured escape hatch.
-    """
-    from pathlib import Path
 
-    from . import evals, tools
-    settings = settings or config.Settings.from_env()
-
-    stem = Path(agent).stem
-    path = config.PROMPTS_DIR / f"{stem}.md"
-    if not path.is_file():
-        return f"Error: unknown agent prompt '{stem}'. Use list_source_files."
-
-    bench_ids = evals.ids_for([stem])
-    if not bench_ids:
-        return (f"Cannot benchmark-gate '{stem}': no benchmark items cover it "
-                f"(only user-facing specialists are scored). Generate coverage "
-                f"with generate_benchmark first — a prompt change cannot be "
-                f"applied unmeasured (M0.4: no ungated prompt-write path).")
-
-    try:
-        before = evals.run(settings, only=bench_ids)["avg"]
-    except Exception as err:
-        return f"Cannot gate '{stem}': baseline benchmark failed ({err})."
-
-    apply_msg = tools._apply_prompt(stem, new_prompt, reason)   # raw writer (backs up old)
-    if apply_msg.startswith("Error"):
-        return apply_msg
-
-    try:
-        after = evals.run(settings, only=bench_ids)["avg"]
-    except Exception as err:
-        restored = tools._restore_prompt(stem)
-        return f"Reverted '{stem}': after-benchmark failed ({err}). {restored}"
-
-    if after >= before:                 # non-regression: keep the upgrade
-        memory.save("evals", f"prompt gate: {stem}",
-                    f"Kept prompt change [{before}→{after}] — {reason}")
-        return f"Prompt '{stem}' gated & kept [{before}→{after}] — {reason}"
-    restored = tools._restore_prompt(stem)   # regression: roll back
-    memory.save("corrections", f"Prompt change reverted: {stem}",
-                f"Benchmark regressed [{before}→{after}]; rolled back. "
-                f"Reason given was: {reason}")
-    return f"Prompt '{stem}' reverted — benchmark regressed [{before}→{after}]. {restored}"
+@_bind_note_owner()
+def gate_prompt_result(agent: str, new_prompt: str, reason: str,
+                       settings: config.Settings | None = None, *, provenance=None) -> dict:
+    from . import prompt_evidence
+    return prompt_evidence.gate(agent, new_prompt, reason, settings,
+                                provenance=provenance)
 
 
 @_bind_note_owner()

@@ -71,6 +71,54 @@ def test_deltas_record_refuses_to_extend_a_corrupt_history():
         deltas.record_snapshot(tid, kind="playbook", state={"v": 2})
 
 
+@_signing
+@pytest.mark.parametrize("damage", ["json", "utf8", "duplicate", "schema", "owner", "tail"])
+def test_deltas_corruption_is_classified_and_preserved_across_consumers(damage):
+    tid = "playbook:damage-" + damage
+    saved = deltas.record_snapshot(tid, kind="playbook", state={"v": 1})
+    path = deltas._path(tid)
+    original = path.read_bytes()
+    row = json.loads(original)
+    if damage == "json":
+        broken = original + b"{ broken\n"
+    elif damage == "utf8":
+        broken = original + b"\xff\n"
+    elif damage == "duplicate":
+        broken = original + b'{"schema":1,"schema":2}\n'
+    elif damage == "tail":
+        broken = original.rstrip(b"\n")
+    else:
+        row["schema" if damage == "schema" else "target_id"] = "foreign"
+        broken = (json.dumps(row) + "\n").encode()
+    path.write_bytes(broken)
+
+    verdict = deltas.verify_history(tid)
+    assert verdict["ok"] is False and verdict["attested"] is False
+    assert verdict["verified"] == 0
+    assert any("corrupt" in problem for problem in verdict["problems"])
+    for operation in (
+        lambda: deltas.snapshots(tid),
+        lambda: deltas.restore(tid, saved["snapshot_hash"]),
+        lambda: deltas.record_snapshot(tid, kind="playbook", state={"v": 2}),
+    ):
+        with pytest.raises(deltas.DeltaError, match="corrupt"):
+            operation()
+        assert path.read_bytes() == broken
+
+
+def test_deltas_unreadable_evidence_is_not_misclassified_as_corruption(monkeypatch):
+    from olympus import note_evidence
+
+    def unavailable(*args, **kwargs):
+        raise note_evidence.NoteStateError("owned read refusal")
+
+    monkeypatch.setattr(note_evidence, "read_raw", unavailable)
+    verdict = deltas.verify_history("playbook:unreadable")
+    assert verdict["ok"] is False and verdict["verified"] == 0
+    assert "unavailable" in verdict["problems"][0]
+    assert "corrupt" not in verdict["problems"][0]
+
+
 # --- ledger (checkpoints + speculation) --------------------------------------
 
 @_signing

@@ -33,7 +33,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 
-from . import config, security, witness
+from . import config, security, witness, proclock, owner_evidence as oe, note_evidence as notes
 
 SNAP_SCHEMA = "olympus-delta-snapshot/1"
 SNAP_LABEL = "delta-snapshot/v1"        # witness subkey (domain separation)
@@ -173,26 +173,38 @@ def _path(target_id: str):
 
 
 def _read(target_id: str) -> list[dict]:
-    path = _path(target_id)
-    if not path.exists():
-        return []
-    out: list[dict] = []
-    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except (ValueError, UnicodeDecodeError) as err:
-            # A syntactically corrupt line (FS corruption, or a hostile writer —
-            # these logs are signed precisely against an attacker with FS write
-            # access). Raise a TYPED error so verify_history reports it as a
-            # fail-closed verdict and record_snapshot refuses to extend a
-            # corrupt history, rather than a bare JSONDecodeError escaping into
-            # every consumer. The raw line is NOT echoed (it may carry state).
-            raise DeltaError(
-                f"corrupt snapshot record at line {i} for target "
-                f"{target_id!r}: {err.__class__.__name__}") from err
-    return out
+    try:
+        raw = notes.read_raw(_path(target_id), 16 * 1024 * 1024)
+        if raw is None:
+            return []
+        if not raw.endswith(b"\n"):
+            raise DeltaError("corrupt snapshot history: incomplete snapshot tail; preserve history")
+        out = []
+        for line_number, line in enumerate(raw.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                row = oe.decode(line, "delta", 1024 * 1024)
+                oe.fields(row, ("schema", "target_id", "seq", "prev", "kind", "state",
+                               "delta", "provenance", "snapshot_hash", "publicKey", "signature"))
+                oe.integer(row["seq"])
+                if row["schema"] != SNAP_SCHEMA or row["target_id"] != target_id:
+                    raise ValueError("snapshot identity differs")
+            except (oe.OwnerEvidenceStateError, ValueError, TypeError) as err:
+                raise DeltaError(
+                    f"corrupt snapshot record at line {line_number}; preserve history: {err}"
+                ) from err
+            out.append(row)
+            if len(out) > _MAX_SNAPSHOTS:
+                raise ValueError("snapshot count exceeds bound")
+        return out
+    except (oe.OwnerEvidenceStateError, ValueError, TypeError) as err:
+        raise DeltaError("snapshot history unavailable: " + str(err)) from err
+
+
+def _guard(target_id):
+    key = hashlib.sha256((str(config.MEMORY_DIR.absolute()) + "\0" + _safe_target(target_id)).encode()).hexdigest()
+    return proclock.lock("delta-" + key)
 
 
 def _core(target_id, seq, prev, kind, state, delta, provenance) -> dict:
@@ -202,44 +214,101 @@ def _core(target_id, seq, prev, kind, state, delta, provenance) -> dict:
 
 
 def record_snapshot(target_id: str, *, kind: str, state,
-                    delta=None, provenance: Provenance | dict | None = None) -> dict:
-    """Append one signed, content-addressed, hash-chained snapshot of a learned
-    target's state. Append-only and non-destructive: prior versions are never
-    overwritten. `state` is the full post-delta state (e.g. a playbook dict);
-    `delta` is the change that produced it; `provenance` attributes it.
+                    delta=None, provenance: Provenance | dict | None = None,
+                    operation_id=None, require_signature=False) -> dict:
+    """Durable serialized append; idempotency is covered by the signed delta.
 
-    A rolling window keeps the newest `_MAX_SNAPSHOTS`; trimming drops the oldest
-    while the retained window stays internally chain-verifiable."""
+    A failed external anchor is distinct from the locally published record.
+    Retrying the same operation reuses that record and retries only its anchor.
+    """
     prov = (provenance if isinstance(provenance, Provenance)
             else Provenance.from_dict(provenance)).to_dict()
-    with _lock_for(target_id):
+    if operation_id is not None:
+        oe.text(operation_id, 128)
+        delta = {"operation_id": operation_id, "value": delta}
+    with _guard(target_id):
         existing = _read(target_id)
-        seq = (existing[-1]["seq"] + 1) if existing else 0
-        prev = existing[-1]["snapshot_hash"] if existing else None
-        core = _core(target_id, seq, prev, kind, state,
-                     delta if delta is not None else None, prov)
-        snap_hash = _content_hash(core)
-        snap = dict(core)
-        snap["snapshot_hash"] = snap_hash
-        try:
-            snap["publicKey"] = witness.sub_public_key_hex(SNAP_LABEL)
-            snap["signature"] = witness.sign_with(SNAP_LABEL,
-                                                  snap_hash.encode("utf-8"))
-        except witness.WitnessError:
-            snap["publicKey"] = ""
-            snap["signature"] = ""
-        kept = (existing + [snap])[-_MAX_SNAPSHOTS:]
-        path = _path(target_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".jsonl.tmp")
-        tmp.write_text("".join(json.dumps(s, ensure_ascii=False) + "\n"
-                               for s in kept), encoding="utf-8")
-        tmp.replace(path)
-    # Anchor the new head OUT of the host's write domain so truncation is
-    # detectable (no-op when anchoring is off; fail-LOUD when on).
-    from . import anchor
-    anchor.publish_head("delta", target_id, snap["seq"], snap["snapshot_hash"])
+        previous = None
+        for row in existing:
+            core = {k: row[k] for k in ("schema", "target_id", "seq", "prev", "kind", "state", "delta", "provenance")}
+            if _content_hash(core) != row["snapshot_hash"]:
+                raise DeltaError("cannot extend a damaged history")
+            if previous is not None and (row["prev"] != previous["snapshot_hash"] or row["seq"] != previous["seq"] + 1):
+                raise DeltaError("cannot extend a broken chain")
+            if (require_signature or row["signature"]) and not _snapshot_ok(row, target_id):
+                raise DeltaError("cannot extend unverifiable evidence")
+            previous = row
+        snap = None
+        if operation_id is not None:
+            for row in existing:
+                if isinstance(row["delta"], dict) and row["delta"].get("operation_id") == operation_id:
+                    if (row["kind"], row["state"], row["delta"], row["provenance"]) != (kind, state, delta, prov):
+                        raise DeltaError("operation retry differs from persisted evidence")
+                    snap = row
+                    break
+        if snap is None:
+            core = _core(target_id, existing[-1]["seq"] + 1 if existing else 0,
+                         existing[-1]["snapshot_hash"] if existing else None,
+                         kind, state, delta, prov)
+            # Reject unsupported/nonfinite JSON before signing or writing.
+            json.dumps(core, allow_nan=False)
+            snap_hash = _content_hash(core)
+            snap = dict(core, snapshot_hash=snap_hash)
+            try:
+                snap["publicKey"] = witness.sub_public_key_hex(SNAP_LABEL)
+                snap["signature"] = witness.sign_with(SNAP_LABEL, snap_hash.encode("utf-8"))
+            except witness.WitnessError:
+                if require_signature:
+                    raise DeltaError("signing unavailable; qualification not recorded")
+                snap["publicKey"] = snap["signature"] = ""
+            kept = (existing + [snap])[-_MAX_SNAPSHOTS:]
+            raw = "".join(json.dumps(s, ensure_ascii=False, allow_nan=False) + "\n" for s in kept).encode()
+            if len(raw) > 16 * 1024 * 1024 or any(len(json.dumps(s).encode()) > 1024 * 1024 for s in kept):
+                raise DeltaError("snapshot history bound exceeded")
+            try:
+                notes.publish(_path(target_id), raw)
+            except (OSError, oe.OwnerEvidenceStateError) as err:
+                raise DeltaError("snapshot publication unconfirmed; reread before retry") from err
+        else:
+            # An earlier rename may have succeeded before its directory fsync
+            # failed. Seeing matching bytes is not a durability acknowledgement.
+            try:
+                notes.publish(_path(target_id), notes.read_raw(_path(target_id), 16 * 1024 * 1024))
+            except (OSError, oe.OwnerEvidenceStateError) as err:
+                raise DeltaError("snapshot durability still unconfirmed") from err
+        # Keep append and anchor publication ordered. Retrying an older
+        # operation must never move an external head backwards.
+        from . import anchor
+        head = existing[-1] if existing and existing[-1]["seq"] > snap["seq"] else snap
+        anchored = anchor.publish_head("delta", target_id, head["seq"], head["snapshot_hash"])
+        if require_signature and anchor.enabled() and not anchored:
+            raise DeltaError("local evidence persisted; configured anchor unavailable; retry the same operation")
     return snap
+
+
+def qualified_snapshots(target_id):
+    """Read qualifying evidence; absent is distinct from unreadable/unsigned.
+
+    A configured anchor must match this exact head. When anchoring is off the
+    retained signed window is the explicit local-custody boundary.
+    """
+    with _guard(target_id):
+        rows = _read(target_id)
+        if not rows:
+            return []
+        verdict = verify_history(target_id)
+        if not verdict["ok"]:
+            raise DeltaError("qualification history unavailable: " + "; ".join(verdict["problems"]))
+        from . import anchor
+        if anchor.enabled():
+            try:
+                record = anchor._sink().read("delta", target_id)
+                if (not anchor.record_ok(record) or record["head"] != rows[-1]["snapshot_hash"]
+                        or record["seq"] != rows[-1]["seq"]):
+                    raise DeltaError("configured anchor does not confirm the current evidence head")
+            except Exception as err:
+                raise DeltaError("qualification anchor unavailable") from err
+        return rows
 
 
 def snapshots(target_id: str) -> list[dict]:

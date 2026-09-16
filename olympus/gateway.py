@@ -487,11 +487,14 @@ def reply_for(bots: dict, user_key: str, text: str,
         # Chat users must never read server paths — URLs/workflows only.
         return chunk(learn.distill(arg, allow_paths=False))
     if cmd == "/wiki":
-        from . import wiki
-        sub, _, ref = arg.strip().partition(" ")
-        if sub == "show" and ref.strip():
-            return chunk(wiki.read(uid, ref.strip()))
-        return chunk(wiki.summary(uid))
+        from . import wiki, owner_evidence
+        try:
+            sub, _, ref = arg.strip().partition(" ")
+            if sub == "show" and ref.strip():
+                return chunk(wiki.read(uid, ref.strip()))
+            return chunk(wiki.summary(uid))
+        except owner_evidence.OwnerEvidenceStateError as err:
+            return chunk(str(err))
     if cmd == "/journey":
         from . import journey
         sub, _, ref = arg.strip().partition(" ")
