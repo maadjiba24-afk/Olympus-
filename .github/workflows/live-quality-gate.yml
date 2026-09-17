@@ -1,0 +1,96 @@
+name: Authorized live quality measurement
+
+# Manual-only operator route. Enabling it and approving provider use are separate
+# operational decisions. This workflow is not one of the automatic PR gates.
+on:
+  workflow_dispatch:
+    inputs:
+      allow_live:
+        description: Explicitly authorize provider calls for this run
+        required: true
+        type: boolean
+        default: false
+      expected_commit:
+        description: Exact reviewed main commit (40 lowercase hex characters)
+        required: true
+        type: string
+      provider:
+        description: Explicitly approved provider
+        required: true
+        type: choice
+        options: [anthropic, openai, gemini, deepseek, groq, mistral, xai, openrouter, kimi]
+      model:
+        description: Explicitly approved model identifier
+        required: true
+        type: string
+      authorization_reason:
+        description: Operator authorization reason (12-512 printable characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  authorized-live-quality:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.allow_live == true &&
+      github.ref == 'refs/heads/main' && github.ref_protected == true &&
+      github.sha == inputs.expected_commit && vars.OLYMPUS_LIVE_QUALITY_ENABLED == '1'
+    environment: olympus-live-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OLYMPUS_LIVE_QUALITY_ENABLED: ${{ vars.OLYMPUS_LIVE_QUALITY_ENABLED }}
+      REVIEWED_COMMIT: ${{ inputs.expected_commit }}
+      APPROVED_PROVIDER: ${{ inputs.provider }}
+      APPROVED_MODEL: ${{ inputs.model }}
+      AUTHORIZATION_REASON: ${{ inputs.authorization_reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.expected_commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Verify manual authorization before credentials or discovery
+        run: |
+          python scripts/ci_provider_resolve.py --check-authorization \
+            --allow-live --expected-commit "$REVIEWED_COMMIT" \
+            --provider "$APPROVED_PROVIDER" --model "$APPROVED_MODEL" \
+            --authorization-reason "$AUTHORIZATION_REASON"
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install -e . --no-deps
+      - name: Bind the authorized provider and verify its model inventory
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: |
+          python scripts/ci_provider_resolve.py --verify-model \
+            --allow-live --expected-commit "$REVIEWED_COMMIT" \
+            --provider "$APPROVED_PROVIDER" --model "$APPROVED_MODEL" \
+            --authorization-reason "$AUTHORIZATION_REASON"
+      - name: Measure against the comparable baseline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: |
+          python scripts/quality_gate.py \
+            --allow-live --expected-commit "$REVIEWED_COMMIT" \
+            --provider "$APPROVED_PROVIDER" --model "$APPROVED_MODEL" \
+            --authorization-reason "$AUTHORIZATION_REASON"

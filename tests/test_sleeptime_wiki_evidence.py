@@ -75,10 +75,28 @@ def test_legacy_wiki_is_preserved_until_explicit_empty_initialization():
     assert wiki.pages("Case:A") == [] and old.read_bytes() == b"ambiguous legacy page"
 
 
-def test_atomic_rewrite_lost_acknowledgement_retries_without_duplicate(monkeypatch):
+@pytest.mark.parametrize("tied_creation_times", [False, True], ids=[
+    "distinct-timestamps", "equal-timestamps-reversed-ids",
+])
+def test_atomic_rewrite_lost_acknowledgement_retries_without_duplicate(
+    monkeypatch, tied_creation_times
+):
     user = "Case:A"
     before = seed(user)
+    # Real clocks can give two inserts the same timestamp (notably Windows).
+    # Pin reverse IDs and both clock cases instead of depending on timing/UUIDs.
+    stamp = before[0]["created_at"]
+    for index, row in enumerate(before):
+        row["id"] = ("ffffffffffff", "000000000001")[index]
+        row["created_at"] = stamp if tied_creation_times else stamp + index
+        row["last_used_at"] = row["created_at"]
+    with usermem._guard(user) as data:
+        data[usermem._MEMS] = deepcopy(before)
+    expected_sources = before[::-1] if tied_creation_times else before
     identifier = propose(user)
+    proposal = sleeptime.proposals(user)[0]
+    assert proposal["source_records"] == expected_sources
+    assert proposal["source_ids"] == [row["id"] for row in expected_sources]
     real = oe.publish
     def fail_after_publish(path, raw, name):
         real(path, raw, name)
@@ -90,7 +108,7 @@ def test_atomic_rewrite_lost_acknowledgement_retries_without_duplicate(monkeypat
     rewritten = sleeptime.approve(user, identifier)
     assert len(usermem.all_memories(user)) == 3
     assert len(sleeptime.snapshots(user)) == 1
-    assert sleeptime.snapshots(user)[0]["sources"] == before
+    assert sleeptime.snapshots(user)[0]["sources"] == expected_sources
     assert sleeptime.snapshots(user)[0]["rewrite_id"] == rewritten
     assert sleeptime.revert(user, identifier) is True
     assert sleeptime.revert(user, identifier) is True

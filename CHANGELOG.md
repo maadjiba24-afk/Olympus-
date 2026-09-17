@@ -1,5 +1,15 @@
 # Changelog
 
+## PR #315 correction — validation and delivery pending
+
+- Separate automatic owned quality contracts from explicit manual live evaluation.
+- Require reviewed-commit authorization before provider discovery, benchmarking
+  and baseline updates; never infer consent or a model from available secrets.
+- Pin answer/judge/retry to the approved model and credential without pool
+  fallback; expose unavailable authorization and incomparable baselines as failure.
+- Record the cancelled live CI incident and unresolved usage evidence; retain the
+  wider M19 live-path audit and all operational restrictions.
+
 ## M03 hardening — platform validation and protected delivery pending
 
 - Isolate sleeptime proposals and wiki state by exact owner; preserve ambiguous

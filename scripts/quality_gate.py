@@ -1,40 +1,24 @@
 #!/usr/bin/env python3
-"""Answer-quality regression gate (M5 / closes SECURITY_RESIDUALS §6).
+"""Explicitly authorized live quality comparison, separate from automatic mock CI.
 
-The unit suite proves the guardrails are correct; it does NOT prove that a
-given answer is *good*. This gate closes that gap in CI: it runs the benchmark
-(`olympus eval`), compares per-specialist averages against the committed
-baseline (`olympus/quality_baseline.json`), and exits nonzero when any
-specialist regresses by more than the tolerance — so a prompt/skill change that
-quietly degrades answer quality fails the build instead of shipping.
-
-Design (mirrors scripts/tier1_exit_check.py + .github/workflows/replay-gate.yml):
-- Needs a real ANTHROPIC_API_KEY (the eval makes real model calls). With NO key
-  the gate SKIPS CLEANLY (exit 0) — CI without the secret is not a failure.
-- The comparison itself is the PURE `evals.regression_check`, unit-tested
-  without a key in tests/test_quality_gate.py.
-- Establish/refresh the baseline with `--update-baseline` (a human act, run
-  once with a key; the new baseline is committed).
-
-Exit codes: 0 = pass or skipped; 1 = regression/missing coverage; 2 = eval error.
+Exit codes: 0 = measured pass / explicitly requested baseline update;
+1 = regression or missing coverage; 2 = benchmark error;
+3 = authorization, credential, or comparable baseline unavailable.
+See docs/LIVE_QUALITY_AUTHORIZATION.md. No key-based automatic activation.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
+from pathlib import Path
 import os
 import sys
 
 # Allow running from a source checkout without an editable install.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from olympus import config, evals  # noqa: E402
-
-
-def _has_key() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("OPENAI_API_KEY")
-                or config.Settings.from_env().api_key)
+from olympus import config, evals, live_quality_authorization as auth  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,28 +27,44 @@ def main(argv: list[str] | None = None) -> int:
                     help="max allowed per-specialist drop vs baseline (of 10)")
     ap.add_argument("--update-baseline", action="store_true",
                     help="write the fresh scores as the new committed baseline")
+    auth.add_arguments(ap)
     args = ap.parse_args(argv)
 
-    if not _has_key():
-        print("No model API key set — skipping the answer-quality gate "
-              "(set ANTHROPIC_API_KEY to enable).")
-        return 0
+    try:
+        authorization = auth.authorize(args, Path(__file__).resolve().parent.parent)
+        settings = config.Settings(**auth.provider_configuration(authorization))
+        if not math.isfinite(args.tolerance) or not 0 <= args.tolerance <= 10:
+            raise auth.AuthorizationRequired("tolerance must be finite and within 0-10")
+    except (auth.AuthorizationRequired, OSError) as error:
+        print(f"UNAVAILABLE: {error}; benchmark not run.", file=sys.stderr)
+        return 3
+
+    current_model = settings.model
+    baseline = evals.load_baseline()
+    meta = evals.load_baseline_meta()
+    if not args.update_baseline and (
+        not baseline or meta.get("model") != current_model
+        or meta.get("endpoint") != (settings.base_url or settings.provider)
+    ):
+        print("UNAVAILABLE: no comparable baseline for the authorized model and endpoint; "
+              "benchmark not run. Establish a baseline only through a separately "
+              "reviewed --update-baseline invocation.", file=sys.stderr)
+        return 3
 
     try:
-        scores = evals.per_specialist_scores()
+        with evals.single_model_benchmark(settings):
+            scores = evals.per_specialist_scores(settings=settings)
     except Exception as err:                    # a real eval/infra failure
-        print(f"Answer-quality gate could not run the benchmark: {err}",
+        print(f"Answer-quality benchmark unavailable ({type(err).__name__})",
               file=sys.stderr)
         return 2
-
-    settings = config.Settings.from_env()
-    current_model = settings.model or os.environ.get("OLYMPUS_MODEL", "")
 
     if args.update_baseline:
         import time
         payload = {
             "_provenance": {
                 "date": time.strftime("%Y-%m-%d"),
+                "authorization": authorization,
                 "endpoint": settings.base_url or settings.provider,
                 "model": current_model,
             },
@@ -79,27 +79,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {s}: {scores[s]}/10")
         return 0
 
-    baseline = evals.load_baseline()
-    if not baseline:
-        print("No committed quality baseline yet — run this gate once with a "
-              "key and --update-baseline to establish it. Reporting scores "
-              "without gating:")
-        print(evals.format_gate_report(scores, {"ok": True}, args.tolerance))
-        return 0
-
-    # Scores are model-dependent: enforce only when the current eval model is
-    # the one that produced the baseline. On a different model (operator
-    # switched providers/keys), report instead of gating — a red build from an
-    # apples-to-oranges comparison would be noise, and a green one a lie.
-    base_model = evals.load_baseline_meta().get("model")
-    if base_model and current_model and base_model != current_model:
-        print(f"Baseline was scored by '{base_model}' but this run uses "
-              f"'{current_model}' — reporting without gating. To re-enable "
-              "gating on the new model, refresh the baseline with "
-              "--update-baseline and commit it.")
-        print(evals.format_gate_report(scores, {"ok": True}, args.tolerance))
-        return 0
-
     result = evals.regression_check(scores, baseline, args.tolerance)
 
     # Confirmation pass: single-run averages carry judge noise beyond the
@@ -112,11 +91,12 @@ def main(argv: list[str] | None = None) -> int:
               f"{', '.join(flagged)} — running an independent confirmation "
               "eval of just those specialists...")
         try:
-            retry = evals.per_specialist_scores(only_specialists=flagged)
+            with evals.single_model_benchmark(settings):
+                retry = evals.per_specialist_scores(settings=settings, only_specialists=flagged)
         except Exception as err:
             # No second opinion available — keep the first verdict (fail
             # closed), never pass on an unconfirmed hunch.
-            print(f"Confirmation eval failed ({err}); keeping the first-pass "
+            print(f"Confirmation eval failed ({type(err).__name__}); keeping the first-pass "
                   "verdict.", file=sys.stderr)
         else:
             for s in sorted(retry):

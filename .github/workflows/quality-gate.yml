@@ -1,64 +1,29 @@
-name: Answer-quality gate
+name: Quality authorization and comparison contracts
 
-# Answer-quality regression tripwire (closes SECURITY_RESIDUALS §6). The unit
-# suite proves the guardrails are correct; it does NOT score AI-output quality.
-# This gate runs the benchmark (`olympus eval`) and fails if any specialist
-# regresses more than the tolerance below the committed baseline
-# (olympus/quality_baseline.json).
-#
-# Needs an ANTHROPIC_API_KEY repo secret (the eval makes real calls). Spend is
-# capped via OLYMPUS_DAILY_BUDGET. If the secret isn't set, the gate skips
-# cleanly (exit 0) rather than failing — CI without the secret is not a failure.
-#
-# To (re)establish the baseline after an intended quality change: a maintainer
-# runs `python scripts/quality_gate.py --update-baseline` with a key and commits
-# the refreshed olympus/quality_baseline.json.
-
+# Automatic CI proves owned/mock contracts, never measured model quality.
 on:
-  schedule:
-    - cron: "0 7 * * 1"        # weekly, Monday 07:00 UTC
-  workflow_dispatch:           # and on demand
   pull_request:
-    paths:                     # only when something that can move quality changes
-      - "olympus/prompts/**"
-      - "olympus/skills/**"
-      - "olympus/benchmarks.json"
-      - "olympus/quality_baseline.json"
-      - "olympus/evals.py"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   quality-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
-      - run: pip install -e . --no-deps
-      # Olympus never assumes a model, so CI resolves provider + model from
-      # whichever provider secret exists (first present wins, in this order):
-      # ANTHROPIC_API_KEY (native), then OPENAI / GEMINI / DEEPSEEK / GROQ /
-      # MISTRAL / XAI / OPENROUTER / KIMI via the OpenAI-compatible provider,
-      # with the model discovered from that account's own /models inventory.
-      # The resolved config lands in $GITHUB_ENV for the gate step. With no
-      # secret at all, nothing is exported and the gate skips cleanly.
-      # NOTE: the gate ENFORCES only when the resolved model matches the one
-      # recorded in olympus/quality_baseline.json — on a different model it
-      # reports without gating until a maintainer re-baselines.
-      - name: Resolve eval provider from available secrets
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-        run: python scripts/ci_provider_resolve.py
-      - name: Run the answer-quality gate (skips if no key)
-        env:
-          OLYMPUS_DAILY_BUDGET: "5.00"     # hard cap on spend for this run
-        run: python scripts/quality_gate.py
+      - run: |
+          pip freeze > /tmp/olympus-quality-runtime.txt
+          pip install -e '.[test]' -c /tmp/olympus-quality-runtime.txt
+      - name: Verify owned authorization and comparison fixtures
+        run: python -m pytest -q tests/test_quality_gate.py tests/test_live_quality_authorization.py

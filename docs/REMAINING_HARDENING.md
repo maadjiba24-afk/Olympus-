@@ -55,12 +55,26 @@ main independently matched. Earlier worktrees, failed attempts and artifacts
 remain preserved. Historical pre-validation text in M04 is superseded by these
 actual receipts, not rewritten as evidence for new code.
 
-**Active: M03, finite S1-S10 requirements in `M03_SLEEPTIME_WIKI.md`.** Its
-integrated source and focused adversarial tests are prepared; Windows/POSIX full
-suites, owned PostgreSQL validation and delivery remain OPEN. M01/M02/M04 delivery does not close
-M03 or M05-M19, or any missing C4-C9 external evidence. All deployment,
-publishing, collection, learned routing, autonomy, broker and live-verifier
-restrictions remain unchanged.
+**Active: M03 / PR #315, plus the bounded live-quality authorization correction
+recorded in `LIVE_QUALITY_AUTHORIZATION.md`.** The first M03 tree
+`5cd528256441653e96fd3fb4a712994e4cc385c2` passed native Windows (766/21
+regression, 12151/283 full), POSIX (780/7 regression, 12207/227 full) and the
+owned PostgreSQL fixture. Those results do not cover this new correction.
+PR #315 remains unmerged: the additional automatic quality job contacted
+Moonshot before cancellation, and authorization must be fixed and validated
+before delivery. The provider-account usage receipt is still missing.
+
+The correction connects both CLI entrypoints, provider binding, actual benchmark
+and retry calls, automatic CI and manual CI. It requires new Windows/POSIX
+validation, all 24 standard checks plus the additional `quality-gate` contract
+check, protected delivery and synchronization. Scheduled replay/search,
+issue-triggered upgrade automation and wider evaluation callers remain explicit
+M19 work, alongside the 299-handler inventory. No repository variable/environment
+activation or provider calls are authorized by implementation tests.
+
+M01/M02/M04 delivery does not close M03 or M05-M19, or missing C4-C9 external
+evidence. Deployment, publishing, collection, learned routing, autonomy, broker
+and live-verifier restrictions remain unchanged.
 
 ## Source and evidence reconciliation
 
@@ -124,7 +138,7 @@ For every implementation batch, completion requires:
 5. Run applicable Windows and native-filesystem POSIX legs. Review skips and
    warnings against the required cases. Recheck base, patch, tree and changed
    paths; commit normally; push the feature; discover the actual PR; require
-   all 24 exact checks at that head; protected squash merge; verify actual
+   all 24 exact standard checks and every applicable additional check at that head; protected squash merge; verify actual
    parent/tree/diff; require post-merge checks and fast-forward synchronization.
 
 No force/reset/clean/prune/admin override, automatic branch deletion, secret

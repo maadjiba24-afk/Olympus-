@@ -51,6 +51,20 @@ def benchmark_snapshot(items):
         _BENCHMARK_SNAPSHOT.reset(token)
 
 
+_SINGLE_MODEL = ContextVar("benchmark_single_model", default=None)
+
+
+@contextmanager
+def single_model_benchmark(settings):
+    """Measure only this approved model, including judging, without pool fallback."""
+    with backend.pinned_model(settings):
+        token = _SINGLE_MODEL.set(settings)
+        try:
+            yield
+        finally:
+            _SINGLE_MODEL.reset(token)
+
+
 def load_benchmarks(*, strict=False) -> list[dict]:
     """Built-in benchmark items plus any Olympus auto-generated for new domains."""
     if _BENCHMARK_SNAPSHOT.get() is not None:
@@ -223,6 +237,8 @@ def _judge_settings(settings: config.Settings) -> config.Settings:
     """A separate judge model so the scorer can't be gamed by the tuned model.
     Only swaps models on the Anthropic backend; other providers judge in-model.
     """
+    if _SINGLE_MODEL.get() is not None:
+        return _SINGLE_MODEL.get()
     if settings.provider == "anthropic" and config.JUDGE_MODEL \
             and config.JUDGE_MODEL != settings.model:
         return config.Settings(provider="anthropic", model=config.JUDGE_MODEL,
