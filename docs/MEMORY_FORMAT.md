@@ -310,5 +310,28 @@ failure is not silently counted as success. Legacy ambiguous notes are untouched
 file notes; they are not whole-principal erasure, destruction of all recovery
 copies, or legal-hold processing. M09 must cover the complete platform, derived
 copies and backend records before those gates can close. Prompt-backup readers
-accept the new unique note names and validate their bytes; complete prompt,
-benchmark and proposal recovery coupling is M03.
+accept the new unique note names and validate their bytes. M03 connects complete
+prompt/benchmark/proposal recovery as described below; its delivery gates remain
+separate from M04's completed platform reports.
+
+## M03 consolidation, wiki and publication evidence
+
+The optional `sleeptime.v1` collection in each exact-owner `usermem.state.v3`
+envelope contains bounded proposals, quarantine outbox entries and full rewrite
+snapshots. Existing v3 documents without the collection remain readable. The
+former normalized sleeptime namespaces are unclaimed; explicit initialization
+does not migrate them. Typed-memory rows and rewrite acknowledgement publish in
+one file snapshot or one PostgreSQL owner transaction.
+
+`owners/<exact-owner-key>/workspace-v2/wiki/state.json` binds pages, freshness and
+content-version dream checkpoints. The note journal protects its updates, and
+also joins discovery result publication with the gap acknowledgement. Prepared
+discovery research is preserved under `workspace-v2/discovery/operations/`.
+
+`sleeptime-cycles-v2/` retains stable cycle drafts/receipts; the signed v2 delta
+scoreboard holds authoritative counters. `prompt-operations-v1/<agent>/` retains
+exact original/candidate prompt bytes, benchmark cases/results and recovery
+receipts. These files, delta histories, shared backup/report projections and
+note-journal before/after bytes are sensitive retained evidence. Deleting an
+active page, reverting a rewrite or restoring a prompt is not erasure. M09 must
+cover every copy before whole-principal migration/erasure can be enabled.

@@ -106,31 +106,22 @@ does **not** score **AI-output quality** — that is measured separately by
 `olympus eval` / `olympus scores`. A green suite means the guardrails are
 correct, not that a given answer is good.
 
-**Now gated in CI (M5).** Answer quality is regression-gated by the
-**answer-quality gate** (`.github/workflows/quality-gate.yml` →
-`scripts/quality_gate.py`): it runs the benchmark and **fails the build** when
-any specialist regresses more than a tolerance (default 1.0/10) below the
-committed baseline (`olympus/quality_baseline.json`). The pass/fail comparison
-is the pure, unit-tested `evals.regression_check`; the live benchmark run makes
-real model calls, so — like the replay gate — the workflow **needs a model-key
-repo secret and skips cleanly (exit 0) without one**. Any one of these works
-(first present wins; `scripts/ci_provider_resolve.py`): `ANTHROPIC_API_KEY`
-(native), or `OPENAI_API_KEY` / `GEMINI_API_KEY` / `DEEPSEEK_API_KEY` /
-`GROQ_API_KEY` / `MISTRAL_API_KEY` / `XAI_API_KEY` / `OPENROUTER_API_KEY` /
-`KIMI_API_KEY` via the OpenAI-compatible provider, with the eval model
-discovered from that account's own `/models` inventory; spend capped by
-`OLYMPUS_DAILY_BUDGET`. **The baseline is live** (first keyed run's real
-scores, `moonshot-v1-32k`, provenance in the file) and the first gated run
-passed against it. Because scores are model-dependent, the gate **enforces
-only when the resolved model matches the baseline's recorded model** — on any
-other model it reports without gating until a maintainer re-baselines
-(`--update-baseline`, a human act, never the agent's). Single-run averages
-carry judge noise beyond the tolerance, so a first-pass regression triggers a
-**confirmation pass** (an independent re-eval of only the flagged specialists,
-`evals.confirm_regressions`): the gate fails only if the drop reproduces —
-noise rarely strikes the same specialist twice, a real regression does. The
-residual therefore narrows but does not vanish: quality is only *actually*
-scored where a key remains configured.
+**Automatic quality CI checks contracts, not live model quality.** The
+`quality-gate.yml` job runs owned fixtures for authorization and comparison.
+Live measurement is separate: `live-quality-gate.yml` is manual-only and requires
+explicit consent, protected main, an exact reviewed commit, provider/model/reason,
+repository enablement and the named environment. Both scripts independently
+validate authorization before provider access. Missing authorization, credentials
+or a comparable model/endpoint baseline is unavailable (exit 3), never a green
+quality result. The existing pure regression comparison and confirmation logic
+remain tested; actual runs pin answer and judge to one approved model without
+pool fallback. See [the complete contract and incident record](LIVE_QUALITY_AUTHORIZATION.md).
+
+The historical committed baseline is retained. It is not a current measurement,
+an independent verifier, a calibration checkpoint, or comparative superiority.
+The separate replay/search/upgrade live routes remain open in M19. Provider
+usage for the cancelled PR #315 run, environment approval protection, approved
+spend, current real measurements and wider evidence integrity remain unresolved.
 
 ---
 

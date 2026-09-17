@@ -25,9 +25,11 @@ It grades cycles; only a human flips switches.
 
 from __future__ import annotations
 
-from . import config, deltas, memory, security, sleeptime, store, usermem
+from functools import wraps
+import uuid
+from . import config, deltas, memory, security, sleeptime, sleeptime_cycles, usermem
 
-SCOREBOARD = "sleeptime:scoreboard"
+SCOREBOARD = sleeptime_cycles.TARGET
 _MAX_SAMPLE = 200
 
 
@@ -50,36 +52,57 @@ def _grade(summary_by_user: dict, mined_count: int, errors: list[str]
         if s.get("error"):
             reasons.append(f"user {user!r}: cycle error — {_clean(s['error'])}")
             continue
+        if s.get("clean") is not True:
+            reasons.append(f"user {user!r}: no affirmative clean decision")
+        if len(s.get("cycle_proposals", [])) != s.get("proposed", 0) + s.get("rejected", 0):
+            reasons.append(f"user {user!r}: incomplete proposal evidence")
         for p in s.get("cycle_proposals", []):
             if not p.get("verified"):
                 claims = "; ".join(_clean(c) for c in (p.get("unsupported") or []))
                 reasons.append(
                     f"user {user!r}: Aletheia REJECTED proposal {p.get('id')}"
                     + (f" — unsupported claims: {claims}" if claims else ""))
-            elif floor > 0 and float(p.get("confidence", 1.0)) < floor:
+            elif floor > 0 and float(p.get("confidence", 0.0)) < floor:
                 reasons.append(
                     f"user {user!r}: proposal {p.get('id')} confidence "
                     f"{p.get('confidence')} below the {floor} floor "
                     "(block-mode would have refused it)")
     reasons.extend(_clean(e) for e in errors)
+    if not any(s.get("cycle_proposals") for s in summary_by_user.values()):
+        reasons.append("no persisted proposals; empty work does not qualify")
     return ("CLEAN" if not reasons else "DIRTY"), reasons
 
 
-def run_supervised_cycle(settings=None, *, generator=None, verifier=None) -> dict:
+def _shared_context(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with memory.user_context("shared"):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_shared_context
+@sleeptime_cycles.serialized
+def run_supervised_cycle(settings=None, *, generator=None, verifier=None, cycle_id=None) -> dict:
     """One supervised reflection cycle. Returns the full evidence report:
     {grade, reasons, users, mined_failures, streak, scoreboard_hash}.
 
     Apply is HARD-OFF: `auto_apply=False` below is a literal, not a config
     read — this harness has no code path that commits a rewrite or writes a
     prompt, whatever the environment says."""
-    memory.set_user("shared")
+    cycle_id = cycle_id or uuid.uuid4().hex
+    prior = sleeptime_cycles.replay(cycle_id)
+    if prior is not None:
+        return _report(prior)
+    # Fail before any model work when authoritative evidence is unavailable.
+    sleeptime.state()
     errors: list[str] = []
 
     # -- evidence: mined failure traces (report-only; no proposer, no gate) --
     mined = {"count": 0, "by_agent": {}, "samples": []}
     try:
         from . import reflect
-        signals = reflect.mine_failures()
+        signals = reflect.mine_failures(strict=True)
         mined["count"] = len(signals)
         for s in signals:
             key = s.agent or "(run-level)"
@@ -100,49 +123,53 @@ def run_supervised_cycle(settings=None, *, generator=None, verifier=None) -> dic
         users = []
         errors.append(f"user enumeration failed: {err}")
     for uid in users:
-        before = len(sleeptime.proposals(uid))
-        s = sleeptime.refine_user(uid, settings=settings, generator=generator,
-                                  verifier=verifier,
-                                  auto_apply=False)   # HARD-OFF — never a config read
-        cycle_props = sleeptime.proposals(uid)[before:]
-        s["cycle_proposals"] = [
-            {"id": p.get("id"), "verified": bool(p.get("verified")),
-             "confidence": p.get("confidence", 1.0),
-             "unsupported": p.get("unsupported") or [],
-             "applied": bool(p.get("applied")),
-             "diff": sleeptime.render_diff(p)}
-            for p in cycle_props]
-        summary_by_user[uid] = s
+        try:
+            s = sleeptime.refine_user(uid, settings=settings, generator=generator,
+                                      verifier=verifier,
+                                      auto_apply=False)   # HARD-OFF — never a config read
+            if not isinstance(s, dict):
+                raise ValueError("invalid refinement summary")
+            by_id = {p["id"]: p for p in sleeptime.proposals(uid)}
+            identifiers = s.get("proposal_ids")
+            if not isinstance(identifiers, list) or len(set(identifiers)) != len(identifiers):
+                raise ValueError("missing or duplicate proposal identities")
+            cycle_props = [by_id[identifier] for identifier in identifiers]
+            s["cycle_proposals"] = [
+                {"id": p["id"], "verified": p["verified"],
+                 "confidence": p["confidence"], "unsupported": p["unsupported"],
+                 "applied": p["applied"], "diff": sleeptime.render_diff(p)} for p in cycle_props]
+            summary_by_user[uid] = s
+        except Exception as err:
+            summary_by_user[uid] = {"error": str(err), "clean": False, "proposal_ids": []}
 
     grade, reasons = _grade(summary_by_user, mined["count"], errors)
 
-    # -- advance/reset the OFFICIAL graduation streak ------------------------
+    # The signed scoreboard and the official streak are ONE publication.
     proposed = sum(s.get("proposed", 0) for s in summary_by_user.values())
-    st = sleeptime._record_cycle(grade == "CLEAN", proposed, committed=0)
+    refs = [(uid, identifier) for uid, s in summary_by_user.items()
+            for identifier in s.get("proposal_ids", [])]
+    try:
+        snap = sleeptime_cycles.record(grade == "CLEAN", proposed, 0,
+            proposal_refs=refs, cycle_id=cycle_id, reasons=reasons,
+            report={"users": summary_by_user, "mined_failures": mined})
+    except Exception as err:
+        # This identifies a retryable cycle. It does not invent a failed/zero
+        # counter when local publication may already have succeeded.
+        raise deltas.DeltaError(f"cycle {cycle_id} recording unconfirmed; retry this cycle ID: {err}") from err
+    return _report(snap)
 
-    # -- witness-signed scoreboard entry (tamper-evident, head-anchored) -----
-    entry_state = {
-        "grade": grade, "reasons": reasons,
-        "users": len(summary_by_user), "proposed": proposed,
-        "rejected": sum(s.get("rejected", 0) for s in summary_by_user.values()),
-        "mined_failures": mined["count"],
-        "clean_cycles_after": st["clean_cycles"],
-        "graduation": config.SLEEPTIME_GRADUATION,
-    }
-    snap = deltas.record_snapshot(
-        SCOREBOARD, kind="supervision", state=entry_state,
-        provenance=deltas.Provenance(source="supervise", trust="operator",
-                                     detail=f"supervised cycle graded {grade}"))
 
-    return {"grade": grade, "reasons": reasons, "users": summary_by_user,
-            "mined_failures": mined, "streak": st["clean_cycles"],
+def _report(snap):
+    data = snap["state"]
+    return {"cycle_id": data["cycle_id"], "grade": data["grade"], "reasons": data["reasons"],
+            **data["report"], "streak": data["counters"]["clean_cycles"],
             "graduation": config.SLEEPTIME_GRADUATION,
             "scoreboard_hash": snap["snapshot_hash"]}
 
 
 def scoreboard() -> list[dict]:
     """Every graded cycle, oldest first (verify with deltas.verify_history)."""
-    return deltas.snapshots(SCOREBOARD)
+    return sleeptime_cycles.records()
 
 
 def render_report(report: dict) -> str:

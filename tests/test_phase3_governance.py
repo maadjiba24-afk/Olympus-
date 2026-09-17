@@ -66,7 +66,7 @@ def test_sleeptime_cycle_emits_structured_metrics(monkeypatch):
     monkeypatch.setattr(sleeptime, "default_generator",
                         lambda s: lambda srcs: "Apollo uses Postgres and Redis.")
     monkeypatch.setattr(sleeptime, "default_verifier",
-                        lambda s: lambda srcs, rw: {"supported": True})
+                        lambda s: lambda srcs, rw: {"supported": True, "confidence": .95})
     sleeptime.run()
     events = evolve.events("sleeptime")
     assert events and events[-1]["kind"] == "cycle"
@@ -90,7 +90,7 @@ def test_proposal_renders_as_unified_diff():
     _seed_pair(u)
     sleeptime.refine_user(
         u, generator=lambda s: "Apollo uses Postgres and Redis.",
-        verifier=lambda s, r: {"supported": True}, auto_apply=False)
+        verifier=lambda s, r: {"supported": True, "confidence": .95}, auto_apply=False)
     diff = sleeptime.render_diff(sleeptime.proposals(u)[-1])
     assert diff.startswith("# proposal ")
     assert "verified" in diff
@@ -108,23 +108,22 @@ def test_ungraduated_loop_never_auto_applies_even_with_env(monkeypatch):
     m1, m2 = _seed_pair(u)
     s = sleeptime.refine_user(
         u, generator=lambda x: "Apollo uses Postgres and Redis.",
-        verifier=lambda x, r: {"supported": True})    # auto_apply from gates
+        verifier=lambda x, r: {"supported": True, "confidence": .95})    # auto_apply from gates
     assert s["proposed"] == 1 and s["committed"] == 0
     assert usermem.get_memory(u, m1["id"])["status"] == usermem.ACTIVE
     assert usermem.get_memory(u, m2["id"])["status"] == usermem.ACTIVE
 
 
-def test_graduated_loop_still_needs_explicit_autoapply(monkeypatch):
+def test_graduated_loop_still_needs_explicit_autoapply(monkeypatch, qualify_sleeptime):
     monkeypatch.delenv("OLYMPUS_SLEEPTIME_AUTOAPPLY", raising=False)
     monkeypatch.setattr(config, "SLEEPTIME_GRADUATION", 2)
-    for _ in range(2):
-        sleeptime._record_cycle(clean=True, proposed=0, committed=0)
+    qualify_sleeptime(2)
     assert sleeptime.graduated()
     u = "p3-gate2"
     m1, _ = _seed_pair(u)
     s = sleeptime.refine_user(
         u, generator=lambda x: "Apollo uses Postgres and Redis.",
-        verifier=lambda x, r: {"supported": True})
+        verifier=lambda x, r: {"supported": True, "confidence": .95})
     assert s["committed"] == 0                        # graduated but not opted in
     assert usermem.get_memory(u, m1["id"])["status"] == usermem.ACTIVE
 

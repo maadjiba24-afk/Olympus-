@@ -4,7 +4,7 @@ The gate has two halves:
 - a PURE comparison (`evals.regression_check`) that decides pass/fail from a
   fresh score dict + a committed baseline — fully tested here without a key;
 - a thin CI wrapper (`scripts/quality_gate.py`) that runs the live benchmark
-  and skips cleanly when no model key is present — the skip path is tested here
+  and refuses without explicit authorization — the refusal path is tested here
   via a real subprocess with the key stripped.
 
 The live benchmark run itself (`olympus eval` producing real per-specialist
@@ -201,19 +201,19 @@ def test_resolver_with_no_keys_emits_nothing(tmp_path):
     env["GITHUB_ENV"] = str(dest)
     r = subprocess.run([sys.executable, str(script)],
                        capture_output=True, text=True, env=env, timeout=60)
-    assert r.returncode == 0
-    assert "skip" in r.stderr.lower()
+    assert r.returncode == 3
+    assert "UNAVAILABLE" in r.stderr
     assert not dest.exists() or dest.read_text() == ""
 
 
-# --- CI wrapper: clean skip when no key (real subprocess) -----------------
+# --- CLI wrapper: authorization refusal (real subprocess) ----------------
 
-def test_gate_script_skips_without_key():
+def test_gate_script_refuses_without_authorization():
     script = Path(__file__).resolve().parent.parent / "scripts" / "quality_gate.py"
     env = {k: v for k, v in os.environ.items()
            if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OLYMPUS_API_KEY")}
     env["OLYMPUS_MODEL"] = "claude-opus-4-8"
     r = subprocess.run([sys.executable, str(script)],
                        capture_output=True, text=True, env=env, timeout=90)
-    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
-    assert "skipping the answer-quality gate" in r.stdout.lower()
+    assert r.returncode == 3, f"{r.stdout}\n{r.stderr}"
+    assert "UNAVAILABLE" in r.stderr and "benchmark not run" in r.stderr

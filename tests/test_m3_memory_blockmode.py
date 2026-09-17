@@ -82,10 +82,9 @@ def test_same_relation_distinct_spans_coexist():
 
 # --- Aletheia block-mode: the blocked rewrite -----------------------------
 
-def _graduate():
-    st = sleeptime.state()
-    st["clean_cycles"] = config.SLEEPTIME_GRADUATION
-    sleeptime._save(sleeptime._STATE_NS, "state", st)
+def _graduate(qualify_sleeptime):
+    qualify_sleeptime(config.SLEEPTIME_GRADUATION)
+    assert sleeptime.graduated()
 
 
 def test_block_mode_inert_before_graduation():
@@ -100,8 +99,8 @@ def test_block_mode_inert_before_graduation():
         "rewrite_confidence": 0.1, "confidence_threshold": 0.5})
 
 
-def test_block_mode_active_after_graduation():
-    _graduate()
+def test_block_mode_active_after_graduation(qualify_sleeptime):
+    _graduate(qualify_sleeptime)
     assert sleeptime.block_mode_active()
     with pytest.raises(abc.ContractViolation) as ei:
         abc.enforce("memory.rewrite", {
@@ -114,7 +113,7 @@ def test_block_mode_active_after_graduation():
 
 
 @_signing
-def test_low_confidence_rewrite_is_blocked_and_quarantined():
+def test_low_confidence_rewrite_is_blocked_and_quarantined(qualify_sleeptime):
     # THE Done bar: a graduated loop, an Aletheia-supported but LOW-confidence
     # consolidation → blocked (not committed), quarantined, streak reset.
     user = "alice"
@@ -122,7 +121,7 @@ def test_low_confidence_rewrite_is_blocked_and_quarantined():
                            confidence=0.9, provenance=["conversation"])
     b = usermem.add_memory(user, type="project", content="Alpha release ships in the first quarter.",
                            confidence=0.9, provenance=["conversation"])
-    _graduate()
+    _graduate(qualify_sleeptime)
 
     def gen(grp):
         return "Alpha ships in Q1."
@@ -143,18 +142,18 @@ def test_low_confidence_rewrite_is_blocked_and_quarantined():
     assert len(q) == 1 and q[0]["confidence"] == 0.2
     assert "confidence" in q[0]["reason"].lower()
     # And recorded as a signed, verifiable delta-substrate record.
-    from olympus import deltas, memory
-    assert deltas.verify_history(f"quarantine:{memory.safe_id(user)}")["ok"]
+    from olympus import deltas, sleeptime_evidence
+    assert deltas.verify_history(sleeptime_evidence.quarantine_target(user))["ok"]
 
 
 @_signing
-def test_high_confidence_rewrite_still_commits_when_graduated():
+def test_high_confidence_rewrite_still_commits_when_graduated(qualify_sleeptime):
     user = "bob"
     usermem.add_memory(user, type="project", content="Product launch happens on May third downtown.",
                        confidence=0.9, provenance=["conversation"])
     usermem.add_memory(user, type="project", content="Product launch happens on May third as scheduled.",
                        confidence=0.9, provenance=["conversation"])
-    _graduate()
+    _graduate(qualify_sleeptime)
 
     summary = sleeptime.refine_user(
         user, generator=lambda grp: "Launch is May 3.",
@@ -173,18 +172,18 @@ def test_production_verifier_schema_emits_confidence():
     assert "confidence" in sleeptime._VERIFY_SCHEMA["required"]
 
 
-def test_derived_confidence_keeps_supported_rewrites_unblocked():
-    # A verifier that returns no numeric confidence: a SUPPORTED rewrite is
-    # treated as confident (1.0), so graduated auto-apply is not spuriously
-    # blocked by the new clause.
+def test_missing_confidence_cannot_authorize_a_graduated_rewrite(qualify_sleeptime):
+    # A support label cannot substitute for the missing numeric evidence.
     user = "carol"
     usermem.add_memory(user, type="preference", content="The grey cat named Milo sleeps often here.",
                        confidence=0.9, provenance=["conversation"])
     usermem.add_memory(user, type="preference", content="The grey cat named Milo sleeps often there.",
                        confidence=0.9, provenance=["conversation"])
-    _graduate()
+    _graduate(qualify_sleeptime)
     summary = sleeptime.refine_user(
         user, generator=lambda grp: "The cat Milo.",
         verifier=lambda grp, rw: {"supported": True, "unsupported_claims": []},
         auto_apply=True)
-    assert summary["committed"] == 1
+    assert summary["committed"] == 0 and summary["clean"] is False
+    assert "missing confidence" in summary["error"]
+    assert len(usermem.active_memories(user)) == 2

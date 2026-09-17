@@ -263,14 +263,14 @@ what docs claim CI does and what it does.
 *document it as a contract*: `ci.yml` (deterministic architecture/gates/security tests — the
 oracle layer; matrix + browser/docker legs that self-skip locally per `docs/TESTING.md`),
 `replay-gate.yml` (the decision-path oracle: re-execute recorded runs, byte-identical decisions —
-Olympus's exact analog of teacher-forcing 32/32), `quality-gate.yml` (LLM-scored, noise-bounded via
-`evals.confirm_regressions` — the layer Colibri *couldn't* have, since its quality oracle is exact),
+Olympus's exact analog of teacher-forcing 32/32), `quality-gate.yml` (owned authorization/comparison contracts; live measurements
+are a separate explicitly authorized `live-quality-gate.yml` route),
 `publish.yml` (release). The absorption items: (a) the "a check that cannot fail is worse than no
 check" audit — grep the workflows for any step whose failure is swallowed (`|| true`, missing
 `needs`, advisory-only jobs not labeled advisory) and label or fix each; (b) the honesty rule that
 what CI cannot execute is *named* (Olympus's version of "no hosted GPUs": no live-provider quality
-runs on PRs — quality is gated on `main`/schedule with real keys, and TESTING.md says so, which it
-already largely does).
+runs on PRs — live quality requires reviewed manual dispatch on protected main; see
+`docs/LIVE_QUALITY_AUTHORIZATION.md` for prerequisites and unresolved evidence).
 
 **11. Final Olympus architecture.** No new modules. A short "CI contract" section in
 `docs/TESTING.md`: for each workflow, *what a green run proves and what it cannot prove* —

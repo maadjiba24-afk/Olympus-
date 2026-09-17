@@ -20,7 +20,7 @@ _CURRENT = ContextVar("owner_memory_transactions", default=None)
 
 
 class Snapshot:
-    def __init__(self, owner, namespace, collections, validate):
+    def __init__(self, owner, namespace, collections, validate, *, strict_durability=False):
         self.owner = oe.exact(owner)
         self.namespace = namespace
         self.collections = collections
@@ -29,6 +29,7 @@ class Snapshot:
             self.owner, namespace, validate,
             empty=lambda: {name: [] for name in collections},
             namespace=namespace, max_bytes=8 * 1024 * 1024,
+            strict_durability=strict_durability,
         )
 
     def legacy(self):

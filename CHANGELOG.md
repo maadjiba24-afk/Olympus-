@@ -1,5 +1,33 @@
 # Changelog
 
+## PR #315 correction — validation and delivery pending
+
+- Separate automatic owned quality contracts from explicit manual live evaluation.
+- Require reviewed-commit authorization before provider discovery, benchmarking
+  and baseline updates; never infer consent or a model from available secrets.
+- Pin answer/judge/retry to the approved model and credential without pool
+  fallback; expose unavailable authorization and incomparable baselines as failure.
+- Record the cancelled live CI incident and unresolved usage evidence; retain the
+  wider M19 live-path audit and all operational restrictions.
+
+## M03 hardening — platform validation and protected delivery pending
+
+- Isolate sleeptime proposals and wiki state by exact owner; preserve ambiguous
+  legacy records and expose unavailable evidence through actual consumers.
+- Commit memory rewrite/supersession/revert evidence atomically, reject stale
+  source edits, and retry lost acknowledgements without duplicate application.
+- Bind graduation to persisted proposals and signed cycle records, with durable
+  model-free recording retries and explicit anchor/signing failures.
+- Publish wiki batches/checkpoints and discovery acknowledgements through
+  recoverable transactions; restore acquisition's qualified storage route.
+- Keep prompt candidates local to their benchmark context and bind publication,
+  backup, signed outcome and recovery to one specific durable operation.
+- Preserve corruption diagnostics for malformed delta histories across verify,
+  restore and append; distinguish unreadable evidence and retain damaged bytes.
+  Document real validation opt-outs and anchor settings without activating them.
+- Preserve M01/M02/M04, all operational restrictions and the open M05-M19 and
+  real-evidence gates. This entry is not a deployment or completion receipt.
+
 ## Unreleased — M04 exact-owner file-note hardening
 
 - Separate private lessons, corrections, feedback and save-note actions by exact

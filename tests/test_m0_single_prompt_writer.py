@@ -14,6 +14,12 @@ from olympus import config, evals, orchestrator, tools
 _S = config.Settings(provider="anthropic", model="x", api_key="k")
 
 
+def _bench(score, identifiers):
+    return {"avg": score, "items": [
+        {"id": key, "score": score, "justification": "Owned mock benchmark"}
+        for key in identifiers]}
+
+
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
@@ -32,7 +38,7 @@ def _prompt(tmp_path):
 def test_update_prompt_tool_reverts_on_regression(tmp_path, monkeypatch):
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     scores = iter([8.0, 6.0])                       # before, after — regression
-    monkeypatch.setattr(evals, "run", lambda *a, **k: {"avg": next(scores)})
+    monkeypatch.setattr(evals, "run", lambda *a, **k: _bench(next(scores), k["only"]))
     out = tools._update_prompt("plutus", "NEW PROMPT", "risky")
     assert "revert" in out.lower()
     assert _prompt(tmp_path) == "OLD PROMPT"        # rolled back, not left regressed
@@ -41,7 +47,7 @@ def test_update_prompt_tool_reverts_on_regression(tmp_path, monkeypatch):
 def test_update_prompt_tool_keeps_on_improvement(tmp_path, monkeypatch):
     monkeypatch.setattr(evals, "ids_for", lambda specs: ["plutus-budget"])
     scores = iter([7.0, 8.0])                       # before, after — improvement
-    monkeypatch.setattr(evals, "run", lambda *a, **k: {"avg": next(scores)})
+    monkeypatch.setattr(evals, "run", lambda *a, **k: _bench(next(scores), k["only"]))
     out = tools._update_prompt("plutus", "NEW PROMPT", "sharper")
     assert "kept" in out.lower()
     assert _prompt(tmp_path) == "NEW PROMPT"

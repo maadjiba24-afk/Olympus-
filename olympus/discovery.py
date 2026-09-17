@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import memory, owner_evidence as evidence_store
+from . import memory, owner_evidence as evidence_store, note_evidence as notes
 
 # Bounds — the discovery ledger and each cycle are hard-capped so a runaway
 # signal source can never flood memory or spend unbounded tokens.
@@ -118,11 +118,26 @@ def evidence_status(user=None):
 
 
 def _load_gaps(user: str) -> list[dict]:
-    return _evidence(user).load()
+    with notes.guard():
+        return _evidence(user).load()
 
 
 def _save_gaps(user: str, gaps: list[dict]) -> None:
-    _evidence(user).save(gaps)
+    with notes.guard():
+        document = _evidence(user)
+        before = document._raw()
+        document._value(before)
+        target = notes.relative(_gaps_path(user))
+        notes.transact({target: _encode_gaps(user, gaps)}, {target: notes.digest(before)})
+
+
+def _encode_gaps(user, gaps):
+    raw = json.dumps({"version": 2, "owner": _user(user), "data": gaps},
+                     sort_keys=True, allow_nan=False).encode()
+    _evidence(user)._value(raw)
+    if len(raw) > notes.MAX_NOTE:
+        raise ValueError("discovery snapshot exceeds publication bound")
+    return raw
 
 
 def _norm(topic: str) -> str:
@@ -140,7 +155,7 @@ def note_gap(kind: str, topic: str, *, evidence: str = "", source: str = "",
     if not topic:
         raise ValueError("a gap needs a topic")
     user = _user(user)
-    with _evidence(user).guard():
+    with notes.guard():
         gaps = _load_gaps(user)
         for g in gaps:
             if g.get("kind") == kind and _norm(g.get("topic", "")) == topic:
@@ -161,9 +176,7 @@ def note_gap(kind: str, topic: str, *, evidence: str = "", source: str = "",
         }
         gaps.append(gap)
         if len(gaps) > _MAX_GAPS:
-            # Drop oldest resolved first; if all open, drop the oldest open.
-            gaps.sort(key=lambda g: (g.get("status") == "open", g.get("created", 0)))
-            gaps = gaps[len(gaps) - _MAX_GAPS:]
+            raise ValueError("discovery capacity reached; existing gaps and receipts preserved")
         _save_gaps(user, gaps)
         return gap
 
@@ -178,7 +191,7 @@ def open_gaps(user: str | None = None, kind: str | None = None) -> list[dict]:
 
 
 def _set_status(user: str, gap_id: str, status: str, ref: str = "") -> None:
-    with _evidence(user).guard():
+    with notes.guard():
         gaps = _load_gaps(user)
         for g in gaps:
             if g.get("id") == gap_id:
@@ -240,60 +253,22 @@ def _is_substantive(report: str) -> bool:
 
 
 def acquire_knowledge(gap: dict, user: str | None = None, runner=None) -> str:
-    """Research a knowledge gap and write the cited result to a durable wiki
-    page, marking the gap acquired. Best-effort: with no provider, a degraded
-    result, or any failure the gap stays OPEN and a queued note is returned —
-    never a raise, and never a degraded page written as if it were knowledge."""
-    user = _user(user)
-    topic = gap.get("topic", "")
-    if not topic:
-        return "(skipped: empty topic)"
+    """Owned research publication with durable retry; replay never acquires."""
+    from . import discovery_publication, research
     try:
-        from . import research, wiki
-        _load_gaps(user)  # Refuse damage before any provider work.
-        if getattr(wiki, "EXACT_OWNER_NAMESPACE", False) is not True:
-            return ("(queued: wiki publication is unavailable until its owner namespace "
-                    "is qualified; the gap and legacy pages are preserved)")
-        report = (runner or research.run)(
-            f"Give a clear, current, well-sourced explanation of: {topic}")
-        if not _is_substantive(report):
-            return f"(queued: no substantive result yet for '{topic}')"
-        slug = wiki.upsert(user, f"{topic}".strip().capitalize(), str(report),
-                           sources="discovery: research", durable=False)
-        _set_status(user, gap.get("id", ""), "acquired", ref=slug)
-        return f"learned '{topic}' → wiki page '{slug}'"
+        return discovery_publication.publish(_user(user), gap, _KNOWLEDGE,
+                                              research=runner or research.run)
     except Exception as err:
-        return f"(queued: could not research '{topic}' now — {str(err)[:120]})"
+        return "(queued: publication unavailable; preserve prepared results and inspect notes-status: " + str(err)[:300] + ")"
 
 
 def propose_feature(gap: dict, user: str | None = None) -> str:
-    """File a capability gap as a structured proposal on the upgrade spine
-    (`memory.save('upgrades', …)` — surfaced in the digest and `olympus
-    discover`), for the operator to review. Never auto-builds anything."""
-    user = _user(user)
-    topic = gap.get("topic", "")
-    if not topic:
-        return "(skipped: empty topic)"
-    title = f"Discovery: {topic}"[:120]
-    details = (
-        f"Olympus's self-discovery loop flagged a capability gap.\n\n"
-        f"- **Gap:** {topic}\n"
-        f"- **Evidence:** {gap.get('evidence', '(none)')}\n"
-        f"- **Seen:** {int(gap.get('hits', 1))} time(s)\n"
-        f"- **Source:** {gap.get('source', 'unknown')}\n\n"
-        "This is a PROPOSAL for the operator to review — nothing has been "
-        "built or changed. If it's worth doing, promote it via the normal "
-        "upgrade path (`propose_upgrade` files it upstream).")
+    """Shared operator proposal and exact-owner acknowledgement commit together."""
+    from . import discovery_publication
     try:
-        from . import memory
-        # Token-based: restoring through `current_user()` would hand the
-        # caller back a normalized identity, not its own.
-        with memory.user_context(user):
-            path = memory.save("upgrades", title, details)
-        _set_status(user, gap.get("id", ""), "proposed", ref=str(path))
-        return f"proposed feature '{topic}' → {path}"
+        return discovery_publication.publish(_user(user), gap, _CAPABILITY)
     except Exception as err:
-        return f"(could not file proposal for '{topic}': {str(err)[:120]})"
+        return "(could not file proposal; evidence preserved: " + str(err)[:300] + ")"
 
 
 # ---------------------------------------------------------------------------

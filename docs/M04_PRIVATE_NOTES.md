@@ -4,10 +4,24 @@ Source reconciliation: 2026-09-14. Exact base is PR #313 merge
 `7a96b42131707303ce5090577537e55fdfe70a6b`, tree
 `81ecea4ee2200cff302125dd39ad81b15ad823b3`.
 
-**Status: N1-N9 source implementation connected and locally regression-tested;
-Windows/POSIX full suites and protected delivery remain open.** Implementation
-and focused cloud evidence are not delivery or overall hardening completion. M04 precedes M03 because background proposal,
+**Status: delivered in PR #314; documented limits and the overall hardening
+register remain open.** The actual delivery record below supersedes the
+preserved implementation-attempt history. M04 preceded M03 because background proposal,
 consolidation and wiki work must consume correctly attributed notes.
+
+## Delivered result (2026-09-16)
+
+N1-N9 are delivered through protected PR #314 at
+`e47993f2831f76b7091fe4c897366de00ec4bb9d`, tree
+`87ce4780b82ee72de14cdea8fb73b7918b4ac688`. Windows regression/full results were
+851/12083 passed (20/278 skipped); POSIX results were 870/12139 passed
+(1/222 skipped). Required native cases and all 24 PR plus 24 merged-commit
+checks passed. Parent/tree/diff and fast-forward synchronization were verified;
+86 unrelated files and existing refs were preserved. The synchronization
+receipt and exact source pins are in `REMAINING_HARDENING.md`.
+
+Earlier pending/failed-attempt text below is historical. M03 and M05-M19 remain
+open; this delivery does not close operational or genuine-data gates.
 
 ## Finite acceptance checklist
 

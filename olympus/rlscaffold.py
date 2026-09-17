@@ -339,9 +339,10 @@ def _scoreboard_health() -> dict:
                 clean += 1
             elif g == "DIRTY":
                 dirty += 1
-        return {"clean_cycles": clean, "dirty_cycles": dirty}
-    except Exception:
-        return {"clean_cycles": 0, "dirty_cycles": 0}
+        return {"available": True, "clean_cycles": clean, "dirty_cycles": dirty}
+    except Exception as err:
+        return {"available": False, "clean_cycles": None, "dirty_cycles": None,
+                "reason": str(err)}
 
 
 def collect_report(*, fit: bool = False) -> dict:

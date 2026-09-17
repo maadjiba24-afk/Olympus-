@@ -48,7 +48,7 @@
     ]
   },
   "commands": {
-    "count": 134,
+    "count": 136,
     "names": [
       "a2a",
       "actions",
@@ -130,6 +130,8 @@
       "plugin",
       "prefs-evidence",
       "profile",
+      "prompt-recover",
+      "prompt-status",
       "pubkey",
       "queue",
       "reject",

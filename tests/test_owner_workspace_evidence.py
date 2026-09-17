@@ -289,7 +289,9 @@ def test_action_completion_survives_outcome_recording_failure(monkeypatch):
     assert "Do not repeat" in action.error and "unavailable" in action.error
 
 
-def test_discovery_unqualified_wiki_refuses_before_research():
+def test_discovery_damaged_wiki_refuses_before_research():
+    from olympus import wiki_evidence, note_evidence
+    note_evidence.publish(wiki_evidence.path(OWNER), b"damaged wiki evidence")
     gap = discovery.note_gap("knowledge", "owned topic", user=OWNER)
     result = discovery.acquire_knowledge(gap, OWNER,
         runner=lambda *_: pytest.fail("unqualified destination must precede research"))

@@ -183,6 +183,7 @@ class JsonStore:
     path: Path | None = None
     namespace: str | None = None
     backend_override: object | None = None
+    strict_durability: bool = False
 
     def _backend(self):
         return self.backend_override if self.backend_override is not None else store.backend()
@@ -244,7 +245,17 @@ class JsonStore:
             self.load()  # Ordinary publication never repairs existing damage.
             path = self._file()
             if path is not None:
-                publish(path, raw, self.name)
+                if self.strict_durability:
+                    from . import note_evidence
+                    try:
+                        note_evidence.mkdir(path.parent)
+                        publish(path, raw, self.name)
+                        note_evidence.sync_dir(path.parent)
+                    except OSError as err:
+                        raise OwnerEvidenceStateError(self.name,
+                            "durable publication unconfirmed; re-read before retry") from err
+                else:
+                    publish(path, raw, self.name)
             else:
                 try:
                     self._backend().put(self.namespace, self.key, raw)

@@ -37,9 +37,11 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from copy import deepcopy
+from functools import wraps
 from typing import Any, Callable
 
-from . import config, memory, store, usermem
+from . import config, memory, store, usermem, sleeptime_cycles
 
 _WORD = re.compile(r"[a-z0-9]+")
 _STATE_NS = "sleeptime"
@@ -152,9 +154,10 @@ def default_generator(settings) -> GenerateFn:
     s = settings or config.Settings.from_env()
 
     def generate(sources: list[dict]) -> str:
+        from . import deltas
         body = "\n".join(f"- {m.get('content', '')}" for m in sources)
         return backend.complete_text(
-            s, _GEN_SYSTEM, [{"role": "user", "content": body[:4000]}],
+            s, _GEN_SYSTEM, [{"role": "user", "content": deltas.enveloped(body[:4000], source="consolidation-sources")}],
             effort="low").strip()[:usermem._MAX_CONTENT]
 
     return generate
@@ -165,11 +168,12 @@ def default_verifier(settings) -> VerifyFn:
     s = settings or config.Settings.from_env()
 
     def verify(sources: list[dict], rewrite: str) -> dict:
+        from . import deltas
         body = ("SOURCE memories:\n"
                 + "\n".join(f"- {m.get('content', '')}" for m in sources)
                 + f"\n\nCONSOLIDATED memory:\n{rewrite}")
         out = backend.complete_json(
-            s, _VERIFY_SYSTEM, [{"role": "user", "content": body[:6000]}],
+            s, _VERIFY_SYSTEM, [{"role": "user", "content": deltas.enveloped(body[:6000], source="consolidation-verification")}],
             _VERIFY_SCHEMA, effort="low")
         return out if isinstance(out, dict) else {"supported": False}
 
@@ -192,42 +196,27 @@ class Proposal:
     unsupported: list[str] = field(default_factory=list)
     applied: bool = False
     created_at: float = 0.0
-    confidence: float = 1.0             # Aletheia's numeric confidence in the rewrite
+    source_records: list[dict] = field(default_factory=list)
+    confidence: float = 0.0             # Missing confidence is not affirmative evidence.
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in (
             "id", "user", "type", "source_ids", "source_contents", "rewrite",
             "provenance", "sensitivity", "verified", "unsupported", "applied",
-            "created_at", "confidence")}
-
-
-def _load(ns: str, key: str) -> Any:
-    blob = store.backend().get(ns, key)
-    if not blob:
-        return None
-    try:
-        return json.loads(blob)
-    except (ValueError, json.JSONDecodeError):
-        return None
-
-
-def _save(ns: str, key: str, data: Any) -> None:
-    store.backend().put(ns, key, json.dumps(data).encode("utf-8"))
+            "created_at", "confidence", "source_records")}
 
 
 def state() -> dict:
-    st = _load(_STATE_NS, "state") or {}
-    return {"clean_cycles": int(st.get("clean_cycles", 0)),
-            "runs": int(st.get("runs", 0)),
-            "last_run": float(st.get("last_run", 0.0)),
-            "committed": int(st.get("committed", 0)),
-            "proposed": int(st.get("proposed", 0))}
+    from . import sleeptime_cycles
+    return sleeptime_cycles.state()
 
 
 def graduated() -> bool:
     """True once the loop has logged enough clean supervised cycles to be
     trusted with auto-apply (still gated by config.sleeptime_autoapply)."""
-    return state()["clean_cycles"] >= config.SLEEPTIME_GRADUATION
+    from . import witness
+    return (state()["clean_cycles"] >= config.SLEEPTIME_GRADUATION
+            and not witness.is_default_seed())
 
 
 def block_mode_active() -> bool:
@@ -237,132 +226,88 @@ def block_mode_active() -> bool:
     return graduated() and config.SLEEPTIME_CONFIDENCE_MIN > 0.0
 
 
-def _record_cycle(clean: bool, proposed: int, committed: int) -> dict:
-    st = state()
-    st["runs"] += 1
-    st["last_run"] = time.time()
-    st["proposed"] += proposed
-    st["committed"] += committed
-    # A clean cycle advances the streak; any Aletheia rejection resets it — the
-    # loop must re-earn trust from zero after a bad rewrite.
-    st["clean_cycles"] = st["clean_cycles"] + 1 if clean else 0
-    _save(_STATE_NS, "state", st)
-    return st
+def _record_cycle(clean: bool, proposed: int, committed: int, **evidence) -> dict:
+    from . import sleeptime_cycles
+    return sleeptime_cycles.record(clean, proposed, committed, **evidence)["state"]["counters"]
 
 
 def proposals(user: str) -> list[dict]:
-    return _load(_PROP_NS, memory.safe_id(user)) or []
+    from . import sleeptime_evidence as se
+    return se.load(user, "proposals")
 
 
 def _add_proposal(p: Proposal) -> None:
-    key = memory.safe_id(p.user)
-    cur = _load(_PROP_NS, key) or []
-    cur.append(p.to_dict())
-    _save(_PROP_NS, key, cur[-_MAX_PROPOSALS_PER_RUN * 5:])
-
-
-def _quarantine(user: str, p: Proposal, reason: str) -> None:
-    """Hold a rewrite the memory.rewrite contract refused (e.g. Aletheia
-    block-mode's confidence floor) for operator review — persisted in the
-    quarantine namespace AND as a witness-signed delta-substrate record, so the
-    near-miss is tamper-evident. Best-effort: never breaks the commit path."""
-    try:
-        key = memory.safe_id(user)
-        entry = {**p.to_dict(), "reason": reason}
-        cur = _load(_QUAR_NS, key) or []
-        cur.append(entry)
-        _save(_QUAR_NS, key, cur[-_MAX_SNAPSHOTS:])
-        from . import deltas
-        deltas.record_snapshot(
-            f"quarantine:{key}", kind="quarantine",
-            state={"proposal": p.to_dict(), "reason": reason},
-            provenance=deltas.Provenance(
-                source="sleeptime", trust="user",
-                detail=f"block-mode rejected rewrite {p.id} "
-                       f"(sensitivity={p.sensitivity})"))
-    except Exception as err:
-        from . import errors
-        errors.capture("sleeptime.quarantine", err)
+    from . import sleeptime_evidence as se
+    se.add(p.user, p.to_dict())
 
 
 def quarantined(user: str) -> list[dict]:
-    """Rewrites rejected by the memory.rewrite contract, held for review."""
-    return _load(_QUAR_NS, memory.safe_id(user)) or []
-
-
-def _snapshot(user: str, sources: list[dict], rewrite_id: str | None) -> str:
-    """Append an immutable pre-rewrite snapshot; returns its id (for revert)."""
-    key = memory.safe_id(user)
-    snaps = _load(_SNAP_NS, key) or []
-    sid = uuid.uuid4().hex[:12]
-    snaps.append({
-        "id": sid, "ts": time.time(), "rewrite_id": rewrite_id,
-        "sources": [{"id": m["id"], "content": m.get("content", ""),
-                     "status": m.get("status"),
-                     "sensitivity": m.get("sensitivity"),
-                     "type": m.get("type"),
-                     "provenance": list(m.get("provenance") or [])}
-                    for m in sources],
-    })
-    _save(_SNAP_NS, key, snaps[-_MAX_SNAPSHOTS:])
-    return sid
+    from . import sleeptime_evidence as se
+    return [{**row["proposal"], "reason": row["reason"]}
+            for row in se.load(user, "quarantine")]
 
 
 def snapshots(user: str) -> list[dict]:
-    return _load(_SNAP_NS, memory.safe_id(user)) or []
+    from . import sleeptime_evidence as se
+    return se.load(user, "snapshots")
 
-
-# --- the refinement cycle -------------------------------------------------
 
 def _commit(user: str, sources: list[dict], p: Proposal) -> str | None:
-    """Apply a verified rewrite under the memory.rewrite contract: snapshot →
-    add the consolidated memory → supersede the sources. Returns the new memory
-    id, or None if the contract blocked the commit."""
-    from . import behavioral_contracts as abc
-    ctx = {
-        "source_provenance": _merged_provenance(sources),
-        "new_provenance": p.provenance,
-        "source_sensitivities": [m.get("sensitivity", "normal") for m in sources],
-        "new_sensitivity": p.sensitivity,
-        "source_type": p.type, "new_type": p.type,
-        "verify_supported": p.verified,
-        "unsupported_claims": p.unsupported,
-        # Aletheia block-mode: reject a below-confidence rewrite once graduated.
-        "block_mode_active": block_mode_active(),
-        "rewrite_confidence": p.confidence,
-        "confidence_threshold": config.SLEEPTIME_CONFIDENCE_MIN,
-    }
-    try:
-        abc.enforce("memory.rewrite", ctx)
-    except abc.ContractViolation as violation:
-        # A blocked rewrite is not silently dropped: quarantine it (signed,
-        # inspectable) so an operator can review the near-miss. The existing
-        # memories are left untouched — consolidation is the only rewriter.
-        _quarantine(user, p, str(violation))
+    """One owner snapshot commits proposal, undo evidence and memory changes."""
+    from . import behavioral_contracts as abc, sleeptime_evidence as se
+    if p.user != memory.canonical_owner(user):
+        raise ValueError("proposal belongs to another owner")
+    proposal = p.to_dict()
+    if not proposal["source_records"]:
+        proposal["source_records"] = deepcopy(sources)
+    if proposal["source_records"] != sources:
+        raise ValueError("proposal source binding differs")
+
+    def check(live):
+        try:
+            abc.enforce("memory.rewrite", {
+                "source_provenance": _merged_provenance(live),
+                "new_provenance": p.provenance,
+                "source_sensitivities": [m["sensitivity"] for m in live],
+                "new_sensitivity": p.sensitivity,
+                "source_type": p.type, "new_type": p.type,
+                "verify_supported": p.verified,
+                "unsupported_claims": p.unsupported,
+                "block_mode_active": block_mode_active(),
+                "rewrite_confidence": p.confidence,
+                "confidence_threshold": config.SLEEPTIME_CONFIDENCE_MIN,
+            })
+        except abc.ContractViolation as err:
+            return str(err)
         return None
-    sid = _snapshot(user, sources, None)
-    new = usermem.add_memory(
-        user, type=p.type, content=p.rewrite,
-        confidence=max((m.get("confidence", 0.5) for m in sources), default=0.5),
-        importance=max((m.get("importance", 0.5) for m in sources), default=0.5),
-        sensitivity=p.sensitivity, provenance=p.provenance)
-    for m in sources:
-        usermem.supersede(user, m["id"], new)
-    # link the snapshot to the memory it produced, so revert can undo the commit
-    _relink_snapshot(user, sid, new["id"])
-    return new["id"]
+
+    result = se.commit(user, proposal, check)
+    se.flush_quarantine(user)
+    return result
 
 
-def _relink_snapshot(user: str, sid: str, rewrite_id: str) -> None:
-    key = memory.safe_id(user)
-    snaps = _load(_SNAP_NS, key) or []
-    for s in snaps:
-        if s.get("id") == sid:
-            s["rewrite_id"] = rewrite_id
-            break
-    _save(_SNAP_NS, key, snaps)
+def approve(user: str, proposal_id: str) -> str | None:
+    from . import sleeptime_evidence as se
+    with se.transaction(user) as data:
+        row = next((p for p in data["proposals"] if p["id"] == proposal_id), None)
+        if row is None:
+            return None
+        # Do not hold a second copied consolidation collection across commit.
+        proposal = Proposal(**deepcopy(row))
+    return _commit(user, proposal.source_records, proposal)
 
 
+def _owner_context(fn):
+    @wraps(fn)
+    def wrapped(user, *args, **kwargs):
+        if not isinstance(user, str) or not user.strip():
+            return {"error": "invalid user", "clean": False}
+        with memory.user_context(user):
+            return fn(user, *args, **kwargs)
+    return wrapped
+
+
+@_owner_context
 def refine_user(user: str, *, settings=None,
                 generator: GenerateFn | None = None,
                 verifier: VerifyFn | None = None,
@@ -370,7 +315,7 @@ def refine_user(user: str, *, settings=None,
     """One refinement cycle for one user. Returns a summary. Never raises into
     the caller. `auto_apply` overrides the config gate (tests set it True)."""
     summary = {"groups": 0, "proposed": 0, "committed": 0,
-               "rejected": 0, "clean": True}
+               "rejected": 0, "clean": True, "proposal_ids": []}
 
     def fail(reason: str) -> None:
         """Make missing/malformed cycle evidence non-graduating."""
@@ -391,6 +336,7 @@ def refine_user(user: str, *, settings=None,
         fail("refinement setup failed")
         return summary
     try:
+        proposals(user)  # Refuse damaged/ambiguous history before provider work.
         mems = usermem.active_memories(user)
     except Exception as err:
         from . import errors
@@ -411,6 +357,8 @@ def refine_user(user: str, *, settings=None,
         if not isinstance(rewrite, str) or not rewrite.strip():
             fail("generation produced no usable rewrite")
             continue
+        from . import security
+        rewrite = security.sanitize_for_memory(rewrite.strip())[:usermem._MAX_CONTENT]
         try:
             verdict = ver(grp, rewrite)
         except Exception as err:
@@ -441,11 +389,11 @@ def refine_user(user: str, *, settings=None,
             fail("verification verdict contradicts its unsupported claims")
             supported = False
 
-        # Aletheia's numeric confidence in the rewrite — from the verdict if it
-        # gives one, else derived from the support verdict (a supported rewrite
-        # with no explicit score is treated as confident).
+        # No inferred confidence: missing evidence cannot authorize a rewrite.
         if "confidence" not in verdict:
-            confidence = 1.0 if supported else 0.0
+            fail("verification verdict is missing confidence")
+            confidence = 0.0
+            supported = False
         else:
             try:
                 raw_confidence = verdict["confidence"]
@@ -471,26 +419,31 @@ def refine_user(user: str, *, settings=None,
             id=uuid.uuid4().hex[:12], user=user, type=grp[0].get("type", "project"),
             source_ids=[m["id"] for m in grp],
             source_contents=[m.get("content", "") for m in grp],
+            source_records=deepcopy(grp),
             rewrite=clean_rewrite,
             provenance=_merged_provenance(grp),
             sensitivity=_rank_sensitivity(grp),
             verified=supported,
             unsupported=list(raw_unsupported),
             created_at=time.time(), confidence=confidence)
-        if not supported:
-            summary["rejected"] += 1
-            summary["clean"] = False        # Aletheia rejection breaks the streak
-            _add_proposal(p)                 # kept for the operator to inspect
-            continue
-        if auto_apply:
-            new_id = _commit(user, grp, p)
-            if new_id:
-                p.applied = True
-                summary["committed"] += 1
-            else:
-                fail("memory rewrite contract rejected")
-        _add_proposal(p)
-        summary["proposed"] += 1
+        try:
+            _add_proposal(p)  # Persist the reference before attempting application.
+            summary["proposal_ids"].append(p.id)
+            if not supported:
+                summary["rejected"] += 1
+                summary["clean"] = False
+                continue
+            summary["proposed"] += 1
+            if auto_apply:
+                new_id = _commit(user, grp, p)
+                if new_id:
+                    summary["committed"] += 1
+                else:
+                    fail("memory rewrite contract rejected")
+        except Exception as err:
+            from . import errors
+            errors.capture("sleeptime.publish", err)
+            fail("proposal/application evidence unavailable; inspect persisted proposal " + p.id)
     return summary
 
 
@@ -514,36 +467,25 @@ def render_diff(proposal: dict) -> str:
 
 
 def revert(user: str, snapshot_id: str) -> bool:
-    """Undo a committed rewrite: reactivate the source memories from the snapshot
-    and tombstone the memory the rewrite produced. Returns False if the snapshot
-    is unknown."""
-    for s in snapshots(user):
-        if s.get("id") != snapshot_id:
-            continue
-        for src in s.get("sources", []):
-            usermem._mutate(user, src["id"], lambda m: (
-                m.__setitem__("status", usermem.ACTIVE),
-                m.__setitem__("superseded_by", None)))
-        rid = s.get("rewrite_id")
-        if rid:
-            usermem.tombstone(user, rid)
-        return True
-    return False
+    """Restore exact pre-rewrite rows atomically; reject stale intervening edits."""
+    from . import sleeptime_evidence
+    return sleeptime_evidence.revert(user, snapshot_id)
 
 
-def run(settings=None) -> list[str]:
-    """The heartbeat entry: refine every user with memory. No-op unless enabled.
-    Returns human log lines (empty when nothing happened — a nightly job must not
-    spam the heartbeat)."""
+@sleeptime_cycles.serialized
+def run_result(settings=None) -> dict:
+    """Typed cycle outcome; unavailable/dirty evidence is never exit success."""
     if not config.sleeptime_enabled():
-        return []
+        return {"status": "disabled", "lines": []}
     try:
+        state()  # Refuse unavailable qualification evidence before model work.
         users = usermem.owners()
     except Exception as err:
         from . import errors
         errors.capture("sleeptime.enumerate", err)
-        return []
+        return {"status": "unavailable", "lines": ["Sleep-time evidence unavailable: " + str(err)]}
     total = {"proposed": 0, "committed": 0, "rejected": 0}
+    refs, problems = [], []
     clean = True
     for uid in users:
         try:
@@ -567,7 +509,22 @@ def run(settings=None) -> list[str]:
         # missing fields, and merely truthy values all reset the streak.
         cycle_clean = s.get("clean") is True and not s.get("error")
         clean = clean and cycle_clean
-    st = _record_cycle(clean, total["proposed"], total["committed"])
+        identifiers = s.get("proposal_ids")
+        if not isinstance(identifiers, list) or not all(isinstance(v, str) for v in identifiers):
+            clean = False
+            problems.append("missing proposal identities for " + uid)
+        else:
+            refs.extend((uid, identifier) for identifier in identifiers)
+        if s.get("error"):
+            problems.append(str(s["error"]))
+    cycle_id = uuid.uuid4().hex
+    try:
+        st = _record_cycle(clean, total["proposed"], total["committed"],
+                           proposal_refs=refs, cycle_id=cycle_id, reasons=problems)
+    except Exception as err:
+        return {"status": "unavailable", "cycle_id": cycle_id, "lines": [
+            f"Sleep-time cycle {cycle_id} recording unconfirmed: {err}. Preserve evidence and retry this cycle ID."]}
+    clean = clean and st["clean_cycles"] > 0
     from . import evolve
     evolve.record("sleeptime", evolve.OK if clean else evolve.DEGRADED,
                   f"proposed={total['proposed']} committed={total['committed']} "
@@ -580,8 +537,15 @@ def run(settings=None) -> list[str]:
         "clean_cycles": st["clean_cycles"], "graduated": graduated(),
         "autoapply": config.sleeptime_autoapply()})
     if not (total["proposed"] or total["committed"] or total["rejected"]):
-        return []
+        return {"status": "dirty", "cycle_id": cycle_id, "lines": [
+            "Sleep-time evidence unavailable: " + "; ".join(problems)] if problems else []}
     mode = "auto-apply" if (graduated() and config.sleeptime_autoapply()) \
         else f"supervised ({st['clean_cycles']}/{config.SLEEPTIME_GRADUATION} clean)"
-    return [f"Sleep-time memory [{mode}]: proposed {total['proposed']}, "
-            f"committed {total['committed']}, rejected {total['rejected']}."]
+    return {"status": "clean" if clean else "dirty", "cycle_id": cycle_id, "lines": [
+        f"Sleep-time memory [{mode}]: proposed {total['proposed']}, "
+        f"committed {total['committed']}, rejected {total['rejected']}."]}
+
+
+def run(settings=None) -> list[str]:
+    """Heartbeat compatibility: retain visible failure lines and quiet no-work."""
+    return run_result(settings)["lines"]

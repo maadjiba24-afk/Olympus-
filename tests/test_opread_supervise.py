@@ -119,13 +119,12 @@ def test_low_confidence_verified_proposal_is_dirty():
 # --- apply is HARD-OFF --------------------------------------------------------
 
 @_signing
-def test_nothing_is_ever_committed_even_when_graduated(monkeypatch):
+def test_nothing_is_ever_committed_even_when_graduated(monkeypatch, qualify_sleeptime):
     user = _seed_user("carol")
     # Worst case: graduated streak AND auto-apply env on — the harness must
     # still commit nothing (auto_apply=False is a literal in the call).
-    st = sleeptime.state()
-    st["clean_cycles"] = config.SLEEPTIME_GRADUATION
-    sleeptime._save(sleeptime._STATE_NS, "state", st)
+    qualify_sleeptime(config.SLEEPTIME_GRADUATION)
+    assert sleeptime.graduated()
     monkeypatch.setenv("OLYMPUS_SLEEPTIME_AUTOAPPLY", "1")
     before = {m["id"] for m in usermem.active_memories(user)}
     report = supervise.run_supervised_cycle(

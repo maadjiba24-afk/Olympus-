@@ -84,6 +84,14 @@ _DERIVED_KV_NAMESPACES = (
     "routing_outcomes",
 )
 
+# M03 adds owner-containing backups/receipts. These are candidate inventory,
+# NOT deletion authority: M09 must classify shared reports, legal holds and
+# embedded before-states before principal erasure can be enabled.
+_SENSITIVE_RECOVERY_ROOTS = (
+    "note-transactions-v2", "note-mirror-v2", "sleeptime-cycles-v2",
+    "prompt-operations-v1", "deltas", "prompt_backups", "evals", "reports",
+)
+
 
 # ---------------------------------------------------------------------------
 # policy surface
@@ -233,7 +241,8 @@ def inspect_principal(principal: str) -> dict:
     paths = _paths_for(uid)
     owned = config.MEMORY_DIR / "owners" / memory.owner_key(principal)
     qualified = [owned] if owned.exists() or owned.is_symlink() else []
-    for ns in ("outcomes.v2", "routing_outcomes.v2", "playbooks.v2", "docrag.ann.v2"):
+    for ns in ("outcomes.v2", "routing_outcomes.v2", "playbooks.v2", "docrag.ann.v2",
+               "usermem.state.v3", "relgraph.state.v3"):
         candidate = config.MEMORY_DIR / "store" / ns / memory.storage_key(principal)
         if candidate.exists() or candidate.is_symlink():
             qualified.append(candidate)
@@ -254,6 +263,8 @@ def inspect_principal(principal: str) -> dict:
         "attribution": "unavailable: legacy normalized candidates are not ownership proof",
         "qualified_workspace": str(config.MEMORY_DIR / "owners" / memory.owner_key(principal)),
         "deletion_available": False,
+        "sensitive_recovery_candidates": [name for name in _SENSITIVE_RECOVERY_ROOTS
+            if (config.MEMORY_DIR / name).exists() or (config.MEMORY_DIR / name).is_symlink()],
         "exists": bool(targets or qualified),
         "qualified_paths": [str(p.relative_to(config.MEMORY_DIR)) for p in qualified],
         "paths": targets,

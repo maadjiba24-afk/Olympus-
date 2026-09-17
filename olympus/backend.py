@@ -12,9 +12,39 @@ spend and context across trust boundaries. OLYMPUS_FALLBACK=0 disables.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Callable
 
 from . import agent, claude_code, config, llm, openai_compat
+
+
+_PINNED_MODEL = ContextVar("backend_pinned_model", default=None)
+
+
+@contextmanager
+def pinned_model(settings: config.Settings):
+    """Scope calls to exactly one provider/model/credential; never pool-failover.
+
+    Used by explicitly authorized measurements. This is not itself consent and
+    does not enable any provider. The caller must establish authorization first.
+    """
+    fingerprint = _fingerprint(settings)
+    prior = _PINNED_MODEL.get()
+    if prior is not None and prior != fingerprint:
+        raise ValueError("cannot widen the pinned model scope")
+    token = _PINNED_MODEL.set(fingerprint)
+    try:
+        yield
+    finally:
+        _PINNED_MODEL.reset(token)
+
+
+def _check_pinned(settings):
+    pinned = _PINNED_MODEL.get()
+    if pinned is not None and pinned != _fingerprint(settings):
+        raise ValueError("provider/model differs from the measurement authorization")
+    return pinned is not None
 
 
 def _fallback_enabled() -> bool:
@@ -58,6 +88,8 @@ def _should_failover(err: Exception) -> bool:
 
 def _with_failover(settings: config.Settings,
                    call: Callable[[config.Settings], Any]) -> Any:
+    if _check_pinned(settings):
+        return call(settings)
     try:
         return call(settings)
     except Exception as err:
@@ -115,6 +147,7 @@ def complete_text_once(settings: config.Settings, system: str,
     """Run exactly this model — NO cross-member failover. Used by blind compare,
     where substituting another model's answer for a failing one would corrupt
     the very thing being measured."""
+    _check_pinned(settings)
     return _dispatch_text(settings, system, messages, effort)
 
 

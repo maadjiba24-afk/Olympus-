@@ -16,7 +16,7 @@ def test_skill_create_read_index():
     assert "No skill named" in skills.read("nonexistent")
 
 
-def test_prompt_update_and_restore(tmp_path, monkeypatch):
+def test_prompt_update_and_restore(tmp_path, monkeypatch, owned_prompt_benchmark):
     monkeypatch.setattr(config, "PROMPTS_DIR", tmp_path / "prompts")
     config.PROMPTS_DIR.mkdir()
     (config.PROMPTS_DIR / "argus.md").write_text("# Argus\n\nOriginal mind.\n")
@@ -31,7 +31,7 @@ def test_prompt_update_and_restore(tmp_path, monkeypatch):
     assert "update reason" not in restored
 
 
-def test_restore_prompt_walks_back_the_chain(tmp_path, monkeypatch):
+def test_restore_prompt_walks_back_the_chain(tmp_path, monkeypatch, owned_prompt_benchmark):
     # A rollback STACK: each restore steps back one update, not just the newest.
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
     monkeypatch.setattr(config, "PROMPTS_DIR", tmp_path / "prompts")
@@ -39,10 +39,8 @@ def test_restore_prompt_walks_back_the_chain(tmp_path, monkeypatch):
     p = config.PROMPTS_DIR / "argus.md"
     p.write_text("# Argus\n\nv0\n")
 
-    # Distinct backup filenames require distinct second-resolution timestamps.
-    import time as _t
+    # Operation identities keep adjacent backups distinct without clock delays.
     tools._apply_prompt("argus", "# Argus\n\nv1", "to v1")
-    _t.sleep(1.05)
     tools._apply_prompt("argus", "# Argus\n\nv2", "to v2")
     assert "v2" in p.read_text()
 

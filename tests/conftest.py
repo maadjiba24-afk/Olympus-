@@ -39,6 +39,45 @@ def preserve_environ():
     os.environ.update(snapshot)
 
 
+@pytest.fixture
+def qualify_sleeptime(monkeypatch):
+    """Owned model fixture traversing proposal persistence and signed graduation.
+
+    This is synthetic test evidence, never a genuine-data checkpoint. Tests
+    cannot mint qualification by incrementing the obsolete counter document.
+    """
+    from olympus import sleeptime, usermem
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "owned-graduation-test-only")
+    def qualify(count=1):
+        owner = "fixture:graduation"
+        if not usermem.active_memories(owner):
+            for suffix in ("this year", "as scheduled"):
+                usermem.add_memory(owner, type="project", confidence=.9,
+                    content="Owned Alpha fixture ships in the first quarter " + suffix)
+        for _ in range(count):
+            summary = sleeptime.refine_user(owner,
+                generator=lambda rows: "Owned Alpha fixture ships in the first quarter.",
+                verifier=lambda rows, text: {"supported": True, "confidence": .95},
+                auto_apply=False)
+            assert summary["clean"] and summary["proposed"] == 1
+            sleeptime._record_cycle(True, 1, 0,
+                proposal_refs=[(owner, key) for key in summary["proposal_ids"]])
+        return sleeptime.state()
+    return qualify
+
+
+@pytest.fixture
+def owned_prompt_benchmark(monkeypatch):
+    from olympus import evals
+    monkeypatch.setenv("OLYMPUS_SIGNING_SEED", "owned-prompt-fixture-only")
+    cases = [{"id": "owned-argus", "specialist": "argus", "task": "Owned test task",
+              "criteria": "Owned deterministic benchmark"}]
+    monkeypatch.setattr(evals, "load_benchmarks", lambda **kwargs: cases)
+    monkeypatch.setattr(evals, "run", lambda *args, **kwargs: {
+        "avg": 8.0, "items": [{"id": "owned-argus", "score": 8.0,
+                               "justification": "Owned mock result"}]})
+
+
 # --- crypto-backend gating (shared skip mechanism) --------------------------
 # `cryptography` is a REQUIRED dependency, so in any correctly-provisioned
 # environment (CI, normal dev) the vault (Fernet) and signing (Ed25519) paths
