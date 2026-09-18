@@ -10,11 +10,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from olympus import (assess, atomicio, builtin_actions, cli, memory,
+from olympus import (assess, atomicio, builtin_actions, cli, config, memory,
                      selfassess, tools)
 
 
@@ -23,6 +24,48 @@ B = "email-a-b-example-test"
 LONG_A = "email-" + "x" * 80 + ".alpha"
 LONG_B = "email-" + "x" * 80 + "-alpha"
 PAIRS = ((A, B), (LONG_A, LONG_B))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows authorization long-path contract")
+def test_native_windows_authorization_long_paths_keep_grants_and_repair_bytes(tmp_path, monkeypatch):
+    root = tmp_path / ("a" * 80) / ("b" * 80) / ("c" * 80)
+    assert len(str(root)) > 260
+    monkeypatch.setattr(config, "MEMORY_DIR", root)
+    legacy = assess._io(assess._legacy_auth_path(LONG_A))
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(b"unclaimed legacy authorization")
+    for owner, target in ((LONG_A, "first.example"), (LONG_B, "second.example")):
+        assess.grant([target], user=owner)
+        assert assess.authorization_status(owner)["state"] == "valid"
+        assert assess.in_scope(target, owner)
+        assert memory.storage_key(owner).endswith(hashlib.sha256(owner.encode()).hexdigest())
+    assert not assess.in_scope("first.example", LONG_B)
+    assert not assess.in_scope("second.example", LONG_A)
+    target = assess._io(assess._auth_path(LONG_A))
+    raw = b'{"unavailable":"preserve owned evidence"'
+    target.write_bytes(raw)
+    with pytest.raises(assess.AssessAuthorizationStateError):
+        assess.grant(["must-not-run.example"], user=LONG_A)
+    publish = atomicio.publish
+    calls = []
+    def fail_reset(tmp, destination, data, **kwargs):
+        calls.append(destination)
+        if len(calls) == 2:
+            raise OSError("owned interrupted reset")
+        return publish(tmp, destination, data, **kwargs)
+    monkeypatch.setattr(atomicio, "publish", fail_reset)
+    with pytest.raises(OSError, match="owned interrupted reset"):
+        assess.repair_authorizations(LONG_A)
+    assert target.read_bytes() == raw
+    archives = list(target.parent.glob("authorizations.corrupt.*.json"))
+    assert len(archives) == 1 and archives[0].read_bytes() == raw
+    monkeypatch.setattr(atomicio, "publish", publish)
+    repaired = assess.repair_authorizations(LONG_A)
+    assert repaired["repaired"] and repaired["quarantined_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert assess.active_authorizations(LONG_A) == []
+    assert assess.in_scope("second.example", LONG_B)
+    assert legacy.read_bytes() == b"unclaimed legacy authorization"
+    assert archives[0].read_bytes() == raw
 
 
 def _record(target: str = "example.test", *, auth_id: str = "auth-1-abcdef"):
@@ -37,7 +80,7 @@ def _record(target: str = "example.test", *, auth_id: str = "auth-1-abcdef"):
 
 
 def _corrupt(user: str, raw: bytes = b'[{"id":'):
-    path = assess._auth_path(user)
+    path = assess._io(assess._auth_path(user))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     return path
@@ -71,7 +114,7 @@ def test_ambient_owner_uses_exact_context_not_lossy_current_user():
 
 
 def test_legacy_lossy_authorization_is_preserved_and_claimed_by_nobody():
-    legacy = assess._legacy_auth_path(A)
+    legacy = assess._io(assess._legacy_auth_path(A))
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text(json.dumps([_record("legacy-secret.example")]),
                       encoding="utf-8")
@@ -266,11 +309,11 @@ def test_repair_refuses_evidence_above_quarantine_bound():
 def test_repair_does_not_rewrite_missing_valid_or_legacy_state():
     valid_user = "valid-owner"
     assess.grant(["valid.example"], user=valid_user)
-    valid_path = assess._auth_path(valid_user)
+    valid_path = assess._io(assess._auth_path(valid_user))
     valid_before = valid_path.read_bytes()
 
     legacy_user = "legacy.owner"
-    legacy = assess._legacy_auth_path(legacy_user)
+    legacy = assess._io(assess._legacy_auth_path(legacy_user))
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text(json.dumps([_record("legacy.example")]), encoding="utf-8")
     legacy_before = legacy.read_bytes()
@@ -336,7 +379,7 @@ def test_updates_use_distinct_full_digest_process_locks(monkeypatch):
 def test_atomic_publish_failure_keeps_previous_authorizations(monkeypatch):
     user = "atomic-owner"
     assess.grant(["original.example"], user=user)
-    path = assess._auth_path(user)
+    path = assess._io(assess._auth_path(user))
     before = path.read_bytes()
 
     def fail_publish(*args, **kwargs):
@@ -355,7 +398,7 @@ def test_atomic_publish_failure_keeps_previous_authorizations(monkeypatch):
 def test_bounded_writer_never_publishes_an_unreadable_store(monkeypatch):
     user = "bounded-writer-owner"
     assess.grant(["original.example"], user=user)
-    path = assess._auth_path(user)
+    path = assess._io(assess._auth_path(user))
     before = path.read_bytes()
     monkeypatch.setattr(assess, "_MAX_AUTH_BYTES", len(before) + 32)
 

@@ -1,5 +1,17 @@
 # Live quality authorization: PR #315 correction
 
+**Delivery reconciliation (2026-09-17):** This contract and its authorization
+correction were delivered in PR #315 at
+`ffd1a0b2aa3c926e4133023602190930cc54090b`, tree
+`6635d459e5241152f3bc46de010294fc1a677786`. Both native full suites, all 25
+feature checks, protected merge, all 25 actual merged-commit checks and operator
+synchronization passed. `REMAINING_HARDENING.md` records the scoped receipts.
+Earlier preparation/validation-pending text below is historical; it is not an
+instruction to reapply this work. The provider-account usage receipt for the
+cancelled Moonshot run remains an external evidence dependency. M05 and later
+source require their own validation and delivery evidence.
+
+
 Implementation prepared; native platform validation and protected delivery remain
 required. This is a bounded M19 prerequisite and does not close M19, M03 delivery,
 or the master hardening objective.

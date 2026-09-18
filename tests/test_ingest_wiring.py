@@ -32,6 +32,8 @@ import json
 import tarfile
 from pathlib import Path
 
+from olympus import note_evidence
+
 import pytest
 
 from olympus import (config, ingestgate, mcp_client, memory, pluginstore,
@@ -138,9 +140,11 @@ def _seed_memory(user="alice") -> dict:
     memory.set_user(user)
     memory.save("lessons", "First lesson", "remember the moat")
     memory.set_user("shared")
-    return {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
-            for r in memory._memory_roots(user) if r.exists()
+    snapshot = {note_evidence.relative(p): p.read_bytes()
+            for r in map(note_evidence.io, memory._memory_roots(user)) if r.exists()
             for p in sorted(r.rglob("*")) if p.is_file()}
+    assert len(snapshot) == 1, "the seeded note must enter the byte snapshot"
+    return snapshot
 
 
 def _make_archive(path: Path, manifest: dict, files=()) -> None:
@@ -311,8 +315,8 @@ def test_flag_on_memory_import_still_restores_byte_for_byte(gate_on, tmp_path):
     memory.delete_memory("alice")
     result = memory.import_memory(archive)
     assert result["count"] == len(before) and result["verified"] == len(before)
-    after = {p.relative_to(config.MEMORY_DIR).as_posix(): p.read_bytes()
-             for r in memory._memory_roots("alice") if r.exists()
+    after = {note_evidence.relative(p): p.read_bytes()
+             for r in map(note_evidence.io, memory._memory_roots("alice")) if r.exists()
              for p in sorted(r.rglob("*")) if p.is_file()}
     assert after == before
 

@@ -38,7 +38,7 @@ modules' meaning).
 | `ledger` | Pattern reused, not called: `SCHEMA`/`LABEL` constants, `_content_hash = sha256(canonical_json(core))`, `parent` = prior node hash, **unsigned degradation** on `WitnessError` | `MEMORY_DIR/ledger/<run_id>.jsonl` |
 | `attest` | Pattern reused, not called: append-only JSONL, tolerant reader skipping malformed lines, receipt header/footer export | `MEMORY_DIR/attestations.jsonl` |
 | `outcomes` | `APPROVED`, `APPROVED_AFTER_EDIT`, `REJECTED`, `UNDONE`; `record(user, ref, outcome, kind)`; `_MIN_SAMPLES = 5` precedent | `store.backend()` ns `outcomes` |
-| `compare` | `model_label(s)->"provider/model"`, `run()->{"id": cid,…}`, `reveal(user,cid,choice)->{"chosen_model","mapping",…}`, `tally(user)` | `MEMORY_DIR/users/<id>/compares/*.json` |
+| `compare` | Exact-owner version-2 records; first reveal decision and outbox commit together; `compare_calibration` links run observations and comparison idempotently; tally keys are complete execution identity digests | `MEMORY_DIR/owners/<owner_key(exact)>/compare-v2/state.json`; legacy normalized records stay unclaimed |
 | `usage` | `estimate_cost(model, in_tokens, out_tokens)->float` | session totals |
 | `config` | `MEMORY_DIR`; `Settings.provider/.model/.base_url` | — |
 | `liveeval` | Env-flag pattern `os.environ.get("OLYMPUS_…","").strip().lower() in (…)`; `_MIN`-style sample bounds | `MEMORY_DIR/traces/` |

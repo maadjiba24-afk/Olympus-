@@ -151,6 +151,25 @@ them."
 
 ## The tool surface
 
+### Blind comparison evidence
+
+CLI and web comparisons bind a nonempty exact owner to a bounded version-2
+snapshot. Normalized legacy directories remain unclaimed. A stable request id,
+prepared record and per-member started markers precede provider work. Recovery
+uses saved results; an unpersisted answer is indeterminate and is never retried
+automatically. Actual dispatches, composite child runs and provider-reported
+identities are recorded separately from configured aliases. Neither a configured
+alias nor a provider response is cryptographic proof of a served revision.
+
+The first reveal decision, derived tally and calibration outbox share one atomic
+publication. A duplicate reveal cannot add a vote and a changed choice conflicts.
+Failed/indeterminate answers cannot win. Blind error text does not expose model
+names, credentials or exceptions. The optional calibration bridge refuses damaged
+chain evidence, preserves pending publication and never promotes a preference to
+verified quality. Reads do not repair or claim legacy data. Full state-admin trust,
+single-machine POSIX locking and the Windows single-process limit remain; this is
+not a distributed database transaction. See `M05_COMPARISON_RECOVERY.md`.
+
 | Tool | Capability | Trust boundary | Deny-first default | Abuse case defended |
 | --- | --- | --- | --- | --- |
 | `current_time` | Return the local time | pure | n/a | None meaningful; excluded from replay as nondeterministic |
@@ -668,3 +687,26 @@ restriction and lacks the POSIX directory-fsync guarantee. M03 recovery across
 other stores, M09 full erasure, M11 encryption migration, M12 backend-wide transactions,
 M13 Windows launch topology and M14 production evidence remain open. This work
 neither activates collection/routing/autonomy nor authorizes live verifier fan-out.
+
+M05 native validation exposed a Windows backup omission: ordinary path predicates
+treated existing long owner-note paths as absent, so the archive and its manifest
+agreed while omitting source data. Backup enumeration now requires successful
+explicit metadata reads for every included entry and refuses links/nonregular
+entries and unavailable custody resolution. Windows extended-path I/O covers
+archive creation and restore and exact/legacy preference reads and writes.
+Tests require reading restored owner data, not only verifying the archive's
+manifest. Original failed-run data and incomplete archives remain preserved.
+Concurrent snapshot consistency, crash-atomic whole-tree restore, independent
+custody and actual host/off-machine recovery remain M14 work; local tests do not
+supply those facts. See `M05_COMPARISON_RECOVERY.md` CMP10.
+
+M05 full-suite correction also covers extended-path assessment authorization I/O
+without shortening identity or relaxing scope/repair checks. Backup file checks
+use native paths while delivery preserves the supplied command argument.
+Calibration publication opts into bounded Windows rename retries in the shared
+atomic writer. The already-written bytes are reused; permanent denial still
+raises and retains old/pending files. Default callers retain one attempt, and
+exclusive staging refuses an existing file. This is not a claim to identify the
+cause of a Windows access-denied error or to support multiple Windows writers.
+The shared publisher change requires fresh owned PostgreSQL evidence; previous
+results cannot be carried forward as byte-identical validation. See CMP11.
