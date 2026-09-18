@@ -214,6 +214,21 @@ handing them to whoever matches.
 
 ## Note format and bounds
 
+Comparison records use the independent exact-owner envelope at
+`owners/<owner_key(exact-owner)>/compare-v2/state.json`. It contains bounded
+answers and execution receipts, the first reveal decision, pending calibration
+linkage and compact expired-comparison id/vote receipts. Tallies derive from
+those decisions; there is no new `_tally.json`. The snapshot has a 64 MiB byte
+bound, at most 50 detailed comparisons and 10,000 total reserved ids. Corrupt,
+nonregular, owner-mismatched or unsupported state is unavailable, never empty.
+
+Old `compares/` and `users/<safe_id>/compares/` records/tallies remain preserved
+and unclaimed. Explicit empty initialization does not import them or repair a
+damaged exact-owner file. M09's complete export/migration/erasure manifest must
+include this snapshot, compact receipts, pending outbox, locks, legacy directories
+and owner-qualified references in the global calibration chain. See
+`M05_COMPARISON_RECOVERY.md`; M05 does not close complete erasure or M15.
+
 New notes use schema version 2: strict UTF-8 Markdown with the exact fields
 `schema_version`, `created`, JSON-encoded `owner_json`, `category`, full
 `body_sha256` and `operation`. The digest covers the complete title/body after

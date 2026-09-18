@@ -79,7 +79,8 @@ def test_failing_model_shows_own_error_not_substitute(two_models, monkeypatch):
     out = compare.run("u", "q")
     texts = {a["label"]: a["text"] for a in out["answers"]}
     # B is the failing model here (no shuffle) — it reports its own failure.
-    assert "failed to answer" in texts["B"] and "gpt-b" in texts["B"]
+    assert "unavailable" in texts["B"]
+    assert "gpt-b" not in texts["B"] and "rate limited" not in texts["B"]
     assert texts["A"] == "real answer"
 
 
@@ -91,7 +92,7 @@ def test_reveal_records_pick_into_tally(two_models, monkeypatch):
     rev = compare.reveal("u", out["id"], "A")
     assert rev["choice"] == "A"
     assert rev["chosen_model"] == "anthropic/claude-a"
-    assert compare.tally("u") == {"anthropic/claude-a": 1}
+    assert compare.tally("u") == {rev["chosen_identity"]: 1}
 
 
 def test_reveal_without_pick_leaves_tally_untouched(two_models):
@@ -102,7 +103,7 @@ def test_reveal_without_pick_leaves_tally_untouched(two_models):
 
 
 def test_reveal_unknown_id_is_none(two_models):
-    assert compare.reveal("u", "nope") is None
+    assert compare.reveal("u", "0" * 32) is None
 
 
 def test_tally_accumulates_across_runs(two_models, monkeypatch):
@@ -112,21 +113,22 @@ def test_tally_accumulates_across_runs(two_models, monkeypatch):
         compare.reveal("u", out["id"], "A")
     out = compare.run("u", "q")
     compare.reveal("u", out["id"], "B")
-    assert compare.tally("u") == {"anthropic/claude-a": 3, "anthropic/gpt-b": 1}
+    assert {r["model"]: r["count"] for r in compare.info("u")["tally_rows"]} == {
+        "anthropic/claude-a": 3, "anthropic/gpt-b": 1}
 
 
 def test_render_tally(two_models, monkeypatch):
     monkeypatch.setattr(compare.random, "shuffle", lambda seq: None)
     out = compare.run("u", "q")
     compare.reveal("u", out["id"], "A")
-    assert "anthropic/claude-a: 1" in compare.render_tally("u")
+    assert "anthropic/claude-a [" in compare.render_tally("u")
+    assert "]: 1" in compare.render_tally("u")
 
 
 def test_stored_comparisons_are_bounded(two_models, monkeypatch):
     monkeypatch.setattr(compare, "_MAX_STORED", 3)
     ids = [compare.run("u", f"q{i}")["id"] for i in range(6)]
-    kept = list((compare._dir("u")).glob("*.json"))
-    kept = [p for p in kept if p.name != "_tally.json"]
+    kept = compare.export("u")["records"]
     assert len(kept) <= 3
     # the oldest ids were pruned; the newest survives
     assert compare.reveal("u", ids[-1]) is not None

@@ -1857,105 +1857,136 @@ function deleteTodo(id) { todoPost({op: 'delete', id: id}); }
 // --- compare (blind multi-model) ---
 const cmpEl = document.getElementById('compare');
 const cmpBtn = document.getElementById('cmpbtn');
-let cmpId = null, cmpRevealed = false;
+let cmpId = null, cmpBusy = false;
 cmpBtn.onclick = () => {
   cmpEl.classList.toggle('open');
   if (cmpEl.classList.contains('open')) renderCompare();
 };
+function cmpMessage(text) {
+  const target = document.getElementById('cmpmessage');
+  if (target) target.textContent = text;
+}
+async function cmpRequest(payload) {
+  return (await fetch('/api/compare', {method: 'POST', headers: hdrs(),
+    body: JSON.stringify(Object.assign({session: session}, payload))})).json();
+}
 async function renderCompare() {
   cmpEl.innerHTML = '';
   const wrap = document.createElement('div'); wrap.className = 'cmpwrap';
-  let info = {models: [], tally: {}};
+  const message = document.createElement('p'); message.id = 'cmpmessage';
+  const results = document.createElement('div'); results.id = 'cmpresults';
+  const tally = document.createElement('div'); tally.id = 'cmptally';
+  wrap.append(message, results, tally); cmpEl.appendChild(wrap);
+  const recovery = document.createElement('div'); recovery.className = 'cmpbar';
+  const id = document.createElement('input'); id.id = 'cmpid';
+  id.placeholder = 'Comparison id to read or recover'; id.value = cmpId || '';
+  const read = document.createElement('button'); read.textContent = 'Read saved answers';
+  const retry = document.createElement('button'); retry.textContent = 'Recover saved work';
+  read.onclick = () => loadCompare(false); retry.onclick = () => loadCompare(true);
+  recovery.append(id, read, retry); wrap.append(recovery);
+  let info;
   try {
     info = await (await fetch('/api/compare?session=' + encodeURIComponent(session),
       {headers: hdrs()})).json();
-  } catch (e) {}
-  const solo = info.models.length < 2;
+  } catch (e) { cmpMessage('Comparison status is unavailable.'); return; }
+  if (info.error) {
+    cmpMessage(info.error);
+    if (info.code === 'unclaimed_legacy') {
+      const init = document.createElement('button');
+      init.textContent = 'Start empty and preserve unclaimed legacy records';
+      init.onclick = async () => {
+        try {
+          const d = await cmpRequest({op: 'initialize', acknowledge_legacy: true});
+          if (d.error) cmpMessage(d.error); else renderCompare();
+        } catch (e) { cmpMessage('Initialization is unconfirmed. Reopen status.'); }
+      };
+      wrap.append(init);
+    }
+    info = {models: [], tally_rows: [], recent: [], unavailable: true};
+  }
   const bar = document.createElement('div'); bar.className = 'cmpbar';
   const inp = document.createElement('input'); inp.id = 'cmpprompt';
-  inp.placeholder = solo
-    ? 'Add a second model to compare — see below'
-    : 'Ask the same thing of ' + info.models.length + ' models, blind…';
-  inp.disabled = solo;
-  const go = document.createElement('button'); go.className = 'ok';
-  go.textContent = 'Compare'; go.disabled = solo;
+  inp.placeholder = 'Ask the same question of your configured models';
+  const go = document.createElement('button'); go.textContent = 'New comparison';
+  go.disabled = info.models.length < 2;
   go.onclick = () => runCompare(inp.value);
-  inp.onkeydown = (e) => { if (e.key === 'Enter') runCompare(inp.value); };
-  bar.append(inp, go); wrap.appendChild(bar);
-  if (solo) {
-    const only = info.models.length === 1 ? 'Only ' + info.models[0] + ' is configured. ' : '';
-    const hint = document.createElement('div'); hint.className = 'cmphint';
-    const p = document.createElement('p'); p.className = 'sys';
-    p.textContent = only + 'Blind compare needs two. A second Anthropic model reuses your key and egress — add this env var and reopen:';
-    const pre = document.createElement('pre'); pre.className = 'cmpsnippet';
-    pre.textContent = info.snippet || '';
-    const copy = document.createElement('button'); copy.className = 'ok';
-    copy.textContent = 'Copy'; copy.style.marginTop = '6px';
-    copy.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(pre.textContent); copy.textContent = 'Copied'; };
-    hint.append(p, pre, copy); wrap.appendChild(hint);
+  bar.append(inp, go); wrap.append(bar);
+  if (!info.unavailable && info.models.length < 2) {
+    const hint = document.createElement('pre'); hint.textContent = info.snippet || '';
+    cmpMessage('Blind compare needs at least two configured models.'); wrap.append(hint);
   }
-  const results = document.createElement('div'); results.id = 'cmpresults';
-  wrap.appendChild(results);
-  const tally = document.createElement('div'); tally.id = 'cmptally';
-  tally.textContent = tallyText(info.tally);
-  wrap.appendChild(tally);
-  cmpEl.appendChild(wrap);
+  const recent = document.createElement('select');
+  const placeholder = document.createElement('option'); placeholder.textContent = 'Recent comparisons'; placeholder.value = '';
+  recent.append(placeholder);
+  (info.recent || []).forEach(r => {
+    const option = document.createElement('option'); option.value = r.id;
+    option.textContent = r.id + ' — ' + r.phase + ' / ' + r.calibration; recent.append(option);
+  });
+  recent.onchange = () => { id.value = recent.value; }; wrap.append(recent);
+  wrap.append(results, tally); tally.textContent = tallyText(info.tally_rows);
 }
-function tallyText(t) {
-  const keys = Object.keys(t || {});
-  if (!keys.length) return 'No blind picks yet.';
-  return 'Your blind picks: ' + keys.sort((a, b) => t[b] - t[a])
-    .map(k => k + ' ' + t[k]).join(', ');
+function tallyText(rows) {
+  if (!rows || !rows.length) return 'No blind picks yet.';
+  return 'Your blind picks: ' + rows.map(r => r.model + ' [' + r.identity.slice(0, 12) + '] ' + r.count).join(', ');
+}
+function showComparison(d) {
+  const results = document.getElementById('cmpresults'); results.innerHTML = '';
+  if (d.id) {
+    cmpId = d.id;
+    document.getElementById('cmpid').value = cmpId;
+  }
+  if (d.error) { cmpMessage(d.error); return; }
+  cmpMessage(d.recovery_required ? 'Saved work needs recovery. Model calls will not be repeated.' : 'Comparison ' + d.id + ': ' + d.phase);
+  (d.answers || []).forEach(a => results.appendChild(cmpCard(a, d)));
+  if (d.phase === 'complete') {
+    const reveal = document.createElement('button'); reveal.textContent = 'Reveal without voting';
+    reveal.onclick = () => revealCompare(''); results.append(reveal);
+  }
+  if (d.tally_rows) document.getElementById('cmptally').textContent = tallyText(d.tally_rows);
 }
 async function runCompare(prompt) {
   prompt = (prompt || '').trim();
-  if (!prompt) return;
-  const results = document.getElementById('cmpresults');
-  results.innerHTML = '<p class="sys">Running across your models…</p>';
-  cmpId = null; cmpRevealed = false;
-  let d = {};
-  try {
-    d = await (await fetch('/api/compare', {method: 'POST', headers: hdrs(),
-      body: JSON.stringify({session: session, op: 'run', prompt: prompt})})).json();
-  } catch (e) { results.innerHTML = '<p class="sys">Compare failed.</p>'; return; }
-  if (d.error) { results.innerHTML = '<p class="sys">' + d.error + '</p>'; return; }
-  cmpId = d.id;
-  results.innerHTML = '';
-  d.answers.forEach(a => results.appendChild(cmpCard(a)));
+  if (!prompt || cmpBusy) return;
+  if (!crypto.randomUUID) { cmpMessage('A secure request id is unavailable in this browser.'); return; }
+  cmpBusy = true;
+  cmpId = crypto.randomUUID().replace(/-/g, '');
+  document.getElementById('cmpresults').innerHTML = '';
+  document.getElementById('cmpid').value = cmpId;
+  cmpMessage('Running comparison ' + cmpId + '. Keep this id for recovery.');
+  try { showComparison(await cmpRequest({op: 'run', prompt: prompt, id: cmpId})); }
+  catch (e) { cmpMessage('The response is unconfirmed. Recover id ' + cmpId + ' before starting another comparison.'); }
+  finally { cmpBusy = false; }
 }
-function cmpCard(a) {
+async function loadCompare(recover) {
+  if (cmpBusy) return;
+  const id = document.getElementById('cmpid').value.trim();
+  if (!id) return;
+  cmpBusy = true;
+  try { showComparison(await cmpRequest({op: recover ? 'recover' : 'get', id: id})); }
+  catch (e) { cmpMessage('Saved evidence is unavailable; preserve this id and retry recovery.'); }
+  finally { cmpBusy = false; }
+}
+function cmpCard(a, d) {
   const card = document.createElement('div'); card.className = 'cmpcard';
-  card.dataset.label = a.label;
   const head = document.createElement('div'); head.className = 'ch';
-  const b = document.createElement('b'); b.textContent = 'Answer ' + a.label;
-  const right = document.createElement('span');
-  const who = document.createElement('span'); who.className = 'who';
-  const pick = document.createElement('button'); pick.className = 'ok';
-  pick.textContent = 'Pick this'; pick.onclick = () => revealCompare(a.label);
-  right.appendChild(pick); right.appendChild(who);
-  head.append(b, right);
-  const body = document.createElement('div'); body.className = 'cb';
-  body.textContent = a.text;
+  const title = document.createElement('b'); title.textContent = 'Answer ' + a.label;
+  head.append(title);
+  if (d.mapping) {
+    const who = document.createElement('span'); who.textContent = d.mapping[a.label]; head.append(who);
+    if (a.label === d.choice) card.classList.add('picked');
+  } else if (a.eligible) {
+    const pick = document.createElement('button'); pick.textContent = 'Pick this';
+    pick.onclick = () => revealCompare(a.label); head.append(pick);
+  }
+  const body = document.createElement('div'); body.className = 'cb'; body.textContent = a.text;
   card.append(head, body); return card;
 }
 async function revealCompare(choice) {
-  if (!cmpId) return;
-  let d = {};
-  try {
-    d = await (await fetch('/api/compare', {method: 'POST', headers: hdrs(),
-      body: JSON.stringify({session: session, op: 'reveal', id: cmpId,
-                            choice: choice || ''})})).json();
-  } catch (e) { return; }
-  if (d.error) return;
-  cmpRevealed = true;
-  document.querySelectorAll('.cmpcard').forEach(card => {
-    const label = card.dataset.label;
-    card.querySelector('.who').textContent = d.mapping[label] || '';
-    card.querySelectorAll('.ch button').forEach(btn => btn.remove());
-    if (d.choice && label === d.choice) card.classList.add('picked');
-  });
-  const tally = document.getElementById('cmptally');
-  if (tally) tally.textContent = tallyText(d.tally);
+  if (!cmpId || cmpBusy) return;
+  cmpBusy = true;
+  try { showComparison(await cmpRequest({op: 'reveal', id: cmpId, choice: choice})); }
+  catch (e) { cmpMessage('Reveal acknowledgement is unconfirmed. Recover this id; the vote will not be counted twice.'); }
+  finally { cmpBusy = false; }
 }
 
 const connectBtn = document.getElementById('connect');
@@ -2095,6 +2126,23 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return json.loads(self.rfile.read(length))
         except Exception:
+            return None
+
+    def _read_compare_json(self) -> dict | None:
+        from . import owner_evidence
+        try:
+            length = self.headers.get("Content-Length", "")
+            if not re.fullmatch(r"[0-9]{1,7}", length):
+                return None
+            size = int(length)
+            if not 0 < size <= 256 * 1024:
+                return None
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                return None
+            payload = owner_evidence.decode(raw, "comparison request", 256 * 1024)
+            return payload if isinstance(payload, dict) else None
+        except (OSError, ValueError, TypeError, owner_evidence.OwnerEvidenceStateError):
             return None
 
     def _drain_refused_body(self) -> None:
@@ -2395,12 +2443,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(health.report())
         elif url.path == "/api/compare":
             from . import compare
-            models = [compare.model_label(m)
-                      for m in compare.available_models()]
-            out = {"models": models, "tally": compare.tally(user)}
-            if len(models) < 2:              # tell the UI how to enable it
-                out["snippet"] = compare._SNIPPET
-            self._json(out)
+            try:
+                self._json(compare.info(user))
+            except compare.CompareError as err:
+                self._json(err.payload(), err.status)
         elif url.path == "/api/memory":
             self._json(_memory_view(user))
         elif url.path == "/api/connected":
@@ -2490,7 +2536,7 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             self._json({"error": _unauthorized_message()}, 401)
             return
-        payload = self._read_json()
+        payload = self._read_compare_json() if path == "/api/compare" else self._read_json()
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
@@ -2618,22 +2664,31 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/compare":
             from . import compare
-            op = str(payload.get("op", "run"))
-            if op == "run":
-                prompt = str(payload.get("prompt", "")).strip()
-                if not prompt:
-                    self._json({"error": "a prompt is required"}, 400)
-                    return
-                self._json(compare.run(user, prompt))
-            elif op == "reveal":
-                out = compare.reveal(user, str(payload.get("id", "")),
-                                     str(payload.get("choice", "")))
-                if out is None:
-                    self._json({"error": "comparison not found"}, 404)
+            try:
+                op = payload.get("op", "run")
+                allowed = {
+                    "run": {"prompt", "id"}, "reveal": {"id", "choice"},
+                    "get": {"id"}, "recover": {"id"},
+                    "initialize": {"acknowledge_legacy"},
+                }
+                if not isinstance(op, str) or op not in allowed or set(payload) - (allowed[op] | {"session", "op"}):
+                    raise compare.CompareError("invalid", "Invalid comparison operation or fields.", 400)
+                if op == "run":
+                    if "id" in payload and not isinstance(payload["id"], str):
+                        raise compare.CompareError("invalid", "Comparison id must be a string.", 400)
+                    out = compare.run(user, payload.get("prompt"), cid=payload.get("id"))
+                elif op == "reveal":
+                    out = compare.reveal(user, payload.get("id"), payload.get("choice", ""))
+                elif op == "initialize":
+                    out = compare.initialize_empty(user, acknowledge_legacy=payload.get("acknowledge_legacy", False))
                 else:
-                    self._json(out)
-            else:
-                self._json({"error": "unknown op"}, 400)
+                    out = getattr(compare, op)(user, payload.get("id"))
+                if out is None:
+                    self._json({"error": "comparison not found", "code": "missing"}, 404)
+                else:
+                    self._json(out, 409 if "error" in out else 202 if out.get("recovery_required") else 200)
+            except compare.CompareError as err:
+                self._json(err.payload(), err.status)
             return
 
         if path == "/api/gallery":

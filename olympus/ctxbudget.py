@@ -43,6 +43,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -152,11 +153,13 @@ def _save(data: dict) -> None:
     path. Atomicity is still guaranteed — a reader never sees a torn file."""
     path = _cal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # A failed publication retains its own complete pending bytes. Never reuse
+    # a previous failure's temporary file. Text mode preserves native newlines.
+    text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    tmp = path.with_name(f".{path.name}-{uuid.uuid4().hex}.tmp")
     from . import atomicio
-    atomicio.publish(tmp, path,
-                     json.dumps(data, ensure_ascii=False, sort_keys=True),
-                     fsync=False)
+    atomicio.publish(tmp, path, text, fsync=False, exclusive=True,
+                     retry_windows_sharing=True)
 
 
 def _key(provider: str, model: str) -> str:

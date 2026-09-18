@@ -55,26 +55,48 @@ main independently matched. Earlier worktrees, failed attempts and artifacts
 remain preserved. Historical pre-validation text in M04 is superseded by these
 actual receipts, not rewritten as evidence for new code.
 
-**Active: M03 / PR #315, plus the bounded live-quality authorization correction
-recorded in `LIVE_QUALITY_AUTHORIZATION.md`.** The first M03 tree
-`5cd528256441653e96fd3fb4a712994e4cc385c2` passed native Windows (766/21
-regression, 12151/283 full), POSIX (780/7 regression, 12207/227 full) and the
-owned PostgreSQL fixture. Those results do not cover this new correction.
-PR #315 remains unmerged: the additional automatic quality job contacted
-Moonshot before cancellation, and authorization must be fixed and validated
-before delivery. The provider-account usage receipt is still missing.
+## Verified continuation after PR #315 (2026-09-17)
 
-The correction connects both CLI entrypoints, provider binding, actual benchmark
-and retry calls, automatic CI and manual CI. It requires new Windows/POSIX
-validation, all 24 standard checks plus the additional `quality-gate` contract
-check, protected delivery and synchronization. Scheduled replay/search,
-issue-triggered upgrade automation and wider evaluation callers remain explicit
-M19 work, alongside the 299-handler inventory. No repository variable/environment
-activation or provider calls are authorized by implementation tests.
+M03 and the live-quality authorization correction are delivered at
+`ffd1a0b2aa3c926e4133023602190930cc54090b`, tree
+`6635d459e5241152f3bc46de010294fc1a677786`, sole parent
+`e47993f2831f76b7091fe4c897366de00ec4bb9d`. Combined canonical diff SHA256:
+`e5158749040851d57add06da683e9a3d339c7131103d44eebe7785721bf49624`.
 
-M01/M02/M04 delivery does not close M03 or M05-M19, or missing C4-C9 external
-evidence. Deployment, publishing, collection, learned routing, autonomy, broker
-and live-verifier restrictions remain unchanged.
+Windows final regression: 859 passed / 21 skipped; full: 12204 / 283.
+Native POSIX regression: 873 / 7; full: 12260 / 227, with 10 reviewed warnings.
+Four owned PostgreSQL 16 tests were retained only for the 18 byte-identical
+storage-contract files; no new PostgreSQL run on the correction was claimed.
+All 25 exact feature checks and all 25 actual merged-commit checks passed.
+Protected squash, actual parent/tree/diff and synchronization were verified;
+the feature branch and all 86 unrelated files remain preserved.
+
+Synchronization receipt `local-sync-t3stsyx4/sync-result.json` SHA256:
+`ce3df2fea0eb0422d34b788400fe70a9c35657fa817dce07580f77c32198f406`.
+The subsequent read-only continuation inspection passed: all 85 refs, the
+tracked worktree/index, all 86 unrelated file fingerprints, complete protection
+object and actual remote main matched. This supersedes pre-delivery PR315 prose;
+it does not turn historical test counts into evidence for later source.
+
+**Active: M05 comparison recovery candidate, native validation/delivery open.**
+See `M05_COMPARISON_RECOVERY.md` for CMP1–CMP10, storage bounds, provenance,
+actual consumers, focused evidence and remaining gates. M06–M19 remain open.
+The first native Windows regression exposed existing long-path preference and
+backup omissions. The bounded correction and retained failed evidence are
+recorded there; deep-path native revalidation is required. This does not close
+M14's whole-tree recovery, consistency or actual host/backup evidence gates.
+The subsequent native full suite completed with 24 failures after regression
+passed and all previous failures recovered. CMP11 records the reviewed correction:
+authorization and fixture long paths, backup command arguments, and bounded
+calibration rename retry. The shared `atomicio` change invalidates the previous
+byte-identical PostgreSQL carry-forward; fresh owned PostgreSQL evidence is now
+required before M05 delivery. Existing full-suite and failed-attempt evidence
+remains preserved. Broader M07/M15 calibration read/quarantine work stays open.
+The cancelled Moonshot run's provider-account usage receipt is still missing;
+no call-count/spend estimate or rerun replaces it. Deployment, publishing,
+collection, learned routing, autonomy, broker and live-verifier restrictions
+remain unchanged. M19 still includes the 299-handler inventory and wider live
+workflow/evaluation callers. No operational activation is part of this batch.
 
 ## Source and evidence reconciliation
 
@@ -169,9 +191,9 @@ later items open; finishing M01 is not a stopping point for the objective.
 | --- | --- | --- | --- |
 | M01 | E19 memory-card age; E31 liveness | `metrics.uptime_seconds`, both web health routes, operational metrics compatibility, `usermem.render_card` and the memory-card CLI. Creation age survives reinforcement; invalid/missing age is unavailable, not zero; liveness never consults storage, configuration or spend. Readiness must still reject unwritable state. | Delivered in PR #312: Windows 11945 passed/272 skipped; POSIX 11996 passed/221 skipped; all 24 PR and 24 merged-commit CI checks passed. Main synchronized at `62b7d6dd565671220e106418052c926eefff11e0`, tree `18e9fd1e104cc107ad2a9256215af5bb19341777`. |
 | M02 | `usermem.events`, `.memories`, `.candidates`; `relgraph.nodes`, `.edges` still key on `safe_id`; invalid JSON becomes empty | Exact-owner validated envelopes and backend transaction boundaries; all memory operations, graph operations, retrieval/ingest, candidate approval, supersession, companion, episodic memory, web memory panel, tools and CLI. Candidate consumption must not lose a candidate if publishing its accepted memory fails; multi-document graph changes need atomicity/recovery. | Delivered in PR #313 at the verified continuation baseline above: Windows/POSIX full suites, owned PostgreSQL lifecycle/adversarial evidence, all 24 PR and 24 merged-commit checks, protected squash merge and synchronization verified. M03/M09/M12/M13 dependencies remain open; neither legacy migration nor general multi-host/Windows topology support is claimed. |
-| M03 | Sleeptime proposal/quarantine/snapshot keys and wiki paths are normalized; background jobs use backend keys as principals | `sleeptime`, `supervise`, `reflection`, `wiki.dream`, `wiki.dream_all`, heartbeat, orchestrator wiki context, gateway/CLI wiki and discovery publication. Exact owner enumeration and context propagation; strict proposals/snapshots; preserve-before-rewrite; atomic/recoverable approval and revert; no graduation from unavailable evidence. Restore discovery acquisition only after real ownership and consumer tests pass; keep acquisition opt-in. | Integrated implementation and focused adversarial regression prepared; applicable Windows/POSIX full suites, owned PostgreSQL contract and protected delivery OPEN. S1-S10 in `M03_SLEEPTIME_WIKI.md` connect proposal/wiki/cycle/prompt/discovery recovery and actual callers. The temporary wiki publication refusal is replaced by the qualified path; acquisition stays opt-in. |
+| M03 | Sleeptime proposal/quarantine/snapshot keys and wiki paths are normalized; background jobs use backend keys as principals | `sleeptime`, `supervise`, `reflection`, `wiki.dream`, `wiki.dream_all`, heartbeat, orchestrator wiki context, gateway/CLI wiki and discovery publication. Exact owner enumeration and context propagation; strict proposals/snapshots; preserve-before-rewrite; atomic/recoverable approval and revert; no graduation from unavailable evidence. Restore discovery acquisition only after real ownership and consumer tests pass; keep acquisition opt-in. | Delivered in PR #315 with the scoped platform, PostgreSQL carry-forward, all 25 feature and 25 post-merge CI, protected delivery and synchronization evidence above. S1-S10 in `M03_SLEEPTIME_WIKI.md` connect proposal/wiki/cycle/prompt/discovery recovery and actual callers. The temporary wiki publication refusal is replaced by the qualified path; acquisition stays opt-in. |
 | M04 | Normalized `memory.USER_SCOPED` lessons/corrections/feedback, separate `notes/<safe_id>` action store; journey uses normalized readers | `memory` save/read/search/recent/count/export/import/delete/mirroring, `builtin_actions` note execute/undo, journey list/show/remove, CLI/tools, wiki material ingestion. Exact private ownership alongside explicitly shared system categories. Unique bounded atomic note writes; undo binds owner, path and content and refuses stale/arbitrary-path deletion. User export/delete cannot claim normalized legacy bytes. | Delivered in PR #314 with Windows/POSIX full suites, all 24 PR and 24 merged-commit checks, protected merge and synchronization verified above. N1-N9 limits remain in `M04_PRIVATE_NOTES.md`; full erasure, native Windows process topology and external evidence remain open. Shared installation notes remain intentionally shared; this is not permission to share private notes. |
-| M05 | `compare` response records and vote tally use normalized paths, loose reads and separate updates | CLI compare/reveal, web compare/reveal/tally, calibration comparison linkage. Exact identities for owner, comparison, actual executed models and runs; bounded data; reveal retry cannot double vote; durable records/tally/calibration failure recoverable without rerunning model calls. | Open code. Real model execution remains restricted; fixtures are owned/mock. |
+| M05 | `compare` response records and vote tally use normalized paths, loose reads and separate updates | CLI compare/reveal, web compare/reveal/tally, calibration comparison linkage. Exact identities for owner, comparison, actual executed models and runs; bounded data; reveal retry cannot double vote; durable records/tally/calibration failure recoverable without rerunning model calls. | Integrated M05 candidate; focused owned tests passed under kernel IP denial. Native full suites and protected delivery remain open. CMP1-CMP9 in `M05_COMPARISON_RECOVERY.md`; real model execution remains restricted. |
 | M06 | Gallery owner uses normalized ambient identity; legacy visibility infers ownership from login being disabled | `gallery`, `media.generate/edit`, web gallery read/delete, CLI and explicit legacy claim. Exact write/read ownership; no ambiguous automatic legacy exposure; qualified claim with preserved source and conflict handling; safe image bounds/type/path, atomic publication and stale-delete protection. | Open code. Shared sandbox file-tool workspace is an explicit separate trust boundary; do not claim tenant confinement for it. |
 | M07 | `ctxheat` labels/paths normalize user identity; heat, pins, shadow and gate evidence need a common contract | `recall` retrieval instrumentation and policy selection, ctxheat CLI/status/gate/apply/rollback. Exact owner throughout; strict finite/bounded heat and pins; unavailable evidence cannot qualify promotion or reset history; serialized/recoverable updates and complete source attribution. | Open code. Keep default-off promotion and existing evidence thresholds. |
 | M08 | `usage` fairness/session/spend owner keys normalize/truncate; E4 pricing tables and updates disagree | `usage._resolve_key`, session totals, admission, budget checks, `modelgate`, assessment cost reporting, metrics/CLI, config pool pricing and `providers.fetch_pricing`. Exact identity distinct from display labels; one validated versioned input/output price source, explicit stale/unknown estimates, deterministic matching, preserved historical costs and consistent budgeting/routing. Refresh only through an approved provider path; malformed/negative/nonfinite prices must not weaken caps. | Open code. Include concurrency, unavailable ledger and cost reporting in M19. |

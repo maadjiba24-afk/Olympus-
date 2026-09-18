@@ -100,6 +100,10 @@ def _run(prompt: str, system: str = "", model: str = "") -> str:
         raise ClaudeCodeError(
             f"claude CLI reported an error: "
             f"{data.get('result') or data.get('subtype') or 'unknown'}")
+    from . import compare_execution
+    if compare_execution.capturing():
+        compare_execution.observe(provider="claude-code", model=data.get("model"),
+            response_id=data.get("session_id"))
     return (data.get("result") or "").strip()
 
 
