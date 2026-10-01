@@ -7,6 +7,7 @@ import contextlib
 import ctypes
 import errno
 import json
+import math
 import os
 
 import pytest
@@ -66,7 +67,7 @@ def test_permanent_denial_preserves_old_and_pending_bytes(monkeypatch, code, win
         ctxbudget.observe("owned", "model", 500, 100)
     assert caught.value is failure
     assert len(calls) == attempts and len(set(calls)) == 1
-    assert sum(sleeps) <= .31
+    assert math.fsum(sleeps) <= .31
     assert path.read_bytes() == before
     assert calls[0][0].read_bytes() == calls[0][1]
     pending = json.loads(calls[0][1])
