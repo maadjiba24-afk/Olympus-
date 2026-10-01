@@ -31,17 +31,20 @@ def _seed(user: str) -> dict[str, bytes]:
     memory.save("lessons", "First lesson", "remember the moat")
     memory.save("corrections", "A fix", "do it this way")
     memory.set_user("shared")
-    return _snapshot(memory._memory_roots(user))
+    snapshot = _snapshot(memory._memory_roots(user))
+    assert len(snapshot) == 2, "both seeded notes must enter the byte snapshot"
+    return snapshot
 
 
 def _snapshot(roots) -> dict[str, bytes]:
     snap = {}
     for r in roots:
+        r = note_evidence.io(r)
         if not r.exists():
             continue
         for p in sorted(r.rglob("*")):
             if p.is_file():
-                snap[p.relative_to(config.MEMORY_DIR).as_posix()] = p.read_bytes()
+                snap[note_evidence.relative(p)] = p.read_bytes()
     return snap
 
 

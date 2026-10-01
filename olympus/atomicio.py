@@ -32,12 +32,15 @@ knob (see `usage._fsync_ledger`), mirroring `sessionlog._fsync_always`.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 #: Whether this platform can fsync a directory. Probed by capability rather
 #: than by platform name: `os.O_DIRECTORY` is absent on Windows (os.name "nt")
 #: and present on Linux/macOS.
 CAN_FSYNC_DIR = hasattr(os, "O_DIRECTORY")
+_WINDOWS = os.name == "nt"
+_REPLACE_DELAYS = (0.01, 0.02, 0.04, 0.08, 0.16)
 
 
 def fsync_dir(directory) -> None:
@@ -59,7 +62,8 @@ def fsync_dir(directory) -> None:
 
 
 def publish(tmp, path, data, *, encoding: str = "utf-8",
-            chmod: int | None = None, fsync: bool = True) -> None:
+            chmod: int | None = None, fsync: bool = True,
+            exclusive: bool = False, retry_windows_sharing: bool = False) -> None:
     """Write `data` to `tmp`, fsync it, then atomically replace `path`.
 
     `data` is `str` or `bytes`. Text is written through text mode with the same
@@ -70,10 +74,16 @@ def publish(tmp, path, data, *, encoding: str = "utf-8",
 
     `fsync=False` keeps the atomic-but-not-durable behaviour, for a call site
     that has measured the cost and opted out through its own policy knob.
+
+    `exclusive=True` refuses to overwrite an existing staging file. Optional
+    `retry_windows_sharing` retries only denied Windows renames, after writing
+    and closing the staging file once. Permanent errors retain its bytes and
+    the previous destination. Other callers keep the single-attempt contract.
     """
     tmp, path = Path(tmp), Path(path)
-    handle = (open(tmp, "w", encoding=encoding) if isinstance(data, str)
-              else open(tmp, "wb"))
+    mode = "x" if exclusive else "w"
+    handle = (open(tmp, mode, encoding=encoding) if isinstance(data, str)
+              else open(tmp, mode + "b"))
     try:
         handle.write(data)
         if fsync:
@@ -88,6 +98,24 @@ def publish(tmp, path, data, *, encoding: str = "utf-8",
             os.chmod(tmp, chmod)
         except OSError:
             pass
-    os.replace(tmp, path)
+    _replace(tmp, path, retry_windows_sharing)
     if fsync:
         fsync_dir(path.parent)
+
+
+def _replace(tmp, path, retry_windows_sharing):
+    """At most six rename attempts and 310 ms of sleep when explicitly enabled.
+
+    Retry the same already-written bytes, never the caller's read-modify-write.
+    No chmod, unlink or error suppression occurs. Uncontended calls do not wait.
+    """
+    for attempt in range(len(_REPLACE_DELAYS) + 1):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as err:
+            if (not retry_windows_sharing or not _WINDOWS
+                    or getattr(err, "winerror", None) not in (5, 32, 33)
+                    or attempt == len(_REPLACE_DELAYS)):
+                raise
+            time.sleep(_REPLACE_DELAYS[attempt])

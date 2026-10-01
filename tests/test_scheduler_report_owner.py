@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 from olympus import config, memory, scheduler
+from olympus import note_evidence as notes
 
 A = "tg-alice"
 B = "tg-bob"
@@ -62,7 +63,7 @@ def test_scheduled_answer_is_not_written_to_shared_reports():
     assert shared == [], (
         f"a scheduled answer was written to the shared reports category: "
         f"{[p.name for p in shared]}")
-    private = list(config.MEMORY_DIR.rglob(f"{CATEGORY}/*.md"))
+    private = list(notes.io(config.MEMORY_DIR).rglob(f"{CATEGORY}/*.md"))
     assert len(private) == 1
     assert MARKER in private[0].read_text(encoding="utf-8")
     assert "owners" in private[0].parts
@@ -374,7 +375,7 @@ def test_private_category_is_not_mirrored_to_the_vault(tmp_path, monkeypatch):
     memory.set_user("shared")
     memory.save("reports", "Opportunity scan", "shared WORLDMARK")
 
-    mirrored = list(vault.rglob("*.md")) if vault.exists() else []
+    mirrored = list(notes.io(vault).rglob("*.md")) if notes.io(vault).exists() else []
     assert not any(MARKER in p.read_text(encoding="utf-8") for p in mirrored)
     assert any("WORLDMARK" in p.read_text(encoding="utf-8") for p in mirrored)
 
@@ -396,7 +397,7 @@ def test_notes_use_the_standard_format_so_readers_and_backup_work():
     """The private note is an ordinary versioned markdown note, so export,
     retention sweeps and any category reader treat it like every other one."""
     memory.save_for(A, CATEGORY, "Scheduled: payroll", f"private {MARKER}")
-    path = next(config.MEMORY_DIR.rglob(f"{CATEGORY}/*.md"))
+    path = next(notes.io(config.MEMORY_DIR).rglob(f"{CATEGORY}/*.md"))
     raw = path.read_text(encoding="utf-8")
 
     assert memory.note_schema_version(raw) == memory.NOTE_SCHEMA_VERSION
@@ -671,7 +672,7 @@ def test_backup_covers_the_private_owner_tree():
 
     assert any("owners" in p.parts and CATEGORY in p.parts for p in files), (
         "the backup archive would not contain the private owner tree")
-    assert any(MARKER in p.read_text(encoding="utf-8")
+    assert any(MARKER in notes.io(p).read_text(encoding="utf-8")
                for p in files if p.suffix == ".md")
 
 
@@ -689,7 +690,7 @@ def test_vault_mirror_deliberately_excludes_private_reports(tmp_path,
     memory.set_user("shared")
     memory.save("reports", "Opportunity scan", "shared WORLDMARK")
 
-    mirrored = list(vault.rglob("*.md")) if vault.exists() else []
+    mirrored = list(notes.io(vault).rglob("*.md")) if notes.io(vault).exists() else []
     assert mirrored, "the mirror did not run at all"
     assert not any(MARKER in p.read_text(encoding="utf-8") for p in mirrored)
     assert any("WORLDMARK" in p.read_text(encoding="utf-8") for p in mirrored)

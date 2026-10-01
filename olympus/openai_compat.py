@@ -577,6 +577,12 @@ def complete_text(settings: config.Settings, system: str,
                else "max_tokens")
     payload[tok_key] = config.MAX_TOKENS
     resp = _post(settings, payload)
+    from . import compare_execution
+    if compare_execution.capturing():
+        data = resp if isinstance(resp, dict) else {}
+        compare_execution.observe(provider=settings.provider, model=data.get("model"),
+            response_id=data.get("id"), revision=data.get("system_fingerprint"),
+            endpoint=_endpoint_url(settings, (settings.base_url or DEFAULT_BASE_URL).rstrip("/")))
     # C8 response-parse seam. No-op when OLYMPUS_STREAMGUARD is off. On a trip
     # the typed StreamAborted propagates INSTEAD of the text — a degenerate
     # reply must never be handed back as a finished answer (W2-I8.3).

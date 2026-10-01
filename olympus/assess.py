@@ -125,6 +125,12 @@ def _user(user: str | None = None) -> str:
     return memory.current_owner()
 
 
+def _io(path: Path) -> Path:
+    """Keep logical owner paths intact; use native Windows paths for I/O."""
+    from .assessment_evidence import _windows_extended_path
+    return Path(_windows_extended_path(path)) if os.name == "nt" else Path(path)
+
+
 def _store_dir(user: str) -> Path:
     """Private assessment state for one exact owner.
 
@@ -133,7 +139,7 @@ def _store_dir(user: str) -> Path:
     every assessment artifact out of a colliding principal's namespace.
     """
     d = config.MEMORY_DIR / "assess" / memory.storage_key(user)
-    d.mkdir(parents=True, exist_ok=True)
+    _io(d).mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -146,7 +152,7 @@ def _legacy_store_dir(user: str) -> Path:
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(
         f".{path.name}-{os.getpid()}-{threading.get_ident()}.tmp")
-    atomicio.publish(tmp, path, text)
+    atomicio.publish(_io(tmp), _io(path), text)
 
 
 def _auth_path(user: str) -> Path:
@@ -254,7 +260,7 @@ def _decode_auths(user: str, raw: bytes) -> list[dict]:
 def _read_auth_bytes(user: str) -> bytes | None:
     path = _auth_path(user)
     try:
-        with path.open("rb") as handle:
+        with _io(path).open("rb") as handle:
             raw = handle.read(_MAX_AUTH_BYTES + 1)
     except FileNotFoundError:
         return None
@@ -451,7 +457,7 @@ def authorization_status(user: str | None = None) -> dict:
     path = _auth_path(exact)
     legacy = _legacy_auth_path(exact)
     try:
-        legacy_present = legacy != path and legacy.is_file()
+        legacy_present = legacy != path and _io(legacy).is_file()
     except OSError:
         legacy_present = True
     try:
@@ -468,7 +474,7 @@ def authorization_status(user: str | None = None) -> dict:
         }
     return {
         "owner": exact,
-        "state": "valid" if path.is_file() else "missing",
+        "state": "valid" if _io(path).is_file() else "missing",
         "reason": None,
         "active_count": sum(a["expires"] > _now() for a in auths),
         "legacy_quarantined": legacy_present,
@@ -481,7 +487,7 @@ def _read_auth_bytes_for_repair(user: str) -> bytes | None:
     """Read exact corrupt bytes for quarantine, with a separate safety cap."""
     path = _auth_path(user)
     try:
-        with path.open("rb") as handle:
+        with _io(path).open("rb") as handle:
             raw = handle.read(_MAX_AUTH_QUARANTINE_BYTES + 1)
     except FileNotFoundError:
         return None
@@ -527,13 +533,13 @@ def repair_authorizations(user: str | None = None) -> dict:
             "authorizations.corrupt."
             f"{digest[:_QUARANTINE_DIGEST_HEX]}.json")
         try:
-            with quarantine.open("rb") as handle:
+            with _io(quarantine).open("rb") as handle:
                 existing = handle.read(_MAX_AUTH_QUARANTINE_BYTES + 1)
         except FileNotFoundError:
             tmp = path.with_name(
                 f".authorizations-quarantine-{os.getpid()}-"
                 f"{threading.get_ident()}.tmp")
-            atomicio.publish(tmp, quarantine, raw)
+            atomicio.publish(_io(tmp), _io(quarantine), raw)
         except OSError as err:
             raise AssessAuthorizationStateError(
                 exact, f"quarantine read failed: {type(err).__name__}") from err

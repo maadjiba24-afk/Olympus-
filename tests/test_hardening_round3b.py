@@ -5,6 +5,7 @@ import pytest
 
 from olympus import (config, email_gateway, gateway, gmail, memory, recall,
                      soul, tools, usermem)
+from olympus import note_evidence as notes
 
 
 # --- email spoof-guard -------------------------------------------------------
@@ -70,8 +71,8 @@ def test_vault_mirror_writes_through(tmp_path, monkeypatch):
     monkeypatch.setenv("OLYMPUS_VAULT_DIR", str(vault))
     memory.set_user("shared")
     canonical = memory.save("lessons", "vault test", "a lesson body")
-    mirrored = list((vault / "olympus-notes-v2" / memory.owner_key("shared")
-                     / "lessons").glob("*.md"))
+    mirrored = list(notes.io(vault / "olympus-notes-v2" / memory.owner_key("shared")
+                             / "lessons").glob("*.md"))
     assert len(mirrored) == 1
     assert mirrored[0].read_bytes() == canonical.read_bytes()
     assert "a lesson body" in mirrored[0].read_text(encoding="utf-8")

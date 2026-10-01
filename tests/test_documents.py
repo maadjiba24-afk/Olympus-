@@ -51,7 +51,7 @@ def test_delete_is_recoverable_backup(user):
     assert documents.delete(user, "gone") is True
     assert not documents.exists(user, "gone")
     assert documents.delete(user, "gone") is False
-    backups = list((documents._backup_dir(user)).glob("deleted-*"))
+    backups = list(documents.evidence._io(documents._backup_dir(user)).glob("deleted-*"))
     assert backups and "bye" in backups[0].read_text()
 
 

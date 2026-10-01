@@ -92,7 +92,8 @@
       "exception": "AssessAuthorizationStateError",
       "source_sha256": "f3009b26bc2241914de50199d6161f9bbff896bf7c2c70f0ce59c3032b06aa97",
       "status": "review_pending",
-      "id": "E20-010"
+      "id": "E20-010",
+      "disposition": "M05 CMP11 adds native-path authorization read/write/status/repair coverage while preserving strict validation and exact quarantined bytes. The broader handler review remains open."
     },
     {
       "path": "olympus/assess.py",
@@ -137,7 +138,8 @@
       "exception": "OSError",
       "source_sha256": "d915664eba1ea6e907b89f6b652ff3e664d116ae03312d09f5907415d2c517c9",
       "status": "review_pending",
-      "id": "E20-015"
+      "id": "E20-015",
+      "disposition": "M05 CMP11 adds exclusive staging and opt-in bounded Windows rename retries; permanent failures raise with pending bytes retained. The pre-existing chmod exception remains in the M19 review inventory. Shared publisher changes require fresh owned PostgreSQL validation."
     },
     {
       "path": "olympus/backup.py",
@@ -145,8 +147,9 @@
       "scope": "_custody_paths",
       "exception": "OSError",
       "source_sha256": "0018271a21e2bad0056c4d0469874d2131d42c7512866bd615721ee46e589063",
-      "status": "review_pending",
-      "id": "E20-016"
+      "status": "implemented_M05_validation_delivery_pending",
+      "id": "E20-016",
+      "disposition": "Native M05 validation exposed long-path backup omissions. Unresolvable configured custody now refuses backup publication; explicit inventory errors cannot become an incomplete success. Owned failure and native Windows restore tests cover the bounded correction. M14 snapshot consistency, whole-tree crash recovery and actual host/delivery proof remain open. See M05_COMPARISON_RECOVERY.md CMP10."
     },
     {
       "path": "olympus/browser.py",
@@ -433,8 +436,9 @@
       "scope": "_prune",
       "exception": "OSError",
       "source_sha256": "8e560f4c9c87025c56443aab98f367a1e298d08b84a11618383cc28f73fa5b51",
-      "status": "review_pending",
-      "id": "E20-048"
+      "status": "implemented_M05_validation_delivery_pending",
+      "id": "E20-048",
+      "disposition": "M05 removes separate pruning/deletion and tally-write swallowing. One strict exact-owner snapshot retains id/vote receipts and exposes failed publication; actual CLI/API recovery is connected. See M05_COMPARISON_RECOVERY.md."
     },
     {
       "path": "olympus/compare.py",
@@ -442,8 +446,9 @@
       "scope": "_record_vote",
       "exception": "OSError",
       "source_sha256": "8e560f4c9c87025c56443aab98f367a1e298d08b84a11618383cc28f73fa5b51",
-      "status": "review_pending",
-      "id": "E20-049"
+      "status": "implemented_M05_validation_delivery_pending",
+      "id": "E20-049",
+      "disposition": "M05 removes separate pruning/deletion and tally-write swallowing. One strict exact-owner snapshot retains id/vote receipts and exposes failed publication; actual CLI/API recovery is connected. See M05_COMPARISON_RECOVERY.md."
     },
     {
       "path": "olympus/computeruse.py",
@@ -515,7 +520,8 @@
       "exception": "OSError",
       "source_sha256": "1b6988b6f9738ea5cecd3f1fef5210c80e60e2f550208ae3808eb54aa43c9705",
       "status": "review_pending",
-      "id": "E20-057"
+      "id": "E20-057",
+      "disposition": "M05 CMP11 hardens calibration publication against denied Windows rename, with permanent-failure preservation. This does not close unavailable-read or quarantine behavior; broader M07/M15/M19 review remains open."
     },
     {
       "path": "olympus/ctxheat.py",

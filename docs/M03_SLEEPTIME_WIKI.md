@@ -1,5 +1,17 @@
 # M03: exact-owner consolidation and recoverable publication
 
+**Delivery reconciliation (2026-09-17):** This contract and its authorization
+correction were delivered in PR #315 at
+`ffd1a0b2aa3c926e4133023602190930cc54090b`, tree
+`6635d459e5241152f3bc46de010294fc1a677786`. Both native full suites, all 25
+feature checks, protected merge, all 25 actual merged-commit checks and operator
+synchronization passed. `REMAINING_HARDENING.md` records the scoped receipts.
+Earlier preparation/validation-pending text below is historical; it is not an
+instruction to reapply this work. The provider-account usage receipt for the
+cancelled Moonshot run remains an external evidence dependency. M05 and later
+source require their own validation and delivery evidence.
+
+
 Reconciled 2026-09-16 against authentic merged PR #314 commit
 `e47993f2831f76b7091fe4c897366de00ec4bb9d`, tree
 `87ce4780b82ee72de14cdea8fb73b7918b4ac688`, parent

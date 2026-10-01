@@ -17,7 +17,7 @@ from olympus import (actions, atomicio, capprofile, cli, config, dashboard,
 
 
 def _corrupt(user: str, raw: bytes = b'{"capability_profile":'):
-    path = prefs._path(user)
+    path = prefs._io(prefs._path(user))
     path.write_bytes(raw)
     return path
 

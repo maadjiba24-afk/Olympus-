@@ -196,7 +196,7 @@ def test_interrupted_mutation_all_publication_phases(monkeypatch, fail_at, decis
     state = notes.recovery_status()
     if fail_at == "plan":
         assert state["state"] == "available"
-        assert {name: notes.checked_relative(name).read_bytes() for name in originals} == originals
+        assert {name: notes.io(notes.checked_relative(name)).read_bytes() for name in originals} == originals
         return
     assert state["state"] == "unavailable"
     with pytest.raises(OwnerEvidenceStateError, match="interrupted"):
@@ -209,9 +209,9 @@ def test_interrupted_mutation_all_publication_phases(monkeypatch, fail_at, decis
     receipt = notes.recover(identity, decision)
     assert receipt["verified"]
     target = changes if decision == "resume" else originals
-    assert {name: notes.checked_relative(name).read_bytes() for name in target} == target
+    assert {name: notes.io(notes.checked_relative(name)).read_bytes() for name in target} == target
     assert notes.recover(identity, decision)["already_completed"]
-    notes.checked_relative(names[0]).write_bytes(b"new independent work")
+    notes.io(notes.checked_relative(names[0])).write_bytes(b"new independent work")
     with pytest.raises(OwnerEvidenceStateError, match="since changed"):
         notes.recover(identity, decision)
 
@@ -286,7 +286,7 @@ def test_archive_exact_roundtrip_and_legacy_remains_unclaimed(tmp_path, version)
     archive = _tar(tmp_path / "old.tgz", [(old, raw)], version=version)
     result = archives.restore(archive, user="a.b", all_users=False)
     assert result["legacy_unclaimed"] == [old]
-    assert notes.checked_relative(old).read_bytes() == raw
+    assert notes.io(notes.checked_relative(old)).read_bytes() == raw
     with pytest.raises(OwnerEvidenceStateError, match="unclaimed"):
         memory.search_for("a-b", "legacy")
 

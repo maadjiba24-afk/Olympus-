@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -59,6 +60,11 @@ class BackupError(RuntimeError):
     pass
 
 
+def _io(path) -> Path:
+    from .assessment_evidence import _windows_extended_path
+    return Path(_windows_extended_path(path)) if os.name == "nt" else Path(path)
+
+
 def _version() -> str:
     try:
         from importlib.metadata import version
@@ -69,13 +75,13 @@ def _version() -> str:
 
 def _backups_dir() -> Path:
     d = config.MEMORY_DIR / "backups"
-    d.mkdir(parents=True, exist_ok=True)
+    _io(d).mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    with _io(path).open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
@@ -97,11 +103,9 @@ def _custody_paths() -> set[Path]:
         if not raw:
             continue
         try:
-            out.add(Path(raw).expanduser().resolve())
-        except OSError:
-            # A broken configured path will be reported by its credential
-            # consumer; it cannot be included if it cannot resolve to a file.
-            pass
+            out.add(_io(Path(raw).expanduser()).resolve())
+        except (OSError, RuntimeError) as err:
+            raise BackupError("backup custody path is unavailable") from err
     return out
 
 
@@ -109,25 +113,44 @@ def _included_files(root: Path, *, full: bool) -> list[Path]:
     """Every file under MEMORY_DIR to back up, excluding the backups dir itself
     (no recursive growth), temp files, the signing seed (never leaves the
     machine), and — unless `full` — the replay caches."""
-    backups = (root / "backups").resolve()
+    # Path.rglob/is_file can suppress traversal/stat failures, including
+    # native Windows MAX_PATH errors, and certify an incomplete inventory.
+    # Explicit scandir/stat must succeed for every non-excluded entry.
+    root = Path(root)
     custody_paths = _custody_paths()
-    out: list[Path] = []
-    for p in sorted(root.rglob("*")):
-        if not p.is_file() or p.is_symlink():
-            continue
-        rp = p.resolve()
-        if rp == backups or backups in rp.parents:
-            continue
-        rel = p.relative_to(root)
-        top = rel.parts[0] if rel.parts else ""
-        if not full and top in _REPLAY_CACHE:
-            continue
-        if p.name in _NEVER_BACKUP or rp in custody_paths:
-            continue
-        if p.name.startswith(".") and p.suffix == ".tmp":
-            continue
-        out.append(p)
-    return out
+    out, pending = [], [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            info = _io(directory).lstat()
+            if (not stat.S_ISDIR(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise BackupError("backup inventory has a linked or non-directory path")
+            with os.scandir(_io(directory)) as entries:
+                for entry in entries:
+                    p = directory / entry.name
+                    top = p.relative_to(root).parts[0]
+                    if top == "backups" or (not full and top in _REPLAY_CACHE):
+                        continue
+                    if p.name in _NEVER_BACKUP or _io(p).resolve() in custody_paths:
+                        continue
+                    if p.name.startswith(".") and p.suffix == ".tmp":
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if (stat.S_ISLNK(info.st_mode)
+                            or getattr(info, "st_file_attributes", 0) & 0x400):
+                        raise BackupError("backup inventory has a linked entry")
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(p)
+                    elif stat.S_ISREG(info.st_mode):
+                        out.append(p)
+                    else:
+                        raise BackupError("backup inventory has a nonregular entry")
+    except (OSError, RuntimeError) as err:
+        if isinstance(err, BackupError):
+            raise
+        raise BackupError("backup inventory is unavailable; no archive was published") from err
+    return sorted(out)
 
 
 # --- create --------------------------------------------------------------
@@ -137,7 +160,7 @@ def create(*, full: bool = False, label: str = "") -> dict:
     result dict (path, encrypted, signed, files, bytes). Atomic: a half-written
     archive is never left at the final path."""
     root = config.MEMORY_DIR
-    root.mkdir(parents=True, exist_ok=True)
+    _io(root).mkdir(parents=True, exist_ok=True)
     files = _included_files(root, full=full)
 
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -153,13 +176,13 @@ def create(*, full: bool = False, label: str = "") -> dict:
         "file_count": len(files),
         "files": [{"path": p.relative_to(root).as_posix(),
                    "sha256": _sha256_file(p),
-                   "bytes": p.stat().st_size} for p in files],
+                   "bytes": _io(p).stat().st_size} for p in files],
     }
 
     with _LOCK:
         # 1) Build the .tar.gz into a temp file, then read its bytes.
         _tmp_fd, _tmp_name = tempfile.mkstemp(prefix=".bk-", suffix=".tar.gz",
-                                              dir=out_dir)
+                                              dir=_io(out_dir))
         os.close(_tmp_fd)          # close the mkstemp fd; tarfile reopens by path
         tmp_tar = Path(_tmp_name)
         try:
@@ -172,11 +195,11 @@ def create(*, full: bool = False, label: str = "") -> dict:
                 tar.addfile(info, io.BytesIO(mbytes))
                 for p in files:
                     arc = "data/" + p.relative_to(root).as_posix()
-                    ti = tar.gettarinfo(str(p), arcname=arc)
+                    ti = tar.gettarinfo(str(_io(p)), arcname=arc)
                     ti.mtime = 0                    # deterministic-ish archive
                     ti.uid = ti.gid = 0
                     ti.uname = ti.gname = ""
-                    with p.open("rb") as fh:
+                    with _io(p).open("rb") as fh:
                         tar.addfile(ti, fh)
             raw = tmp_tar.read_bytes()
         finally:
@@ -207,13 +230,13 @@ def create(*, full: bool = False, label: str = "") -> dict:
         final = out_dir / (name + suffix)
         tmp_final = out_dir / ("." + name + suffix + ".tmp")
         from . import atomicio
-        atomicio.publish(tmp_final, final, payload)   # atomic + durable
+        atomicio.publish(_io(tmp_final), _io(final), payload)   # atomic + durable
 
         # 3) Sign the on-disk archive bytes (tamper-evidence sidecar).
         digest = _sha256_bytes(payload)
         signed = _write_signature(final, digest)
 
-    return {"path": str(final), "name": final.name, "encrypted": encrypted,
+    return {"path": str(_io(final)), "name": final.name, "encrypted": encrypted,
             "signed": signed, "files": len(files), "bytes": len(payload),
             "sha256": digest, "full": full}
 
@@ -229,7 +252,7 @@ def _write_signature(archive: Path, digest: str) -> bool:
                "signature": witness.sign(digest.encode()),
                "publicKey": witness.public_key_hex(),
                "seedDerivation": witness.SEED_DERIVATION}
-        (archive.parent / (archive.name + ".sig.json")).write_text(
+        _io(archive.parent / (archive.name + ".sig.json")).write_text(
             json.dumps(sig, indent=2), encoding="utf-8")
         return True
     except Exception:
@@ -246,8 +269,9 @@ def deliver(archive_path: str) -> dict:
     if not cmd:
         return {"delivered": False, "reason": "no OLYMPUS_BACKUP_CMD set "
                 "(backup kept local only)"}
+    # Native file access must not rewrite the caller's external command argument.
     archive = Path(archive_path)
-    if not archive.exists():
+    if not _io(archive).exists():
         raise BackupError(f"archive not found: {archive_path}")
     if not archive.name.endswith(".enc") and not config.backup_allow_plaintext():
         return {"delivered": False, "reason": "refusing to deliver an "
@@ -273,7 +297,7 @@ def deliver(archive_path: str) -> dict:
     # signed backup is therefore delivered as an archive+sidecar pair.
     signature = archive.parent / (archive.name + ".sig.json")
     signature_delivered = False
-    if signature.exists():
+    if _io(signature).exists():
         _send(signature, "signature sidecar")
         signature_delivered = True
     return {"delivered": True, "signature_delivered": signature_delivered,
@@ -283,7 +307,7 @@ def deliver(archive_path: str) -> dict:
 def list_backups() -> list[dict]:
     """Local backup archives, newest first."""
     out = []
-    for p in _backups_dir().glob("olympus-backup-*"):
+    for p in _io(_backups_dir()).glob("olympus-backup-*"):
         if p.name.endswith(".sig.json") or p.name.startswith("."):
             continue
         st = p.stat()
@@ -366,7 +390,7 @@ def _safe_members(tar: tarfile.TarFile, dest: Path):
 def verify_archive(archive_path: str) -> dict:
     """Check an archive's signature (if a sidecar exists) against the pinned/
     local witness key. Returns {signed, signature_ok, sha256}."""
-    archive = Path(archive_path)
+    archive = _io(archive_path)
     digest = _sha256_file(archive)
     sig_path = archive.parent / (archive.name + ".sig.json")
     if not sig_path.exists():
@@ -389,10 +413,10 @@ def restore(archive_path: str, into: str | Path | None = None, *,
     signature and every file's SHA-256, refuses path-traversal entries, and
     won't overwrite a non-empty target unless `force=True`. Raises BackupError
     on any integrity failure unless `insecure=True` (signature only)."""
-    archive = Path(archive_path)
+    archive = _io(archive_path)
     if not archive.exists():
         raise BackupError(f"archive not found: {archive_path}")
-    dest = Path(into) if into is not None else config.MEMORY_DIR
+    dest = _io(into if into is not None else config.MEMORY_DIR)
 
     v = verify_archive(str(archive))
     if v["signed"] and not v["signature_ok"] and not insecure:
@@ -480,7 +504,7 @@ def drill(archive_path: str | None = None) -> dict:
     is the same recovery mechanism an operator would use after a loss.
     """
     if archive_path:
-        archive = Path(archive_path)
+        archive = _io(archive_path)
     else:
         backups = list_backups()
         if not backups:
@@ -507,6 +531,7 @@ def drill(archive_path: str | None = None) -> dict:
 
 
 def _rmtree(p: Path) -> None:
+    p = _io(p)
     if not p.exists():
         return
     for child in sorted(p.rglob("*"), reverse=True):

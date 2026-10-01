@@ -964,6 +964,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="reveal a prior comparison by id")
     p_cmp.add_argument("--tally", action="store_true",
                        help="show your running blind-pick tally")
+    p_cmp.add_argument("--owner", default="cli", help="exact local operator owner (default cli)")
+    p_cmp.add_argument("--id", help="stable 32-hex request id; retry never repeats model calls")
+    p_cmp.add_argument("--show", metavar="ID", help="read saved answers without revealing identities")
+    p_cmp.add_argument("--recover", metavar="ID", help="recover saved work without any model calls")
+    p_cmp.add_argument("--status", action="store_true", help="show comparison and recovery status")
+    p_cmp.add_argument("--initialize-empty", action="store_true", help="explicitly initialize exact-owner comparison state")
+    p_cmp.add_argument("--acknowledge-unclaimed-legacy", action="store_true",
+                       help="preserve legacy bytes without claiming them during empty initialization")
 
     p_op = sub.add_parser(
         "operator",
@@ -2854,46 +2862,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(spamtriage.render(args.query, max(1, min(args.max_results, 50))))
     elif args.command == "compare":
         from . import compare
-        user = "cli"
-        if args.tally:
-            print(compare.render_tally(user))
-            return 0
-        if args.reveal:
-            out = compare.reveal(user, args.reveal, args.pick or "")
-            if out is None:
-                print(f"No comparison with id '{args.reveal}'.")
-                return 1
-            print("Which model wrote each answer:")
-            for label, model in sorted(out["mapping"].items()):
-                mark = "  ← your pick" if out.get("choice") == label else ""
-                print(f"  {label}: {model}{mark}")
-            return 0
-        if not args.prompt:
-            print('Usage: olympus compare "<prompt>"   '
-                  '(or --reveal <id> [--pick A] | --tally)')
-            return 1
-        result = compare.run(user, args.prompt)
-        if "error" in result:
-            print(result.get("hint") or result["error"])
-            if result.get("models"):
-                print("Configured: " + ", ".join(result["models"]))
-            return 1
-        print(f"Blind comparison {result['id']} — pick the best answer:\n")
-        for a in result["answers"]:
-            print(f"── Answer {a['label']} " + "─" * 40)
-            print(a["text"].strip() + "\n")
-        # Interactive reveal when attached to a terminal; otherwise print how.
-        import sys as _sys
-        if _sys.stdin.isatty():
-            choice = input("Which is best? [label / Enter to skip] ").strip()
-            out = compare.reveal(user, result["id"], choice)
-            print("\nWhich model wrote each answer:")
-            for label, model in sorted(out["mapping"].items()):
-                mark = "  ← your pick" if out.get("choice") == label else ""
-                print(f"  {label}: {model}{mark}")
-        else:
-            print(f"Reveal with: olympus compare --reveal {result['id']} "
-                  f"[--pick <label>]")
+        return compare.cli_command(args)
     elif args.command == "operator":
         from . import browser, operator
         user = "cli"

@@ -336,6 +336,11 @@ def complete(
         if message is None:
             raise replaystore.ReplayDivergence(req_hash, params)
         replaystore.note_call(req_hash)
+        from . import compare_execution
+        if compare_execution.capturing():
+            compare_execution.observe(provider=settings.provider,
+                model=getattr(message, "model", None),
+                response_id=getattr(message, "id", None), replay=True)
         return message
 
     # Sovereign egress choke (after replay, which makes no network call): a
@@ -369,11 +374,19 @@ def complete(
     for attempt in range(4):
         s = _active()
         try:
-            endpoint = client(s).beta.messages if use_beta \
-                else client(s).messages
+            active_client = client(s)
+            endpoint = active_client.beta.messages if use_beta \
+                else active_client.messages
             with usage.slot():
                 with endpoint.stream(**params) as stream:
                     message = stream.get_final_message()
+            from . import compare_execution
+            if compare_execution.capturing():
+                compare_execution.observe(provider=s.provider,
+                    model=getattr(message, "model", None),
+                    response_id=getattr(message, "id", None),
+                    endpoint=(str(active_client.base_url)
+                              if getattr(active_client, "base_url", None) is not None else None))
             u = getattr(message, "usage", None)
             if u is not None:
                 # C5: keep the cache split (in = UNCACHED input tokens);

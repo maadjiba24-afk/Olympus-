@@ -148,7 +148,9 @@ def complete_text_once(settings: config.Settings, system: str,
     where substituting another model's answer for a failing one would corrupt
     the very thing being measured."""
     _check_pinned(settings)
-    return _dispatch_text(settings, system, messages, effort)
+    from . import compare_execution
+    with compare_execution.dispatch(settings):
+        return _dispatch_text(settings, system, messages, effort)
 
 
 def complete_json(settings: config.Settings, system: str,

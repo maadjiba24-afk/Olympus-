@@ -59,6 +59,11 @@ def _repair_command(user: str) -> str:
     return f"olympus prefs-evidence {owner_arg} --repair"
 
 
+def _io(path) -> Path:
+    from .assessment_evidence import _windows_extended_path
+    return Path(_windows_extended_path(path)) if os.name == "nt" else Path(path)
+
+
 def _path(user: str) -> Path:
     """Where a principal's preferences live.
 
@@ -91,7 +96,7 @@ def _path(user: str) -> Path:
         base = config.MEMORY_DIR / "prefs" / "system" / exact
     else:
         base = config.MEMORY_DIR / "prefs" / "owners" / memory.owner_key(exact)
-    base.mkdir(parents=True, exist_ok=True)
+    _io(base).mkdir(parents=True, exist_ok=True)
     return base / "prefs.json"
 
 
@@ -152,8 +157,8 @@ def is_quarantined(user: str) -> bool:
     exact = memory.canonical_owner(user)
     if (not memory.is_system_owner(exact)
             and (memory.is_ambiguous_gateway_owner(exact)
-                 or (config.MEMORY_DIR / "users" / memory.safe_id(exact)
-                     / "prefs.json").is_file())):
+                 or _io(config.MEMORY_DIR / "users" / memory.safe_id(exact)
+                        / "prefs.json").is_file())):
         return True
     try:
         load(user)
@@ -185,7 +190,7 @@ def load(user: str) -> dict:
     """Load one exact preference object, distinguishing missing from corrupt."""
     path = _path(user)
     try:
-        raw = path.read_bytes()
+        raw = _io(path).read_bytes()
     except FileNotFoundError:
         return {}
     except OSError as err:
@@ -252,7 +257,7 @@ def set(user: str, key: str, value) -> None:
         path = _path(user)
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         from . import atomicio
-        atomicio.publish(tmp, path, json.dumps(data, indent=2))
+        atomicio.publish(_io(tmp), _io(path), json.dumps(data, indent=2))
 
 
 def state_status(user: str) -> dict:
@@ -269,7 +274,7 @@ def state_status(user: str) -> dict:
             "reason": err.reason,
             "repair_command": err.repair_command,
         }
-    state = "valid" if path.is_file() else "missing"
+    state = "valid" if _io(path).is_file() else "missing"
     legacy = is_quarantined(exact)
     return {
         "owner": exact,
@@ -297,7 +302,7 @@ def repair(user: str) -> dict:
     path = _path(exact)
     with proclock.lock(f"prefs-{memory.storage_key(exact)}"):
         try:
-            raw = path.read_bytes()
+            raw = _io(path).read_bytes()
         except FileNotFoundError:
             result = state_status(exact)
             result["repaired"] = False
@@ -319,12 +324,12 @@ def repair(user: str) -> dict:
         quarantine = path.with_name(
             f"prefs.corrupt.{digest[:_QUARANTINE_DIGEST_HEX]}.json")
         try:
-            existing = quarantine.read_bytes()
+            existing = _io(quarantine).read_bytes()
         except FileNotFoundError:
             # Do not derive the temporary name from the archive name: doing so
             # crossed MAX_PATH on Windows for long exact-owner storage keys.
             tmp_q = quarantine.with_name(f".prefs-repair.{os.getpid()}.tmp")
-            atomicio.publish(tmp_q, quarantine, raw)
+            atomicio.publish(_io(tmp_q), _io(quarantine), raw)
         except OSError as err:
             raise PreferencesStateError(
                 exact, path, f"quarantine unreadable {type(err).__name__}") from err
@@ -334,7 +339,7 @@ def repair(user: str) -> dict:
                     exact, path, "content-addressed quarantine collision")
 
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        atomicio.publish(tmp, path, json.dumps({}, indent=2))
+        atomicio.publish(_io(tmp), _io(path), json.dumps({}, indent=2))
         return {
             "owner": exact,
             "state": "valid",
@@ -362,7 +367,7 @@ def repair(user: str) -> dict:
 
 def legacy_owners() -> list[str]:
     """Pre-v2 per-user preference files still on disk. Operator inspection."""
-    root = config.MEMORY_DIR / "users"
+    root = _io(config.MEMORY_DIR / "users")
     if not root.is_dir():
         return []
     return sorted(d.name for d in root.iterdir()
@@ -372,7 +377,7 @@ def legacy_owners() -> list[str]:
 def legacy_keys(legacy_id: str) -> list[str]:
     """The preference KEYS held in a quarantined file, so an operator can see
     what would be migrated without the values being surfaced in a listing."""
-    path = config.MEMORY_DIR / "users" / legacy_id / "prefs.json"
+    path = _io(config.MEMORY_DIR / "users" / legacy_id / "prefs.json")
     if not path.is_file():
         return []
     try:
@@ -391,7 +396,7 @@ def migrate_legacy(legacy_id: str, owner: str, *, overwrite: bool = False) -> in
     exact = memory.assert_not_system_owner(owner)
     if legacy_id not in legacy_owners():
         raise ValueError(f"'{legacy_id}' is not a quarantined preference file")
-    path = config.MEMORY_DIR / "users" / legacy_id / "prefs.json"
+    path = _io(config.MEMORY_DIR / "users" / legacy_id / "prefs.json")
     try:
         legacy = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as err:
@@ -422,5 +427,5 @@ def discard_legacy(legacy_id: str) -> bool:
     not quarantined."""
     if legacy_id not in legacy_owners():
         return False
-    (config.MEMORY_DIR / "users" / legacy_id / "prefs.json").unlink()
+    _io(config.MEMORY_DIR / "users" / legacy_id / "prefs.json").unlink()
     return True

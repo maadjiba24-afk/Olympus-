@@ -139,6 +139,11 @@ def complete_text(settings: config.Settings, system: str,
     cli = client or _client()
     body = _to_converse(system, messages, effort)
     resp = cli.converse(modelId=model, **body)
+    from . import compare_execution
+    if compare_execution.capturing():
+        compare_execution.observe(provider="bedrock", model=resp.get("modelId"),
+            response_id=(resp.get("ResponseMetadata") or {}).get("RequestId"),
+            endpoint=getattr(getattr(cli, "meta", None), "endpoint_url", None))
     return _text_from(resp)
 
 

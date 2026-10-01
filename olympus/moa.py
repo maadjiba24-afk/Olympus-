@@ -129,6 +129,29 @@ def complete_text(settings: config.Settings, system: str,
                   messages: list[dict[str, Any]], effort: str = "high") -> str:
     from . import backend
     refs = _members()
+    from . import compare_execution
+    if compare_execution.capturing():
+        # Comparison execution must retain each actual child identity and must
+        # not substitute a fallback member. Keep the bounded child calls in the
+        # same context; ordinary MoA's parallel path remains unchanged.
+        if not 1 <= len(refs) <= 6:
+            raise ValueError("comparison ensemble member bound exceeded")
+        if len(refs) == 1:
+            return backend.complete_text_once(refs[0], system, messages, effort=effort)
+        live, drafts = [], []
+        for member in refs:
+            try:
+                draft = backend.complete_text_once(member, system, messages, effort=effort)
+            except Exception:
+                continue  # Its failed dispatch remains in the comparison receipt.
+            if draft:
+                live.append(member)
+                drafts.append(draft)
+        if not drafts:
+            raise RuntimeError("every comparison ensemble reference failed")
+        # Do not publish private comparison prompts/drafts into shared reports.
+        return backend.complete_text_once(_aggregator(live), system + "\n\n" + _AGGREGATE_NOTE,
+            _aggregate_messages(messages, live, drafts), effort=effort)
     if len(refs) == 1:                    # ensemble of one = just that model
         return backend.complete_text(refs[0], system, messages, effort=effort)
     drafts = _drafts(refs, system, messages, effort)

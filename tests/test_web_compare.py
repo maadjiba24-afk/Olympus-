@@ -85,13 +85,13 @@ def test_reveal_maps_and_records_pick(server):
     assert rev["chosen_model"] == "anthropic/claude-a"
     # tally now reflects the pick on the next GET
     assert _get(server, "/api/compare?session=s1")["tally"] == {
-        "anthropic/claude-a": 1}
+        rev["chosen_identity"]: 1}
 
 
 def test_reveal_unknown_id_is_404(server):
     try:
         _post(server, "/api/compare",
-              {"session": "s1", "op": "reveal", "id": "nope", "choice": "A"})
+              {"session": "s1", "op": "reveal", "id": "0" * 32, "choice": "A"})
         assert False, "expected 404"
     except urllib.error.HTTPError as e:
         assert e.code == 404
