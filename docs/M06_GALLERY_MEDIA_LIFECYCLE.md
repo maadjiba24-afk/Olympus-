@@ -166,14 +166,17 @@ and [same-directory rename](https://learn.microsoft.com/en-us/windows-hardware/d
 ## Native evidence reconciliation, 2026-10-02
 
 **Implemented; reviewed native execution complete; protected delivery pending.**
-These results belong to the exact 1,088-file candidate tree
+The full native results below belong to the exact 1,088-file candidate tree
 `ce79e7588891530b9aa8bdd33e148169539737bf`, reconstructed on the authentic
-M05 baseline above. The delivery checkout adds documentation only to that tree;
-its commit/tree and exact-head CI must be recorded separately. The native suite
-was not rerun on the documentation descendant. Every executable, test,
-dependency and workflow byte and tracked mode must remain identical to the
-tested candidate before delivery. No code or workflow authorization is changed
-by this reconciliation.
+M05 baseline above. Initial delivery commit
+`4a39760dab7d3111127858d16bb5131982fda753`, tree
+`a88c86fe7ab2266f6941f2b2cfb735292445f104`, added documentation only.
+Its Windows CI subsequently exposed the test-only encoding correction recorded
+below. Full native results remain evidence for `ce79e758...`; they are not
+relabeled as full reruns of a later fixture/documentation descendant. Production
+code, dependencies and workflows remain unchanged; the later test delta is
+exactly two explicit UTF-8 settings. Tracked modes remain identical. No workflow
+authorization is changed by this reconciliation.
 
 ### Candidate and harness identity
 
@@ -346,3 +349,65 @@ CI including browser and Docker; reconcile the final gate; perform the protected
 squash without bypass; verify actual merge parent/tree/diff, post-merge checks
 and fast-forward synchronization. No merge or synchronization is claimed here.
 M07-M19 and all separately authorized operational gates remain open.
+
+### Windows CI encoding correction
+
+PR #317's first head `4a39760dab7d3111127858d16bb5131982fda753` did not pass
+the delivery gate. CI run `37044674510`, Windows job `110963023568`, finished
+**1 failed, 12,576 passed, 280 skipped** in 1,690.71 seconds. The required
+`test` aggregate (`110974234000`) failed; the other 23 checks succeeded. No merge
+was attempted. The sole failed case was
+`tests/test_web_gallery.py::test_owned_gallery_dom_contract`: its default
+`Path.read_text()` tried to decode the UTF-8 `web.py` source as CP1252 and raised
+`UnicodeDecodeError`. Earlier local Windows native runs explicitly retained this
+Node-dependent skip; WSL's Node case passed. Neither result proves the missing
+Windows encoding path.
+
+The correction changes only that fixture's source read and Node subprocess
+text transport to explicit `encoding='utf-8'`. The owned Node fixture already
+reads stdin as UTF-8. No production code, assertion, skip, dependency, timeout
+limit or workflow changes. The staged test-only tree is
+`537e238c7b807fea8bef8bba7abb712bf1f91025`; the two-line patch SHA-256 is
+`469747939606034800140ec0e25dd6e18fa7135d316f592a6413dd898861349f`.
+The corrected `tests/test_web_gallery.py` SHA-256 is
+`78dcb0d2acb023bfd3124cf164b5a467420f2458fc020f20e9dc397c85ab3b79`.
+This report/status reconciliation is a documentation-only descendant of that
+focused-regression tree; its final commit/tree and CI remain separately recorded.
+
+Owned Windows evidence is retained under
+`C:UsersmoustDownloadsOlympus-M06-dom-n9fol6_c`:
+
+| Stage | Actual result | Result JSON SHA-256 | JUnit SHA-256 |
+| --- | --- | --- | --- |
+| `reproduce` on initial delivery tree | Exactly the expected CP1252 decode failure; 1 failed, 0 skipped; pytest exit 1 | `d07af51ded6ed6d34fe3dfce1bb35ef52e21612e68488cdf92cb27bf29f51037` | `1220a37d60a590e1f17a7c32d767d5f7cceac2f30c47c2b9e601c575655618de` |
+| `regression` on corrected test-only tree | 1,126 passed, 29 skipped, no failures/errors/warnings; pytest exit 0; 105.76 seconds | `ab18273099d58c62ff907e92e3b4844280d17fc949d0a6038217936600325642` | `97045889b8cde02fd7a9b3147c53b8f166fb468d788256f95ccbc0f9f4e1d6da` |
+
+Both stages used the actual Windows CP1252 file codec with Python UTF-8 mode
+explicitly disabled, isolated Python and bytecode disabled, an asserted import
+binding to the delivery source, disabled plugin autoload with explicit `timeout`,
+a fresh owned profile/memory/temp root, and the available Node v24.19.0 executable
+(SHA-256 `3602f2bb1a10f2cbab4c36886218a33c1ab3db87290e73b033c46c77147d0237`).
+Node was added only to the test child's allowlisted PATH; no host installation or
+environment change was made. The existing private dependency freeze remained
+`f9a7d191c41b04804205e755e1e9e400bc30f395479103ddf96dadb8b4550306`.
+
+The corrected regression ran the same 39 pinned selectors and required all 44
+Windows native cases plus both owned Node gallery/comparison cases: **46/46
+required cases passed**. All 1,088 source files remained unchanged during each
+stage, with no added bytecode. Original-repository preservation matched before
+and after. The 29 skips are the retained Windows POSIX/symlink/permission/process
+topology boundaries; the two former Node skips executed and passed. They are not
+reported as browser execution or a new full native suite. A prior local harness
+attempt stopped during temporary-directory setup before the case; its separate
+`Olympus-M06-dom-hrbqu05k` evidence is preserved and is not the reproduced failure.
+
+The first head's browser/Docker jobs actually ran: browser-smoke 20 passed,
+Firefox 4 passed, WebKit 4 passed and Docker 4 passed. Each had one unknown
+`timeout` pytest configuration warning; browser-smoke additionally had 22
+websocket `connect()` deprecations. These are retained and do not establish
+per-test timeout configuration in those unchanged jobs. Their workflow limits
+remain 15 minutes for browser-smoke/Docker and 20 minutes for Firefox/WebKit.
+The separate native enforcement probes retain their own scope. These old-head
+passes do not replace the corrected head's complete required CI. M06 remains
+open until corrected-head CI, protected merge, merged-main CI and synchronization
+are verified.

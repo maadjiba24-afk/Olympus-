@@ -102,7 +102,11 @@ has been reviewed on tree `ce79e7588891530b9aa8bdd33e148169539737bf`: Windows
 reviewed warnings, with no failures/errors and all required cases passed.
 `M06_GALLERY_MEDIA_LIFECYCLE.md` records exact artifacts, skips, warnings and
 retained failed/interrupted attempts. M06 protected delivery remains pending;
-its delivery documentation descendant has a separate tree/CI identity.
+its later fixture/documentation descendant has separate source/CI evidence.
+The first PR #317 Windows CI failed on a fixture CP1252 source read. The two-line
+UTF-8 correction has separate owned Windows regression: 1,126 passed/29 skipped,
+zero failures/errors/warnings and 46 mandatory passes. Full native counts above
+retain their original tree scope; corrected-head protected delivery remains open.
 M07-M19 remain open.
 The cancelled Moonshot run's provider-account usage receipt is still missing;
 no call-count/spend estimate or rerun replaces it. Deployment, publishing,
@@ -315,7 +319,7 @@ batch. No external operation or feature activation has been performed.
 | Dependency | Concrete next action when its code prerequisite is ready |
 | --- | --- |
 | Current Windows worktree | PR #316 synchronized at `7a9b8be8b30c08928a60bb56cb45b0ece69ba8f8`; 2026-10-01 read-only operator reconciliation reported all 87 reference records, 86 unrelated file hashes and 39 M05 source hashes matching, with tracked worktree/index clean and selected Git metadata unchanged. Recheck before the next guarded branch/application step. |
-| Windows/POSIX batch validation | M06 standard full suites completed on native-tested tree `ce79e7588891530b9aa8bdd33e148169539737bf`; see the M06 report for required cases, complete skip/warning disposition and retained unsuccessful attempts. Documentation-only delivery updates do not change the native-tested code. Exact-head browser/Docker and all applicable CI, protected merge, post-merge checks and synchronization remain pending. |
+| Windows/POSIX batch validation | M06 standard full suites completed on native-tested tree `ce79e7588891530b9aa8bdd33e148169539737bf`; see the M06 report for required cases, complete skip/warning disposition and retained unsuccessful attempts. A later Windows CI fixture encoding correction has separate owned CP1252/Node regression evidence; all production, dependency and workflow bytes retain their native-tested identity. Exact-head browser/Docker and all applicable CI, protected merge, post-merge checks and synchronization remain pending. |
 | Intended deployment host | Identify the intended host, OS, service/container topology and persistent state mount; provide read-only identity/permission evidence before any lifecycle or deployment action is proposed. A dev checkout is not that proof. |
 | Backup/monitoring | Identify the independent backup destination and approved monitoring destination; review a concrete restore/rollback drill and alert test before authorization. Do not send an alert or reboot an unidentified host. |
 | Genuine calibration | Supply the existing current dataset or its non-sensitive signed/hashed report for inspection after custody/gates are ready. If none exists, approve a concrete collection plan before activation; use naturally occurring authorized tasks. |

@@ -146,10 +146,10 @@ def test_owned_gallery_dom_contract():
     node = shutil.which('node')
     if not node:
         pytest.skip('Node required for owned DOM/fetch execution; native browser gate remains separate')
-    source = Path(web.__file__).read_text()
+    source = Path(web.__file__).read_text(encoding='utf-8')
     script = source.split('// --- gallery (workspace images) ---', 1)[1].split('// --- agenda ', 1)[0]
     fixture = Path(__file__).parent / 'fixtures' / 'gallery_ui_owned.cjs'
-    result = subprocess.run([node, str(fixture)], input=script, text=True, capture_output=True, timeout=30)
+    result = subprocess.run([node, str(fixture)], input=script, text=True, encoding='utf-8', capture_output=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'OWNED_GALLERY_UI_PASSED' in result.stdout
 
