@@ -228,7 +228,21 @@ def test_todos_are_not_cross_tenant(srv):
     assert "alice-private-todo" not in seen, "B can see A's todos"
 
 
-def test_gallery_surface_is_not_cross_tenant(srv):
+def _owned_gallery_image(owner, name):
+    """Publish owned valid bytes rather than bypassing gallery authority."""
+    import io
+    from PIL import Image
+    from olympus.gallery_state import Store
+    output = io.BytesIO()
+    Image.new('RGB', (2, 2), 'blue').save(output, 'PNG')
+    store = Store(owner)
+    operation = name.replace('.', '_')
+    store.reserve(operation, 'generate', {}, name)
+    store.start(operation)
+    return store.finalize(operation, output.getvalue())['image']
+
+
+def test_gallery_surface_is_not_cross_tenant(srv, monkeypatch):
     """The GALLERY SURFACE -- all four vectors: list, read, delete, edit_image.
 
     NAMED FOR EXACTLY WHAT IT PROVES. It was `test_gallery_is_not_cross_tenant`,
@@ -250,7 +264,7 @@ def test_gallery_surface_is_not_cross_tenant(srv):
     # bucket instead, which is a different contract (see the legacy tests).
     from olympus import gallery
     ns_a = accounts.namespace_for_token(a)
-    (gallery.owner_root(ns_a, create=True) / "alice-secret.png").write_bytes(_PNG)
+    image = _owned_gallery_image(ns_a, "alice-secret.png")
 
     _, mine = call(base, "GET", "/api/gallery", sid=a)
     assert "alice-secret.png" in mine, "A cannot see their own image"
@@ -259,11 +273,12 @@ def test_gallery_surface_is_not_cross_tenant(srv):
     assert "alice-secret.png" not in theirs, "B can LIST A's images"
 
     status, _ = call(base, "GET", "/api/gallery/image", sid=b,
-                     query="?name=alice-secret.png")
+                     query=f"?name=alice-secret.png&expected_id={image['id']}&expected_revision={image['revision']}")
     assert status == 404, "B can READ A's image bytes"
 
     call(base, "POST", "/api/gallery", sid=b,
-         payload={"op": "delete", "name": "alice-secret.png"})
+         payload={"op": "delete", "name": "alice-secret.png", "expected_id": image["id"],
+                  "expected_revision": image["revision"], "operation_id": "1" * 32})
     _, still = call(base, "GET", "/api/gallery", sid=a)
     assert "alice-secret.png" in still, "B DELETED A's image"
 
@@ -273,15 +288,16 @@ def test_gallery_surface_is_not_cross_tenant(srv):
     # without one every call returns the same "needs an API key" and the cell
     # would pass while proving nothing. With a key, B's edit must stop at
     # source resolution -- before any network call is attempted.
-    import os
-    os.environ["OLYMPUS_MEDIA_API_KEY"] = "dummy-not-used-resolution-fails-first"
-    try:
-        _, edited = call(base, "POST", "/api/gallery", sid=b,
-                         payload={"op": "edit", "prompt": "make it blue",
-                                  "name": "alice-secret.png"})
-    finally:
-        os.environ.pop("OLYMPUS_MEDIA_API_KEY", None)
-    assert "no workspace image named" in edited, (
+    from olympus import media
+    provider_calls = []
+    monkeypatch.setenv('OLYMPUS_MEDIA_API_KEY', 'dummy-not-used-resolution-fails-first')
+    monkeypatch.setattr(media, '_post_multipart_files', lambda *a, **k: provider_calls.append(a))
+    _, edited = call(base, "POST", "/api/gallery", sid=b,
+                     payload={"op": "edit", "prompt": "make it blue",
+                              "name": "alice-secret.png", "expected_id": image["id"],
+                              "expected_revision": image["revision"], "operation_id": "2" * 32})
+    assert provider_calls == []
+    assert "stale" in edited.lower() or "not found" in edited.lower(), (
         f"B could EDIT A's image (fourth vector): {edited[:200]}")
 
 
@@ -315,12 +331,15 @@ def test_file_tools_still_reach_another_principals_gallery(monkeypatch, tmp_path
     # so the assertion proves B READ IT rather than merely that no error came
     # back -- an absence-of-error check would also pass on an empty read.
     a_root = gallery.owner_root("u:alice", create=True)
-    (a_root / "alice-secret.png").write_bytes(_PNG)
+    _owned_gallery_image("u:alice", "alice-secret.png")
     (a_root / "notes.txt").write_text("ALICE-PRIVATE-CONTENT", encoding="utf-8")
-    rel = f"gallery/{memory.safe_id('u:alice')}/notes.txt"
+    rel = f"gallery-v2/{memory.owner_key('u:alice')}/notes.txt"
 
     # The gallery surface refuses B -- that half really is fixed.
-    assert gallery.read_image("alice-secret.png", "u:bob") is None
+    from olympus.gallery_state import GalleryError
+    with pytest.raises(GalleryError) as caught:
+        gallery.read_image("alice-secret.png", "u:bob")
+    assert caught.value.code == "missing"
     assert gallery.list_images("u:bob") == []
 
     # ...but the file tools do not know about principals at all.
@@ -332,23 +351,41 @@ def test_file_tools_still_reach_another_principals_gallery(monkeypatch, tmp_path
         "assertion and drop 'surface' from the sibling test's name.")
 
 
-def test_gallery_owner_can_do_all_four(srv):
+def test_gallery_owner_can_do_all_four(srv, monkeypatch):
     """Scoping must not cost the owner their own access."""
     base, tokens, _ws = srv
     from olympus import accounts, gallery
     a = tokens["alice"]
     ns_a = accounts.namespace_for_token(a)
     root = gallery.owner_root(ns_a, create=True)
-    (root / "mine.png").write_bytes(_PNG)
+    image = _owned_gallery_image(ns_a, "mine.png")
 
     _, listed = call(base, "GET", "/api/gallery", sid=a)
     assert "mine.png" in listed, "owner cannot LIST their own image"
     status, _ = call(base, "GET", "/api/gallery/image", sid=a,
-                     query="?name=mine.png")
+                     query=f"?name=mine.png&expected_id={image['id']}&expected_revision={image['revision']}")
     assert status == 200, "owner cannot READ their own image"
+    import base64
+    from olympus import media
+    provider_calls = []
+    raw = gallery.read_image('mine.png', ns_a)[0]
+    def owned_edit(*args, **kwargs):
+        provider_calls.append(args)
+        return json.dumps({'data': [{'b64_json': base64.b64encode(raw).decode('ascii')}]}).encode()
+    monkeypatch.setenv('OLYMPUS_MEDIA_API_KEY', 'owned-native-fixture-not-a-real-key')
+    monkeypatch.setattr(media, '_post_multipart_files', owned_edit)
+    edit_status, edited = call(base, 'POST', '/api/gallery', sid=a,
+        payload={'op': 'edit', 'name': 'mine.png', 'prompt': 'owned blue edit',
+                 'expected_id': image['id'], 'expected_revision': image['revision'], 'operation_id': '4' * 32})
+    assert edit_status == 200 and json.loads(edited)['status'] == 'complete'
+    assert len(provider_calls) == 1
+    assert gallery.read_image('mine.png', ns_a)[0] == raw
     _, after = call(base, "POST", "/api/gallery", sid=a,
-                    payload={"op": "delete", "name": "mine.png"})
-    assert "mine.png" not in after, "owner cannot DELETE their own image"
+                    payload={"op": "delete", "name": "mine.png", "expected_id": image["id"],
+                             "expected_revision": image["revision"], "operation_id": "3" * 32})
+    assert json.loads(after)["status"] == "deleted", "owner cannot DELETE their own image"
+    _, listed_after = call(base, "GET", "/api/gallery", sid=a)
+    assert "mine.png" not in listed_after
 
 
 def test_gallery_resolver_never_unions_read_roots():
@@ -373,36 +410,34 @@ def test_gallery_resolver_never_unions_read_roots():
         "roots and is exactly the cross-tenant leak this scoping removed")
 
 
-def test_legacy_flat_images_survive_the_upgrade(monkeypatch, tmp_path):
-    """A single-user install must not open the gallery after upgrade and find
-    it empty. With accounts OFF there is one human, so the pre-upgrade flat
-    images are shown to them."""
+@pytest.mark.parametrize('require_login', ['0', '1'])
+def test_legacy_flat_images_preserved_unclaimed_independent_of_login(monkeypatch, tmp_path, require_login):
+    """Login settings never establish historical attribution."""
+    import io
+    from PIL import Image
     from olympus import config, gallery
-    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    ws = tmp_path / "ws"; ws.mkdir()
-    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
-    monkeypatch.delenv("OLYMPUS_REQUIRE_LOGIN", raising=False)
-    (ws / "legacy.png").write_bytes(_PNG)          # written before scoping
-
-    names = [i["name"] for i in gallery.list_images("solo")]
-    assert "legacy.png" in names, "a single-user install LOST its gallery"
-    assert gallery.read_image("legacy.png", "solo") is not None
-
-
-def test_legacy_images_are_hidden_once_accounts_are_on(monkeypatch, tmp_path):
-    """With accounts ON they belong to nobody and must not leak to everyone."""
-    from olympus import config, gallery
-    monkeypatch.setattr(config, "MEMORY_DIR", tmp_path)
-    ws = tmp_path / "ws"; ws.mkdir()
-    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
-    monkeypatch.setenv("OLYMPUS_REQUIRE_LOGIN", "1")
-    (ws / "legacy.png").write_bytes(_PNG)
-
-    assert gallery.list_images("u:1") == [], "legacy images leaked to an account"
-    assert gallery.read_image("legacy.png", "u:1") is None
-    # ...and the operator can claim them deliberately.
-    assert gallery.claim_legacy("u:1") == 1
-    assert [i["name"] for i in gallery.list_images("u:1")] == ["legacy.png"]
+    from olympus.gallery_state import GalleryError
+    monkeypatch.setattr(config, 'MEMORY_DIR', tmp_path)
+    ws = tmp_path / 'ws'
+    ws.mkdir()
+    monkeypatch.setenv('OLYMPUS_EXEC_WORKDIR', str(ws))
+    monkeypatch.setenv('OLYMPUS_REQUIRE_LOGIN', require_login)
+    out = io.BytesIO()
+    Image.new('RGB', (2, 2), 'blue').save(out, 'PNG')
+    original = out.getvalue()
+    (ws / 'legacy.png').write_bytes(original)
+    assert gallery.list_result('solo')['status'] == 'unclaimed'
+    assert gallery.list_images('solo') == []
+    with pytest.raises(GalleryError) as caught:
+        gallery.read_image('legacy.png', 'solo')
+    assert caught.value.code == 'missing'
+    with pytest.raises(GalleryError):
+        gallery.claim_legacy('solo')
+    review = gallery.legacy_review('solo')
+    result = gallery.claim_legacy('solo', review=review, review_digest=review['digest'])
+    assert result['status'] == 'complete'
+    assert gallery.read_image('legacy.png', 'solo')[0] == original
+    assert (ws / 'legacy.png').read_bytes() == original
 
 
 def test_supplied_session_is_ignored_when_login_is_required(srv):

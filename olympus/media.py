@@ -10,7 +10,7 @@ image gen, TTS, browser):
   * ``browse_page``    — fetch a page as readable text *and* extract its links,
     so a specialist can navigate, not just read one URL.
 
-Everything is urllib-only and **degrades gracefully**: with no API key the
+Image decoding uses the optional Pillow media extra. Transports use urllib and **degrade gracefully**: with no API key the
 generative tools return a clear, non-fatal message instead of raising, so a run
 never crashes just because media credentials aren't configured. Generated files
 land in the sandbox workspace (confined, same as run_command/write_file).
@@ -61,100 +61,240 @@ def _post(path: str, payload: dict, timeout: int = 120) -> bytes:
         return resp.read()
 
 
-def generate_image(prompt: str, filename: str = "") -> str:
-    """Generate an image and save it in the workspace. Returns a status string."""
-    if not _api_key():
-        return ("Error: image generation needs an API key "
-                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
-    try:
-        raw = _post("/images/generations",
-                    {"model": IMAGE_MODEL, "prompt": prompt,
-                     "n": 1, "size": "1024x1024"})
-        data = json.loads(raw)
-        b64 = data["data"][0]["b64_json"]
-    except Exception as err:
-        return f"Error generating image: {str(err)[:200]}"
-    name = filename or f"image-{int(time.time())}.png"
-    # OWNERSHIP IS DECIDED HERE, at write time, from the principal the
-    # orchestrator threaded into this thread (W2-1b) — not inferred at read
-    # time from whoever is looking. `gallery.owner_root` is inside workdir(),
-    # so sandbox confinement is unchanged.
-    from . import gallery
-    dest = gallery.owner_root(create=True) / pathlib.Path(name).name
-    res = sandbox.write_file(str(dest.relative_to(sandbox.workdir())), "")
-    with open(res["path"], "wb") as f:
-        f.write(base64.b64decode(b64))
-    return f"Image saved to workspace: {name}"
+# Image-specific transports are bounded; audio/vision retain their existing
+# transport contracts. Capture endpoint/key once, before reserving paid work.
+_MAX_IMAGE_JSON = 24 * 1024 * 1024
+_MAX_PROMPT_BYTES = 32 * 1024
+
+
+def _image_read(resp) -> bytes:
+    from .gallery_state import GalleryError
+    data = resp.read(_MAX_IMAGE_JSON + 1)
+    if not isinstance(data, bytes) or len(data) > _MAX_IMAGE_JSON:
+        raise GalleryError("provider_output", "Provider image response exceeds the 24 MiB limit.", 502)
+    return data
+
+
+def _post_image(endpoint, key, payload, timeout=120):
+    req = urllib.request.Request(endpoint + "/images/generations",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return _image_read(resp)
 
 
 def _post_multipart_files(path: str, fields: dict, files: list[tuple],
-                          timeout: int = 180) -> bytes:
-    """POST multipart/form-data with one or more typed file parts (for the
-    images/edits endpoint). `files` is [(field, filename, content_type, bytes)].
-    Distinct from `_post_multipart` (the single-octet-stream audio uploader) —
-    they must not share a name or the later definition would shadow this one.
-    urllib only — no deps."""
-    boundary = "----olympus" + base64.urlsafe_b64encode(
-        os.urandom(9)).decode().rstrip("=")
-    crlf = b"\r\n"
+                          timeout: int = 180, *, endpoint=None, key=None) -> bytes:
+    """Bounded image-only multipart uploader (separate from audio)."""
+    boundary = "----olympus" + base64.urlsafe_b64encode(os.urandom(18)).decode().rstrip("=")
     body = bytearray()
     for k, v in fields.items():
-        body += b"--" + boundary.encode() + crlf
-        body += f'Content-Disposition: form-data; name="{k}"'.encode() + crlf + crlf
-        body += str(v).encode() + crlf
+        body += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode("utf-8")
     for field, fname, ctype, blob in files:
-        body += b"--" + boundary.encode() + crlf
-        body += (f'Content-Disposition: form-data; name="{field}"; '
-                 f'filename="{fname}"').encode() + crlf
-        body += f"Content-Type: {ctype}".encode() + crlf + crlf
-        body += blob + crlf
-    body += b"--" + boundary.encode() + b"--" + crlf
-    req = urllib.request.Request(
-        f"{_base()}{path}", data=bytes(body),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
-                 "Authorization": f"Bearer {_api_key()}"})
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+                 f'filename="{fname}"\r\nContent-Type: {ctype}\r\n\r\n').encode("utf-8")
+        body += blob + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request((endpoint if endpoint is not None else _base()) + path,
+        data=bytes(body), headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Authorization": "Bearer " + (key if key is not None else _api_key())})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        return _image_read(resp)
 
 
-def edit_image(prompt: str, source: str, filename: str = "") -> str:
-    """Edit an existing workspace image by prompt (AI image edit) and save the
-    result as a new workspace image. `source` is a workspace image name; the
-    original is left untouched. Returns a status string; degrades gracefully
-    without a key or a valid source."""
-    if not _api_key():
-        return ("Error: image editing needs an API key "
-                "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
-    # THE SOURCE MUST BE THIS PRINCIPAL'S IMAGE (W2-1b). `sandbox._confine`
-    # only proves the path is inside workdir(), which includes every OTHER
-    # principal's gallery directory — so edit_image was a third cross-tenant
-    # vector alongside list/read/delete: B could name A's image as the source
-    # and receive an edited copy of it. Resolve through the gallery's own
-    # per-principal resolver, which never unions.
-    from . import gallery
-    src = gallery._owned(None, source) or gallery._legacy(None, source)
-    if src is None:
-        return f"Error: no workspace image named '{source}'."
-    ext = src.suffix.lower()
+def _image_config(prompt):
+    from urllib.parse import urlsplit
+    from .gallery_state import GalleryError
+    if type(prompt) is not str or not prompt.strip():
+        raise GalleryError("invalid", "Image prompt must be a nonempty string.", 400)
     try:
-        blob = src.read_bytes()
-        if len(blob) > _MAX_IMAGE_BYTES:
-            return f"Error: '{source}' is too large to edit."
-        raw = _post_multipart_files("/images/edits", {
-            "model": IMAGE_MODEL, "prompt": prompt, "n": 1,
-        }, [("image", src.name, _IMAGE_EXTS[ext], blob)])
-        data = json.loads(raw)
-        b64 = data["data"][0]["b64_json"]
-    except Exception as err:
-        return f"Error editing image: {str(err)[:200]}"
-    name = filename or f"{src.stem}-edited-{int(time.time())}.png"
-    # The edited copy belongs to whoever asked for it, in their own gallery.
-    dest = gallery.owner_root(create=True) / pathlib.Path(name).name
-    res = sandbox.write_file(str(dest.relative_to(sandbox.workdir())), "")
-    with open(res["path"], "wb") as f:
-        f.write(base64.b64decode(b64))
-    return f"Edited image saved to workspace: {name}"
+        encoded = prompt.encode("utf-8", "strict")
+    except UnicodeError:
+        raise GalleryError("invalid", "Image prompt is not valid UTF-8.", 400) from None
+    if len(encoded) > _MAX_PROMPT_BYTES:
+        raise GalleryError("oversized", "Image prompt exceeds 32 KiB UTF-8.", 413)
+    endpoint, model, key = _base(), IMAGE_MODEL, _api_key()
+    try:
+        parsed = urlsplit(endpoint)
+        valid = (len(endpoint.encode("utf-8")) <= 2048 and parsed.scheme in ("https", "http")
+                 and parsed.hostname and not parsed.username and not parsed.password
+                 and not parsed.query and not parsed.fragment and parsed.port != 0
+                 and not any(ord(c) < 33 or ord(c) == 127 for c in endpoint))
+    except (ValueError, UnicodeError):
+        valid = False
+    if not valid:
+        raise GalleryError("invalid", "Image provider endpoint is invalid.", 400)
+    try:
+        valid_model = (type(model) is str and bool(model.strip()) and len(model.encode("utf-8")) <= 256
+                       and not any(ord(c) < 32 or ord(c) == 127 for c in model))
+    except UnicodeError:
+        valid_model = False
+    if not valid_model:
+        raise GalleryError("invalid", "Image provider model is invalid.", 400)
+    return endpoint, model, key, encoded
 
+
+def _image_credentials(key):
+    from .gallery_state import GalleryError
+    if not key:
+        raise GalleryError("unavailable", "Image generation/editing needs an API key (set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).", 503)
+    if len(key) > 8192 or any(ord(c) < 33 or ord(c) > 126 for c in key):
+        raise GalleryError("invalid", "Image provider credential configuration is invalid.", 400)
+
+
+def _image_response(raw):
+    from .gallery_state import GalleryError
+    from .image_validation import MAX_IMAGE_BYTES, validate_image
+    def bad():
+        return GalleryError("provider_output", "Malformed provider image response.", 502)
+    def pairs(items):
+        result = {}
+        for k, v in items:
+            if k in result:
+                raise bad()
+            result[k] = v
+        return result
+    if type(raw) is not bytes or len(raw) > _MAX_IMAGE_JSON:
+        raise bad()
+    try:
+        data = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                          parse_constant=lambda value: (_ for _ in ()).throw(bad()))
+        if (type(data) is not dict or type(data.get("data")) is not list
+                or len(data["data"]) != 1 or type(data["data"][0]) is not dict):
+            raise bad()
+        b64 = data["data"][0].get("b64_json")
+        if type(b64) is not str or not b64 or len(b64) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+            raise bad()
+        image = base64.b64decode(b64, validate=True)
+        if not image or len(image) > MAX_IMAGE_BYTES or base64.b64encode(image).decode("ascii") != b64:
+            raise bad()
+        info = validate_image(image)
+        metadata = {"validated_mime": info["mime"]}
+        for field in ("model", "id"):
+            if field in data:
+                value = data[field]
+                if type(value) is not str or not value or len(value.encode("utf-8")) > 256:
+                    raise bad()
+                metadata["reported_" + field] = value
+        return image, metadata
+    except GalleryError:
+        raise
+    except Exception:
+        raise bad() from None
+
+
+# Importing this store does not load Pillow or make filesystem/provider calls.
+from .gallery_state import OMITTED as _OWNER_OMITTED
+
+
+def _produce_image(prompt, filename, owner, operation_id, source=None):
+    import hashlib
+    from .gallery_state import Store, GalleryError, capture_owner
+    from .image_validation import require_decoder
+    exact_owner = capture_owner(owner)
+    if type(operation_id) is not str or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+        raise GalleryError("invalid", "A stable 32 lowercase hex operation ID is required before image execution.", 400)
+    endpoint, model, key, encoded = _image_config(prompt)
+    if type(filename) is not str:
+        raise GalleryError("invalid", "Image filename must be a string.", 400, operation_id)
+    store = Store(exact_owner)
+    request = {"prompt_sha256": hashlib.sha256(encoded).hexdigest(),
+               "endpoint": endpoint, "model": model, "size": "1024x1024",
+               "validation_policy": "gallery-image-v1", "filename": filename,
+               "source": source}
+    existing = store.lookup(operation_id, "edit" if source is not None else "generate",
+                            request, name=filename or None, source=source)
+    if existing is not None:
+        return existing
+    _image_credentials(key)
+    require_decoder()
+    # All input/source/capacity admission precedes the durable start marker.
+    source_bytes = source_record = None
+    receipt = store.reserve(operation_id, "edit" if source is not None else "generate",
+                            request, name=filename or None, source=source)
+    if not receipt.get("execute"):
+        return receipt
+    if source is not None:
+        try:
+            source_bytes, source_record = store.read_source(source)
+        except GalleryError as err:
+            return store.mark_failed(operation_id, err.code, err.message)
+    try:
+        store.start(operation_id)
+    except GalleryError:
+        # A failed acknowledgement may follow durable start. Never call a
+        # provider if persisting that marker was not positively acknowledged.
+        return store.recover(operation_id)
+    try:
+        if source is None:
+            raw = _post_image(endpoint, key, {"model": model, "prompt": prompt,
+                                            "n": 1, "size": "1024x1024"})
+        else:
+            # Fixed multipart name avoids filenames influencing HTTP headers.
+            raw = _post_multipart_files("/images/edits",
+                {"model": model, "prompt": prompt, "n": 1},
+                [("image", "source" + pathlib.Path(source_record["name"]).suffix.lower(),
+                  source_record["mime"], source_bytes)], endpoint=endpoint, key=key)
+    except GalleryError as err:
+        return store.mark_failed(operation_id, err.code, err.message)
+    except Exception:
+        # Even an HTTP error can follow paid work. Never infer no execution or
+        # replay merely from a timeout, disconnect or malformed HTTP response.
+        return store.recover(operation_id)
+    try:
+        image, metadata = _image_response(raw)
+        if _IMAGE_EXTS[pathlib.Path(receipt["name"]).suffix.lower()] != metadata["validated_mime"]:
+            raise GalleryError("unsupported_type", "Provider image format does not match the requested output extension.", 415, operation_id)
+        metadata.update(configured_endpoint=endpoint, configured_model=model)
+    except GalleryError as err:
+        return store.mark_failed(operation_id, err.code, err.message)
+    try:
+        return store.finalize(operation_id, image, metadata=metadata)
+    except GalleryError:
+        return store.recover(operation_id)
+
+
+def generate_image_result(prompt, filename="", *, owner=_OWNER_OMITTED, operation_id=None):
+    """Typed generation entrypoint. Retries must keep the same operation ID."""
+    return _produce_image(prompt, filename, owner, operation_id)
+
+
+def edit_image_result(prompt, source, filename="", *, owner=_OWNER_OMITTED,
+                      operation_id=None, source_id=None, source_revision=None):
+    """Typed edit entrypoint; source name alone never authorizes a stale edit."""
+    return _produce_image(prompt, filename, owner, operation_id,
+        {"name": source, "id": source_id, "revision": source_revision})
+
+
+def _image_status_text(receipt):
+    op = receipt.get("operation_id", receipt.get("id", "unknown"))
+    if receipt.get("status") == "complete":
+        return f"Image saved to gallery: {receipt['image']['name']} (operation {op})"
+    if receipt.get("status") == "failed":
+        return f"Error: image operation {op} failed: {receipt.get('error', 'provider output refused')}"
+    return f"Pending: image operation {op} is {receipt.get('status', 'indeterminate')}; recover this operation without resubmitting provider work."
+
+
+def generate_image(prompt: str, filename: str = "", **kwargs) -> str:
+    """String-result adapter; callers must supply a durable operation_id before work."""
+    from .gallery_state import GalleryError
+    try:
+        return _image_status_text(generate_image_result(prompt, filename, **kwargs))
+    except GalleryError as err:
+        operation_id = kwargs.get("operation_id")
+        identity = f" (operation {operation_id})" if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id) else ""
+        return f"Error{identity}: {err.message}"
+
+
+def edit_image(prompt: str, source: str, filename: str = "", **kwargs) -> str:
+    """String-result adapter; caller-owned operation/source IDs remain required."""
+    from .gallery_state import GalleryError
+    try:
+        return _image_status_text(edit_image_result(prompt, source, filename, **kwargs))
+    except GalleryError as err:
+        operation_id = kwargs.get("operation_id")
+        identity = f" (operation {operation_id})" if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id) else ""
+        return f"Error{identity}: {err.message}"
 
 def _post_multipart(path: str, fields: dict[str, str],
                     file_field: str, filename: str, blob: bytes,
@@ -276,10 +416,13 @@ def _image_source(image: str) -> dict | str:
     return {"url": f"data:{mime};base64,{b64}"}
 
 
-def analyze_image(image: str, question: str = "") -> str:
+def analyze_image(image: str, question: str = "", *, gallery_id=None,
+                  gallery_revision=None, owner=_OWNER_OMITTED) -> str:
     """Describe or answer a question about an image using a vision-capable model.
 
-    `image` is either an http(s) URL or a filename in the confined workspace.
+    `image` is an owned gallery display name when gallery_id and
+    gallery_revision are supplied; otherwise an http(s) URL or shared workspace
+    file. Gallery misses never fall back to shared file reads.
     Fills the one real capability gap vs comparable assistants: Olympus could *generate* images
     but never *read* them. The model's answer is external content, so callers
     wrap it as untrusted (analyze_image is an INGESTION tool).
@@ -287,7 +430,19 @@ def analyze_image(image: str, question: str = "") -> str:
     if not _api_key():
         return ("Error: image analysis needs an API key "
                 "(set OPENAI_API_KEY or OLYMPUS_MEDIA_API_KEY).")
-    src = _image_source(image)
+    if gallery_id is not None or gallery_revision is not None:
+        from .gallery_state import Store, GalleryError, capture_owner
+        try:
+            store = Store(capture_owner(owner))
+            blob, record = store.read_source({"name": image, "id": gallery_id,
+                                              "revision": gallery_revision})
+            src = {"url": f"data:{record['mime']};base64,{base64.b64encode(blob).decode('ascii')}"}
+        except GalleryError as err:
+            return f"Error: {err.message}"
+    else:
+        # Existing URL/shared-file route is intentionally separate; it is not
+        # gallery ownership authority and must never be an owned-read fallback.
+        src = _image_source(image)
     if isinstance(src, str):        # an error message
         return src
     return _vision_describe(src, question)

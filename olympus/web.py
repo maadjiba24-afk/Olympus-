@@ -1681,60 +1681,129 @@ async function deleteDoc() {
 // --- gallery (workspace images) ---
 const galEl = document.getElementById('gallery');
 const galBtn = document.getElementById('galbtn');
+let galEpoch = 0, galBusy = false, galPending = null, galImages = [];
+const galMessage = document.createElement('p'); galMessage.className = 'sys';
+const galGrid = document.createElement('div'); galGrid.className = 'galgrid';
+const galRecoveryID = document.createElement('input');
+galRecoveryID.placeholder = 'Operation ID'; galRecoveryID.setAttribute('aria-label', 'Gallery operation ID');
+const galRecover = document.createElement('button'); galRecover.textContent = 'Check / recover';
+galRecover.onclick = () => galPost({op: 'recover', operation_id: galRecoveryID.value});
+const galDismiss = document.createElement('button'); galDismiss.textContent = 'Dismiss local pending state';
+galDismiss.onclick = () => {
+  if (galBusy || !galPending) return;
+  if (!window.confirm('This outcome may still be unknown. Dismissing only unlocks this panel; it does not cancel, erase, or retry the operation. Keep its ID and check / recover later. Continue?')) return;
+  const operationID = galPending.operation_id; galPending = null;
+  galleryMessage('Operation ' + operationID + ': local pending state dismissed; server outcome unchanged. Keep this ID for recovery.');
+  drawGallery();
+};
+galEl.append(galMessage, galRecoveryID, galRecover, galGrid, galDismiss);
 galBtn.onclick = () => {
-  galEl.classList.toggle('open');
+  galEl.classList.toggle('open'); ++galEpoch;
   if (galEl.classList.contains('open')) renderGallery();
 };
-function imgSrc(name) {
-  return '/api/gallery/image?name=' + encodeURIComponent(name) +
+function imgSrc(im) {
+  return '/api/gallery/image?name=' + encodeURIComponent(im.name) +
+    '&expected_id=' + encodeURIComponent(im.id) + '&expected_revision=' + encodeURIComponent(im.revision) +
     '&session=' + encodeURIComponent(session);
 }
-async function renderGallery() {
-  galEl.innerHTML = '';
-  let d = {images: []};
-  try {
-    d = await (await fetch('/api/gallery?session=' + encodeURIComponent(session),
-      {headers: hdrs()})).json();
-  } catch (e) {}
-  if (!d.images || !d.images.length) {
-    const p = document.createElement('p'); p.className = 'sys';
-    p.textContent = 'No images yet. Ask the assistant to generate one and it will appear here.';
-    galEl.appendChild(p); return;
-  }
-  const grid = document.createElement('div'); grid.className = 'galgrid';
-  d.images.forEach(im => {
+function galleryMessage(message) { galMessage.textContent = message; }
+function galleryError(data, fallback) {
+  return typeof data.error === 'string' ? data.error : (data.error && data.error.message) || fallback;
+}
+function drawGallery() {
+  galGrid.innerHTML = '';
+  galImages.forEach(im => {
     const card = document.createElement('div'); card.className = 'galcard';
     const img = document.createElement('img');
-    img.loading = 'lazy'; img.src = imgSrc(im.name); img.alt = im.name;
-    img.onclick = () => window.open(imgSrc(im.name), '_blank');
+    img.loading = 'lazy'; img.src = imgSrc(im); img.alt = im.name;
+    img.onclick = () => window.open(imgSrc(im), '_blank', 'noopener');
+    img.onerror = () => { img.alt = 'Image unavailable: ' + im.name; };
     const meta = document.createElement('div'); meta.className = 'gm';
-    const nm = document.createElement('b'); nm.textContent = im.name;
-    nm.title = im.name;
+    const nm = document.createElement('b'); nm.textContent = im.name; nm.title = im.name;
     const sz = document.createElement('span');
-    sz.textContent = Math.max(1, Math.round(im.bytes / 1024)) + 'KB';
-    meta.append(nm, sz);
+    sz.textContent = Math.max(1, Math.round(im.bytes / 1024)) + 'KB'; meta.append(nm, sz);
     const actions = document.createElement('div'); actions.className = 'gm';
-    const edit = document.createElement('a'); edit.textContent = 'Edit';
-    edit.style.cursor = 'pointer'; edit.style.color = '#d9b44a';
-    edit.onclick = () => editImage(im.name);
-    const del = document.createElement('a'); del.textContent = 'Delete';
-    del.style.cursor = 'pointer'; del.style.color = '#8b93a0';
-    del.onclick = () => galPost({op: 'delete', name: im.name});
-    actions.append(edit, del);
-    card.append(img, meta, actions); grid.appendChild(card);
+    const edit = document.createElement('button'); edit.textContent = 'Edit'; edit.disabled = galBusy || !!galPending;
+    edit.onclick = () => editImage(im);
+    const del = document.createElement('button'); del.textContent = 'Remove'; del.disabled = galBusy || !!galPending;
+    del.onclick = () => {
+      if (galBusy || galPending) return;
+      if (window.confirm('Remove "' + im.name + '" from the gallery? Retained recovery data is not erased.'))
+        galPost({op: 'delete', name: im.name, expected_id: im.id, expected_revision: im.revision});
+    };
+    actions.append(edit, del); card.append(img, meta, actions); galGrid.appendChild(card);
   });
-  galEl.appendChild(grid);
+  galRecover.disabled = galBusy; galRecoveryID.disabled = galBusy;
+  galDismiss.disabled = galBusy || !galPending;
+}
+async function renderGallery() {
+  const epoch = ++galEpoch;
+  try {
+    const response = await fetch('/api/gallery?session=' + encodeURIComponent(session), {headers: hdrs()});
+    const data = await response.json();
+    if (epoch !== galEpoch || !galEl.classList.contains('open')) return;
+    if (!response.ok || !Array.isArray(data.images)) throw Error(galleryError(data, 'Gallery unavailable'));
+    galImages = data.images; drawGallery();
+    if (!galPending) galleryMessage(data.unclaimed ? 'Unclaimed legacy images require operator review.' :
+      (galImages.length ? '' : 'No images yet. Ask the assistant to generate one.'));
+  } catch (error) {
+    if (epoch === galEpoch && galEl.classList.contains('open')) galleryMessage('Gallery unavailable: ' + error.message);
+  }
 }
 async function galPost(payload) {
-  const r = await (await fetch('/api/gallery', {method: 'POST', headers: hdrs(),
-    body: JSON.stringify(Object.assign({session: session}, payload))})).json();
-  if (r.message && !r.ok) alert(r.message);
-  renderGallery();
+  const lookup = payload.op === 'recover' || payload.op === 'status';
+  if (galBusy || (galPending && !lookup)) return;
+  if (lookup) {
+    if (typeof payload.operation_id !== 'string' || !payload.operation_id.trim()) {
+      if (galPending) galRecoveryID.value = galPending.operation_id;
+      galleryMessage(galPending ? 'Operation ' + galPending.operation_id + ': still unresolved. Check / recover this ID.' :
+        'Enter the existing operation ID to check / recover.'); return;
+    }
+    if (galPending && payload.operation_id !== galPending.operation_id) {
+      galRecoveryID.value = galPending.operation_id;
+      galleryMessage('Operation ' + galPending.operation_id + ': still unresolved. Check this ID or explicitly dismiss its local pending state before looking up another.');
+      return;
+    }
+  } else if (!payload.operation_id) {
+    payload.operation_id = crypto.randomUUID().replaceAll('-', '');
+  }
+  // A lookup cannot replace the identity or original mutation of pending work.
+  if (!galPending) galPending = payload;
+  galRecoveryID.value = galPending.operation_id;
+  galleryMessage('Operation ' + payload.operation_id + ': pending');
+  galBusy = true; ++galEpoch; drawGallery();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch('/api/gallery', {method: 'POST', headers: hdrs(), signal: controller.signal,
+      body: JSON.stringify(Object.assign({session: session}, payload))});
+    const data = await response.json();
+    const matching = data.operation_id === payload.operation_id;
+    if (!response.ok) {
+      if ((matching && data.status === 'failed') || (!lookup && response.status < 500 && response.status !== 404)) galPending = null;
+      throw Error(galleryError(data, 'Gallery request failed'));
+    }
+    if (!matching) throw Error('Gallery response operation ID did not match');
+    if (data.status === 'complete' || data.status === 'deleted') {
+      galPending = null;
+      galleryMessage('Operation ' + payload.operation_id + ': ' + data.status +
+        (data.status === 'deleted' ? ' (recovery data retained)' : ''));
+      renderGallery(); // Refresh failure or delay must not lock mutation recovery controls.
+    } else if (data.status === 'failed') {
+      galPending = null; galleryMessage(galleryError(data, 'Operation failed'));
+    } else {
+      galleryMessage('Operation ' + payload.operation_id + ': ' + data.status + '. Check / recover; do not submit another edit.');
+    }
+  } catch (error) {
+    galleryMessage((error.name === 'AbortError' ? 'Request timed out' : error.message) + '. Operation ' + payload.operation_id +
+      (galPending ? ': outcome unconfirmed. Check / recover before retrying.' : ': refused. Refresh before trying again.'));
+  } finally { clearTimeout(timeout); galBusy = false; drawGallery(); }
 }
-function editImage(name) {
-  const prompt = window.prompt('Describe the edit for "' + name + '":');
+function editImage(im) {
+  if (galBusy || galPending) return;
+  const prompt = window.prompt('Describe the edit for "' + im.name + '":');
   if (!prompt) return;
-  galPost({op: 'edit', name: name, prompt: prompt});
+  return galPost({op: 'edit', name: im.name, prompt: prompt, expected_id: im.id, expected_revision: im.revision});
 }
 
 // --- agenda (scheduled tasks + upcoming calendar) ---
@@ -2092,6 +2161,9 @@ class Handler(BaseHTTPRequestHandler):
             metrics.record_response(urlparse(self.path).path, code)
         except Exception:
             pass
+        if urlparse(self.path).path.startswith("/api/gallery"):
+            extra_headers = {**(extra_headers or {}), "Cache-Control": "no-store",
+                             "X-Content-Type-Options": "nosniff"}
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -2424,18 +2496,26 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"name": name, "content": body})
             else:                                 # list documents
                 self._json({"documents": documents.listing(user)})
-        elif url.path == "/api/gallery":
+        elif url.path in ("/api/gallery", "/api/gallery/image"):
             from . import gallery
-            self._json({"images": gallery.list_images(user)})
-        elif url.path == "/api/gallery/image":
-            from . import gallery
-            got = gallery.read_image(params.get("name", [""])[0], user)
-            if got is None:
-                self._json({"error": "not found"}, 404)
-            else:
-                raw, ctype = got
-                self._send(200, raw, ctype,
-                           extra_headers={"Cache-Control": "no-store"})
+            from .gallery_state import GalleryError
+            try:
+                if url.path == "/api/gallery":
+                    self._json(gallery.list_result(user))
+                else:
+                    name = params.get("name", [""])[0]
+                    content_id = params.get("expected_id", [None])[0]
+                    revision = params.get("expected_revision", [None])[0]
+                    if not content_id or not revision:
+                        raise GalleryError("invalid", "Image ID and revision are required.", 400)
+                    raw, ctype = gallery.read_image(name, user, expected_id=content_id,
+                                                    expected_revision=revision)
+                    self._send(200, raw, ctype, extra_headers={
+                        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                        "Content-Disposition": "inline", "X-Gallery-Content-ID": content_id,
+                        "X-Gallery-Revision": revision})
+            except GalleryError as err:
+                self._json(err.to_dict(), err.status)
         elif url.path == "/api/agenda":
             self._json(_agenda_view(user))
         elif url.path == "/api/health":
@@ -2536,7 +2616,7 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             self._json({"error": _unauthorized_message()}, 401)
             return
-        payload = self._read_compare_json() if path == "/api/compare" else self._read_json()
+        payload = self._read_compare_json() if path in ("/api/compare", "/api/gallery") else self._read_json()
         if payload is None:
             self._json({"error": "bad request"}, 400)
             return
@@ -2567,6 +2647,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/api/register", "/api/login", "/api/logout"):
             self._handle_auth(path, payload)
+            return
+        if path == "/api/gallery" and "session" in payload and not isinstance(payload["session"], str):
+            self._json({"error": "session must be a string", "code": "invalid"}, 400)
             return
         sid = self._session_id(payload.get("session"))
         session = _session(sid)
@@ -2692,23 +2775,40 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/gallery":
-            from . import gallery
-            op = str(payload.get("op", ""))
-            if op == "delete":
-                ok = gallery.delete_image(str(payload.get("name", "")), user)
-                self._json({"ok": ok, "images": gallery.list_images(user)})
-            elif op == "edit":
-                from . import media
-                # edit_image resolves its source through the gallery, which
-                # reads memory.current_user(); set it for this request.
-                from . import memory
-                memory.set_user(user)
-                msg = media.edit_image(str(payload.get("prompt", "")),
-                                       str(payload.get("name", "")))
-                self._json({"ok": msg.startswith("Edited"), "message": msg,
-                            "images": gallery.list_images(user)})
-            else:
-                self._json({"error": "unknown op"}, 400)
+            from . import gallery, media
+            from .gallery_state import GalleryError
+            try:
+                op = payload.get("op")
+                allowed = {"delete": {"name", "expected_id", "expected_revision"},
+                           "edit": {"name", "prompt", "expected_id", "expected_revision"},
+                           "status": set(), "recover": set()}
+                if (not isinstance(op, str) or op not in allowed or
+                        set(payload) - (allowed[op] | {"session", "op", "operation_id"})):
+                    raise GalleryError("invalid", "Invalid gallery operation or fields.", 400)
+                required = allowed[op] | {"operation_id"}
+                if any(not isinstance(payload.get(key), str) or not payload[key] for key in required):
+                    raise GalleryError("invalid", "Gallery fields must be nonempty strings.", 400)
+                operation_id = payload["operation_id"]
+                from .gallery_state import validate_operation_id
+                validate_operation_id(operation_id)
+                if op in ("edit", "delete") and not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+                    raise GalleryError("invalid", "Invalid mutation operation ID.", 400)
+                if op == "delete":
+                    out = gallery.delete_image(payload["name"], user,
+                        expected_id=payload["expected_id"], expected_revision=payload["expected_revision"],
+                        operation_id=operation_id)
+                elif op == "edit":
+                    out = media.edit_image_result(payload["prompt"], payload["name"], owner=user,
+                        source_id=payload["expected_id"], source_revision=payload["expected_revision"],
+                        operation_id=operation_id)
+                else:
+                    fn = gallery.recover_operation if op == "recover" else gallery.operation_status
+                    out = fn(operation_id, user)
+                state = out.get("status")
+                code = 200 if state in ("complete", "deleted") else 502 if state == "failed" else 202
+                self._json(out, code)
+            except GalleryError as err:
+                self._json(err.to_dict(), err.status)
             return
 
         if path == "/api/todos":

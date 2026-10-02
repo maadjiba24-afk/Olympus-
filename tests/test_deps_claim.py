@@ -94,6 +94,7 @@ def test_soft_dependencies_are_declared_as_optional_extras():
 
 # Import name -> distribution (pyproject) name, for the few that differ.
 _IMPORT_TO_DIST = {
+    "PIL": "Pillow",  # Pillow exposes the historical PIL import namespace.
     "yaml": "pyyaml",
     "docx": "python-docx",
     "youtube_transcript_api": "youtube-transcript-api",

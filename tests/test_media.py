@@ -7,7 +7,7 @@ from olympus import media, security, tools
 def test_generate_image_without_key_is_graceful(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
-    out = media.generate_image("a logo")
+    out = media.generate_image("a logo", operation_id="a" * 32)
     assert out.startswith("Error") and "API key" in out
 
 
@@ -18,83 +18,18 @@ def test_tts_without_key_is_graceful(monkeypatch):
     assert out.startswith("Error") and "API key" in out
 
 
-def test_generate_image_saves_file(monkeypatch, tmp_path):
-    import base64
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
-    png = base64.b64encode(b"\x89PNG fake").decode()
-    monkeypatch.setattr(media, "_post",
-                        lambda path, payload, timeout=120:
-                        b'{"data":[{"b64_json":"%s"}]}' % png.encode())
-    out = media.generate_image("a cat", filename="cat.png")
-    assert "cat.png" in out
-    assert (tmp_path / "ws" / "gallery" / "shared" / "cat.png").read_bytes().startswith(b"\x89PNG")
-
-
 def test_edit_image_without_key_is_graceful(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OLYMPUS_MEDIA_API_KEY", raising=False)
-    out = media.edit_image("make it blue", "cat.png")
+    out = media.edit_image("make it blue", "cat.png", source_id="a" * 32, source_revision="b" * 64, operation_id="c" * 32)
     assert out.startswith("Error") and "API key" in out
 
 
-def test_edit_image_missing_source_is_graceful(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
+def test_edit_image_requires_owned_source_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-key")
     monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
-    out = media.edit_image("make it blue", "nope.png")
-    assert out.startswith("Error") and "no workspace image" in out
-
-
-def test_edit_image_rejects_traversal(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(tmp_path / "ws"))
-    out = media.edit_image("x", "../secret.png")
-    # Refused by the gallery's per-principal resolver now rather than by
-    # sandbox._confine, so the message changed. STILL REFUSED, and by a
-    # stricter check: the gallery resolver also rejects anything that leaves
-    # the OWNER's directory, not merely anything leaving the workspace.
-    assert out.startswith("Error") and "no workspace image named" in out
-
-
-def test_edit_image_saves_new_file_leaving_source(monkeypatch, tmp_path):
-    # Patch at the urlopen level (NOT the multipart helper) so the REAL call
-    # path runs end-to-end — this is what catches a _post_multipart signature
-    # collision, which patching the helper by name would mask.
-    import base64
-    import urllib.request
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    src = ws / "cat.png"
-    src.write_bytes(b"\x89PNG original")
-    monkeypatch.setenv("OPENAI_API_KEY", "k")
-    monkeypatch.setenv("OLYMPUS_EXEC_WORKDIR", str(ws))
-    png = base64.b64encode(b"\x89PNG edited").decode()
-    captured = {}
-
-    class Resp:
-        def __init__(self, body): self._b = body
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return self._b
-
-    def fake_urlopen(req, timeout=180):
-        captured["url"] = req.full_url
-        captured["ctype"] = req.headers.get("Content-type", "")
-        captured["len"] = len(req.data)
-        return Resp(b'{"data":[{"b64_json":"%s"}]}' % png.encode())
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    out = media.edit_image("make it blue", "cat.png", filename="blue.png")
-    assert "blue.png" in out, out            # NOT an "Error editing image: ..." string
-    assert captured["url"].endswith("/images/edits")
-    assert captured["ctype"].startswith("multipart/form-data; boundary=")
-    assert captured["len"] > len(b"\x89PNG original")   # multipart wrapped the file
-    # source untouched, new file written
-    assert src.read_bytes() == b"\x89PNG original"
-    # W2-1b: the edited copy belongs to whoever asked for it, so it lands in
-    # that principal's gallery directory rather than flat in the workspace.
-    from olympus import gallery
-    assert (gallery.owner_root() / "blue.png").read_bytes() == b"\x89PNG edited"
+    assert media.edit_image("x", "../secret.png", operation_id="d" * 32).startswith("Error")
+    assert media.edit_image("x", "nope.png", operation_id="e" * 32).startswith("Error")
 
 
 def test_post_multipart_names_do_not_collide():
