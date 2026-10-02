@@ -15,6 +15,80 @@ _DEV_LABEL = ("DEV / UNVERIFIED — signed by the public default key; proves the
               "signer.")
 
 
+def _gallery_command(args) -> int:
+    """Operator CLI: typed outcomes, exact owner and visible pre-call identity."""
+    import uuid
+    from . import gallery, media
+    from .gallery_state import GalleryError
+    try:
+        owner = args.owner if args.owner is not None else "cli"
+        action = args.action
+        if action == "list":
+            out = gallery.list_result(owner)
+        elif action == "read":
+            if not args.name or not args.expected_id or not args.expected_revision:
+                raise GalleryError("invalid", "read requires name, --expected-id and --expected-revision", 400)
+            raw, mime = gallery.read_image(args.name, owner, expected_id=args.expected_id,
+                                           expected_revision=args.expected_revision)
+            out = {"status": "complete", "name": args.name, "id": args.expected_id,
+                   "revision": args.expected_revision, "bytes": len(raw), "mime": mime}
+        elif action in ("delete", "edit"):
+            if not args.name or not args.expected_id or not args.expected_revision:
+                raise GalleryError("invalid", "edit/delete requires name, --expected-id and --expected-revision", 400)
+            operation_id = args.operation_id or uuid.uuid4().hex
+            print("Operation ID: " + operation_id, flush=True)
+            if action == "delete":
+                out = gallery.delete_image(args.name, owner, expected_id=args.expected_id,
+                    expected_revision=args.expected_revision, operation_id=operation_id)
+            else:
+                out = media.edit_image_result(" ".join(args.prompt), args.name, owner=owner,
+                    source_id=args.expected_id, source_revision=args.expected_revision,
+                    operation_id=operation_id)
+        elif action in ("status", "recover"):
+            fn = gallery.recover_operation if action == "recover" else gallery.operation_status
+            out = fn(args.operation_id or args.name, owner)
+        elif action == "legacy-review":
+            if not args.operator_reviewed or args.owner is None:
+                raise GalleryError("invalid", "legacy-review requires --operator-reviewed and explicit --owner attribution", 400)
+            out = gallery.legacy_review(owner, offset=args.offset)
+        elif action == "claim":
+            if not args.operator_reviewed or args.owner is None or not args.name or not args.review_digest:
+                raise GalleryError("invalid", "claim requires reviewed manifest, --operator-reviewed, --owner and --review-digest", 400)
+            from . import owner_evidence
+            with open(args.name, "rb") as source:
+                raw = source.read(8 * 1024 * 1024 + 1)
+            review = owner_evidence.decode(raw, "gallery legacy review", 8 * 1024 * 1024)
+            print("Reviewed claim digest: " + args.review_digest +
+                  ". If acknowledgement is lost, retry this same unchanged manifest; "
+                  "per-item operation IDs appear in the outcome.", flush=True)
+            out = gallery.claim_legacy(owner, review=review, review_digest=args.review_digest)
+        else:
+            raise GalleryError("invalid", "Unknown gallery action", 400)
+        print(json.dumps(out, ensure_ascii=True))
+        state = out.get("status")
+        if state in ("reserved", "indeterminate", "pending", "started", "recovery_required"):
+            return 2
+        if state in ("failed", "error", "conflict"):
+            return 1
+        if action == "claim":
+            states = [item.get("status") for item in out.get("results", [])]
+            if (any(item in ("reserved", "indeterminate", "pending") for item in states)
+                    or any(item.get("code") in ("publication_unconfirmed", "ledger_unavailable")
+                           for item in out.get("results", []))):
+                return 2
+            if any(item not in ("complete", "claimed") for item in states):
+                return 1
+        if state not in ("ok", "missing", "unclaimed", "complete", "deleted", "claimed") and action != "legacy-review":
+            return 2
+        return 0
+    except GalleryError as err:
+        print(json.dumps(err.to_dict(), ensure_ascii=True))
+        return 2 if err.status == 202 or err.code in ("publication_unconfirmed", "ledger_unavailable") else 1
+    except (OSError, ValueError) as err:
+        print(json.dumps({"status": "error", "code": "unavailable", "error": str(err)}))
+        return 1
+
+
 def _chat(conversation_id: str = "cli-default") -> None:
     from . import tui
     tui.run(conversation_id=conversation_id)
@@ -910,11 +984,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_gal = sub.add_parser(
         "gallery", aliases=["images"],
-        help="images generated into the workspace: list | delete <name>")
+        help="owned images: list/read/edit/remove/status/recover; explicit operator legacy review/claim")
     p_gal.add_argument("action", nargs="?", default="list",
-                       choices=["list", "delete", "edit"])
-    p_gal.add_argument("name", nargs="?", help="image file name (delete/edit)")
-    p_gal.add_argument("prompt", nargs="*", help="edit prompt (edit)")
+                       choices=["list", "read", "delete", "edit", "status", "recover", "legacy-review", "claim"])
+    p_gal.add_argument("name", nargs="?", help="image name, operation ID, or reviewed manifest file")
+    p_gal.add_argument("prompt", nargs="*", help="edit prompt")
+    p_gal.add_argument("--owner", default=None, help="exact owner (default: cli); operator attribution for claims")
+    p_gal.add_argument("--operation-id", help="stable operation ID; reuse after interrupted requests")
+    p_gal.add_argument("--expected-id", help="content ID from list/read")
+    p_gal.add_argument("--expected-revision", help="revision from list/read")
+    p_gal.add_argument("--review-digest", help="digest of the explicitly reviewed legacy manifest")
+    p_gal.add_argument("--operator-reviewed", action="store_true", help="confirm explicit operator attribution review")
+    p_gal.add_argument("--offset", type=int, default=0, help="legacy review page offset")
 
     sub.add_parser(
         "agenda",
@@ -2786,22 +2867,7 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"Deleted '{args.name}'." if documents.delete(user, args.name)
                   else f"No document named '{args.name}'.")
     elif args.command in ("gallery", "images"):
-        from . import gallery
-        if args.action == "list":
-            print(gallery.render_list())
-        elif args.action == "delete":
-            if not args.name:
-                print("Usage: olympus gallery delete <name>")
-                return 1
-            print(f"Deleted '{args.name}'." if gallery.delete_image(args.name)
-                  else f"No image named '{args.name}'.")
-        elif args.action == "edit":
-            prompt = " ".join(args.prompt).strip()
-            if not args.name or not prompt:
-                print('Usage: olympus gallery edit <name> "<edit prompt>"')
-                return 1
-            from . import media
-            print(media.edit_image(prompt, args.name))
+        return _gallery_command(args)
     elif args.command == "agenda":
         from . import scheduler
         print(scheduler.summary(user="cli"))

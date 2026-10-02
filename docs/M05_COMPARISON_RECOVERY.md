@@ -8,7 +8,34 @@ all 86 unrelated files matched their pinned receipts, and actual protected
 remote main still matched. No operator repository mutation was part of that
 reconciliation. Earlier branches, environments, packages and failed logs stay.
 
-**Status: integrated candidate; native validation and protected delivery OPEN.**
+**Status: delivered within CMP1–CMP11 scope through PR #316 on 2026-10-01.**
+Protected squash `7a9b8be8b30c08928a60bb56cb45b0ece69ba8f8`, tree
+`0dad6df8d95a0c73087db7ae549ff75bbd4137bb`, sole parent
+`ffd1a0b2aa3c926e4133023602190930cc54090b`. The feature branch is preserved
+at `4365999659bbdeacabf9d42e1a32dc7847f6fa1f`. All 25 feature-head and all
+25 actual merged-main checks passed; reviewed Windows synchronization completed
+at 2026-10-01T15:37:50Z with tracked worktree/index clean and all 86 unrelated
+files preserved.
+
+Exact validation scope matters: full native Windows (12,321 passed / 292
+skipped), native-filesystem WSL (12,376 passed / 237 skipped), and fresh scoped
+PostgreSQL (4 passed) evidence belongs to implementation tree
+`992c9fdaf8d898faa1bc036e92c22139765dd4c1`. Final tree `0dad6d…` differs only
+by the `math.fsum` test assertion correction, validated separately on Windows
+(16 passed) and by the final feature/main CI. The older full native suites were
+**not rerun on the final tree**. The PostgreSQL proof covers the four named
+storage contracts, not every store, crash recovery or multi-host safety.
+
+Delivery evidence: `Olympus-M05-main-sync-evidence-41f6c9b3b18a.zip`, SHA256
+`6b74513ceff798fdc513c49e108a0feeea43283ab992bfd266e5dcc73e6564b8`;
+receipt SHA256
+`b46504e2d9c164ad6fca190e41f6a9f9a936cbbe76f32ecdf8a75286d51bf0a5`.
+The independent final review verified 307 receipt artifacts, source identities,
+reference/configuration preservation and retained-evidence inventories.
+Preparation-time pending statements and failed runs below remain historical
+records; this delivery record supersedes their pending status without changing
+their source or test scope.
+
 M06–M19 and the genuine/operational evidence gates remain open. This document is
 not a provider-execution authorization, a deployment receipt or a quality claim.
 

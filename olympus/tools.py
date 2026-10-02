@@ -2088,10 +2088,10 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "complete_todo": lambda item_id: _complete_todo(item_id),
     "trigger_research": lambda question, rounds=None: _trigger_research(
         question, rounds),
-    "edit_image": lambda prompt, source, filename="": _media().edit_image(
-        prompt, source, filename),
-    "generate_image": lambda prompt, filename="": _media().generate_image(
-        prompt, filename),
+    "edit_image": lambda prompt="", source="", operation_id=None, source_id=None, source_revision=None, filename="", mode="run": _image_tool(
+        "edit", prompt, filename, operation_id, source, source_id, source_revision, mode),
+    "generate_image": lambda prompt="", operation_id=None, filename="", mode="run": _image_tool(
+        "generate", prompt, filename, operation_id, mode=mode),
     "text_to_speech": lambda text, filename="": _media().text_to_speech(
         text, filename),
     "transcribe_audio": lambda path: _media().transcribe_audio(path),
@@ -2142,8 +2142,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "chart_from_data": lambda data, chart_type="bar", x="", y="", title="",
         filename="": _media().chart_from_data(data, chart_type, x, y, title,
                                               filename),
-    "analyze_image": lambda image, question="": _media().analyze_image(
-        image, question),
+    "analyze_image": lambda image, question="", gallery_id=None, gallery_revision=None: _analyze_image_tool(
+        image, question, gallery_id, gallery_revision),
     "browser_open": _browser_open,
     "browser_read": _browser_read,
     "browser_read_ax": _browser_read_ax,
@@ -2694,16 +2694,21 @@ GENERATE_IMAGE = {
     "description": (
         "Generate an image from a text prompt and save it to the workspace. "
         "Use for marketing visuals, social posts, mockups, diagrams-as-art. "
-        "Returns the saved filename."
+        "Returns a structured status and stable operation ID; never replay a pending operation."
     ),
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
-            "prompt": {"type": "string", "description": "What to depict"},
+            "mode": {"type": "string", "enum": ["run", "status", "recover"],
+                "description": "Default run; status reads saved state, recover adopts durable output without provider work. Status/recover need only operation_id"},
+            "operation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$",
+                "description": "Create a stable 32 lowercase hex request ID BEFORE calling; retain it for status/recovery, never replace it on timeout"},
+            "prompt": {"type": "string", "description": "What to depict; required in run mode"},
             "filename": {"type": "string",
                          "description": "Optional output filename (.png)"},
         },
-        "required": ["prompt"],
+        "required": ["operation_id"],
     },
 }
 
@@ -2713,19 +2718,26 @@ EDIT_IMAGE = {
         "Edit an existing workspace image by prompt (AI image edit) and save "
         "the result as a NEW workspace image — the original is left untouched. "
         "Use to restyle, extend, or alter an image you already generated. "
-        "Returns the saved filename."
+        "Returns a structured status and stable operation ID; never replay a pending operation."
     ),
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
+            "mode": {"type": "string", "enum": ["run", "status", "recover"],
+                "description": "Default run; status reads saved state, recover adopts durable output without provider work. Status/recover need only operation_id"},
+            "operation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$",
+                "description": "Create a stable 32 lowercase hex request ID BEFORE calling; retain it for status/recovery, never replace it on timeout"},
             "prompt": {"type": "string",
-                       "description": "The change to make"},
+                       "description": "The change to make; required in run mode"},
+            "source_id": {"type": "string", "description": "Exact image ID from the owned gallery listing"},
+            "source_revision": {"type": "string", "description": "Exact SHA256 revision from the owned gallery listing"},
             "source": {"type": "string",
-                       "description": "Workspace image name to edit"},
+                       "description": "Owned gallery name; required in run mode with source_id and source_revision"},
             "filename": {"type": "string",
                          "description": "Optional output filename (.png)"},
         },
-        "required": ["prompt", "source"],
+        "required": ["operation_id"],
     },
 }
 
@@ -4447,13 +4459,16 @@ ANALYZE_IMAGE = {
     "description": (
         "Look at an image and describe it or answer a question about it, using "
         "a vision-capable model. The image is either an http(s) URL or a "
-        "filename in the workspace (e.g. one you generated or a screenshot). "
+        "shared workspace filename, or an owned gallery name with its gallery_id "
+        "and gallery_revision from generation/edit results. "
         "Use for reading charts/screenshots, checking a generated image, OCR, "
         "or describing a photo. Treat the result as external content."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
+            "gallery_id": {"type": "string", "description": "Owned image ID; supply together with gallery_revision for generated images"},
+            "gallery_revision": {"type": "string", "description": "Exact owned image SHA256 revision"},
             "image": {"type": "string",
                       "description": "An http(s) URL or a workspace filename"},
             "question": {"type": "string",
@@ -4679,6 +4694,38 @@ def _sandbox():
 def _subagents():
     from . import subagents
     return subagents
+
+
+def _analyze_image_tool(image, question="", gallery_id=None, gallery_revision=None):
+    from .memory import current_owner
+    owner = current_owner()
+    return _media().analyze_image(image, question, gallery_id=gallery_id,
+                                 gallery_revision=gallery_revision, owner=owner)
+
+
+def _image_tool(kind, prompt, filename, operation_id, source=None, source_id=None, source_revision=None, mode="run"):
+    # Capture exact owner at adapter entry, before any provider work or lazy
+    # import. No model-supplied owner override exists in these schemas.
+    from .memory import current_owner
+    owner = current_owner()
+    import re
+    from .gallery_state import GalleryError, Store
+    try:
+        if mode not in ("run", "status", "recover"):
+            raise GalleryError("invalid", "Image mode must be run, status or recover.", 400, operation_id)
+        if type(operation_id) is not str or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
+            raise GalleryError("invalid", "A stable 32 lowercase hex image operation ID is required.", 400)
+        if mode == "status":
+            return Store(owner).status(operation_id)
+        if mode == "recover":
+            return Store(owner).recover(operation_id)
+        if kind == "generate":
+            return _media().generate_image_result(prompt, filename, owner=owner,
+                                                 operation_id=operation_id)
+        return _media().edit_image_result(prompt, source, filename, owner=owner,
+            operation_id=operation_id, source_id=source_id, source_revision=source_revision)
+    except GalleryError as err:
+        return err.to_dict()
 
 
 def _media():

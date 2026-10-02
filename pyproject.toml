@@ -46,6 +46,7 @@ dependencies = [
 # the dependency surface is fully truthful: nothing the code imports is
 # undeclared. Install what you use, e.g. `pip install olympus-council[all]`.
 [project.optional-dependencies]
+media = ["Pillow>=12.3,<13"]       # bounded full gallery image decoding; no signature fallback
 postgres = ["psycopg>=3.1"]        # olympus/store.py + codegraph_introspect — Postgres
 browser = ["websockets>=12.0", "playwright>=1.61,<2"]  # Chromium CDP + Firefox/WebKit
 sandbox = ["pyyaml>=6.0"]          # olympus/sandbox.py — sandbox config parsing
@@ -87,7 +88,7 @@ native = ["torch>=2.0.0", "numpy>=1.24"]
 # model matches the backend production actually uses. Without it that test fails
 # on every leg of the `test` matrix — `build` is installed only in the separate
 # `package` job, which does not run the suite.
-test = ["pytest", "pytest-timeout>=2.4,<3", "openai", "websockets>=12.0",
+test = ["Pillow>=12.3,<13", "pytest", "pytest-timeout>=2.4,<3", "openai", "websockets>=12.0",
         "mcp>=1.5.0,<2", "pyyaml>=6.0", "build>=1.0",
         # `setuptools` is pinned to the SAME version as requirements-publish.lock
         # and `release_pipeline._SETUPTOOLS_METADATA_POLICY_VERSION`. The release
@@ -104,7 +105,7 @@ test = ["pytest", "pytest-timeout>=2.4,<3", "openai", "websockets>=12.0",
         # only on 3.11+, so the 3.10 leg needs the backport or the whole
         # suite fails at collection.
         'tomli>=2.0; python_version<"3.11"']
-all = ["psycopg>=3.1", "websockets>=12.0", "playwright>=1.61,<2", "pyyaml>=6.0", "mcp>=1.5.0,<2",
+all = ["Pillow>=12.3,<13", "psycopg>=3.1", "websockets>=12.0", "playwright>=1.61,<2", "pyyaml>=6.0", "mcp>=1.5.0,<2",
        "neo4j>=5.0", "falkordb>=1.0", "pypdf>=4.0", "python-docx>=1.0",
        "boto3>=1.34"]
 

@@ -117,7 +117,7 @@ def test_gallery_no_longer_unions_worker_images(monkeypatch, tmp_path):
     how user B could list, read and delete user A's images.
 
     The gallery now resolves inside ONE principal's directory and never unions
-    (`gallery._owned`). A worker-root image is no longer surfaced by it. The
+    (exact-owner gallery-v2 manifest). A worker-root image is no longer surfaced by it. The
     union itself is untouched for the sandbox file tools, which still share one
     workspace by design -- only the gallery stopped relying on it.
     """
@@ -129,7 +129,10 @@ def test_gallery_no_longer_unions_worker_images(monkeypatch, tmp_path):
     finally:
         sandbox.reset_worker_root(tok)
     assert "pic.png" not in [im["name"] for im in gallery.list_images("someone")]
-    assert gallery.read_image("pic.png", "someone") is None
+    from olympus.gallery_state import GalleryError
+    with pytest.raises(GalleryError) as caught:
+        gallery.read_image("pic.png", "someone")
+    assert caught.value.code == "missing"
 
 
 # --- confinement still holds inside a per-worker root -------------------

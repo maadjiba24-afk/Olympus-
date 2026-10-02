@@ -253,6 +253,8 @@ def test_route_approval_spine_defence_in_depth(shadow_on, monkeypatch,
     """The spine is reachable without any tool call — a CLI approval, the web
     approval handler, a scheduled job. Its own risk class must hold the line."""
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    # Probe ActionTypes are test-local; do not pollute later capability gates.
+    monkeypatch.setattr(actions, "_REGISTRY", dict(actions._REGISTRY))
     trip = _Tripwire()
     actions.register(actions.ActionType(
         name="shadow_probe_send", risk_class=actions.IRREVERSIBLE, scope="",
@@ -272,6 +274,8 @@ def test_reversible_actions_still_run_in_shadow(shadow_on, monkeypatch,
     """Blocking everything would make shadow useless: reversible actions are
     Olympus-local and must still execute or the evidence is not representative."""
     monkeypatch.setattr(config, "MEMORY_DIR", tmp_path / "mem")
+    # Probe ActionTypes are test-local; do not pollute later capability gates.
+    monkeypatch.setattr(actions, "_REGISTRY", dict(actions._REGISTRY))
     ran = []
     actions.register(actions.ActionType(
         name="shadow_probe_note", risk_class=actions.TRIVIAL, scope="",

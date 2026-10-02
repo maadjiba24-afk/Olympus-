@@ -133,38 +133,57 @@ the documented behaviour of volume ownership, not from a reproduction — treat 
 as the starting point for the first real upgrade, and check `id` and the write
 probe above rather than assuming it worked.
 
-### Upgrading ACROSS the gallery scoping change (W2-1b)
+### Gallery ownership and legacy review (M06)
 
-The gallery is now **per principal**. Images generated after this change land in
-`<workspace>/gallery/<principal>/` and are listable, readable, deletable and
-editable only by their owner. Before it, every image sat flat in the shared
-workspace and `list/read/delete` unioned across sandbox roots, so any account
-could see and delete any other account's images.
+New gallery images use exact owner identities under
+`<workspace>/gallery-v2/<owner_key(exact-owner)>/`, with immutable objects,
+a bounded authority manifest and operation/recovery receipts. Human image names
+are display names, not filesystem paths. Install the optional `media` extra for
+the bounded maintained image decoder; missing validation support refuses new
+provider work explicitly.
 
-**Images generated before the upgrade have no owner**, and what happens to them
-depends deliberately on whether you run accounts:
+**Both flat workspace images and the old `gallery/<normalized-owner>/` layout
+remain unclaimed.** They are not automatically listed, read, edited or removed
+through the gallery, whether login is enabled or disabled. Original files remain
+preserved. A normalized directory name is not proof of a historical owner.
 
-| `OLYMPUS_REQUIRE_LOGIN` | What you see |
-|---|---|
-| unset (single user) | the old flat images are still shown — **nothing is lost by upgrading** |
-| `1` (accounts on) | they are shown to **nobody**, because they belong to nobody |
-
-The single-user case is the one that would bite a real person, so it is the one
-that keeps working with no action. On a multi-user instance the images are not
-deleted, just not surfaced; claim them into one principal's gallery deliberately:
+An operator first prepares a read-only, bounded review for an exact account
+namespace (for example `u:<account_id>`):
 
 ```bash
-docker compose exec olympus python -c   "from olympus import gallery, memory; memory.set_user('u:1'); print(gallery.claim_legacy(), 'claimed')"
+olympus gallery legacy-review --owner 'u:1' --operator-reviewed > gallery-review.json
 ```
 
-Use the namespace of the account that should own them (`u:<account_id>`).
-Verified by test in both directions: legacy images remain reachable with accounts
-off, and are invisible with accounts on until claimed.
+Inspect the manifest, individual candidate errors, source identities and proposed
+attribution. Use pagination if `next_offset` is present. Do not claim an image
+whose ownership has not been established. For a reviewed manifest, copy its
+exact `digest` into the following explicit claim:
 
-**What this does NOT scope.** The gallery *surface* is per principal; the sandbox
-file tools still share one workspace by design (`sandbox.workdir`, ADR 0005). A
-principal who can run file tools can still reach another's gallery directory
-through those tools. Closing that is a workspace-model change, not a gallery one.
+```bash
+olympus gallery claim gallery-review.json --owner 'u:1' --operator-reviewed --review-digest '<reviewed-digest>'
+```
+
+The claim copies validated bytes and records attribution before publication;
+it does not remove the original. Changed sources, conflicting attribution or
+destination names, unavailable state and partial failures remain visible. Retain
+review, operation and recovery receipts. Never replace an expected digest merely
+to get past a conflict. Listing provides image IDs/revisions used by edit/remove;
+a filename alone does not authorize a stale mutation. Preserve an operation ID
+after timeout and use `gallery status` / `gallery recover`, never submit the
+same provider request with a new ID to guess whether the first one ran.
+
+Removal is recoverable removal from the gallery view, not certified erasure.
+M09 still owns full principal inventory/migration/erasure, and M14 owns actual
+backup custody, consistent snapshots, restore and host survival. Existing
+MEMORY_DIR backups do not automatically cover a separately configured workdir.
+M06 validation/delivery status is tracked in
+[`M06_GALLERY_MEDIA_LIFECYCLE.md`](../docs/M06_GALLERY_MEDIA_LIFECYCLE.md).
+
+**Separate workspace boundary:** sandbox file tools still share one workspace
+(`sandbox.workdir`, ADR 0005). A principal authorized for those tools may reach
+another principal's gallery files through that shared surface. Gallery hardening
+does not establish whole-workspace tenant confinement or Windows multi-process
+support.
 
 ## Verified bring-up (W1-4)
 

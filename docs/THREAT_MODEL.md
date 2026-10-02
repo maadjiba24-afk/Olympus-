@@ -367,16 +367,17 @@ issued as an authenticated tenant principal, since a principal literally named
 `memory.assert_not_system_owner` enforces it wherever an externally-supplied id
 is accepted.
 
-**What is still normalized, stated plainly.** Olympus is NOT exact-owner safe
-end to end. `documents`, `docrag`, `todos`, `playbooks`, `emailstyle`, the
-conversation search index, and `discovery` all key themselves on `safe_id`
-internally, so colliding principals still share those stores; `usage`
-and `gallery` are normalized deliberately, being accounting and display rather
-than authorization. Each remaining store needs the same treatment `vault` and
-`prefs` received: an owner-keyed layout plus a fail-closed legacy quarantine.
-Treat a `current_user()` read as correct only when the value builds a path in an
-already-normalized store, or when the caller is a request boundary binding an
-identity it received from outside.
+**Exact-owner scope remains explicit.** The original normalized-store audit
+identified the stores listed in the historical reports; PR #311 and M01–M05
+supersede the documented subsets, not the repository-wide objective. See
+`REMAINING_HARDENING.md` for current disposition and remaining consumers.
+M06 changes the gallery surface from normalized ambient identity to exact-owner
+manifest/object authority. Gallery display is an authorization boundary: login
+being disabled cannot assign legacy ownership, and an unavailable store cannot
+be interpreted as an empty successful list. `usage` and other remaining stores
+retain their own open milestones. Use `current_owner()` or an explicitly bound
+exact principal at gallery boundaries; `current_user()` is intentionally lossy.
+No end-to-end repository ownership claim follows from one scoped store batch.
 
 **Quarantine restricts; it must never be a way to gain something.** Two
 mistakes are easy here and both were made before being corrected.
@@ -710,3 +711,31 @@ exclusive staging refuses an existing file. This is not a claim to identify the
 cause of a Windows access-denied error or to support multiple Windows writers.
 The shared publisher change requires fresh owned PostgreSQL evidence; previous
 results cannot be carried forward as byte-identical validation. See CMP11.
+
+
+## M06 gallery/media authority and recovery
+
+The gallery-v2 authority binds exact owner, image ID/content revision, operation
+ID and request identity. Generation/editing admits bounded inputs before provider
+work; immutable validated image bytes become visible only through a committed
+manifest. Stable operation receipts distinguish success, refusal and uncertain
+execution. Recovery never calls the provider, and unknown execution cannot imply
+zero billing. Source and delete expectations prevent a stale name from mutating
+a different image. Removed blobs remain recovery data, not certified erasure.
+
+Explicit operator legacy review/claim preserves flat and old normalized-owner
+originals, records attribution and exposes conflicts. Normal gallery routes
+cannot infer ownership from account settings, name spelling or a legacy path.
+Unsigned local receipts remain under the trusted state administrator. Hashes
+bind bytes; they do not independently attest historical attribution.
+
+The shared sandbox file tools remain a separate trust boundary and can still
+reach workspace files under their existing authority. Windows retains its
+single-process state-directory restriction; POSIX locks are not distributed
+sessions/quota/HA support. M09 inventory includes objects, manifests, receipts,
+tombstones, pending/recovery files, claims/locks and conversation/tool/backup
+references. M14 actual-host custody and backup/restore proof remain separate.
+
+See `M06_GALLERY_MEDIA_LIFECYCLE.md` for the finite acceptance contract and
+current validation/delivery status. No live execution or operational activation
+is authorized by this implementation.
