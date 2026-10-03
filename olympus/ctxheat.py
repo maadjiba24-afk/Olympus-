@@ -1,77 +1,12 @@
-"""Context & skill heat — measured USEFULNESS, not frequency (Wave-2 C2).
+"""Exact-owner context heat and recoverable, externally gated pins (M07).
 
-Nothing in Olympus learns which context items (typed memories, wiki pages,
-skills) actually *earn* their tokens. Retrieval is scored lexically per turn and
-forgotten; a page that was retrieved a hundred times and never helped costs the
-same as one that carried the answer. Colibri's expert-heat principle translated
-to context placement — with the one change that matters: **heat is scored from
-measured usefulness, not from raw frequency.** Retrieval is the weakest signal
-in the formula; a VERIFIER-ACCEPTED use outweighs a hundred retrievals.
-
-Invariants (WAVE2 spec W2-C2):
-  W2-I2.1  CONTENT-MINIMISED. An entry stores exactly `_ENTRY_FIELDS`:
-           `{id, kind, hits, useful, verifier_ok, reuse, avoided_cost,
-           avoided_latency, corrections, last, first, provenance}` — ids,
-           counters, timestamps and a label from a CLOSED vocabulary. There is
-           no API that accepts item text: `record()` takes no content parameter
-           (passing one is a `TypeError`), `kind`/`provenance` must come from
-           the fixed vocabularies, and an `item_id` outside `_ID_CHARS` (so:
-           anything that looks like prose) is REFUSED. A ledger that somehow
-           grows an extra field is quarantined on read, never half-parsed —
-           text cannot enter the prompt through this door.
-  W2-I2.2  ISOLATION. `MEMORY_DIR/users/<safe_id(user)>/context_heat.json` per
-           user, `MEMORY_DIR/context_heat.json` for the global/shared scope.
-           A global item never inherits per-user heat and vice versa; a hostile
-           user id is sanitised through `memory.safe_id` and the resolved path
-           is re-checked to be inside `MEMORY_DIR` before any write.
-  W2-I2.3  PIN POLICY. Proposals are bounded by a token budget and a max pin
-           count, incumbents carry a HYSTERESIS margin (no ping-pong on
-           near-ties), heat DECAYS (halves per half-life, applied lazily at
-           read time from timestamps — no write storm), and a genuinely hot
-           item (>= `protect_n()` verifier-accepted uses) cannot be displaced
-           by a never-useful challenger.
-  W2-I2.4  BENCHMARK GATE. `apply_pins()` writes a pin set only after an
-           injected `gate_fn(before, after) -> bool` returns True — the same
-           discipline as `orchestrator.gate_prompt` (a pin IS prompt content,
-           so there is no unmeasured pin-set write path). A missing gate, a
-           failing gate, or a gate that raises all REFUSE.
-  W2-I2.5  ROLLBACK. `OLYMPUS_CTXHEAT=off` (the default) is fully inert — no
-           file is written, no proposal is computed. `shadow` records heat and
-           computes proposals but applies nothing: `apply_pins()` only logs the
-           counterfactual. Placement stays static in both.
-
-Poisoning resistance. The promotion signal is EXTERNAL: only
-`record_verifier_outcome(item_id, accepted, source=...)` can move the
-`verifier_ok` counter, and only for a `source` in `TRUSTED_VERIFIER_SOURCES`.
-The recording path cannot self-grant it — `record(verifier_accepted=True)` is
-accepted for signature compatibility and DELIBERATELY IGNORED (counted in
-`stats()["verifier_claims_refused"]`). Self-reported `useful=True` contributes a
-saturating term capped at `SELF_REPORT_CAP` (below the weight of a SINGLE
-verifier acceptance) and pin eligibility additionally requires
-`verifier_ok >= min_verified()`, so an item that farms its own usefulness can
-never reach the pinned prefix. Claimed savings are bounds-validated.
-
-Failure. A missing ledger means static placement (empty proposals). A corrupt
-or tampered ledger is QUARANTINED aside (reject-never-repair) and the store
-starts fresh and empty. Nothing here raises into a caller.
-
-------------------------------------------------------------------------------
-PROVISIONAL CONSTANTS — NOT CALIBRATED. (Wave-1 audit directive: no inherited
-constants.) Every value in `PROVISIONAL_CONSTANTS` below is a placeholder taken
-from the design note, NOT derived from Olympus swap/pin telemetry — the
-telemetry does not exist yet, which is precisely why this ships in shadow mode.
-They are env-overridable so calibration can sweep them, and `apply_pins()`
-refuses to apply a pin set unless an explicit benchmark gate has passed, which
-is the only thing that makes an uncalibrated constant safe to run.
-Calibration owner: `CALIBRATION_OWNER` (see docs/absorption/02-memory-hierarchy
-rubrics 2-3 and docs/absorption/WAVE2_IMPLEMENTATION_SPEC.md W2-C2).
-------------------------------------------------------------------------------
-
-Scope note: this PR builds the LIBRARY. It is deliberately NOT wired into
-`recall`/`wiki`/`skills`/`orchestrator` — nothing imports it, nothing consumes a
-pin set (that wiring is a later PR, gated on calibration). It ships inert.
+Default-off; shadow records proposals without promotion. PROVISIONAL policy
+cannot activate. Unavailable/unclaimed state is preserved and cannot qualify.
+Telemetry alone cannot promote; owned completed verifier receipts bind exact
+owner, source revision, run and non-replaying event identity. The existing
+provisional policy remains unqualified for activation. Broader verifier and
+benchmark qualification belongs to M15/M16; native process locking to M13.
 """
-
 from __future__ import annotations
 
 import json
@@ -79,10 +14,13 @@ import math
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import config, memory, proclock
+from . import config, memory
+from . import ctxheat_state as state
+import copy
+import contextlib
 
 # --- modes ----------------------------------------------------------------
 OFF, SHADOW, ON = "off", "shadow", "on"
@@ -245,13 +183,13 @@ def enabled() -> bool:
 
 def hysteresis() -> float:
     """PROVISIONAL. Fractional margin a challenger must beat an incumbent by."""
-    return max(0.0, _float_env("OLYMPUS_CTXHEAT_HYSTERESIS", DEFAULT_HYSTERESIS))
+    return min(100.0, max(0.0, _float_env("OLYMPUS_CTXHEAT_HYSTERESIS", DEFAULT_HYSTERESIS)))
 
 
 def halflife_days() -> float:
     """PROVISIONAL. Heat halves after this many days without use."""
-    return max(0.01, _float_env("OLYMPUS_CTXHEAT_HALFLIFE_DAYS",
-                                DEFAULT_HALFLIFE_DAYS))
+    return min(36500.0, max(0.01, _float_env("OLYMPUS_CTXHEAT_HALFLIFE_DAYS",
+                                DEFAULT_HALFLIFE_DAYS)))
 
 
 def protect_n() -> int:
@@ -263,17 +201,17 @@ def protect_n() -> int:
 def min_verified() -> int:
     """PROVISIONAL. Verifier acceptances required before an item is pinnable at
     all — the hard half of the poisoning defence."""
-    return max(0, _int_env("OLYMPUS_CTXHEAT_MIN_VERIFIED", DEFAULT_MIN_VERIFIED))
+    return max(1, _int_env("OLYMPUS_CTXHEAT_MIN_VERIFIED", DEFAULT_MIN_VERIFIED))
 
 
 def max_swaps() -> int:
     """PROVISIONAL. Pin-set changes allowed in one proposal (cache stability)."""
-    return max(0, _int_env("OLYMPUS_CTXHEAT_MAX_SWAPS", DEFAULT_MAX_SWAPS))
+    return min(1000, max(0, _int_env("OLYMPUS_CTXHEAT_MAX_SWAPS", DEFAULT_MAX_SWAPS)))
 
 
 def max_pins() -> int:
     """PROVISIONAL. Hard cap on the number of pinned items."""
-    return max(0, _int_env("OLYMPUS_CTXHEAT_MAX_PINS", DEFAULT_MAX_PINS))
+    return min(1000, max(0, _int_env("OLYMPUS_CTXHEAT_MAX_PINS", DEFAULT_MAX_PINS)))
 
 
 def pin_budget_tokens() -> int:
@@ -290,19 +228,19 @@ def provisional() -> bool:
 def _to_float(raw):
     try:
         val = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return val if math.isfinite(val) else None
 
 
 def _float_env(name: str, default: float) -> float:
     val = _to_float(os.environ.get(name, "").strip())
-    return default if val is None else val
+    return default if val is None or abs(val) > 1000000 else val
 
 
 def _int_env(name: str, default: int) -> int:
     val = _to_float(os.environ.get(name, "").strip())
-    return default if val is None else int(val)
+    return default if val is None or abs(val) > 1000000 or not val.is_integer() else int(val)
 
 
 def _num(value, default: float = 0.0) -> float:
@@ -326,83 +264,6 @@ def key(kind: str, item_id: str) -> str:
     return f"{kind}:{item_id}"
 
 
-def scope_of(user: str | None) -> str:
-    """`global` or `user:<safe_id>` — the isolation boundary, as a label."""
-    if user is None or str(user).strip() == "" or str(user) == "shared":
-        return "global"
-    return f"user:{memory.safe_id(user)}"
-
-
-def _scope_dir(user: str | None) -> Path | None:
-    """The directory holding this scope's ledger, or None if it would escape.
-
-    Hostile ids are sanitised by `memory.safe_id` (which cannot emit `/`, `.`
-    or an empty string); the resolved path is then re-checked to be inside
-    MEMORY_DIR — belt and braces, because this is the one place a caller-
-    supplied string touches the filesystem."""
-    base = Path(config.MEMORY_DIR)
-    if user is None or str(user).strip() == "" or str(user) == "shared":
-        target = base
-    else:
-        target = base / "users" / memory.safe_id(user)
-    try:
-        root = base.resolve()
-        resolved = target.resolve()
-        if resolved != root and root not in resolved.parents:
-            _capture("ctxheat.scope_escape",
-                     ValueError("resolved path outside MEMORY_DIR"),
-                     context=str(target))
-            return None
-    except OSError as err:                   # pragma: no cover - fs edge
-        _capture("ctxheat.scope_resolve", err, context=str(target))
-        return None
-    return target
-
-
-def ledger_path(user: str | None = None) -> Path | None:
-    d = _scope_dir(user)
-    return None if d is None else d / _LEDGER_NAME
-
-
-def pins_path(user: str | None = None) -> Path | None:
-    d = _scope_dir(user)
-    return None if d is None else d / _PINS_NAME
-
-
-def shadow_log_path(user: str | None = None) -> Path | None:
-    d = _scope_dir(user)
-    return None if d is None else d / _SHADOW_NAME
-
-
-def _lock_name(user: str | None) -> str:
-    return f"ctxheat-{scope_of(user)}"
-
-
-def _atomic_write_json(path: Path, obj) -> None:
-    """tmp + `os.replace` publish (ADR 0005) — a reader never sees a torn
-    ledger, and a crash leaves the previous good file intact.
-
-    DELIBERATELY NOT FSYNCED (W1-1b). Reached from `record()` -> `_apply()`,
-    a locked read-modify-write, and `recall._heat_record` calls that once per
-    RETRIEVED MEMORY on a path `orchestrator` runs every turn
-    (`recall.context_block`, orchestrator.py:531/1195/2307) — so this writes
-    more often per turn than `usage.record` does, where W1-1's per-call fsync
-    broke the observability contract. `OLYMPUS_CTXHEAT` defaults to `off`,
-    which means a default install would not have caught the regression and an
-    operator enabling heat would have absorbed it silently.
-
-    No knob: heat is telemetry by construction ("never a retrieval
-    dependency"), so a power cut costs pin-proposal quality, not correctness or
-    a safety control. Atomicity is unchanged."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    from . import atomicio
-    atomicio.publish(tmp, path, json.dumps(obj, indent=1, sort_keys=True),
-                     fsync=False)
-
-
-# --- entry validation (W2-I2.1 content minimisation) ----------------------
-
 def _clean_id(item_id) -> str | None:
     """An item id, or None if it is not a reference-shaped token.
 
@@ -410,12 +271,12 @@ def _clean_id(item_id) -> str | None:
     turn a sentence of user text into a dashed slug and store it. An id must
     already look like what the gated stores emit — a uuid, a slug, a path-free
     token."""
-    text = str(item_id if item_id is not None else "").strip()
-    return text if _ID_CHARS.match(text) else None
+    text = item_id if isinstance(item_id, str) else ""
+    return text if _ID_CHARS.fullmatch(text) else None
 
 
 def _clean_kind(kind) -> str | None:
-    text = str(kind if kind is not None else "").strip().lower()
+    text = kind if isinstance(kind, str) else ""
     return text if text in KINDS else None
 
 
@@ -442,247 +303,29 @@ def _entry_ok(entry) -> bool:
         return False
     if set(entry) != set(_ENTRY_FIELDS):
         return False
-    if _clean_id(entry.get("id")) != entry.get("id"):
+    if _clean_id(entry.get("id")) is None or _clean_id(entry.get("id")) != entry.get("id"):
         return False
-    if _clean_kind(entry.get("kind")) != entry.get("kind"):
+    if _clean_kind(entry.get("kind")) is None or _clean_kind(entry.get("kind")) != entry.get("kind"):
         return False
     if entry.get("provenance") not in PROVENANCES:
         return False
     for name in _COUNTER_FIELDS:
         val = entry.get(name)
-        if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+        if not isinstance(val, int) or isinstance(val, bool) or not 0 <= val <= state.MAX_COUNT:
             return False
     for name in _FLOAT_FIELDS:
         val = entry.get(name)
         if isinstance(val, bool) or not isinstance(val, (int, float)):
             return False
-        if not math.isfinite(float(val)) or float(val) < 0:
+        if not 0 <= val <= state.MAX_TIME or not math.isfinite(val):
             return False
-    return True
-
-
-# --- ledger I/O (corrupt => quarantine, never repair, never raise) --------
-
-def _quarantine(path: Path, reason: str) -> Path | None:
-    dest = path.with_name(f"{path.stem}.corrupt.{time.time():.0f}{path.suffix}")
-    try:
-        if path.exists():
-            os.replace(path, dest)
-    except OSError as err:                   # pragma: no cover - fs edge
-        _capture("ctxheat.quarantine", err, context=str(path))
-        return None
-    _STATS["quarantined"] += 1
-    _capture("ctxheat.ledger_corrupt", ValueError(reason), context=str(dest))
-    return dest
-
-
-def _load(user: str | None = None) -> dict:
-    """Every entry for a scope, keyed by `kind:id`. `{}` when absent/corrupt."""
-    path = ledger_path(user)
-    if path is None or not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as err:
-        _quarantine(path, f"unreadable ledger: {type(err).__name__}")
-        return {}
-    if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
-        _quarantine(path, "missing or unsupported schema_version")
-        return {}
-    entries = raw.get("entries")
-    if not isinstance(entries, dict):
-        _quarantine(path, "entries is not an object")
-        return {}
-    out: dict[str, dict] = {}
-    for ekey, entry in entries.items():
-        if not _entry_ok(entry):
-            _quarantine(path, f"entry {ekey!r} violates the entry contract")
-            return {}
-        if ekey != key(entry["kind"], entry["id"]):
-            _quarantine(path, f"entry key {ekey!r} does not match its id/kind")
-            return {}
-        out[ekey] = dict(entry)
-    return out
-
-
-def _prune(entries: dict, now: float, keep: str | None = None) -> dict:
-    """Bound the ledger; the coldest (lowest scored) entries go first.
-
-    `keep` is the entry being written by this call — a brand-new item starts
-    cold by construction, and dropping it here would mean an item could never
-    accumulate heat once the ledger is full."""
-    if len(entries) <= _MAX_ENTRIES:
-        return entries
-    ranked = sorted(entries.items(),
-                    key=lambda kv: (kv[0] != keep, -score(kv[1], now=now),
-                                    kv[0]))
-    return dict(ranked[:_MAX_ENTRIES])
-
-
-def _save(entries: dict, user: str | None, now: float,
-          keep: str | None = None) -> bool:
-    path = ledger_path(user)
-    if path is None:
+    if entry['first'] > entry['last']:
         return False
-    try:
-        _atomic_write_json(path, {"schema_version": SCHEMA_VERSION,
-                                  "scope": scope_of(user),
-                                  "updated": now,
-                                  "entries": _prune(entries, now, keep)})
-    except (OSError, ValueError) as err:
-        _capture("ctxheat.save", err, context=str(path))
+    if entry['avoided_cost'] > MAX_AVOIDED_COST_USD or entry['avoided_latency'] > MAX_AVOIDED_LATENCY_MS:
         return False
     return True
 
 
-def entries(user: str | None = None) -> dict:
-    """Public read of a scope's entries (a copy). `{}` when the flag is off."""
-    if not enabled():
-        return {}
-    return _load(user)
-
-
-def entry(item_id: str, kind: str, *, user: str | None = None) -> dict | None:
-    """One entry, or None. Read-only; never creates anything."""
-    return entries(user).get(key(kind, str(item_id)))
-
-
-def stats() -> dict:
-    """Process-local counters: recorded / rejected / refused verifier claims /
-    quarantined ledgers. Deliberately not persisted — a poisoning attempt must
-    not be able to write anything at all."""
-    return dict(_STATS)
-
-
-# --- recording ------------------------------------------------------------
-
-def record(item_id, kind, *, retrieved: bool = False, useful=None,
-           verifier_accepted=None, reused: bool = False,
-           avoided_cost_usd: float = 0.0, avoided_latency_ms: float = 0,
-           corrected: bool = False, user: str | None = None,
-           provenance: str = "unknown", now: float | None = None) -> bool:
-    """Record one observation about a context item. Returns True if persisted.
-
-    There is NO content parameter and there never will be (W2-I2.1) — this
-    function's signature is the content-minimisation contract: passing
-    `content=`/`text=`/`snippet=` is a `TypeError`, not a silently dropped
-    field.
-
-    `verifier_accepted` is accepted for signature compatibility and IGNORED:
-    the recording path cannot grant itself the promotion signal. Use
-    `record_verifier_outcome()`, which demands a trusted external source. A
-    claim made here is counted in `stats()["verifier_claims_refused"]`.
-
-    `useful=True` is a SELF-REPORT: it is stored, but its total contribution to
-    the score saturates at `SELF_REPORT_CAP` (less than one verifier
-    acceptance) and it never satisfies pin eligibility.
-
-    Bounds-validated: an unknown `kind`, a prose-shaped `item_id`, a negative or
-    absurd saving is REFUSED (counted in `stats()["rejected"]`), never raised
-    and never written. Inert when `OLYMPUS_CTXHEAT` is off."""
-    if not enabled():
-        return False
-    if verifier_accepted is not None:
-        _STATS["verifier_claims_refused"] += 1
-    clean_id = _clean_id(item_id)
-    clean_kind = _clean_kind(kind)
-    cost = _to_float(avoided_cost_usd)
-    latency = _to_float(avoided_latency_ms)
-    if (clean_id is None or clean_kind is None
-            or cost is None or not (0.0 <= cost <= MAX_AVOIDED_COST_USD)
-            or latency is None
-            or not (0.0 <= latency <= MAX_AVOIDED_LATENCY_MS)):
-        _STATS["rejected"] += 1
-        return False
-
-    stamp = time.time() if now is None else _num(now, time.time())
-    prov = _clean_provenance(provenance)
-
-    def mutate(current: dict) -> None:
-        if retrieved:
-            current["hits"] += 1
-        if useful is True:
-            current["useful"] += 1
-        if reused:
-            current["reuse"] += 1
-        if corrected:
-            current["corrections"] += 1
-        current["avoided_cost"] = round(current["avoided_cost"] + cost, 6)
-        current["avoided_latency"] = round(
-            current["avoided_latency"] + latency, 3)
-
-    return _apply(clean_id, clean_kind, prov, user, stamp, mutate)
-
-
-def record_verifier_outcome(item_id, accepted: bool, *, source: str,
-                            kind: str | None = None, user: str | None = None,
-                            provenance: str = "orchestrator",
-                            now: float | None = None) -> bool:
-    """The ONLY way `verifier_ok` moves — an EXTERNAL usefulness signal.
-
-    `source` must name a trusted verifier (`TRUSTED_VERIFIER_SOURCES`): the
-    path that injected an item cannot grant it acceptance, and no env var can
-    widen the set. `accepted=False` is recorded as a CORRECTION (measured
-    negative evidence lowers heat rather than being discarded).
-
-    `kind` may be omitted only when exactly one existing entry carries this id;
-    otherwise the outcome is refused rather than attributed to a guess."""
-    if not enabled():
-        return False
-    label = str(source or "").strip().lower()
-    clean_id = _clean_id(item_id)
-    if not label or label not in TRUSTED_VERIFIER_SOURCES or clean_id is None:
-        _STATS["rejected"] += 1
-        return False
-
-    clean_kind = _clean_kind(kind) if kind is not None else None
-    if kind is not None and clean_kind is None:
-        _STATS["rejected"] += 1
-        return False
-    if clean_kind is None:
-        matches = [e for e in _load(user).values() if e["id"] == clean_id]
-        if len(matches) != 1:
-            _STATS["rejected"] += 1
-            return False
-        clean_kind = matches[0]["kind"]
-
-    stamp = time.time() if now is None else _num(now, time.time())
-
-    def mutate(current: dict) -> None:
-        if accepted:
-            current["verifier_ok"] += 1
-        else:
-            current["corrections"] += 1
-
-    return _apply(clean_id, clean_kind, _clean_provenance(provenance), user,
-                  stamp, mutate)
-
-
-def _apply(item_id: str, kind: str, provenance: str, user: str | None,
-           now: float, mutate) -> bool:
-    """Read-modify-write one entry under the scope lock. Never raises."""
-    ekey = key(kind, item_id)
-    try:
-        with proclock.lock(_lock_name(user), timeout=10.0):
-            current = _load(user)
-            current.setdefault(ekey, _new_entry(item_id, kind, provenance, now))
-            mutate(current[ekey])
-            current[ekey]["last"] = max(now, _num(current[ekey].get("last")))
-            current[ekey]["first"] = min(now, _num(current[ekey].get("first"),
-                                                   now))
-            if not _entry_ok(current[ekey]):     # defensive: never write junk
-                _STATS["rejected"] += 1
-                return False
-            ok = _save(current, user, now, keep=ekey)
-    except (OSError, TimeoutError, ValueError) as err:
-        _capture("ctxheat.record", err, context=ekey)
-        return False
-    if ok:
-        _STATS["recorded"] += 1
-    return ok
-
-
-# --- scoring (the core requirement: usefulness != frequency) --------------
 
 def score(entry: dict, *, now: float | None = None,
           halflife: float | None = None) -> float:
@@ -707,17 +350,17 @@ def score(entry: dict, *, now: float | None = None,
     the score is a leaky integrator, not a lifetime count."""
     if not isinstance(entry, dict):
         return 0.0
-    half = halflife_days() if halflife is None else max(0.01, float(halflife))
-    stamp = time.time() if now is None else float(now)
+    half = halflife_days() if halflife is None else max(0.01, min(36500.0, _num(halflife, DEFAULT_HALFLIFE_DAYS)))
+    stamp = time.time() if now is None else max(0.0, min(state.MAX_TIME, _num(now)))
 
-    verifier_ok = max(0.0, _num(entry.get("verifier_ok")))
-    reuse = max(0.0, _num(entry.get("reuse")))
+    verifier_ok = min(state.MAX_COUNT, max(0.0, _num(entry.get("verifier_ok"))))
+    reuse = min(state.MAX_COUNT, max(0.0, _num(entry.get("reuse"))))
     cost = min(max(0.0, _num(entry.get("avoided_cost"))), MAX_AVOIDED_COST_USD)
     latency_ms = min(max(0.0, _num(entry.get("avoided_latency"))),
                      MAX_AVOIDED_LATENCY_MS)
-    hits = max(0.0, _num(entry.get("hits")))
-    useful = max(0.0, _num(entry.get("useful")))
-    corrections = max(0.0, _num(entry.get("corrections")))
+    hits = min(state.MAX_COUNT, max(0.0, _num(entry.get("hits"))))
+    useful = min(state.MAX_COUNT, max(0.0, _num(entry.get("useful"))))
+    corrections = min(state.MAX_COUNT, max(0.0, _num(entry.get("corrections"))))
 
     measured = (W_VERIFIER * verifier_ok
                 + W_REUSE * reuse
@@ -740,8 +383,8 @@ def est_tokens_for(entry: dict, est_tokens: dict | None = None) -> int:
         for candidate in (ekey, entry.get("id")):
             if candidate in est_tokens:
                 val = _to_float(est_tokens[candidate])
-                if val is not None and val > 0:
-                    return int(val)
+                if val is not None and 0 < val <= 1000000:
+                    return max(1, math.ceil(val))
     return int(DEFAULT_EST_TOKENS.get(entry.get("kind", ""), 200))
 
 
@@ -753,7 +396,7 @@ def explain(item_id: str, kind: str, *, user: str | None = None,
     if not found:
         return {"found": False, "id": str(item_id), "kind": str(kind),
                 "scope": scope_of(user), "score": 0.0}
-    stamp = time.time() if now is None else float(now)
+    stamp = time.time() if now is None else max(0.0, min(state.MAX_TIME, _num(now)))
     verifier_ok = int(_num(found.get("verifier_ok")))
     return {
         "found": True, "id": found["id"], "kind": found["kind"],
@@ -857,9 +500,9 @@ class _Cand:
         return self.verifier_ok >= protect_n()
 
 
-def propose_pins(budget_tokens: int | None = None, *, user: str | None = None,
+def _select(budget_tokens: int | None = None, *, user: str | None = None,
                  now: float | None = None, est_tokens: dict | None = None,
-                 incumbents=None) -> list[PinProposal]:
+                 incumbents=None, _ledger=None) -> list[PinProposal]:
     """Propose the pin set for a scope. NEVER applies anything.
 
     Selection is by **value density** (score per token, the fix for Colibri's
@@ -884,8 +527,8 @@ def propose_pins(budget_tokens: int | None = None, *, user: str | None = None,
         return []
     budget = pin_budget_tokens() if budget_tokens is None else max(
         0, int(_num(budget_tokens)))
-    stamp = time.time() if now is None else float(now)
-    ledger = _load(user)
+    stamp = time.time() if now is None else max(0.0, min(state.MAX_TIME, _num(now)))
+    ledger = _ledger if _ledger is not None else _load(user)
     incumbent_keys = _incumbent_keys(incumbents, user)
     incumbent_set = set(incumbent_keys)
 
@@ -998,218 +641,686 @@ def _cap_swaps(chosen: list, cands: list, used: int, budget: int,
     return chosen, used
 
 
-# --- applied pin state + the benchmark gate (W2-I2.4) --------------------
 
-def _read_pins(user: str | None = None) -> list[dict]:
-    """The raw applied pin set on disk (ids/kinds only). `[]` when absent or
-    malformed — a damaged pin file means static placement, never an error."""
-    path = pins_path(user)
-    if path is None or not path.exists():
-        return []
+def scope_of(user=None):
+    return 'owner:' + state.owner(user)
+
+
+def _scope_dir(user=None):
+    return state.path(user)
+
+
+def ledger_path(user=None):
+    return state.path(user) / state.STATE
+
+
+def pins_path(user=None):
+    """Pins and heat share one authority; this is a diagnostic path only."""
+    return ledger_path(user)
+
+
+def shadow_log_path(user=None):
+    return ledger_path(user)
+
+
+def _lock_name(user=None):
+    return 'ctxheat-' + state.digest(state.owner(user))
+
+
+def _load(user=None):
+    found = state.read(user)
+    return {} if found is None else found['entries']
+
+
+def entries(user=None):
+    return _load(user) if enabled() else {}
+
+
+def entry(item_id, kind, *, user=None):
+    return entries(user).get(key(kind, item_id))
+
+
+def stats():
+    return dict(_STATS)
+
+
+def _stamp(now=None):
+    value = time.time() if now is None else now
+    state.number(value)
+    return float(value)
+
+
+def memory_revision(user, row):
+    """Revision of the actual prompt item, unaffected by touch/counters."""
+    from . import usermem
+    if type(row) is not dict or row.get('status') != usermem.ACTIVE:
+        return None
+    if (not _clean_id(row.get('id')) or row.get('type') not in usermem.TYPES
+            or not isinstance(row.get('content'), str) or len(row['content']) > 600):
+        raise state.StateError('source_unavailable')
+    return state.digest({'version':1,'owner':state.owner(user),'namespace':'usermem.memories',
+                         'id':row['id'],'type':row['type'],'content':row['content']})
+
+
+def resolve_source(user, kind, item_id):
+    """Only the existing recall memory consumer has a qualified adapter.
+
+    Other kinds may accumulate non-authoritative telemetry, but cannot qualify
+    until their actual producer/consumer receives its own reviewed adapter.
+    This function reads the M02 exact-owner API; it never initializes a store.
+    """
+    if kind != 'memory':
+        return None
+    from . import usermem
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as err:
-        _capture("ctxheat.read_pins", err, context=str(path))
-        return []
-    if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
-        return []
-    out = []
-    for item in raw.get("pins", []) or []:
-        if not isinstance(item, dict):
-            continue
-        iid, knd = _clean_id(item.get("id")), _clean_kind(item.get("kind"))
-        if iid and knd:
-            out.append({"id": iid, "kind": knd,
-                        "pinned_at": _num(item.get("pinned_at")),
-                        "est_tokens": int(_num(item.get("est_tokens"))),
-                        "score": _num(item.get("score"))})
-    return out
+        row = usermem.get_memory(state.owner(user), item_id)
+        rev = memory_revision(user, row)
+    except Exception as exc:
+        raise state.StateError('source_unavailable') from exc
+    if rev is None:
+        return None
+    return {'revision':rev,'est_tokens':len(row['content']) // 4 + 4}
 
 
-def applied_pins(user: str | None = None) -> list[dict]:
-    """The pin set a consumer may act on — EMPTY unless the mode is `on`
-    (W2-I2.5: with the flag off or in shadow, placement is static even if a pin
-    file exists from an earlier experiment)."""
-    if mode() != ON:
+@contextlib.contextmanager
+def _source_guard(user):
+    from . import usermem, owner_evidence
+    try:
+        with usermem._guard(state.owner(user)):
+            yield
+    except owner_evidence.OwnerEvidenceStateError as exc:
+        raise state.StateError('source_unavailable') from exc
+
+
+@contextlib.contextmanager
+def _transaction(user, *, sources=True):
+    # One lock order: the source snapshot first, then the heat authority.
+    # No source changes occur; nested M02 reads use its held snapshot.
+    with _source_guard(user) if sources else contextlib.nullcontext():
+        with state.transaction(user) as held:
+            yield held
+
+
+def _record_entry(data, item_id, kind, prov, stamp, source):
+    ekey = key(kind, item_id)
+    rev = source['revision'] if source else None
+    if ekey in data['entries'] and data['bindings'][ekey] != rev:
+        if len(data['retired']) >= state.MAX_ENTRIES:
+            raise state.StateError('capacity')
+        data['retired'].append({'entry':data['entries'].pop(ekey),
+                                'revision':data['bindings'].pop(ekey), 'serial':data['serial']})
+    if ekey not in data['entries']:
+        if len(data['entries']) >= _MAX_ENTRIES:
+            raise state.StateError('capacity')
+        prior = next((row['entry'] for row in reversed(data['retired'])
+                      if row['revision'] == rev and row['entry']['id'] == item_id
+                      and row['entry']['kind'] == kind), None)
+        data['entries'][ekey] = copy.deepcopy(prior) if prior else _new_entry(item_id, kind, prov, stamp)
+        data['bindings'][ekey] = rev
+    return data['entries'][ekey]
+
+
+def record(item_id, kind, *, retrieved=False, useful=None, verifier_accepted=None,
+           reused=False, avoided_cost_usd=0.0, avoided_latency_ms=0,
+           corrected=False, user=None, provenance='unknown', now=None,
+           source_revision=None):
+    if not enabled():
+        return False
+    if verifier_accepted is not None:
+        _STATS['verifier_claims_refused'] += 1
+    try:
+        exact = state.owner(user)
+        if (_clean_id(item_id) is None or _clean_kind(kind) is None or _clean_id(item_id) != item_id or _clean_kind(kind) != kind
+                or type(retrieved) is not bool or type(reused) is not bool
+                or type(corrected) is not bool or useful not in (None, True, False)
+                or useful is not None and type(useful) is not bool):
+            raise ValueError('invalid observation')
+        state.number(avoided_cost_usd, MAX_AVOIDED_COST_USD)
+        state.number(avoided_latency_ms, MAX_AVOIDED_LATENCY_MS)
+        stamp = _stamp(now)
+        source = resolve_source(exact, kind, item_id)
+        with _transaction(exact, sources=kind == "memory") as (directory, data):
+            source = resolve_source(exact, kind, item_id)
+            if source_revision is not None:
+                state.revision(source_revision)
+                if not source or source['revision'] != source_revision:
+                    raise ValueError('retrieved source changed before recording')
+            current = _record_entry(data,item_id,kind,_clean_provenance(provenance),stamp,source)
+            current['hits'] += int(retrieved)
+            current['useful'] += int(useful is True)
+            current['reuse'] += int(reused)
+            current['corrections'] += int(corrected)
+            current['avoided_cost'] = min(MAX_AVOIDED_COST_USD, round(current['avoided_cost'] + avoided_cost_usd, 6))
+            current['avoided_latency'] = min(MAX_AVOIDED_LATENCY_MS, round(current['avoided_latency'] + avoided_latency_ms, 3))
+            current['last'] = max(stamp,current['last'])
+            current['first'] = min(stamp,current['first'])
+            state.publish(directory,data)
+        _STATS['recorded'] += 1
+        return True
+    except (state.StateError, ValueError, TypeError, OverflowError):
+        _STATS['rejected'] += 1
+        return False
+
+
+def record_verifier_outcome(item_id, accepted, *, source, kind=None, user=None,
+                            provenance='orchestrator', now=None, evidence=None):
+    """Ingest an ALREADY COMPLETED owned verifier receipt; never run a verifier.
+
+    Trusted in-process producers supply exact owner, source, run/event ID,
+    content revision and strict verdict. Labels alone no longer count. The
+    closed vocabulary is not a signature or M15/M16 verifier qualification.
+    There is deliberately no recall producer of these external outcomes.
+    """
+    if not enabled():
+        return False
+    try:
+        exact = state.owner(user)
+        if type(accepted) is not bool or source not in TRUSTED_VERIFIER_SOURCES:
+            raise ValueError('unqualified outcome')
+        state.fields(evidence, 'owner item kind revision source run_id event_id accepted observed_at')
+        if (evidence['owner'] != exact or evidence['item'] != item_id
+                or evidence['source'] != source or evidence['accepted'] is not accepted
+                or kind is not None and evidence['kind'] != kind):
+            raise ValueError('wrong attribution')
+        kind = evidence['kind']
+        if not _clean_id(item_id) or not _clean_kind(kind) or _clean_id(item_id) != item_id or _clean_kind(kind) != kind:
+            raise ValueError('invalid identity')
+        state.token(evidence['run_id']); state.token(evidence['event_id'])
+        state.revision(evidence['revision']); state.number(evidence['observed_at'])
+        if now is not None and _stamp(now) != evidence['observed_at']:
+            raise ValueError('outcome timestamp mismatch')
+        def same_receipt(existing):
+            return existing is not None and {
+                k:v for k,v in existing.items() if k not in ('evidence_digest','recorded_serial')
+            } == evidence
+        prior = state.read(exact)
+        if prior is not None and evidence['event_id'] in prior['events']:
+            # Recovery of a completed receipt does not require the source to
+            # still exist. Confirm persistence without granting fresh evidence.
+            with state.transaction(exact) as (directory, data):
+                return same_receipt(data['events'].get(evidence['event_id']))
+        resolved = resolve_source(exact,kind,item_id)
+        if not resolved or resolved['revision'] != evidence['revision']:
+            raise ValueError('stale or unresolved source')
+        with _transaction(exact) as (directory,data):
+            current_source = resolve_source(exact,kind,item_id)
+            if not current_source or current_source['revision'] != evidence['revision']:
+                raise ValueError('source changed before commit')
+            existing = data['events'].get(evidence['event_id'])
+            if existing is not None:
+                return same_receipt(existing)
+            ekey = key(kind,item_id)
+            current = data['entries'].get(ekey)
+            if not current or data['bindings'][ekey] != evidence['revision'] or current['hits'] == 0:
+                raise ValueError('no attributed retrieval')
+            if len(data['events']) >= state.MAX_EVENTS:
+                raise state.StateError('capacity')
+            event = dict(evidence, recorded_serial=data['serial']+1)
+            event['evidence_digest'] = state.digest(event)
+            data['events'][evidence['event_id']] = event
+            current['verifier_ok' if accepted else 'corrections'] += 1
+            current['last'] = max(current['last'],evidence['observed_at'])
+            state.publish(directory,data)
+        return True
+    except (state.StateError, ValueError, TypeError, OverflowError):
+        _STATS['rejected'] += 1
+        return False
+
+
+def _registry_entry():
+    """Read committed qualification without mutable retest fallback or logging.
+
+    Broader qualification remains a M15/M16 dependency. An unreviewed retest ledger
+    cannot activate M07; a current committed ACTIVE entry and calibrated code
+    are both necessary. No reader writes errors or repairs on damage.
+    """
+    from .gallery_state import Directory, _decode, GalleryError
+    from . import experiments
+    directory = None
+    try:
+        directory = Directory(Path(__file__).absolute().parent)
+        registry = _decode(directory.read('experiments.json', 1024 * 1024))
+        state.fields(registry, 'version entries')
+        if type(registry['version']) is not int or registry['version'] != 1:
+            raise ValueError('unsupported registry')
+        state.collection(registry['entries'], list, 1000)
+        ids = set()
+        found = None
+        for item in registry['entries']:
+            if type(item) is not dict or not isinstance(item.get('id'), str) or item['id'] in ids:
+                raise ValueError('invalid registry identity')
+            ids.add(item['id'])
+            if item['id'] == 'ctxheat-provisional-constants':
+                if set(item) != set(experiments.REQUIRED_FIELDS) or any(
+                        not isinstance(value, str) or len(value) > 16384 for value in item.values()):
+                    raise ValueError('invalid qualification')
+                found = item
+        return found
+    except (OSError, ValueError, GalleryError) as exc:
+        raise state.StateError('qualification_unavailable') from exc
+    finally:
+        if directory is not None:
+            directory.close()
+
+
+def promotion_qualified():
+    import datetime
+    registered = _registry_entry()
+    if PROVISIONAL is not False or not registered or registered.get('status') != 'active':
+        return False
+    try:
+        tested = datetime.date.fromisoformat(registered['last_tested'])
+        review = datetime.date.fromisoformat(registered['next_review'])
+        today = datetime.date.today()
+        return tested <= today <= review and bool(registered['outcome'].strip())
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _policy():
+    return {'hysteresis':hysteresis(),'halflife':halflife_days(),'protect_n':protect_n(),
+            'min_verified':min_verified(),'max_swaps':max_swaps(),'max_pins':max_pins(),
+            'budget':pin_budget_tokens(),'mode':mode(),'qualified':promotion_qualified(),
+            'registry':state.digest(_registry_entry())}
+
+
+def _rollback_policy():
+    """A nonqualifying receipt needs neither registry nor source availability."""
+    return {'hysteresis':DEFAULT_HYSTERESIS,'halflife':DEFAULT_HALFLIFE_DAYS,
+            'protect_n':DEFAULT_PROTECT_N,'min_verified':DEFAULT_MIN_VERIFIED,
+            'max_swaps':DEFAULT_MAX_SWAPS,'max_pins':DEFAULT_MAX_PINS,
+            'budget':DEFAULT_PIN_BUDGET_TOKENS,'mode':OFF,'qualified':False,
+            'registry':state.digest(None)}
+
+
+def _sources(data):
+    with _source_guard(data['owner']):
+        return _sources_unlocked(data)
+
+
+def _sources_unlocked(data):
+    sources, estimates = {}, {}
+    for ekey, item in data['entries'].items():
+        resolved = resolve_source(data['owner'],item['kind'],item['id'])
+        if resolved is not None and data['bindings'][ekey] == resolved['revision']:
+            state.revision(resolved['revision']); state.integer(resolved['est_tokens'],1,1000000)
+            sources[ekey] = resolved['revision']
+            estimates[ekey] = resolved['est_tokens']
+    return sources, estimates
+
+
+def _binding(data, stamp):
+    sources, estimates = _sources(data)
+    return {'owner':data['owner'],'nonce':data['nonce'],'serial':data['serial'],
+            'at':stamp,'ledger':state.digest({'entries':data['entries'],'bindings':data['bindings']}),
+            'pins':state.digest(data['pins']),'policy':_policy(),
+            'sources':sources,'estimates':estimates}
+
+
+def _validate_binding(binding, exact):
+    state.fields(binding,'owner nonce serial at ledger pins policy sources estimates')
+    if binding['owner'] != exact:
+        raise ValueError('wrong proposal owner')
+    state.token(binding['nonce']); state.integer(binding['serial']); state.number(binding['at'])
+    state.revision(binding['ledger']); state.revision(binding['pins'])
+    policy = binding['policy']
+    state.fields(policy,'hysteresis halflife protect_n min_verified max_swaps max_pins budget mode qualified registry')
+    state.number(policy['hysteresis'],100); state.number(policy['halflife'],36500)
+    if policy['halflife'] < .01:
+        raise ValueError('invalid half-life')
+    for name in ('protect_n','min_verified'):
+        state.integer(policy[name],1,1000000)
+    state.integer(policy['max_swaps'],0,1000); state.integer(policy['max_pins'],0,1000)
+    state.integer(policy['budget'],0,1000000); state.revision(policy['registry'])
+    if policy['mode'] not in (OFF,SHADOW,ON) or type(policy['qualified']) is not bool:
+        raise ValueError('invalid policy')
+    state.collection(binding['sources'],dict,_MAX_ENTRIES)
+    state.collection(binding['estimates'],dict,_MAX_ENTRIES)
+    if set(binding['sources']) != set(binding['estimates']):
+        raise ValueError('missing measured size')
+    for ekey, rev in binding['sources'].items():
+        knd, sep, iid = ekey.partition(':')
+        if not sep or _clean_id(iid) != iid or _clean_kind(knd) != knd:
+            raise ValueError('invalid source reference')
+        state.revision(rev); state.integer(binding['estimates'][ekey],1,1000000)
+
+
+def _validate_proposals(rows):
+    state.collection(rows,list,2000)
+    seen = set()
+    for row in rows:
+        state.fields(row,'id kind action score est_tokens verifier_ok reason')
+        if (not _clean_id(row['id']) or not _clean_kind(row['kind']) or _clean_id(row['id']) != row['id'] or _clean_kind(row['kind']) != row['kind']
+                or row['action'] not in (KEEP,ADD,DROP)
+                or row['reason'] not in ('incumbent_retained','highest_value_density','displaced','stale_or_ineligible')):
+            raise ValueError('invalid proposal')
+        state.number(row['score'],1e12); state.integer(row['est_tokens'],0 if row['action']==DROP else 1,1000000)
+        state.integer(row['verifier_ok'])
+        ekey = key(row['kind'],row['id'])
+        if ekey in seen:
+            raise ValueError('duplicate proposal')
+        seen.add(ekey)
+
+
+@dataclass(frozen=True)
+class ProposalSet:
+    items: tuple
+    binding: dict
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+
+def propose_pins(budget_tokens=None, *, user=None, now=None, est_tokens=None, incumbents=None):
+    if not enabled():
         return []
-    return _read_pins(user)
+    data = state.read(user)
+    if data is None:
+        return []
+    stamp = _stamp(now)
+    binding = _binding(data,stamp)
+    _validate_binding(binding,data['owner'])
+    # Caller hints may increase estimates, never make a measured source cheaper.
+    estimates = dict(binding['estimates'])
+    if est_tokens is not None:
+        state.collection(est_tokens,dict,_MAX_ENTRIES)
+        for ekey in estimates:
+            iid = ekey.partition(':')[2]
+            hinted = est_tokens.get(ekey,est_tokens.get(iid,estimates[ekey]))
+            state.integer(hinted,1,1000000)
+            estimates[ekey] = max(estimates[ekey],hinted)
+    # A non-default exploratory budget/incumbent list is a pure scenario, never
+    # authority. Apply recomputes the authoritative policy before a gate runs.
+    budget = pin_budget_tokens() if budget_tokens is None else budget_tokens
+    state.integer(budget,0,1000000)
+    ledger = {k:e for k,e in data['entries'].items() if k in binding['sources']}
+    pins = data['pins'] if incumbents is None else incumbents
+    items = _select(budget,user=data['owner'],now=stamp,est_tokens=estimates,incumbents=pins,_ledger=ledger)
+    return ProposalSet(tuple(items),binding)
+
+
+def _rows(proposals):
+    if not isinstance(proposals,ProposalSet):
+        raise ValueError('an attributed proposal set is required')
+    for p in proposals:
+        if type(p) is not PinProposal or type(p.est_tokens) is not int or type(p.verifier_ok) is not int or type(p.score) not in (int,float):
+            raise ValueError('invalid proposal types')
+    rows = [p.to_dict() for p in proposals]
+    _validate_proposals(rows)
+    return rows
+
+
+def _matches(data, binding, expected_serial):
+    if data['serial'] != expected_serial:
+        return False
+    fresh = _binding(data,binding['at'])
+    fresh['serial'] = binding['serial']
+    return fresh == binding
+
+
+def _authoritative(data, binding):
+    ledger = {k:e for k,e in data['entries'].items() if k in binding['sources']}
+    return [p.to_dict() for p in _select(binding['policy']['budget'],user=data['owner'],
+            now=binding['at'],est_tokens=binding['estimates'],incumbents=data['pins'],_ledger=ledger)]
 
 
 @dataclass(frozen=True)
 class ApplyResult:
-    """The outcome of an application attempt — always explicit, never silent."""
-
     applied: bool
     reason: str
-    scope: str = "global"
+    scope: str = ''
     mode: str = OFF
     pins: list = field(default_factory=list)
     counterfactual: dict = field(default_factory=dict)
     gate_called: bool = False
+    operation_id: str | None = None
+    active: bool = False
 
-    def to_dict(self) -> dict:
-        return {"applied": self.applied, "reason": self.reason,
-                "scope": self.scope, "mode": self.mode, "pins": list(self.pins),
-                "counterfactual": dict(self.counterfactual),
-                "gate_called": self.gate_called}
+    def to_dict(self):
+        return dict(self.__dict__)
 
 
-def counterfactual(proposals, *, user: str | None = None,
-                   now: float | None = None) -> dict:
-    """What WOULD change if this proposal were applied — ids and counts only."""
-    stamp = time.time() if now is None else float(now)
+def _result(reason, user, operation_id=None, gate_called=False, applied=False, pins=None, active=False):
+    try:
+        scope = scope_of(user)
+    except state.StateError:
+        scope = ''
+    return ApplyResult(applied,reason,scope,mode(),pins or [],{},gate_called,operation_id,active)
+
+
+def _operation_pins(op):
+    return [{'id':p['id'],'kind':p['kind'],'pinned_at':op['created'],
+             'score':p['score'],'est_tokens':p['est_tokens'],'verifier_ok':p['verifier_ok'],
+             'revision':op['binding']['sources'][key(p['kind'],p['id'])]}
+            for p in op['proposals'] if p['action'] != DROP]
+
+
+def _replayed(data, operation_id):
+    op=data['operations'][operation_id]
+    applied=op['status']=='applied'
+    active=bool(data['gate'] and data['gate']['operation_id']==operation_id)
+    return _result(op['status'],data['owner'],operation_id,applied=applied,
+                   pins=_operation_pins(op) if applied else [],active=active)
+
+
+def counterfactual(proposals, *, user=None, now=None):
+    rows = [p.to_dict() for p in proposals or []]
+    _validate_proposals(rows)
     keeps = [p for p in proposals or [] if p.action == KEEP]
     adds = [p for p in proposals or [] if p.action == ADD]
     drops = [p for p in proposals or [] if p.action == DROP]
-    return {
-        "ts": stamp, "scope": scope_of(user), "mode": mode(),
-        "provisional": provisional(),
-        "pins": sorted(p.key for p in keeps + adds),
-        "add": sorted(p.key for p in adds),
-        "drop": sorted(p.key for p in drops),
-        "keep": sorted(p.key for p in keeps),
-        "tokens": sum(int(p.est_tokens) for p in keeps + adds),
-        "swaps": len(adds),
-    }
+    return {'ts':_stamp(now),'scope':scope_of(user),'mode':mode(),'provisional':provisional(),
+            'pins':sorted(p.key for p in keeps+adds),'add':sorted(p.key for p in adds),
+            'drop':sorted(p.key for p in drops),'keep':sorted(p.key for p in keeps),
+            'tokens':sum(p.est_tokens for p in keeps+adds),'swaps':len(adds)}
 
 
-def _log_counterfactual(record_row: dict, user: str | None) -> None:
-    """Append the shadow row (bounded). Best-effort; never raises."""
-    path = shadow_log_path(user)
-    if path is None:
-        return
+def gate_pins(proposals, gate_fn=None, *, user=None, operation_id=None, now=None):
+    if mode() == OFF:
+        return _result('off',user,operation_id)
+    called = False
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record_row, sort_keys=True) + "\n")
-        lines = path.read_text(encoding="utf-8").splitlines()
-        if len(lines) > _MAX_SHADOW_ROWS:
-            path.write_text("\n".join(lines[-_MAX_SHADOW_ROWS:]) + "\n",
-                            encoding="utf-8")
-    except (OSError, ValueError) as err:
-        _capture("ctxheat.shadow_log", err, context=str(path))
+        exact = state.owner(user)
+        stamp = _stamp(now)
+        rows = _rows(proposals)
+        binding = copy.deepcopy(proposals.binding)
+        _validate_binding(binding,exact)
+        if mode() == SHADOW or gate_fn is None:
+            reason = 'shadow' if mode() == SHADOW else 'no_benchmark_gate'
+            with _transaction(exact) as (directory,data):
+                if not _matches(data,binding,binding['serial']):
+                    return _result('stale',exact,operation_id)
+                state.shadow(data,reason,rows,stamp); state.publish(directory,data)
+            return _result(reason,exact,operation_id)
+        state.token(operation_id)
+        if not promotion_qualified():
+            return _result('promotion_unqualified',exact,operation_id)
+        request = state.digest({'binding':binding,'proposals':rows,'kind':'gate'})
+        with _transaction(exact) as (directory,data):
+            previous = data['operations'].get(operation_id)
+            if previous:
+                if previous['request'] != request:
+                    return _result('operation_conflict',exact,operation_id)
+                return _replayed(data,operation_id)
+            if not _matches(data,binding,binding['serial']) or rows != _authoritative(data,binding):
+                return _result('stale_or_ineligible',exact,operation_id)
+            if len(data['operations']) >= state.MAX_OPERATIONS:
+                raise state.StateError('capacity')
+            op = {'kind':'gate','request':request,'status':'evaluating','created':stamp,
+                  'revision':data['serial']+1,'binding':binding,'proposals':rows,'result':'pending'}
+            data['operations'][operation_id] = op
+            state.publish(directory,data)
+            expected_serial = data['serial']
+        # An external gate is called once, only after its durable reservation.
+        # Exceptions, interruption or an unknown reply never become a pass.
+        before = {'owner':exact,'revision':binding['serial'],'pins_digest':binding['pins'],
+                  'ledger_digest':binding['ledger'],'policy':copy.deepcopy(binding['policy'])}
+        after = {'owner':exact,'request_digest':request,'sources':copy.deepcopy(binding['sources']),
+                 'proposals':copy.deepcopy(rows)}
+        called = True
+        try:
+            verdict = gate_fn(before,after)
+            verdict_reason = 'benchmark_passed' if verdict is True else 'benchmark_failed'
+        except Exception:
+            verdict = False
+            verdict_reason = 'gate_error'
+        with _transaction(exact) as (directory,data):
+            op = data['operations'][operation_id]
+            if not _matches(data,binding,expected_serial):
+                verdict = False; verdict_reason = 'stale'
+            op['status'] = 'qualified' if verdict is True else 'refused'
+            op['result'] = verdict_reason; op['revision'] = data['serial']+1
+            state.shadow(data,'qualified' if verdict is True else 'refused',rows,stamp)
+            state.publish(directory,data)
+        return _result('qualified' if verdict is True else verdict_reason,exact,operation_id,called)
+    except state.StateError as exc:
+        return _result(exc.code,user,operation_id,called)
+    except (ValueError,TypeError,OverflowError,AttributeError):
+        return _result('invalid_proposal',user,operation_id,called)
 
 
-def shadow_log(user: str | None = None, limit: int = 50) -> list[dict]:
-    """The recorded counterfactuals for a scope, oldest-first."""
-    path = shadow_log_path(user)
-    if path is None or not path.exists():
+def apply_gate(operation_id, *, user=None):
+    if mode() != ON:
+        return _result(mode(),user,operation_id)
+    try:
+        exact = state.owner(user); state.token(operation_id)
+        if not promotion_qualified():
+            return _result('promotion_unqualified',exact,operation_id)
+        if state.read(exact) is None:
+            return _result('missing_operation',exact,operation_id)
+        with _transaction(exact) as (directory,data):
+            op = data['operations'].get(operation_id)
+            if not op or op['kind'] != 'gate':
+                return _result('missing_operation',exact,operation_id)
+            if op['status'] == 'applied':
+                return _replayed(data,operation_id)
+            if op['status'] != 'qualified':
+                return _result(op['status'],exact,operation_id)
+            binding = op['binding']
+            if not _matches(data,binding,op['revision']) or op['proposals'] != _authoritative(data,binding):
+                op['status']='refused'; op['result']='stale'; op['revision']=data['serial']+1
+                state.publish(directory,data)
+                return _result('stale',exact,operation_id)
+            pins = [{'id':p['id'],'kind':p['kind'],'pinned_at':op['created'],
+                     'score':p['score'],'est_tokens':p['est_tokens'],'verifier_ok':p['verifier_ok'],
+                     'revision':binding['sources'][key(p['kind'],p['id'])]}
+                    for p in op['proposals'] if p['action'] != DROP]
+            op['status']='applied'; op['result']='applied'; op['revision']=data['serial']+1
+            data['pins']=pins
+            data['gate']={'operation_id':operation_id,'pins_digest':state.digest(pins)}
+            state.shadow(data,'applied',op['proposals'],op['created'])
+            state.publish(directory,data)
+        return _result('applied',exact,operation_id,applied=True,pins=pins,active=True)
+    except state.StateError as exc:
+        return _result(exc.code,user,operation_id)
+    except (ValueError,TypeError,OverflowError):
+        return _result('invalid_operation',user,operation_id)
+
+
+def apply_pins(proposals, gate_fn=None, *, user=None, reason='pin_selection', now=None, operation_id=None):
+    result = gate_pins(proposals,gate_fn,user=user,operation_id=operation_id,now=now)
+    if result.reason == 'qualified':
+        applied = apply_gate(operation_id,user=user)
+        return replace(applied,gate_called=result.gate_called)
+    return result
+
+
+def _read_pins(user=None):
+    data = state.read(user)
+    return [] if data is None else data['pins']
+
+
+def applied_pins(user=None):
+    if mode() != ON or not promotion_qualified():
         return []
-    out = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                out.append(json.loads(line))
-            except (ValueError, json.JSONDecodeError):
-                continue
-    except OSError as err:                   # pragma: no cover - fs edge
-        _capture("ctxheat.shadow_read", err, context=str(path))
+    data = state.read(user)
+    if not data or not data['gate']:
         return []
-    return out[-limit:]
+    op = data['operations'][data['gate']['operation_id']]
+    if op['binding']['policy'] != _policy():
+        return []
+    for pin in data['pins']:
+        source = resolve_source(data['owner'],pin['kind'],pin['id'])
+        if not source or source['revision'] != pin['revision']:
+            return []
+    return data['pins']
 
 
-def apply_pins(proposals, *, gate_fn=None, user: str | None = None,
-               now: float | None = None, reason: str = "") -> ApplyResult:
-    """Apply a proposed pin set — ONLY behind a passing benchmark gate.
+def shadow_log(user=None, limit=50):
+    state.integer(limit,0,state.MAX_SHADOW)
+    data=state.read(user)
+    return [] if data is None or limit==0 else data['shadow'][-limit:]
 
-    A pin is prompt content, so this mirrors `orchestrator.gate_prompt`: the
-    caller injects `gate_fn(before, after) -> bool` (in practice a `liveeval` /
-    `evals` before-after run over the two pin sets) and a write happens only if
-    it returns True. There is no unmeasured pin-set write path — a missing
-    gate, a falsey gate, or a gate that raises all REFUSE. While the policy
-    constants are PROVISIONAL this is the only thing that makes them safe.
 
-    Modes: `off` refuses inertly (nothing computed, nothing written); `shadow`
-    refuses but LOGS the counterfactual (this is the shipping mode); `on`
-    evaluates the gate and, on success, publishes `pins.json`."""
-    current_mode = mode()
-    scope = scope_of(user)
-    stamp = time.time() if now is None else float(now)
-    proposals = list(proposals or [])
-
-    if current_mode == OFF:
-        return ApplyResult(False, "mode_off", scope, current_mode)
-
-    cf = counterfactual(proposals, user=user, now=stamp)
-    cf["reason"] = str(reason or "")[:120]
-
-    if current_mode == SHADOW:
-        cf["applied"] = False
-        cf["outcome"] = "shadow_counterfactual_only"
-        _log_counterfactual(cf, user)
-        return ApplyResult(False, "shadow", scope, current_mode,
-                           pins=cf["pins"], counterfactual=cf)
-
-    if gate_fn is None or not callable(gate_fn):
-        cf["applied"] = False
-        cf["outcome"] = "refused_no_gate"
-        _log_counterfactual(cf, user)
-        return ApplyResult(False, "no_benchmark_gate", scope, current_mode,
-                           counterfactual=cf)
-
-    before = {"pins": sorted(key(p["kind"], p["id"]) for p in _read_pins(user)),
-              "tokens": sum(int(p.get("est_tokens", 0))
-                            for p in _read_pins(user)),
-              "scope": scope}
-    after = {"pins": list(cf["pins"]), "tokens": cf["tokens"], "scope": scope}
-
+def rollback_pins(*, user=None, operation_id=None):
+    """Publish an explicit empty-pin receipt, including while mode is off."""
     try:
-        passed = bool(gate_fn(before, after))
-    except Exception as err:                 # noqa: BLE001 - a gate that raises
-        _capture("ctxheat.gate", err, context=scope)   # is a FAILED gate
-        cf["applied"] = False
-        cf["outcome"] = "refused_gate_error"
-        _log_counterfactual(cf, user)
-        return ApplyResult(False, "benchmark_gate_error", scope, current_mode,
-                           counterfactual=cf, gate_called=True)
+        exact=state.owner(user); state.token(operation_id)
+        if state.read(exact) is None:
+            return _result('missing',exact,operation_id)
+        with state.transaction(exact) as (directory,data):
+            previous=data['operations'].get(operation_id)
+            if previous:
+                return _result('rolled_back' if previous['kind']=='rollback' else 'operation_conflict',exact,operation_id,
+                               active=state.latest_pin_operation(data)==operation_id)
+            if len(data['operations'])>=state.MAX_OPERATIONS:
+                raise state.StateError('capacity')
+            stamp=_stamp()
+            # Rollback needs no source availability or promotion qualification.
+            binding={'owner':exact,'nonce':data['nonce'],'serial':data['serial'],'at':stamp,
+                     'ledger':state.digest({'entries':data['entries'],'bindings':data['bindings']}),
+                     'pins':state.digest(data['pins']),'policy':_rollback_policy(),'sources':{},'estimates':{}}
+            op={'kind':'rollback','request':state.digest({'binding':binding,'proposals':[],'kind':'rollback'}),
+                'status':'rolled_back','created':stamp,'revision':data['serial']+1,
+                'binding':binding,'proposals':[],'result':'rolled_back'}
+            data['operations'][operation_id]=op; data['pins']=[]; data['gate']=None
+            state.shadow(data,'rolled_back',[],stamp); state.publish(directory,data)
+        return _result('rolled_back',exact,operation_id,active=True)
+    except state.StateError as exc:
+        return _result(exc.code,user,operation_id)
+    except (ValueError,TypeError,OverflowError):
+        return _result('invalid_operation',user,operation_id)
 
-    if not passed:
-        cf["applied"] = False
-        cf["outcome"] = "refused_gate_failed"
-        _log_counterfactual(cf, user)
-        return ApplyResult(False, "benchmark_gate_failed", scope, current_mode,
-                           counterfactual=cf, gate_called=True)
 
-    pins = [{"id": p.item_id, "kind": p.kind, "pinned_at": stamp,
-             "est_tokens": int(p.est_tokens), "score": round(float(p.score), 6),
-             "verifier_ok": int(p.verifier_ok)}
-            for p in proposals if p.pinned]
-    path = pins_path(user)
-    if path is None:
-        return ApplyResult(False, "scope_unavailable", scope, current_mode,
-                           counterfactual=cf, gate_called=True)
+def clear_pins(user=None, *, operation_id=None):
+    return rollback_pins(user=user,operation_id=operation_id).reason == 'rolled_back'
+
+
+def status(user=None, *, operation_id=None):
     try:
-        with proclock.lock(_lock_name(user), timeout=10.0):
-            _atomic_write_json(path, {
-                "schema_version": SCHEMA_VERSION, "scope": scope,
-                "applied_at": stamp, "gate": "passed",
-                "reason": str(reason or "")[:120],
-                "provisional": provisional(), "pins": pins})
-    except (OSError, TimeoutError, ValueError) as err:
-        _capture("ctxheat.apply", err, context=scope)
-        return ApplyResult(False, "write_failed", scope, current_mode,
-                           counterfactual=cf, gate_called=True)
+        exact=state.owner(user); data=state.read(exact)
+        out={'status':'missing' if data is None else 'available','owner':exact,'mode':mode(),
+             'promotion_qualified':False,'qualification_status':'unavailable',
+             'entries':len(data['entries']) if data else 0,
+             'stored_pins':len(data['pins']) if data else 0,'serial':data['serial'] if data else None,
+             'topology':'single-process' if os.name=='nt' else 'local-filesystem-flock',
+             'directory_fsync':os.name!='nt'}
+        if operation_id is not None:
+            state.token(operation_id)
+            op=data['operations'].get(operation_id) if data else None
+            out['operation']={'id':operation_id,'status':op['status'],'result':op['result'],
+                              'active':state.latest_pin_operation(data)==operation_id} if op else None
+        try:
+            out['promotion_qualified']=promotion_qualified()
+            out['qualification_status']='qualified' if out['promotion_qualified'] else 'unqualified'
+        except state.StateError as exc:
+            out['qualification_status']=exc.code
+        return out
+    except state.StateError as exc:
+        return {'status':exc.code,'mode':mode(),'promotion_qualified':False}
 
-    cf["applied"] = True
-    cf["outcome"] = "applied_after_gate"
-    _log_counterfactual(cf, user)
-    return ApplyResult(True, "applied", scope, current_mode,
-                       pins=[key(p["kind"], p["id"]) for p in pins],
-                       counterfactual=cf, gate_called=True)
 
-
-def clear_pins(user: str | None = None) -> bool:
-    """Remove the applied pin set (the one-step rollback to static placement).
-    Always allowed — unpinning needs no benchmark, it IS the safe direction."""
-    path = pins_path(user)
-    if path is None or not path.exists():
-        return False
-    try:
-        with proclock.lock(_lock_name(user), timeout=10.0):
-            path.unlink()
-    except (OSError, TimeoutError) as err:
-        _capture("ctxheat.clear_pins", err, context=str(path))
-        return False
-    return True
+def liveness():
+    data=state.read()
+    if data is None:
+        return {'hits':0,'misses':0,'note':'no attributed history'}
+    # Self-reported reuse is never proof that a qualified pin avoided work.
+    return {'hits':0,'misses':sum(e['hits'] for e in data['entries'].values()),
+            'savings':None,'overhead':None,'net_benefit':None,
+            'note':'owned activation evidence unavailable; mode='+mode()}

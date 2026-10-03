@@ -53,7 +53,7 @@ _DERIVED_ROOTS = (
 #: Stores keyed by principal that live outside `users/`.
 _DERIVED_GLOBS = (
     "sessions/quarantine/{uid}.*.journal",
-    "ctxheat/users/{uid}",
+    "ctxheat/users/{uid}",              # historical candidate only; never ownership proof
     "documents/{uid}",
     "docrag/{uid}",
 )
@@ -262,6 +262,8 @@ def inspect_principal(principal: str) -> dict:
         "principal": memory.canonical_owner(principal),
         "attribution": "unavailable: legacy normalized candidates are not ownership proof",
         "qualified_workspace": str(config.MEMORY_DIR / "owners" / memory.owner_key(principal)),
+        "context_heat_workspace": str(owned / "ctxheat-v2"),
+        "context_heat_artifacts": ["initialized.json", "state.json", "store.lock", "pending-*.json"],
         "deletion_available": False,
         "sensitive_recovery_candidates": [name for name in _SENSITIVE_RECOVERY_ROOTS
             if (config.MEMORY_DIR / name).exists() or (config.MEMORY_DIR / name).is_symlink()],
