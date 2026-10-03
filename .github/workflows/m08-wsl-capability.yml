@@ -1,0 +1,148 @@
+name: M08 Windows WSL capability discovery
+
+on:
+  push:
+    branches: [diagnostics/m08-wsl-capability-20261003]
+    paths: [.github/workflows/m08-wsl-capability.yml]
+
+permissions: {}
+
+jobs:
+  capability:
+    if: github.repository == 'maadjiba24-afk/Olympus-' && github.event_name == 'push' && github.ref == 'refs/heads/diagnostics/m08-wsl-capability-20261003'
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 5
+    steps:
+      - name: Inspect existing Windows and WSL resources only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = [ordered]@{
+            schema = 1
+            kind = 'capability_discovery_not_qualification'
+            utc = [DateTime]::UtcNow.ToString('o')
+            commit = '${{ github.sha }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            runner = '${{ runner.name }}'
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+            powershell = $PSVersionTable.PSVersion.ToString()
+            errors = @()
+          }
+          function Invoke-BoundedCommand {
+            param([string]$Executable, [string[]]$Arguments, [bool]$Unicode = $false)
+            $start = [System.Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = $Executable
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $encoding = if ($Unicode) { [Text.Encoding]::Unicode } else { [Text.Encoding]::UTF8 }
+            $start.StandardOutputEncoding = $encoding
+            $start.StandardErrorEncoding = $encoding
+            foreach ($argument in $Arguments) { [void]$start.ArgumentList.Add($argument) }
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            try {
+              [void]$process.Start()
+              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+              $stderrTask = $process.StandardError.ReadToEndAsync()
+              $finished = $process.WaitForExit(15000)
+              if (-not $finished) {
+                $process.Kill()
+                [void]$process.WaitForExit(3000)
+                return @{ timed_out = $true; exit_code = $null; output_complete = $false }
+              }
+              if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 3000)) {
+                return @{ timed_out = $false; exit_code = $process.ExitCode; output_complete = $false; pipe_timeout = $true }
+              }
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              if ($stdout.Length -gt 16384 -or $stderr.Length -gt 4096) {
+                return @{ timed_out = $false; exit_code = $process.ExitCode; output_complete = $false; oversized = $true }
+              }
+              return @{ timed_out = $false; exit_code = $process.ExitCode; output_complete = $true; stdout = $stdout; stderr = $stderr }
+            } catch {
+              return @{ output_complete = $false; error_type = $_.Exception.GetType().FullName }
+            } finally { $process.Dispose() }
+          }
+          try {
+            $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
+            $machine = Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15
+            $report.windows = @{
+              caption = $os.Caption; version = $os.Version; build = $os.BuildNumber
+              last_boot_utc = $os.LastBootUpTime.ToUniversalTime().ToString('o')
+              total_memory_bytes = $machine.TotalPhysicalMemory
+              free_memory_kib = $os.FreePhysicalMemory
+              manufacturer = $machine.Manufacturer; model = $machine.Model
+              hypervisor_present = $machine.HypervisorPresent
+            }
+            $report.cpu = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 15 | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, VirtualizationFirmwareEnabled)
+            $report.volumes = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 15 | Select-Object DeviceID, FileSystem, Size, FreeSpace)
+          } catch { $report.errors += @{ stage = 'windows_metadata'; error_type = $_.Exception.GetType().FullName } }
+          try {
+            $cfg = Join-Path $env:USERPROFILE '.wslconfig'
+            $report.wslconfig = @{ present = (Test-Path -LiteralPath $cfg -PathType Leaf) }
+            if ($report.wslconfig.present) {
+              $item = Get-Item -LiteralPath $cfg
+              if ($item.Length -gt 16384 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                $report.wslconfig.read_refused = $true
+              } else {
+                $report.wslconfig.sha256 = (Get-FileHash -LiteralPath $cfg -Algorithm SHA256).Hash.ToLowerInvariant()
+                $settings = @{}
+                foreach ($line in Get-Content -LiteralPath $cfg) {
+                  if ($line -match '^\s*(memory|processors|swap|pageReporting|autoMemoryReclaim|sparseVhd|nestedVirtualization)\s*=\s*([^#;]+)') {
+                    $key = $Matches[1]; $value = $Matches[2].Trim()
+                    $settings[$key] = if ($value -match '^(\d{1,12}(KB|MB|GB)?|true|false|disabled|gradual|dropCache)$') { $value } else { '<unrecognized-resource-value>' }
+                  }
+                }
+                $report.wslconfig.settings = $settings
+              }
+            }
+          } catch { $report.errors += @{ stage = 'wsl_resource_config'; error_type = $_.Exception.GetType().FullName } }
+          $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+          $report.wsl_binary_present = Test-Path -LiteralPath $wsl -PathType Leaf
+          $report.classification = 'NO_WSL_BINARY'
+          if ($report.wsl_binary_present) {
+            $report.wsl_version = Invoke-BoundedCommand -Executable $wsl -Arguments @('--version') -Unicode $true
+            $report.wsl_status = Invoke-BoundedCommand -Executable $wsl -Arguments @('--status') -Unicode $true
+            $report.wsl_list = Invoke-BoundedCommand -Executable $wsl -Arguments @('--list', '--verbose') -Unicode $true
+            $names = Invoke-BoundedCommand -Executable $wsl -Arguments @('--list', '--quiet') -Unicode $true
+            $report.wsl_names = $names
+            $report.classification = 'NO_VERIFIED_EXISTING_WSL2_DISTRIBUTION'
+            if ($names.output_complete -and $names.exit_code -eq 0 -and $report.wsl_list.output_complete -and $report.wsl_list.exit_code -eq 0) {
+              $candidates = @($names.stdout -split '[\r\n]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^(Ubuntu|Debian)(-[A-Za-z0-9.]+)?$' })
+              $selected = $null
+              foreach ($name in $candidates) {
+                $pattern = '(?m)^\s*\*?\s*' + [regex]::Escape($name) + '\s+\S+\s+2\s*$'
+                if ($report.wsl_list.stdout -match $pattern) { $selected = $name; break }
+              }
+              if ($selected) {
+                $probe = @'
+          printf 'KERNEL\n'; uname -r
+          printf 'OS\n'; sed -n '/^NAME=/p;/^VERSION_ID=/p;/^PRETTY_NAME=/p' /etc/os-release
+          printf 'CPU\n'; getconf _NPROCESSORS_ONLN
+          printf 'AFFINITY\n'; sed -n '/^Cpus_allowed_list:/p' /proc/self/status
+          printf 'MEMORY\n'; sed -n '/^MemTotal:/p;/^MemAvailable:/p;/^SwapTotal:/p;/^SwapFree:/p' /proc/meminfo
+          printf 'FILESYSTEM\n'; if command -v findmnt >/dev/null 2>&1; then findmnt -J -T / -o SOURCE,FSTYPE,TARGET,OPTIONS; fi
+          printf 'CAPACITY\n'; df -Pk /
+          printf 'CGROUP\n'; for item in cpu.max memory.max memory.swap.max cpuset.cpus.effective; do if test -f "/sys/fs/cgroup/$item"; then printf '%s=' "$item"; head -c 128 "/sys/fs/cgroup/$item"; printf '\n'; fi; done
+          printf 'PYTHON\n'; if command -v python3 >/dev/null 2>&1; then python3 -I -B -c 'import sys,importlib.metadata,json; names=("pytest","pytest-timeout","cryptography","anthropic"); d={x.metadata["Name"].lower():x.version for x in importlib.metadata.distributions() if x.metadata["Name"]}; print(json.dumps({"executable":sys.executable,"version":sys.version,"packages":{n:d.get(n) for n in names}}))'; fi
+          '@
+                $report.selected_existing_distribution = $selected
+                $report.wsl_runtime = Invoke-BoundedCommand -Executable $wsl -Arguments @('--distribution', $selected, '--exec', '/bin/sh', '-c', $probe)
+                $report.classification = if ($report.wsl_runtime.output_complete -and $report.wsl_runtime.exit_code -eq 0) { 'EXISTING_WSL2_RUNTIME_DISCOVERED_NOT_QUALIFIED' } else { 'EXISTING_WSL2_RUNTIME_UNAVAILABLE_OR_INCOMPLETE' }
+              }
+            }
+          }
+          $report.qualification_started = $false
+          $report.software_or_security_changes = $false
+          $json = $report | ConvertTo-Json -Depth 12 -Compress
+          $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -gt 131072) { throw 'Capability report exceeded its fixed output bound' }
+          $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+          Write-Output ('OLYMPUS_CAPABILITY_JSON=' + $json)
+          Write-Output ('OLYMPUS_CAPABILITY_SHA256=' + $digest)
